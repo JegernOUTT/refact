@@ -8,6 +8,7 @@ import {
   BackgroundAgentSummary,
   ChatMessages,
   GoalSnapshot,
+  PendingQuestionSet,
 } from "../../../services/refact/types";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
 import { parseOrElse } from "../../../utils/parseOrElse";
@@ -152,6 +153,7 @@ export type ChatThread = {
   auto_compact_enabled?: boolean;
   worktree?: WorktreeMeta | null;
   goal?: GoalSnapshot | null;
+  pending_questions?: PendingQuestionSet[];
 
   parent_id?: string;
   link_type?: string;
@@ -210,6 +212,7 @@ export type ChatThreadRuntime = {
   prevent_send: boolean;
   error: string | null;
   queued_items: QueuedItem[];
+  command_acks?: Record<string, { accepted: boolean; result: unknown }>;
   send_immediately: boolean;
   attached_images: ImageFile[];
   attached_text_files: TextFile[];

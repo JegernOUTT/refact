@@ -2315,6 +2315,26 @@ impl DaemonClient {
             .await
     }
 
+    pub async fn send_answer_questions(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        command: AnswerQuestionsCommand,
+    ) -> Result<(), ClientError> {
+        self.send_command(
+            project_id,
+            chat_id,
+            json!({
+                "type": "answer_questions",
+                "tool_call_id": command.tool_call_id,
+                "asked_at_ms": command.asked_at_ms,
+                "answers": command.answers,
+                "client_request_id": command.client_request_id,
+            }),
+        )
+        .await
+    }
+
     async fn send_command(
         &self,
         project_id: &str,
@@ -2982,6 +3002,20 @@ pub fn worker_state_label(worker: Option<&WorkerInfo>) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct QuestionAnswer {
+    pub id: String,
+    pub answer: Value,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AnswerQuestionsCommand {
+    pub tool_call_id: String,
+    pub asked_at_ms: u64,
+    pub answers: Vec<QuestionAnswer>,
+    pub client_request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ToolDecision {
     pub tool_call_id: String,
     pub accepted: bool,
@@ -3635,6 +3669,35 @@ mod tests {
                 "tool_call_id": "tool-1",
                 "content": "result",
                 "tool_failed": true,
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn native_answer_questions_serializes_bound_typed_command() {
+        let body = capture_command(|client| async move {
+            client
+                .send_answer_questions(
+                    "project",
+                    "chat",
+                    AnswerQuestionsCommand {
+                        tool_call_id: "ask-native".into(),
+                        asked_at_ms: 42,
+                        answers: vec![QuestionAnswer {
+                            id: "yes".into(),
+                            answer: json!(true),
+                        }],
+                        client_request_id: "answer-native".into(),
+                    },
+                )
+                .await
+        })
+        .await;
+        assert_command(
+            &body,
+            json!({
+                "type":"answer_questions", "tool_call_id":"ask-native", "asked_at_ms":42,
+                "answers":[{"id":"yes","answer":true}], "client_request_id":"answer-native"
             }),
         );
     }

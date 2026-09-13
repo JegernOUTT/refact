@@ -10,6 +10,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 
 pub mod auth;
+pub mod buddy_reconciliation;
+pub mod buddy_wake;
 pub mod chat_client;
 pub mod cli;
 pub mod client;

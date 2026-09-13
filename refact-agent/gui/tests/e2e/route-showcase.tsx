@@ -39,6 +39,7 @@ import type { EventEnvelope } from "../../src/services/refact/chatSubscription";
 import { isPushMode } from "../../src/services/refact/chatSubscription";
 import { sidebarSectionSnapshotReceived } from "../../src/features/Sidebar/sidebarSlice";
 import { tasksApi, type TaskMeta } from "../../src/services/refact/tasks";
+import type { OperatorStatus } from "../../src/services/refact/buddyOperator";
 import type { ChatHistoryItem } from "../../src/features/History/historySlice";
 import type { ChatThreadRuntime } from "../../src/features/Chat/Thread";
 import type { ChatMessages } from "../../src/services/refact";
@@ -86,6 +87,22 @@ const chatRoute =
 const chatDndRoute = route === "chat-dnd";
 const queueRoute = route === "queue";
 const multiChatRoute = route === "chat-split" || chatDndRoute;
+
+// This showcase exercises legacy layout only under authoritative disabled mode.
+// An absent/failed status must remain unavailable, never imply compatibility.
+const buddyOperatorStatus: OperatorStatus = {
+  schema_version: 1,
+  mode: "disabled",
+  features: {
+    storage: false,
+    actions: false,
+    supervision: false,
+    improvement: false,
+    editorial: false,
+  },
+  project: null,
+  worker: null,
+};
 
 const buddySettings: BuddySettings = {
   enabled: true,
@@ -1387,6 +1404,9 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         is_cmd_executable: false,
       }),
     );
+  }
+  if (path === "/v1/buddy/operator/status") {
+    return Promise.resolve(jsonResponse(buddyOperatorStatus));
   }
   if (path === "/v1/buddy") return Promise.resolve(jsonResponse(buddySnapshot));
   if (path === "/v1/buddy/settings") {

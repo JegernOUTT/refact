@@ -6,7 +6,6 @@ use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
 
 use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
@@ -348,25 +347,7 @@ pub(crate) async fn write_file_atomic(
     path: &std::path::Path,
     content: &str,
 ) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    tokio::fs::create_dir_all(parent).await?;
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("ext");
-    let tmp_path = parent.join(format!(".{}.{}.tmp", file_name, uuid::Uuid::new_v4()));
-    let write_result = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-            .await?;
-        file.write_all(content.as_bytes()).await?;
-        file.flush().await?;
-        tokio::fs::rename(&tmp_path, path).await
-    }
-    .await;
-    if write_result.is_err() {
-        let _ = tokio::fs::remove_file(&tmp_path).await;
-    }
-    write_result
+    crate::ext::operator_service::write_file_atomic(path, content).await
 }
 
 async fn resolve_scope_dir(

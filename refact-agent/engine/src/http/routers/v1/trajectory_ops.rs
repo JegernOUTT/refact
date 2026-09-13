@@ -707,6 +707,7 @@ pub async fn handle_mode_transition_apply(
         .or_else(|| Some(chat_id.clone()));
 
     let mut snapshot = TrajectorySnapshot {
+        pending_browser_decision: None,
         pending_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
         goal: transferred_goal.target_goal.clone(),
@@ -756,6 +757,7 @@ pub async fn handle_mode_transition_apply(
         reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
+        pending_questions: Vec::new(),
     };
     reset_transition_snapshot_identity(&mut snapshot);
 
@@ -907,6 +909,7 @@ pub async fn handle_planner_from_transition(
     let root_chat_id = Some(new_chat_id.clone());
 
     let mut snapshot = TrajectorySnapshot {
+        pending_browser_decision: None,
         pending_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
         goal: transferred_goal.target_goal.clone(),
@@ -960,6 +963,7 @@ pub async fn handle_planner_from_transition(
         reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
+        pending_questions: Vec::new(),
     };
     reset_transition_snapshot_identity(&mut snapshot);
 
@@ -1342,6 +1346,7 @@ mod tests {
 
     fn transition_identity_snapshot(link_type: &str) -> TrajectorySnapshot {
         let mut snapshot = TrajectorySnapshot {
+            pending_browser_decision: None,
             pending_deliveries: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
@@ -1398,6 +1403,7 @@ mod tests {
             reactive_compact_attempts: None,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
+            pending_questions: Vec::new(),
         };
         reset_transition_snapshot_identity(&mut snapshot);
         snapshot
@@ -1733,6 +1739,7 @@ mod tests {
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
         }
         let snapshot = TrajectorySnapshot {
+            pending_browser_decision: None,
             pending_deliveries: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
@@ -1779,6 +1786,7 @@ mod tests {
             reactive_compact_attempts: None,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
+            pending_questions: Vec::new(),
         };
 
         save_trajectory_snapshot_with_parent(gcx, snapshot, "source-chat", "mode_transition")

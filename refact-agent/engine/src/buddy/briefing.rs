@@ -153,6 +153,28 @@ pub fn assemble_briefing(
     }
 }
 
+/// Enabled-storage briefings are ephemeral projections. The caller must not save
+/// them into legacy briefing files or feed legacy queue cards into this branch.
+pub async fn assemble_operator_briefing(
+    runtime: &super::outcome_runtime::OutcomeRuntime,
+    state: &BuddyState,
+    pulse: &BuddyPulse,
+    date: String,
+) -> Result<BuddyBriefing, String> {
+    let (opportunities, receipts) = runtime
+        .briefing_inputs()
+        .await
+        .map_err(|error| error.to_string())?;
+    // Receipt JSON is historical compatibility data, not current execution truth.
+    Ok(assemble_briefing(
+        state,
+        pulse,
+        &opportunities,
+        receipts,
+        date,
+    ))
+}
+
 pub async fn save_briefing(project_root: &Path, briefing: &BuddyBriefing) -> Result<(), String> {
     let dir = briefings_dir(project_root);
     fs::create_dir_all(&dir)

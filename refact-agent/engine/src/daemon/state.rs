@@ -90,6 +90,9 @@ pub struct DaemonState {
     relaunch_executable: Result<PathBuf, String>,
     pub projects: RwLock<crate::daemon::projects::ProjectRegistry>,
     worker_statuses: RwLock<HashMap<String, StoredWorkerStatus>>,
+    buddy_observations: Mutex<Option<crate::daemon::buddy_reconciliation::ReconciliationStore>>,
+    buddy_wakes: Mutex<Option<crate::daemon::buddy_wake::WakeStore>>,
+    buddy_wake_epochs: SyncRwLock<HashMap<String, (String, u64)>>,
     pub proxy_activity: Arc<SyncRwLock<HashMap<String, ProxyActivity>>>,
     pub supervisor: Arc<crate::daemon::supervisor::Supervisor>,
     pub proxy_client: reqwest::Client,
@@ -283,6 +286,9 @@ impl DaemonState {
                 daemon_dir.join("projects.json"),
             )),
             worker_statuses: RwLock::new(HashMap::new()),
+            buddy_observations: Mutex::new(None),
+            buddy_wakes: Mutex::new(None),
+            buddy_wake_epochs: SyncRwLock::new(HashMap::new()),
             proxy_activity,
             supervisor,
             proxy_client,
@@ -297,6 +303,23 @@ impl DaemonState {
             shutdown_tx,
             shutdown_requested: AtomicBool::new(false),
         })
+    }
+
+    /// Scratch-only constructor; production never accepts an installation target from transport.
+    #[cfg(test)]
+    pub(crate) fn with_test_installation_target(
+        config: DaemonConfig,
+        daemon_dir: PathBuf,
+        target: PathBuf,
+    ) -> Arc<Self> {
+        Self::new_with_daemon_dir_and_executable(
+            config,
+            EventBus::new(daemon_dir.join("events.jsonl")),
+            Some("worker-bearer".into()),
+            daemon_dir,
+            0,
+            Ok(target),
+        )
     }
 
     pub(crate) fn relaunch_executable(&self) -> Result<&Path, String> {
@@ -405,11 +428,239 @@ impl DaemonState {
     }
 
     pub async fn load_projects(&self, path: PathBuf) {
+        // The store is colocated with native registry metadata, never in a
+        // project's Buddy database. Loading observations performs no wakes.
+        let observations_path = path.with_file_name("buddy-observations.json");
+        match crate::daemon::buddy_reconciliation::ReconciliationStore::load(
+            observations_path,
+            now_ms(),
+        )
+        .await
+        {
+            Ok(store) => *self.buddy_observations.lock().await = Some(store),
+            Err(error) => {
+                *self.buddy_observations.lock().await = None;
+                tracing::warn!("Buddy daemon observations unavailable: {error}");
+            }
+        }
+        // Only future explicit timer slots are eligible after restart; never catch up.
+        match crate::daemon::buddy_wake::WakeStore::load(
+            path.with_file_name("buddy-wake-grants.json"),
+            now_ms(),
+        )
+        .await
+        {
+            Ok(store) => {
+                for grant in store.all() {
+                    self.buddy_wake_epochs.write().insert(
+                        grant.project_id.clone(),
+                        (
+                            grant.grant_id.clone(),
+                            self.supervisor.buddy_wake_fence(&grant.project_id),
+                        ),
+                    );
+                }
+                *self.buddy_wakes.lock().await = Some(store);
+            }
+            Err(error) => {
+                *self.buddy_wakes.lock().await = None;
+                tracing::warn!("Buddy wake grants unavailable: {error}");
+            }
+        }
         let registry = crate::daemon::projects::ProjectRegistry::load(path).await;
         for entry in registry.list() {
             self.sync_project_liveness(&entry).await;
         }
         *self.projects.write().await = registry;
+    }
+
+    pub(crate) async fn buddy_wake_grant(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::daemon::buddy_wake::WakeGrant>, String> {
+        Ok(self
+            .buddy_wakes
+            .lock()
+            .await
+            .as_ref()
+            .ok_or("wake store unavailable")?
+            .get(id))
+    }
+
+    pub(crate) async fn issue_buddy_wake_grant(
+        &self,
+        id: &str,
+        request: crate::daemon::buddy_wake::WakeGrantRequest,
+        author: String,
+    ) -> Result<crate::daemon::buddy_wake::WakeGrant, String> {
+        let registry = self.projects.read().await;
+        let entry = registry.get(id).ok_or("project not found")?;
+        let mut guard = self.buddy_wakes.lock().await;
+        self.supervisor.invalidate_buddy_wake(id);
+        let epoch = self.supervisor.buddy_wake_fence(id);
+        let grant = guard
+            .as_mut()
+            .ok_or("wake store unavailable")?
+            .issue(entry, request, author, now_ms())
+            .await?;
+        self.buddy_wake_epochs
+            .write()
+            .insert(id.into(), (grant.grant_id.clone(), epoch));
+        Ok(grant)
+    }
+
+    pub(crate) async fn revoke_buddy_wake_grant(&self, id: &str) -> Result<(), String> {
+        // Revoke fence before first await, including when the disk writer is busy.
+        self.supervisor.invalidate_buddy_wake(id);
+        self.buddy_wakes
+            .lock()
+            .await
+            .as_mut()
+            .ok_or("wake store unavailable")?
+            .revoke(id)
+            .await
+    }
+
+    pub(crate) async fn tick_buddy_wakes(&self, now: u64) {
+        let tick_started = std::time::Instant::now();
+        // Missing configured user authentication disables starts, not GET/revoke.
+        if self.is_shutting_down()
+            || !self.config.auth.enabled
+            || self
+                .config
+                .auth
+                .password
+                .as_ref()
+                .is_none_or(|s| s.is_empty())
+        {
+            return;
+        }
+        let grants = self
+            .buddy_wakes
+            .lock()
+            .await
+            .as_mut()
+            .map(|s| s.batch(now))
+            .unwrap_or_default();
+        for grant in grants {
+            if self.config.auth.username.as_ref() != Some(&grant.authored_by) {
+                continue;
+            }
+            let epoch = self
+                .buddy_wake_epochs
+                .read()
+                .get(&grant.project_id)
+                .cloned();
+            let Some((id, epoch)) = epoch.filter(|(id, _)| id == &grant.grant_id) else {
+                continue;
+            };
+            let registry = self.projects.read().await;
+            let Some(entry) = registry.get(&grant.project_id) else {
+                continue;
+            };
+            let outcome = self
+                .supervisor
+                .buddy_wake(entry, epoch, grant.request.expires_at_ms, || async {
+                    if self.is_shutting_down()
+                        || tokio::fs::canonicalize(&entry.root)
+                            .await
+                            .map_err(|e| e.to_string())?
+                            != entry.root
+                    {
+                        return Ok(false);
+                    }
+                    self.buddy_wakes
+                        .lock()
+                        .await
+                        .as_mut()
+                        .ok_or("wake store unavailable")?
+                        .consume(
+                            entry,
+                            &grant,
+                            now.saturating_add(tick_started.elapsed().as_millis() as u64),
+                        )
+                        .await
+                })
+                .await;
+            let message = match outcome {
+                Ok(None) => continue,
+                Ok(Some(info)) => format!(
+                    "worker_observed_{:?}; no execution authority restored",
+                    info.state
+                ),
+                Err(_) => "start_failed_or_unconfirmed; no budget refund".into(),
+            };
+            if let Some(store) = self.buddy_wakes.lock().await.as_mut() {
+                if let Err(error) = store.outcome(&grant.project_id, &id, message).await {
+                    tracing::warn!("Buddy wake outcome unavailable: {error}");
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn accept_buddy_projection(
+        &self,
+        report: crate::daemon::buddy_reconciliation::WorkerProjection,
+    ) -> Result<bool, String> {
+        let registry = self.projects.read().await;
+        let entry = registry
+            .get(&report.project_id)
+            .ok_or("project not found")?;
+        let token = report.instance_token.clone();
+        self.supervisor
+            .with_worker_identity(&entry.id, report.pid, &token, |identity| async {
+                self.buddy_observations
+                    .lock()
+                    .await
+                    .as_mut()
+                    .ok_or("daemon observations unavailable")?
+                    .accept(entry, identity, report, now_ms())
+                    .await
+            })
+            .await
+    }
+
+    pub(crate) async fn buddy_projection(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::daemon::buddy_reconciliation::ProjectObservation>, String> {
+        self.reconcile_buddy_project(id, now_ms()).await?;
+        Ok(self
+            .buddy_observations
+            .lock()
+            .await
+            .as_ref()
+            .ok_or("daemon observations unavailable")?
+            .get(id))
+    }
+
+    pub(crate) async fn reconcile_buddy_project(&self, id: &str, now: u64) -> Result<(), String> {
+        let registry = self.projects.read().await;
+        self.supervisor
+            .with_observed_worker_identity(id, |identity| async move {
+                if let Some(store) = self.buddy_observations.lock().await.as_mut() {
+                    store
+                        .reconcile(id, registry.get(id), identity.as_ref(), now)
+                        .await?;
+                }
+                Ok(())
+            })
+            .await
+    }
+
+    pub(crate) async fn reconcile_buddy_batch(&self, now: u64) {
+        let ids = self
+            .buddy_observations
+            .lock()
+            .await
+            .as_mut()
+            .map(|s| s.batch())
+            .unwrap_or_default();
+        for id in ids {
+            if let Err(error) = self.reconcile_buddy_project(&id, now).await {
+                tracing::warn!("Buddy daemon reconciliation unavailable: {error}");
+            }
+        }
     }
 
     pub(crate) async fn sync_project_liveness(
@@ -569,6 +820,10 @@ impl DaemonState {
     }
 
     pub(crate) async fn purge_project_runtime(&self, project_id: &str) -> Result<(), String> {
+        self.supervisor.invalidate_buddy_wake(project_id);
+        if let Some(store) = self.buddy_wakes.lock().await.as_mut() {
+            store.revoke(project_id).await?;
+        }
         self.supervisor.forget_worker(project_id).await?;
         self.worker_statuses.write().await.remove(project_id);
         self.proxy_activity.write().remove(project_id);

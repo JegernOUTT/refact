@@ -82,16 +82,75 @@ export const ideTaskDone = createAction<{
   knowledgePath?: string;
 }>("ide/taskDone");
 
-export const ideAskQuestions = createAction<{
-  chatId: string;
-  toolCallId: string;
-  questions: {
-    id: string;
-    type: string;
-    text: string;
-    options?: string[];
-  }[];
-}>("ide/askQuestions");
+/**
+ * Host decision bridge actions (B21).
+ *
+ * The engine owns every decision: a native pending question is created,
+ * answered, cancelled and resolved exclusively by the chat session
+ * (`chat/queue.rs`). The IDE bridge is a *notification* channel only — it tells
+ * a host that a native decision is waiting, and later that the same native
+ * decision stopped waiting. It never carries an answer, a permission, a grant
+ * or a credential, and a host may never synthesise one from it.
+ *
+ * The correlation/duplicate/stale/reconnect rules themselves live in
+ * `events/hostDecisions.ts` so that the browser, VS Code and JetBrains bridges
+ * all execute one implementation instead of three drifting copies.
+ */
+import type {
+  IdeAskQuestionsPayload,
+  IdeDecisionOrigin,
+  IdeDecisionQuestion,
+  IdeDecisionResolution,
+  IdeDecisionResolvedPayload,
+} from "../events/hostDecisions";
+
+export {
+  DECISION_BRIDGE_CONTRACT_VERSION,
+  HOST_DECISION_INTENTS,
+  HOST_DECISION_PARITY_CASES,
+  MAX_OUTSTANDING_DECISIONS,
+  MAX_RESOLVED_TOMBSTONES,
+  applyDecisionResolution,
+  decisionCorrelationKey,
+  decisionQuestionsDigest,
+  emptyDecisionAnnouncementState,
+  isValidAskQuestionsPayload,
+  isValidDecisionResolvedPayload,
+  outstandingDecisionCount,
+  reconcileDecisionSnapshot,
+  scopeDecisionState,
+  shouldAnnounceDecision,
+} from "../events/hostDecisions";
+export type {
+  DecisionAnnouncementDecision,
+  DecisionAnnouncementState,
+  DecisionResolutionOutcome,
+  DecisionScope,
+  HostDecisionIntent,
+  IdeAskQuestionsPayload,
+  IdeDecisionOrigin,
+  IdeDecisionQuestion,
+  IdeDecisionResolution,
+  IdeDecisionResolvedPayload,
+  NativeDecisionSnapshotInput,
+  OutstandingDecision,
+  SnapshotReconciliation,
+} from "../events/hostDecisions";
+
+export const ideAskQuestions =
+  createAction<IdeAskQuestionsPayload>("ide/askQuestions");
+
+/**
+ * A native decision that was announced to the host is no longer waiting.
+ *
+ * Emitted when the authoritative native question leaves `pending` — including
+ * when it was answered from a different client (other IDE, browser, TUI) or
+ * cancelled natively. Hosts use it to retire their own notification state; it
+ * grants nothing and answers nothing.
+ */
+export const ideDecisionResolved = createAction<IdeDecisionResolvedPayload>(
+  "ide/decisionResolved",
+);
 
 export const ideSwitchToThread = createAction<{
   chatId: string;
@@ -301,14 +360,24 @@ export const useEventsBusForIDE = () => {
     (
       chatId: string,
       toolCallId: string,
-      questions: {
-        id: string;
-        type: string;
-        text: string;
-        options?: string[];
-      }[],
+      questions: IdeDecisionQuestion[],
+      meta?: { askedAtMs?: number; origin?: IdeDecisionOrigin },
     ) => {
-      const action = ideAskQuestions({ chatId, toolCallId, questions });
+      const action = ideAskQuestions({
+        chatId,
+        toolCallId,
+        questions,
+        ...(meta?.askedAtMs !== undefined ? { askedAtMs: meta.askedAtMs } : {}),
+        ...(meta?.origin !== undefined ? { origin: meta.origin } : {}),
+      });
+      postMessage(action);
+    },
+    [postMessage],
+  );
+
+  const notifyDecisionResolved = useCallback(
+    (chatId: string, toolCallId: string, resolution: IdeDecisionResolution) => {
+      const action = ideDecisionResolved({ chatId, toolCallId, resolution });
       postMessage(action);
     },
     [postMessage],
@@ -347,6 +416,7 @@ export const useEventsBusForIDE = () => {
     setLoginMessage,
     notifyTaskDone,
     notifyAskQuestions,
+    notifyDecisionResolved,
     queryIdeLogs,
   };
 };

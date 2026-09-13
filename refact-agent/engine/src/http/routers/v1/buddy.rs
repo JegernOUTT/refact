@@ -350,6 +350,86 @@ impl BuddySettingsRequest {
     }
 }
 
+pub(crate) fn operator_settings_patch(
+    before: &Option<Vec<u8>>,
+    changes: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> std::result::Result<Vec<u8>, String> {
+    let mut document: serde_json::Value = match before {
+        Some(bytes) => serde_json::from_slice(bytes).map_err(|_| "invalid Buddy settings")?,
+        None => serde_json::json!({}),
+    };
+    let patch = serde_json::to_value(changes).map_err(|_| "invalid Buddy settings patch")?;
+    let req: BuddySettingsRequest =
+        serde_json::from_value(patch.clone()).map_err(|_| "invalid Buddy settings patch")?;
+    req.validate().map_err(|_| "invalid Buddy settings patch")?;
+    if changes.is_empty()
+        || changes.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "personality_prompt"
+                    | "clear_personality_prompt"
+                    | "humor_enabled"
+                    | "humor_level"
+                    | "quiet_mode"
+                    | "daily_digest_hour"
+                    | "quiet_hours_mode"
+                    | "quiet_hours_start"
+                    | "quiet_hours_end"
+                    | "muted_intents"
+                    | "muted_chat_ids"
+            )
+        })
+    {
+        return Err(
+            "authority or observation settings require a separate permission-governed action"
+                .into(),
+        );
+    }
+    let mut settings: BuddySettings =
+        serde_json::from_value(document.clone()).map_err(|_| "invalid Buddy settings")?;
+    req.apply_to_settings(&mut settings);
+    let applied = serde_json::to_value(settings).map_err(|_| "invalid Buddy settings")?;
+    let map = document.as_object_mut().ok_or("invalid Buddy settings")?;
+    for key in changes.keys() {
+        let key = if key == "clear_personality_prompt" {
+            "personality_prompt"
+        } else {
+            key.as_str()
+        };
+        map.insert(
+            key.into(),
+            applied.get(key).cloned().unwrap_or(serde_json::Value::Null),
+        );
+    }
+    serde_json::to_vec_pretty(&document).map_err(|_| "invalid Buddy settings".into())
+}
+
+pub(crate) async fn operator_settings_compare_exchange(
+    app: &AppState,
+    root: &std::path::Path,
+    expected: &Option<Vec<u8>>,
+    replacement: &Option<Vec<u8>>,
+) -> std::result::Result<bool, String> {
+    let settings = match replacement {
+        Some(b) => {
+            serde_json::from_slice::<BuddySettings>(b).map_err(|_| "invalid Buddy settings")?
+        }
+        None => BuddySettings::default(),
+    };
+    let mut lock = app.buddy.buddy.lock().await;
+    crate::buddy::settings::settings_compare_exchange(root, expected, replacement).await?;
+    if let Some(service) = lock.as_mut().filter(|service| service.project_root == root) {
+        service.settings = settings.clone();
+        crate::buddy::state::mark_persona_cache_dirty();
+        let _ = service
+            .events_tx
+            .send(BuddyEvent::SettingsChanged { settings });
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 pub async fn handle_v1_buddy_settings_update(
     State(app): State<AppState>,
     axum::Json(req): axum::Json<BuddySettingsRequest>,
@@ -361,7 +441,13 @@ pub async fn handle_v1_buddy_settings_update(
         let mut lock = buddy_arc.lock().await;
         if let Some(service) = lock.as_mut() {
             let was_enabled = service.settings.enabled;
-            if req.apply_to_settings(&mut service.settings) {
+            let mut next = service.settings.clone();
+            let persona_dirty = req.apply_to_settings(&mut next);
+            crate::buddy::settings::save_settings(&service.project_root, &next)
+                .await
+                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            service.settings = next;
+            if persona_dirty {
                 crate::buddy::state::mark_persona_cache_dirty();
             }
             if !was_enabled && service.settings.enabled {
@@ -386,9 +472,6 @@ pub async fn handle_v1_buddy_settings_update(
         }
     };
     if let Some((project_root, new_settings, tx)) = updated {
-        crate::buddy::settings::save_settings(&project_root, &new_settings)
-            .await
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         let storage = crate::buddy::settings::storage_metadata(&project_root);
         let _ = tx.send(BuddyEvent::SettingsChanged {
             settings: new_settings.clone(),
@@ -478,7 +561,6 @@ async fn refresh_completed_quest_with_voice(
     let persona = svc.state.personality.clone();
     let identity_name = svc.state.identity.name.clone();
     let pulse = svc.pulse.clone();
-    let reward = quest.reward_xp;
     svc.dirty = true;
     let _ = svc.events_tx.send(BuddyEvent::StateUpdated {
         state: svc.state.clone(),
@@ -495,13 +577,6 @@ async fn refresh_completed_quest_with_voice(
     .await;
     crate::buddy::actor::buddy_update_speech_user(app.clone(), completed.speech).await;
     crate::buddy::actor::buddy_apply(app.clone(), completed.mutation).await;
-    if reward > 0 {
-        let buddy_arc = app.buddy.buddy.clone();
-        let mut lock = buddy_arc.lock().await;
-        if let Some(svc) = lock.as_mut() {
-            svc.grant_xp(reward);
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -513,7 +588,7 @@ pub async fn handle_v1_buddy_briefing(
     State(app): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<BriefingQuery>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
-    let project_root = {
+    let (project_root, operator_state) = {
         let buddy_arc = app.buddy.buddy.clone();
         let lock = buddy_arc.lock().await;
         let svc = lock.as_ref().ok_or_else(|| {
@@ -522,8 +597,32 @@ pub async fn handle_v1_buddy_briefing(
                 "buddy not initialized".to_string(),
             )
         })?;
-        svc.project_root.clone()
+        (
+            svc.project_root.clone(),
+            svc.operator_features
+                .storage
+                .then(|| (svc.presentation_state(), svc.pulse.clone())),
+        )
     };
+    if let Some((state, pulse)) = operator_state {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        if query.date.as_ref().is_some_and(|date| date != &today) {
+            return Err(ScratchError::new(StatusCode::CONFLICT, "Historical briefing files are compatibility evidence; use Work report history for authoritative revisions".into()));
+        }
+        let runtime = crate::buddy::operator_runtime::runtime(
+            &app,
+            crate::buddy::operator_runtime::OperatorCapability::Storage,
+        )
+        .await
+        .map_err(|error| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, error))?;
+        let briefing =
+            crate::buddy::briefing::assemble_operator_briefing(&runtime, &state, &pulse, today)
+                .await
+                .map_err(|error| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, error))?;
+        return Ok(axum::Json(
+            serde_json::json!({"briefing": briefing, "authority":"work_items"}),
+        ));
+    }
     let briefing =
         crate::buddy::briefing::load_briefing(&project_root, query.date.as_deref()).await;
     Ok(axum::Json(serde_json::json!({ "briefing": briefing })))
@@ -588,6 +687,7 @@ pub async fn handle_v1_buddy_care(
         None,
     ));
     svc.update_speech_user_initiated(crate::buddy::types::BuddySpeechItem {
+        editorial_delivery_required: false,
         id: uuid::Uuid::new_v4().to_string(),
         text: message.clone(),
         mood: mood.to_string(),
@@ -634,6 +734,7 @@ pub async fn handle_v1_buddy_personality_reroll(
         .map(|quest| quest.status == "active" && quest.progress >= quest.goal)
         .unwrap_or(false);
     svc.update_speech_user_initiated(crate::buddy::types::BuddySpeechItem {
+        editorial_delivery_required: false,
         id: uuid::Uuid::new_v4().to_string(),
         text: format!(
             "New vibe loaded: {} — {}",
@@ -745,14 +846,52 @@ pub async fn handle_v1_buddy_quest_accept(
 
 pub async fn handle_v1_buddy_activities(
     State(app): State<AppState>,
-) -> Result<axum::Json<Vec<BuddyActivity>>, ScratchError> {
+    Query(query): Query<super::buddy_opportunities::HistoryQuery>,
+) -> Result<(axum::http::HeaderMap, axum::Json<Vec<BuddyActivity>>), ScratchError> {
     let buddy_arc = app.buddy.buddy.clone();
     let lock = buddy_arc.lock().await;
+    if lock
+        .as_ref()
+        .is_some_and(|svc| svc.operator_features.storage)
+    {
+        drop(lock);
+        let runtime = crate::buddy::operator_runtime::runtime(
+            &app,
+            crate::buddy::operator_runtime::OperatorCapability::Storage,
+        )
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
+        let (activities, next_after) = runtime
+            .with_store(move |store| {
+                crate::buddy::legacy_work::activity_history_page(
+                    store,
+                    query.after,
+                    query.limit.unwrap_or(50).clamp(1, 200),
+                )
+            })
+            .await
+            .map_err(|e| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?;
+        // Preserve the array body consumed by existing clients. Pagination is
+        // opt-in via query parameters and the next cursor response header.
+        let mut headers = axum::http::HeaderMap::new();
+        if let Some(cursor) = next_after {
+            headers.insert(
+                "x-next-after",
+                cursor.to_string().parse().map_err(|_| {
+                    ScratchError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "invalid history cursor".into(),
+                    )
+                })?,
+            );
+        }
+        return Ok((headers, axum::Json(activities)));
+    }
     let activities = lock
         .as_ref()
         .map(|s| s.state.recent_activities.clone())
         .unwrap_or_default();
-    Ok(axum::Json(activities))
+    Ok((axum::http::HeaderMap::new(), axum::Json(activities)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -822,6 +961,7 @@ pub async fn handle_v1_buddy_conversations_create(
 
     let model = crate::buddy::actor::resolve_buddy_chat_model(app.clone()).await;
     let snapshot = TrajectorySnapshot {
+        pending_browser_decision: None,
         pending_deliveries: Vec::new(),
         goal: None,
         goal_ledger: Vec::new(),
@@ -869,6 +1009,7 @@ pub async fn handle_v1_buddy_conversations_create(
         reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
+        pending_questions: Vec::new(),
     };
 
     crate::chat::trajectories::save_trajectory_snapshot(gcx.clone(), snapshot)
@@ -984,6 +1125,7 @@ pub async fn handle_v1_buddy_conversations_create_setup(
         _ => "Setup",
     };
     let snapshot = TrajectorySnapshot {
+        pending_browser_decision: None,
         pending_deliveries: Vec::new(),
         goal: None,
         goal_ledger: Vec::new(),
@@ -1031,6 +1173,7 @@ pub async fn handle_v1_buddy_conversations_create_setup(
         reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
+        pending_questions: Vec::new(),
     };
     crate::chat::trajectories::save_trajectory_snapshot(app.gcx.clone(), snapshot)
         .await

@@ -84,6 +84,8 @@ pub fn upsert_progress(list: &mut Vec<MCPProgressInfo>, incoming: MCPProgressInf
 
 #[derive(Clone)]
 pub struct McpClientHandler {
+    /// Opt-in inert operator connection; native sessions retain their existing defaults.
+    pub restricted: bool,
     pub peer_arc: Arc<AMutex<Option<Peer<RoleClient>>>>,
     pub session_arc: Arc<AMutex<Box<dyn IntegrationSession>>>,
     pub logs: Arc<AMutex<Vec<String>>>,
@@ -190,6 +192,9 @@ pub fn redact_sensitive_json(value: &serde_json::Value) -> serde_json::Value {
 impl ClientHandler for McpClientHandler {
     fn get_info(&self) -> ClientInfo {
         let mut info = ClientInfo::default();
+        if self.restricted {
+            return info;
+        }
         let mut capabilities = ClientCapabilities::builder()
             .enable_sampling()
             .enable_roots()
@@ -210,6 +215,12 @@ impl ClientHandler for McpClientHandler {
         let session_arc = self.session_arc.clone();
         let logs = self.logs.clone();
         async move {
+            if self.restricted {
+                return Err(rmcp::ErrorData::internal_error(
+                    "Operator MCP callbacks are disabled",
+                    None,
+                ));
+            }
             let (config_path, policy, already_approved) = {
                 let mut session_locked = session_arc.lock().await;
                 match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
@@ -226,7 +237,7 @@ impl ClientHandler for McpClientHandler {
                         return Err(rmcp::ErrorData::internal_error(
                             "Session is not a SessionMCP",
                             None,
-                        ))
+                        ));
                     }
                 }
             };
@@ -318,6 +329,12 @@ impl ClientHandler for McpClientHandler {
     ) -> impl Future<Output = Result<ListRootsResult, rmcp::ErrorData>> + Send + '_ {
         let gcx_weak = self.gcx.clone();
         async move {
+            if self.restricted {
+                return Err(rmcp::ErrorData::internal_error(
+                    "Operator MCP callbacks are disabled",
+                    None,
+                ));
+            }
             let gcx = match gcx_weak.upgrade() {
                 Some(gcx) => gcx,
                 None => return Ok(ListRootsResult::default()),
@@ -348,6 +365,12 @@ impl ClientHandler for McpClientHandler {
         let logs = self.logs.clone();
         let debug_name = self.debug_name.clone();
         async move {
+            if self.restricted {
+                return Err(rmcp::ErrorData::internal_error(
+                    "Operator MCP callbacks are disabled",
+                    None,
+                ));
+            }
             let config_path = {
                 let mut session_locked = session_arc.lock().await;
                 match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
@@ -356,7 +379,7 @@ impl ClientHandler for McpClientHandler {
                         return Err(rmcp::ErrorData::internal_error(
                             "Session is not a SessionMCP",
                             None,
-                        ))
+                        ));
                     }
                 }
             };
@@ -473,6 +496,9 @@ impl ClientHandler for McpClientHandler {
         let handle_arc = self.tool_refresh_handle.clone();
         let gcx = self.gcx.clone();
         async move {
+            if self.restricted {
+                return;
+            }
             let mut handle = handle_arc.lock().await;
             if let Some(h) = handle.take() {
                 h.abort();
@@ -581,6 +607,9 @@ impl ClientHandler for McpClientHandler {
         let gcx = self.gcx.clone();
         let handle_arc = self.resource_refresh_handle.clone();
         async move {
+            if self.restricted {
+                return;
+            }
             let mut handle = handle_arc.lock().await;
             if let Some(h) = handle.take() {
                 h.abort();
@@ -736,6 +765,9 @@ impl ClientHandler for McpClientHandler {
         let request_timeout = self.request_timeout;
         let handle_arc = self.prompt_refresh_handle.clone();
         async move {
+            if self.restricted {
+                return;
+            }
             let mut handle = handle_arc.lock().await;
             if let Some(h) = handle.take() {
                 h.abort();
@@ -1001,6 +1033,118 @@ pub async fn cancel_mcp_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn operator_fixture_handshake_lists_and_denies_callbacks() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let (client_io, server_io) = tokio::io::duplex(16384);
+        let fixture = tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(server_io);
+            let mut lines = BufReader::new(read).lines();
+            let mut denied = 0;
+            let mut list_id = None;
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let outgoing = match request["method"].as_str() {
+                    Some("initialize") => {
+                        assert_eq!(request["params"]["capabilities"], serde_json::json!({}));
+                        vec![
+                            serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{},"resources":{},"prompts":{}},"serverInfo":{"name":"local-fixture","version":"1"}}}),
+                        ]
+                    }
+                    Some("notifications/initialized") => vec![
+                        serde_json::json!({"jsonrpc":"2.0","id":"roots-fixture","method":"roots/list"}),
+                        serde_json::json!({"jsonrpc":"2.0","id":"sampling-fixture","method":"sampling/createMessage","params":{"messages":[],"maxTokens":1}}),
+                        serde_json::json!({"jsonrpc":"2.0","id":"elicitation-fixture","method":"elicitation/create","params":{"message":"fixture","requestedSchema":{"type":"object","properties":{}}}}),
+                        serde_json::json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"}),
+                        serde_json::json!({"jsonrpc":"2.0","method":"notifications/resources/list_changed"}),
+                        serde_json::json!({"jsonrpc":"2.0","method":"notifications/prompts/list_changed"}),
+                    ],
+                    Some("tools/list") => {
+                        assert!(list_id.is_none());
+                        list_id = Some(request["id"].clone());
+                        vec![]
+                    }
+                    None => {
+                        assert!(request.get("error").is_some());
+                        denied += 1;
+                        vec![]
+                    }
+                    other => panic!("unexpected MCP request: {other:?}"),
+                };
+                for response in outgoing {
+                    write
+                        .write_all(format!("{response}\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+                if denied == 3 {
+                    if let Some(id) = list_id.take() {
+                        let response = serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"tools":[{"name":"read","inputSchema":{"type":"object"}},{"name":"write","inputSchema":{"type":"object"}}]}});
+                        write
+                            .write_all(format!("{response}\n").as_bytes())
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+            denied
+        });
+        let session: Arc<AMutex<Box<dyn IntegrationSession>>> =
+            Arc::new(AMutex::new(Box::new(SessionMCP::detached("fixture"))));
+        let handler = McpClientHandler {
+            restricted: true,
+            peer_arc: Arc::new(AMutex::new(None)),
+            session_arc: session.clone(),
+            logs: Arc::new(AMutex::new(Vec::new())),
+            debug_name: "fixture".into(),
+            request_timeout: 1,
+            gcx: Weak::new(),
+            tool_refresh_handle: Arc::new(AMutex::new(None)),
+            resource_refresh_handle: Arc::new(AMutex::new(None)),
+            prompt_refresh_handle: Arc::new(AMutex::new(None)),
+        };
+        let client = timeout(
+            Duration::from_secs(2),
+            rmcp::serve_client(handler, client_io),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let tools = timeout(Duration::from_secs(2), client.list_all_tools())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tools.len(), 2);
+        assert!(session
+            .lock()
+            .await
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .unwrap()
+            .mcp_tools
+            .is_empty());
+        assert!(client.service().tool_refresh_handle.lock().await.is_none());
+        assert!(client
+            .service()
+            .resource_refresh_handle
+            .lock()
+            .await
+            .is_none());
+        assert!(client
+            .service()
+            .prompt_refresh_handle
+            .lock()
+            .await
+            .is_none());
+        let _ = client.cancel().await;
+        assert_eq!(
+            timeout(Duration::from_secs(2), fixture)
+                .await
+                .unwrap()
+                .unwrap(),
+            3
+        );
+    }
 
     fn make_session_mcp(debug_name: &str) -> SessionMCP {
         SessionMCP {
@@ -1041,6 +1185,7 @@ mod tests {
         let session_arc = Arc::new(AMutex::new(session));
         let logs = Arc::new(AMutex::new(Vec::new()));
         let handler = McpClientHandler {
+            restricted: false,
             peer_arc: peer_arc.clone(),
             session_arc,
             logs,
@@ -1193,6 +1338,40 @@ pub async fn mcp_session_wait_startup(session_arc: Arc<AMutex<Box<dyn Integratio
         let mut join_handler_locked = join_handler_arc.lock().await;
         if let Some(join_handler) = join_handler_locked.take() {
             let _ = join_handler.await;
+        }
+    }
+}
+
+impl SessionMCP {
+    pub(crate) fn detached(config_path: &str) -> Self {
+        let debug_name = config_path;
+        SessionMCP {
+            debug_name: debug_name.to_string(),
+            config_path: config_path.to_string(),
+            launched_cfg: serde_json::Value::Null,
+            mcp_client: None,
+            mcp_tools: Vec::new(),
+            mcp_resources: Vec::new(),
+            mcp_prompts: Vec::new(),
+            server_info: None,
+            startup_task_handles: None,
+            health_task_handle: None,
+            logs: Arc::new(AMutex::new(Vec::new())),
+            stderr_file_path: None,
+            stderr_cursor: Arc::new(AMutex::new(0)),
+            connection_status: MCPConnectionStatus::Disconnected,
+            last_successful_connection: None,
+            metrics: super::mcp_metrics::new_shared_metrics(),
+            #[cfg(target_os = "linux")]
+            observation: None,
+            auth_manager: None,
+            auth_status: MCPAuthStatus::NotApplicable,
+            oauth_refresh_task_handle: None,
+            resource_index_task: None,
+            oauth_probe: None,
+            sampling_session_approved: false,
+            active_progress: Vec::new(),
+            last_logged_status: None,
         }
     }
 }

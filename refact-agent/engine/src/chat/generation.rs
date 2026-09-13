@@ -2149,7 +2149,62 @@ pub fn start_generation(
                     );
                     ev.chat_id = Some(chat_id.to_string());
                     ev.persistent = true;
-                    app.buddy_event_sink.enqueue_event(ev).await;
+                    let origin = {
+                        let session = session_arc.lock().await;
+                        session.thread.worktree.as_ref().map(|worktree| {
+                            (
+                                worktree.source_workspace_root.clone(),
+                                session.created_at.clone(),
+                                session.event_seq,
+                            )
+                        })
+                    };
+                    let mut correlated = false;
+                    if let Some((root, version, sequence)) = origin {
+                        if let Ok(root) = tokio::fs::canonicalize(root).await {
+                            use refact_buddy_core::operator_events::{
+                                OperatorSignal, OperatorSignalAuthority, OperatorSignalKind,
+                                OPERATOR_SIGNAL_SCHEMA_VERSION_V1,
+                            };
+                            use refact_buddy_core::operator_types::{
+                                NativeSourceIdentity, NativeSourceKind, ProjectIdentity,
+                                ResourceRef,
+                            };
+                            let canonical_root = root.to_string_lossy().into_owned();
+                            let signal = OperatorSignal {
+                                schema_version: OPERATOR_SIGNAL_SCHEMA_VERSION_V1,
+                                kind: OperatorSignalKind::OperationState,
+                                authority: OperatorSignalAuthority::Hint,
+                                project: ProjectIdentity {
+                                    project_id: canonical_root.clone(),
+                                    canonical_root,
+                                },
+                                worker: None,
+                                source: NativeSourceIdentity {
+                                    source_kind: NativeSourceKind::Chat,
+                                    source_id: chat_id.to_string(),
+                                    source_version: version.clone(),
+                                },
+                                source_sequence: Some(sequence),
+                                chat: Some(ResourceRef {
+                                    resource_kind: "chat".into(),
+                                    resource_id: chat_id.to_string(),
+                                    version,
+                                }),
+                                tool: None,
+                                goal: None,
+                                runtime_event: ev.clone(),
+                            };
+                            correlated = app
+                                .buddy_event_sink
+                                .enqueue_operator_signal(signal)
+                                .await
+                                .is_ok();
+                        }
+                    }
+                    if !correlated {
+                        app.buddy_event_sink.enqueue_event(ev).await;
+                    }
                     break;
                 }
                 ToolStepOutcome::Stop => {

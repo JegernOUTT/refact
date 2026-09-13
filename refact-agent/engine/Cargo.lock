@@ -4542,6 +4542,7 @@ dependencies = [
  "resvg",
  "rmcp",
  "ropey",
+ "roxmltree",
  "rusqlite",
  "rust-embed",
  "select",

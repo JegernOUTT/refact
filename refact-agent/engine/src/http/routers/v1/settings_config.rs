@@ -264,11 +264,11 @@ async fn atomic_write(path: &Path, content: &str) -> Result<(), ScratchError> {
         nonce
     ));
     let result = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp)
-            .await?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&tmp).await?;
         file.write_all(content.as_bytes()).await?;
         file.flush().await?;
         file.sync_all().await?;
@@ -542,13 +542,93 @@ pub async fn handle_v1_trajectory_settings_post(
         })?
         .into_config();
     crate::runtime_settings::validate(&settings).map_err(bad_request)?;
+    let _guard = BUDDY_TRAJECTORY_WRITE_LOCK.lock().await;
     let path = crate::runtime_settings::settings_path(&app.paths.config_dir);
-    let yaml = serde_yaml::to_string(&settings)
-        .map_err(|error| server_error(format!("cannot serialize trajectory settings: {error}")))?;
+    let mut persisted = match buddy_trajectory_snapshot(&app)
+        .await
+        .map_err(server_error)?
+    {
+        Some(bytes) => serde_yaml::from_slice::<serde_yaml::Value>(&bytes)
+            .map_err(|_| bad_request("invalid persisted trajectory settings"))?,
+        None => serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+    };
+    let map = persisted
+        .as_mapping_mut()
+        .ok_or_else(|| bad_request("invalid persisted trajectory settings"))?;
+    let known = serde_yaml::to_value(&settings)
+        .map_err(|_| server_error("cannot serialize trajectory settings"))?;
+    for (key, value) in known
+        .as_mapping()
+        .ok_or_else(|| server_error("invalid settings mapping"))?
+    {
+        map.insert(key.clone(), value.clone());
+    }
+    let yaml = serde_yaml::to_string(&persisted)
+        .map_err(|_| server_error("cannot serialize trajectory settings"))?;
+    buddy_trajectory_parse(yaml.as_bytes()).map_err(bad_request)?;
     atomic_write(&path, &yaml).await?;
     crate::runtime_settings::install_live(&settings);
     Ok(trajectory_settings_response(path, settings))
 }
+
+pub fn buddy_trajectory_parse(
+    bytes: &[u8],
+) -> Result<crate::runtime_settings::TrajectoryRuntimeSettings, String> {
+    crate::runtime_settings::parse_persisted(bytes)
+}
+
+pub async fn buddy_trajectory_snapshot(app: &AppState) -> Result<Option<Vec<u8>>, String> {
+    let path = crate::runtime_settings::settings_path(&app.paths.config_dir);
+    for candidate in [app.paths.config_dir.clone(), path.clone()] {
+        match tokio::fs::symlink_metadata(candidate).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err("settings symlink not allowed".into())
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("settings snapshot failed".into()),
+        }
+    }
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("settings snapshot failed".into()),
+    }
+}
+
+pub async fn buddy_trajectory_compare_exchange(
+    app: &AppState,
+    expected: &Option<Vec<u8>>,
+    replacement: &Option<Vec<u8>>,
+) -> Result<(), String> {
+    let _guard = BUDDY_TRAJECTORY_WRITE_LOCK.lock().await;
+    let settings = match replacement {
+        Some(bytes) => buddy_trajectory_parse(bytes)?,
+        None => crate::runtime_settings::TrajectoryRuntimeSettings::default(),
+    };
+    crate::runtime_settings::validate(&settings)?;
+    if &buddy_trajectory_snapshot(app).await? != expected {
+        return Err("settings version mismatch".into());
+    }
+    let path = crate::runtime_settings::settings_path(&app.paths.config_dir);
+    match replacement {
+        Some(bytes) => atomic_write(
+            &path,
+            std::str::from_utf8(bytes).map_err(|_| "invalid settings encoding")?,
+        )
+        .await
+        .map_err(|_| "settings persistence failed".to_string())?,
+        None => match tokio::fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("settings persistence failed".into()),
+        },
+    }
+    crate::runtime_settings::install_live(&settings);
+    Ok(())
+}
+
+static BUDDY_TRAJECTORY_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
 mod tests {

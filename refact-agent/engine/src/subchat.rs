@@ -66,7 +66,7 @@ fn should_compact_context_limit_error(
 }
 
 fn subchat_retries_allowed(config: &SubchatConfig) -> bool {
-    config.tool_name != "mode_transition"
+    config.tool_name != "mode_transition" && !matches!(config.tools, ToolsPolicy::Supervised { .. })
 }
 
 fn append_runner_deliveries(
@@ -170,12 +170,13 @@ pub(crate) async fn drain_background_agent_inbox(
     if !runner_tool_window_closed(messages) {
         return;
     }
-    let (app, agent_id, chat_id) = {
+    let (app, agent_id, chat_id, model) = {
         let ccx = ccx.lock().await;
         (
             ccx.app.clone(),
             ccx.background_agent_id.clone(),
             ccx.chat_id.clone(),
+            ccx.current_model.clone(),
         )
     };
     let Some(agent_id) = agent_id else {
@@ -221,6 +222,51 @@ pub(crate) async fn drain_background_agent_inbox(
             format!("{sender}\n{}", message.text),
         ));
     }
+    // Native steering notes are authorized again at consume time against the
+    // chat and model that will actually see them. A note whose grant was
+    // revoked, expired, re-epoched, or rebound while queued is dropped here;
+    // nothing is ever composed from request text.
+    for note in app.agents.drain_native_notes(&agent_id).await {
+        match note.consume(&chat_id, &model) {
+            Ok(text) => messages.push(event(
+                EventSubkind::SystemNotice,
+                "agents.native_note",
+                json!({
+                    "from": "supervisor",
+                    "control_id": note.control_id,
+                    "note_id": note.note_id,
+                    "queued_at": note.queued_at,
+                }),
+                format!("[steering note from supervisor]\n{text}"),
+            )),
+            Err(error) => warn!(
+                "dropping queued native steering note {} for {}: {}",
+                note.control_id, agent_id, error
+            ),
+        }
+    }
+}
+
+/// Cooperative pause barrier at a model/tool boundary. Parks while the native
+/// owner has a pause requested and returns `Ok(true)` when the wait ended by
+/// cancellation, in which case the caller must not dispatch anything else.
+/// The messages the caller already holds (the in-flight outcome) are never
+/// touched. Agents without a live registry runtime never park.
+pub(crate) async fn hold_native_pause(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    config: &SubchatConfig,
+) -> bool {
+    let (app, agent_id) = {
+        let ccx = ccx.lock().await;
+        (ccx.app.clone(), ccx.background_agent_id.clone())
+    };
+    let Some(agent_id) = agent_id else {
+        return is_aborted(&config.abort_flag);
+    };
+    let Some(gate) = app.agents.pause_gate(&agent_id).await else {
+        return is_aborted(&config.abort_flag);
+    };
+    gate.hold(config.abort_flag.as_deref()).await || is_aborted(&config.abort_flag)
 }
 
 async fn emit_parent_compaction_diagnostics(
@@ -444,6 +490,11 @@ pub enum ToolsPolicy {
     All,
     None,
     Only(Vec<String>),
+    /// Constructed only by the native authority-guarded spawn path.
+    Supervised {
+        tools: Vec<String>,
+        budget: crate::chat::types::GoalBudget,
+    },
 }
 
 impl ToolsPolicy {
@@ -460,6 +511,7 @@ impl ToolsPolicy {
             ToolsPolicy::All => None,
             ToolsPolicy::None => Some(vec![]),
             ToolsPolicy::Only(v) => Some(v.clone()),
+            ToolsPolicy::Supervised { tools, .. } => Some(tools.clone()),
         }
     }
 
@@ -468,6 +520,7 @@ impl ToolsPolicy {
             ToolsPolicy::All => true,
             ToolsPolicy::None => false,
             ToolsPolicy::Only(v) => v.iter().any(|t| t == tool_name),
+            ToolsPolicy::Supervised { tools, .. } => tools.iter().any(|t| t == tool_name),
         }
     }
 }
@@ -1560,6 +1613,13 @@ fn stateful_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadP
         ToolsPolicy::All => "agent".to_string(),
         ToolsPolicy::None => "none".to_string(),
         ToolsPolicy::Only(v) => v.join(","),
+        ToolsPolicy::Supervised { tools, .. } => {
+            if tools.is_empty() {
+                "none".into()
+            } else {
+                tools.join(",")
+            }
+        }
     };
     let task_meta = task_meta_for_stateful_subchat(config);
 
@@ -2399,8 +2459,16 @@ async fn run_subchat_loop(
 ) -> Result<(Vec<ChatMessage>, bool), String> {
     let mut context_limit_compact_count = 0usize;
     let mut empty_choice_retry_count = 0usize;
+    let mut supervised_cost = 0.0_f64;
     for step in 0..config.max_steps {
         if is_aborted(&config.abort_flag) {
+            if config.soft_abort {
+                return Ok((messages, true));
+            }
+            return Err("Aborted".to_string());
+        }
+        // Model boundary: honour a native pause before any new dispatch.
+        if hold_native_pause(&ccx, config).await {
             if config.soft_abort {
                 return Ok((messages, true));
             }
@@ -2410,6 +2478,41 @@ async fn run_subchat_loop(
         emit_subchat_progress(config, SubchatProgress::Step(step + 1));
         drain_background_agent_inbox(&ccx, &mut messages).await;
         persist_subchat_progress(&ccx, config, progress, &messages).await;
+
+        // Reserve the entire possible input/output envelope before a provider
+        // call. Unknown pricing/usage fails closed; retries and wrap-up calls
+        // are disabled for supervision, and budgets are never increased.
+        let mut supervised_pricing = None;
+        if let ToolsPolicy::Supervised { budget, .. } = tools_policy {
+            let envelope = config.n_ctx.saturating_add(config.max_new_tokens) as u64;
+            if budget.max_turns.is_none_or(|limit| step >= limit as usize)
+                || budget.max_tokens.is_none_or(|limit| {
+                    (usage.total_tokens as u64).saturating_add(envelope) > limit
+                })
+            {
+                return Err("Aborted: supervised token/turn budget exhausted".into());
+            }
+            if let Some(cents) = budget.max_cost_cents {
+                let gcx = ccx.lock().await.global_context.clone();
+                let pricing = crate::providers::pricing::lookup_model_pricing(&gcx, &config.model)
+                    .await
+                    .ok_or("Aborted: supervised cost pricing unavailable")?;
+                let reserve = ChatUsage {
+                    prompt_tokens: config.n_ctx as _,
+                    completion_tokens: config.max_new_tokens as _,
+                    total_tokens: envelope as _,
+                    ..Default::default()
+                };
+                let cost = crate::providers::pricing::compute_cost(&reserve, &pricing)
+                    .ok_or("Aborted: supervised cost bound unavailable")?
+                    .total_usd;
+                if !cost.is_finite() || cost < 0.0 || supervised_cost + cost > cents as f64 / 100.0
+                {
+                    return Err("Aborted: supervised cost budget exhausted".into());
+                }
+                supervised_pricing = Some(pricing);
+            }
+        }
 
         let results = loop {
             match runner_model_turn(
@@ -2468,6 +2571,30 @@ async fn run_subchat_loop(
             }
         };
 
+        if let ToolsPolicy::Supervised { budget, .. } = tools_policy {
+            let actual = results
+                .first()
+                .and_then(|messages| messages.last())
+                .and_then(|m| m.usage.as_ref())
+                .ok_or("Aborted: supervised provider usage unavailable")?;
+            if let Some(pricing) = supervised_pricing.as_ref() {
+                let cost = crate::providers::pricing::compute_cost(actual, pricing)
+                    .ok_or("Aborted: supervised provider cost unavailable")?
+                    .total_usd;
+                if !cost.is_finite() || cost < 0.0 {
+                    return Err("Aborted: invalid provider cost".into());
+                }
+                supervised_cost += cost;
+            }
+            if budget.max_tokens.is_none_or(|limit| {
+                (usage.total_tokens as u64).saturating_add(actual.total_tokens as u64) > limit
+            }) || budget
+                .max_cost_cents
+                .is_some_and(|limit| supervised_cost > limit as f64 / 100.0)
+            {
+                return Err("Aborted: supervised provider budget exhausted".into());
+            }
+        }
         update_usage_from_messages(usage, &results);
         let gcx = ccx.lock().await.global_context.clone();
         emit_usage_progress(&gcx, config, &results).await;
@@ -2478,6 +2605,14 @@ async fn run_subchat_loop(
             break;
         }
 
+        // Tool boundary: the provider outcome above is retained; a pause
+        // parks here and cancellation exits before any tool starts.
+        if hold_native_pause(&ccx, config).await {
+            if config.soft_abort {
+                return Ok((messages, true));
+            }
+            return Err("Aborted".to_string());
+        }
         messages = execute_pending_tool_calls(
             ccx.clone(),
             &config.model,
@@ -2894,18 +3029,29 @@ async fn execute_pending_tool_calls(
     auto_approve_dangerous_commands: bool,
     step_progress: Option<Arc<dyn Fn(SubchatProgress) + Send + Sync>>,
 ) -> Result<Vec<ChatMessage>, String> {
-    let (gcx, n_ctx, task_meta, worktree, chat_id, root_chat_id) = {
+    let (n_ctx, task_meta, worktree, chat_id, root_chat_id, app, agent_id, abort_flag) = {
         let cgcx = ccx.lock().await;
         (
-            cgcx.global_context.clone(),
             cgcx.n_ctx,
             cgcx.task_meta.clone(),
             cgcx.execution_scope_worktree(),
             cgcx.chat_id.clone(),
             cgcx.root_chat_id.clone(),
+            cgcx.app.clone(),
+            cgcx.background_agent_id.clone(),
+            cgcx.abort_flag.clone(),
         )
     };
-    let app = AppState::from_gcx(gcx.clone()).await;
+    let native_pause = if matches!(tools_policy, ToolsPolicy::Supervised { .. }) {
+        let agent_id = agent_id.ok_or_else(|| {
+            "supervised native tool dispatch missing background agent identity".to_string()
+        })?;
+        Some(app.agents.pause_gate(&agent_id).await.ok_or_else(|| {
+            "supervised native tool dispatch missing live registry runtime".to_string()
+        })?)
+    } else {
+        None
+    };
     let last = match messages.last() {
         Some(m) => m,
         None => return Ok(messages),
@@ -2989,7 +3135,11 @@ async fn execute_pending_tool_calls(
         &thread,
         &thread.mode,
         Some(&thread.model),
-        ExecuteToolsOptions::default(),
+        ExecuteToolsOptions {
+            native_pause,
+            native_abort: Some(abort_flag.clone()),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -2997,12 +3147,16 @@ async fn execute_pending_tool_calls(
         callback(SubchatProgress::ToolsFinished);
     }
 
+    // A cancelled dispatch deliberately leaves unstarted calls without a
+    // fabricated success result; the enclosing subchat observes the same
+    // abort flag and exits rather than continuing this turn.
+    let dispatch_aborted = abort_flag.load(Ordering::Relaxed);
     for tc in &tool_calls {
         let answered = denied_msgs
             .iter()
             .chain(tool_results.iter())
             .any(|m| m.tool_call_id == tc.id);
-        if !answered {
+        if !answered && !dispatch_aborted {
             tool_results.push(ChatMessage {
                 message_id: Uuid::new_v4().to_string(),
                 role: "tool".to_string(),
@@ -4287,6 +4441,131 @@ mod subchat_tests {
         )
         .await;
         assert_eq!(result.err(), Some("Aborted".to_string()));
+    }
+
+    /// Real registry runtime bound to a loop context: the loop parks on the
+    /// agent's own pause gate and observes the agent's own abort flag.
+    async fn paused_agent_loop(
+        app: &crate::app_state::AppState,
+        tools_policy: ToolsPolicy,
+    ) -> (
+        String,
+        Arc<crate::agents::registry::PauseGate>,
+        tokio::sync::mpsc::UnboundedReceiver<SubchatProgress>,
+        tokio::task::JoinHandle<Result<(Vec<ChatMessage>, bool), String>>,
+    ) {
+        let (record, abort_flag, _) = app
+            .agents
+            .create(crate::agents::types::CreateAgentRequest {
+                parent_chat_id: "parent".into(),
+                parent_root_chat_id: None,
+                parent_tool_call_id: None,
+                kind: crate::agents::types::BgAgentKind::Subagent,
+                config_name: "test".into(),
+                title: "paused".into(),
+                prompt: "prompt".into(),
+                target_files: vec![],
+                model: "model".into(),
+                model_type: None,
+                goal_summary: None,
+                plan_present: false,
+                worktree_id: None,
+                worktree_branch: None,
+            })
+            .await
+            .unwrap();
+        let gate = app.agents.pause_gate(&record.agent_id).await.unwrap();
+        app.agents.request_pause(&record.agent_id).await.unwrap();
+        let mut ccx = crate::at_commands::at_commands::AtCommandsContext::new_from_app(
+            app.clone(),
+            4096,
+            1,
+            false,
+            vec![],
+            format!("subchat-{}", record.agent_id),
+            None,
+            "model".to_string(),
+            None,
+            None,
+        )
+        .await;
+        ccx.background_agent_id = Some(record.agent_id.clone());
+        let ccx = Arc::new(tokio::sync::Mutex::new(ccx));
+        let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = test_subchat_config();
+        config.abort_flag = Some(abort_flag);
+        config.background_agent_id = Some(record.agent_id.clone());
+        config.max_steps = 3;
+        config.tools = tools_policy.clone();
+        config.step_progress = Some(Arc::new(move |update| {
+            let _ = progress_tx.send(update);
+        }));
+        let task = tokio::spawn(async move {
+            let mut usage = crate::call_validation::ChatUsage::default();
+            let progress = Arc::new(StdMutex::new(Vec::new()));
+            super::run_subchat_loop(
+                ccx,
+                &config,
+                vec![ChatMessage::new("user".to_string(), "hi".to_string())],
+                &tools_policy,
+                &mut usage,
+                &progress,
+            )
+            .await
+        });
+        (record.agent_id, gate, progress_rx, task)
+    }
+
+    #[tokio::test]
+    async fn paused_loop_parks_before_any_dispatch_and_cancel_wakes_it_without_effect() {
+        let app = crate::app_state::AppState::from_gcx(make_test_gcx().await).await;
+        let (agent_id, gate, mut progress, task) = paused_agent_loop(&app, ToolsPolicy::None).await;
+        gate.quiesced().await;
+        let status = app.agents.pause_status(&agent_id).await.unwrap();
+        assert!(status.requested && status.quiescent);
+        assert!(!status.running_tool_cancelable);
+        assert!(
+            progress.try_recv().is_err(),
+            "no step may start while parked"
+        );
+        app.agents
+            .cancel("parent", &agent_id, Some("owner cancel".into()))
+            .await
+            .unwrap();
+        assert_eq!(task.await.unwrap().err(), Some("Aborted".to_string()));
+        assert!(
+            progress.try_recv().is_err(),
+            "cancel must not release a dispatch"
+        );
+        assert!(app.agents.pause_status(&agent_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resume_wakes_parked_loop_and_next_boundary_is_reached() {
+        let app = crate::app_state::AppState::from_gcx(make_test_gcx().await).await;
+        // A zero-turn supervised budget makes the first post-barrier check
+        // fail closed deterministically, proving the loop moved past the gate
+        // without needing a provider.
+        let policy = ToolsPolicy::Supervised {
+            tools: vec![],
+            budget: crate::chat::types::GoalBudget {
+                max_turns: Some(0),
+                max_tokens: Some(1),
+                explicit: true,
+                ..Default::default()
+            },
+        };
+        let (agent_id, gate, mut progress, task) = paused_agent_loop(&app, policy).await;
+        gate.quiesced().await;
+        assert!(progress.try_recv().is_err());
+        let status = app.agents.release_pause(&agent_id).await.unwrap();
+        assert!(!status.requested);
+        assert_eq!(progress.recv().await, Some(SubchatProgress::Step(1)));
+        assert_eq!(
+            task.await.unwrap().err(),
+            Some("Aborted: supervised token/turn budget exhausted".to_string())
+        );
+        assert!(!gate.is_quiescent());
     }
 
     #[test]

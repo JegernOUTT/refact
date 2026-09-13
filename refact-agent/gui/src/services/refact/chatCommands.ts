@@ -4,6 +4,7 @@ import {
   getEngineEndpointIdentity,
   type EngineApiConfig,
 } from "./apiUrl";
+import type { PendingQuestionAnswer } from "./types";
 import type { PushMode } from "./chatSubscription";
 
 export type EngineApiConnection = EngineApiConfig;
@@ -76,6 +77,12 @@ export type ChatCommandBase =
   | {
       type: "tool_decisions";
       decisions: { tool_call_id: string; accepted: boolean }[];
+    }
+  | {
+      type: "answer_questions";
+      tool_call_id: string;
+      answers: PendingQuestionAnswer[];
+      asked_at_ms?: number;
     }
   | {
       type: "ide_tool_result";
@@ -247,7 +254,7 @@ async function sendRawChatCommand(
   apiKey: string | undefined,
   command: ChatCommandBase,
   priority?: boolean,
-): Promise<void> {
+): Promise<string> {
   const commandWithId: ChatCommand = {
     ...command,
     client_request_id: uuidv4(),
@@ -274,6 +281,7 @@ async function sendRawChatCommand(
       `Failed to send command: ${response.status} ${response.statusText} - ${text}`,
     );
   }
+  return commandWithId.client_request_id;
 }
 
 async function sendChangedChatParams(
@@ -327,7 +335,7 @@ export async function sendChatCommand(
   apiKey: string | undefined,
   command: ChatCommandBase,
   priority?: boolean,
-): Promise<void> {
+): Promise<string | undefined> {
   if (command.type === "set_params") {
     await sendChangedChatParams(
       chatId,
@@ -338,7 +346,7 @@ export async function sendChatCommand(
     );
     return;
   }
-  await sendRawChatCommand(chatId, connection, apiKey, command, priority);
+  return sendRawChatCommand(chatId, connection, apiKey, command, priority);
 }
 
 export async function sendUserMessage(
@@ -487,6 +495,26 @@ export async function respondToToolConfirmations(
     type: "tool_decisions",
     decisions,
   } as ChatCommandBase);
+}
+
+export async function answerQuestions(
+  chatId: string,
+  toolCallId: string,
+  answers: PendingQuestionAnswer[],
+  connection: PortOrConnection,
+  apiKey?: string,
+  askedAtMs?: number,
+): Promise<string> {
+  const clientRequestId = await sendChatCommand(chatId, connection, apiKey, {
+    type: "answer_questions",
+    tool_call_id: toolCallId,
+    answers,
+    ...(askedAtMs === undefined ? {} : { asked_at_ms: askedAtMs }),
+  });
+  if (!clientRequestId) {
+    throw new Error("Answer command was not sent");
+  }
+  return clientRequestId;
 }
 
 export async function updateMessage(

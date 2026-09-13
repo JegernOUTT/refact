@@ -1529,6 +1529,7 @@ mod tests {
         planner_chat_id: Option<&str>,
     ) -> TrajectorySnapshot {
         TrajectorySnapshot {
+            pending_browser_decision: None,
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
@@ -1579,6 +1580,7 @@ mod tests {
             reactive_compact_attempts: None,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
+            pending_questions: Vec::new(),
             pending_deliveries: Vec::new(),
         }
     }

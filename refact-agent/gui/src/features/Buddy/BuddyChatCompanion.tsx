@@ -1,3 +1,7 @@
+import {
+  isLegacyWorkControl,
+  useBuddyLegacyControls,
+} from "./hooks/useBuddyLegacyControls";
 import React, {
   useCallback,
   useEffect,
@@ -38,7 +42,6 @@ import {
 import { isUserMessage } from "../../services/refact/types";
 import { push } from "../Pages/pagesSlice";
 import {
-  useDismissBuddySuggestionMutation,
   useDismissBuddyRuntimeEventMutation,
   useUpdateBuddySettingsMutation,
 } from "../../services/refact/buddy";
@@ -47,8 +50,9 @@ import { BuddyCanvas } from "./BuddyCanvas";
 import { useBuddyOpportunities } from "./hooks/useBuddyOpportunities";
 import {
   formatOpportunityActionError,
-  useExecuteBuddyAction,
+  buddyActionResultMessage,
 } from "./hooks/useExecuteBuddyAction";
+import { useBuddyControlAction } from "./hooks/useBuddyControlAction";
 import type {
   BuddyControl,
   BuddyOpportunity,
@@ -176,6 +180,8 @@ function isFreshEventOnce(createdAt: string, ttlMs?: number | null): boolean {
   if (createdAtTime > now + 30_000) return false;
   return now - createdAtTime <= eventFreshnessMs(ttlMs);
 }
+
+import { requiresEditorialClaim } from "./useBuddyEditorialDelivery";
 
 function isDurableSpeech(activeSpeech: {
   persistent: boolean;
@@ -493,13 +499,20 @@ function runtimeEventRank(event: BuddyRuntimeEvent, index: number): number {
 
 export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const dispatch = useAppDispatch();
+  const legacyControls = useBuddyLegacyControls();
   const snapshot = useAppSelector(selectBuddySnapshot);
   const enabled = useAppSelector(selectIsBuddyInteractiveEnabled);
-  const runtimeQueue = useAppSelector(selectRuntimeQueue);
-  const nowPlaying = useAppSelector(selectNowPlaying);
+  const rawQueue = useAppSelector(selectRuntimeQueue);
+  const runtimeQueue = useMemo(
+    () => rawQueue.filter((event) => !requiresEditorialClaim(event)),
+    [rawQueue],
+  );
+  const rawPlaying = useAppSelector(selectNowPlaying);
+  const nowPlaying = requiresEditorialClaim(rawPlaying) ? null : rawPlaying;
   const diagnostics = useAppSelector(selectBuddyDiagnostics);
   const suggestions = useAppSelector(selectBuddySuggestions);
-  const activeSpeech = useAppSelector(selectActiveSpeech);
+  const rawSpeech = useAppSelector(selectActiveSpeech);
+  const activeSpeech = requiresEditorialClaim(rawSpeech) ? null : rawSpeech;
   const seenNotificationIds = useAppSelector(selectSeenNotificationIds);
   const chatBubbleSnoozedUntil = useAppSelector(selectChatBubbleSnoozedUntil);
   const chatBubbleImpressions = useAppSelector(selectChatBubbleImpressions);
@@ -521,8 +534,29 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
   const buddy = useBuddyState();
   const triggerBuddySignal = buddy.signal;
   const { unread } = useBuddyOpportunities();
-  const executeOpportunityAction = useExecuteBuddyAction();
-  const [dismissMutation] = useDismissBuddySuggestionMutation();
+  const { opportunity: executeOpportunityAction, control: executeControl } =
+    useBuddyControlAction(chatId);
+  const dismissSuggestion = useCallback(
+    async (id: string) => {
+      const result = await executeControl(
+        {
+          id: `dismiss-${id}`,
+          action: "dismiss_suggestion",
+          action_param: id,
+          label: "Dismiss",
+          style: "secondary",
+        },
+        undefined,
+        "companion-suggestion",
+      );
+      if (result.status !== "success")
+        throw new Error(
+          buddyActionResultMessage(result) ??
+            "Suggestion dismissal was not acknowledged.",
+        );
+    },
+    [executeControl],
+  );
   const [dismissRuntimeMutation] = useDismissBuddyRuntimeEventMutation();
   const [updateSettings, { isLoading: isEnabling }] =
     useUpdateBuddySettingsMutation();
@@ -827,9 +861,13 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
     unread,
   ]);
 
-  const gatedSelection = useMemo(() => {
+  const gatedSelection = useMemo<{
+    candidates: NotificationCandidate[];
+    retryAtMs: number | null;
+  }>(() => {
     void gateTick;
     void historyKnown;
+    void hasUserMessages;
     const impressedIds = new Set(
       chatBubbleImpressions.map((impression) => impression.id),
     );
@@ -1158,16 +1196,19 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
             const results = await Promise.allSettled(
               [notification.opportunity].map(async (opp) => {
                 const dismissAction = getOpportunityDismissAction(opp);
-                await executeOpportunityAction(
+                const outcome = await executeOpportunityAction(
                   dismissAction.action,
                   opp,
                   dismissAction.actionIndex,
                 );
-                return opp.id;
+                return { id: opp.id, outcome };
               }),
             );
             const dismissedOpportunityIds = results.flatMap((result) =>
-              result.status === "fulfilled" ? [result.value] : [],
+              result.status === "fulfilled" &&
+              result.value.outcome.status === "success"
+                ? [result.value.id]
+                : [],
             );
             if (dismissedOpportunityIds.length > 0) {
               for (const oppId of dismissedOpportunityIds) {
@@ -1187,14 +1228,31 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
               restoreNotification(notification.id);
               setActionError(formatOpportunityActionError(failed.reason));
             }
+            const failure = results
+              .flatMap((result) =>
+                result.status === "fulfilled"
+                  ? [buddyActionResultMessage(result.value.outcome)]
+                  : [],
+              )
+              .find((message) => message !== null);
+            if (failure) {
+              restoreNotification(notification.id);
+              setActionError(failure);
+            }
             return;
           }
 
-          await executeOpportunityAction(
+          const outcome = await executeOpportunityAction(
             action,
             notification.opportunity,
             actionIndex,
           );
+          if (outcome.status === "ignored") return;
+          if (outcome.status !== "success") {
+            restoreNotification(notification.id);
+            setActionError(buddyActionResultMessage(outcome));
+            return;
+          }
           dismissNotification(notification.id, notification.contentKey);
           completeBubbleInteraction();
         } catch (error) {
@@ -1215,8 +1273,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
           dispatch(clearActiveSpeech());
         } else if (notification.source === "suggestion") {
           try {
-            await dismissMutation(notification.sourceId).unwrap();
-            dispatch(dismissBuddySuggestion(notification.sourceId));
+            await dismissSuggestion(notification.sourceId);
           } catch (error) {
             restoreNotification(notification.id);
             setActionError(formatOpportunityActionError(error));
@@ -1266,17 +1323,32 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
       }
 
       if (ctrl.action === "accept_quest") {
-        completeBubbleInteraction();
-        await executeBuddyAction(ctrl, dispatch, {
-          triggerText: notification.text,
-          triggerSource: notificationTriggerSource(notification.source),
-          sourceChatId: chatId,
-          diagnostic: notification.diagnostic,
-        });
-        if (notification.source === "suggestion") {
-          dispatch(dismissBuddySuggestion(notification.sourceId));
+        if (pendingRef.current || pending) return;
+        pendingRef.current = true;
+        setPending(true);
+        setActionError(null);
+        try {
+          const outcome = await executeBuddyAction(ctrl, dispatch, {
+            triggerText: notification.text,
+            triggerSource: notificationTriggerSource(notification.source),
+            sourceChatId: chatId,
+            diagnostic: notification.diagnostic,
+          });
+          if (outcome.status !== "ok") {
+            setActionError(outcome.message);
+            return;
+          }
+          completeBubbleInteraction();
+          if (notification.source === "suggestion") {
+            dispatch(dismissBuddySuggestion(notification.sourceId));
+          }
+          dismissNotification(notification.id, notification.contentKey);
+        } catch (error) {
+          setActionError(formatOpportunityActionError(error));
+        } finally {
+          pendingRef.current = false;
+          setPending(false);
         }
-        dismissNotification(notification.id, notification.contentKey);
         return;
       }
 
@@ -1288,8 +1360,7 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         try {
           if (notification.source === "suggestion") {
             dismissNotification(notification.id, notification.contentKey);
-            await dismissMutation(notification.sourceId).unwrap();
-            dispatch(dismissBuddySuggestion(notification.sourceId));
+            await dismissSuggestion(notification.sourceId);
           } else if (notification.source === "runtime") {
             dispatch(dismissRuntimeEvent(notification.sourceId));
             void dismissRuntimeMutation(notification.sourceId)
@@ -1320,25 +1391,39 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
         return;
       }
 
-      completeBubbleInteraction();
-      dismissNotification(notification.id, notification.contentKey);
+      if (pendingRef.current || pending) return;
+      pendingRef.current = true;
+      setPending(true);
       setActionError(null);
-      await executeBuddyAction(ctrl, dispatch, {
-        triggerText: notification.text,
-        triggerSource: notificationTriggerSource(notification.source),
-        sourceChatId: chatId,
-        diagnostic: notification.diagnostic,
-        suggestionId:
-          notification.source === "suggestion"
-            ? notification.sourceId
-            : undefined,
-      });
+      try {
+        const outcome = await executeBuddyAction(ctrl, dispatch, {
+          triggerText: notification.text,
+          triggerSource: notificationTriggerSource(notification.source),
+          sourceChatId: chatId,
+          diagnostic: notification.diagnostic,
+          suggestionId:
+            notification.source === "suggestion"
+              ? notification.sourceId
+              : undefined,
+        });
+        if (outcome.status !== "ok") {
+          setActionError(outcome.message);
+          return;
+        }
+        completeBubbleInteraction();
+        dismissNotification(notification.id, notification.contentKey);
+      } catch (error) {
+        setActionError(formatOpportunityActionError(error));
+      } finally {
+        pendingRef.current = false;
+        setPending(false);
+      }
     },
     [
       notification,
       pending,
       executeOpportunityAction,
-      dismissMutation,
+      dismissSuggestion,
       dismissRuntimeMutation,
       dismissNotification,
       restoreNotification,
@@ -1385,7 +1470,14 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
             speechOverride={
               leaving ? null : actionError ?? shownNotification.text
             }
-            speechControls={leaving ? undefined : shownNotification.controls}
+            speechControls={
+              leaving
+                ? undefined
+                : shownNotification.controls.filter(
+                    (control) =>
+                      legacyControls || !isLegacyWorkControl(control),
+                  )
+            }
             speechIntent={shownNotification.speechIntent}
             onSpeechControlClick={
               leaving ? undefined : (ctrl) => void handleControl(ctrl)

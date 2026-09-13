@@ -658,7 +658,11 @@ async fn buddy_persona_block(app: AppState, mode_id: &str) -> Arc<str> {
             return Arc::clone(&entry.rendered);
         }
     }
-    let rendered: Arc<str> = refact_buddy_core::state::render_persona_block(&snapshot.state).into();
+    let rendered: Arc<str> = refact_buddy_core::state::render_persona_block_with_style(
+        &snapshot.state,
+        snapshot.settings.personality_prompt.as_deref(),
+    )
+    .into();
     cache.insert(
         cache_key,
         BuddyPersonaCacheEntry {

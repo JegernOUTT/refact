@@ -359,6 +359,8 @@ mod tests {
         session
             .command_queue
             .push_back(crate::chat::types::CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "goal-nudge-x".to_string(),
                 priority: true,
                 command: crate::chat::types::ChatCommand::Regenerate {},
@@ -366,6 +368,8 @@ mod tests {
         session
             .command_queue
             .push_back(crate::chat::types::CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "user-x".to_string(),
                 priority: false,
                 command: crate::chat::types::ChatCommand::Regenerate {},

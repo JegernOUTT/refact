@@ -41,6 +41,8 @@ pub struct AtCommandsContext {
     pub current_model: String,
     pub task_meta: Option<TaskMeta>,
     pub execution_scope: Option<ExecutionScope>,
+    native_edit_scope: Option<crate::buddy::supervision_authority::NativeEditScope>,
+    native_edit_required: bool,
     pub derived_privacy_zones: crate::privacy::records::DerivedPrivacyZones,
     pub subchat_depth: usize,
     pub tool_access_bypass: bool,
@@ -172,7 +174,17 @@ impl AtCommandsContext {
         } else {
             app.agents.find_agent_id_by_child_chat_id(&chat_id).await
         };
+        let native_edit_scope =
+            crate::buddy::supervision_authority::native_edit_scope_for_chat(&chat_id);
+        let native_edit_required = chat_id.starts_with("subchat-supervised-")
+            || native_edit_scope.is_some()
+            || execution_scope.as_ref().is_some_and(|scope| {
+                scope.worktree().kind
+                    == crate::buddy::supervision_authority::SUPERVISED_WORKTREE_KIND
+            });
         AtCommandsContext {
+            native_edit_scope,
+            native_edit_required,
             global_context,
             app: app.clone(),
             n_ctx,
@@ -199,6 +211,19 @@ impl AtCommandsContext {
             abort_flag: abort_flag.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
             activity_stamp: None,
         }
+    }
+
+    pub(crate) fn check_native_edit_scope(&self, path: &std::path::Path) -> Result<(), String> {
+        if !self.native_edit_required {
+            return Ok(());
+        }
+        self.native_edit_scope
+            .as_ref()
+            .ok_or_else(|| {
+                "supervised edit authority is unavailable; explicit renewed supervision required"
+                    .to_string()
+            })?
+            .check_edit(&self.chat_id, path)
     }
 
     #[cfg(test)]

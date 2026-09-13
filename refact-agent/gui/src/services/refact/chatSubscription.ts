@@ -3,6 +3,7 @@ import type {
   BackgroundAgentSummary,
   ChatMessage,
   GoalSnapshot,
+  PendingQuestionSet,
   GoalStatus,
 } from "./types";
 import type { ExecStatus } from "./exec";
@@ -233,6 +234,7 @@ export type EventEnvelope =
       runtime: RuntimeState;
       messages: ChatMessage[];
       background_agents: BackgroundAgentSummary[];
+      pending_questions?: PendingQuestionSet[];
       goal?: GoalSnapshot | null;
       browser?: {
         runtime_id: string;

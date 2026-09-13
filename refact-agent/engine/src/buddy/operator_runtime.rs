@@ -1,0 +1,142 @@
+use axum::http::HeaderMap;
+use refact_buddy_core::operator_types::{NativeSourceIdentity, NativeSourceKind};
+
+use crate::app_state::AppState;
+use super::outcome_runtime::OutcomeRuntime;
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct OperatorFeatures {
+    pub storage: bool,
+    pub actions: bool,
+    pub supervision: bool,
+    pub improvement: bool,
+    pub editorial: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum OperatorCapability {
+    Storage,
+    Actions,
+    Supervision,
+    Improvement,
+    Editorial,
+}
+
+impl OperatorFeatures {
+    pub fn allows(self, capability: OperatorCapability) -> bool {
+        self.storage
+            && match capability {
+                OperatorCapability::Storage => true,
+                OperatorCapability::Actions => self.actions,
+                OperatorCapability::Supervision => self.supervision,
+                OperatorCapability::Improvement => self.improvement,
+                OperatorCapability::Editorial => self.editorial,
+            }
+    }
+}
+
+pub async fn runtime(
+    app: &AppState,
+    capability: OperatorCapability,
+) -> Result<OutcomeRuntime, String> {
+    let (runtime, root) = {
+        let buddy = app.buddy.buddy.lock().await;
+        let service = buddy.as_ref().ok_or("Buddy service unavailable")?;
+        if !service.operator_features.allows(capability) {
+            return Err(format!("Buddy operator {capability:?} rollout is disabled"));
+        }
+        (
+            service
+                .outcome_runtime
+                .clone()
+                .ok_or("Buddy operator store unavailable")?,
+            service.project_root.clone(),
+        )
+    };
+    let roots = crate::files_correction::get_unscoped_project_dirs(app.gcx.clone()).await;
+    if roots.len() != 1
+        || roots[0] != root
+        || runtime.project().canonical_root != root.to_string_lossy()
+    {
+        return Err("Buddy operator project identity changed".into());
+    }
+    Ok(runtime)
+}
+
+pub fn authenticated_operator_request(
+    app: &AppState,
+    headers: &HeaderMap,
+) -> Result<NativeSourceIdentity, String> {
+    let expected = app
+        .gcx
+        .cmdline
+        .daemon_auth_token
+        .as_deref()
+        .filter(|token| !token.is_empty())
+        .ok_or("Authenticated operator transport is unavailable")?;
+    let actual = crate::daemon::auth::bearer_token_from_headers(headers)
+        .ok_or("Operator authorization required")?;
+    if !crate::daemon::auth::token_matches(actual, expected) {
+        return Err("Operator authorization required".into());
+    }
+    Ok(NativeSourceIdentity {
+        source_kind: NativeSourceKind::External,
+        source_id: "authenticated-user".into(),
+        source_version: "operator-http-v1".into(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_flags_never_grant_automation() {
+        let disabled = OperatorFeatures::default();
+        for capability in [
+            OperatorCapability::Storage,
+            OperatorCapability::Actions,
+            OperatorCapability::Supervision,
+            OperatorCapability::Improvement,
+            OperatorCapability::Editorial,
+        ] {
+            assert!(!disabled.allows(capability));
+        }
+        let storage_only = OperatorFeatures {
+            storage: true,
+            ..Default::default()
+        };
+        assert!(storage_only.allows(OperatorCapability::Storage));
+        assert!(!storage_only.allows(OperatorCapability::Actions));
+        assert!(!OperatorFeatures {
+            actions: true,
+            ..Default::default()
+        }
+        .allows(OperatorCapability::Actions));
+    }
+
+    #[tokio::test]
+    async fn missing_or_wrong_transport_never_becomes_a_user_grant() {
+        let root = tempfile::tempdir().unwrap();
+        let mut gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            root.path().join("cache"),
+            root.path().join("config"),
+        )
+        .await;
+        std::sync::Arc::get_mut(&mut gcx)
+            .unwrap()
+            .cmdline
+            .daemon_auth_token = Some("fixture-secret".into());
+        let app = AppState::from_gcx(gcx).await;
+        let mut headers = HeaderMap::new();
+        assert!(authenticated_operator_request(&app, &headers).is_err());
+        headers.insert("authorization", "Bearer wrong".parse().unwrap());
+        assert!(authenticated_operator_request(&app, &headers).is_err());
+        headers.insert("authorization", "Bearer fixture-secret".parse().unwrap());
+        let origin = authenticated_operator_request(&app, &headers).unwrap();
+        assert_eq!(origin.source_id, "authenticated-user");
+        assert!(!serde_json::to_string(&origin)
+            .unwrap()
+            .contains("fixture-secret"));
+    }
+}

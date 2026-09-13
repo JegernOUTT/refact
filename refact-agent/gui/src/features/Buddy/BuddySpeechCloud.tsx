@@ -1,3 +1,7 @@
+import {
+  isLegacyWorkControl,
+  useBuddyLegacyControls,
+} from "./hooks/useBuddyLegacyControls";
 import React, { useCallback } from "react";
 import { Badge, Button } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
@@ -31,6 +35,7 @@ export const BuddySpeechCloud: React.FC<Props> = ({
   onControl,
 }) => {
   const dispatch = useAppDispatch();
+  const legacyControls = useBuddyLegacyControls();
   const activeSpeech = useAppSelector(selectActiveSpeech);
   const diagnostics = useAppSelector(selectBuddyDiagnostics);
 
@@ -69,16 +74,18 @@ export const BuddySpeechCloud: React.FC<Props> = ({
         {speech.text}
       </p>
       <div className={styles.controls}>
-        {speech.controls.map((ctrl) => (
-          <Button
-            key={ctrl.id}
-            size="1"
-            variant={ctrl.style === "primary" ? "solid" : "soft"}
-            onClick={() => void handleControl(ctrl)}
-          >
-            {ctrl.label}
-          </Button>
-        ))}
+        {speech.controls
+          .filter((control) => legacyControls || !isLegacyWorkControl(control))
+          .map((ctrl) => (
+            <Button
+              key={ctrl.id}
+              size="1"
+              variant={ctrl.style === "primary" ? "solid" : "soft"}
+              onClick={() => void handleControl(ctrl)}
+            >
+              {ctrl.label}
+            </Button>
+          ))}
         {!onControl && (
           <Button
             size="1"

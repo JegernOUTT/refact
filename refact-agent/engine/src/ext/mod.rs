@@ -3,6 +3,7 @@ pub mod config_dirs;
 pub mod extensions_marketplace;
 pub mod hooks;
 pub mod hooks_runner;
+pub mod operator_service;
 pub mod plugins;
 pub mod skills;
 pub mod skills_context;

@@ -25,6 +25,11 @@ type BuddyTabPanelTarget = {
 
 const BUDDY_TAB_PANELS: (BuddyTabPanelTarget & { tab: string })[] = [
   {
+    tab: "Play",
+    selector: "[data-testid='buddy-home-hero']",
+    description: "Buddy Play scene",
+  },
+  {
     tab: "Personality",
     selector: "[data-testid='buddy-personality-panel']",
     description: "Buddy personality panel",
@@ -170,7 +175,8 @@ test.describe("no page-level horizontal scroll", () => {
         }
         if (route.path.includes("route=buddy")) {
           await page.getByTestId("buddy-home-content").waitFor();
-          await expect(page.getByTestId("buddy-home-hero")).toBeVisible();
+          await expect(page.getByTestId("buddy-presence")).toBeVisible();
+          await expect(page.getByTestId("buddy-world")).toHaveCount(0);
         }
         if (route.path.includes("route=chat-split")) {
           await page.locator("[data-workspace-group-tab-id]").waitFor();
@@ -329,8 +335,8 @@ test.describe("no page-level horizontal scroll", () => {
               description: "Buddy content scroller",
             },
             {
-              selector: "[data-testid='buddy-home-hero']",
-              description: "Buddy hero band",
+              selector: "[data-testid='buddy-presence']",
+              description: "Buddy compact presence",
             },
             {
               selector: "[data-testid='buddy-summary-strip']",
@@ -549,10 +555,20 @@ test.describe("Buddy route smoke", () => {
     await page.goto("/tests/e2e/route-showcase.html?route=buddy");
     await page.getByTestId("buddy-home-content").waitFor();
 
-    await expect(page.getByTestId("buddy-home-hero")).toBeVisible();
-    await expect(page.getByTestId("buddy-world")).toBeVisible();
+    await expect(page.getByTestId("buddy-presence-avatar")).toBeVisible();
+    await expect(page.getByTestId("buddy-world")).toHaveCount(0);
     await expect(page.getByTestId("buddy-summary-strip")).toBeVisible();
     await expect(page.getByTestId("buddy-opportunities-feed")).toBeVisible();
+
+    await page.getByRole("button", { name: "Open Play", exact: true }).click();
+    await expect(page.getByTestId("buddy-home-hero")).toBeVisible();
+    await expect(page.getByTestId("buddy-world")).toBeVisible();
+    await expect(page.getByTestId("buddy-presence-avatar")).toHaveCount(0);
+    await page
+      .getByRole("button", { name: "Back to Desk", exact: true })
+      .click();
+    await expect(page.getByTestId("buddy-world")).toHaveCount(0);
+    await expect(page.getByTestId("buddy-presence-avatar")).toBeVisible();
 
     await page.getByRole("tab", { name: "Pulse", exact: true }).click();
     await expect(page.getByTestId("buddy-pulse-card")).toBeVisible();

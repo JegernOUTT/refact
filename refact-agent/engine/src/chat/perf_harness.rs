@@ -2677,6 +2677,8 @@ async fn run_full_soak_sample(
             locked.thread.include_project_info = false;
             locked.thread.auto_enrichment_enabled = Some(false);
             let request = crate::chat::types::CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: format!("full-soak-goal-{chat_index}"),
                 priority: false,
                 command: crate::chat::types::ChatCommand::SetGoal {

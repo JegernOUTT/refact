@@ -477,11 +477,7 @@ function updateWalk(anim: BuddyAnimState, semantic: BuddySemanticState): void {
   }
 }
 
-function startToy(
-  anim: BuddyAnimState,
-  toyType: ToyType,
-  emit: (e: BuddyEvent) => void,
-): void {
+function startToy(anim: BuddyAnimState, toyType: ToyType): void {
   const def = TOY_DEFS[toyType] as ToyDef | undefined;
   if (def === undefined) return;
   anim.toyActive = true;
@@ -489,7 +485,6 @@ function startToy(
   anim.toyAnimPhase = 0;
   anim.toyDurationTimer = 140 + Math.random() * 40;
   setStatus(anim, def.statusMessage, 160);
-  if (def.xp > 0) emit({ type: "xp_gained", amount: def.xp, newTotal: 0 });
   spawnFloatingEmoji(
     anim,
     (TOY_EMOJI[toyType] as string | undefined) ?? "📦",
@@ -1031,7 +1026,7 @@ function applySignalStatus(
 export function triggerSignalAnimation(
   anim: BuddyAnimState,
   signalType: string,
-  emit: (e: BuddyEvent) => void,
+  _emit: (e: BuddyEvent) => void,
   semantic?: BuddySemanticState,
 ): void {
   const def = SIGNALS[signalType] as SignalDef | undefined;
@@ -1095,8 +1090,6 @@ export function triggerSignalAnimation(
       displayTimer: 180,
       rainbowHue: 0,
     };
-    const bonus = recent.length * 10;
-    emit({ type: "xp_gained", amount: bonus, newTotal: 0 });
     spawnRainbowSparks(anim, 20 + recent.length * 5);
     anim.squashTargetX = 1.2;
     anim.squashTargetY = 0.82;
@@ -1384,7 +1377,6 @@ export function updateSceneAnimation(
 function startIdleAction(
   anim: BuddyAnimState,
   semantic: BuddySemanticState,
-  emit: (e: BuddyEvent) => void,
   action: IdleActionType,
 ): void {
   anim.nextIdleBias = {};
@@ -1407,19 +1399,19 @@ function startIdleAction(
       startWalk(anim, semantic);
       break;
     case "playDuck":
-      startToy(anim, "duck", emit);
+      startToy(anim, "duck");
       break;
     case "playDice":
-      startToy(anim, "dice", emit);
+      startToy(anim, "dice");
       break;
     case "drinkCoffee":
-      startToy(anim, "coffee", emit);
+      startToy(anim, "coffee");
       break;
     case "playBug":
-      startToy(anim, "bug", emit);
+      startToy(anim, "bug");
       break;
     case "readScroll":
-      startToy(anim, "scroll", emit);
+      startToy(anim, "scroll");
       break;
     case "doze":
       say(anim, pickFrom(STATUS_POOLS.doze), -30);
@@ -2082,7 +2074,7 @@ export function stepAnimFrame(
     anim.mouseProximity < 0.2 &&
     Math.random() < 0.004
   ) {
-    startIdleAction(anim, semantic, emit, selectIdleAction(anim, semantic));
+    startIdleAction(anim, semantic, selectIdleAction(anim, semantic));
   }
 
   if (anim.idleActionTimer > 0) {

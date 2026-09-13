@@ -305,6 +305,11 @@ pub async fn handle_v1_chat_command(
             .unwrap());
     }
 
+    if let Err(error) = super::queue::prepare_guarded_command(&mut session, &request) {
+        super::queue::reject_guard(&mut session, &request.client_request_id, error.clone());
+        return Err(ScratchError::new(StatusCode::CONFLICT, error));
+    }
+
     // Delivery edits must bypass the command processor: it awaits the running
     // turn, precisely when a user needs to reprioritize or cancel a delivery.
     if matches!(
@@ -621,6 +626,13 @@ pub async fn handle_v1_chat_command(
 
     let client_request_id_for_ack = request.client_request_id.clone();
     let enqueue_outcome = session.enqueue_accepted_command(request);
+    if enqueue_outcome == EnqueueCommandOutcome::Rejected {
+        return Ok(Response::builder()
+            .status(StatusCode::CONFLICT)
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"status":"authority_changed","error":"Refresh native state before responding"}"#))
+            .unwrap());
+    }
     if enqueue_outcome == EnqueueCommandOutcome::Full {
         session.emit(ChatEvent::Ack {
             client_request_id: client_request_id_for_ack,
@@ -854,6 +866,8 @@ mod tests {
             },
         ] {
             let request = CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: uuid::Uuid::new_v4().to_string(),
                 priority: false,
                 command,
@@ -919,6 +933,8 @@ mod tests {
             .insert(chat_id.to_string(), session_arc.clone());
 
         let request = CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "wake-up-request".to_string(),
             priority: false,
             command: ChatCommand::Abort {},
@@ -972,6 +988,8 @@ mod tests {
         {
             let mut session = session_arc.lock().await;
             session.command_queue.push_back(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "queued-request".to_string(),
                 priority: false,
                 command: ChatCommand::Regenerate {},
@@ -1011,16 +1029,22 @@ mod tests {
         {
             let mut session = session_arc.lock().await;
             session.command_queue.push_back(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "priority-first".to_string(),
                 priority: true,
                 command: ChatCommand::Regenerate {},
             });
             session.command_queue.push_back(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "normal-last".to_string(),
                 priority: false,
                 command: ChatCommand::Regenerate {},
             });
             session.command_queue.push_back(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "multimodal".to_string(),
                 priority: false,
                 command: ChatCommand::UserMessage {
@@ -1155,6 +1179,8 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let app = test_app_with_workspace(workspace.path()).await;
         let request = CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "oversized-client-message-id".to_string(),
             priority: false,
             command: ChatCommand::UserMessage {

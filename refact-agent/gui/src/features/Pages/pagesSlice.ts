@@ -128,6 +128,8 @@ export interface LimitsSettingsPage {
 export interface BuddyPage {
   name: "buddy";
   draftId?: string;
+  workId?: string;
+  workProjectId?: string;
 }
 
 export interface IntegrationsSetupPage {

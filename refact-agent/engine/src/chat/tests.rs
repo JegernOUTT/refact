@@ -174,6 +174,7 @@ mod tests {
     fn snapshot_roundtrips_with_background_agents() {
         let event = ChatEvent::Snapshot {
             goal: None,
+            pending_questions: Vec::new(),
             thread: ThreadParams::default(),
             runtime: RuntimeState::default(),
             messages: vec![],

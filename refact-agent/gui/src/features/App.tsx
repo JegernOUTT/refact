@@ -30,6 +30,7 @@ import {
 } from "../hooks";
 import { useBrowserOnlineStatus } from "../hooks/useBrowserOnlineStatus";
 import { useChatDeepLink } from "../hooks/useChatDeepLink";
+import { useBuddyWorkDeepLink } from "../hooks/useBuddyWorkDeepLink";
 import { store } from "../app/store";
 import { Provider } from "react-redux";
 import { Theme } from "../components/Theme";
@@ -293,6 +294,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
     isPageInHistory("task agent");
 
   const canAccessApp = providerBootstrap.canAccessApp;
+  useBuddyWorkDeepLink(canAccessApp && isLoggedIn);
   useChatDeepLink(canAccessApp && isLoggedIn);
   const hadAppAccessRef = useRef(canAccessApp);
   const [startupResolved, setStartupResolved] = useState(false);

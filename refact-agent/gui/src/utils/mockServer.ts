@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll } from "vitest";
+import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import type { Store } from "../app/store";
 import {
@@ -26,7 +27,72 @@ export const resetApi = (store: Store) => {
   store.dispatch(filesApi.util.resetApiState());
   store.dispatch(performanceApi.util.resetApiState());
 };
-export const server = setupServer();
+// Home always mounts the native safety surfaces, even with intelligence off.
+// Defaults model a real disabled rollout; tests can override each exact route.
+export const server = setupServer(
+  http.get("*/v1/buddy/operator/status", () =>
+    HttpResponse.json({
+      schema_version: 1,
+      mode: "disabled",
+      project: null,
+      worker: null,
+      features: {
+        storage: false,
+        actions: false,
+        supervision: false,
+        improvement: false,
+        editorial: false,
+      },
+    }),
+  ),
+  http.get("*/v1/buddy/operator/legacy-drafts/:id/work", () =>
+    HttpResponse.json({ detail: "No mapped proposal" }, { status: 404 }),
+  ),
+  http.get("*/v1/buddy/decisions/current", () =>
+    HttpResponse.json({
+      schema_version: 1,
+      project_root: "/fixture",
+      coverage: "loaded_native_sessions",
+      truncated: false,
+      questions: [],
+    }),
+  ),
+  http.get("*/v1/buddy/native-work", () =>
+    HttpResponse.json({
+      schema_version: 1,
+      project_root: "/fixture",
+      coverage: "loaded_native_sessions",
+      next_cursor: null,
+      sessions: [],
+    }),
+  ),
+  http.get("*/v1/buddy/supervision/context", () =>
+    HttpResponse.json({
+      schema_version: 1,
+      project: null,
+      worker: null,
+      authenticated_owner: null,
+      features: {
+        storage: false,
+        actions: false,
+        supervision: false,
+        improvement: false,
+        editorial: false,
+      },
+    }),
+  ),
+  http.get("*/v1/buddy/approvals/current", () =>
+    HttpResponse.json({
+      schema_version: 1,
+      project_root: "/fixture",
+      engine_identity: "fixture-engine",
+      coverage: "loaded_native_sessions",
+      truncated: false,
+      warnings: [],
+      sessions: [],
+    }),
+  ),
+);
 
 beforeAll(() => {
   // Enable the mocking in tests.

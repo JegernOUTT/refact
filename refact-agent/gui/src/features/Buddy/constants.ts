@@ -157,7 +157,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   user_message: {
     mood: "curious",
     animationType: "perk",
-    xp: 2,
     icon: "💬",
     isError: false,
     isWin: true,
@@ -169,7 +168,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   chat_started: {
     mood: "working",
     animationType: "work",
-    xp: 3,
     icon: "▶️",
     isError: false,
     isWin: true,
@@ -181,7 +179,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   chat_completed: {
     mood: "celebrate",
     animationType: "celebrate",
-    xp: 15,
     icon: "✅",
     isError: false,
     isWin: true,
@@ -193,7 +190,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   chat_error: {
     mood: "concerned",
     animationType: "shake",
-    xp: 1,
     icon: "❌",
     isError: true,
     isWin: false,
@@ -205,7 +201,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   error: {
     mood: "concerned",
     animationType: "shake",
-    xp: 0,
     icon: "❌",
     isError: true,
     isWin: false,
@@ -217,7 +212,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   streaming: {
     mood: "focused",
     animationType: "work",
-    xp: 1,
     icon: "📡",
     isError: false,
     isWin: false,
@@ -229,7 +223,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   generating: {
     mood: "thinking",
     animationType: "think",
-    xp: 1,
     icon: "⚡",
     isError: false,
     isWin: false,
@@ -241,7 +234,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   tool_used: {
     mood: "working",
     animationType: "work",
-    xp: 3,
     icon: "🔧",
     isError: false,
     isWin: false,
@@ -253,7 +245,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   tool_failed: {
     mood: "concerned",
     animationType: "shake",
-    xp: 1,
     icon: "💥",
     isError: true,
     isWin: false,
@@ -265,7 +256,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   tool_confirmation: {
     mood: "alert",
     animationType: "perk",
-    xp: 1,
     icon: "⏸️",
     isError: false,
     isWin: false,
@@ -277,7 +267,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   edit_applied: {
     mood: "happy",
     animationType: "celebrate",
-    xp: 5,
     icon: "📝",
     isError: false,
     isWin: true,
@@ -289,7 +278,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   search_done: {
     mood: "curious",
     animationType: "perk",
-    xp: 3,
     icon: "🔍",
     isError: false,
     isWin: false,
@@ -301,7 +289,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   browser_action: {
     mood: "curious",
     animationType: "perk",
-    xp: 3,
     icon: "🌐",
     isError: false,
     isWin: false,
@@ -313,7 +300,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   title_generating: {
     mood: "thinking",
     animationType: "think",
-    xp: 2,
     icon: "📋",
     isError: false,
     isWin: false,
@@ -325,7 +311,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   commit_msg: {
     mood: "focused",
     animationType: "work",
-    xp: 4,
     icon: "📦",
     isError: false,
     isWin: false,
@@ -337,7 +322,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   memory_extract: {
     mood: "learning",
     animationType: "absorb",
-    xp: 5,
     icon: "🧠",
     isError: false,
     isWin: true,
@@ -349,7 +333,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   knowledge_update: {
     mood: "learning",
     animationType: "absorb",
-    xp: 5,
     icon: "📚",
     isError: false,
     isWin: true,
@@ -361,7 +344,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   indexing: {
     mood: "working",
     animationType: "work",
-    xp: 3,
     icon: "📂",
     isError: false,
     isWin: false,
@@ -373,7 +355,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   vecdb_building: {
     mood: "focused",
     animationType: "work",
-    xp: 4,
     icon: "🧮",
     isError: false,
     isWin: false,
@@ -385,7 +366,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   codegraph_indexing: {
     mood: "focused",
     animationType: "work",
-    xp: 4,
     icon: "🕸️",
     isError: false,
     isWin: false,
@@ -397,7 +377,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   ast_parsing: {
     mood: "focused",
     animationType: "work",
-    xp: 4,
     icon: "🌳",
     isError: false,
     isWin: false,
@@ -409,7 +388,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   compression: {
     mood: "eating",
     animationType: "eat",
-    xp: 3,
     icon: "🗜️",
     isError: false,
     isWin: false,
@@ -421,7 +399,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   task_created: {
     mood: "alert",
     animationType: "perk",
-    xp: 5,
     icon: "📋",
     isError: false,
     isWin: false,
@@ -433,7 +410,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   task_completed: {
     mood: "celebrate",
     animationType: "celebrate",
-    xp: 20,
     icon: "🎯",
     isError: false,
     isWin: true,
@@ -445,7 +421,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   task_failed: {
     mood: "concerned",
     animationType: "shake",
-    xp: 2,
     icon: "📋",
     isError: true,
     isWin: false,
@@ -457,7 +432,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   checkpoint_saved: {
     mood: "happy",
     animationType: "celebrate",
-    xp: 4,
     icon: "💾",
     isError: false,
     isWin: true,
@@ -469,7 +443,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   skill_learned: {
     mood: "celebrate",
     animationType: "celebrate",
-    xp: 15,
     icon: "⭐",
     isError: false,
     isWin: true,
@@ -481,7 +454,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   connection_lost: {
     mood: "concerned",
     animationType: "shake",
-    xp: 0,
     icon: "📡",
     isError: true,
     isWin: false,
@@ -493,7 +465,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   connection_restored: {
     mood: "happy",
     animationType: "celebrate",
-    xp: 2,
     icon: "📡",
     isError: false,
     isWin: true,
@@ -505,7 +476,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   git_changes: {
     mood: "alert",
     animationType: "perk",
-    xp: 2,
     icon: "🔀",
     isError: false,
     isWin: false,
@@ -517,7 +487,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   speech_humor: {
     mood: "happy",
     animationType: "perk",
-    xp: 1,
     icon: "✨",
     isError: false,
     isWin: true,
@@ -529,7 +498,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   speech_insight: {
     mood: "curious",
     animationType: "think",
-    xp: 1,
     icon: "💡",
     isError: false,
     isWin: false,
@@ -541,7 +509,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   speech_chat_reaction: {
     mood: "happy",
     animationType: "perk",
-    xp: 1,
     icon: "💬",
     isError: false,
     isWin: true,
@@ -553,7 +520,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   chat_bug_candidate: {
     mood: "curious",
     animationType: "perk",
-    xp: 1,
     icon: "🐛",
     isError: false,
     isWin: false,
@@ -565,7 +531,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   care_feed: {
     mood: "eating",
     animationType: "eat",
-    xp: 0,
     icon: "🍜",
     isError: false,
     isWin: true,
@@ -577,7 +542,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   care_play: {
     mood: "happy",
     animationType: "celebrate",
-    xp: 0,
     icon: "🎾",
     isError: false,
     isWin: true,
@@ -589,7 +553,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   care_pet: {
     mood: "happy",
     animationType: "perk",
-    xp: 0,
     icon: "💕",
     isError: false,
     isWin: true,
@@ -601,7 +564,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   care_sleep: {
     mood: "sleepy",
     animationType: "sleep",
-    xp: 0,
     icon: "😴",
     isError: false,
     isWin: true,
@@ -613,7 +575,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   care_clean: {
     mood: "focused",
     animationType: "work",
-    xp: 0,
     icon: "🧼",
     isError: false,
     isWin: true,
@@ -625,7 +586,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   stage_up: {
     mood: "celebrate",
     animationType: "celebrate",
-    xp: 0,
     icon: "🌟",
     isError: false,
     isWin: true,
@@ -637,7 +597,6 @@ export const SIGNALS: Record<string, SignalDef> = {
   idle_timeout: {
     mood: "sleepy",
     animationType: "sleep",
-    xp: 0,
     icon: "😴",
     isError: false,
     isWin: false,
@@ -651,7 +610,6 @@ export const SIGNALS: Record<string, SignalDef> = {
 export const UNKNOWN_SIGNAL: SignalDef = {
   mood: "idle",
   animationType: "idle",
-  xp: 0,
   icon: "✨",
   isError: false,
   isWin: false,
@@ -681,11 +639,11 @@ export const SKILLS: SkillDef[] = [
 ];
 
 export const TOY_DEFS: Record<string, ToyDef> = {
-  duck: { statusMessage: "quack!", xp: 1 },
-  dice: { statusMessage: "01101001!", xp: 2 },
-  coffee: { statusMessage: "nom nom~", xp: 0, energyRestore: 22 },
-  bug: { statusMessage: "gotcha!", xp: 3 },
-  scroll: { statusMessage: "reading...", xp: 2 },
+  duck: { statusMessage: "quack!" },
+  dice: { statusMessage: "01101001!" },
+  coffee: { statusMessage: "nom nom~", energyRestore: 22 },
+  bug: { statusMessage: "gotcha!" },
+  scroll: { statusMessage: "reading..." },
 };
 
 export const TOY_EMOJI: Record<string, string> = {

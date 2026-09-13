@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use crate::settings::BuddySettings;
 use crate::types::*;
+use crate::operator_events::OperatorSignal;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type")]
@@ -25,6 +26,9 @@ pub enum BuddyEvent<Diagnostic = serde_json::Value> {
     },
     RuntimeEvent {
         event: BuddyRuntimeEvent,
+    },
+    OperatorSignal {
+        signal: OperatorSignal,
     },
     SpeechUpdated {
         speech: BuddySpeechItem,
@@ -85,5 +89,31 @@ mod tests {
             }
             other => panic!("unexpected event: {:?}", other),
         }
+    }
+
+    #[test]
+    fn operator_signal_keeps_a_distinct_event_tag() {
+        let signal: OperatorSignal = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "kind": "observation",
+            "authority": "hint",
+            "project": {"project_id": "p", "canonical_root": "/p"},
+            "worker": null,
+            "source": {"source_kind": "chat", "source_id": "chat-1", "source_version": "1"},
+            "source_sequence": null,
+            "chat": null,
+            "tool": null,
+            "goal": null,
+            "runtime_event": {
+                "id": "event-1", "signal_type": "observed", "title": "Observed",
+                "source": "test", "status": "completed", "priority": "normal",
+                "created_at": "2026-01-01T00:00:00Z"
+            }
+        }))
+        .unwrap();
+        let value =
+            serde_json::to_value(BuddyEvent::<serde_json::Value>::OperatorSignal { signal })
+                .unwrap();
+        assert_eq!(value["event_type"], "OperatorSignal");
     }
 }

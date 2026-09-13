@@ -153,6 +153,10 @@ class RefactAIToolboxPaneFactory : ToolWindowFactory {
 
     companion object {
         private val panesKey = Key.create<ChatPanes>("refact.panes")
+        fun chatForProject(project: Project): ChatPanes? {
+            val tw = ToolWindowManager.getInstance(project).getToolWindow("Refact")
+            return tw?.contentManager?.contents?.firstOrNull()?.getUserData(panesKey)
+        }
         val chat: ChatPanes?
             get() {
                 val tw = ToolWindowManager.getInstance(getLastUsedProject()).getToolWindow("Refact")

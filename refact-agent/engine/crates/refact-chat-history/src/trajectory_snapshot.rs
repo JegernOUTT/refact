@@ -5,6 +5,15 @@ use refact_chat_api::{
 use refact_core::chat_types::{ChatMessage, PendingDelivery};
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingBrowserDecisionSnapshot {
+    pub version: u8,
+    pub pending_message_id: String,
+    pub client_message_id: Option<String>,
+    pub browser_runtime_id: Option<String>,
+    pub requires_revalidation: bool,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TrajectorySnapshot {
     pub chat_id: String,
@@ -50,6 +59,8 @@ pub struct TrajectorySnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waiting_for_card_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_questions: Vec<refact_chat_api::PendingQuestionSet>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_deliveries: Vec<PendingDelivery>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalSnapshot>,
@@ -61,6 +72,8 @@ pub struct TrajectorySnapshot {
     pub goal_ledger: Vec<GoalLedgerEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_verification_blocked_until_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_browser_decision: Option<PendingBrowserDecisionSnapshot>,
 }
 
 fn tolerant_goal_ledger<'de, D>(deserializer: D) -> Result<Vec<GoalLedgerEntry>, D::Error>
@@ -122,10 +135,12 @@ impl TrajectorySnapshot {
             reactive_compact_attempts: thread.reactive_compact_attempts,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
+            pending_questions: Vec::new(),
             pending_deliveries: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
+            pending_browser_decision: None,
         }
     }
 }
@@ -298,6 +313,53 @@ mod tests {
         assert!(value.get("goal").is_none());
         let decoded: TrajectorySnapshot = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.goal, None);
+    }
+
+    #[test]
+    fn pending_questions_roundtrip_and_legacy_absence() {
+        let mut value = serde_json::to_value(snapshot()).unwrap();
+        assert!(value.get("pending_questions").is_none());
+        let legacy: TrajectorySnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert!(legacy.pending_questions.is_empty());
+        value["pending_questions"] = serde_json::json!([{
+            "tool_call_id": "ask-1",
+            "questions": [{ "id": "choice", "type": "yes_no", "text": "Continue?" }],
+            "asked_at_ms": 100,
+            "status": "pending",
+            "answers": []
+        }]);
+        let snapshot: TrajectorySnapshot = serde_json::from_value(value).unwrap();
+        let saved = serde_json::to_string(&snapshot).unwrap();
+        let restored: TrajectorySnapshot = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.pending_questions, snapshot.pending_questions);
+        assert_eq!(restored.pending_questions[0].tool_call_id, "ask-1");
+        assert_eq!(
+            restored.pending_questions[0].status,
+            refact_chat_api::PendingQuestionStatus::Pending
+        );
+    }
+
+    #[test]
+    fn pending_browser_decision_roundtrips_without_proposed_message_payload() {
+        let mut snapshot = snapshot();
+        snapshot.pending_browser_decision = Some(PendingBrowserDecisionSnapshot {
+            version: 1,
+            pending_message_id: "browser-pending".to_string(),
+            client_message_id: Some("optimistic-browser".to_string()),
+            browser_runtime_id: Some("browser-runtime".to_string()),
+            requires_revalidation: true,
+        });
+
+        let value = serde_json::to_value(&snapshot).unwrap();
+        assert!(value["pending_browser_decision"].get("content").is_none());
+        assert!(value["pending_browser_decision"]
+            .get("attachments")
+            .is_none());
+        let restored: TrajectorySnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            restored.pending_browser_decision,
+            snapshot.pending_browser_decision
+        );
     }
 
     #[test]

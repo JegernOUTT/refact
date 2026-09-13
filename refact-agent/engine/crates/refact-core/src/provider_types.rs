@@ -194,6 +194,108 @@ pub struct ModelTypeDefaults {
     pub thinking_budget: Option<usize>,
 }
 
+pub static DEFAULTS_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefaultsScope {
+    Global,
+    Project,
+}
+
+pub fn defaults_document_path(root: &Path, scope: DefaultsScope) -> PathBuf {
+    match scope {
+        DefaultsScope::Global => root.join("providers.d/defaults.yaml"),
+        DefaultsScope::Project => project_model_defaults_path(root),
+    }
+}
+
+pub async fn defaults_snapshot(
+    root: &Path,
+    scope: DefaultsScope,
+) -> Result<Option<Vec<u8>>, String> {
+    let path = defaults_document_path(root, scope);
+    for candidate in [
+        root.to_path_buf(),
+        path.parent().unwrap().to_path_buf(),
+        path.clone(),
+    ] {
+        match tokio::fs::symlink_metadata(candidate).await {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err("defaults symlink not allowed".into())
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("defaults snapshot failed".into()),
+        }
+    }
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("defaults snapshot failed".into()),
+    }
+}
+
+pub async fn defaults_compare_exchange(
+    root: &Path,
+    scope: DefaultsScope,
+    expected: &Option<Vec<u8>>,
+    replacement: &Option<Vec<u8>>,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let _guard = DEFAULTS_WRITE_LOCK.lock().await;
+    if let Some(bytes) = replacement {
+        match scope {
+            DefaultsScope::Global => {
+                serde_yaml::from_slice::<ProviderDefaults>(bytes)
+                    .map_err(|_| "invalid defaults")?;
+            }
+            DefaultsScope::Project => {
+                serde_yaml::from_slice::<ProjectModelDefaults>(bytes)
+                    .map_err(|_| "invalid defaults")?;
+            }
+        }
+    }
+    if &defaults_snapshot(root, scope).await? != expected {
+        return Err("defaults version mismatch".into());
+    }
+    let path = defaults_document_path(root, scope);
+    if let Some(bytes) = replacement {
+        let parent = path.parent().unwrap();
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|_| "defaults persistence failed")?;
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = parent.join(format!(
+            ".defaults-{}-{}.tmp",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let result = async {
+            let mut options = tokio::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(&tmp).await?;
+            file.write_all(bytes).await?;
+            file.sync_all().await?;
+            tokio::fs::rename(&tmp, &path).await
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(tmp).await;
+            return Err("defaults persistence failed".into());
+        }
+    } else {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("defaults persistence failed".into()),
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderDefaults {
     #[serde(default)]
@@ -293,6 +395,7 @@ impl ProviderDefaults {
     }
 
     pub async fn load(config_dir: &Path) -> Result<Self, String> {
+        let _guard = DEFAULTS_WRITE_LOCK.lock().await;
         let defaults_path = config_dir.join("providers.d").join("defaults.yaml");
         match tokio::fs::read_to_string(&defaults_path).await {
             Ok(content) => {
@@ -302,7 +405,7 @@ impl ProviderDefaults {
                     tracing::warn!(
                         "Outdated model defaults in providers.d/defaults.yaml were migrated"
                     );
-                    if let Err(e) = defaults.save(config_dir).await {
+                    if let Err(e) = defaults.save_unlocked(config_dir).await {
                         tracing::warn!(
                             "Failed to persist migrated providers.d/defaults.yaml: {}",
                             e
@@ -317,6 +420,11 @@ impl ProviderDefaults {
     }
 
     pub async fn save(&self, config_dir: &Path) -> Result<(), String> {
+        let _guard = DEFAULTS_WRITE_LOCK.lock().await;
+        self.save_unlocked(config_dir).await
+    }
+
+    async fn save_unlocked(&self, config_dir: &Path) -> Result<(), String> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -432,6 +540,7 @@ impl ProjectModelDefaults {
     }
 
     pub async fn save(&self, project_root: &Path) -> Result<(), String> {
+        let _guard = DEFAULTS_WRITE_LOCK.lock().await;
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
 

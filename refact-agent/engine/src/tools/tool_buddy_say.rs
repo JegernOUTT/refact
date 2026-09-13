@@ -132,6 +132,7 @@ impl Tool for ToolBuddySay {
             .map(|s| s.to_string());
 
         let speech = BuddySpeechItem {
+            editorial_delivery_required: false,
             id: Uuid::new_v4().to_string(),
             text: text.clone(),
             mood,
@@ -296,6 +297,7 @@ impl Tool for ToolBuddyRenderControls {
             .map(|s| s.to_string());
 
         let speech = BuddySpeechItem {
+            editorial_delivery_required: false,
             id: uuid::Uuid::new_v4().to_string(),
             text: speech_text,
             mood: "neutral".to_string(),

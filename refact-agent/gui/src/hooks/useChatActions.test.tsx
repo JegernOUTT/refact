@@ -1,43 +1,32 @@
 import { Provider } from "react-redux";
 import { renderHook } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import type { AppStore, RootState } from "../app/store";
+import { beforeEach, describe, expect, test, vi } from "vitest";
+import { setUpStore, type AppStore, type RootState } from "../app/store";
+import { createDefaultChatState } from "../utils/test-utils";
+import { useChatActions } from "./useChatActions";
 import type { ChatThreadRuntime } from "../features/Chat/Thread/types";
 
-type UseChatActions = typeof import("./useChatActions").useChatActions;
-type SetUpStore = typeof import("../app/store").setUpStore;
-type CreateDefaultChatState =
-  typeof import("../utils/test-utils").createDefaultChatState;
-
-const commandMocks = {
-  sendChatCommand: vi.fn(() => Promise.resolve()),
-  sendUserMessage: vi.fn(() => Promise.resolve()),
-  retryFromIndex: vi.fn(() => Promise.resolve()),
-  regenerate: vi.fn(() => Promise.resolve()),
-  updateChatParams: vi.fn(() => Promise.resolve()),
-  abortGeneration: vi.fn(() => Promise.resolve()),
-  respondToToolConfirmation: vi.fn(() => Promise.resolve()),
-  respondToToolConfirmations: vi.fn(() => Promise.resolve()),
-  updateMessage: vi.fn(() => Promise.resolve()),
-  removeMessage: vi.fn(() => Promise.resolve()),
-  cancelQueuedItem: vi.fn(() => Promise.resolve(true)),
-};
-
-let useChatActions: UseChatActions;
-let setUpStore: SetUpStore;
-let createDefaultChatState: CreateDefaultChatState;
-
-beforeEach(async () => {
+const commandMocks = vi.hoisted(() => {
   vi.resetModules();
-  Object.values(commandMocks).forEach((mock) => mock.mockClear());
-  vi.doMock("../services/refact/chatCommands", () => commandMocks);
-  ({ useChatActions } = await import("./useChatActions"));
-  ({ setUpStore } = await import("../app/store"));
-  ({ createDefaultChatState } = await import("../utils/test-utils"));
+  return {
+    sendChatCommand: vi.fn(() => Promise.resolve()),
+    sendUserMessage: vi.fn(() => Promise.resolve()),
+    retryFromIndex: vi.fn(() => Promise.resolve()),
+    regenerate: vi.fn(() => Promise.resolve()),
+    updateChatParams: vi.fn(() => Promise.resolve()),
+    abortGeneration: vi.fn(() => Promise.resolve()),
+    respondToToolConfirmation: vi.fn(() => Promise.resolve()),
+    respondToToolConfirmations: vi.fn(() => Promise.resolve()),
+    updateMessage: vi.fn(() => Promise.resolve()),
+    removeMessage: vi.fn(() => Promise.resolve()),
+    cancelQueuedItem: vi.fn(() => Promise.resolve(true)),
+  };
 });
 
-afterEach(() => {
-  vi.doUnmock("../services/refact/chatCommands");
+vi.mock("../services/refact/chatCommands", () => commandMocks);
+
+beforeEach(() => {
+  Object.values(commandMocks).forEach((mock) => mock.mockClear());
 });
 
 function makeRuntime(id: string): ChatThreadRuntime {
@@ -89,7 +78,7 @@ function makeStore(): AppStore {
 }
 
 function renderUseChatActions(store: AppStore) {
-  return renderHook<ReturnType<UseChatActions>, unknown>(
+  return renderHook<ReturnType<typeof useChatActions>, unknown>(
     () => useChatActions("thread-B"),
     {
       wrapper: ({ children }) => <Provider store={store}>{children}</Provider>,

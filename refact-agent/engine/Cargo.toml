@@ -307,6 +307,7 @@ portable-pty = "0.9"
 process-wrap = { version = "8.0.2", features = ["tokio1"] }
 rand = "0.8.5"
 rayon = "1.8.0"
+roxmltree = "0.20.0"
 regex = "1.9.5"
 reqwest = { version = "0.13", default-features = false, features = ["json", "form", "stream", "rustls", "charset", "http2"] }
 eventsource-stream = "0.2"

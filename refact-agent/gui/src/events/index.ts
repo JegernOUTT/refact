@@ -80,9 +80,47 @@ export {
   ideSetLoginMessage,
   ideTaskDone,
   ideAskQuestions,
+  ideDecisionResolved,
   ideSwitchToThread,
   ideRequestLogs,
 } from "../hooks/useEventBusForIDE";
+
+// Host-native decision bridge (B21). Plugin hosts consume these to apply the
+// same duplicate / stale / reconnect rules as the browser shell.
+export {
+  DECISION_BRIDGE_CONTRACT_VERSION,
+  HOST_DECISION_INTENTS,
+  HOST_DECISION_PARITY_CASES,
+  MAX_OUTSTANDING_DECISIONS,
+  MAX_RESOLVED_TOMBSTONES,
+  applyDecisionResolution,
+  decisionCorrelationKey,
+  decisionQuestionsDigest,
+  emptyDecisionAnnouncementState,
+  isValidAskQuestionsPayload,
+  isValidDecisionResolvedPayload,
+  outstandingDecisionCount,
+  reconcileChatDecisions,
+  reconcileDecisionSnapshot,
+  scopeDecisionState,
+  shouldAnnounceDecision,
+} from "./hostDecisions";
+export type {
+  ChatDecisionSnapshotInput,
+  DecisionAnnouncementDecision,
+  DecisionAnnouncementState,
+  DecisionResolutionOutcome,
+  DecisionScope,
+  HostDecisionIntent,
+  IdeAskQuestionsPayload,
+  IdeDecisionOrigin,
+  IdeDecisionQuestion,
+  IdeDecisionResolution,
+  IdeDecisionResolvedPayload,
+  NativeDecisionSnapshotInput,
+  OutstandingDecision,
+  SnapshotReconciliation,
+} from "./hostDecisions";
 
 export { ideAttachFileToChat } from "../hooks/useEventBusForApp";
 export { ideLogLines } from "../features/BugReport/ideLog";
@@ -122,3 +160,9 @@ export {
 
 export * from "./setup";
 export type * from "./setup";
+
+export * from "./hostDecisionTracker";
+export {
+  getEngineEndpointIdentity,
+  sanitizeEngineBaseUrl,
+} from "../services/refact/apiUrl";

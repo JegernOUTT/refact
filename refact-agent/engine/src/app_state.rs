@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use async_trait::async_trait;
 use axum::extract::FromRef;
 use refact_buddy_core::snapshot::BuddySnapshot;
+use refact_buddy_core::operator_events::{OperatorSignal, OperatorSignalProjection};
 use refact_buddy_core::types::{BuddyRuntimeEvent, BuddySuggestion};
 use refact_buddy_core::user_action::UserAction;
 use refact_chat_api::ChatMessage;
@@ -102,6 +103,7 @@ pub struct BuddyServices {
     pub buddy: Arc<AMutex<Option<BuddyService>>>,
     pub buddy_events_tx: tokio::sync::broadcast::Sender<BuddyEvent>,
     pub user_activity: Arc<AMutex<UserActivityRing>>,
+    pub operator_signal_projection: Arc<AMutex<OperatorSignalProjection>>,
 }
 
 #[derive(Clone)]
@@ -130,6 +132,17 @@ impl EngineChatSessionFacade {
         chat_id: &str,
         command: refact_chat_api::ChatCommand,
         priority: bool,
+    ) -> Result<(), String> {
+        self.enqueue_guarded_command(chat_id, command, priority, None)
+            .await
+    }
+
+    async fn enqueue_guarded_command(
+        &self,
+        chat_id: &str,
+        command: refact_chat_api::ChatCommand,
+        priority: bool,
+        supervision_guard: Option<refact_chat_api::SupervisionCommandGuard>,
     ) -> Result<(), String> {
         let app = AppState::from_gcx(self.gcx.clone()).await;
         match command {
@@ -161,12 +174,23 @@ impl EngineChatSessionFacade {
         )
         .await;
         let mut session = session_arc.lock().await;
+        if session.closed {
+            return Err("chat session is closed".into());
+        }
+        if let Some(guard) = &supervision_guard {
+            crate::buddy::supervision_authority::validate_chat_command(guard, chat_id, &command)?;
+        }
         let request = refact_chat_api::CommandRequest {
+            native_approval_guard: None,
+            supervision_guard,
             client_request_id: uuid::Uuid::new_v4().to_string(),
             priority,
             command,
         };
         let enqueue_outcome = session.enqueue_command(request);
+        if enqueue_outcome == EnqueueCommandOutcome::Rejected {
+            return Err("chat command authority changed; refresh native state".into());
+        }
         if enqueue_outcome == EnqueueCommandOutcome::Full {
             return Err("chat command queue is full".to_string());
         }
@@ -282,6 +306,17 @@ impl ChatSessionFacade for EngineChatSessionFacade {
         command: refact_chat_api::ChatCommand,
     ) -> Result<(), String> {
         self.enqueue_command(chat_id, command, true).await
+    }
+
+    async fn push_supervised_command(
+        &self,
+        chat_id: &str,
+        command: refact_chat_api::ChatCommand,
+        guard: refact_chat_api::SupervisionCommandGuard,
+    ) -> Result<(), String> {
+        crate::buddy::supervision_authority::validate_chat_command(&guard, chat_id, &command)?;
+        self.enqueue_guarded_command(chat_id, command, false, Some(guard))
+            .await
     }
 
     async fn session_state(
@@ -1335,11 +1370,20 @@ impl ToolRegistry for AppToolRegistry {
 pub struct AppBuddyEventSink {
     gcx: SharedGlobalContext,
     buddy: Arc<AMutex<Option<BuddyService>>>,
+    operator_signal_projection: Arc<AMutex<OperatorSignalProjection>>,
 }
 
 impl AppBuddyEventSink {
-    pub fn new(gcx: SharedGlobalContext, buddy: Arc<AMutex<Option<BuddyService>>>) -> Self {
-        Self { gcx, buddy }
+    pub fn new(
+        gcx: SharedGlobalContext,
+        buddy: Arc<AMutex<Option<BuddyService>>>,
+        operator_signal_projection: Arc<AMutex<OperatorSignalProjection>>,
+    ) -> Self {
+        Self {
+            gcx,
+            buddy,
+            operator_signal_projection,
+        }
     }
 }
 
@@ -1351,6 +1395,24 @@ impl BuddyEventSink for AppBuddyEventSink {
         if let Some(svc) = lock.as_mut() {
             svc.enqueue_runtime_event(event);
         }
+    }
+
+    async fn enqueue_operator_signal(&self, signal: OperatorSignal) -> Result<(), String> {
+        let accepted = {
+            let mut projection = self.operator_signal_projection.lock().await;
+            projection.accept(signal.clone())?
+        };
+        if !accepted {
+            return Ok(());
+        }
+
+        let mut lock = self.buddy.lock().await;
+        let Some(svc) = lock.as_mut() else {
+            return Err("buddy service is unavailable for operator signal correlation".to_string());
+        };
+        svc.enqueue_runtime_event(signal.runtime_event.clone());
+        let _ = svc.events_tx.send(BuddyEvent::OperatorSignal { signal });
+        Ok(())
     }
 
     async fn complete_event(&self, dedupe_key: &str, status: &str) {

@@ -68,6 +68,12 @@ pub struct ExecuteToolsOptions {
     pub allowed_tools: Vec<String>,
     pub catalog: Option<Arc<ToolCatalogSnapshot>>,
     pub turn_tool_pool: Option<TurnToolPool>,
+    /// Present only for authority-supervised native subchats. The gate is
+    /// checked immediately before every native tool invocation, rather than
+    /// only before the enclosing tool turn.
+    pub native_pause: Option<Arc<refact_agents_core::registry::PauseGate>>,
+    /// The runtime-owned abort flag paired with `native_pause`.
+    pub native_abort: Option<Arc<AtomicBool>>,
 }
 
 fn tool_execution_messages(
@@ -786,6 +792,112 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct SerialPauseToolRegistry {
+        control: Arc<SerialPauseToolControl>,
+    }
+
+    struct SerialPauseToolControl {
+        invocations: AtomicUsize,
+        first_started: AMutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release_first: AMutex<tokio::sync::oneshot::Receiver<()>>,
+    }
+
+    struct SerialPauseTool {
+        control: Arc<SerialPauseToolControl>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::tools_description::Tool for SerialPauseTool {
+        async fn tool_execute(
+            &mut self,
+            _ccx: Arc<AMutex<AtCommandsContext>>,
+            tool_call_id: &String,
+            _args: &std::collections::HashMap<String, serde_json::Value>,
+        ) -> Result<(bool, Vec<crate::call_validation::ContextEnum>), String> {
+            if self
+                .control
+                .invocations
+                .fetch_add(1, AtomicOrdering::SeqCst)
+                == 0
+            {
+                if let Some(first_started) = self.control.first_started.lock().await.take() {
+                    let _ = first_started.send(());
+                }
+                let mut release_first = self.control.release_first.lock().await;
+                let _ = (&mut *release_first).await;
+            }
+            let mut message = ChatMessage::new("tool".to_string(), "serial result".to_string());
+            message.tool_call_id = tool_call_id.clone();
+            Ok((
+                false,
+                vec![crate::call_validation::ContextEnum::ChatMessage(message)],
+            ))
+        }
+
+        fn tool_description(&self) -> refact_tool_api::ToolDesc {
+            let mut desc = deterministic_tool_desc("serial_pause");
+            desc.allow_parallel = false;
+            desc
+        }
+
+        async fn match_against_confirm_deny(
+            &self,
+            _ccx: Arc<AMutex<AtCommandsContext>>,
+            _args: &std::collections::HashMap<String, serde_json::Value>,
+        ) -> Result<refact_tool_api::MatchConfirmDeny, String> {
+            Ok(refact_tool_api::MatchConfirmDeny {
+                result: MatchConfirmDenyResult::PASS,
+                command: "serial_pause".to_string(),
+                rule: "serial pause test".to_string(),
+            })
+        }
+    }
+
+    impl SerialPauseToolRegistry {
+        fn tools(&self) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
+            vec![Box::new(SerialPauseTool {
+                control: self.control.clone(),
+            })]
+        }
+    }
+
+    async fn serial_pause_execute_fixture() -> (
+        AppState,
+        ThreadParams,
+        Arc<SerialPauseToolControl>,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let base_app = AppState::from_gcx(gcx).await;
+        let (first_started, first_started_rx) = tokio::sync::oneshot::channel();
+        let (release_first, release_first_rx) = tokio::sync::oneshot::channel();
+        let control = Arc::new(SerialPauseToolControl {
+            invocations: AtomicUsize::new(0),
+            first_started: AMutex::new(Some(first_started)),
+            release_first: AMutex::new(release_first_rx),
+        });
+        let fixture = SerialPauseToolRegistry {
+            control: control.clone(),
+        };
+        let app = AppState {
+            tool_registry: Arc::new(
+                crate::app_state::AppToolRegistry::with_fixture_tool_factory(
+                    base_app.gcx.clone(),
+                    Arc::new(move || fixture.tools()),
+                ),
+            ),
+            ..base_app
+        };
+        let thread = ThreadParams {
+            id: "serial-pause-tools".to_string(),
+            model: "model".to_string(),
+            ..Default::default()
+        };
+        (app, thread, control, first_started_rx, release_first)
+    }
+
     fn deterministic_tool_call(id: &str, name: &str) -> ChatToolCall {
         ChatToolCall {
             id: id.to_string(),
@@ -955,6 +1067,123 @@ mod tests {
         barrier.wait().await;
         let outcome = execution.await.expect("tool execution task");
         assert!(matches!(outcome, ToolStepOutcome::Continue));
+    }
+
+    #[tokio::test]
+    async fn execute_tools_native_pause_parks_between_serial_tools_and_resume_retains_results() {
+        let (app, thread, control, first_started, release_first) =
+            serial_pause_execute_fixture().await;
+        let gate = Arc::new(refact_agents_core::registry::PauseGate::default());
+        let abort = Arc::new(AtomicBool::new(false));
+        let calls = vec![
+            deterministic_tool_call("serial-first", "serial_pause"),
+            deterministic_tool_call("serial-second", "serial_pause"),
+        ];
+        let execution = tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                execute_tools(
+                    app,
+                    &calls,
+                    &[],
+                    &thread,
+                    "agent",
+                    None,
+                    ExecuteToolsOptions {
+                        native_pause: Some(gate),
+                        native_abort: Some(abort),
+                        ..Default::default()
+                    },
+                )
+                .await
+            }
+        });
+
+        first_started.await.expect("first serial tool started");
+        gate.request();
+        release_first.send(()).expect("release first serial tool");
+        gate.quiesced().await;
+        assert_eq!(control.invocations.load(AtomicOrdering::SeqCst), 1);
+        assert!(
+            !execution.is_finished(),
+            "second serial tool remains parked"
+        );
+
+        gate.release();
+        let (results, had_corrections) = execution.await.expect("tool execution task");
+        assert!(!had_corrections);
+        assert_eq!(control.invocations.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(
+            results
+                .iter()
+                .map(|message| message.tool_call_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["serial-first", "serial-second"],
+        );
+        assert!(results
+            .iter()
+            .all(|message| message.tool_failed == Some(false)));
+    }
+
+    #[tokio::test]
+    async fn execute_tools_native_cancel_while_parked_skips_second_serial_tool_without_success() {
+        let (app, thread, control, first_started, release_first) =
+            serial_pause_execute_fixture().await;
+        let gate = Arc::new(refact_agents_core::registry::PauseGate::default());
+        let abort = Arc::new(AtomicBool::new(false));
+        let calls = vec![
+            deterministic_tool_call("serial-first", "serial_pause"),
+            deterministic_tool_call("serial-second", "serial_pause"),
+        ];
+        let execution = tokio::spawn({
+            let gate = gate.clone();
+            let native_abort = abort.clone();
+            async move {
+                execute_tools(
+                    app,
+                    &calls,
+                    &[],
+                    &thread,
+                    "agent",
+                    None,
+                    ExecuteToolsOptions {
+                        native_pause: Some(gate),
+                        native_abort: Some(native_abort),
+                        ..Default::default()
+                    },
+                )
+                .await
+            }
+        });
+
+        first_started.await.expect("first serial tool started");
+        gate.request();
+        release_first.send(()).expect("release first serial tool");
+        gate.quiesced().await;
+        assert_eq!(control.invocations.load(AtomicOrdering::SeqCst), 1);
+        assert!(
+            !execution.is_finished(),
+            "second serial tool remains parked"
+        );
+
+        abort.store(true, Ordering::SeqCst);
+        gate.wake_for_abort();
+        let (results, had_corrections) = execution.await.expect("tool execution task");
+        assert!(!had_corrections);
+        assert_eq!(control.invocations.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            results
+                .iter()
+                .map(|message| message.tool_call_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["serial-first"],
+        );
+        assert!(results
+            .iter()
+            .all(|message| message.tool_failed == Some(false)));
+        assert!(results
+            .iter()
+            .all(|message| message.tool_call_id != "serial-second"));
     }
 
     #[tokio::test]
@@ -3018,13 +3247,21 @@ async fn execute_single_tool(
     batch_size: usize,
     mode_id: &str,
     model_id: Option<&str>,
+    native_pause: Option<Arc<refact_agents_core::registry::PauseGate>>,
+    native_abort: Option<Arc<AtomicBool>>,
 ) -> (usize, bool, Vec<ChatMessage>, Vec<ContextFile>) {
-    let abort_flag = {
+    let context_abort_flag = {
         let cgcx = ccx.lock().await;
         cgcx.abort_flag.clone()
     };
+    let abort_flag = native_abort.unwrap_or(context_abort_flag);
     if abort_flag.load(Ordering::Relaxed) {
         return (idx, false, Vec::new(), Vec::new());
+    }
+    if let Some(gate) = native_pause {
+        if gate.hold(Some(abort_flag.as_ref())).await || abort_flag.load(Ordering::Relaxed) {
+            return (idx, false, Vec::new(), Vec::new());
+        }
     }
 
     let args: std::collections::HashMap<String, serde_json::Value> =
@@ -3363,6 +3600,8 @@ async fn execute_tools_inner(
                     serial_registry.clone(),
                     mode_id,
                     model_id,
+                    options.native_pause.clone(),
+                    options.native_abort.clone(),
                 )
                 .await;
                 all_results.extend(batch_results);
@@ -3380,6 +3619,8 @@ async fn execute_tools_inner(
                     serial_registry.clone(),
                     mode_id,
                     model_id,
+                    options.native_pause.clone(),
+                    options.native_abort.clone(),
                 )
                 .await;
                 all_results.extend(batch_results);
@@ -3398,6 +3639,8 @@ async fn execute_tools_inner(
                 1,
                 mode_id,
                 model_id,
+                options.native_pause.clone(),
+                options.native_abort.clone(),
             )
             .await;
             all_results.push(result);
@@ -3415,6 +3658,8 @@ async fn execute_tools_inner(
             serial_registry.clone(),
             mode_id,
             model_id,
+            options.native_pause.clone(),
+            options.native_abort.clone(),
         )
         .await;
         all_results.extend(batch_results);
@@ -3479,6 +3724,8 @@ async fn execute_parallel_batch(
     serial_registry: Arc<SerialToolRegistry>,
     mode_id: &str,
     model_id: Option<&str>,
+    native_pause: Option<Arc<refact_agents_core::registry::PauseGate>>,
+    native_abort: Option<Arc<AtomicBool>>,
 ) -> Vec<(usize, bool, Vec<ChatMessage>, Vec<ContextFile>)> {
     if let Some(pool) = turn_tool_pool.as_ref() {
         let mut required_slots: std::collections::HashMap<
@@ -3562,6 +3809,8 @@ async fn execute_parallel_batch(
             let batch_size = batch_size;
             let mode_id = mode_id.to_string();
             let model_id = model_id.map(|s| s.to_string());
+            let native_pause = native_pause.clone();
+            let native_abort = native_abort.clone();
 
             async move {
                 execute_single_tool(
@@ -3576,6 +3825,8 @@ async fn execute_parallel_batch(
                     batch_size,
                     &mode_id,
                     model_id.as_deref(),
+                    native_pause.clone(),
+                    native_abort,
                 )
                 .await
             }
@@ -3856,6 +4107,8 @@ mod interruptible_wait_tests {
                     true,
                     1,
                     "agent",
+                    None,
+                    None,
                     None,
                 )
                 .await

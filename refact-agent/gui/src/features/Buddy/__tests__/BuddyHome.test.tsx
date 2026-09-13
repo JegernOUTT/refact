@@ -290,8 +290,9 @@ describe("BuddyHome", () => {
     const { user } = render(<BuddyHome />, { store });
 
     expect(await screen.findByTestId("buddy-home-content")).toBeInTheDocument();
-    expect(screen.getByTestId("buddy-home-hero")).toBeInTheDocument();
-    expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-presence-avatar")).toBeInTheDocument();
+    expect(screen.queryByTestId("buddy-home-hero")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("buddy-world")).not.toBeInTheDocument();
     expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
     expect(screen.getByText("Project setup")).toBeInTheDocument();
     expect(
@@ -301,6 +302,15 @@ describe("BuddyHome", () => {
     // Opportunities is the default tab; the other panels each live behind a tab.
     expect(screen.getByTestId("buddy-opportunities-feed")).toBeInTheDocument();
     expect(screen.getByText("Model config is broken")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Open Play" }));
+    expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("buddy-presence-avatar"),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close Play" }));
+    expect(screen.queryByTestId("buddy-world")).not.toBeInTheDocument();
+    expect(screen.getByTestId("buddy-presence-avatar")).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Personality" }));
     expect(

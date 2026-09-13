@@ -4,6 +4,12 @@ import {
   type BuddySpeechExitKind,
 } from "./BuddySpeechBubble";
 import { useReducedMotion } from "../../hooks";
+import {
+  resolveBuddyPresenceLoop,
+  shouldDrawPresenceFrame,
+  useBuddyPresencePreferences,
+  useBuddySurfaceVisible,
+} from "./buddyPresenceMotion";
 import { createInitialAnimState } from "./state";
 import { renderFrame } from "./canvas/render";
 import {
@@ -146,6 +152,8 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   chatCompanionBubble: chatCompanionBubbleOverride = false,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const presence = useBuddyPresencePreferences();
+  const surfaceVisible = useBuddySurfaceVisible(canvasRef);
   const animRef = useRef<BuddyAnimState>(createInitialAnimState());
   const semanticRef = useRef<BuddySemanticState>(state);
   const envRef = useRef<BuddyEnvContext | null>(envContext ?? null);
@@ -173,7 +181,8 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
   const controlExitRef = useRef<BubbleControlExitState | null>(null);
   const bubbleClosingRef = useRef<BubbleClosingState | null>(null);
   const speechControlCount = speechControls?.length ?? 0;
-  const reducedMotion = useReducedMotion();
+  const systemReducedMotion = useReducedMotion();
+  const reducedMotion = presence.reducedMotion ?? systemReducedMotion;
 
   useEffect(() => {
     speechOverrideRef.current = speechOverride;
@@ -233,10 +242,29 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
 
   useEffect(() => {
     let active = true;
-    const loop = () => {
-      if (!active || document.hidden) {
+    // Shared loop policy (B37). Scheduling is unchanged: the avatar keeps every
+    // animation frame while visible and stops entirely when the document is
+    // hidden or the component unmounted.
+    const loopPolicy = () =>
+      resolveBuddyPresenceLoop({
+        mounted: active,
+        documentHidden: document.hidden,
+        surfaceVisible,
+        enabled: !presence.textOnly,
+        reducedMotion: presence.enabled && reducedMotion,
+        lowPower: presence.lowPower,
+        interactive: true,
+      });
+    let lastDrawMs = -Infinity;
+    const loop = (timestampMs: number) => {
+      if (!loopPolicy().running) {
         return;
       }
+      if (!shouldDrawPresenceFrame(loopPolicy(), timestampMs, lastDrawMs)) {
+        frameIdRef.current = requestAnimationFrame(loop);
+        return;
+      }
+      lastDrawMs = timestampMs;
 
       const canvas = canvasRef.current;
       const ctx = canvas?.getContext("2d", { willReadFrequently: true });
@@ -436,13 +464,13 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
       frameIdRef.current = requestAnimationFrame(loop);
     };
     const startLoop = () => {
-      if (!document.hidden) {
+      if (loopPolicy().running) {
         cancelAnimationFrame(frameIdRef.current);
         frameIdRef.current = requestAnimationFrame(loop);
       }
     };
     const handleVisibilityChange = () => {
-      if (document.hidden) {
+      if (!loopPolicy().running) {
         cancelAnimationFrame(frameIdRef.current);
       } else {
         startLoop();
@@ -463,6 +491,10 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
     randomizeBubblePosition,
     reducedMotion,
     speechControlCount,
+    surfaceVisible,
+    presence.enabled,
+    presence.textOnly,
+    presence.lowPower,
   ]);
 
   const clientToCanvasCoords = useCallback(
@@ -615,6 +647,26 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
     Math.max(hitDiameter * 0.84, (spriteHitH + 14) * 1.8 * scaleK),
   );
 
+  if (presence.textOnly)
+    return (
+      <div className={className}>
+        <p>
+          {state.name} — text-only presence. Stage {state.progress.stage} is
+          unchanged.
+        </p>
+        {speechOverride && <p>{speechOverride}</p>}
+        {speechControls?.map((control) => (
+          <button
+            type="button"
+            key={control.id}
+            onClick={() => onSpeechControlClick?.(control)}
+          >
+            {control.label}
+          </button>
+        ))}
+      </div>
+    );
+
   return (
     <div
       className={className}
@@ -628,6 +680,20 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
         ...style,
       }}
     >
+      {presence.textOnly && (
+        <span>
+          {state.name}. {speechOverride ?? "Companion present."}
+          {speechControls?.map((control) => (
+            <button
+              type="button"
+              key={control.id}
+              onClick={() => onSpeechControlClick?.(control)}
+            >
+              {control.label}
+            </button>
+          ))}
+        </span>
+      )}
       <canvas
         ref={canvasRef}
         width={displaySize}
@@ -636,6 +702,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
           width: displaySize,
           height: displaySize,
           display: "block",
+          visibility: presence.textOnly ? "hidden" : undefined,
           cursor: spritePointer ? "default" : "pointer",
           pointerEvents: spritePointer ? "none" : undefined,
         }}
@@ -645,7 +712,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
         onMouseUp={spritePointer ? undefined : onMouseUp}
         onClick={spritePointer ? undefined : onClick}
       />
-      {spritePointer && (
+      {spritePointer && !presence.textOnly && (
         <div
           data-testid="buddy-sprite-hit"
           style={{
@@ -666,7 +733,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
           onClick={onClick}
         />
       )}
-      {displaySize >= 100 && (
+      {displaySize >= 100 && !presence.textOnly && (
         <BuddySpeechBubble
           text={bubbleView.text}
           textKey={bubbleView.textKey}

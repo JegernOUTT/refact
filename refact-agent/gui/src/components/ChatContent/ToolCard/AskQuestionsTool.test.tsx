@@ -1,8 +1,9 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   createDefaultChatState,
   render,
   screen,
+  waitFor,
   within,
 } from "../../../utils/test-utils";
 import { AskQuestionsTool } from "./AskQuestionsTool";
@@ -43,6 +44,10 @@ function toolMessage(): ChatMessage {
 }
 
 describe("AskQuestionsTool", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   test("renders single_select as a readable vertical radio list", async () => {
     const chat = createDefaultChatState();
     const runtime = chat.threads[chat.current_thread_id];
@@ -69,5 +74,80 @@ describe("AskQuestionsTool", () => {
 
     expect(radios[0]).toBeChecked();
     expect(radios[1]).not.toBeChecked();
+  });
+
+  test("submits native pending answers and waits for the authoritative snapshot", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const chat = createDefaultChatState();
+    const runtime = chat.threads[chat.current_thread_id];
+    runtime.thread.pending_questions = [
+      {
+        tool_call_id: "ask-questions-single-select",
+        asked_at_ms: 1,
+        status: "pending",
+        questions: [
+          { id: "continue", type: "yes_no", text: "Continue?" },
+          {
+            id: "scope",
+            type: "single_select",
+            text: "Choose scope",
+            options: ["GUI", "Engine"],
+          },
+        ],
+      },
+    ];
+
+    const { user } = render(<AskQuestionsTool toolCall={toolCall()} />, {
+      preloadedState: { chat },
+    });
+
+    expect(
+      screen.getByRole("button", { name: "Submit Answers" }),
+    ).toBeDisabled();
+    await user.click(screen.getByText("Yes"));
+    await user.click(screen.getByRole("radio", { name: "GUI" }));
+    await user.click(screen.getByRole("button", { name: "Submit Answers" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const [, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(request.body))).toMatchObject({
+      type: "answer_questions",
+      tool_call_id: "ask-questions-single-select",
+      answers: [
+        { id: "continue", answer: true },
+        { id: "scope", answer: "GUI" },
+      ],
+    });
+    expect(
+      screen.getByText("Answers sent, awaiting confirmation."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Submit Answers" }),
+    ).toBeDisabled();
+  });
+
+  test("renders answered and cancelled native questions without a submit button", () => {
+    const chat = createDefaultChatState();
+    const runtime = chat.threads[chat.current_thread_id];
+    runtime.thread.pending_questions = [
+      {
+        tool_call_id: "ask-questions-single-select",
+        asked_at_ms: 1,
+        status: "answered",
+        questions: [{ id: "continue", type: "yes_no", text: "Continue?" }],
+        answers: [{ id: "continue", answer: true }],
+      },
+    ];
+
+    const { rerender } = render(<AskQuestionsTool toolCall={toolCall()} />, {
+      preloadedState: { chat },
+    });
+    expect(screen.queryByRole("button", { name: "Submit Answers" })).toBeNull();
+    expect(screen.getByText("Questions answered")).toBeInTheDocument();
+
+    runtime.thread.pending_questions[0].status = "cancelled";
+    rerender(<AskQuestionsTool toolCall={toolCall()} />);
+    expect(screen.queryByRole("button", { name: "Submit Answers" })).toBeNull();
   });
 });

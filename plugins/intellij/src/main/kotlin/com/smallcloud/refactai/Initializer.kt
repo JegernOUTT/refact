@@ -30,6 +30,9 @@ class Initializer : ProjectActivity, Disposable {
         }
         val shouldInitialize = !initialized.getAndSet(true)
         if (shouldInitialize) {
+            // Snapshot manifest before any user-invoked host package lifecycle operation.
+            runCatching { com.smallcloud.refactai.lsp.HostReleaseActivation.capture() }
+                .onFailure { logger.warn("Native release activation identity unavailable") }
             JcefConfigurer.applyEarlyRemoteModeWorkaround()
             logger.info("Bin prefix = ${Resources.binPrefix}")
             initialize()

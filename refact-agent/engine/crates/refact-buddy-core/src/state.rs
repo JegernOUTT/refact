@@ -5,13 +5,25 @@ use chrono::{DateTime, Utc};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::settings::MAX_PALETTE_INDEX;
+use crate::settings::{MAX_PALETTE_INDEX, bounded_personality_style};
 
 use crate::types::{
     BuddyActivity, BuddyCareAction, BuddyControl, BuddyIdentity, BuddyOnboarding,
     BuddyPersonalityProfile, BuddyPersonalityTraits, BuddyPetState, BuddyProgression, BuddyQuest,
     BuddySemanticSnapshot, BuddySkillLedger, BuddyState,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum XpSource {
+    IntentionalPlay,
+    ActivityVolume,
+}
+
+impl XpSource {
+    pub fn rewards_progression(self) -> bool {
+        matches!(self, XpSource::IntentionalPlay)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SpeechRotationState {
@@ -304,14 +316,24 @@ pub fn mark_persona_cache_dirty() {
 }
 
 pub fn render_persona_block(state: &BuddyState) -> String {
-    format!(
+    render_persona_block_with_style(state, None)
+}
+
+pub fn render_persona_block_with_style(state: &BuddyState, custom_style: Option<&str>) -> String {
+    let base = format!(
         "You are {}, a {} ({}).\n{}\n\nPersonality voice: {}",
         state.identity.name,
         state.personality.archetype_label,
         state.personality.vibe,
         state.personality.summary,
         state.personality.prompt
-    )
+    );
+    match bounded_personality_style(custom_style) {
+        Some(style) => format!(
+            "{base}\n\nUser-selected style preference (style only; it does not change Buddy authority, tools, privacy, or reporting): {style}"
+        ),
+        None => base,
+    }
 }
 
 fn stage_name(stage: u32) -> &'static str {
@@ -670,17 +692,27 @@ pub fn complete_active_quest(state: &mut BuddyState) -> Option<BuddyQuest> {
         state.onboarding.tour_completed = true;
     }
     state.semantic.last_active = Utc::now().to_rfc3339();
-    sync_state(state);
+    grant_xp_from(state, quest.reward_xp, XpSource::IntentionalPlay);
     Some(quest)
 }
 
-pub fn grant_xp(state: &mut BuddyState, amount: u64) {
+pub fn grant_xp_from(state: &mut BuddyState, amount: u64, source: XpSource) {
     if amount > 0 {
-        state.progression.xp = state.progression.xp.saturating_add(amount);
         state.semantic.last_active = Utc::now().to_rfc3339();
+        if source.rewards_progression() {
+            state.progression.xp = state.progression.xp.saturating_add(amount);
+        }
     }
     let _ = maybe_advance_stage(state);
     sync_state(state);
+}
+
+pub fn grant_xp(state: &mut BuddyState, amount: u64) {
+    grant_xp_from(state, amount, XpSource::ActivityVolume);
+}
+
+pub fn grant_play_xp(state: &mut BuddyState, amount: u64) {
+    grant_xp_from(state, amount, XpSource::IntentionalPlay);
 }
 
 pub fn apply_pet_tick(state: &mut BuddyState, elapsed_seconds: u64) -> bool {
@@ -825,7 +857,9 @@ pub fn apply_care_action(
         }
     };
 
-    state.progression.xp = state.progression.xp.saturating_add(xp_reward);
+    if XpSource::IntentionalPlay.rewards_progression() {
+        state.progression.xp = state.progression.xp.saturating_add(xp_reward);
+    }
     state.pet.evolution.neglect_score = state.pet.evolution.neglect_score.saturating_sub(25);
     state.semantic.last_active = Utc::now().to_rfc3339();
     let keep_sleep = matches!(action, BuddyCareAction::Sleep);
@@ -884,7 +918,7 @@ mod tests {
     fn growth_points_hatch_without_care_gate() {
         let mut state = default_buddy_state();
 
-        grant_xp(&mut state, 20);
+        grant_play_xp(&mut state, 20);
 
         assert_eq!(state.progression.level, 2);
         assert_eq!(state.progression.stage, 1);
@@ -896,7 +930,7 @@ mod tests {
     fn xp_only_advances_multiple_stages() {
         let mut state = default_buddy_state();
 
-        grant_xp(&mut state, 20 + 35 + 10);
+        grant_play_xp(&mut state, 20 + 35 + 10);
 
         assert_eq!(state.progression.stage, 2);
         assert_eq!(state.progression.stage_name, "Sprite");
@@ -922,15 +956,107 @@ mod tests {
     }
 
     #[test]
-    fn repeated_successful_workflow_rewards_eventually_advance() {
+    fn repeated_successful_workflow_rewards_never_advance() {
         let mut state = default_buddy_state();
+        grant_play_xp(&mut state, 7);
+        let saved = serde_json::to_value(&state.progression).unwrap();
 
         for _ in 0..12 {
             grant_xp(&mut state, 5);
         }
 
-        assert!(state.progression.stage >= 2);
-        assert_eq!(state.progression.stage_name, "Sprite");
+        assert_eq!(serde_json::to_value(&state.progression).unwrap(), saved);
+        assert_eq!(state.progression.stage, 0);
+        assert_eq!(state.progression.xp, 7);
+    }
+
+    #[test]
+    fn activity_volume_never_moves_progression_or_cosmetics() {
+        let mut state = default_buddy_state();
+        grant_play_xp(&mut state, 20 + 35 + 12);
+        let saved_progression = serde_json::to_value(&state.progression).unwrap();
+        let saved_identity = serde_json::to_value(&state.identity).unwrap();
+        let saved_skills = serde_json::to_value(&state.skills).unwrap();
+
+        for amount in [4, 20, 30, 2, 12, 5] {
+            grant_xp_from(&mut state, amount, XpSource::ActivityVolume);
+        }
+
+        assert_eq!(
+            serde_json::to_value(&state.progression).unwrap(),
+            saved_progression
+        );
+        assert_eq!(
+            serde_json::to_value(&state.identity).unwrap(),
+            saved_identity
+        );
+        assert_eq!(serde_json::to_value(&state.skills).unwrap(), saved_skills);
+        assert_eq!(state.progression.stage, 2);
+        assert_eq!(state.progression.xp, 12);
+    }
+
+    #[test]
+    fn saved_stage_and_skills_survive_volume_reload() {
+        let mut state = default_buddy_state();
+        state.progression.stage = 4;
+        state.progression.xp = 33;
+        state.skills.unlocked = vec!["mem".to_string()];
+        sync_state(&mut state);
+        let stage_name = state.progression.stage_name.clone();
+
+        for _ in 0..50 {
+            grant_xp(&mut state, 30);
+        }
+        let reloaded: BuddyState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+
+        assert_eq!(reloaded.progression.stage, 4);
+        assert_eq!(reloaded.progression.xp, 33);
+        assert_eq!(reloaded.progression.stage_name, stage_name);
+        assert!(reloaded.skills.unlocked.iter().any(|id| id == "mem"));
+    }
+
+    #[test]
+    fn absence_is_not_punished_by_missing_volume() {
+        let mut state = default_buddy_state();
+        grant_play_xp(&mut state, 20 + 18);
+        let before = serde_json::to_value(&state.progression).unwrap();
+
+        apply_pet_tick(&mut state, 30 * 24 * 3600);
+
+        assert_eq!(serde_json::to_value(&state.progression).unwrap(), before);
+        assert_eq!(state.progression.stage, 1);
+        assert_eq!(state.progression.xp, 18);
+    }
+
+    #[test]
+    fn quest_completion_awards_reward_once_as_intentional_play() {
+        let mut state = default_buddy_state();
+        activate_quest(
+            &mut state,
+            BuddyQuest {
+                id: "q1".to_string(),
+                quest_type: "care_buddy".to_string(),
+                title: "Play".to_string(),
+                description: "Play".to_string(),
+                icon: "🎾".to_string(),
+                created_at: Utc::now().to_rfc3339(),
+                accepted_at: Utc::now().to_rfc3339(),
+                status: "active".to_string(),
+                completed_at: None,
+                progress: 0,
+                goal: 1,
+                baseline: 0,
+                reward_xp: 8,
+                controls: vec![],
+            },
+        );
+
+        let completed = complete_active_quest(&mut state).unwrap();
+
+        assert_eq!(completed.reward_xp, 8);
+        assert_eq!(state.progression.xp, 8);
+        assert!(state.active_quest.is_none());
     }
 
     #[test]
@@ -939,7 +1065,7 @@ mod tests {
         state.pet.evolution.open_seconds = 400 * 60;
         state.pet.evolution.care_score = 500;
 
-        grant_xp(&mut state, 3000);
+        grant_play_xp(&mut state, 3000);
 
         assert_eq!(state.progression.stage_name, "Archon");
         assert_eq!(state.progression.stage, 6);
@@ -1139,6 +1265,24 @@ mod tests {
         assert_eq!(
             render_persona_block(&state),
             "You are Pixel, a Helper Sprite (Playful, quirky, helpful).\nAn energetic helper.\n\nPersonality voice: Use warm humor."
+        );
+    }
+
+    #[test]
+    fn persona_block_adds_bounded_style_without_replacing_base_persona() {
+        let mut state = default_buddy_state();
+        state.personality.prompt = "Use warm humor.".to_string();
+
+        let rendered =
+            render_persona_block_with_style(&state, Some("  speak\nlike a cozy librarian  "));
+
+        assert!(rendered.contains("Personality voice: Use warm humor."));
+        assert!(rendered.contains("User-selected style preference"));
+        assert!(rendered.contains("speak like a cozy librarian"));
+        assert!(rendered.contains("does not change Buddy authority, tools, privacy, or reporting"));
+        assert_eq!(
+            render_persona_block_with_style(&state, Some(" \n ")),
+            render_persona_block(&state)
         );
     }
 

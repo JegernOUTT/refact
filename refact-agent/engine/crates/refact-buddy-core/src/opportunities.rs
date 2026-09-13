@@ -9,7 +9,7 @@ pub use crate::queue::{
 
 use crate::types::{
     BuddyAction, BuddyFactKind, BuddyOpportunity, BuddyOpportunityKind, BuddyOpportunityLinks,
-    BuddyPage, BuddyPriority, BuddyPulse, CustomizationKind, DefaultsKind, InvestigationContext,
+    BuddyPage, BuddyPriority, BuddyPulse, CustomizationKind, InvestigationContext,
     OpportunityStatus, PulseScope,
 };
 
@@ -365,36 +365,6 @@ mod rules {
             .collect()
     }
 
-    fn provider_defaults_patch(field: &str) -> Option<(DefaultsKind, serde_json::Value)> {
-        match field {
-            "chat_model" => Some((
-                DefaultsKind::ChatModel,
-                serde_json::json!({ "chat": { "model": "your-provider/model-name" } }),
-            )),
-            "chat_model_2" => Some((
-                DefaultsKind::ChatModel2,
-                serde_json::json!({ "chat_model_2": { "model": "your-provider/model-name" } }),
-            )),
-            "task_planner_agent_model" => Some((
-                DefaultsKind::TaskPlannerAgentModel,
-                serde_json::json!({ "task_planner_agent_model": { "model": "your-provider/model-name" } }),
-            )),
-            "chat_light_model" => Some((
-                DefaultsKind::ChatLightModel,
-                serde_json::json!({ "chat_light": { "model": "your-provider/model-name" } }),
-            )),
-            "chat_thinking_model" => Some((
-                DefaultsKind::ChatThinkingModel,
-                serde_json::json!({ "chat_thinking": { "model": "your-provider/model-name" } }),
-            )),
-            "chat_buddy_model" => Some((
-                DefaultsKind::ChatBuddyModel,
-                serde_json::json!({ "chat_buddy": { "model": "your-provider/model-name" } }),
-            )),
-            _ => None,
-        }
-    }
-
     fn is_chat_default_field(field: &str) -> bool {
         matches!(
             field,
@@ -426,9 +396,9 @@ mod rules {
                     .get("field")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let Some((defaults_kind, patch)) = provider_defaults_patch(field) else {
+                if !is_chat_default_field(field) {
                     return None;
-                };
+                }
                 let mut o = opp(
                     BuddyOpportunityKind::ProviderTuning,
                     "Default model not configured",
@@ -439,10 +409,6 @@ mod rules {
                     vec![
                         BuddyAction::OpenPage {
                             page: BuddyPage::DefaultModels,
-                        },
-                        BuddyAction::DraftDefaultsChange {
-                            defaults_kind,
-                            patch,
                         },
                         BuddyAction::Dismiss,
                     ],

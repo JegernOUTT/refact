@@ -98,7 +98,60 @@ impl KnowledgeFrontmatter {
         if content.len() > end_offset && content.as_bytes().get(end_offset) == Some(&b'\n') {
             end_offset += 1;
         }
-        match serde_yaml::from_str::<KnowledgeFrontmatter>(yaml_content) {
+        let parsed = (|| -> Result<Self, serde_yaml::Error> {
+            let fields = serde_yaml::from_str::<serde_yaml::Mapping>(yaml_content)?;
+            let mut known = serde_yaml::Mapping::new();
+            let mut extra = BTreeMap::new();
+            for (key, value) in fields {
+                let key: String = serde_yaml::from_value(key)?;
+                if matches!(
+                    key.as_str(),
+                    "id" | "title"
+                        | "tags"
+                        | "created"
+                        | "updated"
+                        | "filenames"
+                        | "links"
+                        | "kind"
+                        | "status"
+                        | "superseded_by"
+                        | "deprecated_at"
+                        | "review_after"
+                        | "source_chat_id"
+                        | "created_at"
+                        | "summary"
+                        | "description"
+                        | "entities"
+                        | "related_files"
+                        | "related_entities"
+                        | "content_hash"
+                        | "source_tool"
+                        | "source_confidence"
+                        | "source_trajectory_id"
+                        | "source_message_range"
+                        | "source_commit"
+                        | "topic"
+                        | "last_used_at"
+                        | "use_count"
+                        | "last_injected_at"
+                        | "dismissed_count"
+                        | "source_id"
+                        | "source_content_hash"
+                        | "review_needed"
+                        | "occurrences"
+                        | "signal_key"
+                        | "last_observed"
+                ) {
+                    known.insert(serde_yaml::Value::String(key), value);
+                } else {
+                    extra.insert(key, value);
+                }
+            }
+            let mut fm: Self = serde_yaml::from_value(serde_yaml::Value::Mapping(known))?;
+            fm.extra = extra;
+            Ok(fm)
+        })();
+        match parsed {
             Ok(fm) => (fm, end_offset),
             Err(_) => (Self::default(), 0),
         }
@@ -286,17 +339,12 @@ impl KnowledgeFrontmatter {
         if let Some(last_observed) = &self.last_observed {
             lines.push(format!("last_observed: \"{}\"", last_observed));
         }
-        for (key, value) in &self.extra {
-            if let Ok(serialized) = serde_yaml::to_string(value) {
-                let rendered = serialized.trim_end_matches('\n');
-                if !rendered.contains('\n') {
-                    lines.push(format!("{}: {}", key, rendered));
-                } else {
-                    lines.push(format!("{}:", key));
-                    for line in rendered.lines() {
-                        lines.push(format!("  {}", line));
-                    }
-                }
+        // Serialize unknown fields as a mapping, not isolated values: even a
+        // single-line value can be a block mapping, sequence or tagged node.
+        // This also lets serde_yaml quote keys and indent nested values correctly.
+        if !self.extra.is_empty() {
+            if let Ok(serialized) = serde_yaml::to_string(&self.extra) {
+                lines.push(serialized.trim_end_matches('\n').to_string());
             }
         }
         lines.push("---".to_string());
@@ -355,6 +403,61 @@ mod tests {
 
         assert_eq!(roundtripped.title.as_deref(), Some("Known"));
         assert_eq!(roundtripped.tags, vec!["buddy".to_string()]);
+        assert_eq!(roundtripped.extra, frontmatter.extra);
+    }
+
+    #[test]
+    fn unknown_nested_and_tagged_fields_roundtrip_through_to_yaml() {
+        let doc = "---\ntitle: Known\ncustom_object:\n  nested: true\ncustom_list: [alpha]\ncustom_tagged: !custom\n  nested: true\n'key: with colon': retained\ncustom_multiline: |\n  first\n  second\n---\nBody";
+        let (frontmatter, start) = KnowledgeFrontmatter::parse(doc);
+        assert!(start > 0);
+        assert_eq!(&doc[start..], "Body");
+        assert_eq!(frontmatter.extra.len(), 5);
+        assert_eq!(
+            frontmatter.extra.get("custom_tagged"),
+            Some(&serde_yaml::from_str::<serde_yaml::Value>("!custom\nnested: true").unwrap())
+        );
+
+        let rendered = format!("{}\nBody", frontmatter.to_yaml());
+        let (roundtripped, start) = KnowledgeFrontmatter::parse(&rendered);
+        assert!(start > 0);
+        assert_eq!(roundtripped.title, frontmatter.title);
+        assert_eq!(roundtripped.extra, frontmatter.extra);
+        assert_eq!(&rendered[start..], "Body");
+    }
+
+    #[test]
+    fn invalid_known_fields_and_duplicate_keys_reject_frontmatter() {
+        for invalid in [
+            "title: [not, a, string]",
+            "tags: not-a-list",
+            "use_count: -1",
+            "review_needed: not-a-bool",
+            "source_confidence: not-a-number",
+            "title: first\ntitle: second",
+        ] {
+            let doc = format!("---\n{invalid}\ncustom: !custom {{nested: true}}\n---\nBody");
+            let (frontmatter, start) = KnowledgeFrontmatter::parse(&doc);
+            assert_eq!(start, 0, "accepted invalid frontmatter: {invalid}");
+            assert!(frontmatter.extra.is_empty());
+        }
+    }
+
+    #[test]
+    fn unknown_nested_tags_preserve_values_and_body_offset() {
+        let yaml = "title: Known\ncustom:\n  nested: !custom [alpha, {enabled: true}]\ncustom_scalar: !scalar retained\ncustom_sequence: !sequence [one, two]";
+        let expected: serde_yaml::Mapping = serde_yaml::from_str(yaml).unwrap();
+        let doc = format!("---\n{yaml}\n---\nBody");
+        let (frontmatter, start) = KnowledgeFrontmatter::parse(&doc);
+        assert!(start > 0);
+        assert_eq!(&doc[start..], "Body");
+        for key in ["custom", "custom_scalar", "custom_sequence"] {
+            assert_eq!(frontmatter.extra.get(key), expected.get(key));
+        }
+        let rendered = format!("{}\nBody", frontmatter.to_yaml());
+        let (roundtripped, start) = KnowledgeFrontmatter::parse(&rendered);
+        assert!(start > 0);
+        assert_eq!(&rendered[start..], "Body");
         assert_eq!(roundtripped.extra, frontmatter.extra);
     }
 

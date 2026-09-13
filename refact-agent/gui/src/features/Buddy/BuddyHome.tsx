@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Button,
   Flex,
@@ -47,6 +53,7 @@ import {
   snoozeHomeNotifications,
   markBuddyNotificationSeen,
   clearExpiredBuddyNotificationSnooze,
+  setActiveSpeech,
   setBuddySnapshot,
 } from "./buddySlice";
 import {
@@ -55,6 +62,7 @@ import {
   startBuddyInvestigation,
 } from "../Chat/Thread";
 import {
+  buddyActionFeedbackSpeech,
   executeBuddyAction,
   navigateFromBuddyPage,
 } from "./executeBuddyAction";
@@ -64,7 +72,22 @@ import {
   pickBuddySceneSpeechCandidate,
   type BuddySceneSpeech,
 } from "./buddySceneSpeech";
-import { useExecuteBuddyAction } from "./hooks/useExecuteBuddyAction";
+import { buddyActionResultMessage } from "./hooks/useExecuteBuddyAction";
+import { useBuddyControlAction } from "./hooks/useBuddyControlAction";
+import { BuddyDesk } from "./BuddyDesk";
+import {
+  buddyOperatorIdentity,
+  useGetBuddyOperatorStatusQuery,
+  useGetBuddyLegacyDraftWorkQuery,
+} from "../../services/refact/buddyOperator";
+import { BuddyPresence } from "./BuddyPresence";
+import { BuddyNativeDecisions } from "./BuddyNativeDecisions";
+import { BuddyNativeApprovals } from "./BuddyNativeApprovals";
+import { BuddySupervision } from "./BuddySupervision";
+import {
+  requiresEditorialClaim,
+  useBuddyEditorialDelivery,
+} from "./useBuddyEditorialDelivery";
 import {
   getOpportunityActionFromControl,
   getOpportunityActionIndexFromControl,
@@ -118,6 +141,7 @@ const REVIEWABLE_DRAFT_KINDS: DraftKind[] = ["agents_md", "pulse_report"];
 
 type BuddyHomeTab =
   | "settings"
+  | "play"
   | "opportunities"
   | "personality"
   | "chats"
@@ -127,6 +151,7 @@ type BuddyHomeTab =
 
 const BUDDY_HOME_TAB_ORDER: BuddyHomeTab[] = [
   "settings",
+  "play",
   "opportunities",
   "personality",
   "chats",
@@ -137,6 +162,7 @@ const BUDDY_HOME_TAB_ORDER: BuddyHomeTab[] = [
 
 const BUDDY_HOME_TAB_LABELS: Record<BuddyHomeTab, string> = {
   settings: "Settings",
+  play: "Play",
   opportunities: "Opportunities",
   personality: "Personality",
   chats: "Recent chats",
@@ -175,6 +201,7 @@ const BuddyHomeDraftReview: React.FC<{ draftId: string }> = ({ draftId }) => {
   const [deleteDraft, { isLoading: isDeleting }] = useDeleteDraftMutation();
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
+  const [dismissError, setDismissError] = useState(false);
 
   const handleCopy = useCallback(async () => {
     if (!draft) return;
@@ -195,7 +222,12 @@ const BuddyHomeDraftReview: React.FC<{ draftId: string }> = ({ draftId }) => {
   }, [draft]);
 
   const handleDismiss = useCallback(async () => {
-    await deleteDraft(draftId).unwrap();
+    setDismissError(false);
+    try {
+      await deleteDraft(draftId).unwrap();
+    } catch {
+      setDismissError(true);
+    }
   }, [deleteDraft, draftId]);
 
   if (isLoading) {
@@ -268,6 +300,11 @@ const BuddyHomeDraftReview: React.FC<{ draftId: string }> = ({ draftId }) => {
           {copyError}
         </Text>
       )}
+      {dismissError && (
+        <Text size="1" color="red" role="alert">
+          Draft was not dismissed. Try again.
+        </Text>
+      )}
     </Surface>
   );
 };
@@ -278,11 +315,36 @@ export const BuddyHome: React.FC = () => {
   const draftId =
     currentPage?.name === "buddy" ? currentPage.draftId : undefined;
   const snapshot = useAppSelector(selectBuddySnapshot);
+  const operatorIdentity = useAppSelector(buddyOperatorIdentity);
+  const operator = useGetBuddyOperatorStatusQuery(operatorIdentity, {
+    refetchOnMountOrArgChange: true,
+    refetchOnFocus: true,
+    refetchOnReconnect: true,
+  });
+  // Unknown/unavailable is not disabled. Never mount compatibility writers while discovering authority.
+  const legacyCompatibility =
+    !operator.error && operator.currentData?.mode === "disabled";
+  const operatorEnabled =
+    !operator.error && operator.currentData?.mode === "enabled";
+  const mappedDraft = useGetBuddyLegacyDraftWorkQuery(
+    {
+      id: draftId ?? "",
+      project_id: operator.currentData?.project?.project_id,
+      endpoint_identity: operatorIdentity,
+    },
+    { skip: !operatorEnabled || !draftId },
+  );
   const loaded = useAppSelector(selectBuddyLoaded);
   const enabled = useAppSelector(selectIsBuddyInteractiveEnabled);
   const activities = useAppSelector(selectBuddyActivities);
   const nowPlaying = useAppSelector(selectNowPlaying);
-  const activeSpeech = useAppSelector(selectActiveSpeech);
+  const rawSpeech = useAppSelector(selectActiveSpeech);
+  const editorial = useBuddyEditorialDelivery(
+    rawSpeech && !isBuddySpeechExpired(rawSpeech) ? rawSpeech : null,
+    "panel",
+    enabled && loaded && !!snapshot,
+  );
+  const activeSpeech = requiresEditorialClaim(rawSpeech) ? null : rawSpeech;
   const suggestions = useAppSelector(selectBuddySuggestions);
   const diagnostics = useAppSelector(selectBuddyDiagnostics);
   const runtimeQueue = useAppSelector(selectRuntimeQueue);
@@ -291,12 +353,15 @@ export const BuddyHome: React.FC = () => {
   const homeSnoozedUntil = useAppSelector(selectHomeSnoozedUntil);
   const seenNotificationIds = useAppSelector(selectSeenNotificationIds);
   const [dismissRuntimeMutation] = useDismissBuddyRuntimeEventMutation();
-  const executeOpportunityAction = useExecuteBuddyAction();
+  const { control: runControl, opportunity: runOpportunity } =
+    useBuddyControlAction();
   const buddy = useBuddyState();
   const { state, signal: buddySignal } = buddy;
   const [setupDismissed, setSetupDismissed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [activeTab, setActiveTab] = useState<BuddyHomeTab>("opportunities");
+  const playPanelRef = useRef<HTMLDivElement>(null);
+  const presenceRef = useRef<HTMLDivElement>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
   const [worldBoundaryKey, setWorldBoundaryKey] = useState(0);
   const verdictReaction = useAppSelector(selectVerdictReaction);
@@ -305,6 +370,15 @@ export const BuddyHome: React.FC = () => {
   const [isRetryingBuddySnapshot, setIsRetryingBuddySnapshot] = useState(false);
   const [updateSettings, { isLoading: isSavingSettings }] =
     useUpdateBuddySettingsMutation();
+
+  useEffect(() => {
+    if (activeTab !== "play") return;
+    playPanelRef.current?.scrollIntoView({
+      block: "start",
+      behavior: "instant",
+    });
+    playPanelRef.current?.focus({ preventScroll: true });
+  }, [activeTab]);
 
   const { data: statsData } = useGetStatsSummaryQuery({});
   const { data: setupData } = useGetSetupStatusQuery(undefined, {
@@ -326,7 +400,7 @@ export const BuddyHome: React.FC = () => {
 
   const stageIndex = progression?.stage ?? state.progress.stage;
   const stage = STAGES[stageIndex] ?? STAGES[0];
-  const nextStage = STAGES[stageIndex + 1];
+  const nextStage = STAGES.at(stageIndex + 1);
   const atMaxStage = stageIndex >= STAGES.length - 1;
 
   const xp = progression?.xp ?? state.progress.xp;
@@ -478,6 +552,7 @@ export const BuddyHome: React.FC = () => {
   const homeNotificationsSnoozed =
     homeSnoozedUntil != null && homeSnoozedUntil > Date.now();
   const heroSpeechCandidates = useMemo(() => {
+    if (!legacyCompatibility) return [];
     if (activeSpeech && !isBuddySpeechExpired(activeSpeech)) {
       return [
         {
@@ -492,12 +567,15 @@ export const BuddyHome: React.FC = () => {
     }
     if (homeNotificationsSnoozed) return [];
     return buildBuddySceneSpeechCandidates({
-      nowPlaying,
-      runtimeQueue,
+      nowPlaying: requiresEditorialClaim(nowPlaying) ? null : nowPlaying,
+      runtimeQueue: runtimeQueue.filter(
+        (event) => !requiresEditorialClaim(event),
+      ),
       activeSuggestion,
       activeOpportunities: unreadOpportunities,
     }).filter((speech) => !(speech.id in seenNotificationIds));
   }, [
+    legacyCompatibility,
     activeSpeech,
     activeSuggestion,
     homeNotificationsSnoozed,
@@ -562,32 +640,69 @@ export const BuddyHome: React.FC = () => {
         if (!opportunity || actionIndex == null) return;
         const action = getOpportunityActionFromControl(ctrl, opportunity);
         if (!action) return;
+        const result = await runOpportunity(
+          action,
+          opportunity,
+          actionIndex,
+          undefined,
+          "home-speech",
+        );
+        if (result.status === "ignored") return;
+        if (result.status !== "success") {
+          dispatch(
+            setActiveSpeech(
+              buddyActionFeedbackSpeech(
+                "buddy-action-error",
+                buddyActionResultMessage(result) ?? "Action failed.",
+              ),
+            ),
+          );
+          return;
+        }
         dispatch(markBuddyNotificationSeen(heroSpeech.id));
         if (action.kind === "dismiss") {
           dispatch(snoozeHomeNotifications(undefined));
         }
-        await executeOpportunityAction(action, opportunity, actionIndex);
+        return;
+      }
+      const result = await runControl(
+        ctrl,
+        {
+          triggerText: heroSpeech.text,
+          triggerSource:
+            heroSpeech.source === "suggestion" ? "suggestion" : "runtime",
+          sourceChatId: heroSpeech.chat_id,
+          diagnostic: activeDiagnostic,
+          suggestionId: heroSpeech.suggestionId,
+        },
+        "home-speech",
+      );
+      if (result.status === "ignored") return;
+      if (result.status !== "success") {
+        if (result.status !== "unsupported") {
+          dispatch(
+            setActiveSpeech(
+              buddyActionFeedbackSpeech(
+                "buddy-action-error",
+                buddyActionResultMessage(result) ?? "Action failed.",
+              ),
+            ),
+          );
+        }
         return;
       }
       dispatch(markBuddyNotificationSeen(heroSpeech.id));
       if (ctrl.action === "dismiss_suggestion" && heroSpeech.suggestionId) {
         dispatch(snoozeHomeNotifications(undefined));
       }
-      await executeBuddyAction(ctrl, dispatch, {
-        triggerText: heroSpeech.text,
-        triggerSource:
-          heroSpeech.source === "suggestion" ? "suggestion" : "runtime",
-        sourceChatId: heroSpeech.chat_id,
-        diagnostic: activeDiagnostic,
-        suggestionId: heroSpeech.suggestionId,
-      });
     },
     [
       activeDiagnostic,
       dismissRuntimeMutation,
       dispatch,
-      executeOpportunityAction,
       heroSpeech,
+      runControl,
+      runOpportunity,
       unreadOpportunities,
     ],
   );
@@ -738,6 +853,9 @@ export const BuddyHome: React.FC = () => {
   if (!loaded) {
     return (
       <div className={classNames(styles.page, "rf-enter")}>
+        <BuddyNativeDecisions />
+        <BuddyNativeApprovals />
+        <BuddySupervision />
         <LoadingState label="Loading Buddy" variant="full" />
       </div>
     );
@@ -766,6 +884,9 @@ export const BuddyHome: React.FC = () => {
           <Text size="2" color="gray">
             {name} is not available
           </Text>
+          <BuddyNativeDecisions />
+          <BuddyNativeApprovals />
+          <BuddySupervision />
           <Button
             type="button"
             size="sm"
@@ -807,6 +928,9 @@ export const BuddyHome: React.FC = () => {
           className={classNames(styles.content, styles.contentPadded)}
           data-testid="buddy-home-disabled"
         >
+          <BuddyNativeDecisions />
+          <BuddyNativeApprovals />
+          <BuddySupervision />
           <Surface
             variant="glass"
             radius="card"
@@ -860,49 +984,76 @@ export const BuddyHome: React.FC = () => {
         className={classNames(styles.content, styles.homeContent, "rf-stagger")}
         data-testid="buddy-home-content"
       >
-        <Surface
-          as="section"
-          variant="glass"
-          radius="card"
-          animated="rise"
-          className={styles.heroCard}
-          data-testid="buddy-home-hero"
-        >
-          <BuddyErrorBoundary key={worldBoundaryKey}>
-            <BuddyWorld
-              homeDoorDisabled
-              palette={palette}
-              stage={stage}
-              state={state}
-              pulse={pulse}
-              pet={pet}
-              nowPlaying={nowPlaying}
-              activeQuest={activeQuest}
-              onCanvasEvent={buddy.handleCanvasEvent}
-              activeSpeech={heroSpeech}
-              setupNeeded={setupNeeded}
-              onRunMode={handleRunMode}
-              onDismissSetup={handleDismissSetup}
-              onCare={(action, toy) => void handleCare(action, toy)}
-              onOpenPage={handleOpenWorldPage}
-              onSpeechControl={(control) => handleSpeechControl(control)}
-              pendingCards={unreadOpportunities.length}
-              onOpenInbox={() => setInboxOpen(true)}
-              verdictReaction={verdictReaction}
-            />
-          </BuddyErrorBoundary>
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            onClick={handleResetWorld}
-            aria-label="Reset Buddy scene"
-          >
-            Reset scene
-          </Button>
-        </Surface>
+        <div ref={presenceRef} tabIndex={-1}>
+          <BuddyPresence
+            state={state}
+            headline={snapshot.state.semantic.headline}
+            speech={activeTab === "play" ? null : heroSpeech}
+            playOpen={activeTab === "play"}
+            onPlay={() =>
+              setActiveTab(activeTab === "play" ? "opportunities" : "play")
+            }
+            onControl={handleSpeechControl}
+          />
+        </div>
+        {operatorEnabled && (
+          <BuddyDesk
+            key={JSON.stringify([
+              operator.currentData?.worker,
+              mappedDraft.currentData?.data.value.id,
+            ])}
+            workId={
+              currentPage?.name === "buddy"
+                ? currentPage.workId ?? mappedDraft.currentData?.data.value.id
+                : undefined
+            }
+            projectId={
+              currentPage?.name === "buddy"
+                ? currentPage.workProjectId ??
+                  mappedDraft.currentData?.project.project_id
+                : undefined
+            }
+          />
+        )}
+        {!operatorEnabled && !legacyCompatibility && (
+          <section role="status">
+            <p>
+              Saved work authority is unavailable or still loading. Legacy work
+              actions remain paused; native decisions remain available.
+            </p>
+            <Button onClick={() => void operator.refetch()}>
+              Retry work authority
+            </Button>
+          </section>
+        )}
+        <BuddyNativeDecisions />
+        <BuddyNativeApprovals />
+        <BuddySupervision />
 
-        {inboxOpen && (
+        {editorial.canFeedback && editorial.speech && (
+          <section aria-label="Buddy editorial message">
+            <p>{editorial.speech.text}</p>
+            <p>
+              Feedback only adjusts future editorial attention, never
+              permissions.
+            </p>
+            <Button onClick={() => void editorial.sendFeedback("useful")}>
+              Helpful
+            </Button>
+            <Button onClick={() => void editorial.sendFeedback("noisy")}>
+              Noisy
+            </Button>
+            <Button
+              onClick={() => void editorial.sendFeedback("less_like_this")}
+            >
+              Less like this
+            </Button>
+            {editorial.feedbackStatus && (
+              <p role="status">{editorial.feedbackStatus}</p>
+            )}
+          </section>
+        )}
+        {legacyCompatibility && inboxOpen && (
           <div
             className={styles.inboxOverlay}
             data-testid="buddy-proposal-inbox"
@@ -966,13 +1117,31 @@ export const BuddyHome: React.FC = () => {
           ))}
         </Surface>
 
-        {draftId && (
+        {legacyCompatibility && draftId && (
           <div className={classNames(styles.draftSection, "rf-enter-rise")}>
             <BuddyHomeDraftReview draftId={draftId} />
           </div>
         )}
 
-        <BuddyBriefingCard />
+        {legacyCompatibility && <BuddyBriefingCard />}
+        {!legacyCompatibility && draftId && (
+          <div>
+            <p>
+              Draft editing sessions may expire. Durable proposals and their
+              execution receipts remain in saved work above; this legacy draft
+              link does not dismiss or delete them.
+            </p>
+            {mappedDraft.isFetching && (
+              <p role="status">Finding the saved proposal…</p>
+            )}
+            {mappedDraft.error && (
+              <p role="alert">
+                No saved proposal could be loaded for this editing session. No
+                other work was substituted.
+              </p>
+            )}
+          </div>
+        )}
 
         <Tabs
           value={activeTab}
@@ -991,6 +1160,75 @@ export const BuddyHome: React.FC = () => {
             ))}
           </Tabs.List>
 
+          <Tabs.Content value="play" className={styles.tabContent}>
+            <div ref={playPanelRef} tabIndex={-1} aria-label="Buddy Play">
+              <Surface
+                as="section"
+                variant="glass"
+                radius="card"
+                className={styles.heroCard}
+                data-testid="buddy-home-hero"
+              >
+                <BuddyErrorBoundary key={worldBoundaryKey}>
+                  <BuddyWorld
+                    homeDoorDisabled
+                    palette={palette}
+                    stage={stage}
+                    state={state}
+                    pulse={pulse}
+                    pet={pet}
+                    nowPlaying={nowPlaying}
+                    activeQuest={activeQuest}
+                    onCanvasEvent={buddy.handleCanvasEvent}
+                    activeSpeech={heroSpeech}
+                    setupNeeded={setupNeeded}
+                    onRunMode={handleRunMode}
+                    onDismissSetup={handleDismissSetup}
+                    onCare={(action, toy) => void handleCare(action, toy)}
+                    onOpenPage={handleOpenWorldPage}
+                    onSpeechControl={(control) =>
+                      void handleSpeechControl(control)
+                    }
+                    pendingCards={unreadOpportunities.length}
+                    onOpenInbox={() => {
+                      if (legacyCompatibility) setInboxOpen(true);
+                      else setActiveTab("opportunities");
+                    }}
+                    verdictReaction={verdictReaction}
+                  />
+                </BuddyErrorBoundary>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={handleResetWorld}
+                  aria-label="Reset Buddy scene"
+                >
+                  Reset scene
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setActiveTab("opportunities");
+                    presenceRef.current?.scrollIntoView({
+                      block: "start",
+                      behavior: "instant",
+                    });
+                    presenceRef.current?.focus({ preventScroll: true });
+                  }}
+                >
+                  Back to Desk
+                </Button>
+                <Text size="1" color="gray">
+                  Play is optional. Closing the scene ends the current local
+                  game; it does not stop work or answer a pending decision.
+                </Text>
+              </Surface>
+            </div>
+          </Tabs.Content>
+
           <Tabs.Content value="settings" className={styles.tabContent}>
             <div
               className={styles.settingsSection}
@@ -1002,7 +1240,14 @@ export const BuddyHome: React.FC = () => {
 
           <Tabs.Content value="opportunities" className={styles.tabContent}>
             <div className={styles.tabPanel}>
-              <BuddyOpportunitiesFeed />
+              {legacyCompatibility ? (
+                <BuddyOpportunitiesFeed />
+              ) : (
+                <p>
+                  Opportunities are saved work in Needs you above. Open a work
+                  item to read, snooze, or review its registered actions.
+                </p>
+              )}
             </div>
           </Tabs.Content>
 
@@ -1032,26 +1277,55 @@ export const BuddyHome: React.FC = () => {
 
           <Tabs.Content value="activity" className={styles.tabContent}>
             <div className={styles.tabPanel}>
-              <BuddyActivityPanel
-                activities={activities}
-                onOpenChat={handleOpenActivityChat}
-              />
+              {legacyCompatibility ? (
+                <BuddyActivityPanel
+                  activities={activities}
+                  onOpenChat={handleOpenActivityChat}
+                />
+              ) : (
+                <p>
+                  Activity and execution receipts are in saved work above.
+                  Recorded checks remain available in each work detail.
+                </p>
+              )}
             </div>
           </Tabs.Content>
 
           <Tabs.Content value="pulse" className={styles.tabContent}>
             <div className={styles.tabPanel}>
-              <BuddyPulseCard />
+              {legacyCompatibility ? (
+                <BuddyPulseCard />
+              ) : (
+                <p>
+                  Saved pulse reports are in Delivered above. Repeated checks
+                  share one work history.
+                </p>
+              )}
             </div>
           </Tabs.Content>
 
           <Tabs.Content value="errors" className={styles.tabContent}>
             <div className={styles.tabPanel}>
-              <BuddyRecentErrorsPanel
-                recentErrors={recentErrors}
-                onInvestigate={handleInvestigateError}
-                onDismiss={handleDismissError}
-              />
+              {legacyCompatibility ? (
+                <BuddyRecentErrorsPanel
+                  recentErrors={recentErrors}
+                  onInvestigate={handleInvestigateError}
+                  onDismiss={handleDismissError}
+                />
+              ) : (
+                <div>
+                  <p>
+                    Operational warnings (read-only). Work decisions and
+                    attention are managed in Needs you above.
+                  </p>
+                  {recentErrors.map((event) => (
+                    <p key={event.id}>
+                      {event.title}:{" "}
+                      {event.failure_summary ?? event.description}
+                    </p>
+                  ))}
+                </div>
+              )}
             </div>
           </Tabs.Content>
         </Tabs>

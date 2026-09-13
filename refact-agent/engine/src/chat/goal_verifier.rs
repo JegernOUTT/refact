@@ -522,7 +522,7 @@ pub async fn run_goal_verifier(
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> Result<GoalVerifierReply, String> {
     let gcx = app.gcx.clone();
-    let (thread, messages, goal_text, criteria, chat_id, abort_notify) = {
+    let (thread, messages, goal_text, criteria, chat_id, abort_notify, source_facts) = {
         let session = session_arc.lock().await;
         let goal_text = goal_text_for_verifier(&session)?;
         (
@@ -538,6 +538,15 @@ pub async fn run_goal_verifier(
                 .unwrap_or_default(),
             session.chat_id.clone(),
             session.abort_notify.clone(),
+            session
+                .goal
+                .as_ref()
+                .map(|goal| crate::buddy::supervision_proof::SessionFacts {
+                    chat_id: session.chat_id.clone(),
+                    goal_version: goal.version,
+                    goal_content: goal.content.clone(),
+                    goal_criteria: goal.criteria.clone(),
+                }),
         )
     };
 
@@ -625,6 +634,21 @@ pub async fn run_goal_verifier(
         return Err(ABORT_ERROR_MESSAGE.to_string());
     }
 
+    let source_capture = match source_facts {
+        Some(facts) => match crate::buddy::supervision_proof::capture_before_stream(
+            app.paths.cache_dir.clone(),
+            &facts,
+        )
+        .await
+        {
+            Ok(capture) => capture,
+            Err(_) => {
+                tracing::warn!("Native engineering source observation unavailable; no engineering proof will be issued");
+                None
+            }
+        },
+        None => None,
+    };
     let verifier_abort_flag = Arc::new(AtomicBool::new(false));
     let params = StreamRunParams {
         llm_request: prepared.llm_request,
@@ -649,7 +673,17 @@ pub async fn run_goal_verifier(
             }
         })?;
     let choice = choices.into_iter().next().unwrap_or_default();
-    Ok(goal_verifier_reply_from_choice(choice))
+    let reply = goal_verifier_reply_from_choice(choice);
+    if let Some(capture) = source_capture {
+        if matches!(&reply.verdict, GoalVerdict::Met)
+            && crate::buddy::supervision_proof::bind_after_stream(capture, &reply.verifier_reply)
+                .await
+                .is_err()
+        {
+            tracing::warn!("Native engineering source changed or authority expired during verification; no engineering proof issued");
+        }
+    }
+    Ok(reply)
 }
 
 fn goal_verifier_reply_from_choice(choice: ChoiceFinal) -> GoalVerifierReply {
@@ -700,6 +734,7 @@ pub fn apply_goal_verdict_guarded_with_delivery(
     tool_call_id: Option<&str>,
 ) -> GoalVerificationApplyOutcome {
     if session.goal.is_some() && session.trajectory_version != fork_trajectory_version {
+        crate::buddy::supervision_proof::discard_pending(&session.chat_id, &reply.verifier_reply);
         if session.goal_status == Some(GoalStatus::Verifying) {
             session.goal_set_status(GoalStatus::Active);
         }
@@ -726,10 +761,15 @@ fn apply_goal_verdict_with_delivery(
     tool_call_id: Option<&str>,
 ) -> GoalVerificationApplyOutcome {
     if session.goal.is_none() {
+        crate::buddy::supervision_proof::discard_pending(&session.chat_id, &reply.verifier_reply);
         return GoalVerificationApplyOutcome::NoGoal;
     }
     if let Some(epoch) = epoch {
         if session.goal_status_changed_since(epoch) {
+            crate::buddy::supervision_proof::discard_pending(
+                &session.chat_id,
+                &reply.verifier_reply,
+            );
             return GoalVerificationApplyOutcome::Superseded;
         }
     }
@@ -777,12 +817,30 @@ fn apply_goal_verdict_with_delivery(
     let outcome = match reply.verdict {
         GoalVerdict::Met => {
             session.goal_set_status(GoalStatus::Completed);
+            if let Some(goal) = &session.goal {
+                if let Some(attempt) = goal.attempts.last() {
+                    crate::buddy::supervision_proof::finalize_met(
+                        &session.chat_id,
+                        goal.version,
+                        &goal.content,
+                        &goal.criteria,
+                        &attempt.verifier_reply,
+                        attempt.at_ms,
+                    );
+                }
+            }
             if trigger != "validate_goal" {
                 session.set_runtime_state(SessionState::Completed, None);
             }
             GoalVerificationApplyOutcome::Finalized
         }
         GoalVerdict::Unmet(_) => {
+            if let Some(attempt) = session.goal.as_ref().and_then(|goal| goal.attempts.last()) {
+                crate::buddy::supervision_proof::discard_pending(
+                    &session.chat_id,
+                    &attempt.verifier_reply,
+                );
+            }
             if let Some(status) = held_status {
                 session.goal_set_status(status);
                 session.set_runtime_state(SessionState::Idle, None);

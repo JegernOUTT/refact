@@ -1,10 +1,8 @@
-import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import {
+  isLegacyWorkControl,
+  useBuddyLegacyControls,
+} from "./hooks/useBuddyLegacyControls";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Text } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { push } from "../Pages/pagesSlice";
@@ -19,13 +17,10 @@ import {
   selectBuddyDiagnostics,
   dismissRuntimeEvent,
 } from "./buddySlice";
-import { executeBuddyAction } from "./executeBuddyAction";
 import type { BuddyControl } from "./types";
 import { getSignalDef, PALETTES } from "./constants";
-import {
-  formatOpportunityActionError,
-  useExecuteBuddyAction,
-} from "./hooks/useExecuteBuddyAction";
+import { buddyActionResultMessage } from "./hooks/useExecuteBuddyAction";
+import { useBuddyControlAction } from "./hooks/useBuddyControlAction";
 import {
   getOpportunityActionFromControl,
   getOpportunityActionIndexFromControl,
@@ -38,13 +33,16 @@ import {
   useUpdateBuddySettingsMutation,
 } from "../../services/refact/buddy";
 import styles from "./BuddyPanel.module.css";
+import { requiresEditorialClaim } from "./useBuddyEditorialDelivery";
 
 export const BuddyPanel: React.FC = () => {
   const dispatch = useAppDispatch();
+  const legacyControls = useBuddyLegacyControls();
   const snapshot = useAppSelector(selectBuddySnapshot);
   const enabled = useAppSelector(selectIsBuddyInteractiveEnabled);
   const nowPlaying = useAppSelector(selectNowPlaying);
-  const activeSpeech = useAppSelector(selectActiveSpeech);
+  const rawSpeech = useAppSelector(selectActiveSpeech);
+  const activeSpeech = requiresEditorialClaim(rawSpeech) ? null : rawSpeech;
   const diagnostics = useAppSelector(selectBuddyDiagnostics);
   const { unread } = useBuddyOpportunities();
   const [opportunityIndex, setOpportunityIndex] = useState(0);
@@ -52,8 +50,8 @@ export const BuddyPanel: React.FC = () => {
     Set<string>
   >(new Set());
   const [opportunityError, setOpportunityError] = useState<string | null>(null);
-  const pendingOpportunityRef = useRef(false);
-  const executeOpportunityAction = useExecuteBuddyAction();
+  const { control: runControl, opportunity: runOpportunity } =
+    useBuddyControlAction();
   const [dismissRuntimeMutation] = useDismissBuddyRuntimeEventMutation();
   const [updateSettings, { isLoading: isEnabling }] =
     useUpdateBuddySettingsMutation();
@@ -64,7 +62,10 @@ export const BuddyPanel: React.FC = () => {
   const activeDiagnostic = activeSpeech?.chat_id
     ? diagnostics.find((diag) => diag.chat_id === activeSpeech.chat_id)
     : undefined;
-  const activeRuntime = nowPlaying?.dismissed ? null : nowPlaying;
+  const activeRuntime =
+    nowPlaying?.dismissed || requiresEditorialClaim(nowPlaying)
+      ? null
+      : nowPlaying;
   const activeRuntimeSignal = activeRuntime
     ? getSignalDef(activeRuntime.signal_type)
     : null;
@@ -120,47 +121,50 @@ export const BuddyPanel: React.FC = () => {
         : undefined;
   const speechHandler = activeSpeech
     ? async (ctrl: BuddyControl) => {
-        await executeBuddyAction(ctrl, dispatch, {
-          triggerText: activeSpeech.text,
-          triggerSource: "runtime",
-          sourceChatId: activeSpeech.chat_id,
-          diagnostic: activeDiagnostic,
-        });
+        const result = await runControl(
+          ctrl,
+          {
+            triggerText: activeSpeech.text,
+            triggerSource: "runtime",
+            sourceChatId: activeSpeech.chat_id,
+            diagnostic: activeDiagnostic,
+          },
+          "panel-speech",
+        );
+        if (result.status === "ignored") return;
+        setOpportunityError(buddyActionResultMessage(result));
       }
     : topOpportunity
       ? async (ctrl: BuddyControl) => {
-          if (pendingOpportunityRef.current) return;
           const actionIndex = getOpportunityActionIndexFromControl(ctrl);
           if (actionIndex == null) return;
           const action = getOpportunityActionFromControl(ctrl, topOpportunity);
           if (!action) return;
 
-          pendingOpportunityRef.current = true;
           setOpportunityError(null);
-          try {
-            if (action.kind === "dismiss") {
-              const dismissAction = getOpportunityDismissAction(topOpportunity);
-              await executeOpportunityAction(
-                dismissAction.action,
-                topOpportunity,
-                dismissAction.actionIndex,
-              );
-              setDismissedOpportunityIds((prev) =>
-                new Set(prev).add(`opportunity-${topOpportunity.id}`),
-              );
-              setOpportunityIndex(0);
-              return;
-            }
-
-            await executeOpportunityAction(action, topOpportunity, actionIndex);
-            setDismissedOpportunityIds((prev) =>
-              new Set(prev).add(`opportunity-${topOpportunity.id}`),
-            );
+          const isDismiss = action.kind === "dismiss";
+          const dismissAction = isDismiss
+            ? getOpportunityDismissAction(topOpportunity)
+            : null;
+          const result = await runOpportunity(
+            dismissAction ? dismissAction.action : action,
+            topOpportunity,
+            dismissAction ? dismissAction.actionIndex : actionIndex,
+            undefined,
+            "panel-opportunity",
+          );
+          if (result.status === "ignored") return;
+          if (result.status !== "success") {
+            setOpportunityError(buddyActionResultMessage(result));
+            return;
+          }
+          setDismissedOpportunityIds((prev) =>
+            new Set(prev).add(`opportunity-${topOpportunity.id}`),
+          );
+          if (isDismiss) {
+            setOpportunityIndex(0);
+          } else {
             setOpportunityIndex((index) => index + 1);
-          } catch (error) {
-            setOpportunityError(formatOpportunityActionError(error));
-          } finally {
-            pendingOpportunityRef.current = false;
           }
         }
       : activeRuntime?.controls?.length
@@ -179,12 +183,18 @@ export const BuddyPanel: React.FC = () => {
               return;
             }
 
-            await executeBuddyAction(ctrl, dispatch, {
-              triggerText: activeRuntime.speech_text ?? activeRuntime.title,
-              triggerSource: "runtime",
-              sourceChatId: activeRuntime.chat_id,
-              diagnostic: runtimeDiagnostic,
-            });
+            const result = await runControl(
+              ctrl,
+              {
+                triggerText: activeRuntime.speech_text ?? activeRuntime.title,
+                triggerSource: "runtime",
+                sourceChatId: activeRuntime.chat_id,
+                diagnostic: runtimeDiagnostic,
+              },
+              "panel-runtime",
+            );
+            if (result.status === "ignored") return;
+            setOpportunityError(buddyActionResultMessage(result));
           }
         : undefined;
 
@@ -239,7 +249,9 @@ export const BuddyPanel: React.FC = () => {
               onEvent={buddy.handleCanvasEvent}
               displaySize={200}
               speechOverride={speechText}
-              speechControls={speechControls}
+              speechControls={speechControls?.filter(
+                (control) => legacyControls || !isLegacyWorkControl(control),
+              )}
               speechIntent={activeSpeech?.speech_intent}
               onSpeechControlClick={speechHandler}
             />

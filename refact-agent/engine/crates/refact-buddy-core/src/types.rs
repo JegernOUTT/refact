@@ -427,6 +427,9 @@ fn default_control_style() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuddySpeechItem {
+    /// Must obtain an editorial delivery claim before any UI surface displays this item.
+    #[serde(default)]
+    pub editorial_delivery_required: bool,
     pub id: String,
     pub text: String,
     #[serde(default = "default_mood")]

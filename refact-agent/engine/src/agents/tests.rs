@@ -1647,6 +1647,7 @@ async fn spawn_and_wait_times_out_when_runner_hangs() {
 async fn spawn_and_wait_timeout_returns_error() {
     let (_gcx, app, _session_arc, _workspace) = app_with_parent_session("parent-timeout").await;
     let req = crate::agents::spawn::SpawnRequest {
+        native_supervision_guard: None,
         kind: BgAgentKind::Subagent,
         parent_chat_id: "parent-timeout".to_string(),
         parent_root_chat_id: None,
@@ -1712,6 +1713,7 @@ fn subagent_spawn_request(
     target_file: &str,
 ) -> crate::agents::spawn::SpawnRequest {
     crate::agents::spawn::SpawnRequest {
+        native_supervision_guard: None,
         kind: BgAgentKind::Subagent,
         parent_chat_id: parent_chat_id.to_string(),
         parent_root_chat_id: Some(parent_chat_id.to_string()),

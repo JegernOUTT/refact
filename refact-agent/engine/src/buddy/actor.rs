@@ -13,9 +13,7 @@ use uuid::Uuid;
 use crate::app_state::AppState;
 pub use refact_buddy_core::runtime_writer::{run_runtime_queue_writer, RuntimeQueueWriteOp};
 use refact_buddy_core::user_action::UserAction;
-use super::drafts::{
-    validate_draft_payload, DraftCreateError, DraftStore, DraftTarget, DraftValidationError,
-};
+use super::drafts::{validate_draft_payload, DraftStore, DraftTarget, DraftValidationError};
 use super::events::BuddyEvent;
 use super::facts::FactStore;
 use super::humor::{HumorPlan, HumorService};
@@ -197,6 +195,29 @@ async fn wait_for_shutdown(shutdown_flag: Arc<std::sync::atomic::AtomicBool>) {
     }
 }
 
+/// Poll the single owned maintenance future alongside native actor ticks and stop.
+/// Cancellation drops the future (not a detached task); repository-owned permits
+/// remain held until an already-started database operation completes.
+async fn drive_maintenance(
+    buddy: &Arc<tokio::sync::Mutex<Option<BuddyService>>>,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    maintenance: impl std::future::Future<Output = ()>,
+) {
+    tokio::pin!(maintenance);
+    let mut native_tick =
+        tokio::time::interval(std::time::Duration::from_secs(PET_DECAY_INTERVAL_SECS));
+    loop {
+        tokio::select! {
+            _ = wait_for_shutdown(shutdown.clone()) => break,
+            _ = &mut maintenance => break,
+            _ = native_tick.tick() => {
+                let mut guard = buddy.lock().await;
+                if let Some(svc) = guard.as_mut() { svc.apply_pet_tick(PET_DECAY_INTERVAL_SECS); }
+            }
+        }
+    }
+}
+
 pub(crate) fn redact_diagnostic_metadata(value: &str) -> Option<String> {
     let redacted = redact_sensitive(value).trim().to_string();
     if redacted.is_empty() {
@@ -207,8 +228,23 @@ pub(crate) fn redact_diagnostic_metadata(value: &str) -> Option<String> {
 }
 
 pub struct BuddyService {
+    admission_owner: Arc<()>,
     pub state: BuddyState,
     pub settings: BuddySettings,
+    pub outcome_runtime: Option<super::outcome_runtime::OutcomeRuntime>,
+    pub operator_features: super::operator_runtime::OperatorFeatures,
+    /// Read-only compatibility cache; never saved into legacy state.
+    pub operator_opportunity_projection: Vec<BuddyOpportunity>,
+    operator_legacy_seeded: bool,
+    /// How many historical cards already committed. Bounds each migration pass
+    /// without dropping a backlog larger than one batch.
+    operator_legacy_seed_cursor: usize,
+    operator_legacy_history_seeded: bool,
+    operator_receipt_seed: super::legacy_work::HistorySeed<super::receipts::BuddyReceipt>,
+    operator_activity_seed: super::legacy_work::HistorySeed<BuddyActivity>,
+    persisted_operator_drafts: HashSet<String>,
+    /// Serializes bounded durable admission, never native actor decisions.
+    admission_gate: Arc<tokio::sync::Mutex<()>>,
     pub events_tx: broadcast::Sender<BuddyEvent>,
     pub project_root: std::path::PathBuf,
     pub last_suggestion_at: Option<Instant>,
@@ -236,6 +272,87 @@ pub struct BuddyService {
     pub auto_quiet_window: Option<(u8, u8)>,
     #[cfg(test)]
     pub force_next_runtime_enqueue_drop: bool,
+}
+
+/// A captured service admission. Dropping it releases backpressure without an ack.
+/// No uncommitted draft or memory replacement is installed in the actor.
+pub struct BuddyAdmission<T> {
+    value: T,
+    pending: Option<AdmissionWrite>,
+}
+
+struct AdmissionWrite {
+    runtime: super::outcome_runtime::OutcomeRuntime,
+    owner: Arc<()>,
+    permit: Option<tokio::sync::OwnedMutexGuard<()>>,
+    opportunities: Vec<BuddyOpportunity>,
+    drafts: Vec<BuddyDraft>,
+    memory: Option<(MemoryOpsState, MemoryOpsState)>,
+}
+
+impl<T> BuddyAdmission<T> {
+    fn ready(value: T) -> Self {
+        Self {
+            value,
+            pending: None,
+        }
+    }
+
+    pub async fn commit(
+        self,
+        buddy: &Arc<tokio::sync::Mutex<Option<BuddyService>>>,
+    ) -> Result<T, String> {
+        let Some(mut pending) = self.pending else {
+            return Ok(self.value);
+        };
+        let opportunities = pending.opportunities.clone();
+        let drafts = pending.drafts.clone();
+        let worker = pending.runtime.worker();
+        // The repository closure owns capacity even if the caller is cancelled:
+        // spawn_blocking work cannot be cancelled once it has started.
+        let permit = pending.permit.take();
+        let (_permit, result) = pending
+            .runtime
+            .with_store(move |store| {
+                let result =
+                    super::legacy_work::migrate_batch(store, &worker, &opportunities, &drafts)
+                        .and_then(|_| super::legacy_work::projection_page(store, None, 200));
+                Ok((permit, result))
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let (projection, _) = result.map_err(|error| error.to_string())?;
+        let mut guard = buddy.lock().await;
+        let svc = guard
+            .as_mut()
+            .ok_or("Buddy operator unavailable after commit")?;
+        require_publication_owner(svc, &pending.runtime)?;
+        if !Arc::ptr_eq(&svc.admission_owner, &pending.owner) {
+            return Err("Buddy actor replaced during admission".into());
+        }
+        if pending.opportunities.iter().any(|opportunity| {
+            svc.state
+                .muted_rules
+                .contains(&refact_buddy_core::verdicts::rule_key_of(
+                    &opportunity.cooldown_key,
+                ))
+        }) {
+            return Err("Buddy admission preference changed; committed work retained".into());
+        }
+        if let Some((previous, replacement)) = pending.memory {
+            if svc.memory_ops != previous {
+                return Err("Buddy memory input changed during admission".into());
+            }
+            svc.memory_ops = replacement;
+        }
+        svc.operator_opportunity_projection = projection;
+        for draft in pending.drafts {
+            svc.persisted_operator_drafts.insert(draft.id.clone());
+            svc.draft_store.restore(vec![draft.clone()]);
+            let _ = svc.events_tx.send(BuddyEvent::DraftCreated { draft });
+        }
+        Ok(self.value)
+    }
 }
 
 fn normalize_generated_buddy_text(raw: &str) -> String {
@@ -412,6 +529,13 @@ pub async fn render_buddy_activity_title(
 }
 
 impl BuddyService {
+    pub(crate) fn admission_identity(&self) -> Arc<()> {
+        self.admission_owner.clone()
+    }
+    pub(crate) fn has_admission_identity(&self, owner: &Arc<()>) -> bool {
+        Arc::ptr_eq(&self.admission_owner, owner)
+    }
+
     pub fn new(
         project_root: std::path::PathBuf,
         mut state: BuddyState,
@@ -439,9 +563,20 @@ impl BuddyService {
         state.opportunities = opportunity_snapshot;
         state.dismissed_history = dismissed_snapshot;
         Self {
+            admission_owner: Arc::new(()),
             project_root,
             state,
             settings,
+            outcome_runtime: None,
+            operator_features: Default::default(),
+            operator_opportunity_projection: Vec::new(),
+            operator_legacy_seeded: false,
+            operator_legacy_seed_cursor: 0,
+            operator_legacy_history_seeded: false,
+            operator_receipt_seed: Default::default(),
+            operator_activity_seed: Default::default(),
+            persisted_operator_drafts: HashSet::new(),
+            admission_gate: Arc::new(tokio::sync::Mutex::new(())),
             events_tx,
             last_suggestion_at: None,
             recent_diagnostics,
@@ -502,10 +637,30 @@ impl BuddyService {
         std::mem::take(&mut self.background_tasks)
     }
 
+    /// Public state always projects Work authority; legacy fields on `state` are
+    /// retained only as frozen migration/rollback input, never overwritten by this view.
+    pub fn presentation_state(&self) -> BuddyState {
+        let mut state = self.state.clone();
+        if self.operator_features.storage {
+            state.opportunities = self.operator_opportunity_projection.clone();
+            state.suggestion_state.clear();
+            state.dismissed_history.clear();
+        }
+        state
+    }
+
     pub fn snapshot(&self) -> BuddySnapshot {
-        let opportunities = self.opportunity_queue.snapshot();
+        let opportunities = if self.operator_features.storage {
+            self.operator_opportunity_projection.clone()
+        } else {
+            self.opportunity_queue.snapshot()
+        };
         let mut state = self.state.clone();
         state.opportunities = opportunities.clone();
+        if self.operator_features.storage {
+            state.suggestion_state.clear();
+            state.dismissed_history.clear();
+        }
         let mut pulse = self.pulse.clone();
         self.apply_memory_ops_to_pulse(&mut pulse);
         BuddySnapshot {
@@ -525,6 +680,9 @@ impl BuddyService {
     }
 
     pub fn expire_opportunities(&mut self) {
+        if self.operator_features.storage {
+            return;
+        }
         let now = Utc::now();
         let expiring: Vec<String> = self
             .opportunity_queue
@@ -558,7 +716,15 @@ impl BuddyService {
         );
     }
 
-    pub fn add_opportunity_with_cooldown(&mut self, opp: BuddyOpportunity, cooldown_secs: u64) {
+    pub fn add_opportunity_with_cooldown(
+        &mut self,
+        opp: BuddyOpportunity,
+        cooldown_secs: u64,
+    ) -> bool {
+        if self.operator_features.storage {
+            tracing::warn!("operator producer requires durable async admission");
+            return false;
+        }
         self.opportunity_queue
             .push_with_cooldown(opp.clone(), cooldown_secs);
         self.state.opportunities = self.opportunity_queue.snapshot();
@@ -567,6 +733,7 @@ impl BuddyService {
         let _ = self
             .events_tx
             .send(BuddyEvent::OpportunityProduced { opportunity: opp });
+        true
     }
 
     pub fn surface_opportunity_with_cooldown(
@@ -574,6 +741,14 @@ impl BuddyService {
         mut opp: BuddyOpportunity,
         cooldown_secs: u64,
     ) -> bool {
+        if self.operator_features.storage {
+            tracing::warn!("operator producer requires durable async admission");
+            return false;
+        }
+        if self.operator_features.editorial {
+            opp.humor = None;
+            opp.humor_allowed = false;
+        }
         match evaluate_with_mutes(
             &opp,
             &self.settings,
@@ -585,16 +760,164 @@ impl BuddyService {
                 false
             }
             PolicyDecision::Surface { humor_allowed } => {
-                opp.humor_allowed = humor_allowed;
+                opp.humor_allowed = humor_allowed && !self.operator_features.editorial;
                 let rule_key = refact_buddy_core::verdicts::rule_key_of(&opp.cooldown_key);
                 let multiplier = refact_buddy_core::verdicts::cooldown_multiplier_for_rule(
                     &self.state.verdicts,
                     &rule_key,
                 );
-                self.add_opportunity_with_cooldown(opp, cooldown_secs.saturating_mul(multiplier));
-                true
+                self.add_opportunity_with_cooldown(opp, cooldown_secs.saturating_mul(multiplier))
             }
         }
+    }
+
+    /// Capture under the actor lock. The returned admission owns bounded capacity,
+    /// but never the actor mutex; commit must be awaited after releasing that mutex.
+    fn admission<T>(&self, value: T) -> Result<BuddyAdmission<T>, String> {
+        let runtime = self
+            .outcome_runtime
+            .clone()
+            .ok_or("Buddy operator store unavailable")?;
+        if runtime.project().canonical_root != self.project_root.to_string_lossy() {
+            return Err("Buddy operator project identity changed".into());
+        }
+        let permit = self
+            .admission_gate
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| "Buddy operator admission busy; retry input")?;
+        Ok(BuddyAdmission {
+            value,
+            pending: Some(AdmissionWrite {
+                runtime,
+                owner: self.admission_owner.clone(),
+                permit: Some(permit),
+                opportunities: Vec::new(),
+                drafts: Vec::new(),
+                memory: None,
+            }),
+        })
+    }
+
+    pub fn prepare_opportunity(
+        &mut self,
+        mut opportunity: BuddyOpportunity,
+        cooldown_secs: u64,
+    ) -> Result<BuddyAdmission<bool>, String> {
+        if !self.operator_features.storage {
+            return Ok(BuddyAdmission::ready(
+                self.surface_opportunity_with_cooldown(opportunity, cooldown_secs),
+            ));
+        }
+        let rule = refact_buddy_core::verdicts::rule_key_of(&opportunity.cooldown_key);
+        if self.state.muted_rules.contains(&rule) {
+            return Ok(BuddyAdmission::ready(false));
+        }
+        if serde_json::to_vec(&opportunity)
+            .map_err(|error| error.to_string())?
+            .len()
+            > 32_768
+        {
+            return Err("operator opportunity exceeds bounded payload capacity".into());
+        }
+        if opportunity.cooldown_key.trim().is_empty() {
+            return Err("operator source identity missing".into());
+        }
+        opportunity.id = format!(
+            "producer:{}",
+            super::work_items::stable_hash(&[&opportunity.cooldown_key])
+        );
+        opportunity.humor = None;
+        opportunity.humor_allowed = false;
+        let mut admission = self.admission(true)?;
+        admission
+            .pending
+            .as_mut()
+            .unwrap()
+            .opportunities
+            .push(opportunity);
+        Ok(admission)
+    }
+
+    pub fn prepare_suggestion(
+        &mut self,
+        suggestion: BuddySuggestion,
+    ) -> Result<BuddyAdmission<bool>, String> {
+        if !self.operator_features.storage {
+            return Ok(BuddyAdmission::ready(self.maybe_add_suggestion(suggestion)));
+        }
+        self.prepare_opportunity(operator_suggestion(&suggestion), SUGGESTION_RATE_LIMIT_SECS)
+    }
+
+    pub fn prepare_draft(
+        &mut self,
+        kind: super::types::DraftKind,
+        title: String,
+        yaml_or_json: String,
+        explanation: String,
+    ) -> Result<BuddyAdmission<BuddyDraft>, String> {
+        if !self.operator_features.storage {
+            return self
+                .create_draft_legacy(kind, title, yaml_or_json, explanation)
+                .map(BuddyAdmission::ready)
+                .map_err(|error| error.to_string());
+        }
+        validate_draft_payload(&title, &yaml_or_json, &explanation)
+            .map_err(|error| error.to_string())?;
+        if yaml_or_json
+            .len()
+            .saturating_add(explanation.len())
+            .saturating_add(2)
+            > 32_768
+        {
+            return Err("operator proposal exceeds bounded payload capacity".into());
+        }
+        if self.draft_store.snapshot().len() >= super::legacy_work::MAX_MIGRATION_BATCH - 1 {
+            return Err("operator draft admission capacity exhausted".into());
+        }
+        let now = Utc::now();
+        let draft = BuddyDraft {
+            id: Uuid::new_v4().to_string(),
+            kind,
+            title,
+            yaml_or_json,
+            explanation,
+            created_at: now,
+            expires_at: now + super::drafts::DRAFT_TTL,
+        };
+        let mut admission = self.admission(draft.clone())?;
+        admission.pending.as_mut().unwrap().drafts.push(draft);
+        Ok(admission)
+    }
+
+    pub async fn surface_opportunity_durable(
+        buddy: &Arc<tokio::sync::Mutex<Option<Self>>>,
+        opportunity: BuddyOpportunity,
+        cooldown_secs: u64,
+    ) -> Result<bool, String> {
+        let admission = buddy
+            .lock()
+            .await
+            .as_mut()
+            .ok_or("Buddy unavailable")?
+            .prepare_opportunity(opportunity, cooldown_secs)?;
+        admission.commit(buddy).await
+    }
+
+    pub async fn create_draft_durable(
+        buddy: &Arc<tokio::sync::Mutex<Option<Self>>>,
+        kind: super::types::DraftKind,
+        title: String,
+        yaml_or_json: String,
+        explanation: String,
+    ) -> Result<BuddyDraft, String> {
+        let admission = buddy
+            .lock()
+            .await
+            .as_mut()
+            .ok_or("Buddy unavailable")?
+            .prepare_draft(kind, title, yaml_or_json, explanation)?;
+        admission.commit(buddy).await
     }
 
     pub fn record_verdict(
@@ -638,12 +961,56 @@ impl BuddyService {
 
     pub fn set_memory_ops(&mut self, memory_ops: MemoryOpsState) {
         self.memory_ops = memory_ops;
-        self.surface_memory_batch_opportunities();
+        if !self.operator_features.storage {
+            for opp in self.memory_batch_opportunities() {
+                self.surface_opportunity_with_cooldown(opp, 24 * 60 * 60);
+            }
+        }
     }
 
-    fn surface_memory_batch_opportunities(&mut self) {
-        let batches =
-            refact_buddy_core::memory_lifecycle_model::memory_op_batches(&self.memory_ops.ops);
+    pub fn prepare_memory_ops(
+        &mut self,
+        memory_ops: MemoryOpsState,
+    ) -> Result<BuddyAdmission<()>, String> {
+        if !self.operator_features.storage {
+            self.set_memory_ops(memory_ops);
+            return Ok(BuddyAdmission::ready(()));
+        }
+        let mut admission = self.admission(())?;
+        let pending = admission.pending.as_mut().unwrap();
+        pending.opportunities = Self::opportunities_for_memory(&memory_ops);
+        pending.opportunities.retain(|opportunity| {
+            !self
+                .state
+                .muted_rules
+                .contains(&refact_buddy_core::verdicts::rule_key_of(
+                    &opportunity.cooldown_key,
+                ))
+        });
+        pending.memory = Some((self.memory_ops.clone(), memory_ops));
+        Ok(admission)
+    }
+
+    pub async fn set_memory_ops_durable(
+        buddy: &Arc<tokio::sync::Mutex<Option<Self>>>,
+        memory_ops: MemoryOpsState,
+    ) -> Result<(), String> {
+        let admission = buddy
+            .lock()
+            .await
+            .as_mut()
+            .ok_or("Buddy unavailable")?
+            .prepare_memory_ops(memory_ops)?;
+        admission.commit(buddy).await
+    }
+
+    fn memory_batch_opportunities(&self) -> Vec<BuddyOpportunity> {
+        Self::opportunities_for_memory(&self.memory_ops)
+    }
+
+    fn opportunities_for_memory(memory_ops: &MemoryOpsState) -> Vec<BuddyOpportunity> {
+        let mut opportunities = Vec::new();
+        let batches = refact_buddy_core::memory_lifecycle_model::memory_op_batches(&memory_ops.ops);
         let now = Utc::now();
         for batch in batches {
             if batch.count == 0 {
@@ -682,14 +1049,18 @@ impl BuddyService {
                 expires_at: now + chrono::Duration::hours(24),
                 resolved_at: None,
             };
-            self.surface_opportunity_with_cooldown(opp, 24 * 60 * 60);
+            opportunities.push(opp);
         }
+        opportunities
     }
 
     pub fn accept_quest_from_suggestion(
         &mut self,
         suggestion_id: &str,
     ) -> Result<(BuddySuggestion, BuddyQuest), String> {
+        if self.operator_features.storage {
+            return Err("Legacy suggestion actions are unavailable; use Work Desk".into());
+        }
         let suggestion = self
             .state
             .suggestion_state
@@ -705,7 +1076,7 @@ impl BuddyService {
         super::state::activate_quest(&mut self.state, quest.clone());
         self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::StateUpdated {
-            state: self.state.clone(),
+            state: self.presentation_state(),
         });
         Ok((suggestion, quest))
     }
@@ -723,6 +1094,9 @@ impl BuddyService {
     }
 
     pub fn resolve_opportunity(&mut self, id: &str, status: OpportunityStatus) -> bool {
+        if self.operator_features.storage {
+            return false;
+        }
         let changed = if matches!(status, OpportunityStatus::Dismissed) {
             self.opportunity_queue.dismiss(id)
         } else {
@@ -760,26 +1134,47 @@ impl BuddyService {
         pulse.memory.conflict_candidates = counts.conflict_candidates;
     }
 
+    #[cfg(test)]
     pub fn create_draft(
         &mut self,
         kind: super::types::DraftKind,
         title: String,
         yaml_or_json: String,
         explanation: String,
-    ) -> Result<BuddyDraft, DraftCreateError> {
-        validate_draft_payload(&title, &yaml_or_json, &explanation)?;
+    ) -> Result<BuddyDraft, String> {
+        self.create_draft_legacy(kind, title, yaml_or_json, explanation)
+    }
+
+    fn create_draft_legacy(
+        &mut self,
+        kind: super::types::DraftKind,
+        title: String,
+        yaml_or_json: String,
+        explanation: String,
+    ) -> Result<BuddyDraft, String> {
+        if self.operator_features.storage {
+            return Err("operator draft requires durable async admission".into());
+        }
+        validate_draft_payload(&title, &yaml_or_json, &explanation)
+            .map_err(|error| error.to_string())?;
         let draft = self
             .draft_store
             .create(kind, title, yaml_or_json, explanation);
         self.drafts_dirty = true;
-        let _ = self.events_tx.send(BuddyEvent::DraftCreated {
-            draft: draft.clone(),
-        });
+        if !self.operator_features.storage {
+            let _ = self.events_tx.send(BuddyEvent::DraftCreated {
+                draft: draft.clone(),
+            });
+        }
         Ok(draft)
     }
 
     pub fn delete_draft(&mut self, id: &str) -> Option<BuddyDraft> {
+        if self.operator_features.storage && !self.persisted_operator_drafts.contains(id) {
+            return None;
+        }
         let draft = self.draft_store.delete(id)?;
+        self.persisted_operator_drafts.remove(id);
         self.drafts_dirty = true;
         let _ = self.events_tx.send(BuddyEvent::DraftRemoved {
             draft_id: id.to_string(),
@@ -788,7 +1183,11 @@ impl BuddyService {
     }
 
     pub fn consume_draft(&mut self, id: &str) -> Option<BuddyDraft> {
+        if self.operator_features.storage && !self.persisted_operator_drafts.contains(id) {
+            return None;
+        }
         let draft = self.draft_store.consume(id)?;
+        self.persisted_operator_drafts.remove(id);
         self.drafts_dirty = true;
         let _ = self.events_tx.send(BuddyEvent::DraftConsumed {
             draft_id: id.to_string(),
@@ -797,7 +1196,24 @@ impl BuddyService {
     }
 
     pub fn expire_drafts(&mut self, now: DateTime<Utc>) -> Vec<String> {
-        let expired = self.draft_store.expire_old(now);
+        let expired = if self.operator_features.storage {
+            let ids: Vec<_> = self
+                .draft_store
+                .snapshot()
+                .into_iter()
+                .filter(|draft| {
+                    draft.expires_at <= now && self.persisted_operator_drafts.contains(&draft.id)
+                })
+                .map(|draft| draft.id)
+                .collect();
+            for id in &ids {
+                self.draft_store.delete(id);
+                self.persisted_operator_drafts.remove(id);
+            }
+            ids
+        } else {
+            self.draft_store.expire_old(now)
+        };
         if !expired.is_empty() {
             self.drafts_dirty = true;
         }
@@ -840,6 +1256,12 @@ impl BuddyService {
     }
 
     fn update_speech_gated(&mut self, speech: BuddySpeechItem, user_initiated: bool) -> bool {
+        if self.operator_features.editorial
+            && !user_initiated
+            && !speech.editorial_delivery_required
+        {
+            return false;
+        }
         let intent = speech
             .speech_intent
             .as_deref()
@@ -930,6 +1352,11 @@ impl BuddyService {
     }
 
     fn gate_runtime_event_speech(&mut self, mut event: BuddyRuntimeEvent) -> BuddyRuntimeEvent {
+        if self.operator_features.editorial {
+            // Preserve native warnings and controls, not a second cosmetic delivery channel.
+            event.speech_text = None;
+            return event;
+        }
         let Some(speech_text) = event.speech_text.clone() else {
             return event;
         };
@@ -946,6 +1373,7 @@ impl BuddyService {
         );
         if !decision.allowed && decision.reason != "intent_budget" {
             let preview_item = BuddySpeechItem {
+                editorial_delivery_required: false,
                 id: event.id.clone(),
                 text: speech_text,
                 mood: "neutral".to_string(),
@@ -981,6 +1409,7 @@ impl BuddyService {
             now,
         );
         let preview_item = BuddySpeechItem {
+            editorial_delivery_required: false,
             id: event.id.clone(),
             text: speech_text,
             mood: "neutral".to_string(),
@@ -1184,7 +1613,7 @@ impl BuddyService {
             if progressed {
                 self.dirty = true;
                 let _ = self.events_tx.send(BuddyEvent::StateUpdated {
-                    state: self.state.clone(),
+                    state: self.presentation_state(),
                 });
             }
             return;
@@ -1194,12 +1623,11 @@ impl BuddyService {
             return;
         };
 
-        let reward = quest.reward_xp;
         let title = quest.title.clone();
         let icon = quest.icon.clone();
         self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::StateUpdated {
-            state: self.state.clone(),
+            state: self.presentation_state(),
         });
 
         self.add_activity(BuddyActivity {
@@ -1216,6 +1644,7 @@ impl BuddyService {
             failure_summary: None,
         });
         self.update_speech_user_initiated(BuddySpeechItem {
+            editorial_delivery_required: false,
             id: format!("quest-complete-{}", quest.id),
             text: format!("Quest complete: {title}! Tiny victory dance?"),
             mood: "happy".to_string(),
@@ -1246,25 +1675,33 @@ impl BuddyService {
                 Some("high"),
             )
         });
-        if reward > 0 {
-            self.grant_xp(reward);
-        }
     }
 
     pub fn dismiss_quest(&mut self) {
         super::state::clear_active_quest(&mut self.state);
         self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::StateUpdated {
-            state: self.state.clone(),
+            state: self.presentation_state(),
         });
     }
 
     pub fn grant_xp(&mut self, amount: u64) {
-        super::state::grant_xp(&mut self.state, amount);
+        self.grant_xp_from(amount, super::state::XpSource::ActivityVolume);
+    }
+
+    pub fn grant_play_xp(&mut self, amount: u64) {
+        self.grant_xp_from(amount, super::state::XpSource::IntentionalPlay);
+    }
+
+    pub fn grant_xp_from(&mut self, amount: u64, source: super::state::XpSource) {
+        if !source.rewards_progression() {
+            return;
+        }
+        super::state::grant_xp_from(&mut self.state, amount, source);
         self.refresh_active_quest();
         self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::StateUpdated {
-            state: self.state.clone(),
+            state: self.presentation_state(),
         });
     }
 
@@ -1278,11 +1715,18 @@ impl BuddyService {
         self.refresh_active_quest();
         self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::StateUpdated {
-            state: self.state.clone(),
+            state: self.presentation_state(),
         });
     }
 
     pub fn add_suggestion(&mut self, suggestion: BuddySuggestion) {
+        if self.operator_features.storage {
+            self.add_opportunity_with_cooldown(
+                operator_suggestion(&suggestion),
+                SUGGESTION_RATE_LIMIT_SECS,
+            );
+            return;
+        }
         if self.state.suggestion_state.len() >= 50 {
             if let Some(pos) = self.state.suggestion_state.iter().position(|s| s.dismissed) {
                 self.state.suggestion_state.remove(pos);
@@ -1297,6 +1741,12 @@ impl BuddyService {
     }
 
     pub fn maybe_add_suggestion(&mut self, suggestion: BuddySuggestion) -> bool {
+        if self.operator_features.storage {
+            return self.surface_opportunity_with_cooldown(
+                operator_suggestion(&suggestion),
+                SUGGESTION_RATE_LIMIT_SECS,
+            );
+        }
         if let Some(last) = self.last_suggestion_at {
             if last.elapsed().as_secs() < SUGGESTION_RATE_LIMIT_SECS {
                 return false;
@@ -1315,6 +1765,9 @@ impl BuddyService {
     }
 
     pub fn dismiss_suggestion(&mut self, id: &str) {
+        if self.operator_features.storage {
+            return;
+        }
         if let Some(s) = self.state.suggestion_state.iter_mut().find(|s| s.id == id) {
             s.dismissed = true;
         }
@@ -1352,7 +1805,7 @@ impl BuddyService {
         self.refresh_active_quest();
         self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::StateUpdated {
-            state: self.state.clone(),
+            state: self.presentation_state(),
         });
     }
 
@@ -1468,7 +1921,7 @@ impl BuddyService {
         self.refresh_active_quest();
         self.dirty = true;
         let _ = self.events_tx.send(BuddyEvent::StateUpdated {
-            state: self.state.clone(),
+            state: self.presentation_state(),
         });
 
         let mut event = make_runtime_event(
@@ -1643,6 +2096,15 @@ impl BuddyService {
             ".refact/buddy/chats/workflows/{}.json",
             workflow_id
         ));
+        if let Some(parent) = path.parent() {
+            if let Err(error) = tokio::fs::create_dir_all(parent).await {
+                warn!(
+                    "buddy: failed to create workflow transcript dir {:?}: {}",
+                    parent, error
+                );
+                return;
+            }
+        }
         super::workflows::append_workflow_entry(&path, output_summary, success).await;
     }
 
@@ -1733,6 +2195,9 @@ impl BuddyService {
     }
 
     pub fn expire_suggestions(&mut self) {
+        if self.operator_features.storage {
+            return;
+        }
         let now = chrono::Utc::now();
         let mut changed = false;
         for s in self.state.suggestion_state.iter_mut() {
@@ -1771,9 +2236,239 @@ impl BuddyService {
         if changed || self.state.suggestion_state.len() != before {
             self.dirty = true;
             let _ = self.events_tx.send(BuddyEvent::StateUpdated {
-                state: self.state.clone(),
+                state: self.presentation_state(),
             });
         }
+    }
+}
+
+fn operator_suggestion(suggestion: &BuddySuggestion) -> BuddyOpportunity {
+    let created_at = DateTime::parse_from_rfc3339(&suggestion.created_at)
+        .map(|time| time.with_timezone(&Utc))
+        .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+    BuddyOpportunity {
+        id: format!("suggestion:{}", suggestion.id),
+        kind: super::types::BuddyOpportunityKind::JobFinding,
+        summary: format!("{}\n\n{}", suggestion.title, suggestion.description),
+        priority: super::types::BuddyPriority::Normal,
+        confidence: 0.5,
+        fact_keys: vec![],
+        cooldown_key: format!("suggestion:{}", suggestion.id),
+        cooldown_secs: SUGGESTION_RATE_LIMIT_SECS,
+        status: if suggestion.dismissed {
+            OpportunityStatus::Dismissed
+        } else {
+            OpportunityStatus::New
+        },
+        // Old controls and quests are reference material, never new action authority.
+        proposed_actions: vec![],
+        humor: None,
+        humor_allowed: false,
+        related: Default::default(),
+        created_at,
+        expires_at: DateTime::<Utc>::MAX_UTC,
+        resolved_at: None,
+    }
+}
+
+/// Copy producer inputs under the actor lock, commit on the store worker, then
+/// acknowledge only those exact inputs. Failed batches remain available for retry.
+pub(crate) async fn publish_operator_inputs(
+    buddy: &Arc<tokio::sync::Mutex<Option<BuddyService>>>,
+) -> Result<(), String> {
+    let (runtime, project_root, opportunities, drafts, seed_cursor) = {
+        let mut guard = buddy.lock().await;
+        let Some(svc) = guard.as_mut() else {
+            return Ok(());
+        };
+        if !svc.operator_features.storage {
+            return Ok(());
+        }
+        let runtime = svc
+            .outcome_runtime
+            .clone()
+            .ok_or("Buddy operator store unavailable")?;
+        if runtime.project().canonical_root != svc.project_root.to_string_lossy() {
+            return Err("Buddy operator project identity changed".into());
+        }
+        let mut drafts: Vec<_> = svc
+            .draft_store
+            .snapshot()
+            .into_iter()
+            .filter(|draft| !svc.persisted_operator_drafts.contains(&draft.id))
+            .collect();
+        drafts.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        // Finish proposal content first, even across batches. Otherwise an editor
+        // link could import a placeholder before its real draft is persisted.
+        let opportunities = if drafts.is_empty() && !svc.operator_legacy_seeded {
+            // A long historical backlog is paginated, never refused: the queue
+            // is frozen once storage owns the lifecycle, so this deterministic
+            // order lets a later pass resume exactly where this one stopped.
+            let mut inputs = svc.opportunity_queue.snapshot();
+            inputs.extend(svc.state.suggestion_state.iter().map(operator_suggestion));
+            inputs.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+            inputs.split_off(svc.operator_legacy_seed_cursor.min(inputs.len()))
+        } else {
+            Vec::new()
+        };
+        (
+            runtime,
+            svc.project_root.clone(),
+            opportunities,
+            drafts,
+            svc.operator_legacy_seed_cursor,
+        )
+    };
+    let worker = runtime.worker();
+    let pending_opportunities = opportunities.len();
+    let committed_drafts = drafts.clone();
+    let (chunk, migration_error) = runtime
+        .with_store(move |store| {
+            Ok(super::legacy_work::migrate_chunk_partial(
+                store,
+                &worker,
+                &opportunities,
+                &drafts,
+            ))
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let committed_drafts: Vec<_> = committed_drafts
+        .into_iter()
+        .take(chunk.consumed_drafts)
+        .collect();
+    let consumed_opportunities = chunk.consumed_opportunities;
+    let seeded_complete = pending_opportunities > 0 && chunk.remaining == 0;
+    // Independent history errors cannot erase the committed work prefix.
+    let history = publish_operator_history(buddy, &runtime, &project_root).await;
+    // Publication is separate from projection refresh: a read failure must not
+    // lose committed inputs, nor claim that uncommitted proposals were saved.
+    let projection = runtime
+        .with_store(|store| super::legacy_work::projection_page(store, None, 200))
+        .await;
+    let mut guard = buddy.lock().await;
+    let Some(svc) = guard.as_mut() else {
+        return Ok(());
+    };
+    require_publication_owner(svc, &runtime)?;
+    // Concurrent publishers must not double-advance the same captured prefix.
+    if svc.operator_legacy_seed_cursor != seed_cursor {
+        return Err("Buddy operator migration cursor changed during publication".into());
+    }
+    svc.operator_legacy_seeded |= seeded_complete;
+    // Only advance the cursor by what actually committed, so an interrupted
+    // migration resumes rather than skipping or re-admitting historical cards.
+    svc.operator_legacy_seed_cursor = svc
+        .operator_legacy_seed_cursor
+        .saturating_add(consumed_opportunities);
+    for draft in committed_drafts {
+        if svc.persisted_operator_drafts.insert(draft.id.clone()) {
+            let _ = svc.events_tx.send(BuddyEvent::DraftCreated { draft });
+        }
+    }
+    if let Some(error) = migration_error {
+        return Err(error.to_string());
+    }
+    history?;
+    let (projection, _) = projection.map_err(|error| error.to_string())?;
+    for opportunity in &projection {
+        if !svc
+            .operator_opportunity_projection
+            .iter()
+            .any(|old| old.id == opportunity.id)
+        {
+            let _ = svc.events_tx.send(BuddyEvent::OpportunityProduced {
+                opportunity: opportunity.clone(),
+            });
+        }
+    }
+    svc.operator_opportunity_projection = projection;
+    Ok(())
+}
+
+/// Seed immutable source snapshots in bounded pages. A changing activity feed
+/// cannot reset the cursor and starve its tail; restart replays idempotently.
+async fn publish_operator_history(
+    buddy: &Arc<tokio::sync::Mutex<Option<BuddyService>>>,
+    runtime: &super::outcome_runtime::OutcomeRuntime,
+    project_root: &Path,
+) -> Result<(), String> {
+    let need_receipts = {
+        let guard = buddy.lock().await;
+        let svc = guard.as_ref().ok_or("Buddy operator unavailable")?;
+        if svc.operator_legacy_history_seeded {
+            return Ok(());
+        }
+        svc.operator_receipt_seed.needs_source()
+    };
+    let receipts = if need_receipts {
+        super::legacy_work::load_receipt_history(project_root).await
+    } else {
+        Ok(Vec::new())
+    };
+    let load_error = receipts.as_ref().err().cloned();
+    let (receipt_page, activity_page, receipt_start, activity_start) = {
+        let mut guard = buddy.lock().await;
+        let svc = guard.as_mut().ok_or("Buddy operator unavailable")?;
+        require_publication_owner(svc, runtime)?;
+        if let Ok(receipts) = receipts {
+            svc.operator_receipt_seed.stage(receipts);
+        }
+        if svc.operator_activity_seed.needs_source() {
+            let mut activities = svc.state.recent_activities.clone();
+            activities.sort_by_key(|activity| serde_json::to_string(activity).unwrap_or_default());
+            svc.operator_activity_seed.stage(activities);
+        }
+        (
+            svc.operator_receipt_seed
+                .page(super::legacy_work::MAX_MIGRATION_BATCH / 2),
+            svc.operator_activity_seed
+                .page(super::legacy_work::MAX_MIGRATION_BATCH / 2),
+            svc.operator_receipt_seed.cursor,
+            svc.operator_activity_seed.cursor,
+        )
+    };
+    let (receipts_committed, activities_committed, import_error) = runtime
+        .with_store(move |store| {
+            Ok(super::legacy_work::migrate_history_chunk(
+                store,
+                &receipt_page,
+                &activity_page,
+            ))
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut guard = buddy.lock().await;
+    let svc = guard.as_mut().ok_or("Buddy operator unavailable")?;
+    require_publication_owner(svc, runtime)?;
+    svc.operator_receipt_seed
+        .acknowledge(receipt_start, receipts_committed);
+    svc.operator_activity_seed
+        .acknowledge(activity_start, activities_committed);
+    svc.operator_legacy_history_seeded =
+        svc.operator_receipt_seed.complete() && svc.operator_activity_seed.complete();
+    match load_error.or(import_error) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn require_publication_owner(
+    svc: &BuddyService,
+    runtime: &super::outcome_runtime::OutcomeRuntime,
+) -> Result<(), String> {
+    if svc.operator_features.storage
+        && svc.outcome_runtime.as_ref().is_some_and(|current| {
+            current.same_owner(runtime)
+                && !current.is_closed()
+                && current.project() == runtime.project()
+                && current.worker() == runtime.worker()
+                && current.project().canonical_root == svc.project_root.to_string_lossy()
+        })
+    {
+        Ok(())
+    } else {
+        Err("Buddy operator owner changed during publication".into())
     }
 }
 
@@ -2118,7 +2813,7 @@ pub async fn buddy_apply(gcx: AppState, m: BuddyMutation) {
         svc.enqueue_runtime_event(ev);
     }
     if m.xp > 0 {
-        svc.grant_xp(m.xp);
+        svc.grant_xp_from(m.xp, super::state::XpSource::ActivityVolume);
     }
     if let Some(activity) = m.activity {
         svc.add_activity(activity);
@@ -2127,7 +2822,7 @@ pub async fn buddy_apply(gcx: AppState, m: BuddyMutation) {
         svc.state.semantic.mood = mood;
         svc.dirty = true;
         let _ = svc.events_tx.send(BuddyEvent::StateUpdated {
-            state: svc.state.clone(),
+            state: svc.presentation_state(),
         });
     }
 }
@@ -2230,34 +2925,6 @@ pub async fn buddy_background_task(gcx: AppState) {
         }
     }
 
-    let agents_md = project_root.join("AGENTS.md");
-    let setup_done = tokio::fs::try_exists(&agents_md).await.unwrap_or(false);
-    if !setup_done {
-        let mut guard = buddy_arc.lock().await;
-        if let Some(svc) = guard.as_mut() {
-            let already = svc
-                .state
-                .suggestion_state
-                .iter()
-                .any(|s| s.suggestion_type == "setup");
-            if !already {
-                let suggestion = BuddySuggestion {
-                    id: "setup".to_string(),
-                    suggestion_type: "setup".to_string(),
-                    title: "Set up this project".to_string(),
-                    description:
-                        "Run setup to generate guidelines, integrations, and toolbox commands."
-                            .to_string(),
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    dismissed: false,
-                    controls: vec![],
-                    quest: None,
-                };
-                svc.add_suggestion(suggestion);
-            }
-        }
-    }
-
     info!("buddy: service started for {:?}", project_root);
 
     let scheduler = super::scheduler::BuddyScheduler::new();
@@ -2269,317 +2936,447 @@ pub async fn buddy_background_task(gcx: AppState) {
     ));
     let mut expiry_tick: u64 = 0;
 
-    loop {
-        if shutdown_flag.load(Ordering::SeqCst) {
-            break;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        expiry_tick += 1;
-        if expiry_tick % PET_DECAY_INTERVAL_SECS == 0 {
-            let mut buddy = buddy_arc.lock().await;
-            if let Some(svc) = buddy.as_mut() {
-                svc.apply_pet_tick(PET_DECAY_INTERVAL_SECS);
-            }
-        }
-        if expiry_tick % 60 == 0 {
-            let mut buddy = buddy_arc.lock().await;
-            if let Some(svc) = buddy.as_mut() {
-                svc.expire_suggestions();
-            }
-        }
-        // Pulse refresh + opportunity expiry every 60s
-        if expiry_tick % 60 == 0 {
-            let now = Utc::now();
-            let fact_snap = {
-                let buddy = buddy_arc.lock().await;
-                buddy
-                    .as_ref()
-                    .map(|svc| svc.fact_store.iter().cloned().collect::<Vec<_>>())
-            };
-            if let Some(facts) = fact_snap {
-                let mut tmp_store = FactStore::new();
-                for f in facts {
-                    tmp_store.ingest(f);
-                }
-                let knowledge_dirs = crate::files_correction::get_project_dirs(gcx.gcx.clone())
-                    .await
-                    .into_iter()
-                    .map(|dir| dir.join(crate::file_filter::KNOWLEDGE_FOLDER_NAME))
-                    .filter(|dir| dir.exists())
-                    .collect::<Vec<_>>();
-                let lifecycle_ops =
-                    detect_memory_lifecycle_ops_from_knowledge_dirs(&knowledge_dirs, now).await;
-                if !lifecycle_ops.is_empty() {
-                    let mut memory_ops = super::storage::load_memory_ops(&project_root).await;
-                    for op in lifecycle_ops {
-                        match super::storage::enqueue_memory_op(&project_root, op).await {
-                            Ok(updated) => memory_ops = updated,
-                            Err(err) => {
-                                warn!("buddy: failed to enqueue memory lifecycle op: {}", err)
-                            }
-                        }
-                    }
-                    let mut buddy = buddy_arc.lock().await;
-                    if let Some(svc) = buddy.as_mut() {
-                        svc.set_memory_ops(memory_ops);
-                    }
-                }
-                let new_pulse =
-                    super::pulse::build_pulse(gcx.clone(), &project_root, &tmp_store).await;
-                let mut buddy = buddy_arc.lock().await;
-                if let Some(svc) = buddy.as_mut() {
-                    svc.set_pulse(new_pulse);
-                    svc.expire_opportunities();
-                    svc.opportunity_queue.refresh_cooldowns(now);
-                    svc.expire_drafts(now);
-                    svc.expire_runtime_events_at(now);
-                }
-            }
-        }
-        {
-            let window = {
-                let actions = {
-                    let ring = gcx.buddy.user_activity.lock().await;
-                    ring.snapshot()
+    // Exactly one maintenance future is owned and polled here (never spawned).
+    // Slow repository work backpressures maintenance, not native actor decisions
+    // or shutdown. Dropping the future cannot acknowledge an unfinished admission.
+    {
+        let maintenance = async {
+            let agents_md = project_root.join("AGENTS.md");
+            let setup_done = tokio::fs::try_exists(&agents_md).await.unwrap_or(false);
+            if !setup_done {
+                let mut guard = buddy_arc.lock().await;
+                if let Some(svc) = guard.as_mut() {
+                    let already = svc
+                        .state
+                        .suggestion_state
+                        .iter()
+                        .any(|s| s.suggestion_type == "setup");
+                    if !already {
+                        let suggestion = BuddySuggestion {
+                    id: "setup".to_string(),
+                    suggestion_type: "setup".to_string(),
+                    title: "Set up this project".to_string(),
+                    description:
+                        "Run setup to generate guidelines, integrations, and toolbox commands."
+                            .to_string(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    dismissed: false,
+                    controls: vec![],
+                    quest: None,
                 };
-                super::speech_policy::auto_quiet_window_from_actions(&actions)
-            };
-            let mut buddy = buddy_arc.lock().await;
-            if let Some(svc) = buddy.as_mut() {
-                svc.auto_quiet_window = window;
+                        let admission = svc.prepare_suggestion(suggestion);
+                        drop(guard);
+                        match admission {
+                            Ok(admission) => {
+                                if let Err(error) = admission.commit(&buddy_arc).await {
+                                    tracing::warn!(%error, "operator suggestion admission failed");
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "operator suggestion admission failed")
+                            }
+                        }
+                    }
+                }
             }
-        }
-        // Observer ticking — each observer respects its own cadence
-        {
-            let now = Utc::now();
-            let due_observers = {
-                let buddy = buddy_arc.lock().await;
-                match buddy.as_ref() {
-                    Some(svc) => {
-                        let s = svc.settings.clone();
-                        let lt = svc.last_observer_tick.clone();
-                        let due: Vec<Arc<dyn BuddyObserver>> = svc
-                            .observers
-                            .iter()
-                            .filter(|obs| {
-                                if !obs.requires_setting(&s) {
-                                    return false;
-                                }
-                                match lt.get(obs.id()) {
-                                    Some(t) => {
-                                        (now - *t).num_seconds() as u64 >= obs.cadence_seconds()
-                                    }
-                                    None => true,
-                                }
+
+            loop {
+                if shutdown_flag.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                expiry_tick += 1;
+                if let Err(error) = publish_operator_inputs(&buddy_arc).await {
+                    if expiry_tick % 60 == 0 {
+                        warn!("buddy: operator proposals remain pending: {}", error);
+                    }
+                }
+                if expiry_tick % 60 == 0 {
+                    let runtime = {
+                        let buddy = buddy_arc.lock().await;
+                        buddy
+                            .as_ref()
+                            .filter(|svc| {
+                                svc.operator_features.storage && svc.operator_features.supervision
                             })
-                            .cloned()
-                            .collect();
-                        due
+                            .and_then(|svc| svc.outcome_runtime.clone())
+                    };
+                    if let Some(runtime) = runtime {
+                        if let Err(error) =
+                            super::supervision::reconcile_active(&gcx, &runtime).await
+                        {
+                            warn!("buddy: supervision reconciliation unavailable: {}", error);
+                        }
                     }
-                    None => vec![],
                 }
-            };
-            if !due_observers.is_empty() {
-                // Run observers without holding buddy lock (prevents deadlock with
-                // DiagnosticClusterObserver which also locks buddy).
-                let all_facts = observe_buddy_facts_parallel(
-                    due_observers.clone(),
-                    gcx.clone(),
-                    project_root.clone(),
-                    now,
-                )
-                .await;
-                // Phase 1: ingest facts, detect candidates, add non-humor opps — all under buddy lock.
-                let (humor_tasks, pulse_for_humor, humor_arc) = {
+                if expiry_tick % 60 == 0 {
                     let mut buddy = buddy_arc.lock().await;
                     if let Some(svc) = buddy.as_mut() {
-                        for obs in &due_observers {
-                            svc.last_observer_tick.insert(obs.id(), now);
+                        svc.expire_suggestions();
+                    }
+                }
+                // Pulse refresh + opportunity expiry every 60s
+                if expiry_tick % 60 == 0 {
+                    let now = Utc::now();
+                    let fact_snap = {
+                        let buddy = buddy_arc.lock().await;
+                        buddy
+                            .as_ref()
+                            .map(|svc| svc.fact_store.iter().cloned().collect::<Vec<_>>())
+                    };
+                    if let Some(facts) = fact_snap {
+                        let mut tmp_store = FactStore::new();
+                        for f in facts {
+                            tmp_store.ingest(f);
                         }
-                        for (refresh_ttl_secs, facts) in all_facts {
-                            svc.fact_store.ingest_many_with_refresh_ttl(
-                                facts,
-                                chrono::Duration::seconds(refresh_ttl_secs as i64),
-                            );
-                        }
-                        let candidates = OpportunityDetector::new().detect(
-                            &svc.fact_store,
-                            &svc.pulse,
-                            &svc.opportunity_queue,
-                        );
-                        let mut humor_needed: Vec<(BuddyOpportunity, BuddyFactKind, u64)> = vec![];
-                        for (opp, cooldown_secs) in candidates {
-                            match evaluate_with_mutes(
-                                &opp,
-                                &svc.settings,
-                                &svc.opportunity_queue,
-                                &svc.state.muted_rules,
-                            ) {
-                                PolicyDecision::Drop { reason } => {
-                                    tracing::debug!("buddy: opp dropped by policy: {}", reason);
-                                }
-                                PolicyDecision::Surface { humor_allowed } => {
-                                    if humor_allowed {
-                                        let kind = primary_fact_kind_for_opportunity(
-                                            &opp,
-                                            &svc.fact_store,
-                                        );
-                                        humor_needed.push((opp, kind, cooldown_secs));
-                                    } else {
-                                        svc.surface_opportunity_with_cooldown(opp, cooldown_secs);
+                        let knowledge_dirs =
+                            crate::files_correction::get_project_dirs(gcx.gcx.clone())
+                                .await
+                                .into_iter()
+                                .map(|dir| dir.join(crate::file_filter::KNOWLEDGE_FOLDER_NAME))
+                                .filter(|dir| dir.exists())
+                                .collect::<Vec<_>>();
+                        let lifecycle_ops =
+                            detect_memory_lifecycle_ops_from_knowledge_dirs(&knowledge_dirs, now)
+                                .await;
+                        if !lifecycle_ops.is_empty() {
+                            let mut memory_ops =
+                                super::storage::load_memory_ops(&project_root).await;
+                            for op in lifecycle_ops {
+                                match super::storage::enqueue_memory_op(&project_root, op).await {
+                                    Ok(updated) => memory_ops = updated,
+                                    Err(err) => {
+                                        warn!(
+                                            "buddy: failed to enqueue memory lifecycle op: {}",
+                                            err
+                                        )
                                     }
                                 }
                             }
-                        }
-                        let pulse = svc.pulse.clone();
-                        let humor_arc = svc.humor_service.clone();
-                        (humor_needed, pulse, humor_arc)
-                    } else {
-                        (
-                            vec![],
-                            BuddyPulse::default(),
-                            Arc::new(tokio::sync::Mutex::new(HumorService::new())),
-                        )
-                    }
-                }; // buddy lock released — LLM humor calls happen outside the lock
-
-                // Phase 2: attach humor outside the buddy lock.
-                let mut ready: Vec<(BuddyOpportunity, u64)> = Vec::with_capacity(humor_tasks.len());
-                for (mut opp, kind, cooldown_secs) in humor_tasks {
-                    let plan = {
-                        let mut humor = humor_arc.lock().await;
-                        humor.plan_humor(kind, &pulse_for_humor)
-                    };
-                    match plan {
-                        HumorPlan::Ready(line) => {
-                            opp.humor = Some(line);
-                        }
-                        HumorPlan::Generate(reservation) => {
-                            let lines = reservation.generate(gcx.clone()).await;
-                            let line = {
-                                let mut humor = humor_arc.lock().await;
-                                humor.complete_humor(reservation, lines)
-                            };
-                            if let Some(line) = line {
-                                opp.humor = Some(line);
+                            if let Err(error) =
+                                BuddyService::set_memory_ops_durable(&buddy_arc, memory_ops).await
+                            {
+                                tracing::warn!(%error, "operator memory admission failed");
                             }
                         }
-                        HumorPlan::Skip => {}
-                    }
-                    ready.push((opp, cooldown_secs));
-                }
-
-                // Phase 3: re-acquire buddy lock to add humor-processed opps.
-                if !ready.is_empty() {
-                    let mut buddy = buddy_arc.lock().await;
-                    if let Some(svc) = buddy.as_mut() {
-                        for (opp, cooldown_secs) in ready {
-                            svc.surface_opportunity_with_cooldown(opp, cooldown_secs);
+                        let new_pulse =
+                            super::pulse::build_pulse(gcx.clone(), &project_root, &tmp_store).await;
+                        let mut buddy = buddy_arc.lock().await;
+                        if let Some(svc) = buddy.as_mut() {
+                            svc.set_pulse(new_pulse);
+                            svc.expire_opportunities();
+                            svc.opportunity_queue.refresh_cooldowns(now);
+                            svc.expire_drafts(now);
+                            svc.expire_runtime_events_at(now);
                         }
                     }
                 }
-            }
-        }
-        if expiry_tick % 30 == 0 {
-            scheduler
-                .tick(gcx.clone(), buddy_arc.clone(), &project_root)
-                .await;
-        }
-        let state_to_save = {
-            let mut buddy = buddy_arc.lock().await;
-            buddy.as_mut().and_then(|svc| {
-                if svc.dirty {
-                    svc.dirty = false;
-                    Some(svc.state.clone())
-                } else {
-                    None
-                }
-            })
-        };
-        if let Some(s) = state_to_save {
-            if let Err(e) = super::state::save_state(&project_root, &s).await {
-                warn!("buddy: failed to save state: {}", e);
-                if let Some(svc) = buddy_arc.lock().await.as_mut() {
-                    svc.dirty = true;
-                }
-            }
-        }
-        let drafts_to_save = {
-            let mut buddy = buddy_arc.lock().await;
-            buddy.as_mut().and_then(|svc| {
-                if svc.drafts_dirty {
-                    svc.drafts_dirty = false;
-                    Some(svc.draft_store.snapshot())
-                } else {
-                    None
-                }
-            })
-        };
-        if let Some(drafts) = drafts_to_save {
-            if let Err(e) = super::storage::save_drafts(&project_root, &drafts).await {
-                warn!("buddy: failed to save drafts: {}", e);
-                if let Some(svc) = buddy_arc.lock().await.as_mut() {
-                    svc.drafts_dirty = true;
-                }
-            }
-        }
-
-        // Periodic compaction: ask the writer task to rewrite the JSONL from
-        // the in-memory queue every 5 minutes. The append-on-mutation log can
-        // grow unbounded under churn (progress updates, repeated coalesces);
-        // this collapses it back to one line per surviving event. Routing
-        // through the same channel keeps writes strictly ordered.
-        if expiry_tick % 300 == 0 {
-            let buddy = buddy_arc.lock().await;
-            if let Some(svc) = buddy.as_ref() {
-                if let Some(tx) = &svc.queue_writer {
-                    let _ = tx.send(RuntimeQueueWriteOp::Compact(svc.runtime_queue.clone()));
-                }
-            }
-        }
-        if expiry_tick % MEMORY_OPS_COMPACT_INTERVAL_SECS == 0 {
-            match super::storage::compact_memory_ops(&project_root).await {
-                Ok(memory_ops) => {
+                {
+                    let window = {
+                        let actions = {
+                            let ring = gcx.buddy.user_activity.lock().await;
+                            ring.snapshot()
+                        };
+                        super::speech_policy::auto_quiet_window_from_actions(&actions)
+                    };
                     let mut buddy = buddy_arc.lock().await;
                     if let Some(svc) = buddy.as_mut() {
-                        svc.set_memory_ops(memory_ops);
+                        svc.auto_quiet_window = window;
                     }
                 }
-                Err(err) => warn!("buddy: failed to compact memory ops queue: {}", err),
-            }
-        }
-        if expiry_tick % MEMORY_OPS_DRAIN_INTERVAL_SECS == 0 {
-            let drain_settings = {
-                let buddy = buddy_arc.lock().await;
-                buddy
-                    .as_ref()
-                    .map(|svc| (svc.settings.autonomy_level, svc.settings.enabled))
-            };
-            if let Some((autonomy, enabled)) = drain_settings {
-                if enabled {
-                    match super::storage::drain_memory_ops(
-                        &project_root,
-                        gcx.clone(),
-                        autonomy,
-                        MEMORY_OPS_DRAIN_MAX_APPLIES,
-                    )
-                    .await
-                    {
-                        Ok((memory_ops, changed)) => {
+                // Observer ticking — each observer respects its own cadence
+                {
+                    let now = Utc::now();
+                    let due_observers = {
+                        let buddy = buddy_arc.lock().await;
+                        match buddy.as_ref() {
+                            Some(svc) => {
+                                let s = svc.settings.clone();
+                                let lt = svc.last_observer_tick.clone();
+                                let due: Vec<Arc<dyn BuddyObserver>> = svc
+                                    .observers
+                                    .iter()
+                                    .filter(|obs| {
+                                        if !obs.requires_setting(&s) {
+                                            return false;
+                                        }
+                                        match lt.get(obs.id()) {
+                                            Some(t) => {
+                                                (now - *t).num_seconds() as u64
+                                                    >= obs.cadence_seconds()
+                                            }
+                                            None => true,
+                                        }
+                                    })
+                                    .cloned()
+                                    .collect();
+                                due
+                            }
+                            None => vec![],
+                        }
+                    };
+                    if !due_observers.is_empty() {
+                        // Run observers without holding buddy lock (prevents deadlock with
+                        // DiagnosticClusterObserver which also locks buddy).
+                        let all_facts = observe_buddy_facts_parallel(
+                            due_observers.clone(),
+                            gcx.clone(),
+                            project_root.clone(),
+                            now,
+                        )
+                        .await;
+                        // Phase 1: ingest facts, detect candidates, add non-humor opps — all under buddy lock.
+                        let source_owner = buddy_arc
+                            .lock()
+                            .await
+                            .as_ref()
+                            .map(BuddyService::admission_identity);
+                        let mut native_ready = Vec::new();
+                        let (humor_tasks, pulse_for_humor, humor_arc) = {
                             let mut buddy = buddy_arc.lock().await;
                             if let Some(svc) = buddy.as_mut() {
-                                svc.set_memory_ops(memory_ops);
+                                for obs in &due_observers {
+                                    svc.last_observer_tick.insert(obs.id(), now);
+                                }
+                                for (refresh_ttl_secs, facts) in all_facts {
+                                    svc.fact_store.ingest_many_with_refresh_ttl(
+                                        facts,
+                                        chrono::Duration::seconds(refresh_ttl_secs as i64),
+                                    );
+                                }
+                                let candidates = OpportunityDetector::new().detect(
+                                    &svc.fact_store,
+                                    &svc.pulse,
+                                    &svc.opportunity_queue,
+                                );
+                                let mut humor_needed: Vec<(BuddyOpportunity, BuddyFactKind, u64)> =
+                                    vec![];
+                                for (opp, cooldown_secs) in candidates {
+                                    if svc.operator_features.storage {
+                                        native_ready.push((opp, cooldown_secs));
+                                        continue;
+                                    }
+                                    match evaluate_with_mutes(
+                                        &opp,
+                                        &svc.settings,
+                                        &svc.opportunity_queue,
+                                        &svc.state.muted_rules,
+                                    ) {
+                                        PolicyDecision::Drop { reason } => {
+                                            tracing::debug!(
+                                                "buddy: opp dropped by policy: {}",
+                                                reason
+                                            );
+                                        }
+                                        PolicyDecision::Surface { humor_allowed } => {
+                                            if humor_allowed && !svc.operator_features.editorial {
+                                                let kind = primary_fact_kind_for_opportunity(
+                                                    &opp,
+                                                    &svc.fact_store,
+                                                );
+                                                humor_needed.push((opp, kind, cooldown_secs));
+                                            } else {
+                                                svc.surface_opportunity_with_cooldown(
+                                                    opp,
+                                                    cooldown_secs,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                let pulse = svc.pulse.clone();
+                                let humor_arc = svc.humor_service.clone();
+                                (humor_needed, pulse, humor_arc)
+                            } else {
+                                (
+                                    vec![],
+                                    BuddyPulse::default(),
+                                    Arc::new(tokio::sync::Mutex::new(HumorService::new())),
+                                )
                             }
-                            if changed > 0 {
-                                info!("buddy: drained {} memory ops", changed);
+                        }; // buddy lock released — LLM humor calls happen outside the lock
+
+                        // Phase 2: attach humor outside the buddy lock.
+                        let mut ready: Vec<(BuddyOpportunity, u64)> = native_ready;
+                        for (mut opp, kind, cooldown_secs) in humor_tasks {
+                            let legacy_humor_allowed = {
+                                let buddy = buddy_arc.lock().await;
+                                buddy
+                                    .as_ref()
+                                    .is_some_and(|svc| !svc.operator_features.editorial)
+                            };
+                            if !legacy_humor_allowed {
+                                opp.humor = None;
+                                ready.push((opp, cooldown_secs));
+                                continue;
+                            }
+                            let plan = {
+                                let mut humor = humor_arc.lock().await;
+                                humor.plan_humor(kind, &pulse_for_humor)
+                            };
+                            match plan {
+                                HumorPlan::Ready(line) => {
+                                    opp.humor = Some(line);
+                                }
+                                HumorPlan::Generate(reservation) => {
+                                    let legacy_humor_allowed = {
+                                        let buddy = buddy_arc.lock().await;
+                                        buddy
+                                            .as_ref()
+                                            .is_some_and(|svc| !svc.operator_features.editorial)
+                                    };
+                                    if !legacy_humor_allowed {
+                                        opp.humor = None;
+                                        ready.push((opp, cooldown_secs));
+                                        continue;
+                                    }
+                                    let lines = reservation.generate(gcx.clone()).await;
+                                    let line = {
+                                        let mut humor = humor_arc.lock().await;
+                                        humor.complete_humor(reservation, lines)
+                                    };
+                                    if let Some(line) = line {
+                                        opp.humor = Some(line);
+                                    }
+                                }
+                                HumorPlan::Skip => {}
+                            }
+                            ready.push((opp, cooldown_secs));
+                        }
+
+                        // Persistence never owns the actor mutex.
+                        for (opp, cooldown_secs) in ready {
+                            let admission = {
+                                let mut guard = buddy_arc.lock().await;
+                                guard
+                                    .as_mut()
+                                    .filter(|svc| {
+                                        source_owner
+                                            .as_ref()
+                                            .is_some_and(|owner| svc.has_admission_identity(owner))
+                                    })
+                                    .ok_or("Buddy observer owner changed".to_string())
+                                    .and_then(|svc| svc.prepare_opportunity(opp, cooldown_secs))
+                            };
+                            if let Err(error) = async { admission?.commit(&buddy_arc).await }.await
+                            {
+                                tracing::warn!(%error, "operator admission failed");
                             }
                         }
-                        Err(err) => warn!("buddy: failed to drain memory ops queue: {}", err),
+                    }
+                }
+                if expiry_tick % 30 == 0 {
+                    scheduler
+                        .tick(gcx.clone(), buddy_arc.clone(), &project_root)
+                        .await;
+                }
+                if let Err(error) = publish_operator_inputs(&buddy_arc).await {
+                    tracing::debug!("buddy: operator publication deferred: {}", error);
+                }
+                let state_to_save = {
+                    let mut buddy = buddy_arc.lock().await;
+                    buddy.as_mut().and_then(|svc| {
+                        if svc.dirty {
+                            svc.dirty = false;
+                            Some(svc.state.clone())
+                        } else {
+                            None
+                        }
+                    })
+                };
+                if let Some(s) = state_to_save {
+                    if let Err(e) = super::state::save_state(&project_root, &s).await {
+                        warn!("buddy: failed to save state: {}", e);
+                        if let Some(svc) = buddy_arc.lock().await.as_mut() {
+                            svc.dirty = true;
+                        }
+                    }
+                }
+                let drafts_to_save = {
+                    let mut buddy = buddy_arc.lock().await;
+                    buddy.as_mut().and_then(|svc| {
+                        if svc.drafts_dirty && !svc.operator_features.storage {
+                            svc.drafts_dirty = false;
+                            Some(svc.draft_store.snapshot())
+                        } else {
+                            None
+                        }
+                    })
+                };
+                if let Some(drafts) = drafts_to_save {
+                    if let Err(e) = super::storage::save_drafts(&project_root, &drafts).await {
+                        warn!("buddy: failed to save drafts: {}", e);
+                        if let Some(svc) = buddy_arc.lock().await.as_mut() {
+                            svc.drafts_dirty = true;
+                        }
+                    }
+                }
+
+                // Periodic compaction: ask the writer task to rewrite the JSONL from
+                // the in-memory queue every 5 minutes. The append-on-mutation log can
+                // grow unbounded under churn (progress updates, repeated coalesces);
+                // this collapses it back to one line per surviving event. Routing
+                // through the same channel keeps writes strictly ordered.
+                if expiry_tick % 300 == 0 {
+                    let buddy = buddy_arc.lock().await;
+                    if let Some(svc) = buddy.as_ref() {
+                        if let Some(tx) = &svc.queue_writer {
+                            let _ =
+                                tx.send(RuntimeQueueWriteOp::Compact(svc.runtime_queue.clone()));
+                        }
+                    }
+                }
+                if expiry_tick % MEMORY_OPS_COMPACT_INTERVAL_SECS == 0 {
+                    match super::storage::compact_memory_ops(&project_root).await {
+                        Ok(memory_ops) => {
+                            if let Err(error) =
+                                BuddyService::set_memory_ops_durable(&buddy_arc, memory_ops).await
+                            {
+                                tracing::warn!(%error, "operator memory admission failed");
+                            }
+                        }
+                        Err(err) => warn!("buddy: failed to compact memory ops queue: {}", err),
+                    }
+                }
+                if expiry_tick % MEMORY_OPS_DRAIN_INTERVAL_SECS == 0 {
+                    let drain_settings = {
+                        let buddy = buddy_arc.lock().await;
+                        buddy
+                            .as_ref()
+                            .map(|svc| (svc.settings.autonomy_level, svc.settings.enabled))
+                    };
+                    if let Some((autonomy, enabled)) = drain_settings {
+                        if enabled {
+                            match super::storage::drain_memory_ops(
+                                &project_root,
+                                gcx.clone(),
+                                autonomy,
+                                MEMORY_OPS_DRAIN_MAX_APPLIES,
+                            )
+                            .await
+                            {
+                                Ok((memory_ops, changed)) => {
+                                    if let Err(error) =
+                                        BuddyService::set_memory_ops_durable(&buddy_arc, memory_ops)
+                                            .await
+                                    {
+                                        tracing::warn!(%error, "operator memory admission failed");
+                                    }
+                                    if changed > 0 {
+                                        info!("buddy: drained {} memory ops", changed);
+                                    }
+                                }
+                                Err(err) => {
+                                    warn!("buddy: failed to drain memory ops queue: {}", err)
+                                }
+                            }
+                        }
                     }
                 }
             }
-        }
-    }
+        };
+        drive_maintenance(&buddy_arc, shutdown_flag.clone(), maintenance).await;
+    } // cancels maintenance and releases its admission permit before teardown.
 
     let state_opt = {
         let buddy = buddy_arc.lock().await;
@@ -2592,7 +3389,7 @@ pub async fn buddy_background_task(gcx: AppState) {
         let buddy = buddy_arc.lock().await;
         buddy
             .as_ref()
-            .filter(|s| s.drafts_dirty)
+            .filter(|s| s.drafts_dirty && !s.operator_features.storage)
             .map(|s| s.draft_store.snapshot())
     };
     if let Some(drafts) = drafts_opt {
@@ -2636,6 +3433,10 @@ pub async fn buddy_background_task(gcx: AppState) {
 
     info!("buddy: background task stopped");
 }
+
+#[cfg(test)]
+#[path = "actor_operator_tests.rs"]
+mod operator_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2684,5 +3485,133 @@ mod tests {
             UserAction::CommitMade { sha, message_first_line, .. }
                 if sha == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" && message_first_line == "new commit"
         )));
+    }
+}
+
+#[cfg(test)]
+mod migration_restart_regressions {
+    use super::*;
+
+    #[tokio::test]
+    async fn stale_owner_failed_history_and_restart_preserve_committed_cursor() {
+        let root = tempfile::tempdir().unwrap();
+        let project = refact_buddy_core::operator_types::ProjectIdentity {
+            project_id: "migration-restart".into(),
+            canonical_root: root.path().to_string_lossy().into_owned(),
+        };
+        let worker = refact_buddy_core::operator_types::WorkerIdentity {
+            worker_id: "worker".into(),
+            engine_instance_id: "engine".into(),
+            epoch: 1,
+        };
+        let runtime = super::super::outcome_runtime::OutcomeRuntime::open(
+            root.path(),
+            project.clone(),
+            worker.clone(),
+        )
+        .unwrap();
+        let mut svc = BuddyService::new(
+            root.path().to_path_buf(),
+            super::super::state::default_buddy_state(),
+            Default::default(),
+            vec![],
+            RuntimeQueue::new(),
+            broadcast::channel(64).0,
+            None,
+        );
+        // Direct retained-state fixture avoids the intentionally bounded live queue.
+        svc.state.suggestion_state = (0..260)
+            .map(|i| BuddySuggestion {
+                id: format!("seed-{i:04}"),
+                suggestion_type: "setup".into(),
+                title: format!("Proposal {i}"),
+                description: "Review only".into(),
+                created_at: "2020-01-01T00:00:00Z".into(),
+                dismissed: false,
+                controls: vec![],
+                quest: None,
+            })
+            .collect();
+        svc.operator_features.storage = true;
+        let buddy = Arc::new(tokio::sync::Mutex::new(Some(svc)));
+        assert!(publish_operator_inputs(&buddy).await.is_err());
+        assert_eq!(
+            buddy
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .operator_legacy_seed_cursor,
+            0
+        );
+        buddy.lock().await.as_mut().unwrap().outcome_runtime = Some(runtime.clone());
+        let path = super::super::receipts::receipts_path(root.path());
+        tokio::fs::write(&path, b"invalid-json").await.unwrap();
+        assert!(publish_operator_inputs(&buddy).await.is_err());
+        {
+            let guard = buddy.lock().await;
+            let svc = guard.as_ref().unwrap();
+            assert_eq!(svc.operator_legacy_seed_cursor, 128);
+            assert!(!svc.operator_legacy_seeded);
+            assert!(!svc.operator_legacy_history_seeded);
+        }
+        tokio::fs::write(&path, b"[]").await.unwrap();
+        publish_operator_inputs(&buddy).await.unwrap();
+        assert_eq!(
+            buddy
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .operator_legacy_seed_cursor,
+            256
+        );
+        publish_operator_inputs(&buddy).await.unwrap();
+        assert!(buddy.lock().await.as_ref().unwrap().operator_legacy_seeded);
+        assert!(
+            !buddy
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .operator_legacy_history_seeded
+        );
+        runtime.shutdown().await;
+        let reopened =
+            super::super::outcome_runtime::OutcomeRuntime::open(root.path(), project, worker)
+                .unwrap();
+        {
+            let mut guard = buddy.lock().await;
+            let svc = guard.as_mut().unwrap();
+            svc.outcome_runtime = Some(reopened.clone());
+            svc.operator_legacy_seed_cursor = 0;
+            svc.operator_legacy_seeded = false;
+        }
+        for _ in 0..3 {
+            publish_operator_inputs(&buddy).await.unwrap();
+        }
+        let first = reopened.list_work_items(None, 200).await.unwrap();
+        let second = reopened
+            .list_work_items(first.next_after, 200)
+            .await
+            .unwrap();
+        assert_eq!(first.entries.len() + second.entries.len(), 260);
+        let mut stale_project = root.path().to_path_buf();
+        stale_project.push("different-owner");
+        buddy.lock().await.as_mut().unwrap().project_root = stale_project;
+        assert!(publish_operator_inputs(&buddy)
+            .await
+            .unwrap_err()
+            .contains("identity changed"));
+        assert_eq!(
+            buddy
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .operator_legacy_seed_cursor,
+            260
+        );
+        reopened.shutdown().await;
     }
 }

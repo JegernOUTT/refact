@@ -153,6 +153,7 @@ impl Tool for ToolSubagent {
             args.goal.is_some(),
         );
         let req = SpawnRequest {
+            native_supervision_guard: None,
             kind: BgAgentKind::Subagent,
             parent_chat_id: parent_chat_id.clone(),
             parent_root_chat_id: Some(parent_root_chat_id),

@@ -1,5 +1,9 @@
 import { useCallback } from "react";
-import { useAppDispatch } from "../../../hooks";
+import { useAppDispatch, useAppSelector } from "../../../hooks";
+import {
+  buddyOperatorIdentity,
+  buddyOperatorApi,
+} from "../../../services/refact/buddyOperator";
 import { push } from "../../Pages/pagesSlice";
 import { navigateFromBuddyPage, routeDraftByKind } from "../executeBuddyAction";
 import {
@@ -18,6 +22,43 @@ import type {
   BuddyOpportunityAcceptResponse,
   BuddySpeechItem,
 } from "../types";
+
+export type BuddyControlActionResult =
+  | { status: "success" }
+  | {
+      status: "partial";
+      applied: number;
+      failed: number;
+      remaining: number;
+      message: string;
+    }
+  | { status: "unsupported"; message: string }
+  | { status: "failed"; message: string }
+  | { status: "ignored"; reason: "duplicate" | "stale" };
+
+export const BUDDY_ACTION_SUCCESS: BuddyControlActionResult = {
+  status: "success",
+};
+
+export function isBuddyActionApplied(
+  result: BuddyControlActionResult,
+): result is { status: "success" } {
+  return result.status === "success";
+}
+
+export function buddyActionResultMessage(
+  result: BuddyControlActionResult,
+): string | null {
+  switch (result.status) {
+    case "partial":
+    case "unsupported":
+    case "failed":
+      return result.message;
+    case "success":
+    case "ignored":
+      return null;
+  }
+}
 
 function actionFeedbackSpeech(
   id: string,
@@ -73,6 +114,7 @@ export function formatOpportunityActionError(error: unknown): string {
 
 export function useExecuteBuddyAction() {
   const dispatch = useAppDispatch();
+  const identity = useAppSelector(buddyOperatorIdentity);
   const [acceptOpportunity] = useAcceptOpportunityMutation();
   const [dismissOpportunity] = useDismissOpportunityMutation();
 
@@ -82,13 +124,34 @@ export function useExecuteBuddyAction() {
       opp: BuddyOpportunity | null,
       actionIndex: number,
       options?: { never?: boolean },
-    ) => {
+      isCurrent: () => boolean = () => true,
+    ): Promise<BuddyControlActionResult> => {
       if (opp == null) {
         if (action.kind === "open_page") {
+          if (!isCurrent()) return { status: "ignored", reason: "stale" };
           navigateFromBuddyPage(action.page, dispatch);
-          return;
+          return BUDDY_ACTION_SUCCESS;
         }
-        return;
+        return {
+          status: "unsupported",
+          message:
+            "This action needs an opportunity to act on and is unavailable here.",
+        };
+      }
+
+      const authority = await dispatch(
+        buddyOperatorApi.endpoints.getBuddyOperatorStatus.initiate(identity, {
+          subscribe: false,
+          forceRefetch: true,
+        }),
+      );
+      if (!isCurrent()) return { status: "ignored", reason: "stale" };
+      if (authority.error || authority.data?.mode !== "disabled") {
+        return {
+          status: "unsupported",
+          message:
+            "Open this proposal in Buddy Desk saved work to use its current registered actions. Legacy opportunity actions are available only when operator storage is explicitly disabled.",
+        };
       }
 
       if (action.kind === "dismiss") {
@@ -97,12 +160,16 @@ export function useExecuteBuddyAction() {
             id: opp.id,
             never: options?.never === true,
           }).unwrap();
+          if (!isCurrent()) return { status: "ignored", reason: "stale" };
           dispatch(setBuddySnapshot(response.snapshot));
           dispatch(recordVerdictReaction("dismiss"));
         } catch (error) {
-          throw new Error(formatOpportunityActionError(error));
+          return {
+            status: "failed",
+            message: formatOpportunityActionError(error),
+          };
         }
-        return;
+        return BUDDY_ACTION_SUCCESS;
       }
 
       let response: BuddyOpportunityAcceptResponse;
@@ -112,8 +179,12 @@ export function useExecuteBuddyAction() {
           action_index: actionIndex,
         }).unwrap();
       } catch (error) {
-        throw new Error(formatOpportunityActionError(error));
+        return {
+          status: "failed",
+          message: formatOpportunityActionError(error),
+        };
       }
+      if (!isCurrent()) return { status: "ignored", reason: "stale" };
       dispatch(setBuddySnapshot(response.snapshot));
       dispatch(recordVerdictReaction("accept"));
 
@@ -135,15 +206,22 @@ export function useExecuteBuddyAction() {
           break;
         case "marketplace_install":
           if (result.success === false) {
-            throw new Error(result.error ?? "Marketplace install failed");
+            return {
+              status: "failed",
+              message: result.error ?? "Marketplace install failed",
+            };
           }
           dispatch(push({ name: "marketplace hub" }));
           break;
         case "memory_batch_applied":
           if (result.failed > 0) {
-            throw new Error(
-              `Applied ${result.applied}, ${result.failed} failed (${result.remaining} left)`,
-            );
+            return {
+              status: "partial",
+              applied: result.applied,
+              failed: result.failed,
+              remaining: result.remaining,
+              message: `Applied ${result.applied}, ${result.failed} failed (${result.remaining} left)`,
+            };
           }
           break;
         case "config_patch_applied":
@@ -168,8 +246,15 @@ export function useExecuteBuddyAction() {
             ),
           );
           break;
+        default:
+          return {
+            status: "unsupported",
+            message:
+              "The server returned an unsupported action result. No success was inferred.",
+          };
       }
+      return BUDDY_ACTION_SUCCESS;
     },
-    [dispatch, acceptOpportunity, dismissOpportunity],
+    [dispatch, acceptOpportunity, dismissOpportunity, identity],
   );
 }

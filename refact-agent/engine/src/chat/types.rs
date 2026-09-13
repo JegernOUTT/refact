@@ -17,7 +17,8 @@ pub use refact_chat_api::{
     BrowserSnapshot, BrowserTabInfo, BuddyThreadMeta, ChatCommand, ChatEvent, CommandRequest,
     CompressionPhase, CompressionReason, CriterionVerdict, DeliveryOutcome, DeltaOp, DiffBox,
     EventEnvelope, GoalAttempt, GoalBudget, GoalCriterion, GoalEvent, GoalLedgerEntry,
-    GoalLedgerOp, GoalProgress, GoalSnapshot, GoalStatus, PauseReason, PendingDelivery, PushMode,
+    GoalLedgerOp, GoalProgress, GoalSnapshot, GoalStatus, PauseReason, PendingDelivery,
+    PendingQuestion, PendingQuestionSet, PendingQuestionStatus, PushMode, QuestionAnswer,
     QueuedItem, RuntimeState, SessionState, TaskMeta, ThreadParams, TimelineEntry,
     ToolDecisionItem, WindowBounds, WorktreeMeta, CLIENT_MESSAGE_ID_EXTRA_KEY,
     DELIVERY_COMMAND_TYPE, DELIVERY_EXTRA_KEY,
@@ -385,6 +386,7 @@ pub struct ChatSession {
     pub goal_ledger: Vec<GoalLedgerEntry>,
     pub goal_turn_evidence: bool,
     pub goal_verification_blocked_until_ms: Option<u64>,
+    pub pending_questions: Vec<PendingQuestionSet>,
 }
 
 #[derive(Default)]

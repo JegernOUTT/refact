@@ -395,6 +395,208 @@ fn background_process_cleanup_notice(killed_count: usize) -> ChatMessage {
 }
 
 impl ChatSession {
+    pub fn register_pending_questions(&mut self, set: PendingQuestionSet) -> Result<(), String> {
+        if set.tool_call_id.trim().is_empty() || set.questions.is_empty() {
+            return Err("questions require a tool_call_id and at least one question".to_string());
+        }
+        let mut ids = HashSet::new();
+        for question in &set.questions {
+            if question.id.trim().is_empty()
+                || question.text.trim().is_empty()
+                || !ids.insert(&question.id)
+            {
+                return Err("questions require unique non-empty ids and text".to_string());
+            }
+            match question.question_type.as_str() {
+                "yes_no" | "free_text" => {}
+                "single_select" | "multi_select"
+                    if question
+                        .options
+                        .as_ref()
+                        .is_some_and(|options| !options.is_empty()) => {}
+                _ => return Err(format!("invalid question schema for id: {}", question.id)),
+            }
+        }
+        if self
+            .pending_questions
+            .iter()
+            .any(|existing| existing.tool_call_id == set.tool_call_id)
+        {
+            return Err("a question set already exists for this tool call".to_string());
+        }
+        const MAX_RESOLVED_QUESTION_SETS: usize = 64;
+        let resolved = self
+            .pending_questions
+            .iter()
+            .filter(|set| set.status != PendingQuestionStatus::Pending)
+            .count();
+        if resolved >= MAX_RESOLVED_QUESTION_SETS {
+            if let Some(index) = self
+                .pending_questions
+                .iter()
+                .position(|set| set.status != PendingQuestionStatus::Pending)
+            {
+                self.pending_questions.remove(index);
+            }
+        }
+        self.pending_questions.push(set);
+        self.increment_version();
+        Ok(())
+    }
+
+    pub fn answer_pending_questions(
+        &mut self,
+        tool_call_id: &str,
+        answers: Vec<QuestionAnswer>,
+        resolution_id: String,
+    ) -> Result<bool, String> {
+        self.answer_pending_questions_at(tool_call_id, answers, resolution_id, None)
+    }
+
+    pub fn answer_pending_questions_at(
+        &mut self,
+        tool_call_id: &str,
+        answers: Vec<QuestionAnswer>,
+        resolution_id: String,
+        asked_at_ms: Option<u64>,
+    ) -> Result<bool, String> {
+        let set = self
+            .pending_questions
+            .iter_mut()
+            .find(|set| set.tool_call_id == tool_call_id)
+            .ok_or_else(|| "unknown question tool_call_id".to_string())?;
+        if asked_at_ms.is_some_and(|timestamp| timestamp != set.asked_at_ms) {
+            return Err("question instance changed; refresh before answering".to_string());
+        }
+        let mut answers = answers;
+        for answer in &mut answers {
+            if let Some(values) = answer.answer.as_array_mut() {
+                values.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+                values.dedup();
+            }
+        }
+        answers.sort_by(|left, right| left.id.cmp(&right.id));
+        if set.status == PendingQuestionStatus::Answered {
+            let mut existing = set.answers.clone();
+            existing.sort_by(|left, right| left.id.cmp(&right.id));
+            return if existing == answers {
+                Ok(false)
+            } else {
+                Err("conflicting answer for an already resolved question set".to_string())
+            };
+        }
+        if set.status != PendingQuestionStatus::Pending {
+            return Err("question set is no longer pending".to_string());
+        }
+        if answers.len() != set.questions.len() {
+            return Err("answers must include every pending question exactly once".to_string());
+        }
+        let mut seen = HashSet::new();
+        for answer in &answers {
+            let question = set
+                .questions
+                .iter()
+                .find(|question| question.id == answer.id)
+                .ok_or_else(|| format!("unknown question id: {}", answer.id))?;
+            if !seen.insert(&answer.id) {
+                return Err(format!("duplicate answer id: {}", answer.id));
+            }
+            let valid = match question.question_type.as_str() {
+                "yes_no" => answer.answer.as_bool().is_some(),
+                "free_text" => answer.answer.as_str().is_some(),
+                "single_select" => answer.answer.as_str().is_some_and(|value| {
+                    question
+                        .options
+                        .as_ref()
+                        .is_some_and(|options| options.iter().any(|option| option == value))
+                }),
+                "multi_select" => answer.answer.as_array().is_some_and(|values| {
+                    values.iter().all(|value| {
+                        value.as_str().is_some_and(|value| {
+                            question
+                                .options
+                                .as_ref()
+                                .is_some_and(|options| options.iter().any(|option| option == value))
+                        })
+                    })
+                }),
+                _ => false,
+            };
+            if !valid {
+                return Err(format!("invalid answer for question id: {}", answer.id));
+            }
+        }
+        set.answers = answers;
+        set.status = PendingQuestionStatus::Answered;
+        set.resolution_id = Some(resolution_id);
+        self.increment_version();
+        Ok(true)
+    }
+
+    pub fn cancel_pending_questions(&mut self) -> bool {
+        let mut changed = false;
+        for set in &mut self.pending_questions {
+            if set.status == PendingQuestionStatus::Pending {
+                set.status = PendingQuestionStatus::Cancelled;
+                changed = true;
+            }
+        }
+        if changed {
+            self.increment_version();
+        }
+        changed
+    }
+
+    pub fn rollback_answered_questions(
+        &mut self,
+        tool_call_id: &str,
+        resolution_id: &str,
+        staged_message_id: Option<&str>,
+    ) -> bool {
+        let Some(set) = self.pending_questions.iter_mut().find(|set| {
+            set.tool_call_id == tool_call_id
+                && set.status == PendingQuestionStatus::Answered
+                && set.resolution_id.as_deref() == Some(resolution_id)
+        }) else {
+            return false;
+        };
+        set.status = PendingQuestionStatus::Pending;
+        set.answers.clear();
+        set.resolution_id = None;
+        if let Some(message_id) = staged_message_id {
+            self.remove_message(message_id);
+        }
+        self.increment_version();
+        true
+    }
+
+    pub fn rollback_pending_question_registration(&mut self, tool_call_id: &str) -> bool {
+        let Some(index) = self.pending_questions.iter().position(|set| {
+            set.tool_call_id == tool_call_id && set.status == PendingQuestionStatus::Pending
+        }) else {
+            return false;
+        };
+        self.pending_questions.remove(index);
+        self.increment_version();
+        true
+    }
+
+    #[cfg(test)]
+    fn pending_questions_for_test() -> PendingQuestionSet {
+        PendingQuestionSet {
+            tool_call_id: "ask-1".to_string(),
+            questions: vec![PendingQuestion {
+                id: "proceed".to_string(),
+                question_type: "yes_no".to_string(),
+                text: "Proceed?".to_string(),
+                options: None,
+            }],
+            asked_at_ms: 1,
+            status: PendingQuestionStatus::Pending,
+            answers: Vec::new(),
+            resolution_id: None,
+        }
+    }
     pub fn add_background_process_cleanup_notice(&mut self, killed_count: usize) {
         self.add_message(background_process_cleanup_notice(killed_count));
     }
@@ -497,6 +699,7 @@ impl ChatSession {
             goal_ledger: Vec::new(),
             goal_turn_evidence: false,
             goal_verification_blocked_until_ms: None,
+            pending_questions: Vec::new(),
         }
     }
 
@@ -625,6 +828,7 @@ impl ChatSession {
             goal_ledger: Vec::new(),
             goal_turn_evidence: false,
             goal_verification_blocked_until_ms: None,
+            pending_questions: Vec::new(),
         }
     }
 
@@ -1434,6 +1638,7 @@ impl ChatSession {
         runtime.queue_size = runtime.queued_items.len();
         ChatEvent::Snapshot {
             goal: self.goal.clone(),
+            pending_questions: self.pending_questions.clone(),
             thread: self.thread.clone(),
             runtime,
             messages,
@@ -1515,6 +1720,10 @@ impl ChatSession {
     }
 
     pub fn enqueue_accepted_command(&mut self, request: CommandRequest) -> EnqueueCommandOutcome {
+        if let Err(error) = super::queue::prepare_guarded_command(self, &request) {
+            super::queue::reject_guard(self, &request.client_request_id, error);
+            return EnqueueCommandOutcome::Rejected;
+        }
         if self.command_queue.len() >= max_queue_size()
             && !self.command_is_critical_for_queue(&request.command)
         {
@@ -2510,7 +2719,9 @@ impl ChatSession {
         if pending.start_index > self.messages.len() {
             warn!(
                 "Skill deactivation cleanup: start_index {} is beyond messages.len() {} for skill '{}', skipping compaction",
-                pending.start_index, self.messages.len(), pending.skill_name
+                pending.start_index,
+                self.messages.len(),
+                pending.skill_name
             );
             return;
         }
@@ -2530,7 +2741,9 @@ impl ChatSession {
         if pending.start_index > self.messages.len() {
             warn!(
                 "Skill deactivation cleanup: start_index {} is beyond messages.len() {} for skill '{}', skipping compaction",
-                pending.start_index, self.messages.len(), pending.skill_name
+                pending.start_index,
+                self.messages.len(),
+                pending.skill_name
             );
             return;
         }
@@ -2547,9 +2760,7 @@ impl ChatSession {
 
         let report_content = format!(
             "## Skill Report: {}\n\n✅ Skill '{}' executed successfully.\n\nHere is the compactified result. The full skill conversation was compactified and removed from the thread.\n\n{}",
-            pending.skill_name,
-            pending.skill_name,
-            pending.report
+            pending.skill_name, pending.skill_name, pending.report
         );
         let report_message = ChatMessage {
             role: "plain_text".to_string(),
@@ -2803,6 +3014,10 @@ impl ChatSession {
         mut request: CommandRequest,
     ) -> EnqueueCommandOutcome {
         request.priority = true;
+        if let Err(error) = super::queue::prepare_guarded_command(self, &request) {
+            super::queue::reject_guard(self, &request.client_request_id, error);
+            return EnqueueCommandOutcome::Rejected;
+        }
         if matches!(request.command, ChatCommand::Regenerate {})
             && self.command_queue.iter().any(|queued| {
                 queued.priority && matches!(queued.command, ChatCommand::Regenerate {})
@@ -3480,6 +3695,219 @@ mod tests {
         ChatSession::new("test-chat".to_string())
     }
 
+    fn question_set(tool_call_id: &str) -> PendingQuestionSet {
+        PendingQuestionSet {
+            tool_call_id: tool_call_id.to_string(),
+            questions: vec![
+                PendingQuestion {
+                    id: "yes".into(),
+                    question_type: "yes_no".into(),
+                    text: "Continue?".into(),
+                    options: None,
+                },
+                PendingQuestion {
+                    id: "one".into(),
+                    question_type: "single_select".into(),
+                    text: "Pick one".into(),
+                    options: Some(vec!["a".into(), "b".into()]),
+                },
+                PendingQuestion {
+                    id: "many".into(),
+                    question_type: "multi_select".into(),
+                    text: "Pick many".into(),
+                    options: Some(vec!["a".into(), "b".into(), "c".into()]),
+                },
+                PendingQuestion {
+                    id: "text".into(),
+                    question_type: "free_text".into(),
+                    text: "Explain".into(),
+                    options: None,
+                },
+            ],
+            asked_at_ms: 1,
+            status: PendingQuestionStatus::Pending,
+            answers: Vec::new(),
+            resolution_id: None,
+        }
+    }
+
+    fn valid_question_answers() -> Vec<QuestionAnswer> {
+        vec![
+            QuestionAnswer {
+                id: "text".into(),
+                answer: json!("because"),
+            },
+            QuestionAnswer {
+                id: "many".into(),
+                answer: json!(["b", "a", "b"]),
+            },
+            QuestionAnswer {
+                id: "one".into(),
+                answer: json!("a"),
+            },
+            QuestionAnswer {
+                id: "yes".into(),
+                answer: json!(true),
+            },
+        ]
+    }
+
+    #[test]
+    fn pending_questions_validate_all_types_and_normalize_multi_select() {
+        let mut session = make_session();
+        session
+            .register_pending_questions(question_set("ask-types"))
+            .unwrap();
+        assert!(session
+            .answer_pending_questions("ask-types", valid_question_answers(), "r1".into())
+            .unwrap());
+        let set = &session.pending_questions[0];
+        assert_eq!(set.status, PendingQuestionStatus::Answered);
+        assert_eq!(
+            set.answers
+                .iter()
+                .find(|answer| answer.id == "many")
+                .unwrap()
+                .answer,
+            json!(["a", "b"])
+        );
+        assert!(!session
+            .answer_pending_questions("ask-types", valid_question_answers(), "r1".into())
+            .unwrap());
+    }
+
+    #[test]
+    fn pending_questions_reject_invalid_answers_without_mutating_or_user_message() {
+        let mut session = make_session();
+        session
+            .register_pending_questions(question_set("ask-invalid"))
+            .unwrap();
+        let mut answers = valid_question_answers();
+        answers.push(QuestionAnswer {
+            id: "unknown".into(),
+            answer: json!(true),
+        });
+        assert!(session
+            .answer_pending_questions("ask-invalid", answers, "r1".into())
+            .is_err());
+        assert_eq!(
+            session.pending_questions[0].status,
+            PendingQuestionStatus::Pending
+        );
+        assert!(session.messages.is_empty());
+
+        let mut invalid_options = question_set("ask-options");
+        invalid_options.questions[1].options = Some(Vec::new());
+        assert!(session.register_pending_questions(invalid_options).is_err());
+    }
+
+    #[test]
+    fn pending_questions_preserve_tool_id_and_cancel_pending_only() {
+        let mut session = make_session();
+        session
+            .register_pending_questions(question_set("ask-once"))
+            .unwrap();
+        session
+            .answer_pending_questions("ask-once", valid_question_answers(), "r1".into())
+            .unwrap();
+        assert!(session
+            .register_pending_questions(question_set("ask-once"))
+            .is_err());
+        assert!(!session.cancel_pending_questions());
+
+        session
+            .register_pending_questions(question_set("ask-cancel"))
+            .unwrap();
+        assert!(session.cancel_pending_questions());
+        assert_eq!(
+            session.pending_questions[1].status,
+            PendingQuestionStatus::Cancelled
+        );
+        assert_eq!(
+            session.pending_questions[0].status,
+            PendingQuestionStatus::Answered
+        );
+    }
+
+    #[test]
+    fn rollback_answered_questions_restores_pending_and_removes_staged_message() {
+        let mut session = make_session();
+        session
+            .register_pending_questions(question_set("ask-rollback"))
+            .unwrap();
+        assert!(session
+            .answer_pending_questions("ask-rollback", valid_question_answers(), "r1".into())
+            .unwrap());
+        let staged = ChatMessage {
+            message_id: "staged-answer".into(),
+            role: "user".into(),
+            content: ChatContent::SimpleText("answer".into()),
+            ..Default::default()
+        };
+        session.add_message(staged);
+        let keeper = ChatMessage {
+            message_id: "keeper".into(),
+            role: "user".into(),
+            content: ChatContent::SimpleText("earlier".into()),
+            ..Default::default()
+        };
+        session.add_message(keeper);
+
+        assert!(session.rollback_answered_questions("ask-rollback", "r1", Some("staged-answer")));
+
+        assert_eq!(
+            session.pending_questions[0].status,
+            PendingQuestionStatus::Pending
+        );
+        assert!(session.pending_questions[0].answers.is_empty());
+        assert_eq!(session.pending_questions[0].resolution_id, None);
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].message_id, "keeper");
+
+        assert!(session
+            .answer_pending_questions("ask-rollback", valid_question_answers(), "r2".into())
+            .unwrap());
+        assert_eq!(
+            session.pending_questions[0].resolution_id.as_deref(),
+            Some("r2")
+        );
+        assert_eq!(session.messages.len(), 1);
+    }
+
+    #[test]
+    fn rollback_answered_questions_ignores_other_resolution_or_status() {
+        let mut session = make_session();
+        session
+            .register_pending_questions(question_set("ask-mismatch"))
+            .unwrap();
+        assert!(!session.rollback_answered_questions("ask-mismatch", "r1", None));
+        session
+            .answer_pending_questions("ask-mismatch", valid_question_answers(), "r1".into())
+            .unwrap();
+        assert!(!session.rollback_answered_questions("ask-mismatch", "other", None));
+        assert!(!session.rollback_answered_questions("ask-unknown", "r1", None));
+        assert_eq!(
+            session.pending_questions[0].status,
+            PendingQuestionStatus::Answered
+        );
+    }
+
+    #[test]
+    fn pending_question_resolved_history_is_bounded() {
+        let mut session = make_session();
+        for index in 0..65 {
+            let id = format!("ask-{index}");
+            session
+                .register_pending_questions(question_set(&id))
+                .unwrap();
+            session
+                .answer_pending_questions(&id, valid_question_answers(), format!("r-{index}"))
+                .unwrap();
+        }
+        assert_eq!(session.pending_questions.len(), 64);
+        assert_eq!(session.pending_questions[0].tool_call_id, "ask-1");
+    }
+
     fn turn_memory_catalog() -> Arc<refact_runtime_api::ToolCatalogSnapshot> {
         let tools = (0..8)
             .map(|index| refact_tool_api::ToolDesc {
@@ -4006,16 +4434,22 @@ mod tests {
         let mut session = make_session();
         session.command_queue.extend([
             CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "first".to_string(),
                 priority: true,
                 command: ChatCommand::Regenerate {},
             },
             CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "target".to_string(),
                 priority: true,
                 command: ChatCommand::Regenerate {},
             },
             CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "last".to_string(),
                 priority: false,
                 command: ChatCommand::Regenerate {},
@@ -4068,6 +4502,8 @@ mod tests {
         let attachments = vec![json!({"name": "image.png", "mime": "image/png"})];
         let context_files = vec![json!({"file_name": "context.md", "file_content": "details"})];
         session.command_queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "promoted-request".to_string(),
             priority: false,
             command: ChatCommand::UserMessage {
@@ -4111,11 +4547,15 @@ mod tests {
         let mut session = make_session();
 
         session.enqueue_accepted_command(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "ordinary".to_string(),
             priority: false,
             command: ChatCommand::Regenerate {},
         });
         session.enqueue_accepted_priority_command(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "priority".to_string(),
             priority: true,
             command: ChatCommand::Regenerate {},
@@ -4264,6 +4704,8 @@ mod tests {
         let (_guard, _) = install_perf_recorder();
         let mut session = make_session();
         session.enqueue_accepted_command(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "queued".to_string(),
             priority: false,
             command: ChatCommand::Regenerate {},
@@ -4359,6 +4801,8 @@ mod tests {
         let (_guard, _) = install_perf_recorder();
         let mut session = make_session();
         session.enqueue_accepted_command(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "queued".to_string(),
             priority: false,
             command: ChatCommand::Regenerate {},
@@ -6234,6 +6678,8 @@ mod tests {
             text: "partial".into(),
         }]);
         session.enqueue_priority_command(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "priority-regenerate".into(),
             priority: false,
             command: ChatCommand::Regenerate {},
@@ -6263,6 +6709,8 @@ mod tests {
         }]);
 
         let outcome = session.enqueue_priority_command(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "priority-regenerate".into(),
             priority: false,
             command: ChatCommand::Regenerate {},
@@ -6279,6 +6727,8 @@ mod tests {
         let mut session = make_session();
         for i in 0..max_queue_size() {
             session.command_queue.push_back(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: format!("queued-{i}"),
                 priority: true,
                 command: ChatCommand::SetParams {
@@ -6293,6 +6743,8 @@ mod tests {
         }]);
 
         let outcome = session.enqueue_priority_command(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "priority-regenerate-full".into(),
             priority: false,
             command: ChatCommand::Regenerate {},
@@ -6312,6 +6764,8 @@ mod tests {
         let mut session = make_session();
         for i in 0..max_queue_size() {
             session.command_queue.push_back(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: format!("queued-{i}"),
                 priority: true,
                 command: ChatCommand::SetParams {
@@ -6326,6 +6780,8 @@ mod tests {
         }]);
 
         let outcome = session.enqueue_priority_command(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "priority-abort-full".into(),
             priority: false,
             command: ChatCommand::Abort {},
@@ -6349,6 +6805,8 @@ mod tests {
         }]);
 
         session.enqueue_priority_command(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "priority-abort".into(),
             priority: false,
             command: ChatCommand::Abort {},
@@ -6386,6 +6844,8 @@ mod tests {
         });
 
         session.enqueue_priority_command(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "priority-user".into(),
             priority: false,
             command: ChatCommand::UserMessage {
@@ -6452,6 +6912,8 @@ mod tests {
         });
 
         session.enqueue_priority_command(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "priority-regenerate".into(),
             priority: false,
             command: ChatCommand::Regenerate {},
@@ -7177,6 +7639,8 @@ mod tests {
     fn test_build_queued_items() {
         let mut session = make_session();
         session.command_queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-1".into(),
             priority: false,
             command: ChatCommand::UserMessage {
@@ -7188,6 +7652,8 @@ mod tests {
             },
         });
         session.command_queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-2".into(),
             priority: true,
             command: ChatCommand::Abort {},
@@ -7206,6 +7672,8 @@ mod tests {
     fn test_emit_queue_update_syncs_runtime() {
         let mut session = make_session();
         session.command_queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-1".into(),
             priority: false,
             command: ChatCommand::Abort {},
@@ -7219,6 +7687,8 @@ mod tests {
     fn test_set_runtime_state_syncs_queued_items() {
         let mut session = make_session();
         session.command_queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-1".into(),
             priority: true,
             command: ChatCommand::Abort {},
@@ -7232,6 +7702,8 @@ mod tests {
     fn test_snapshot_includes_queued_items() {
         let mut session = make_session();
         session.command_queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-1".into(),
             priority: false,
             command: ChatCommand::UserMessage {

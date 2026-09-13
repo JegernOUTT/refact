@@ -1,4 +1,5 @@
 pub mod browser_context;
+pub(crate) mod browser_decisions;
 pub mod cache_diagnostics;
 pub mod cache_guard;
 #[cfg(test)]
@@ -43,6 +44,7 @@ mod tool_call_recovery;
 mod tool_call_recovery_oss;
 pub mod tools;
 pub mod trajectories;
+pub mod trajectory_archive;
 pub mod trajectory_index;
 pub mod trajectory_ops;
 pub mod types;

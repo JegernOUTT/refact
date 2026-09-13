@@ -1,0 +1,32 @@
+.approvals {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.session {
+  display: grid;
+  gap: var(--space-2);
+  border: 1px solid var(--gray-6);
+  border-radius: var(--radius-3);
+  padding: var(--space-3);
+  min-width: 0;
+}
+
+.session fieldset {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.session label {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+}
+
+.command {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 12rem;
+  overflow: auto;
+}

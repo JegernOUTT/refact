@@ -92,16 +92,17 @@ async fn create_draft(
     kind: DraftKind,
 ) -> Result<axum::Json<BuddyDraft>, ScratchError> {
     let buddy_arc = gcx.buddy.clone();
-    let mut lock = buddy_arc.lock().await;
-    let svc = lock.as_mut().ok_or_else(|| {
-        ScratchError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "buddy not initialized".into(),
-        )
-    })?;
-    let draft = svc
-        .create_draft(kind, req.title, req.yaml_or_json, req.explanation)
+    crate::buddy::drafts::validate_draft_payload(&req.title, &req.yaml_or_json, &req.explanation)
         .map_err(draft_create_error)?;
+    let draft = crate::buddy::actor::BuddyService::create_draft_durable(
+        &buddy_arc,
+        kind,
+        req.title,
+        req.yaml_or_json,
+        req.explanation,
+    )
+    .await
+    .map_err(|error| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, error))?;
     Ok(axum::Json(draft))
 }
 

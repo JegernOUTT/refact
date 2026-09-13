@@ -501,9 +501,24 @@ async fn install_release(
             SelfUpdateError::runtime(format!("sha256 sidecar is not valid UTF-8: {error}"))
         })?,
     )?;
-    let temp_path = temp_binary_path(&exe_path);
-    extract_binary_to_path(&archive, archive_kind_for_target(target), &temp_path)?;
-    replace_binary(&exe_path, &temp_path)?;
+    #[cfg(target_os = "linux")]
+    {
+        let bytes = match archive_kind_for_target(target) {
+            ArchiveKind::TarGz => extract_from_targz(&archive, binary_name())?,
+            ArchiveKind::Zip => extract_from_zip(&archive, binary_name())?,
+        };
+        // Both native installation entry points participate in the same pinned
+        // directory transaction, including its interrupted-transaction marker.
+        candidate_install::Installer::open(&exe_path)
+            .and_then(|installer| installer.install_release_bytes(&bytes))
+            .map_err(SelfUpdateError::runtime)?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let temp_path = temp_binary_path(&exe_path);
+        extract_binary_to_path(&archive, archive_kind_for_target(target), &temp_path)?;
+        replace_binary(&exe_path, &temp_path)?;
+    }
     Ok(exe_path)
 }
 
@@ -784,6 +799,7 @@ fn archive_kind_for_target(target: &str) -> ArchiveKind {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn extract_binary_to_path(
     archive_bytes: &[u8],
     kind: ArchiveKind,
@@ -874,6 +890,7 @@ fn binary_name() -> &'static str {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn temp_binary_path(exe_path: &Path) -> PathBuf {
     let file_name = exe_path
         .file_name()
@@ -1090,6 +1107,458 @@ fn truncate_error_body(body: &str) -> String {
 
 fn restart_hint() -> &'static str {
     "Restart any running daemon with `refact restart --daemon`."
+}
+
+/// Candidate installation is a separate, offline native owner. No release lookup,
+/// caller-selected command, or version string is used as executable evidence.
+#[cfg(target_os = "linux")]
+pub mod candidate_install {
+    use super::*;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    const LIMIT: u64 = 256 * 1024 * 1024;
+    // Keep the original marker name so interrupted candidate transactions also
+    // block ordinary self-update after upgrading. Never auto-delete stale claims.
+    const INSTALL_LOCK: &str = ".refact-candidate-install-lock";
+    const O_NOFOLLOW: i32 = 0x20000;
+    const O_DIRECTORY: i32 = 0x10000;
+    const O_NONBLOCK: i32 = 0x800;
+    pub struct Installer {
+        directory: std::fs::File,
+        executable: PathBuf,
+        name: OsString,
+    }
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    pub struct ImageReceipt {
+        pub before: String,
+        pub installed: String,
+        pub operation: String,
+    }
+    fn hash(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
+    fn digest(value: &str) -> bool {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+    fn read(path: &Path) -> Result<Vec<u8>, String> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW | O_NONBLOCK)
+            .open(path)
+            .map_err(|e| e.to_string())?;
+        let meta = file.metadata().map_err(|e| e.to_string())?;
+        let uid = std::fs::metadata("/proc/self")
+            .map_err(|e| e.to_string())?
+            .uid();
+        if !meta.is_file()
+            || meta.nlink() != 1
+            || meta.len() > LIMIT
+            || meta.uid() != uid
+            || meta.mode() & 0o022 != 0
+        {
+            return Err("native image owner/mode/type/link/size rejected".into());
+        }
+        let mut bytes = Vec::new();
+        (&file)
+            .take(LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        let after = file.metadata().map_err(|e| e.to_string())?;
+        let named = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if bytes.len() as u64 != meta.len()
+            || (meta.dev(), meta.ino()) != (named.dev(), named.ino())
+            || (
+                meta.len(),
+                meta.mtime(),
+                meta.mtime_nsec(),
+                meta.ctime(),
+                meta.ctime_nsec(),
+            ) != (
+                after.len(),
+                after.mtime(),
+                after.mtime_nsec(),
+                after.ctime(),
+                after.ctime_nsec(),
+            )
+        {
+            return Err("native image changed while reading".into());
+        }
+        Ok(bytes)
+    }
+    impl Installer {
+        /// Only the daemon passes its captured native relaunch path.
+        /// This is not an HTTP parameter. A directory handle pins all mutations.
+        /// Ownership/mode checks exclude other-user writes, not hostile same-UID
+        /// processes: those can alter files or remove a cooperative lock. Path
+        /// revalidation detects observed moves, but is not an atomic namespace
+        /// guarantee against such processes or an attacker controlling ancestors.
+        pub fn open(executable: &Path) -> Result<Self, String> {
+            if !executable.is_absolute()
+                || executable.canonicalize().map_err(|e| e.to_string())? != executable
+            {
+                return Err("canonical installed executable required".into());
+            }
+            let parent = executable.parent().ok_or("image parent missing")?;
+            let directory = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(O_DIRECTORY | O_NOFOLLOW)
+                .open(parent)
+                .map_err(|e| e.to_string())?;
+            let owner = Self {
+                directory,
+                executable: executable.to_owned(),
+                name: executable
+                    .file_name()
+                    .ok_or("image name missing")?
+                    .to_owned(),
+            };
+            owner.validate_path()?;
+            read(&owner.path(&owner.name))?;
+            Ok(owner)
+        }
+        fn validate_path(&self) -> Result<(), String> {
+            let meta = self.directory.metadata().map_err(|e| e.to_string())?;
+            let uid = std::fs::metadata("/proc/self")
+                .map_err(|e| e.to_string())?
+                .uid();
+            let parent = self.executable.parent().ok_or("image parent missing")?;
+            let named = std::fs::symlink_metadata(parent).map_err(|e| e.to_string())?;
+            if !meta.is_dir()
+                || meta.uid() != uid
+                || meta.mode() & 0o022 != 0
+                || (meta.dev(), meta.ino()) != (named.dev(), named.ino())
+                || self.executable.canonicalize().map_err(|e| e.to_string())? != self.executable
+            {
+                return Err("installer requires an unchanged user-owned non-shared canonical install directory".into());
+            }
+            Ok(())
+        }
+        fn claim(&self, operation: &str) -> Result<std::fs::File, String> {
+            self.validate_path()?;
+            let mut claim = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(self.path(INSTALL_LOCK))
+                .map_err(|e| format!("installer busy or interrupted: {e}"))?;
+            claim
+                .write_all(operation.as_bytes())
+                .map_err(|e| e.to_string())?;
+            claim.sync_all().map_err(|e| e.to_string())?;
+            self.directory.sync_all().map_err(|e| e.to_string())?;
+            Ok(claim)
+        }
+        fn complete(&self, claim: std::fs::File) -> Result<(), String> {
+            self.validate_path()?;
+            let held = claim.metadata().map_err(|e| e.to_string())?;
+            let named =
+                std::fs::symlink_metadata(self.path(INSTALL_LOCK)).map_err(|e| e.to_string())?;
+            if (held.dev(), held.ino()) != (named.dev(), named.ino()) {
+                return Err("installation lock changed; inspect interrupted transaction".into());
+            }
+            std::fs::remove_file(self.path(INSTALL_LOCK)).map_err(|e| e.to_string())?;
+            self.directory.sync_all().map_err(|e| e.to_string())
+        }
+        pub(super) fn install_release_bytes(&self, bytes: &[u8]) -> Result<(), String> {
+            if bytes.len() as u64 > LIMIT {
+                return Err("native image size rejected".into());
+            }
+            let before = self.installed_digest()?;
+            let after = hash(bytes);
+            if before == after {
+                // Even an identical release must not bypass an interrupted claim.
+                let claim = self.claim("release-identical")?;
+                if self.installed_digest()? != before {
+                    return Err("installed preimage changed".into());
+                }
+                return self.complete(claim);
+            }
+            let operation = hash(format!("release:{before}:{after}").as_bytes());
+            self.install(bytes, &before, &after, &operation).map(|_| ())
+        }
+        fn path(&self, name: impl AsRef<std::ffi::OsStr>) -> PathBuf {
+            PathBuf::from(format!("/proc/self/fd/{}", self.directory.as_raw_fd()))
+                .join(name.as_ref())
+        }
+        pub fn installed_digest(&self) -> Result<String, String> {
+            self.validate_path()?;
+            Ok(hash(&read(&self.path(&self.name))?))
+        }
+        /// Known-good bytes are fsynced before replacement. An interrupted lock
+        /// is deliberately not replayed or removed by a subsequent request.
+        pub fn install(
+            &self,
+            bytes: &[u8],
+            before: &str,
+            after: &str,
+            operation: &str,
+        ) -> Result<ImageReceipt, String> {
+            if !digest(before)
+                || !digest(after)
+                || !digest(operation)
+                || before == after
+                || bytes.len() as u64 > LIMIT
+                || hash(bytes) != after
+            {
+                return Err("exact image binding rejected".into());
+            }
+            let old = read(&self.path(&self.name))?;
+            if hash(&old) != before {
+                return Err("installed preimage changed".into());
+            }
+            let claim = self.claim(operation)?;
+            if self.installed_digest()? != before {
+                return Err("installed preimage changed under lock".into());
+            }
+            let backup = self.path(format!(".refact-known-good-{before}"));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&backup)
+            {
+                Ok(mut file) => {
+                    file.write_all(&old).map_err(|e| e.to_string())?;
+                    file.sync_all().map_err(|e| e.to_string())?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if read(&backup)? != old {
+                        return Err("known-good material changed".into());
+                    }
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+            let temporary = self.path(format!(".refact-candidate-{operation}"));
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o700)
+                .open(&temporary)
+                .map_err(|e| e.to_string())?;
+            file.write_all(bytes).map_err(|e| e.to_string())?;
+            file.sync_all().map_err(|e| e.to_string())?;
+            self.directory.sync_all().map_err(|e| e.to_string())?;
+            if self.installed_digest()? != before || hash(&read(&temporary)?) != after {
+                return Err("native image CAS failed; inspect interrupted transaction".into());
+            }
+            replace_binary(&self.path(&self.name), &temporary).map_err(|e| e.message)?;
+            self.directory.sync_all().map_err(|e| e.to_string())?;
+            if self.installed_digest()? != after {
+                return Err("installed image observation differs".into());
+            }
+            self.complete(claim)?;
+            Ok(ImageReceipt {
+                before: before.into(),
+                installed: after.into(),
+                operation: operation.into(),
+            })
+        }
+        pub fn recover(
+            &self,
+            receipt: &ImageReceipt,
+            operation: &str,
+        ) -> Result<ImageReceipt, String> {
+            if !digest(&receipt.before) || !digest(&receipt.installed) {
+                return Err("invalid recovery identity".into());
+            }
+            let bytes = read(&self.path(format!(".refact-known-good-{}", receipt.before)))?;
+            self.install(&bytes, &receipt.installed, &receipt.before, operation)
+        }
+    }
+    /// Kernel executable handle, not the (possibly already replaced) install path.
+    pub fn running_digest() -> Result<String, String> {
+        let mut file = std::fs::File::open("/proc/self/exe").map_err(|e| e.to_string())?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 65536];
+        loop {
+            let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+        Ok(hex::encode(hasher.finalize()))
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn scratch_install() -> (tempfile::TempDir, PathBuf) {
+            // tempfile and std::fs::write inherit the process umask; 0002 would
+            // otherwise create a shared directory (0775) and image (0664).
+            let dir = tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .unwrap();
+            let path = dir.path().canonicalize().unwrap().join("refact");
+            let mut image = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .unwrap();
+            image.write_all(b"old").unwrap();
+            (dir, path)
+        }
+
+        #[tokio::test]
+        async fn scratch_ordinary_release_honors_native_claim() {
+            struct OfflineArchive(Vec<u8>);
+            impl ReleaseSource for OfflineArchive {
+                fn latest_release<'a>(&'a self) -> ReleaseFuture<'a, EngineReleaseInfo> {
+                    Box::pin(async { Err(SelfUpdateError::runtime("unexpected lookup")) })
+                }
+                fn release_for_version<'a>(
+                    &'a self,
+                    _: &'a str,
+                ) -> ReleaseFuture<'a, EngineReleaseInfo> {
+                    self.latest_release()
+                }
+                fn download<'a>(
+                    &'a self,
+                    _: &'a str,
+                    label: &'static str,
+                ) -> ReleaseFuture<'a, Vec<u8>> {
+                    Box::pin(async move {
+                        Ok(if label == "release archive" {
+                            self.0.clone()
+                        } else {
+                            hash(&self.0).into_bytes()
+                        })
+                    })
+                }
+            }
+            let mut archive = Vec::new();
+            {
+                let encoder =
+                    flate2::write::GzEncoder::new(&mut archive, flate2::Compression::default());
+                let mut builder = tar::Builder::new(encoder);
+                let mut header = tar::Header::new_gnu();
+                header.set_size(3);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, binary_name(), Cursor::new(b"new"))
+                    .unwrap();
+                builder.into_inner().unwrap().finish().unwrap();
+            }
+            let source = OfflineArchive(archive);
+            let (_dir, path) = scratch_install();
+            let owner = Installer::open(&path).unwrap();
+            let claim = owner.claim("scratch").unwrap();
+            let target = "x86_64-unknown-linux-gnu";
+            let urls = asset_urls_for_version("99.0.0", target);
+            let error = install_release(&source, target, &urls, Some(path.clone()))
+                .await
+                .unwrap_err();
+            assert!(error.message.contains("busy or interrupted"));
+            assert_eq!(std::fs::read(&path).unwrap(), b"old");
+            owner.complete(claim).unwrap();
+            install_release(&source, target, &urls, Some(path.clone()))
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        }
+        #[test]
+        fn scratch_shared_claim_blocks_release_and_candidate_without_mutation() {
+            let (dir, path) = scratch_install();
+            let candidate = Installer::open(&path).unwrap();
+            let release = Installer::open(&path).unwrap();
+            let claim = candidate.claim(&hash(b"claim")).unwrap();
+            assert!(release
+                .install_release_bytes(b"new")
+                .unwrap_err()
+                .contains("busy or interrupted"));
+            assert!(release.install_release_bytes(b"old").is_err());
+            assert!(release
+                .install(b"new", &hash(b"old"), &hash(b"new"), &hash(b"op"))
+                .is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), b"old");
+            candidate.complete(claim).unwrap();
+            release.install_release_bytes(b"new").unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"new");
+            assert!(!dir.path().join(INSTALL_LOCK).exists());
+            release.install_release_bytes(b"new").unwrap();
+        }
+        #[test]
+        fn scratch_rejects_shared_linked_symlink_and_moved_install_paths() {
+            use std::os::unix::fs::{symlink, PermissionsExt};
+            let dir = tempfile::tempdir().unwrap();
+            let install = dir.path().join("install");
+            std::fs::create_dir(&install).unwrap();
+            std::fs::set_permissions(&install, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let path = install.join("refact");
+            std::fs::write(&path, b"old").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            // Prove the baseline is valid before introducing each unsafe path.
+            assert!(Installer::open(&path).is_ok());
+            let alias = install.join("alias");
+            symlink(&path, &alias).unwrap();
+            assert!(Installer::open(&alias).is_err());
+            std::fs::remove_file(&alias).unwrap();
+            std::fs::hard_link(&path, &alias).unwrap();
+            assert!(Installer::open(&path).is_err());
+            std::fs::remove_file(&alias).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+            assert!(Installer::open(&path).is_err());
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            std::fs::set_permissions(&install, std::fs::Permissions::from_mode(0o777)).unwrap();
+            assert!(Installer::open(&path).is_err());
+            std::fs::set_permissions(&install, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let owner = Installer::open(&path).unwrap();
+            let moved = dir.path().join("moved");
+            std::fs::rename(&install, &moved).unwrap();
+            std::fs::create_dir(&install).unwrap();
+            std::fs::write(&path, b"decoy").unwrap();
+            assert!(owner.installed_digest().is_err());
+            assert!(owner.install_release_bytes(b"new").is_err());
+            assert_eq!(std::fs::read(moved.join("refact")).unwrap(), b"old");
+            assert_eq!(std::fs::read(&path).unwrap(), b"decoy");
+        }
+        #[test]
+        fn scratch_replaced_claim_is_not_removed() {
+            let (dir, path) = scratch_install();
+            let owner = Installer::open(&path).unwrap();
+            let claim = owner.claim("scratch").unwrap();
+            let lock = dir.path().join(INSTALL_LOCK);
+            std::fs::remove_file(&lock).unwrap();
+            std::fs::write(&lock, b"different owner").unwrap();
+            assert!(owner.complete(claim).is_err());
+            assert_eq!(std::fs::read(&lock).unwrap(), b"different owner");
+        }
+        #[test]
+        fn scratch_installer_exact_cas_retained_recovery_and_interrupted_lock() {
+            let (dir, path) = scratch_install();
+            let owner = Installer::open(&path).unwrap();
+            assert!(owner
+                .install(b"new", &hash(b"wrong"), &hash(b"new"), &hash(b"op"))
+                .is_err());
+            let receipt = owner
+                .install(b"new", &hash(b"old"), &hash(b"new"), &hash(b"op"))
+                .unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"new");
+            assert!(owner
+                .install(b"new", &hash(b"old"), &hash(b"new"), &hash(b"op"))
+                .is_err());
+            owner.recover(&receipt, &hash(b"recovery")).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"old");
+            std::fs::write(
+                dir.path().join(".refact-candidate-install-lock"),
+                b"interrupted",
+            )
+            .unwrap();
+            assert!(owner
+                .install(b"new", &hash(b"old"), &hash(b"new"), &hash(b"another"))
+                .is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        }
+    }
 }
 
 #[cfg(test)]

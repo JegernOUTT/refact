@@ -411,6 +411,9 @@ describe("buddy UI polish", () => {
       preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
     });
 
+    expect(screen.queryByTestId("buddy-world")).not.toBeInTheDocument();
+    expect(screen.getByTestId("buddy-presence")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Open Play" }));
     await waitFor(() => {
       expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
       expect(screen.getByTestId("buddy-world-canvas")).toBeInTheDocument();

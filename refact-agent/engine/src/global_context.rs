@@ -414,6 +414,8 @@ pub struct GlobalContext {
     pub tool_catalog_generations: Arc<ToolCatalogGenerations>,
     pub tool_catalog_cache: Arc<ToolCatalogCache>,
     pub buddy: Arc<AMutex<Option<crate::buddy::actor::BuddyService>>>,
+    pub operator_signal_projection:
+        Arc<AMutex<refact_buddy_core::operator_events::OperatorSignalProjection>>,
     pub buddy_events_tx: Option<tokio::sync::broadcast::Sender<crate::buddy::events::BuddyEvent>>,
     pub user_activity: Arc<AMutex<crate::buddy::user_activity::UserActivityRing>>,
     pub agents: Arc<BackgroundAgentRegistry>,
@@ -430,7 +432,11 @@ pub type SharedGlobalContext = Arc<GlobalContext>; // TODO: remove this type ali
 impl GlobalContext {
     pub fn app_state(&self, gcx: SharedGlobalContext) -> AppState {
         let activity_sink = Arc::new(AppActivitySink::new(self.user_activity.clone()));
-        let buddy_event_sink = Arc::new(AppBuddyEventSink::new(gcx.clone(), self.buddy.clone()));
+        let buddy_event_sink = Arc::new(AppBuddyEventSink::new(
+            gcx.clone(),
+            self.buddy.clone(),
+            self.operator_signal_projection.clone(),
+        ));
         let tool_registry = Arc::new(AppToolRegistry::new(gcx.clone()));
         AppState {
             gcx: gcx.clone(),
@@ -490,6 +496,7 @@ impl GlobalContext {
             },
             buddy: BuddyServices {
                 buddy: self.buddy.clone(),
+                operator_signal_projection: self.operator_signal_projection.clone(),
                 buddy_events_tx: self
                     .buddy_events_tx
                     .clone()
@@ -929,6 +936,7 @@ pub async fn create_global_context(
         tool_catalog_generations: Arc::new(ToolCatalogGenerations::default()),
         tool_catalog_cache: Arc::new(ToolCatalogCache::default()),
         buddy: Arc::new(AMutex::new(None)),
+        operator_signal_projection: Arc::new(AMutex::new(Default::default())),
         buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
         user_activity: Arc::new(AMutex::new(user_activity)),
         agents,
@@ -1257,6 +1265,7 @@ pub mod tests {
             tool_catalog_generations: Arc::new(ToolCatalogGenerations::default()),
             tool_catalog_cache: Arc::new(ToolCatalogCache::default()),
             buddy: Arc::new(AMutex::new(None)),
+            operator_signal_projection: Arc::new(AMutex::new(Default::default())),
             buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
             user_activity: Arc::new(AMutex::new(user_activity)),
             agents,

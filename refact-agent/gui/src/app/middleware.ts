@@ -110,7 +110,13 @@ import {
   ideToolCallResponse,
   ideTaskDone,
   ideAskQuestions,
+  ideDecisionResolved,
 } from "../hooks/useEventBusForIDE";
+import {
+  announceHostDecision,
+  observeHostQuestionStatuses,
+  scopeHostDecisions,
+} from "../events/hostDecisionTracker";
 import { upsertToolCallIntoHistory } from "../features/History/historySlice";
 import {
   getEventMetadata,
@@ -1585,11 +1591,28 @@ function safeParseJson(str: string): unknown {
 
 startListening({
   actionCreator: applyChatEvent,
-  effect: (action) => {
+  effect: (action, listenerApi) => {
     if (!isIdeHost()) return;
-
+    const state = listenerApi.getState();
     const event = action.payload;
+    const scope = {
+      projectRoot: state.current_project.workspaceRoots?.[0] ?? "",
+      endpointIdentity: getEngineEndpointIdentity(state.config),
+    };
+    scopeHostDecisions(scope);
+    if (event.type === "snapshot") {
+      for (const payload of observeHostQuestionStatuses(
+        scope,
+        event.chat_id,
+        event.pending_questions,
+      )) {
+        getPostMessageForHost()(ideDecisionResolved(payload));
+      }
+      return;
+    }
     if (event.type !== "message_added") return;
+    if (state.chat.threads[event.chat_id]?.last_applied_seq !== event.seq)
+      return;
 
     const msg = event.message;
     if (!isToolMessage(msg)) return;
@@ -1613,13 +1636,22 @@ startListening({
         }),
       );
     } else if (isAskQuestionsContent(content)) {
-      postToIde(
-        ideAskQuestions({
-          chatId,
-          toolCallId,
-          questions: content.questions,
-        }),
+      const native = state.chat.threads[chatId]?.thread.pending_questions?.find(
+        (question) => question.tool_call_id === toolCallId,
       );
+      if (native && native.status !== "pending") return;
+      const askedAtMs =
+        native?.asked_at_ms ?? (parsed as { asked_at_ms?: number }).asked_at_ms;
+      const payload = {
+        chatId,
+        toolCallId,
+        questions: content.questions,
+        askedAtMs,
+        scope,
+        origin: "native_chat_event" as const,
+      };
+      if (announceHostDecision(payload, scope))
+        postToIde(ideAskQuestions(payload));
     }
   },
 });

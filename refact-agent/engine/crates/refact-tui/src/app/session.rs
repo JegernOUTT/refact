@@ -716,12 +716,17 @@ impl App {
     }
 
     pub(super) fn clear_ask_questions_state(&mut self) {
+        self.native_pending_questions = None;
+        self.native_answer_request_id = None;
+        self.native_answer_accepted = false;
         self.ask_questions_form = None;
         self.pending_manual_ask_questions = None;
         self.handled_ask_questions_tool_ids.clear();
     }
 
     pub(super) fn clear_active_ask_questions(&mut self) {
+        self.native_answer_request_id = None;
+        self.native_answer_accepted = false;
         self.ask_questions_form = None;
         self.pending_manual_ask_questions = None;
     }

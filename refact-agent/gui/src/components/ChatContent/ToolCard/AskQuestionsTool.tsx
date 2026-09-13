@@ -12,14 +12,26 @@ import { Button, FieldTextarea, SegmentedControl, Switch } from "../../ui";
 import { useStoredOpen } from "../useStoredOpen";
 import { Markdown } from "../../Markdown";
 import { useAppSelector } from "../../../hooks/useAppSelector";
+import { useAppDispatch } from "../../../hooks/useAppDispatch";
 import { useChatActions } from "../../../hooks/useChatActions";
 import {
   selectToolResultByThreadAndId,
   selectMessagesById,
+  selectPendingQuestionSetsById,
+  selectHasPendingQuestionsCapabilityById,
+  selectCommandAckByThreadAndId,
 } from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
+import { requestSseRefresh } from "../../../features/Chat/Thread/actions";
+import {
+  selectApiKey,
+  selectConfig,
+} from "../../../features/Config/configSlice";
+import { answerQuestions } from "../../../services/refact/chatCommands";
 import {
   ToolCall,
+  PendingQuestion,
+  PendingQuestionAnswer,
   isUserMessage,
   isToolMessage,
 } from "../../../services/refact/types";
@@ -31,12 +43,7 @@ import {
 } from "../../../utils/chatUiPersistence";
 import styles from "./AskQuestionsTool.module.css";
 
-interface QuestionItem {
-  id: string;
-  type: "yes_no" | "single_select" | "multi_select" | "free_text";
-  text: string;
-  options?: string[];
-}
+type QuestionItem = PendingQuestion;
 
 interface AskQuestionsResult {
   type: "ask_questions";
@@ -129,7 +136,8 @@ const QuestionWidget: React.FC<{
   question: QuestionItem;
   value: string | string[];
   onChange: (val: string | string[]) => void;
-}> = ({ question, value, onChange }) => {
+  disabled?: boolean;
+}> = ({ question, value, onChange, disabled = false }) => {
   switch (question.type) {
     case "yes_no":
       return (
@@ -144,7 +152,9 @@ const QuestionWidget: React.FC<{
               { value: "No", label: "No" },
             ]}
             value={typeof value === "string" ? value : ""}
-            onValueChange={onChange}
+            onValueChange={(nextValue) => {
+              if (!disabled) onChange(nextValue);
+            }}
           />
         </Box>
       );
@@ -175,6 +185,7 @@ const QuestionWidget: React.FC<{
                     name={question.id}
                     value={opt}
                     checked={checked}
+                    disabled={disabled}
                     onChange={() => onChange(opt)}
                   />
                   <span className={styles.singleSelectIndicator} />
@@ -199,6 +210,7 @@ const QuestionWidget: React.FC<{
                 <Switch
                   key={opt}
                   checked={checked}
+                  disabled={disabled}
                   label={opt}
                   onCheckedChange={(nextChecked) => {
                     const current = Array.isArray(value) ? value : [];
@@ -224,6 +236,7 @@ const QuestionWidget: React.FC<{
           <FieldTextarea
             value={typeof value === "string" ? value : ""}
             onChange={onChange}
+            disabled={disabled}
             placeholder="Type your answer..."
           />
         </Box>
@@ -247,8 +260,16 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
   );
   const hasCollapsedManualRef = useRef(false);
   const threadId = useThreadId();
-
   const { submit } = useChatActions(threadId);
+  const dispatch = useAppDispatch();
+  const config = useAppSelector(selectConfig);
+  const apiKey = useAppSelector(selectApiKey);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submissionSent, setSubmissionSent] = useState(false);
+  const [submissionRequestId, setSubmissionRequestId] = useState<string | null>(
+    null,
+  );
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const maybeResult = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
@@ -256,6 +277,20 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
 
   const messages = useAppSelector((state) =>
     selectMessagesById(state, threadId),
+  );
+  const pendingQuestionSets = useAppSelector((state) =>
+    selectPendingQuestionSetsById(state, threadId),
+  );
+  const hasNativeQuestionCapability = useAppSelector((state) =>
+    selectHasPendingQuestionsCapabilityById(state, threadId),
+  );
+  const submissionAck = useAppSelector((state) =>
+    selectCommandAckByThreadAndId(state, threadId, submissionRequestId),
+  );
+
+  const nativeQuestionSet = useMemo(
+    () => pendingQuestionSets.find((set) => set.tool_call_id === toolCall.id),
+    [pendingQuestionSets, toolCall.id],
   );
 
   const data = useMemo((): AskQuestionsResult | null => {
@@ -331,7 +366,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
   const hasNextMessage = !!nextUserMessage;
 
   useEffect(() => {
-    if (hasNextMessage) {
+    if (nativeQuestionSet?.status === "answered" || hasNextMessage) {
       clearAskQuestionsDraft(toolCall.id);
       return;
     }
@@ -343,7 +378,13 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
     }
 
     saveAskQuestionsDraft(toolCall.id, answers, additionalText);
-  }, [additionalText, answers, hasNextMessage, toolCall.id]);
+  }, [
+    additionalText,
+    answers,
+    hasNextMessage,
+    nativeQuestionSet?.status,
+    toolCall.id,
+  ]);
 
   const handleSubmit = useCallback(() => {
     if (!data) return;
@@ -356,7 +397,163 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
     void submit(formatted);
   }, [data, marker, answers, additionalText, submit]);
 
-  if (!hasNextMessage && data) {
+  const handleNativeSubmit = useCallback(async () => {
+    if (
+      !nativeQuestionSet ||
+      nativeQuestionSet.status !== "pending" ||
+      isSubmitting ||
+      submissionSent
+    ) {
+      return;
+    }
+    const nativeAnswers: PendingQuestionAnswer[] =
+      nativeQuestionSet.questions.map((question) => {
+        const answer = answers[question.id];
+        if (question.type === "yes_no") {
+          return { id: question.id, answer: answer === "Yes" };
+        }
+        return {
+          id: question.id,
+          answer:
+            typeof answer === "string" || Array.isArray(answer) ? answer : "",
+        };
+      });
+    setIsSubmitting(true);
+    setSubmitError(null);
+    try {
+      const clientRequestId = await answerQuestions(
+        threadId,
+        nativeQuestionSet.tool_call_id,
+        nativeAnswers,
+        config,
+        apiKey ?? undefined,
+        nativeQuestionSet.asked_at_ms,
+      );
+      setSubmissionRequestId(clientRequestId);
+      setSubmissionSent(true);
+    } catch (error) {
+      setSubmitError(
+        error instanceof Error ? error.message : "Unable to submit answers",
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [
+    answers,
+    apiKey,
+    config,
+    isSubmitting,
+    nativeQuestionSet,
+    submissionSent,
+    threadId,
+  ]);
+
+  useEffect(() => {
+    if (nativeQuestionSet?.status !== "pending") {
+      setSubmissionSent(false);
+      setSubmissionRequestId(null);
+    }
+  }, [nativeQuestionSet?.status]);
+
+  useEffect(() => {
+    if (!submissionAck || submissionAck.accepted) return;
+    setSubmissionSent(false);
+    setSubmissionRequestId(null);
+    setSubmitError("The server rejected these answers. Please try again.");
+    dispatch(requestSseRefresh({ chatId: threadId }));
+  }, [dispatch, submissionAck, threadId]);
+
+  if (nativeQuestionSet) {
+    const isPending = nativeQuestionSet.status === "pending";
+    const hasCompleteAnswers = nativeQuestionSet.questions.every((question) => {
+      const answer = answers[question.id];
+      if (question.type === "multi_select") return Array.isArray(answer);
+      return typeof answer === "string" && answer.trim().length > 0;
+    });
+    const submittedAnswers = new Map(
+      nativeQuestionSet.answers?.map((answer) => [answer.id, answer.answer]) ??
+        [],
+    );
+    const statusLabel =
+      nativeQuestionSet.status === "answered"
+        ? "Questions answered"
+        : nativeQuestionSet.status === "cancelled"
+          ? "Questions no longer available"
+          : "Questions for you";
+
+    return (
+      <ToolCard
+        icon={isPending ? <CircleHelp /> : <CircleCheck />}
+        summary={statusLabel}
+        status={isPending ? "running" : "success"}
+        isOpen={isOpen}
+        onToggle={handleToggle}
+        toolCall={toolCall}
+      >
+        <Box className={`${styles.content} rf-enter-rise`}>
+          <Flex direction="column" gap="2">
+            {nativeQuestionSet.questions.map((question) => {
+              if (!isPending) {
+                const answer = submittedAnswers.get(question.id);
+                return (
+                  <Box key={question.id}>
+                    <Markdown>{question.text}</Markdown>
+                    <Text color="gray" size="2" ml="2">
+                      →{" "}
+                      {Array.isArray(answer)
+                        ? answer.join(", ")
+                        : String(answer ?? "(no answer)")}
+                    </Text>
+                  </Box>
+                );
+              }
+              return (
+                <QuestionWidget
+                  key={question.id}
+                  question={question}
+                  value={
+                    answers[question.id] ||
+                    (question.type === "multi_select" ? [] : "")
+                  }
+                  onChange={(value) =>
+                    setAnswers((previous) => ({
+                      ...previous,
+                      [question.id]: value,
+                    }))
+                  }
+                  disabled={isSubmitting || submissionSent}
+                />
+              );
+            })}
+            {isPending && (
+              <>
+                {submitError && (
+                  <Text color="red" size="2">
+                    {submitError}
+                  </Text>
+                )}
+                {submissionSent && (
+                  <Text color="gray" size="2">
+                    Answers sent, awaiting confirmation.
+                  </Text>
+                )}
+                <Button
+                  onClick={() => void handleNativeSubmit()}
+                  disabled={
+                    isSubmitting || submissionSent || !hasCompleteAnswers
+                  }
+                >
+                  {isSubmitting ? "Submitting…" : "Submit Answers"}
+                </Button>
+              </>
+            )}
+          </Flex>
+        </Box>
+      </ToolCard>
+    );
+  }
+
+  if (!hasNativeQuestionCapability && !hasNextMessage && data) {
     return (
       <ToolCard
         icon={<CircleHelp />}
@@ -392,6 +589,25 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
 
             <Button onClick={handleSubmit}>Submit Answers</Button>
           </Flex>
+        </Box>
+      </ToolCard>
+    );
+  }
+
+  if (hasNativeQuestionCapability && data) {
+    return (
+      <ToolCard
+        icon={<CircleHelp />}
+        summary="Questions syncing"
+        status="running"
+        isOpen={isOpen}
+        onToggle={handleToggle}
+        toolCall={toolCall}
+      >
+        <Box className={`${styles.content} rf-enter-rise`}>
+          <Text color="gray" size="2">
+            Waiting for the current question state.
+          </Text>
         </Box>
       </ToolCard>
     );

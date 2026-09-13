@@ -200,24 +200,6 @@ export function BuddyDemo(): React.ReactElement {
           <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
             <button
               style={{ ...base, ...variantStyle.default }}
-              onClick={() => buddy.addXP(50)}
-            >
-              +50 XP
-            </button>
-            <button
-              style={{ ...base, ...variantStyle.default }}
-              onClick={() => buddy.addXP(500)}
-            >
-              +500 XP
-            </button>
-            <button
-              style={{ ...base, ...variantStyle.default }}
-              onClick={() => buddy.addXP(2000)}
-            >
-              +2K XP
-            </button>
-            <button
-              style={{ ...base, ...variantStyle.default }}
               onClick={buddy.nextPalette}
             >
               🎨 Palette

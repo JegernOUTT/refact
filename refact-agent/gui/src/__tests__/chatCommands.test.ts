@@ -15,6 +15,7 @@ import {
   abortGeneration,
   respondToToolConfirmation,
   respondToToolConfirmations,
+  answerQuestions,
   updateMessage,
   removeMessage,
   cancelQueuedItem,
@@ -560,6 +561,36 @@ describe("chatCommands", () => {
       const calledBody = getRequestBody(mockFetch.mock.calls[0] as MockCall);
       expect(calledBody.type).toBe("tool_decisions");
       expect(calledBody.decisions).toEqual(decisions);
+    });
+  });
+
+  describe("answerQuestions", () => {
+    it("sends the native answer_questions command", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true } as Response);
+
+      const requestId = await answerQuestions(
+        "test-chat",
+        "call-questions",
+        [
+          { id: "confirm", answer: true },
+          { id: "scope", answer: ["GUI"] },
+        ],
+        8001,
+      );
+
+      expect(getRequestBody(mockFetch.mock.calls[0] as MockCall)).toMatchObject(
+        {
+          type: "answer_questions",
+          tool_call_id: "call-questions",
+          answers: [
+            { id: "confirm", answer: true },
+            { id: "scope", answer: ["GUI"] },
+          ],
+        },
+      );
+      expect(requestId).toBe(
+        getRequestBody(mockFetch.mock.calls[0] as MockCall).client_request_id,
+      );
     });
   });
 

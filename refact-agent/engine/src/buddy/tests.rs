@@ -15,7 +15,7 @@ use super::issues::{
 use super::scheduler::BuddyJobContext;
 use super::settings::{AutonomyLevel, BuddySettings, HumorLevel, MAX_PALETTE_INDEX};
 use super::state::{
-    add_activity, apply_care_action, apply_pet_tick, default_buddy_state, grant_xp,
+    add_activity, apply_care_action, apply_pet_tick, default_buddy_state, grant_play_xp, grant_xp,
     reroll_personality,
 };
 use super::types::{
@@ -156,11 +156,10 @@ async fn expired_drafts_are_dropped_on_load() {
 fn record_workflow_success(
     state: &mut BuddyState,
     workflow_id: &str,
-    xp: u64,
+    _xp: u64,
     activity: BuddyActivity,
 ) {
     add_activity(state, activity);
-    grant_xp(state, xp);
     let now = chrono::Utc::now().to_rfc3339();
     if let Some(ws) = state
         .workflow_summaries
@@ -395,7 +394,7 @@ fn test_default_state_starts_egg() {
 #[test]
 fn test_growth_points_hatch_without_care_gate() {
     let mut state = default_buddy_state();
-    grant_xp(&mut state, 20);
+    grant_play_xp(&mut state, 20);
     assert_eq!(state.progression.level, 2);
     assert_eq!(state.progression.stage, 1);
     assert_eq!(state.progression.stage_name, "Hatch");
@@ -407,7 +406,7 @@ fn test_grant_xp_updates_stage_when_care_gate_met() {
     let mut state = default_buddy_state();
     state.pet.evolution.open_seconds = 10 * 60;
     state.pet.evolution.care_score = 20;
-    grant_xp(&mut state, 30);
+    grant_play_xp(&mut state, 30);
     assert_eq!(state.progression.stage, 1);
     assert_eq!(state.progression.stage_name, "Hatch");
     assert_eq!(state.progression.level, 2);
@@ -417,7 +416,7 @@ fn test_grant_xp_updates_stage_when_care_gate_met() {
 #[test]
 fn test_xp_only_advance_reaches_later_stage() {
     let mut state = default_buddy_state();
-    grant_xp(&mut state, 120);
+    grant_play_xp(&mut state, 120);
     assert_eq!(state.progression.stage_name, "Imp");
     assert_eq!(state.progression.stage, 3);
 }
@@ -425,7 +424,7 @@ fn test_xp_only_advance_reaches_later_stage() {
 #[test]
 fn test_xp_only_advances_multiple_stages() {
     let mut state = default_buddy_state();
-    grant_xp(&mut state, 20 + 35 + 10);
+    grant_play_xp(&mut state, 20 + 35 + 10);
     assert_eq!(state.progression.stage, 2);
     assert_eq!(state.progression.stage_name, "Sprite");
     assert_eq!(state.progression.xp, 10);
@@ -446,8 +445,10 @@ fn test_realistic_workflow_care_path_advances_later_stage() {
 }
 
 #[test]
-fn test_repeated_successful_workflow_rewards_eventually_advance() {
+fn test_repeated_successful_workflows_record_volume_without_rewards() {
     let mut state = default_buddy_state();
+    grant_play_xp(&mut state, 65);
+    let saved_progression = serde_json::to_value(&state.progression).unwrap();
     for idx in 0..12 {
         record_workflow_success(
             &mut state,
@@ -465,7 +466,10 @@ fn test_repeated_successful_workflow_rewards_eventually_advance() {
             },
         );
     }
-    assert!(state.progression.stage >= 2);
+    assert_eq!(
+        serde_json::to_value(&state.progression).unwrap(),
+        saved_progression
+    );
     assert_eq!(
         state
             .workflow_summaries
@@ -488,7 +492,7 @@ fn test_max_stage_behavior() {
     let mut state = default_buddy_state();
     state.pet.evolution.open_seconds = 400 * 60;
     state.pet.evolution.care_score = 500;
-    grant_xp(&mut state, 3000);
+    grant_play_xp(&mut state, 3000);
     assert_eq!(state.progression.stage_name, "Archon");
     assert_eq!(state.progression.stage, 6);
     assert_eq!(state.progression.level, 7);
@@ -548,10 +552,23 @@ fn test_old_state_migration() {
 }
 
 #[test]
+fn activity_volume_preserves_saved_progress_without_dirtying_state() {
+    let mut svc = make_service();
+    svc.grant_play_xp(65);
+    svc.dirty = false;
+    let saved = serde_json::to_value(&svc.state).unwrap();
+    for _ in 0..100 {
+        svc.grant_xp(1000);
+    }
+    assert_eq!(serde_json::to_value(&svc.state).unwrap(), saved);
+    assert!(!svc.dirty);
+}
+
+#[test]
 fn test_save_on_mutate_sets_dirty() {
     let mut svc = make_service();
     assert!(!svc.dirty);
-    svc.grant_xp(10);
+    svc.grant_play_xp(10);
     assert!(svc.dirty);
 }
 
@@ -561,7 +578,7 @@ async fn test_save_on_mutate_writes_file() {
     let root = dir.path();
     super::storage::bootstrap_buddy_storage(root).await.unwrap();
     let mut svc = make_service();
-    svc.grant_xp(25);
+    svc.grant_play_xp(25);
     super::state::save_state(root, &svc.state).await.unwrap();
     let loaded = super::state::load_state(root).await;
     assert_eq!(loaded.progression.stage_name, "Hatch");
@@ -1652,6 +1669,7 @@ fn test_buddy_say_creates_speech() {
     use super::types::{BuddySpeechItem, BuddyControl};
     let mut svc = make_service();
     let speech = BuddySpeechItem {
+        editorial_delivery_required: false,
         id: "test-id".to_string(),
         text: "Hello!".to_string(),
         mood: "happy".to_string(),
@@ -1669,6 +1687,7 @@ fn test_buddy_say_creates_speech() {
     assert_eq!(svc.active_speech.as_ref().unwrap().text, "Hello!");
 
     let speech2 = BuddySpeechItem {
+        editorial_delivery_required: false,
         id: "test-id-2".to_string(),
         text: "Updated!".to_string(),
         mood: "happy".to_string(),
@@ -2098,17 +2117,61 @@ async fn test_greeting_triggers_on_first_launch() {
 #[tokio::test]
 async fn test_first_launch_greeting_has_short_ttl() {
     use super::jobs::greeting::GreetingJob;
-    use super::scheduler::BuddyJob;
-    let job = GreetingJob;
-    let ctx = make_job_context(BuddyOnboarding::default(), 0, BuddyJobState::default());
-    let gcx = crate::global_context::tests::make_test_gcx().await;
-    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-
-    let result = job.execute(app, ctx).await;
-    let speech = result.speech.expect("greeting should produce speech");
+    let (speech, result) = scheduled_onboarding_speech(Box::new(GreetingJob), false).await;
+    assert_eq!(result.as_deref(), Some("completed"));
 
     assert!(!speech.persistent);
     assert!(speech.ttl_seconds > 0 && speech.ttl_seconds <= 15);
+}
+
+async fn scheduled_onboarding_speech(
+    job: Box<dyn super::scheduler::BuddyJob>,
+    greeted: bool,
+) -> (super::types::BuddySpeechItem, Option<String>) {
+    let (voice, renderer) = super::voice_service::test_voice_service_with_responses(vec![Some(
+        "Welcome to your Desk.".into(),
+    )]);
+    let _guard = super::voice_service::install_test_voice_service(voice).await;
+    let root = tempfile::tempdir().unwrap();
+    let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+        root.path().join("cache"),
+        root.path().join("config"),
+    )
+    .await;
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    let (tx, _) = tokio::sync::broadcast::channel(16);
+    let mut state = default_buddy_state();
+    state.onboarding.greeted = greeted;
+    let mut settings = BuddySettings::default();
+    settings.quiet_hours_mode = super::settings::QuietHoursMode::Off;
+    *app.buddy.buddy.lock().await = Some(BuddyService::new(
+        root.path().into(),
+        state,
+        settings,
+        vec![],
+        super::runtime_queue::RuntimeQueue::new(),
+        tx,
+        None,
+    ));
+    let id = job.id().to_string();
+    super::scheduler::BuddyScheduler::with_test_job(job)
+        .tick(app.clone(), app.buddy.buddy.clone(), root.path())
+        .await;
+    let buddy = app.buddy.buddy.lock().await;
+    let service = buddy.as_ref().unwrap();
+    assert_eq!(renderer.calls(), 1);
+    let speech = service
+        .active_speech
+        .clone()
+        .expect("selected onboarding speech should be delivered");
+    let result = service
+        .state
+        .job_cooldowns
+        .get(&id)
+        .unwrap()
+        .last_result
+        .clone();
+    (speech, result)
 }
 
 #[test]
@@ -2271,45 +2334,8 @@ async fn test_tour_job_runs_only_once() {
 #[tokio::test]
 async fn test_tour_speech_has_short_ttl() {
     use super::jobs::tour::TourJob;
-    use super::scheduler::BuddyJob;
-    let job = TourJob;
-    let ctx = make_job_context(
-        BuddyOnboarding {
-            greeted: true,
-            tour_completed: false,
-            ..Default::default()
-        },
-        0,
-        BuddyJobState::default(),
-    );
-    let gcx = crate::global_context::tests::make_test_gcx().await;
-    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-    {
-        let (tx, _) = tokio::sync::broadcast::channel(16);
-        let mut state = crate::buddy::state::default_buddy_state();
-        state.onboarding.greeted = true;
-        let service = crate::buddy::actor::BuddyService::new(
-            std::env::temp_dir().join(format!("buddy-tour-ttl-test-{}", uuid::Uuid::new_v4())),
-            state,
-            crate::buddy::settings::BuddySettings::default(),
-            Vec::new(),
-            crate::buddy::runtime_queue::RuntimeQueue::new(),
-            tx,
-            None,
-        );
-        let buddy_arc = app.buddy.buddy.clone();
-        *buddy_arc.lock().await = Some(service);
-    }
-
-    let result = job.execute(app.clone(), ctx).await;
-    assert_eq!(result.last_result.as_deref(), Some("completed"));
-
-    let buddy = app.buddy.buddy.lock().await;
-    let service = buddy.as_ref().unwrap();
-    let speech = service
-        .active_speech
-        .as_ref()
-        .expect("tour should emit speech through the arbiter");
+    let (speech, result) = scheduled_onboarding_speech(Box::new(TourJob), true).await;
+    assert_eq!(result.as_deref(), Some("completed"));
 
     assert!(!speech.persistent);
     assert!(speech.ttl_seconds > 0 && speech.ttl_seconds <= 15);
@@ -6462,6 +6488,7 @@ async fn tool_buddy_launch_investigation_creates_chat() {
     let created_at = chrono::Utc::now().to_rfc3339();
 
     let snapshot = TrajectorySnapshot {
+        pending_browser_decision: None,
         goal: None,
         goal_ledger: Vec::new(),
         goal_verification_blocked_until_ms: None,
@@ -6512,6 +6539,7 @@ async fn tool_buddy_launch_investigation_creates_chat() {
         reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
+        pending_questions: Vec::new(),
         pending_deliveries: Vec::new(),
     };
 
@@ -7942,7 +7970,7 @@ async fn accept_route_response_shape_for_defaults_draft() {
 
     let action = BuddyAction::DraftDefaultsChange {
         defaults_kind: DefaultsKind::ChatBuddyModel,
-        patch: serde_json::json!({}),
+        patch: serde_json::json!({"chat_buddy": {"model": "fixture/selected"}}),
     };
 
     let outcome = dispatch_action(app.clone(), "irrelevant-id", &action)
@@ -7976,7 +8004,7 @@ async fn accept_route_response_shape_for_defaults_draft() {
             .get("chat_buddy")
             .and_then(|v| v.get("model"))
             .and_then(|v| v.as_str()),
-        Some("your-provider/model-name")
+        Some("fixture/selected")
     );
 
     assert!(
@@ -8948,7 +8976,7 @@ fn restart_preserves_per_rule_cooldown() {
 }
 
 #[test]
-fn provider_tuning_uses_field_specific_defaults_kind() {
+fn provider_tuning_requires_real_selection_for_each_missing_default() {
     use super::facts::FactStore;
     use super::opportunities::{OpportunityDetector, OpportunityQueue};
     let now = chrono::Utc::now();
@@ -8970,7 +8998,7 @@ fn provider_tuning_uses_field_specific_defaults_kind() {
         ),
     ];
 
-    for (field, patch_key, expected_kind_str) in cases {
+    for (field, _, _) in cases {
         let mut store = FactStore::new();
         store.ingest(BuddyFact {
             kind: BuddyFactKind::DefaultModelMissing,
@@ -8989,37 +9017,50 @@ fn provider_tuning_uses_field_specific_defaults_kind() {
             .find(|(o, _)| o.kind == BuddyOpportunityKind::ProviderTuning)
             .unwrap_or_else(|| panic!("must emit ProviderTuning for field={}", field));
 
-        let draft_action = provider_opp
+        assert!(provider_opp
             .0
             .proposed_actions
             .iter()
-            .find(|a| matches!(a, BuddyAction::DraftDefaultsChange { .. }))
-            .unwrap_or_else(|| panic!("must have DraftDefaultsChange for field={}", field));
+            .any(|action| matches!(
+                action,
+                BuddyAction::OpenPage {
+                    page: BuddyPage::DefaultModels
+                }
+            )));
+        assert!(!provider_opp
+            .0
+            .proposed_actions
+            .iter()
+            .any(|action| matches!(action, BuddyAction::DraftDefaultsChange { .. })));
+        assert!(provider_opp.0.cooldown_key.contains(field));
+        assert!(!serde_json::to_string(&provider_opp.0)
+            .unwrap()
+            .contains("your-provider/model-name"));
+    }
+}
 
-        if let BuddyAction::DraftDefaultsChange {
-            defaults_kind,
-            patch,
-        } = draft_action
-        {
-            let kind_json = serde_json::to_string(defaults_kind).unwrap();
-            let kind_str = kind_json.trim_matches('"');
-            assert_eq!(
-                kind_str, *expected_kind_str,
-                "field={} must map to defaults_kind={}",
-                field, expected_kind_str
-            );
-            assert_eq!(
-                patch
-                    .get(*patch_key)
-                    .and_then(|v| v.get("model"))
-                    .and_then(|v| v.as_str()),
-                Some("your-provider/model-name"),
-                "field={} patch must contain ProviderDefaults key '{}', got: {}",
-                field,
-                patch_key,
-                patch
-            );
-        }
+#[tokio::test]
+async fn empty_or_legacy_placeholder_defaults_open_selection_without_creating_a_draft() {
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    for patch in [
+        serde_json::json!({}),
+        serde_json::json!({"chat_buddy": {"model": "your-provider/model-name"}}),
+    ] {
+        let result = crate::http::routers::v1::buddy_opportunities::dispatch_action(
+            app.clone(),
+            "legacy",
+            &BuddyAction::DraftDefaultsChange {
+                defaults_kind: DefaultsKind::ChatBuddyModel,
+                patch,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.result["kind"], "open_page");
+        assert_eq!(result.result["navigate_to"]["type"], "default_models");
+        assert!(result.result.get("draft_id").is_none());
+        assert!(app.buddy.buddy.lock().await.is_none());
     }
 }
 
@@ -11735,6 +11776,7 @@ fn speech_arbiter_gates_update_speech_and_records_decisions() {
     let mut svc = make_service();
     svc.settings.muted_intents = vec!["humor".to_string()];
     let mut speech = super::types::BuddySpeechItem {
+        editorial_delivery_required: false,
         id: "sp-1".to_string(),
         text: "a tiny joke".to_string(),
         mood: "happy".to_string(),

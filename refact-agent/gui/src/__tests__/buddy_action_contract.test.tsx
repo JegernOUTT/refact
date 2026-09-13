@@ -11,9 +11,11 @@ import { BuddyOpportunityCard } from "../features/Buddy/BuddyOpportunityCard";
 import { BuddyChatCompanion } from "../features/Buddy/BuddyChatCompanion";
 import { setBuddySnapshot } from "../features/Buddy/buddySlice";
 import { useExecuteBuddyAction } from "../features/Buddy/hooks/useExecuteBuddyAction";
+import { executeBuddyAction } from "../features/Buddy/executeBuddyAction";
 import type {
   BuddyAction,
   BuddyActionResult,
+  BuddyControl,
   BuddyOpportunity,
   BuddyRuntimeEvent,
   BuddySnapshot,
@@ -274,6 +276,174 @@ describe("buddy action execution contract", () => {
     vi.useRealTimers();
   });
 
+  const pulseControl: BuddyControl = {
+    id: "worktree-report",
+    label: "Create Worktrees pulse report",
+    action: "create_worktrees_pulse",
+    style: "primary",
+  };
+  const pulseContext = {
+    triggerText: "Worktrees need attention",
+    triggerSource: "suggestion" as const,
+    suggestionId: "worktree-suggestion",
+  };
+
+  function installPulseHandlers(options?: {
+    enabled?: boolean;
+    readOnly?: boolean;
+    failure?: "settings" | "pulse" | "draft" | "missing-id";
+  }) {
+    const calls = { pulse: 0, draft: 0, resolved: 0, body: null as unknown };
+    server.use(
+      http.get("*/v1/buddy/settings", () =>
+        options?.failure === "settings"
+          ? HttpResponse.json({ detail: "settings offline" }, { status: 503 })
+          : HttpResponse.json({
+              ...makeSnapshot().settings,
+              enabled: options?.enabled ?? true,
+              autonomy_level: options?.readOnly ? "read_only" : "suggest",
+            }),
+      ),
+      http.get("*/v1/buddy/pulse", () => {
+        calls.pulse += 1;
+        return options?.failure === "pulse"
+          ? HttpResponse.json({ detail: "pulse offline" }, { status: 503 })
+          : HttpResponse.json({
+              generated_at: "2026-09-05T00:00:00Z",
+              worktrees: {
+                total: 3,
+                dirty: 1,
+                clean: 2,
+                disk_usage_bytes: null,
+              },
+              diagnostics: { private_text: "must not appear in report" },
+            });
+      }),
+      http.post("*/v1/buddy/drafts/pulse_report", async ({ request }) => {
+        calls.draft += 1;
+        calls.body = await request.json();
+        return options?.failure === "draft"
+          ? HttpResponse.json({ detail: "draft offline" }, { status: 503 })
+          : HttpResponse.json({
+              id: options?.failure === "missing-id" ? " " : "worktree-draft",
+              kind: "pulse_report",
+            });
+      }),
+      http.post("*/v1/buddy/suggestions/:id/dismiss", () => {
+        calls.resolved += 1;
+        return HttpResponse.json({ dismissed: true });
+      }),
+    );
+    return calls;
+  }
+
+  it("creates a worktree report draft before opening it and resolving the suggestion", async () => {
+    const calls = installPulseHandlers();
+    const store = setUpStore(CONFIG_STATE);
+    const outcome = await executeBuddyAction(
+      pulseControl,
+      store.dispatch,
+      pulseContext,
+    );
+
+    expect(outcome).toEqual({ status: "ok" });
+    expect(calls.pulse).toBe(1);
+    expect(calls.draft).toBe(1);
+    expect(calls.resolved).toBe(1);
+    expect(calls.body).toEqual({
+      title: "Worktrees pulse report",
+      yaml_or_json:
+        "# Worktrees pulse report\n\nPulse generated at 2026-09-05T00:00:00Z.\n\n- Worktrees total: 3\n- Clean: 2\n- Dirty: 1",
+      explanation: "Worktree counters read from the current Buddy pulse.",
+    });
+    expect(lastPage(store)).toMatchObject({
+      name: "buddy",
+      draftId: "worktree-draft",
+    });
+  });
+
+  it.each(["settings", "pulse", "draft", "missing-id"] as const)(
+    "keeps the suggestion unresolved and reports %s failure without navigation",
+    async (failure) => {
+      const calls = installPulseHandlers({ failure });
+      const store = setUpStore(CONFIG_STATE);
+      const before = store.getState().pages;
+      const outcome = await executeBuddyAction(
+        pulseControl,
+        store.dispatch,
+        pulseContext,
+      );
+
+      expect(outcome.status).toBe("failed");
+      expect(calls.resolved).toBe(0);
+      expect(calls.draft).toBe(
+        failure === "settings" || failure === "pulse" ? 0 : 1,
+      );
+      expect(store.getState().pages).toEqual(before);
+      expect(store.getState().buddy.activeSpeech?.text).toContain(
+        "Could not create",
+      );
+    },
+  );
+
+  it.each([{ readOnly: true }, { enabled: false }])(
+    "does not create drafts when current settings forbid it: %j",
+    async (settings) => {
+      const calls = installPulseHandlers(settings);
+      const store = setUpStore(CONFIG_STATE);
+      const outcome = await executeBuddyAction(
+        pulseControl,
+        store.dispatch,
+        pulseContext,
+      );
+
+      expect(outcome.status).toBe("unsupported");
+      expect(calls.pulse).toBe(0);
+      expect(calls.draft).toBe(0);
+      expect(calls.resolved).toBe(0);
+      expect(store.getState().buddy.activeSpeech?.text).toContain(
+        "allowed to create drafts",
+      );
+    },
+  );
+
+  it.each([
+    "unsupported-control",
+    "dismiss_suggestion",
+    "dismiss_runtime_event",
+    "accept_quest",
+  ])(
+    "reports unavailable or malformed %s without falsely resolving the suggestion",
+    async (action) => {
+      const calls = installPulseHandlers();
+      const store = setUpStore(CONFIG_STATE);
+      const outcome = await executeBuddyAction(
+        { ...pulseControl, action },
+        store.dispatch,
+        pulseContext,
+      );
+      expect(outcome.status).toBe("unsupported");
+      expect(calls.resolved).toBe(0);
+      expect(store.getState().buddy.activeSpeech?.speech_intent).toBe(
+        "error_alert",
+      );
+    },
+  );
+
+  it("supports dismiss_speech without resolving the underlying suggestion", async () => {
+    const calls = installPulseHandlers();
+    const store = setUpStore(CONFIG_STATE);
+    expect(
+      await executeBuddyAction(
+        { ...pulseControl, action: "dismiss_speech" },
+        store.dispatch,
+        pulseContext,
+      ),
+    ).toEqual({ status: "ok" });
+    expect(calls.resolved).toBe(0);
+    expect(store.getState().buddy.activeSpeech).toBeNull();
+  });
+
   it("click_second_action_sends_action_index_1", async () => {
     let requestBody: unknown = null;
     server.use(
@@ -505,6 +675,101 @@ describe("buddy action execution contract", () => {
     });
   });
 
+  it("chat companion keeps a failed pulse report notification and shows its error", async () => {
+    setupCompanionRender();
+    setupCompanionApiHandlers();
+    pinCompanionTime();
+    const calls = installPulseHandlers({ failure: "draft" });
+    const store = setUpStore(CONFIG_STATE);
+    const runtime = makeRuntimeEvent({
+      id: "runtime-pulse-fails",
+      controls: [pulseControl],
+    });
+    store.dispatch(
+      setBuddySnapshot(makeSnapshot("Companion", { runtime_queue: [runtime] })),
+    );
+    const { container } = render(<BuddyChatCompanion chatId="chat-a" />, {
+      store,
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: pulseControl.label }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Could not create the worktrees pulse report/),
+      ).toBeInTheDocument();
+    });
+    expect(
+      container.querySelector(
+        '[data-notification-id="runtime:runtime-pulse-fails"]',
+      ),
+    ).not.toBeNull();
+    expect(calls.draft).toBe(1);
+    expect(calls.resolved).toBe(0);
+    expect(lastPage(store)).not.toMatchObject({
+      name: "buddy",
+      draftId: "worktree-draft",
+    });
+  });
+
+  it("guards repeated quest acceptance and retains the notification on failure", async () => {
+    setupCompanionRender();
+    setupCompanionApiHandlers();
+    pinCompanionTime();
+    let calls = 0;
+    let finish: (() => void) | undefined;
+    const responseReady = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    server.use(
+      http.post("*/v1/buddy/quest/accept", async () => {
+        calls += 1;
+        await responseReady;
+        return HttpResponse.json({ detail: "quest offline" }, { status: 503 });
+      }),
+    );
+    const store = setUpStore(CONFIG_STATE);
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot("Companion", {
+          runtime_queue: [
+            makeRuntimeEvent({
+              id: "runtime-quest-fails",
+              controls: [
+                {
+                  id: "quest",
+                  label: "Accept quest",
+                  action: "accept_quest",
+                  action_param: "quest-id",
+                  style: "primary",
+                },
+              ],
+            }),
+          ],
+        }),
+      ),
+    );
+    const { container } = render(<BuddyChatCompanion chatId="chat-a" />, {
+      store,
+    });
+    const button = await screen.findByRole("button", { name: "Accept quest" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() => expect(calls).toBe(1));
+    finish?.();
+    await waitFor(() =>
+      expect(screen.getByText(/quest offline/)).toBeInTheDocument(),
+    );
+    expect(
+      container.querySelector(
+        '[data-notification-id="runtime:runtime-quest-fails"]',
+      ),
+    ).not.toBeNull();
+    expect(calls).toBe(1);
+  });
+
   it("chat_companion_failed_dismiss_keeps_notification_visible", async () => {
     setupCompanionRender();
     pinCompanionTime();
@@ -694,9 +959,15 @@ describe("buddy action execution contract", () => {
       market_kind: "mcp",
       item_id: "server-1",
     };
-    await expect(
-      execute(action, makeOpportunity({ proposed_actions: [action] }), 0),
-    ).rejects.toBeTruthy();
+    const result = await execute(
+      action,
+      makeOpportunity({ proposed_actions: [action] }),
+      0,
+    );
+    expect(result.status).toBe("failed");
+    expect("message" in result && typeof result.message === "string").toBe(
+      true,
+    );
 
     expect(lastPage(store)).toMatchObject({ name: "login page" });
     consoleError.mockRestore();
@@ -719,5 +990,59 @@ describe("buddy action execution contract", () => {
 
     expect(lastPage(store)).toMatchObject({ name: "stats dashboard" });
     expect(acceptCalled).toBe(false);
+  });
+
+  it("preserves partial memory effects instead of reporting success", async () => {
+    server.use(
+      http.post("*/v1/buddy/opportunities/:id/accept", () =>
+        acceptResponse({
+          kind: "memory_batch_applied",
+          batch_key: "batch",
+          applied: 2,
+          failed: 1,
+          remaining: 3,
+        }),
+      ),
+    );
+    const { store, execute } = renderExecutor();
+    const action: BuddyAction = { kind: "open_page", page: { type: "buddy" } };
+    const outcome = await execute(
+      action,
+      makeOpportunity({ proposed_actions: [action] }),
+      0,
+    );
+
+    expect(outcome).toMatchObject({
+      status: "partial",
+      applied: 2,
+      failed: 1,
+      remaining: 3,
+    });
+    expect(lastPage(store)).toMatchObject({ name: "login page" });
+  });
+
+  it("does not apply a stale opportunity response snapshot or navigation", async () => {
+    server.use(
+      http.post("*/v1/buddy/opportunities/:id/accept", () =>
+        acceptResponse({
+          kind: "open_page",
+          navigate_to: { type: "marketplace_hub" },
+        }),
+      ),
+    );
+    const { store, execute } = renderExecutor();
+    const snapshot = store.getState().buddy.snapshot;
+    const action: BuddyAction = { kind: "open_page", page: { type: "buddy" } };
+    const outcome = await execute(
+      action,
+      makeOpportunity({ proposed_actions: [action] }),
+      0,
+      undefined,
+      () => false,
+    );
+
+    expect(outcome).toEqual({ status: "ignored", reason: "stale" });
+    expect(store.getState().buddy.snapshot).toEqual(snapshot);
+    expect(lastPage(store)).toMatchObject({ name: "login page" });
   });
 });

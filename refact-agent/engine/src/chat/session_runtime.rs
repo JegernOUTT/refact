@@ -221,6 +221,10 @@ pub async fn get_or_create_session_with_trajectory(
             session.restore_pending_deliveries(loaded.pending_deliveries);
         }
         session.goal_ledger = loaded.goal_ledger;
+        session.pending_questions = loaded.pending_questions;
+        if let Some(pending) = loaded.pending_browser_decision {
+            super::browser_decisions::expire_restored_browser_decision(&mut session, pending);
+        }
         session.goal_verification_blocked_until_ms = loaded.goal_verification_blocked_until_ms;
         if transition_identity_repaired {
             session.increment_version();
@@ -1088,6 +1092,8 @@ mod tests {
         {
             let mut session = session_arc.lock().await;
             session.enqueue_priority_command(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "queued-before-removal".to_string(),
                 priority: false,
                 command: ChatCommand::Regenerate {},
@@ -1125,6 +1131,8 @@ mod tests {
         {
             let mut session = delayed_enqueue_ref.lock().await;
             session.enqueue_priority_command(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "queued-from-outstanding-ref".to_string(),
                 priority: false,
                 command: ChatCommand::Regenerate {},

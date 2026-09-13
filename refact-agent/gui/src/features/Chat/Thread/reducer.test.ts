@@ -62,6 +62,67 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
       expect(runtime.waiting_for_response).toBe(false);
     });
 
+    test("uses pending questions from a reconnect snapshot as authoritative state", () => {
+      const event: ChatEventEnvelope = {
+        chat_id: chatId,
+        seq: "1",
+        type: "snapshot",
+        thread: {
+          id: chatId,
+          title: "Test Chat",
+          model: "gpt-4",
+          mode: "AGENT",
+          tool_use: "agent",
+          boost_reasoning: false,
+          context_tokens_cap: 8192,
+          include_project_info: true,
+          checkpoints_enabled: true,
+          is_title_generated: false,
+        },
+        runtime: {
+          state: "waiting_user_input",
+          paused: false,
+          error: null,
+          queue_size: 0,
+          pause_reasons: [],
+          queued_items: [],
+        },
+        background_agents: [],
+        messages: [],
+        pending_questions: [
+          {
+            tool_call_id: "ask-1",
+            asked_at_ms: 1,
+            status: "pending",
+            questions: [{ id: "proceed", type: "yes_no", text: "Proceed?" }],
+          },
+        ],
+      };
+
+      let state = chatReducer(initialState, applyChatEvent(event));
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          ...event,
+          seq: "2",
+          pending_questions: [
+            {
+              ...event.pending_questions![0],
+              status: "answered",
+              answers: [{ id: "proceed", answer: true }],
+            },
+          ],
+        }),
+      );
+
+      expect(state.threads[chatId]!.thread.pending_questions).toEqual([
+        expect.objectContaining({
+          status: "answered",
+          answers: [{ id: "proceed", answer: true }],
+        }),
+      ]);
+    });
+
     test("should handle snapshot with generating state", () => {
       const event: ChatEventEnvelope = {
         chat_id: chatId,

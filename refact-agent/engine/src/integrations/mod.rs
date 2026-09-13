@@ -18,6 +18,8 @@ pub mod integr_cmdline;
 pub mod integr_cmdline_service;
 pub mod mcp;
 pub mod notifier;
+pub mod operator_probe;
+pub mod operator_service;
 
 pub mod config_chat;
 pub mod process_io_utils;

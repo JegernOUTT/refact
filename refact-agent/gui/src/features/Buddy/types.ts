@@ -22,7 +22,6 @@ export interface Stage {
 export interface SignalDef {
   mood: MoodType;
   animationType: AnimType;
-  xp: number;
   icon: string;
   isError: boolean;
   isWin: boolean;
@@ -41,7 +40,6 @@ export interface SkillDef {
 
 export interface ToyDef {
   statusMessage: string;
-  xp: number;
   energyRestore?: number;
 }
 
@@ -486,7 +484,6 @@ export interface ColorMap {
 }
 
 export type BuddyEvent =
-  | { type: "xp_gained"; amount: number; newTotal: number }
   | { type: "stage_evolved"; stage: number; name: string }
   | { type: "skill_unlocked"; skillId: string; skillName: string }
   | { type: "petted" }

@@ -3,7 +3,7 @@ use axum::response::Result;
 use axum::extract::State;
 use hyper::{Body, Response, StatusCode};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+
 use std::sync::Arc;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -15,7 +15,7 @@ use crate::files_correction::get_project_dirs;
 use crate::yaml_configs::customization_registry::{
     load_merged_registry, load_registry_from_dir, invalidate_all_registry_caches, ConfigScope,
 };
-use crate::yaml_configs::customization_types::*;
+
 use crate::yaml_configs::project_configs_bootstrap::{
     global_configs_try_create_all, project_configs_ensure_dirs,
 };
@@ -104,31 +104,6 @@ async fn consume_draft_for_target(
     };
     svc.consume_validated_draft(draft_id, expected_kind, DraftTarget::Id(target_id))
         .map(|d| ConsumedDraft { draft_id: d.id })
-}
-
-async fn write_file_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    tokio::fs::create_dir_all(parent).await?;
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("config");
-    let tmp_path: PathBuf = parent.join(format!(".{}.{}.tmp", file_name, uuid::Uuid::new_v4()));
-    let write_result = async {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-            .await?;
-        file.write_all(content.as_bytes()).await?;
-        file.flush().await?;
-        tokio::fs::rename(&tmp_path, path).await
-    }
-    .await;
-    if write_result.is_err() {
-        let _ = tokio::fs::remove_file(&tmp_path).await;
-    }
-    write_result
 }
 
 async fn invalidate_registry_cache(gcx: Arc<GlobalContext>, scope: ConfigScope) {
@@ -478,6 +453,8 @@ pub async fn handle_v1_customization_get(
 
 #[derive(Deserialize)]
 pub struct SaveConfigRequest {
+    #[serde(default)]
+    pub expected_version: Option<String>,
     pub config: serde_json::Value,
     #[serde(default)]
     pub scope: Option<String>,
@@ -562,7 +539,36 @@ pub async fn handle_v1_customization_save(
         let _ = tokio::fs::create_dir_all(parent).await;
     }
 
-    let yaml_str = match serde_yaml::to_string(&request.config) {
+    let previous = match tokio::fs::read(&file_path).await {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
+    if let Some(expected) = &request.expected_version {
+        let actual = previous
+            .as_ref()
+            .map(|bytes| crate::buddy::resources::customization::digest(bytes));
+        if actual.as_ref() != Some(expected) {
+            return json_error(StatusCode::CONFLICT, "customization version changed");
+        }
+    }
+    let config = match previous.as_ref() {
+        Some(bytes) => {
+            let original = match serde_yaml::from_slice::<serde_json::Value>(bytes) {
+                Ok(value) => value,
+                Err(error) => return json_error(StatusCode::BAD_REQUEST, &error.to_string()),
+            };
+            match crate::yaml_configs::customization_service::merge_preserving_unknown(
+                &original,
+                &request.config,
+            ) {
+                Ok(value) => value,
+                Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
+            }
+        }
+        None => request.config.clone(),
+    };
+    let yaml_str = match serde_yaml::to_string(&config) {
         Ok(s) => s,
         Err(e) => {
             return json_error(
@@ -572,11 +578,31 @@ pub async fn handle_v1_customization_save(
         }
     };
 
-    if let Err(e) = write_file_atomic(&file_path, &yaml_str).await {
-        return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("write error: {}", e),
-        );
+    let expected = previous
+        .as_ref()
+        .map(|bytes| crate::yaml_configs::customization_service::version(bytes));
+    let target = file_path.clone();
+    let saved = tokio::task::spawn_blocking(move || {
+        crate::yaml_configs::customization_service::replace_checked(
+            &target,
+            expected.as_deref(),
+            yaml_str.as_bytes(),
+        )
+    })
+    .await;
+    match saved {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            return json_error(
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                },
+                &error.to_string(),
+            )
+        }
+        Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     }
 
     invalidate_registry_cache(gcx.clone(), scope).await;
@@ -841,76 +867,6 @@ pub async fn handle_v1_customization_delete(
     json_response(StatusCode::OK, &response)
 }
 
-fn validate_kind(kind: &str) -> std::result::Result<&str, String> {
-    match kind {
-        "modes" | "subagents" | "delegates" | "toolbox_commands" | "code_lens" => Ok(kind),
-        "hooks" => Err("hooks are managed by ext hooks routes".to_string()),
-        _ => Err(format!("invalid kind: {}", kind)),
-    }
-}
-
-fn validate_id(id: &str) -> std::result::Result<(), String> {
-    if id.is_empty() {
-        return Err("id cannot be empty".to_string());
-    }
-    if id.contains('/') || id.contains('\\') || id.contains("..") {
-        return Err("id contains invalid characters".to_string());
-    }
-    if !id
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
-    {
-        return Err(
-            "id must contain only lowercase letters, digits, underscore, or hyphen".to_string(),
-        );
-    }
-    Ok(())
-}
-
-const MAX_SUPPORTED_SCHEMA_VERSION: u32 = 100;
-
-fn validate_config(
-    kind: &str,
-    config: &serde_json::Value,
-    expected_id: &str,
-) -> std::result::Result<(), String> {
-    let kind = normalize_kind(kind);
-    let config_id = config.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    if config_id != expected_id {
-        return Err(format!(
-            "config id '{}' does not match expected '{}'",
-            config_id, expected_id
-        ));
-    }
-
-    let schema_version = config
-        .get("schema_version")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| "missing or invalid schema_version field".to_string())?;
-    if schema_version == 0 || schema_version > MAX_SUPPORTED_SCHEMA_VERSION as u64 {
-        return Err(format!(
-            "schema_version {} is not supported (must be 1..={})",
-            schema_version, MAX_SUPPORTED_SCHEMA_VERSION
-        ));
-    }
-
-    let json_str = serde_json::to_string(config).map_err(|e| e.to_string())?;
-    match kind {
-        "modes" => {
-            serde_json::from_str::<ModeConfig>(&json_str).map_err(|e| e.to_string())?;
-        }
-        "subagents" => {
-            serde_json::from_str::<SubagentConfig>(&json_str).map_err(|e| e.to_string())?;
-        }
-        "toolbox_commands" => {
-            serde_json::from_str::<ToolboxCommandConfig>(&json_str).map_err(|e| e.to_string())?;
-        }
-        "code_lens" => {
-            serde_json::from_str::<CodeLensConfig>(&json_str).map_err(|e| e.to_string())?;
-        }
-        _ => {
-            return Err(format!("unknown kind: {}", kind));
-        }
-    }
-    Ok(())
-}
+pub(crate) use crate::yaml_configs::customization_service::{
+    validate_kind, validate_id, validate_config,
+};

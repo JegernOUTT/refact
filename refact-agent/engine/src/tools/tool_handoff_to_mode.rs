@@ -778,6 +778,8 @@ async fn finalize_handoff_inner(
 
     let snapshot_task_meta = task_meta.clone();
     let snapshot = TrajectorySnapshot {
+        pending_browser_decision: None,
+        pending_questions: Vec::new(),
         goal_verification_blocked_until_ms: None,
         goal: transferred_goal.target_goal.clone(),
         goal_ledger: transferred_goal

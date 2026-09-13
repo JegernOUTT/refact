@@ -111,11 +111,8 @@ impl BuddyJob for BuddyHandbookDistillerJob {
         let target_path = handbook_target_path(&tag);
         let draft = {
             let buddy_arc = gcx.buddy.buddy.clone();
-            let mut lock = buddy_arc.lock().await;
-            let Some(svc) = lock.as_mut() else {
-                return BuddyJobResult::default();
-            };
-            match svc.create_draft(
+            match crate::buddy::actor::BuddyService::create_draft_durable(
+                &buddy_arc,
                 crate::buddy::types::DraftKind::PulseReport,
                 format!("Handbook: {}", tag),
                 content,
@@ -124,7 +121,9 @@ impl BuddyJob for BuddyHandbookDistillerJob {
                     cards.len(),
                     tag
                 ),
-            ) {
+            )
+            .await
+            {
                 Ok(draft) => draft,
                 Err(err) => {
                     tracing::warn!("buddy: handbook draft failed: {}", err);

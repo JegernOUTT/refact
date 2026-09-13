@@ -46,6 +46,7 @@ import {
     OpenFilePayload,
     ideTaskDone,
     ideAskQuestions,
+    sanitizeEngineBaseUrl,
     ideSwitchToThread
 } from "refact-chat-js/dist/events";
 import { diff_paste_back } from "./chatTab";
@@ -61,6 +62,7 @@ import {
 import { backendConfigForStatus, effectiveLspPortForStatus, type RefactBackendConfig } from "./backendStatus";
 import { webviewEndpointConfig } from "./sidebarConfig";
 import { getIdeLogSnapshot } from "./ideLogBuffer";
+import { HostDecisionNotifications } from "./hostDecisions";
 
 const OPEN_CHAT_IN_BROWSER_EVENT = "ide/openChatInBrowser";
 
@@ -118,7 +120,11 @@ export class PanelWebview implements vscode.WebviewViewProvider {
     public chat: chatTab.ChatTab | null = null;
     public statistic: statisticTab.StatisticTab | null = null;
     public tool_edit_in_progress: null | {chatId: string, toolCallId?: string} = null;
-    private pendingNotifications: number = 0;
+    private readonly decisionNotifications = new HostDecisionNotifications({
+        badge: count => this.updateBadge(count),
+        notify: message => vscode.window.showInformationMessage(message, "Open Chat"),
+        openChat: chatId => this.switchToChat(chatId),
+    });
     private chatReadyGeneration: number = 0;
     private isChatReady: boolean = false;
     private queuedWebviewMessages: QueuedWebviewMessage[] = [];
@@ -379,6 +385,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
     }
 
     handleSettingsChange() {
+        this.bindDecisionScope();
         const vecdb =
             vscode.workspace
                 .getConfiguration()
@@ -440,6 +447,8 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         this._view = webviewView;
         this.cancel_token = cancel_token;
         this.nextWebviewGeneration();
+        this.bindDecisionScope();
+        this.decisionNotifications.reconnect();
 
         webviewView.webview.options = {
             enableScripts: true,
@@ -456,7 +465,14 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         });
 
         webviewView.webview.onDidReceiveMessage(async (data) => {
+            if (this._view !== webviewView) { return; }
             this.handleEvents(data);
+        });
+        webviewView.onDidDispose(() => {
+            if (this._view === webviewView) {
+                this._view = undefined;
+                this.decisionNotifications.reconnect();
+            }
         });
     }
 
@@ -708,6 +724,10 @@ export class PanelWebview implements vscode.WebviewViewProvider {
 
         if(ideAskQuestions.match(e)) {
             return this.handleAskQuestions(e.payload);
+        }
+        if(e?.type === "ide/decisionResolved") {
+            this.bindDecisionScope();
+            return this.decisionNotifications.resolved(e.payload);
         }
         // if(ideOpenChatInNewTab.match(e)) {
         //     return this.handleOpenInTab(e.payload);
@@ -1006,7 +1026,6 @@ export class PanelWebview implements vscode.WebviewViewProvider {
     }
 
     private updateBadge(count: number) {
-        this.pendingNotifications = count;
         if (this._view) {
             this._view.badge = count > 0 ? { value: count, tooltip: `${count} pending` } : undefined;
         }
@@ -1018,45 +1037,22 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         this.postMessageToChat(action);
     }
 
-    async handleTaskDone(payload: {
-        chatId: string;
-        toolCallId: string;
-        summary: string;
-        knowledgePath?: string;
-    }) {
-        const message = payload.summary || "Task completed";
-        vscode.window.showInformationMessage(message, "Open Chat").then(selection => {
-            if (selection === "Open Chat") {
-                this.switchToChat(payload.chatId);
-            }
-        });
+    async handleTaskDone(payload: unknown) {
+        this.bindDecisionScope();
+        this.decisionNotifications.taskDone(payload);
     }
 
-    async handleAskQuestions(payload: {
-        chatId: string;
-        toolCallId: string;
-        questions: Array<{
-            id: string;
-            type: string;
-            text: string;
-            options?: string[];
-        }>;
-    }) {
-        const questions = Array.isArray(payload.questions) ? payload.questions : [];
-        const count = questions.length;
-        const text = count === 0 ? "your input" : count === 1 ? "1 question" : `${count} questions`;
-        
-        this.updateBadge(this.pendingNotifications + 1);
-        
-        vscode.window.showInformationMessage(
-            `AI needs ${text} to continue`,
-            "Open Chat"
-        ).then(selection => {
-            if (selection === "Open Chat") {
-                this.updateBadge(Math.max(0, this.pendingNotifications - 1));
-                this.switchToChat(payload.chatId);
-            }
-        });
+    private bindDecisionScope() {
+        const endpoint = sanitizeEngineBaseUrl(global.rust_binary_blob?.rust_url?.());
+        this.decisionNotifications.bind(endpoint ? {
+            projectRoot: this.getWorkspaceRoots()[0] ?? "",
+            endpointIdentity: endpoint,
+        } : undefined);
+    }
+
+    async handleAskQuestions(payload: unknown) {
+        this.bindDecisionScope();
+        this.decisionNotifications.ask(payload);
     }
 
     private filePathToUri(fileName: string): vscode.Uri | undefined {
@@ -1330,6 +1326,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
     }
 
     dispose() {
+        this.decisionNotifications.dispose();
         vscode.commands.executeCommand("setContext", "refactai.chat_page", "");
         this._disposables.forEach(d => d.dispose());
     }

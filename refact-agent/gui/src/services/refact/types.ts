@@ -64,6 +64,33 @@ export type AgentQuestion = {
   answered_at?: string | null;
 };
 
+export type PendingQuestionType =
+  | "yes_no"
+  | "single_select"
+  | "multi_select"
+  | "free_text";
+
+export type PendingQuestion = {
+  id: string;
+  type: PendingQuestionType;
+  text: string;
+  options?: string[];
+};
+
+export type PendingQuestionAnswer = {
+  id: string;
+  answer: boolean | string | string[];
+};
+
+export type PendingQuestionSet = {
+  tool_call_id: string;
+  questions: PendingQuestion[];
+  asked_at_ms: number;
+  status: "pending" | "answered" | "cancelled";
+  answers?: PendingQuestionAnswer[];
+  resolution_id?: string;
+};
+
 export type BackgroundAgentStatus =
   | "queued"
   | "running"

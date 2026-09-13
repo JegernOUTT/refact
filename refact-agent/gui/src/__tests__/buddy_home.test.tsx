@@ -8,9 +8,10 @@ import {
 import { http, HttpResponse } from "msw";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 import { Provider } from "react-redux";
+import { QueryStatus } from "@reduxjs/toolkit/query";
 import { Theme } from "@radix-ui/themes";
 import { server } from "../utils/mockServer";
 import { setUpStore } from "../app/store";
@@ -30,6 +31,7 @@ import { BuddyOpportunitiesFeed } from "../features/Buddy/BuddyOpportunitiesFeed
 import { BuddyWorkshop } from "../features/Buddy/BuddyWorkshop";
 import { BuddyDraftPreview } from "../features/Buddy/BuddyDraftPreview";
 import { BuddySettingsPanel } from "../features/Buddy/BuddySettingsPanel";
+import { BuddyChatCompanion } from "../features/Buddy/BuddyChatCompanion";
 import { BuddyPanel } from "../features/Buddy/BuddyPanel";
 import { BuddyDashboardScene } from "../features/Buddy/BuddyDashboardScene";
 import { BuddyHome } from "../features/Buddy/BuddyHome";
@@ -66,6 +68,281 @@ import type {
   BuddySpeechItem,
 } from "../features/Buddy/types";
 import type React from "react";
+
+const operatorStatus = (mode: "disabled" | "enabled" | "unavailable") => ({
+  schema_version: 1,
+  mode,
+  features: {
+    storage: mode !== "disabled",
+    actions: false,
+    supervision: false,
+    improvement: false,
+    editorial: false,
+  },
+  project:
+    mode === "enabled"
+      ? { project_id: "fixture", canonical_root: "/fixture" }
+      : null,
+  worker:
+    mode === "enabled"
+      ? { worker_id: "worker", engine_instance_id: "engine", epoch: 1 }
+      : null,
+});
+
+// Existing legacy tests explicitly exercise the disabled compatibility contract.
+beforeEach(() => {
+  server.use(
+    http.get("*/v1/buddy/operator/status", () =>
+      HttpResponse.json(operatorStatus("disabled")),
+    ),
+  );
+});
+
+describe("BuddyHome single work authority", () => {
+  it.each(["enabled", "unavailable", "disabled"] as const)(
+    "gates exact producer controls on Panel, Companion and SpeechCloud when %s",
+    async (mode) => {
+      server.use(
+        http.get("*/v1/buddy/operator/status", () =>
+          HttpResponse.json(operatorStatus(mode)),
+        ),
+        http.get("*/v1/buddy/opportunities", () =>
+          HttpResponse.json({ opportunities: [] }),
+        ),
+      );
+      const controls = [
+        {
+          id: "worktree-pulse",
+          label: "Create Worktrees pulse report",
+          action: "create_worktrees_pulse",
+          style: "secondary" as const,
+        },
+        {
+          id: "dismiss-worktree-cleanup",
+          label: "Dismiss proposal",
+          action: "dismiss_suggestion",
+          action_param: "worktree_cleanup",
+          style: "ghost" as const,
+        },
+        {
+          id: "review-worktree-cleanup",
+          label: "Review cleanup candidates",
+          action: "review_worktree_cleanup",
+          style: "primary" as const,
+        },
+      ];
+      for (const Surface of [
+        () => <BuddyPanel />,
+        () => <BuddyChatCompanion chatId="producer-fixture" />,
+        () => <BuddySpeechCloud />,
+      ]) {
+        const store = setUpStore({ ...CONFIG_STATE });
+        store.dispatch(
+          setBuddySnapshot(
+            makeSnapshot(undefined, {
+              active_speech: makeSpeech({
+                text: "Saved cleanup advice",
+                created_at: new Date().toISOString(),
+                persistent: true,
+                controls,
+              }),
+            }),
+          ),
+        );
+        const view = render(<Surface />, { store });
+        expect(
+          await screen.findByText("Review cleanup candidates"),
+        ).toBeInTheDocument();
+        if (mode === "disabled") {
+          expect(
+            await screen.findByText("Create Worktrees pulse report"),
+          ).toBeInTheDocument();
+          expect(screen.getByText("Dismiss proposal")).toBeInTheDocument();
+        } else {
+          await waitFor(() =>
+            expect(
+              Object.values(store.getState().buddyApi.queries).some(
+                (query) =>
+                  query?.endpointName === "getBuddyOperatorStatus" &&
+                  query.status === QueryStatus.fulfilled,
+              ),
+            ).toBe(true),
+          );
+          expect(
+            screen.queryByText("Create Worktrees pulse report"),
+          ).not.toBeInTheDocument();
+          expect(
+            screen.queryByText("Dismiss proposal"),
+          ).not.toBeInTheDocument();
+        }
+        // The canvas bubble animates text via requestAnimationFrame (not driven
+        // by this fixture); the advisory source must remain intact regardless.
+        expect(store.getState().buddy.snapshot?.active_speech?.text).toBe(
+          "Saved cleanup advice",
+        );
+        view.unmount();
+      }
+    },
+  );
+  it("opens the durable proposal when its legacy editing draft has expired", async () => {
+    const project = operatorStatus("enabled").project;
+    const work = {
+      schema_version: 1,
+      id: "saved-proposal",
+      project,
+      subject: {
+        resource_kind: "legacy_draft",
+        resource_id: "expired",
+        version: "1",
+      },
+      kind: "proposal",
+      title: "Preserved proposal",
+      state: "needs_attention",
+      native_sources: [],
+      current_artifact_id: "saved-report",
+      current_artifact_revision: 1,
+      last_material_change_at: "2026-01-01T00:00:00Z",
+    };
+    const record = (value: unknown) => ({ value, revision: 1, change_seq: 1 });
+    const envelope = (data: unknown) => ({
+      schema_version: 1,
+      project,
+      data,
+      next_cursor: null,
+    });
+    let legacyRequests = 0;
+    let resolved = 0;
+    server.use(
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get("*/v1/buddy/operator/legacy-drafts/expired/work", () => {
+        resolved++;
+        return HttpResponse.json(envelope(record(work)));
+      }),
+      http.get("*/v1/buddy/work", () => HttpResponse.json(envelope([]))),
+      http.get("*/v1/buddy/work/saved-proposal", () =>
+        HttpResponse.json(envelope(record(work))),
+      ),
+      http.get("*/v1/buddy/artifacts/saved-report", () =>
+        HttpResponse.json(
+          envelope(
+            record({
+              schema_version: 1,
+              artifact_id: "saved-report",
+              revision: 1,
+              project,
+              source_run_ids: [],
+              title: "Retained proposal report",
+              conclusion: "The proposal still needs a decision.",
+              delta: "",
+              body: "Durable content survives the editing session.",
+              uncertainty: null,
+              proposed_action_ids: [],
+              evidence: [],
+              provenance: {
+                source_run_ids: [],
+                evidence_refs: [],
+                contains_untrusted_source: false,
+              },
+            }),
+          ),
+        ),
+      ),
+      http.get("*/v1/buddy/work/saved-proposal/read", () =>
+        HttpResponse.json(envelope(null)),
+      ),
+      http.get("*/v1/buddy/work/saved-proposal/snooze", () =>
+        HttpResponse.json(envelope(null)),
+      ),
+      http.get("*/v1/buddy/work/saved-proposal/actions", () =>
+        HttpResponse.json(envelope([])),
+      ),
+      http.get("*/v1/buddy/work/saved-proposal/outcomes", () =>
+        HttpResponse.json(envelope([])),
+      ),
+      http.get("*/v1/buddy/artifacts/saved-report/revisions", () =>
+        HttpResponse.json(envelope([])),
+      ),
+      http.all("*/v1/buddy/drafts/expired", () => {
+        legacyRequests++;
+        return new HttpResponse(null, { status: 404 });
+      }),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+    store.dispatch(push({ name: "buddy", draftId: "expired" }));
+    render(<BuddyHome />, { store });
+    expect(
+      await screen.findByText("Retained proposal report"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Durable content survives the editing session."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("The proposal still needs a decision."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Dismiss draft" }),
+    ).not.toBeInTheDocument();
+    expect(resolved).toBe(1);
+    expect(legacyRequests).toBe(0);
+  });
+  it.each(["enabled", "unavailable"] as const)(
+    "does not mount legacy lifecycle producers when %s",
+    async (mode) => {
+      let legacyRequests = 0;
+      let workRequests = 0;
+      server.use(
+        http.get("*/v1/buddy/operator/status", () =>
+          HttpResponse.json(operatorStatus(mode)),
+        ),
+        http.get("*/v1/buddy/work", () => {
+          workRequests += 1;
+          return HttpResponse.json({
+            schema_version: 1,
+            project: operatorStatus("enabled").project,
+            data: [],
+            next_cursor: null,
+          });
+        }),
+        http.get("*/v1/buddy/briefing", () => {
+          legacyRequests += 1;
+          return HttpResponse.json({});
+        }),
+        http.get("*/v1/buddy/drafts/expired", () => {
+          legacyRequests += 1;
+          return new HttpResponse(null, { status: 404 });
+        }),
+      );
+      const store = setUpStore({ ...CONFIG_STATE });
+      store.dispatch(setBuddySnapshot(makeSnapshot()));
+      store.dispatch(push({ name: "buddy", draftId: "expired" }));
+      const { user } = render(<BuddyHome />, { store });
+      if (mode === "enabled")
+        await screen.findByRole("heading", { name: "Buddy Desk" });
+      else await screen.findByRole("button", { name: "Retry work authority" });
+      for (const name of [
+        "Opportunities",
+        "Activity",
+        "Pulse",
+        "Recent errors",
+      ]) {
+        await user.click(screen.getByRole("tab", { name }));
+        expect(screen.queryByTestId("buddy-opportunities-feed")).toBeNull();
+        expect(screen.queryByTestId("buddy-briefing-card")).toBeNull();
+        expect(
+          screen.queryByRole("button", { name: "Dismiss draft" }),
+        ).toBeNull();
+      }
+      expect(
+        screen.getByText(/Draft editing sessions may expire/),
+      ).toBeTruthy();
+      expect(legacyRequests).toBe(0);
+      expect(workRequests).toBe(mode === "enabled" ? 1 : 0);
+    },
+  );
+});
 
 vi.mock("../features/Buddy/BuddyCharacter", async () => {
   const ReactModule = await vi.importActual<typeof import("react")>("react");
@@ -730,7 +1007,7 @@ describe("BuddyHome_renders_all_sections", () => {
 
     try {
       render(<BuddyHome />, { store });
-      const world = await screen.findByTestId("buddy-world");
+      const world = await screen.findByTestId("buddy-presence");
       const dismissButton = within(world)
         .getAllByRole("button", { hidden: true })
         .find((button) => button.textContent === "Shoo");
@@ -753,6 +1030,76 @@ describe("BuddyHome_renders_all_sections", () => {
       expect(unhandled).not.toHaveBeenCalled();
     } finally {
       window.removeEventListener("unhandledrejection", unhandled);
+      vi.useRealTimers();
+    }
+  });
+
+  it("failed hero opportunity action stays unseen and prevents duplicate requests", async () => {
+    // Opportunity speech intentionally stays silent in some 30-second buckets.
+    // Fix only the wall clock to a speaking bucket; keep request timers real.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2024-01-01T12:00:00Z"));
+    try {
+      const opportunity = makeOpportunity({
+        id: "hero-failed-action",
+        proposed_actions: [{ kind: "open_page", page: { type: "providers" } }],
+      });
+      let calls = 0;
+      let finish: (() => void) | undefined;
+      const responseReady = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      server.use(
+        http.get("*/v1/buddy/opportunities", () =>
+          HttpResponse.json({ opportunities: [opportunity] }),
+        ),
+        http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
+        http.get("*/v1/buddy/briefing", () => HttpResponse.json(null)),
+        http.get("*/v1/stats/llm/summary", () =>
+          HttpResponse.json({ totals: {} }),
+        ),
+        http.get("*/v1/setup/status", () =>
+          HttpResponse.json({ configured: true }),
+        ),
+        http.post("*/v1/buddy/opportunities/:id/accept", async () => {
+          calls += 1;
+          await responseReady;
+          return HttpResponse.json(
+            { detail: "hero action offline" },
+            { status: 503 },
+          );
+        }),
+      );
+      const store = setUpStore(CONFIG_STATE);
+      store.dispatch(
+        setBuddySnapshot(
+          makeSnapshot(makePulse(), {
+            opportunities: [opportunity],
+            runtime_queue: [],
+          }),
+        ),
+      );
+      render(<BuddyHome />, { store });
+      const world = await screen.findByTestId("buddy-presence");
+      const button = within(world)
+        .getAllByRole("button", { hidden: true })
+        .find((candidate) => candidate.textContent === "Open Providers");
+      if (!button) throw new Error("Expected hero opportunity control");
+      fireEvent.click(button);
+      fireEvent.click(button);
+      await waitFor(() => expect(calls).toBe(1));
+      finish?.();
+      await waitFor(() =>
+        expect(store.getState().buddy.activeSpeech?.text).toContain(
+          "hero action offline",
+        ),
+      );
+      expect(selectSeenNotificationIds(store.getState())).not.toHaveProperty(
+        `opportunity-${opportunity.id}`,
+      );
+      expect(selectHomeSnoozedUntil(store.getState())).toBeNull();
+      expect(calls).toBe(1);
+    } finally {
       vi.useRealTimers();
     }
   });
@@ -2279,7 +2626,7 @@ describe("BuddyWorld_dynamic_environment", () => {
 
   it("honors director intent duration before replacing it", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2024-01-01T14:00:00Z"));
+    vi.setSystemTime(new Date("2024-01-01T14:00:00"));
     const quietPulse = makePulse({
       providers: { defaults_ok: true, broken_refs: 0, quota_warnings: 0 },
       diagnostics: { last_hour: 0, top_error_types: [] },
@@ -2332,7 +2679,7 @@ describe("BuddyWorld_dynamic_environment", () => {
       );
 
       await vi.advanceTimersByTimeAsync(7_100);
-      vi.setSystemTime(new Date("2024-01-01T14:00:07.101Z"));
+      vi.setSystemTime(new Date("2024-01-01T14:00:07.101"));
       rerender(
         <BuddyWorld
           palette={PALETTES[0]}
@@ -2344,7 +2691,7 @@ describe("BuddyWorld_dynamic_environment", () => {
           activeQuest={null}
           activeSpeech={null}
           setupNeeded={false}
-          now={new Date("2024-01-01T14:00:07.101Z")}
+          now={new Date("2024-01-01T14:00:07.101")}
           onCanvasEvent={vi.fn()}
           onCare={vi.fn()}
           onOpenPage={vi.fn()}
@@ -2359,7 +2706,7 @@ describe("BuddyWorld_dynamic_environment", () => {
         "rest_home",
       );
 
-      vi.setSystemTime(new Date("2024-01-01T14:00:12.101Z"));
+      vi.setSystemTime(new Date("2024-01-01T14:00:12.101"));
       rerender(
         <BuddyWorld
           palette={PALETTES[0]}
@@ -2371,7 +2718,7 @@ describe("BuddyWorld_dynamic_environment", () => {
           activeQuest={null}
           activeSpeech={null}
           setupNeeded={false}
-          now={new Date("2024-01-01T14:00:12.101Z")}
+          now={new Date("2024-01-01T14:00:12.101")}
           onCanvasEvent={vi.fn()}
           onCare={vi.fn()}
           onOpenPage={vi.fn()}
@@ -2922,6 +3269,10 @@ describe("buildBuddySceneSpeech", () => {
 });
 
 describe("BuddySettingsPanel_autosave", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("toggling a switch immediately sends partial patch to server", async () => {
     let capturedBody: unknown;
     server.use(
@@ -3149,7 +3500,7 @@ describe("BuddySettingsPanel_autosave", () => {
 
       await vi.advanceTimersByTimeAsync(750);
 
-      await waitFor(() => {
+      await vi.waitFor(() => {
         expect(capturedBody).toEqual({
           personality_prompt: "Be more chaotic",
         });
@@ -3221,7 +3572,7 @@ describe("BuddySettingsPanel_autosave", () => {
 
       await vi.advanceTimersByTimeAsync(750);
 
-      await waitFor(() => {
+      await vi.waitFor(() => {
         expect(capturedBodies).toEqual([{ clear_personality_prompt: true }]);
       });
     } finally {
@@ -3316,7 +3667,7 @@ describe("BuddySettingsPanel_autosave", () => {
 
       await vi.advanceTimersByTimeAsync(750);
 
-      await waitFor(() => {
+      await vi.waitFor(() => {
         expect(capturedBodies).toEqual([
           { personality_prompt: "Unsaved local prompt" },
         ]);
@@ -3923,7 +4274,14 @@ describe("BuddyPanel_opportunity_notifications", () => {
   it("renders unread opportunities as Buddy speech controls without a badge", async () => {
     server.use(
       http.get("*/v1/buddy/opportunities", () =>
-        HttpResponse.json({ opportunities: [] }),
+        HttpResponse.json({
+          opportunities: [
+            makeOpportunity({
+              status: "new",
+              proposed_actions: [{ kind: "dismiss" }],
+            }),
+          ],
+        }),
       ),
     );
 

@@ -353,8 +353,25 @@ mod tests {
             .with_timezone(&Utc)
     }
 
+    #[test]
+    fn editorial_delivery_marker_is_additive_and_survives_wire_roundtrip() {
+        let mut encoded = serde_json::to_value(speech("fixture")).unwrap();
+        encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("editorial_delivery_required");
+        let legacy: BuddySpeechItem = serde_json::from_value(encoded).unwrap();
+        assert!(!legacy.editorial_delivery_required);
+        let mut gated = legacy;
+        gated.editorial_delivery_required = true;
+        let decoded: BuddySpeechItem =
+            serde_json::from_value(serde_json::to_value(gated).unwrap()).unwrap();
+        assert!(decoded.editorial_delivery_required);
+    }
+
     fn speech(id: &str) -> BuddySpeechItem {
         BuddySpeechItem {
+            editorial_delivery_required: false,
             id: id.to_string(),
             text: id.to_string(),
             mood: "happy".to_string(),

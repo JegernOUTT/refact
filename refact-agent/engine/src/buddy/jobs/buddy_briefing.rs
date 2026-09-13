@@ -32,7 +32,17 @@ impl BuddyJob for BuddyBriefingJob {
         false
     }
 
-    async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
+    async fn should_run(&self, gcx: AppState, ctx: &BuddyJobContext) -> bool {
+        if gcx
+            .buddy
+            .buddy
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|svc| svc.operator_features.storage)
+        {
+            return false;
+        }
         if chrono::Local::now().hour() < BRIEFING_READY_HOUR {
             return false;
         }
@@ -40,6 +50,16 @@ impl BuddyJob for BuddyBriefingJob {
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
+        if gcx
+            .buddy
+            .buddy
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|svc| svc.operator_features.storage)
+        {
+            return BuddyJobResult::default();
+        }
         let receipts = crate::buddy::receipts::load_receipts(&ctx.project_root).await;
         let snapshot = {
             let buddy_arc = gcx.buddy.buddy.clone();

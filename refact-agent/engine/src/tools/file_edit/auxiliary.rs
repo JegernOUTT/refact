@@ -86,6 +86,7 @@ pub async fn check_scope_guard(
 ) -> Result<(), String> {
     let (gcx, task_id, card_id) = {
         let ccx_lock = ccx.lock().await;
+        ccx_lock.check_native_edit_scope(edit_path)?;
         let meta = match ccx_lock.task_meta.as_ref() {
             Some(meta) if meta.role == "agents" => meta.clone(),
             _ => return Ok(()),
@@ -1850,6 +1851,79 @@ mod tests {
                 "planner",
             )
             .await;
+            fs::write(f.root.join("src/outside.rs"), "old\n").unwrap();
+
+            check_scope_guard(&ccx, &f.root.join("src/outside.rs"))
+                .await
+                .unwrap();
+        }
+
+        async fn native_scope_ccx(
+            f: &Fixture,
+            chat_id: &str,
+            worktree_kind: &str,
+        ) -> Arc<AMutex<AtCommandsContext>> {
+            let mut worktree = f.worktree.clone();
+            worktree.kind = worktree_kind.to_string();
+            Arc::new(AMutex::new(
+                AtCommandsContext::new_from_app(
+                    crate::app_state::AppState::from_gcx(f.gcx.clone()).await,
+                    4096,
+                    20,
+                    false,
+                    Vec::new(),
+                    chat_id.to_string(),
+                    None,
+                    "model".to_string(),
+                    None,
+                    Some(worktree),
+                )
+                .await,
+            ))
+        }
+
+        #[tokio::test]
+        async fn native_edit_scope_fails_closed_for_supervised_chat_without_live_grant() {
+            let f = fixture().await;
+            let ccx = native_scope_ccx(&f, "subchat-supervised-unbound", "task_agent").await;
+            fs::write(f.root.join("src/allowed.rs"), "old\n").unwrap();
+            fs::write(f.root.join("src/allowed_test.rs"), "old\n").unwrap();
+
+            for path in ["src/allowed.rs", "src/allowed_test.rs"] {
+                let error = check_scope_guard(&ccx, &f.root.join(path))
+                    .await
+                    .unwrap_err();
+                assert!(
+                    error.contains("supervised edit authority is unavailable"),
+                    "{path}: {error}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn native_edit_scope_fails_closed_in_supervised_worktree_without_live_grant() {
+            let f = fixture().await;
+            let ccx = native_scope_ccx(
+                &f,
+                "chat",
+                crate::buddy::supervision_authority::SUPERVISED_WORKTREE_KIND,
+            )
+            .await;
+            fs::write(f.root.join("src/allowed.rs"), "old\n").unwrap();
+
+            let error = check_scope_guard(&ccx, &f.root.join("src/allowed.rs"))
+                .await
+                .unwrap_err();
+            assert!(
+                error.contains("supervised edit authority is unavailable"),
+                "{error}"
+            );
+        }
+
+        #[tokio::test]
+        async fn native_edit_scope_leaves_unsupervised_subchat_untouched() {
+            let f = fixture().await;
+            let ccx = native_scope_ccx(&f, "subchat-plain", "subagent").await;
             fs::write(f.root.join("src/outside.rs"), "old\n").unwrap();
 
             check_scope_guard(&ccx, &f.root.join("src/outside.rs"))

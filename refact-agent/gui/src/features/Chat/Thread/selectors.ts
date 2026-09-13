@@ -39,6 +39,7 @@ import type { WorktreeMeta } from "../../../services/refact/worktrees";
 import type {
   AgentQuestion,
   BackgroundAgentSummary,
+  PendingQuestionSet,
 } from "../../../services/refact/types";
 import type {
   CompressionPhase,
@@ -207,6 +208,30 @@ export const selectCurrentRuntime = (
 
 export const selectThreadById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.thread ?? null;
+
+const EMPTY_PENDING_QUESTION_SETS: PendingQuestionSet[] = [];
+
+export const selectPendingQuestionSetsById = (
+  state: RootState,
+  chatId: string,
+): PendingQuestionSet[] =>
+  state.chat.threads[chatId]?.thread.pending_questions ??
+  EMPTY_PENDING_QUESTION_SETS;
+
+export const selectHasPendingQuestionsCapabilityById = (
+  state: RootState,
+  chatId: string,
+): boolean =>
+  state.chat.threads[chatId]?.thread.pending_questions !== undefined;
+
+export const selectCommandAckByThreadAndId = (
+  state: RootState,
+  chatId: string,
+  clientRequestId: string | null,
+) =>
+  clientRequestId
+    ? state.chat.threads[chatId]?.command_acks?.[clientRequestId]
+    : undefined;
 
 export const selectBackgroundAgentsByThread = (
   state: RootState,

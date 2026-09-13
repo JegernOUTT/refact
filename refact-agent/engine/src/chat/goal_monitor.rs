@@ -873,6 +873,8 @@ mod tests {
     fn goal_monitor_does_not_fire_when_user_message_queued() {
         let (mut session, now) = old_idle_session();
         session.command_queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "queued-user".to_string(),
             priority: false,
             command: ChatCommand::UserMessage {
@@ -1426,6 +1428,8 @@ mod tests {
     fn goal_monitor_pending_non_user_command_prevents_double_fire() {
         let (mut session, now) = old_idle_session();
         session.command_queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "queued-regenerate".to_string(),
             priority: true,
             command: ChatCommand::Regenerate {},

@@ -138,17 +138,23 @@ fn memory_ops_file_stamp_sync(project_root: &Path) -> Option<MemoryOpsFileStamp>
 }
 
 fn cached_memory_ops_state(
+    cache: &std::sync::Mutex<Vec<MemoryOpsCacheEntry>>,
     project_root: &Path,
     stamp: &MemoryOpsFileStamp,
 ) -> Option<MemoryOpsState> {
-    let mut cache = MEMORY_OPS_CACHE
+    let mut cache = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     memory_ops_cache_lookup(&mut cache, project_root, stamp)
 }
 
-fn store_memory_ops_state(project_root: &Path, stamp: MemoryOpsFileStamp, state: &MemoryOpsState) {
-    let mut cache = MEMORY_OPS_CACHE
+fn store_memory_ops_state(
+    cache: &std::sync::Mutex<Vec<MemoryOpsCacheEntry>>,
+    project_root: &Path,
+    stamp: MemoryOpsFileStamp,
+    state: &MemoryOpsState,
+) {
+    let mut cache = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     memory_ops_cache_store(&mut cache, project_root, stamp, state);
@@ -659,14 +665,14 @@ fn enqueue_memory_op_locked(
     let stamp = memory_ops_file_stamp_sync(project_root);
     let current = match stamp
         .as_ref()
-        .and_then(|stamp| cached_memory_ops_state(project_root, stamp))
+        .and_then(|stamp| cached_memory_ops_state(&MEMORY_OPS_CACHE, project_root, stamp))
     {
         Some(state) => state,
         None => {
             let (records, malformed_lines) = read_memory_ops_records_locked(lock, project_root)?;
             let state = MemoryOpsState::from_records_with_malformed(records, malformed_lines);
             if let Some(stamp) = memory_ops_file_stamp_sync(project_root) {
-                store_memory_ops_state(project_root, stamp, &state);
+                store_memory_ops_state(&MEMORY_OPS_CACHE, project_root, stamp, &state);
             }
             state
         }
@@ -708,7 +714,7 @@ fn enqueue_memory_op_locked(
         None => current.with_appended_record(replayed),
     };
     if let Some(stamp) = memory_ops_file_stamp_sync(project_root) {
-        store_memory_ops_state(project_root, stamp, &state);
+        store_memory_ops_state(&MEMORY_OPS_CACHE, project_root, stamp, &state);
     }
     Ok(state)
 }
@@ -750,10 +756,17 @@ pub async fn save_drafts(
 }
 
 pub async fn load_memory_ops(project_root: &Path) -> MemoryOpsState {
+    load_memory_ops_with_cache(project_root, &MEMORY_OPS_CACHE).await
+}
+
+async fn load_memory_ops_with_cache(
+    project_root: &Path,
+    cache: &std::sync::Mutex<Vec<MemoryOpsCacheEntry>>,
+) -> MemoryOpsState {
     let stamp = memory_ops_file_stamp(project_root).await;
     if let Some(state) = stamp
         .as_ref()
-        .and_then(|stamp| cached_memory_ops_state(project_root, stamp))
+        .and_then(|stamp| cached_memory_ops_state(cache, project_root, stamp))
     {
         return state;
     }
@@ -764,7 +777,7 @@ pub async fn load_memory_ops(project_root: &Path) -> MemoryOpsState {
     let state = MemoryOpsState::from_records_with_malformed(read.records, malformed_lines);
     if let Some(stamp) = stamp {
         if memory_ops_file_stamp(project_root).await.as_ref() == Some(&stamp) {
-            store_memory_ops_state(project_root, stamp, &state);
+            store_memory_ops_state(cache, project_root, stamp, &state);
         }
     }
     state
@@ -931,7 +944,7 @@ fn compact_memory_ops_locked(
 fn remember_compacted_file(project_root: &Path, state: &MemoryOpsState) {
     if let Some(stamp) = memory_ops_file_stamp_sync(project_root) {
         remember_compacted_len(project_root, stamp.len);
-        store_memory_ops_state(project_root, stamp, state);
+        store_memory_ops_state(&MEMORY_OPS_CACHE, project_root, stamp, state);
     }
 }
 
@@ -1778,6 +1791,46 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Injectable-cache twin of `load_memory_ops_keeps_two_roots_cached_simultaneously`:
+    /// entries are keyed by project root, so loading a second root neither
+    /// serves the first root's state for it nor evicts the first root while
+    /// the cache is under capacity.
+    async fn memory_ops_cache_keys_entries_by_project() {
+        let cache = std::sync::Mutex::new(Vec::new());
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let first_op = test_op("first-project", "first", MemoryOpStatus::Pending);
+        let second_op = test_op("second-project", "second", MemoryOpStatus::Approved);
+        write_memory_ops_records_for_test(first_dir.path(), vec![first_op.clone()]).await;
+        write_memory_ops_records_for_test(second_dir.path(), vec![second_op.clone()]).await;
+
+        let first = load_memory_ops_with_cache(first_dir.path(), &cache).await;
+        let stamp = memory_ops_file_stamp(first_dir.path()).await.unwrap();
+        assert_eq!(
+            cached_memory_ops_state(&cache, first_dir.path(), &stamp),
+            Some(first.clone())
+        );
+        assert!(cached_memory_ops_state(&cache, second_dir.path(), &stamp).is_none());
+        let second = load_memory_ops_with_cache(second_dir.path(), &cache).await;
+        assert_eq!(second.ops, vec![second_op.normalized()]);
+        let second_stamp = memory_ops_file_stamp(second_dir.path()).await.unwrap();
+        assert_eq!(
+            cached_memory_ops_state(&cache, second_dir.path(), &second_stamp),
+            Some(second.clone())
+        );
+        assert_eq!(
+            cached_memory_ops_state(&cache, first_dir.path(), &stamp),
+            Some(first.clone()),
+            "a second root must not evict the first while under capacity"
+        );
+        assert_eq!(
+            load_memory_ops_with_cache(first_dir.path(), &cache).await,
+            first
+        );
+        assert_eq!(first.ops, vec![first_op.normalized()]);
+    }
+
+    #[tokio::test]
     async fn enqueue_backs_off_when_compaction_cannot_shrink_the_queue() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1863,7 +1916,8 @@ mod tests {
         let state = enqueue_memory_op(root, incoming.clone()).await.unwrap();
 
         let stamp = memory_ops_file_stamp(root).await.unwrap();
-        let cached = cached_memory_ops_state(root, &stamp).expect("cache refreshed for new stamp");
+        let cached = cached_memory_ops_state(&MEMORY_OPS_CACHE, root, &stamp)
+            .expect("cache refreshed for new stamp");
         assert_eq!(cached, state);
         assert_eq!(
             state.ops,
@@ -2008,6 +2062,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_memory_ops_serves_unchanged_file_from_cache() {
+        let cache = std::sync::Mutex::new(Vec::new());
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let op = op_with_time(
@@ -2017,16 +2072,21 @@ mod tests {
             Utc::now(),
         );
         write_memory_ops_records_for_test(root, vec![op.clone()]).await;
-        let first = load_memory_ops(root).await;
+        let first = load_memory_ops_with_cache(root, &cache).await;
         assert_eq!(first.ops, vec![op.clone().normalized()]);
 
         let path = memory_ops_path(root);
         let stamp = memory_ops_file_stamp(root).await.unwrap();
-        let cached = cached_memory_ops_state(root, &stamp);
+        let cached = cached_memory_ops_state(&cache, root, &stamp);
         assert_eq!(cached.as_ref().map(|state| &state.ops), Some(&first.ops));
 
+        let mut cache_only = first.clone();
+        cache_only.malformed_lines = 7;
+        store_memory_ops_state(&cache, root, stamp, &cache_only);
+        assert_eq!(load_memory_ops_with_cache(root, &cache).await, cache_only);
+
         tokio::fs::write(&path, "not json\n").await.unwrap();
-        let reread = load_memory_ops(root).await;
+        let reread = load_memory_ops_with_cache(root, &cache).await;
         assert!(reread.ops.is_empty());
     }
 
@@ -2064,25 +2124,25 @@ mod tests {
 
         // The first root must survive the second root's load.
         assert_eq!(
-            cached_memory_ops_state(first_root, &first_stamp),
+            cached_memory_ops_state(&MEMORY_OPS_CACHE, first_root, &first_stamp),
             Some(first_state),
             "first root was evicted by a load for a different root"
         );
         assert_eq!(
-            cached_memory_ops_state(second_root, &second_stamp),
+            cached_memory_ops_state(&MEMORY_OPS_CACHE, second_root, &second_stamp),
             Some(second_state),
             "second root was not cached"
         );
 
         // And the two entries stay distinct rather than aliasing each other.
         assert_eq!(
-            cached_memory_ops_state(first_root, &first_stamp)
+            cached_memory_ops_state(&MEMORY_OPS_CACHE, first_root, &first_stamp)
                 .unwrap()
                 .ops,
             vec![first_op.normalized()]
         );
         assert_eq!(
-            cached_memory_ops_state(second_root, &second_stamp)
+            cached_memory_ops_state(&MEMORY_OPS_CACHE, second_root, &second_stamp)
                 .unwrap()
                 .ops,
             vec![second_op.normalized()]

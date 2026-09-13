@@ -30,6 +30,90 @@ use crate::worktrees::types::{
 
 const MAX_DIFF_SUMMARY_PATHSPECS: usize = 100;
 
+#[derive(Default)]
+struct SpawnOwners {
+    closing: bool,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    cancellations: Vec<std::sync::Weak<AtomicBool>>,
+}
+static SPAWN_OWNERS: std::sync::OnceLock<std::sync::Mutex<SpawnOwners>> =
+    std::sync::OnceLock::new();
+
+fn track_spawn_owner(
+    task: impl std::future::Future<Output = ()> + Send + 'static,
+    cleanup: bool,
+) -> Result<(), String> {
+    let mut owners = SPAWN_OWNERS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| "spawn owner unavailable")?;
+    owners.tasks.retain(|task| !task.is_finished());
+    if !cleanup && (owners.closing || owners.tasks.len() >= 64) {
+        return Err("spawn owner shutdown or capacity reached".into());
+    }
+    owners.tasks.push(tokio::spawn(task));
+    Ok(())
+}
+
+pub(crate) fn track_cancellable_spawn_owner(
+    task: impl std::future::Future<Output = ()> + Send + 'static,
+    cancel: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    let mut owners = SPAWN_OWNERS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| "spawn owner unavailable")?;
+    owners.tasks.retain(|task| !task.is_finished());
+    owners.cancellations.retain(|flag| flag.strong_count() > 0);
+    if owners.closing || owners.tasks.len() >= 64 {
+        return Err("spawn owner shutdown or capacity reached".into());
+    }
+    owners.cancellations.push(Arc::downgrade(cancel));
+    owners.tasks.push(tokio::spawn(task));
+    Ok(())
+}
+
+pub(crate) async fn drain_spawn_owners() {
+    loop {
+        let tasks = {
+            let mut owners = SPAWN_OWNERS.get_or_init(Default::default).lock().unwrap();
+            owners.closing = true;
+            for cancel in owners
+                .cancellations
+                .drain(..)
+                .filter_map(|flag| flag.upgrade())
+            {
+                cancel.store(true, std::sync::atomic::Ordering::Release);
+            }
+            std::mem::take(&mut owners.tasks)
+        };
+        if tasks.is_empty() {
+            break;
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+    }
+}
+
+async fn handoff_startup_result<T: Clone, F: std::future::Future<Output = ()>>(
+    result: Result<T, String>,
+    tx: oneshot::Sender<Result<T, String>>,
+    accepted: oneshot::Receiver<()>,
+    cleanup: impl FnOnce(T) -> F,
+) {
+    match result {
+        Ok(created) => {
+            if tx.send(Ok(created.clone())).is_err() || accepted.await.is_err() {
+                cleanup(created).await;
+            }
+        }
+        Err(error) => {
+            let _ = tx.send(Err(error));
+        }
+    }
+}
+
 #[cfg(test)]
 type TestRunner = Arc<
     dyn Fn(
@@ -69,6 +153,7 @@ pub fn install_test_runner(runner: TestRunner) -> TestRunnerGuard {
 
 #[derive(Clone)]
 pub struct SpawnRequest {
+    pub native_supervision_guard: Option<crate::buddy::supervision_authority::NativeSpawnGuard>,
     pub kind: BgAgentKind,
     pub parent_chat_id: String,
     pub parent_root_chat_id: Option<String>,
@@ -92,7 +177,7 @@ pub struct SpawnRequest {
     pub completion_push: PushMode,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct SpawnGoal {
     pub content: String,
     pub criteria: Vec<GoalCriterion>,
@@ -131,10 +216,51 @@ pub struct SpawnHandle {
     pub completion_rx: oneshot::Receiver<BackgroundAgent>,
 }
 
+/// Roll back native startup effects on every error and on future cancellation.
+/// The consumed mandate binding is deliberately retained: uncertain dispatches
+/// must never be replayed automatically.
+struct SupervisedStartupRollback {
+    app: AppState,
+    child: String,
+    worktree: Option<SpawnedWorktree>,
+    agent_id: Option<String>,
+    armed: bool,
+}
+
+impl Drop for SupervisedStartupRollback {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let app = self.app.clone();
+        let child = self.child.clone();
+        let worktree = self.worktree.take();
+        let agent_id = self.agent_id.take();
+        let _ = track_spawn_owner(
+            async move {
+                if let Some(agent_id) = agent_id {
+                    let _ = app
+                        .agents
+                        .mark_cancelled(&agent_id, Some("supervised startup cancelled".into()))
+                        .await;
+                }
+                if let Some(session) = app.chat.sessions.write().await.remove(&child) {
+                    session.lock().await.close_event_channel();
+                }
+                cleanup_spawn_worktree(app, worktree.as_ref()).await;
+            },
+            true,
+        );
+    }
+}
+
 pub async fn spawn_background_agent(
     app: AppState,
     req: SpawnRequest,
 ) -> Result<SpawnHandle, String> {
+    if let Some(guard) = &req.native_supervision_guard {
+        guard.validate_request(&req)?;
+    }
     if req.subchat_depth >= MAX_SUBCHAT_DEPTH {
         return Err(format!(
             "subchat depth limit ({}) exceeded",
@@ -142,21 +268,94 @@ pub async fn spawn_background_agent(
         ));
     }
     let child_uuid = Uuid::new_v4();
-    let child_chat_id = format!("subchat-{}", child_uuid);
+    let child_chat_id = if req.native_supervision_guard.is_some() {
+        format!("subchat-supervised-{child_uuid}")
+    } else {
+        format!("subchat-{child_uuid}")
+    };
+    if let Some(guard) = &req.native_supervision_guard {
+        guard.bind_child(&child_chat_id)?;
+    }
+    let mut rollback = SupervisedStartupRollback {
+        app: app.clone(),
+        child: child_chat_id.clone(),
+        worktree: None,
+        agent_id: None,
+        armed: req.native_supervision_guard.is_some(),
+    };
     let config_name = req.config_name.clone();
     let config_title = req.title.clone();
     let parent_chat_id = req.parent_chat_id.clone();
     let link_type = req.kind.as_str().to_string();
     let parent_root_chat_id = req.parent_root_chat_id.clone();
     let parent_task_meta = req.parent_task_meta.clone();
-    let spawned_worktree = create_spawn_worktree(
-        app.clone(),
-        &req.worktree_mode,
-        req.parent_worktree.as_ref(),
-        &child_chat_id,
-        &child_uuid,
-    )
-    .await?;
+    let spawned_worktree = if let Some(guard) = req
+        .native_supervision_guard
+        .as_ref()
+        .filter(|_| matches!(req.worktree_mode, SpawnWorktreeMode::Isolated { .. }))
+    {
+        // Filesystem creation contains spawn_blocking work which cannot be
+        // cancelled. A dedicated owner drains it and cleans up if our guarded
+        // receiver is dropped before accepting the result.
+        let (tx, rx) = oneshot::channel();
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let owner_app = app.clone();
+        let mode = req.worktree_mode.clone();
+        let parent = req.parent_worktree.clone();
+        let child = child_chat_id.clone();
+        guard.validate_request(&req)?;
+        track_spawn_owner(
+            async move {
+                let result = create_spawn_worktree(
+                    owner_app.clone(),
+                    &mode,
+                    parent.as_ref(),
+                    &child,
+                    &child_uuid,
+                    true,
+                )
+                .await;
+                handoff_startup_result(result, tx, accepted_rx, |worktree| async move {
+                    cleanup_spawn_worktree(owner_app, worktree.as_ref()).await;
+                })
+                .await;
+            },
+            false,
+        )?;
+        let worktree = guard
+            .run(&child_chat_id, async {
+                rx.await
+                    .map_err(|_| "worktree owner unavailable".to_string())?
+            })
+            .await?;
+        rollback.worktree = worktree.clone();
+        let _ = accepted_tx.send(());
+        worktree
+    } else {
+        create_spawn_worktree(
+            app.clone(),
+            &req.worktree_mode,
+            req.parent_worktree.as_ref(),
+            &child_chat_id,
+            &child_uuid,
+            false,
+        )
+        .await?
+    };
+    rollback.worktree = spawned_worktree.clone();
+    if let Some(guard) = &req.native_supervision_guard {
+        // Bind the exact native edit scope before any provider or tool work:
+        // the engineering worker may only touch mandate-listed files inside
+        // the isolated worktree just created; a read-only worker gets a scope
+        // that rejects every edit. Failure here rolls the startup back.
+        guard.validate_request(&req)?;
+        guard.bind_edit_scope(
+            &child_chat_id,
+            spawned_worktree
+                .as_ref()
+                .map(|worktree| worktree.meta.root.as_path()),
+        )?;
+    }
     let effective_worktree = spawned_worktree
         .as_ref()
         .map(|worktree| worktree.meta.clone())
@@ -269,6 +468,21 @@ pub async fn spawn_background_agent(
         }
     };
     config.model = req.model.clone();
+    if let Some(guard) = &req.native_supervision_guard {
+        guard.validate_request(&req)?;
+        config.autonomous_no_confirm = false;
+        config.auto_approve_editing_tools = false;
+        config.auto_approve_dangerous_commands = false;
+        config.wrap_up = None;
+        config.tools = crate::subchat::ToolsPolicy::Supervised {
+            tools: req.tools.clone().unwrap_or_default(),
+            budget: req
+                .goal
+                .as_ref()
+                .and_then(|g| g.budget.clone())
+                .ok_or("finite goal budget required")?,
+        };
+    }
 
     let messages = match build_messages(
         app.clone(),
@@ -285,6 +499,36 @@ pub async fn spawn_background_agent(
             return Err(error);
         }
     };
+
+    if let Some(guard) = &req.native_supervision_guard {
+        guard.validate_request(&req)?;
+        guard
+            .run(&child_chat_id, async {
+                crate::subchat::install_stateful_subchat_session(
+                    &app,
+                    &child_chat_id,
+                    &config,
+                    &messages,
+                )
+                .await;
+                Ok(())
+            })
+            .await?;
+        let snapshot = app.chat.facade.session_snapshot(&child_chat_id).await?;
+        let expected = req.goal.as_ref().ok_or("supervised native goal missing")?;
+        if snapshot.thread.model != req.model
+            || snapshot.goal.as_ref().is_none_or(|goal| {
+                goal.version != 1
+                    || goal.content != expected.content
+                    || goal.criteria != expected.criteria
+                    || Some(&goal.budget) != expected.budget.as_ref()
+                    || !goal.active
+            })
+        {
+            return Err("native child goal/model/budget installation mismatch".into());
+        }
+        guard.validate_request(&req)?;
+    }
 
     let (record, abort_flag, _) = match app
         .agents
@@ -316,6 +560,7 @@ pub async fn spawn_background_agent(
             return Err(error);
         }
     };
+    rollback.agent_id = Some(record.agent_id.clone());
     app.agents
         .set_completion_push(&record.agent_id, req.completion_push)
         .await?;
@@ -345,7 +590,12 @@ pub async fn spawn_background_agent(
     )
     .await;
 
-    tokio::spawn(async move {
+    if let Some(guard) = &req.native_supervision_guard {
+        guard.validate_request(&req)?;
+    }
+    let supervised = req.native_supervision_guard.is_some();
+    let owner_cancel = abort_flag.clone();
+    let task = async move {
         let agent_id_for_run = agent_id.clone();
         let final_record = match tokio::spawn(run_spawned_agent(
             app.clone(),
@@ -380,7 +630,13 @@ pub async fn spawn_background_agent(
             }
         };
         let _ = completion_tx.send(final_record);
-    });
+    };
+    if supervised {
+        track_cancellable_spawn_owner(task, &owner_cancel)?;
+    } else {
+        tokio::spawn(task);
+    }
+    rollback.armed = false;
 
     Ok(SpawnHandle {
         agent_id: handle_agent_id,
@@ -429,10 +685,10 @@ async fn run_spawned_agent(
     abort_flag: Arc<AtomicBool>,
     spawned_worktree: Option<SpawnedWorktree>,
 ) -> BackgroundAgent {
-    config.abort_flag = Some(abort_flag);
+    config.abort_flag = Some(abort_flag.clone());
     config.background_agent_id = Some(agent_id.clone());
     config.chat_id = Some(stable_child_chat_id(&config, &child_chat_id));
-    config.final_step_force_answer = true;
+    config.final_step_force_answer = req.native_supervision_guard.is_none();
     {
         let progress_app = app.clone();
         let progress_agent_id = agent_id.clone();
@@ -498,7 +754,39 @@ async fn run_spawned_agent(
         .or(req.parent_worktree.as_ref());
     let dirty_baseline = collect_worktree_dirty_files(scope_worktree).await;
 
-    let result = run_background_subchat(app.gcx.clone(), messages, config).await;
+    let supervised_config = req
+        .native_supervision_guard
+        .as_ref()
+        .map(|_| config.clone());
+    let result = if let Some(guard) = &req.native_supervision_guard {
+        let run = guard.run(
+            &child_chat_id,
+            run_background_subchat(app.gcx.clone(), messages, config),
+        );
+        tokio::pin!(run);
+        let fenced = std::future::poll_fn(|cx| {
+            if abort_flag.load(std::sync::atomic::Ordering::Acquire) {
+                std::task::Poll::Ready(Err("Aborted: native owner cancelled".into()))
+            } else {
+                std::future::Future::poll(run.as_mut(), cx)
+            }
+        });
+        tokio::select! {
+            result = fenced => result,
+            _ = async {
+                while !abort_flag.load(std::sync::atomic::Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            } => Err("Aborted: native owner cancelled".into()),
+        }
+    } else {
+        run_background_subchat(app.gcx.clone(), messages, config).await
+    };
+    // Dropping a suspended runner on revocation skips its own epilogue.
+    // Restore native session lifecycle even in that cancellation path.
+    if let Some(config) = supervised_config.as_ref() {
+        crate::subchat::finish_stateful_subchat_session(&app, &child_chat_id, config).await;
+    }
     let final_record = match result {
         Ok(result) => {
             let result_summary = result
@@ -683,9 +971,18 @@ async fn create_spawn_worktree(
     parent_worktree: Option<&WorktreeMeta>,
     child_chat_id: &str,
     child_uuid: &Uuid,
+    supervised: bool,
 ) -> Result<Option<SpawnedWorktree>, String> {
     let SpawnWorktreeMode::Isolated { auto_merge } = mode else {
         return Ok(None);
+    };
+    // Supervised children get a runtime-owned, persisted worktree kind. The
+    // file-edit runtime uses it only to fail closed: an editing context in
+    // such a worktree without a live native edit scope is denied.
+    let worktree_kind = if supervised {
+        crate::buddy::supervision_authority::SUPERVISED_WORKTREE_KIND
+    } else {
+        "subagent"
     };
     let source_workspace_root = match parent_worktree {
         Some(parent) => parent.source_workspace_root.clone(),
@@ -729,7 +1026,7 @@ async fn create_spawn_worktree(
             base_branch: base_branch.clone(),
             base_commit,
             chat_id: Some(child_chat_id.to_string()),
-            kind: Some("subagent".to_string()),
+            kind: Some(worktree_kind.to_string()),
             ..Default::default()
         })
         .await?;
@@ -1148,5 +1445,129 @@ fn fallback_failed_record(agent_id: String, req: SpawnRequest, error: String) ->
         finished_at: Some(now),
         last_update_at: now,
         change_seq: 1,
+    }
+}
+
+#[cfg(test)]
+mod supervised_rollback_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unaccepted_buffered_worktree_is_cleaned_after_receiver_drop() {
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let observed = cleaned.clone();
+        let (tx, mut rx) = oneshot::channel();
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let task = tokio::spawn(handoff_startup_result(
+            Ok(()),
+            tx,
+            accepted_rx,
+            move |_| async move {
+                observed.store(true, std::sync::atomic::Ordering::Release);
+            },
+        ));
+        rx.try_recv().unwrap_err();
+        while rx.try_recv().is_err() {
+            tokio::task::yield_now().await;
+        }
+        assert!(!cleaned.load(std::sync::atomic::Ordering::Acquire));
+        drop(rx);
+        drop(accepted_tx);
+        task.await.unwrap();
+        assert!(cleaned.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn accepted_worktree_transfers_cleanup_to_startup_rollback() {
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let observed = cleaned.clone();
+        let (tx, rx) = oneshot::channel();
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let task = tokio::spawn(handoff_startup_result(
+            Ok(()),
+            tx,
+            accepted_rx,
+            move |_| async move {
+                observed.store(true, std::sync::atomic::Ordering::Release);
+            },
+        ));
+        rx.await.unwrap().unwrap();
+        accepted_tx.send(()).unwrap();
+        task.await.unwrap();
+        assert!(!cleaned.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn cancelling_startup_future_keeps_rollback_owner_alive() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let child = uuid::Uuid::new_v4().to_string();
+        let session = Arc::new(AMutex::new(crate::chat::types::ChatSession::new(
+            child.clone(),
+        )));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(child.clone(), session.clone());
+        let rollback = SupervisedStartupRollback {
+            app: app.clone(),
+            child: child.clone(),
+            worktree: None,
+            agent_id: None,
+            armed: true,
+        };
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _rollback = rollback;
+            ready_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        ready_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !session.lock().await.closed {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!app.chat.sessions.read().await.contains_key(&child));
+    }
+
+    #[tokio::test]
+    async fn failed_startup_rollback_closes_native_session() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let child = uuid::Uuid::new_v4().to_string();
+        let session = Arc::new(AMutex::new(crate::chat::types::ChatSession::new(
+            child.clone(),
+        )));
+        session
+            .lock()
+            .await
+            .set_runtime_state(crate::chat::types::SessionState::Generating, None);
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(child.clone(), session.clone());
+        let rollback = SupervisedStartupRollback {
+            app,
+            child,
+            worktree: None,
+            agent_id: None,
+            armed: true,
+        };
+        drop(rollback);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if session.lock().await.closed {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }

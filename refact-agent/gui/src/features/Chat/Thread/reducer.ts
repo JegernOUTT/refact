@@ -163,6 +163,7 @@ const createThreadRuntime = (
     prevent_send: false,
     error: null,
     queued_items: [],
+    command_acks: {},
     send_immediately: false,
     attached_images: [],
     attached_text_files: [],
@@ -1119,6 +1120,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
       prevent_send: false,
       error: null,
       queued_items: [],
+      command_acks: {},
       send_immediately: false,
       attached_images: [],
       attached_text_files: [],
@@ -1594,6 +1596,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
           root_chat_id: event.thread.root_chat_id ?? existing?.root_chat_id,
           buddy_meta: snapshotBuddyMeta,
           goal: event.goal ?? null,
+          pending_questions: event.pending_questions,
         };
 
         const snapshotState = event.runtime.state as string;
@@ -1630,6 +1633,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
           queued_items: Array.isArray(event.runtime.queued_items)
             ? event.runtime.queued_items
             : [],
+          command_acks: existingRuntime?.command_acks ?? {},
           send_immediately: existingRuntime?.send_immediately ?? false,
           attached_images: existingRuntime?.attached_images ?? [],
           attached_text_files: existingRuntime?.attached_text_files ?? [],
@@ -2136,6 +2140,11 @@ export const chatReducer = createReducer(initialState, (builder) => {
         if (eventSeq != null && lastSeq != null && eventSeq <= lastSeq) {
           break;
         }
+        rt.command_acks ??= {};
+        rt.command_acks[event.client_request_id] = {
+          accepted: event.accepted,
+          result: event.result,
+        };
         rt.last_applied_seq = event.seq;
         break;
       }

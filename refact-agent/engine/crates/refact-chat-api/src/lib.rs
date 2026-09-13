@@ -754,6 +754,8 @@ pub enum ChatEvent {
         browser: Option<BrowserSnapshot>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         goal: Option<GoalSnapshot>,
+        #[serde(default)]
+        pending_questions: Vec<PendingQuestionSet>,
     },
     BackgroundAgentUpdated {
         chat_id: String,
@@ -1003,6 +1005,12 @@ pub enum ChatCommand {
         action: String,
     },
     Abort {},
+    AnswerQuestions {
+        tool_call_id: String,
+        answers: Vec<QuestionAnswer>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        asked_at_ms: Option<u64>,
+    },
     CleanBackgroundProcesses {
         #[serde(default)]
         include_services: bool,
@@ -1076,14 +1084,73 @@ pub enum ChatCommand {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingQuestion {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub question_type: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionAnswer {
+    pub id: String,
+    pub answer: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingQuestionStatus {
+    Pending,
+    Answered,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingQuestionSet {
+    pub tool_call_id: String,
+    pub questions: Vec<PendingQuestion>,
+    pub asked_at_ms: u64,
+    pub status: PendingQuestionStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<QuestionAnswer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDecisionItem {
     pub tool_call_id: String,
     pub accepted: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeApprovalGuard {
+    pub project_root: String,
+    pub engine_identity: String,
+    pub source_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisionCommandGuard {
+    pub mandate_id: String,
+    pub project_id: String,
+    pub worker_id: String,
+    pub engine_instance_id: String,
+    pub worker_epoch: u64,
+    pub owner_epoch: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_approval_guard: Option<NativeApprovalGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervision_guard: Option<SupervisionCommandGuard>,
     pub client_request_id: String,
     #[serde(default)]
     pub priority: bool,
@@ -1132,6 +1199,15 @@ impl CommandRequest {
                 ("goal_control".to_string(), action.clone(), String::new())
             }
             ChatCommand::Abort {} => ("abort".to_string(), String::new(), String::new()),
+            ChatCommand::AnswerQuestions {
+                tool_call_id,
+                answers,
+                ..
+            } => (
+                "answer_questions".to_string(),
+                format!("{} answers", answers.len()),
+                tool_call_id.clone(),
+            ),
             ChatCommand::CleanBackgroundProcesses { include_services } => (
                 "clean_background_processes".to_string(),
                 format!("include_services={include_services}"),
@@ -2076,12 +2152,16 @@ mod tests {
             background_agents: vec![],
             browser: None,
             goal: None,
+            pending_questions: vec![],
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "snapshot");
         assert!(json.get("goal").is_none());
+        assert_eq!(json["pending_questions"], serde_json::json!([]));
         let parsed: ChatEvent = serde_json::from_value(json).unwrap();
-        matches!(parsed, ChatEvent::Snapshot { .. });
+        assert!(
+            matches!(parsed, ChatEvent::Snapshot { pending_questions, .. } if pending_questions.is_empty())
+        );
     }
 
     #[test]
@@ -2094,6 +2174,7 @@ mod tests {
             background_agents: vec![],
             browser: None,
             goal: Some(goal.clone()),
+            pending_questions: vec![],
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "snapshot");
@@ -2133,13 +2214,19 @@ mod tests {
 
         let event: ChatEvent = serde_json::from_str(json).unwrap();
         match event {
-            ChatEvent::Snapshot { runtime, goal, .. } => {
+            ChatEvent::Snapshot {
+                runtime,
+                goal,
+                pending_questions,
+                ..
+            } => {
                 assert!(!runtime.goal_active);
                 assert_eq!(runtime.goal_status, None);
                 assert_eq!(runtime.goal_turns_used, 0);
                 assert_eq!(runtime.goal_tokens_used, 0);
                 assert_eq!(runtime.goal_no_progress_turns, 0);
                 assert_eq!(goal, None);
+                assert!(pending_questions.is_empty());
             }
             _ => panic!("Expected Snapshot"),
         }
@@ -2184,6 +2271,7 @@ mod tests {
             background_agents: vec![background_agent_summary()],
             browser: None,
             goal: None,
+            pending_questions: vec![],
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: ChatEvent = serde_json::from_str(&json).unwrap();
@@ -2215,6 +2303,7 @@ mod tests {
                 }],
             }),
             goal: None,
+            pending_questions: vec![],
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["browser"]["runtime_id"], "rt-1");
@@ -2350,6 +2439,8 @@ mod tests {
     #[test]
     fn test_command_request_flattens_command() {
         let req = CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-1".into(),
             priority: false,
             command: ChatCommand::Abort {},
@@ -2397,6 +2488,8 @@ mod tests {
             explicit: false,
         };
         let req = CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-budget".into(),
             priority: false,
             command: ChatCommand::SetGoalBudget {

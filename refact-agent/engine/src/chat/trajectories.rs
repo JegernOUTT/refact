@@ -27,10 +27,17 @@ use crate::yaml_configs::customization_registry::get_subagent_config;
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeMeta;
 
-use refact_chat_api::{GoalLedgerEntry, GoalSnapshot, GoalStatus};
+use refact_chat_api::{GoalLedgerEntry, GoalSnapshot, GoalStatus, PendingQuestionSet};
 use super::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 
 pub async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
+    super::trajectory_archive::with_trajectory_mutation_lock(atomic_write_file_coordinated(
+        tmp_path, dest_path,
+    ))
+    .await
+}
+
+async fn atomic_write_file_coordinated(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
         if fs::try_exists(dest_path)
@@ -718,6 +725,8 @@ pub struct LoadedTrajectory {
     pub goal: Option<GoalSnapshot>,
     pub goal_ledger: Vec<GoalLedgerEntry>,
     pub goal_verification_blocked_until_ms: Option<u64>,
+    pub pending_questions: Vec<PendingQuestionSet>,
+    pub pending_browser_decision: Option<super::browser_decisions::PendingBrowserDecisionSnapshot>,
     pub created_at: String,
     pub updated_at: String,
     pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -778,6 +787,17 @@ pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> Traject
     snapshot.goal = session.goal.clone();
     snapshot.goal_ledger = session.goal_ledger.clone();
     snapshot.goal_verification_blocked_until_ms = session.goal_verification_blocked_until_ms;
+    snapshot.pending_questions = session.pending_questions.clone();
+    snapshot.pending_browser_decision = session.pending_browser_message.as_ref().map(|pending| {
+        super::browser_decisions::snapshot_pending_browser_decision(
+            pending,
+            session
+                .thread
+                .browser_meta
+                .as_ref()
+                .and_then(|meta| meta.browser_runtime_id.clone()),
+        )
+    });
     snapshot.pending_deliveries = session.pending_deliveries_for_snapshot();
     span.finish(
         PerfOutcome::Success,
@@ -2226,6 +2246,15 @@ async fn read_existing_trajectory_object(
     chat_id: &str,
 ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, String> {
     #[cfg(test)]
+    if let Some(reads) = test_trajectory_metadata_read_counters()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&trajectory_metadata_cache_key(path))
+        .and_then(Weak::upgrade)
+    {
+        reads.fetch_add(1, Ordering::Relaxed);
+    }
+    #[cfg(test)]
     record_trajectory_metadata_disk_read(chat_id);
     match fs::symlink_metadata(path).await {
         Ok(metadata) => {
@@ -2262,14 +2291,39 @@ async fn read_existing_trajectory_object(
         .map(Some)
 }
 
-/// Per-chat metadata disk-read counters, used only by tests.
+/// Per-path metadata disk-read counters, used only by tests.
 ///
 /// This intentionally is *not* a single process-wide counter. The read it counts happens inside
 /// the detached trajectory writer, i.e. on a `tokio::spawn`ed task on some other worker thread,
 /// so a thread-local/task-local scope (the `TrajectoryIndexListingCounterScope::local()` pattern
-/// in `trajectory_index.rs`) would never observe it. Keying by `chat_id` gives each test its own
-/// counter instead, since every test already uses a unique chat id, so concurrently running tests
-/// can no longer inflate one another's deltas.
+/// in `trajectory_index.rs`) would never observe it. Keying by trajectory path lets a test count
+/// exactly the file it cares about and ignore reads of any other trajectory.
+#[cfg(test)]
+fn test_trajectory_metadata_read_counters(
+) -> &'static StdMutex<std::collections::HashMap<PathBuf, Weak<AtomicUsize>>> {
+    static COUNTERS: OnceLock<StdMutex<std::collections::HashMap<PathBuf, Weak<AtomicUsize>>>> =
+        OnceLock::new();
+    COUNTERS.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn count_test_trajectory_metadata_reads(path: &Path) -> Arc<AtomicUsize> {
+    // Count the real read path, including detached writers, but not unrelated tests
+    // that can make progress while this save awaits archive mutation coordination.
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut counters = test_trajectory_metadata_read_counters()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counters.retain(|_, counter| counter.strong_count() > 0);
+    counters.insert(trajectory_metadata_cache_key(path), Arc::downgrade(&reads));
+    reads
+}
+
+/// Per-chat metadata disk-read counters, used only by tests.
+///
+/// Same detached-writer reasoning as the per-path counters above, but keyed by `chat_id`: every
+/// test already uses a unique chat id, so concurrently running tests can no longer inflate one
+/// another's deltas even when they never learn the on-disk path.
 #[cfg(test)]
 fn trajectory_metadata_disk_reads_by_chat(
 ) -> &'static StdMutex<std::collections::HashMap<String, usize>> {
@@ -2295,6 +2349,7 @@ fn trajectory_metadata_disk_reads_for_chat(chat_id: &str) -> usize {
         .copied()
         .unwrap_or(0)
 }
+
 #[cfg(test)]
 fn reset_test_trajectory_watcher_task() {
     let mut guard = TRAJECTORY_WATCHER_TASK
@@ -2342,6 +2397,8 @@ fn is_known_trajectory_top_level_key(key: &str) -> bool {
             | "reactive_compact_attempts"
             | "wake_up_at"
             | "waiting_for_card_ids"
+            | "pending_questions"
+            | "pending_browser_decision"
             | "pending_deliveries"
             | "worktree"
             | "parent_id"
@@ -3023,6 +3080,13 @@ async fn load_trajectory_candidate(
     let goal_verification_blocked_until_ms = t
         .get("goal_verification_blocked_until_ms")
         .and_then(|v| v.as_u64());
+    let pending_questions = t
+        .get("pending_questions")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let pending_browser_decision = t
+        .get("pending_browser_decision")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
 
     let parent_id = t
         .get("parent_id")
@@ -3211,6 +3275,8 @@ async fn load_trajectory_candidate(
         pending_deliveries,
         goal_ledger,
         goal_verification_blocked_until_ms,
+        pending_questions,
+        pending_browser_decision,
         source_path: traj_path,
         messages,
         thread,
@@ -3493,6 +3559,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         goal_ledger: Vec::new(),
         pending_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
+        pending_browser_decision: None,
         chat_id: chat_id.to_string(),
         title: String::new(),
         model: String::new(),
@@ -3536,6 +3603,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
+        pending_questions: Vec::new(),
     };
 
     save_trajectory_snapshot(gcx, snapshot).await
@@ -3569,11 +3637,30 @@ pub async fn save_trajectory_as_with_intent_checked(
     if !intent.persists() {
         return Ok(());
     }
+    let existing_session = gcx.chat_sessions.read().await.get(&thread.id).cloned();
+    let (pending_questions, pending_browser_decision) = if let Some(session) = existing_session {
+        let session = session.lock().await;
+        let browser = session.pending_browser_message.as_ref().map(|pending| {
+            super::browser_decisions::snapshot_pending_browser_decision(pending, None)
+        });
+        (session.pending_questions.clone(), browser)
+    } else {
+        load_trajectory_for_chat(gcx.clone(), &thread.id)
+            .await
+            .map(|trajectory| {
+                (
+                    trajectory.pending_questions,
+                    trajectory.pending_browser_decision,
+                )
+            })
+            .unwrap_or_default()
+    };
     let snapshot = TrajectorySnapshot {
         goal: None,
         goal_ledger: Vec::new(),
         pending_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
+        pending_browser_decision,
         chat_id: thread.id.clone(),
         title: thread.title.clone(),
         model: thread.model.clone(),
@@ -3613,6 +3700,7 @@ pub async fn save_trajectory_as_with_intent_checked(
         reactive_compact_attempts: thread.reactive_compact_attempts,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
+        pending_questions,
     };
     persist_trajectory_snapshot_with_intent(gcx, snapshot, intent).await
 }
@@ -4356,6 +4444,14 @@ async fn save_trajectory_snapshot_inner(
     }
     if !snapshot.waiting_for_card_ids.is_empty() {
         trajectory["waiting_for_card_ids"] = json!(snapshot.waiting_for_card_ids);
+    }
+    if !snapshot.pending_questions.is_empty() {
+        trajectory["pending_questions"] = serde_json::to_value(&snapshot.pending_questions)
+            .map_err(|error| format!("failed to serialize pending questions: {error}"))?;
+    }
+    if let Some(ref pending_browser_decision) = snapshot.pending_browser_decision {
+        trajectory["pending_browser_decision"] = serde_json::to_value(pending_browser_decision)
+            .map_err(|error| format!("failed to serialize pending browser decision: {error}"))?;
     }
     if !snapshot.pending_deliveries.is_empty() {
         trajectory["pending_deliveries"] = json!(snapshot.pending_deliveries);
@@ -5252,6 +5348,8 @@ fn apply_external_delete_to_session(session: &mut ChatSession, chat_id: &str) {
     session.waiting_for_card_ids.clear();
     session.goal_ledger.clear();
     session.goal_verification_blocked_until_ms = None;
+    session.pending_questions.clear();
+    session.pending_browser_message = None;
     session.set_goal_projection(None);
     session.reset_compaction_runtime_state();
     session.external_reload_pending = None;
@@ -5271,6 +5369,11 @@ fn apply_loaded_external_update_to_session(
     session.reset_compaction_runtime_state();
     session.goal_ledger = loaded.goal_ledger;
     session.goal_verification_blocked_until_ms = loaded.goal_verification_blocked_until_ms;
+    session.pending_questions = loaded.pending_questions;
+    session.pending_browser_message = None;
+    if let Some(pending) = loaded.pending_browser_decision {
+        super::browser_decisions::expire_restored_browser_decision(session, pending);
+    }
     session.set_goal_projection(loaded.goal);
     session.created_at = loaded.created_at;
     session.wake_up_at = loaded.wake_up_at;
@@ -9364,6 +9467,32 @@ mod tests {
         assert_eq!(saved["external_metadata"], json!({"preserved": true}));
     }
 
+    #[tokio::test]
+    async fn metadata_read_counter_excludes_other_paths_and_tracks_spawned_reads() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("tracked.json");
+        let other_path = workspace.path().join("other.json");
+        tokio::fs::write(&path, r#"{"id":"tracked","messages":[]}"#)
+            .await
+            .unwrap();
+        tokio::fs::write(&other_path, r#"{"id":"other","messages":[]}"#)
+            .await
+            .unwrap();
+        let reads = count_test_trajectory_metadata_reads(&path);
+        read_existing_trajectory_object(&other_path, "other")
+            .await
+            .unwrap();
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        tokio::spawn(async move {
+            read_existing_trajectory_object(&path, "tracked")
+                .await
+                .unwrap();
+        })
+        .await
+        .unwrap();
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+    }
+
     #[serial(trajectory_perf)]
     #[tokio::test]
     async fn repeated_save_reuses_pretty_round_trip_metadata_without_a_second_disk_read() {
@@ -9398,7 +9527,9 @@ mod tests {
         .await
         .unwrap();
 
-        let reads_before = trajectory_metadata_disk_reads_for_chat(chat_id);
+        let metadata_reads = count_test_trajectory_metadata_reads(&path);
+        let reads_before = metadata_reads.load(Ordering::Relaxed);
+        let chat_reads_before = trajectory_metadata_disk_reads_for_chat(chat_id);
         for title in ["First", "Second"] {
             save_trajectory_snapshot(
                 gcx.clone(),
@@ -9411,9 +9542,15 @@ mod tests {
             .await
             .unwrap();
         }
-        let reads_after = trajectory_metadata_disk_reads_for_chat(chat_id);
+        let reads_after = metadata_reads.load(Ordering::Relaxed);
         assert_eq!(
             reads_after - reads_before,
+            1,
+            "the second save must reuse the cached metadata instead of re-reading from disk"
+        );
+        let chat_reads_after = trajectory_metadata_disk_reads_for_chat(chat_id);
+        assert_eq!(
+            chat_reads_after - chat_reads_before,
             1,
             "the second save must reuse the cached metadata instead of re-reading from disk"
         );
@@ -11160,10 +11297,12 @@ mod tests {
 
     fn test_snapshot(chat_id: &str, title: &str, messages: Vec<ChatMessage>) -> TrajectorySnapshot {
         TrajectorySnapshot {
+            pending_questions: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
             pending_deliveries: Vec::new(),
             goal_verification_blocked_until_ms: None,
+            pending_browser_decision: None,
             chat_id: chat_id.to_string(),
             title: title.to_string(),
             model: "model".to_string(),
@@ -18601,6 +18740,7 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let session = ChatSession {
+            pending_questions: Vec::new(),
             chat_id: "test-123".to_string(),
             interruptible_waits: 0,
             wait_delivery_boundary: false,
@@ -18757,6 +18897,7 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let mut session = ChatSession {
+            pending_questions: Vec::new(),
             chat_id: "skill-test".to_string(),
             interruptible_waits: 0,
             wait_delivery_boundary: false,
@@ -19366,6 +19507,117 @@ mod tests {
         assert_eq!(loaded.waiting_for_card_ids, card_ids);
     }
 
+    #[tokio::test]
+    async fn pending_questions_roundtrip_through_actual_trajectory_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        *app.workspace
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![dir.path().to_path_buf()];
+        let mut session = ChatSession::new("pending-questions-roundtrip".into());
+        session.thread.title = "Pending questions".into();
+        session
+            .register_pending_questions(refact_chat_api::PendingQuestionSet {
+                tool_call_id: "ask-native".into(),
+                questions: vec![refact_chat_api::PendingQuestion {
+                    id: "choice".into(),
+                    question_type: "yes_no".into(),
+                    text: "Continue?".into(),
+                    options: None,
+                }],
+                asked_at_ms: 123,
+                status: refact_chat_api::PendingQuestionStatus::Pending,
+                answers: Vec::new(),
+                resolution_id: None,
+            })
+            .unwrap();
+        save_trajectory_snapshot(gcx.clone(), trajectory_snapshot_from_session(&session))
+            .await
+            .unwrap();
+        let loaded = load_trajectory_for_chat(gcx.clone(), &session.chat_id)
+            .await
+            .unwrap();
+        assert_eq!(loaded.pending_questions, session.pending_questions);
+        session
+            .answer_pending_questions(
+                "ask-native",
+                vec![refact_chat_api::QuestionAnswer {
+                    id: "choice".into(),
+                    answer: json!(true),
+                }],
+                "resolution-1".into(),
+            )
+            .unwrap();
+        save_trajectory_snapshot(gcx.clone(), trajectory_snapshot_from_session(&session))
+            .await
+            .unwrap();
+        let answered = load_trajectory_for_chat(gcx, &session.chat_id)
+            .await
+            .unwrap();
+        assert_eq!(answered.pending_questions, session.pending_questions);
+        assert_eq!(
+            answered.pending_questions[0].resolution_id.as_deref(),
+            Some("resolution-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_decision_descriptor_roundtrips_to_disk_and_expires_on_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        *app.workspace
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![dir.path().to_path_buf()];
+        let mut session = ChatSession::new("browser-decision-roundtrip".into());
+        session.pending_browser_message = Some(crate::chat::types::PendingBrowserMessage {
+            pending_message_id: "pending-browser".into(),
+            content: json!({"secret": "must-not-persist"}),
+            attachments: vec![],
+            client_message_id: Some("optimistic-browser".into()),
+            checkpoints: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
+            skill_activation_name: None,
+            skill_context_msg: None,
+        });
+
+        save_trajectory_snapshot(gcx.clone(), trajectory_snapshot_from_session(&session))
+            .await
+            .unwrap();
+        let loaded = load_trajectory_for_chat(gcx, &session.chat_id)
+            .await
+            .unwrap();
+        let descriptor = loaded
+            .pending_browser_decision
+            .clone()
+            .expect("descriptor saved");
+        assert_eq!(descriptor.pending_message_id, "pending-browser");
+        assert!(descriptor.requires_revalidation);
+        assert_eq!(
+            crate::chat::browser_decisions::restore_browser_decision(descriptor),
+            crate::chat::browser_decisions::RestoredBrowserDecision::Expired {
+                pending_message_id: "pending-browser".into(),
+                client_message_id: Some("optimistic-browser".into()),
+            }
+        );
+        let content = tokio::fs::read_to_string(loaded.source_path).await.unwrap();
+        assert!(!content.contains("must-not-persist"));
+    }
+
     #[test]
     fn test_trajectory_load_without_active_skill_field() {
         let json_str = r#"{"id":"chat-1","title":"T","model":"m","mode":"agent","tool_use":"agent","messages":[],"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","include_project_info":true,"checkpoints_enabled":true}"#;
@@ -19631,10 +19883,12 @@ mod tests {
         let worktree = created.worktree.meta.clone();
         let chat_id = "wt-roundtrip".to_string();
         let snapshot = TrajectorySnapshot {
+            pending_questions: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
             pending_deliveries: Vec::new(),
             goal_verification_blocked_until_ms: None,
+            pending_browser_decision: None,
             chat_id: chat_id.clone(),
             title: "Worktree Chat".to_string(),
             model: "model".to_string(),

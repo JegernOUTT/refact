@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use refact_buddy_core::snapshot::BuddySnapshot;
+use refact_buddy_core::operator_events::OperatorSignal;
 use refact_buddy_core::types::{BuddyRuntimeEvent, BuddySuggestion};
 use refact_buddy_core::user_action::UserAction;
 use refact_chat_api::{
@@ -18,6 +19,7 @@ pub use refact_chat_api::{DeliveryOutcome as RuntimeDeliveryOutcome, SessionStat
 pub use refact_chat_api::{PendingDelivery as RuntimePendingDelivery, PushMode as RuntimePushMode};
 pub use refact_tool_api::ToolDesc as RuntimeToolDesc;
 pub use refact_buddy_core::types::BuddyRuntimeEvent as RuntimeBuddyEvent;
+pub use refact_buddy_core::operator_events::OperatorSignal as RuntimeOperatorSignal;
 pub use refact_buddy_core::user_action::UserAction as RuntimeUserAction;
 pub use refact_chat_history::trajectory_snapshot::TrajectorySnapshot as RuntimeTrajectorySnapshot;
 
@@ -29,6 +31,10 @@ pub trait ActivitySink: Send + Sync {
 #[async_trait]
 pub trait BuddyEventSink: Send + Sync {
     async fn enqueue_event(&self, event: BuddyRuntimeEvent);
+    async fn enqueue_operator_signal(&self, signal: OperatorSignal) -> Result<(), String> {
+        let _ = signal;
+        Err("operator signal correlation is not supported by this event sink".to_string())
+    }
     async fn complete_event(&self, dedupe_key: &str, status: &str);
     async fn snapshot(&self) -> Option<BuddySnapshot>;
     async fn apply_chat_completion(&self, event: BuddyRuntimeEvent, xp: u64, mood: String);
@@ -305,6 +311,14 @@ pub trait ChatSessionFacade: Send + Sync {
     async fn update_session(&self, chat_id: &str, update: ChatSessionUpdate) -> Result<(), String>;
     async fn create_session(&self, request: CreateSessionRequest) -> Result<(), String>;
     async fn push_command(&self, chat_id: &str, command: ChatCommand) -> Result<(), String>;
+    async fn push_supervised_command(
+        &self,
+        _chat_id: &str,
+        _command: ChatCommand,
+        _guard: refact_chat_api::SupervisionCommandGuard,
+    ) -> Result<(), String> {
+        Err("supervised commands are not supported by this runtime".into())
+    }
     async fn push_priority_command(
         &self,
         chat_id: &str,

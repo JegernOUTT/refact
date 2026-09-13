@@ -569,6 +569,19 @@ fn normalized_memo_title(title: &str) -> String {
     stripped.to_lowercase()
 }
 
+fn source_id_has_root(source_id: &str, root_chat_id: &str) -> bool {
+    if root_chat_id.is_empty() {
+        return false;
+    }
+    let Some((prefix, hash)) = source_id.rsplit_once(':') else {
+        return false;
+    };
+    let Some((trajectory_range, root)) = prefix.rsplit_once(':') else {
+        return false;
+    };
+    !hash.is_empty() && trajectory_range.contains(":memo:") && root == root_chat_id
+}
+
 fn dedupe_memo_candidates(
     candidates: Vec<MemoryCandidate>,
     existing_docs: &[MemoryDocSnapshot],
@@ -588,7 +601,7 @@ fn dedupe_memo_candidates(
                         || doc
                             .source_id
                             .as_deref()
-                            .map(|source_id| source_id.contains(root_chat_id))
+                            .map(|source_id| source_id_has_root(source_id, root_chat_id))
                             .unwrap_or(false))
             })
         })
@@ -706,6 +719,21 @@ fn candidate_hash(parts: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provenance_root_matching_is_exact_not_substring() {
+        assert!(source_id_has_root(
+            "trajectory:memo:0-0:root-a:hash",
+            "root-a"
+        ));
+        assert!(!source_id_has_root(
+            "trajectory:memo:0-0:root-ab:hash",
+            "root-a"
+        ));
+        assert!(!source_id_has_root("root-a:memo:0-0:other:hash", "root-a"));
+        assert!(!source_id_has_root("malformed-root-a", "root-a"));
+        assert!(!source_id_has_root("trajectory:memo:0-0:root-a:hash", ""));
+    }
 
     fn extraction_with_memo(memo_type: &str, content: &str) -> ExtractionResult {
         ExtractionResult {

@@ -1,0 +1,31 @@
+.supervision {
+  padding-block: var(--rf-space-4);
+  overflow-wrap: anywhere;
+}
+
+.controls,
+.controls fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.controls label {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.controls input,
+.controls textarea {
+  max-width: 100%;
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  border: var(--rf-border-width) solid var(--rf-color-border);
+}
+
+.details {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

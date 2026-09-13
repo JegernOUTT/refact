@@ -190,6 +190,20 @@ pub async fn tool_apply_patch_exec(
 ) -> Result<ApplyPatchResult, String> {
     let parsed = parse_patch_arg(args)?;
 
+    if let Some(ccx) = scope_guard_context {
+        for operation in &parsed.operations {
+            let (path, destination) = match operation {
+                FileOperation::Add { path, .. } | FileOperation::Delete { path } => (path, None),
+                FileOperation::Update { path, move_to, .. } => (path, move_to.as_ref()),
+            };
+            for path in std::iter::once(path).chain(destination) {
+                let resolved =
+                    resolve_patch_path(gcx.clone(), path, false, execution_scope).await?;
+                check_scope_guard(ccx, &resolved.path).await?;
+            }
+        }
+    }
+
     let mut file_results = Vec::new();
     let mut all_chunks = Vec::new();
     let mut warnings = Vec::new();

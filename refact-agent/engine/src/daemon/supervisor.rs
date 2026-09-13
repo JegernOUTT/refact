@@ -44,6 +44,26 @@ const MAX_PORT_BUSY_RETRIES: usize = 3;
 const MAX_RESTART_DELAY_MS: u64 = 8_000;
 const MAX_RESTART_JITTER_MS: u64 = 500;
 
+fn observed_identity(
+    record: &WorkerRecord,
+) -> Option<crate::daemon::buddy_reconciliation::ObservedIdentity> {
+    use sha2::{Digest, Sha256};
+    if !matches!(
+        record.info.state,
+        WorkerState::Ready | WorkerState::Starting
+    ) {
+        return None;
+    }
+    Some(crate::daemon::buddy_reconciliation::ObservedIdentity {
+        pid: record.info.pid?,
+        generation: record.generation,
+        instance_digest: format!(
+            "{:x}",
+            Sha256::digest(record.instance_token.as_ref()?.as_bytes())
+        ),
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerState {
@@ -103,6 +123,7 @@ struct WorkerRecord {
     child: Option<Child>,
     instance_token: Option<String>,
     generation: u64,
+    wake_only: bool,
     crash_history: VecDeque<u64>,
     monitor_task: Option<JoinHandle<()>>,
 }
@@ -133,7 +154,13 @@ struct WorkerSlot {
 }
 
 pub struct Supervisor {
+    pub(crate) native_exec: Arc<crate::exec::ExecRegistry>,
+    pub(crate) native_shutdown: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) native_lifecycle: Arc<tokio::sync::Mutex<()>>,
     workers: RwLock<HashMap<String, Arc<WorkerSlot>>>,
+    wake_fences: SyncMutex<HashMap<String, u64>>,
+    wake_shutdown: std::sync::atomic::AtomicBool,
+    installation_fence: Arc<tokio::sync::RwLock<()>>,
     events: EventBus,
     daemon_dir: PathBuf,
     daemon_auth_token: Option<String>,
@@ -184,7 +211,13 @@ impl Supervisor {
     ) -> Arc<Self> {
         let (shutdown_tx, _) = broadcast::channel(16);
         Arc::new(Self {
+            native_exec: Arc::new(crate::exec::ExecRegistry::new()),
+            native_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            native_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             workers: RwLock::new(HashMap::new()),
+            wake_fences: SyncMutex::new(HashMap::new()),
+            wake_shutdown: std::sync::atomic::AtomicBool::new(false),
+            installation_fence: Arc::new(tokio::sync::RwLock::new(())),
             events,
             daemon_dir,
             daemon_auth_token,
@@ -211,7 +244,39 @@ impl Supervisor {
     }
 
     pub fn request_shutdown(&self, reason: String) {
+        self.native_shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let _fence = self.wake_fences.lock();
+        self.wake_shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.shutdown_tx.send(reason);
+    }
+
+    /// No candidate may drain its own evaluator. A user must stop workers first;
+    /// this fence blocks every native spawn until installation consumption ends.
+    pub(crate) async fn installation_drained(
+        &self,
+    ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>, String> {
+        let guard = self
+            .installation_fence
+            .clone()
+            .try_write_owned()
+            .map_err(|_| "worker startup active; drain first")?;
+        for slot in self.workers.read().await.values() {
+            let record = slot.record.lock().await;
+            if record.child.is_some()
+                || record.info.pid.is_some()
+                || record.info.state != WorkerState::Stopped
+            {
+                return Err(
+                    "native installation requires all managed workers already stopped".into(),
+                );
+            }
+        }
+        if !self.child_reap_tasks.lock().await.is_empty() {
+            return Err("native installation requires all child reapers drained".into());
+        }
+        Ok(guard)
     }
 
     pub fn workspace_busy(&self, project_id: &str) -> Option<WorkspaceBusyInfo> {
@@ -311,6 +376,98 @@ impl Supervisor {
         self.spawn_worker(slot.clone(), spec, "ensure").await
     }
 
+    pub(crate) fn invalidate_buddy_wake(&self, id: &str) {
+        let mut fences = self.wake_fences.lock();
+        let value = fences.entry(id.into()).or_default();
+        *value = value.saturating_add(1);
+    }
+
+    pub(crate) fn buddy_wake_fence(&self, id: &str) -> u64 {
+        self.wake_fences.lock().get(id).copied().unwrap_or(0)
+    }
+
+    /// Single native start. No port retries or crash-budget auto restarts.
+    pub(crate) async fn buddy_wake<F, Fut>(
+        self: &Arc<Self>,
+        entry: &ProjectEntry,
+        fence: u64,
+        expires_at_ms: u64,
+        consume: F,
+    ) -> Result<Option<WorkerInfo>, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<bool, String>>,
+    {
+        let _installation = self.installation_fence.read().await;
+        let slot = self.slot_for(&entry.id).await;
+        let reservation = self.reserve_port_pair()?;
+        let ports = reservation.ports();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let spec = WorkerLaunchSpec::from(entry);
+        let (pid, generation) = {
+            let _op = slot.op_lock.lock().await;
+            if self.buddy_wake_fence(&entry.id) != fence {
+                return Ok(None);
+            }
+            if matches!(
+                slot.record.lock().await.info.state,
+                WorkerState::Ready | WorkerState::Starting | WorkerState::Stopping
+            ) {
+                return Ok(None);
+            }
+            if !consume().await? {
+                return Ok(None);
+            }
+            let child = self
+                .spawn_child_fenced(&spec, ports, &nonce, Some((fence, expires_at_ms)))
+                .await?;
+            let pid = child.id();
+            let mut record = slot.record.lock().await;
+            abort_task(&mut record.monitor_task);
+            record.generation = record.generation.saturating_add(1);
+            record.wake_only = true;
+            record.child = Some(child);
+            record.instance_token = Some(nonce.clone());
+            record.info = WorkerInfo {
+                project_id: entry.id.clone(),
+                pid,
+                http_port: ports.http_port,
+                lsp_port: ports.lsp_port,
+                state: WorkerState::Starting,
+                last_error: None,
+            };
+            (pid, record.generation)
+        };
+        match self
+            .wait_until_ready_or_exit(
+                &slot,
+                generation,
+                pid,
+                ports.http_port,
+                ports.lsp_port,
+                &nonce,
+            )
+            .await?
+        {
+            ReadinessOutcome::Ready => {
+                let mut record = slot.record.lock().await;
+                if record.generation == generation {
+                    record.info.state = WorkerState::Ready;
+                    record.monitor_task = Some(self.monitor_handle(slot.clone(), spec, generation));
+                }
+                Ok(Some(record.info.clone()))
+            }
+            ReadinessOutcome::Superseded(info) => Ok(Some(info)),
+            _ => {
+                let _op = slot.op_lock.lock().await;
+                if slot.record.lock().await.generation == generation {
+                    self.stop_slot_locked(&slot, &entry.id, false).await?;
+                }
+                Err("wake startup unconfirmed or failed; budget consumed".into())
+            }
+        }
+    }
+
     pub async fn ensure_ready_worker(
         self: &Arc<Self>,
         entry: &ProjectEntry,
@@ -368,6 +525,7 @@ impl Supervisor {
     }
 
     pub async fn stop_worker(&self, project_id: &str) -> Result<Option<WorkerInfo>, String> {
+        self.invalidate_buddy_wake(project_id);
         let Some(slot) = self.get_slot(project_id).await else {
             return Ok(None);
         };
@@ -397,6 +555,7 @@ impl Supervisor {
     }
 
     pub(crate) async fn forget_worker(&self, project_id: &str) -> Result<(), String> {
+        self.invalidate_buddy_wake(project_id);
         if let Some(slot) = self.get_slot(project_id).await {
             let _guard = slot.op_lock.lock().await;
             let _ = self.stop_slot_locked(&slot, project_id, false).await?;
@@ -408,6 +567,12 @@ impl Supervisor {
     }
 
     pub async fn stop_all(self: &Arc<Self>) {
+        self.native_shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.native_exec
+            .cleanup_shutdown(Duration::from_secs(5))
+            .await;
+        let _native_drained = self.native_lifecycle.lock().await;
         self.abort_proxy_restart_tasks().await;
         let ids: Vec<String> = self.workers.read().await.keys().cloned().collect();
         stream::iter(ids)
@@ -473,6 +638,63 @@ impl Supervisor {
             WorkerState::Ready | WorkerState::Starting
         ) && record.info.pid == Some(pid)
             && record.instance_token.as_deref() == Some(instance_token)
+    }
+
+    pub(crate) async fn observed_worker_identity(
+        &self,
+        project_id: &str,
+    ) -> Option<crate::daemon::buddy_reconciliation::ObservedIdentity> {
+        let slot = self.get_slot(project_id).await?;
+        let record = slot.record.lock().await;
+        observed_identity(&record)
+    }
+
+    pub(crate) async fn with_observed_worker_identity<F, Fut, T>(
+        &self,
+        project_id: &str,
+        consume: F,
+    ) -> T
+    where
+        F: FnOnce(Option<crate::daemon::buddy_reconciliation::ObservedIdentity>) -> Fut,
+        Fut: Future<Output = T>,
+    {
+        let slot = self.slot_for(project_id).await;
+        let _guard = slot.op_lock.lock().await;
+        let record = slot.record.lock().await;
+        let result = consume(observed_identity(&record)).await;
+        drop(record);
+        result
+    }
+
+    /// Hold both owner fences through the observation commit. A monitor exit,
+    /// restart, or stop cannot replace the identity between check and commit.
+    pub(crate) async fn with_worker_identity<F, Fut, T>(
+        &self,
+        project_id: &str,
+        pid: u32,
+        instance_token: &str,
+        consume: F,
+    ) -> Result<T, String>
+    where
+        F: FnOnce(crate::daemon::buddy_reconciliation::ObservedIdentity) -> Fut,
+        Fut: Future<Output = Result<T, String>>,
+    {
+        let slot = self
+            .get_slot(project_id)
+            .await
+            .ok_or("worker unavailable")?;
+        let _operation = slot.op_lock.lock().await;
+        let record = slot.record.lock().await;
+        if instance_token.is_empty()
+            || record.info.pid != Some(pid)
+            || record.instance_token.as_deref() != Some(instance_token)
+        {
+            return Err("projection does not match the current worker".into());
+        }
+        let identity = observed_identity(&record).ok_or("worker is offline")?;
+        let result = consume(identity).await;
+        drop(record);
+        result
     }
 
     #[cfg(test)]
@@ -745,6 +967,10 @@ impl Supervisor {
         spec: WorkerLaunchSpec,
         reason: &str,
     ) -> Result<WorkerInfo, String> {
+        let _installation = self.installation_fence.read().await;
+        if self.wake_shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("worker start rejected during daemon shutdown".into());
+        }
         if let Some(conflict) = self.probe_foreign_workspace_lease(&spec.root).await {
             let _guard = slot.op_lock.lock().await;
             if let Some(info) = self.reusable_info(&slot).await {
@@ -774,6 +1000,7 @@ impl Supervisor {
                 let mut record = slot.record.lock().await;
                 abort_task(&mut record.monitor_task);
                 record.generation = record.generation.saturating_add(1);
+                record.wake_only = false;
                 record.child = Some(child);
                 record.instance_token = Some(nonce.clone());
                 record.info = WorkerInfo {
@@ -1011,6 +1238,16 @@ impl Supervisor {
         ports: PortPair,
         nonce: &str,
     ) -> Result<Child, String> {
+        self.spawn_child_fenced(spec, ports, nonce, None).await
+    }
+
+    async fn spawn_child_fenced(
+        &self,
+        spec: &WorkerLaunchSpec,
+        ports: PortPair,
+        nonce: &str,
+        fence: Option<(u64, u64)>,
+    ) -> Result<Child, String> {
         let mut command = self.worker_command(spec, ports, nonce).await?;
         let log_path = self
             .daemon_dir
@@ -1037,6 +1274,15 @@ impl Supervisor {
         }
         command.stdin(Stdio::null());
         command.kill_on_drop(true);
+        // Revocation and stop fence changes linearize against the actual OS spawn.
+        let fences = self.wake_fences.lock();
+        if fence.is_some_and(|(expected_epoch, expires_at_ms)| {
+            self.wake_shutdown.load(std::sync::atomic::Ordering::SeqCst)
+                || fences.get(&spec.project_id).copied().unwrap_or(0) != expected_epoch
+                || now_ms() >= expires_at_ms
+        }) {
+            return Err("wake cancelled before spawn; budget consumed".into());
+        }
         command
             .spawn()
             .map_err(|error| format!("failed to spawn worker command: {error}"))
@@ -1291,6 +1537,7 @@ impl Supervisor {
             Some(code) => format!("{reason} (exit code {code})"),
             None => format!("{reason} (signal)"),
         });
+        let wants_alive = wants_alive && !record.wake_only;
         if delay.is_some() && wants_alive {
             record.info.state = WorkerState::Starting;
         } else if delay.is_none() {
@@ -1586,6 +1833,7 @@ impl WorkerSlot {
                 child: None,
                 instance_token: None,
                 generation: 0,
+                wake_only: false,
                 crash_history: VecDeque::new(),
                 monitor_task: None,
             }),
@@ -2516,5 +2764,58 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("shutdown"));
+    }
+    #[tokio::test]
+    async fn installation_fence_requires_stopped_workers_and_blocks_spawn_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = Supervisor::new(
+            EventBus::new(dir.path().join("events.jsonl")),
+            dir.path().join("daemon"),
+            0,
+        );
+        let drained = owner.installation_drained().await.unwrap();
+        assert!(owner.installation_fence.try_read().is_err());
+        drop(drained);
+        let start = owner.installation_fence.read().await;
+        assert!(owner.installation_drained().await.is_err());
+        drop(start);
+        owner
+            .set_test_worker_info("project", 42, WorkerState::Ready, "fixture")
+            .await;
+        assert!(owner.installation_drained().await.is_err());
+        assert_eq!(owner.worker_info("project").await.unwrap().pid, Some(42));
+    }
+
+    #[tokio::test]
+    async fn buddy_wake_stop_fence_and_ready_starting_do_not_consume() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = Supervisor::new(
+            EventBus::new(dir.path().join("events.jsonl")),
+            dir.path().join("daemon"),
+            0,
+        );
+        let entry = test_entry(dir.path().to_path_buf());
+        let queued_fence = supervisor.buddy_wake_fence(&entry.id);
+        supervisor.stop_worker(&entry.id).await.unwrap();
+        assert!(supervisor
+            .buddy_wake(&entry, queued_fence, u64::MAX, || async {
+                panic!("stopped queued start must not consume")
+            })
+            .await
+            .unwrap()
+            .is_none());
+        for state in [WorkerState::Ready, WorkerState::Starting] {
+            supervisor
+                .set_test_worker_info(&entry.id, 42, state, "fake-identity")
+                .await;
+            let fence = supervisor.buddy_wake_fence(&entry.id);
+            assert!(supervisor
+                .buddy_wake(&entry, fence, u64::MAX, || async {
+                    panic!("active worker must not consume or spawn")
+                })
+                .await
+                .unwrap()
+                .is_none());
+        }
     }
 }

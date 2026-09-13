@@ -161,10 +161,27 @@ pub fn settings_path(config_dir: &Path) -> PathBuf {
     config_dir.join("trajectory-settings.yaml")
 }
 
+pub fn parse_persisted(bytes: &[u8]) -> Result<TrajectoryRuntimeSettings, String> {
+    let mut value: serde_yaml::Value =
+        serde_yaml::from_slice(bytes).map_err(|_| "invalid trajectory settings")?;
+    let defaults = serde_yaml::to_value(TrajectoryRuntimeSettings::default())
+        .map_err(|_| "invalid trajectory settings")?;
+    let known = defaults.as_mapping().ok_or("invalid trajectory settings")?;
+    let map = value
+        .as_mapping_mut()
+        .ok_or("invalid trajectory settings")?;
+    if map.contains_key(serde_yaml::Value::String("schema_version".into())) {
+        return Err("versioned trajectory settings are unsupported".into());
+    }
+    map.retain(|key, _| known.contains_key(key));
+    let settings = serde_yaml::from_value(value).map_err(|_| "invalid trajectory settings")?;
+    validate(&settings)?;
+    Ok(settings)
+}
+
 pub async fn load_from_path(path: &Path) -> Result<TrajectoryRuntimeSettings, String> {
     match tokio::fs::read_to_string(path).await {
-        Ok(contents) => serde_yaml::from_str(&contents)
-            .map_err(|error| format!("invalid trajectory settings in {}: {error}", path.display())),
+        Ok(contents) => parse_persisted(contents.as_bytes()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Ok(TrajectoryRuntimeSettings::default())
         }

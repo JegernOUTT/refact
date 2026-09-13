@@ -1299,7 +1299,9 @@ pub async fn find_memory_by_source(
             .collect(),
         global: get_global_knowledge_dir(gcx).await,
     };
-    for root in roots.all() {
+    // Creation writes to the first local knowledge root. A global or second-project
+    // match is not authority to suppress a local write or remint its provenance.
+    for root in roots.local.into_iter().take(1) {
         let docs = load_memory_doc_snapshots_from_knowledge_dirs(&[root]).await;
         for doc in docs {
             let Ok(text) = tokio::fs::read_to_string(&doc.path).await else {
@@ -1904,6 +1906,13 @@ pub async fn apply_memory_lifecycle_op(
     gcx: AppState,
     op: &MemoryLifecycleOp,
 ) -> Result<MemoryApplyOutcome, String> {
+    crate::memories::with_memory_mutation_lock(apply_memory_lifecycle_op_locked(gcx, op)).await
+}
+
+async fn apply_memory_lifecycle_op_locked(
+    gcx: AppState,
+    op: &MemoryLifecycleOp,
+) -> Result<MemoryApplyOutcome, String> {
     let op = op.clone().normalized();
     if memory_op_status_is_finalized(op.status) {
         return Ok(MemoryApplyOutcome {
@@ -2348,26 +2357,40 @@ async fn apply_merge_archive(
         let existing = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| format!("failed to read canonical memory: {e}"))?;
-        let (existing_frontmatter, _) = KnowledgeFrontmatter::parse(&existing);
+        let (existing_frontmatter, body_start) = KnowledgeFrontmatter::parse(&existing);
+        for line in existing[body_start..].lines().filter(|line| {
+            line.starts_with('#')
+                || line.contains("<a ")
+                || line.contains("id=\"")
+                || line.contains("](")
+                || line.contains("][")
+                || line.starts_with("Source:")
+                || line.starts_with('[')
+        }) {
+            if !canonical.content.lines().any(|new| new == line) {
+                return Err("merge would remove an original anchor or evidence link".into());
+            }
+        }
         let merged_frontmatter = frontmatter;
         frontmatter = existing_frontmatter.clone();
         frontmatter.title = merged_frontmatter.title;
         frontmatter.tags = merged_frontmatter.tags;
-        frontmatter.filenames = merged_frontmatter.filenames;
-        frontmatter.links = merged_frontmatter.links;
+        frontmatter.filenames.extend(merged_frontmatter.filenames);
+        frontmatter.filenames.sort();
+        frontmatter.filenames.dedup();
+        frontmatter.links.extend(merged_frontmatter.links);
+        frontmatter.links.sort();
+        frontmatter.links.dedup();
         frontmatter.kind = merged_frontmatter.kind;
-        frontmatter.related_files = merged_frontmatter.related_files;
+        frontmatter
+            .related_files
+            .extend(merged_frontmatter.related_files);
+        frontmatter.related_files.sort();
+        frontmatter.related_files.dedup();
         frontmatter.content_hash = merged_frontmatter.content_hash;
-        frontmatter.source_id = op
-            .payload
-            .source_id
-            .clone()
-            .or(existing_frontmatter.source_id.clone());
-        frontmatter.source_content_hash = op
-            .payload
-            .source_content_hash
-            .clone()
-            .or(existing_frontmatter.source_content_hash.clone());
+        // Merging knowledge cannot replace the canonical document's original lineage.
+        frontmatter.source_id = existing_frontmatter.source_id.clone();
+        frontmatter.source_content_hash = existing_frontmatter.source_content_hash.clone();
         frontmatter.review_after = merged_frontmatter.review_after;
         frontmatter.source_tool = existing_frontmatter
             .source_tool
@@ -2375,7 +2398,14 @@ async fn apply_merge_archive(
             .or(merged_frontmatter.source_tool);
         frontmatter.status = existing_frontmatter.status.or(Some("active".to_string()));
         frontmatter.updated = Some(today_string());
-        rewrite_memory_document(&path, frontmatter.clone(), canonical.content.trim(), &[]).await?;
+        // Use the owning atomic writer so retrieval/index state changes with the file.
+        crate::memories::rewrite_memory_document(
+            gcx.gcx.clone(),
+            &path,
+            &frontmatter,
+            canonical.content.trim(),
+        )
+        .await?;
         path
     } else {
         memories_add(gcx.gcx.clone(), &frontmatter, canonical.content.trim()).await?
@@ -2400,6 +2430,19 @@ async fn apply_merge_archive(
 }
 
 pub async fn archive_memory_file_checked(
+    gcx: AppState,
+    path: &Path,
+    superseded_by: Option<&str>,
+) -> Result<bool, String> {
+    crate::memories::with_memory_mutation_lock(archive_memory_file_checked_locked(
+        gcx,
+        path,
+        superseded_by,
+    ))
+    .await
+}
+
+async fn archive_memory_file_checked_locked(
     gcx: AppState,
     path: &Path,
     superseded_by: Option<&str>,
@@ -3970,6 +4013,50 @@ mod tests {
             Some(&serde_yaml::Value::String("unknown-value".to_string()))
         );
         assert_eq!(body, "Merged body");
+    }
+
+    #[tokio::test]
+    async fn merge_owner_preserves_lineage_links_and_refreshes_retrieval() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_gcx_with_workspace(dir.path()).await;
+        let root = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let path = root.join("canonical.md");
+        let mut fm = active_frontmatter("canonical", &["old"]);
+        fm.source_id = Some("trajectory:original:3".into());
+        fm.links = strings(&["original-link"]);
+        write_memory_file(&path, fm, "# Original anchor\nOriginal body").await;
+        let mut op = MemoryLifecycleOp::pending(
+            "merge",
+            MemorySource::MemoryGarden,
+            MemoryOpType::MergeArchive,
+            vec![path.to_string_lossy().into_owned()],
+            "merge",
+            0.9,
+            "2026-05-02T00:00:00Z",
+        );
+        op.payload.source_id = Some("replacement-lineage".into());
+        op.payload.canonical = Some(MemoryCreatePayload {
+            content: "# Original anchor\nNew retrieval body".into(),
+            links: strings(&["new-link"]),
+            ..Default::default()
+        });
+        apply_memory_lifecycle_op(app.clone(), &op).await.unwrap();
+        let text = tokio::fs::read_to_string(&path).await.unwrap();
+        let (fm, _) = frontmatter_and_body(&text);
+        assert_eq!(fm.source_id.as_deref(), Some("trajectory:original:3"));
+        assert_eq!(fm.links, strings(&["new-link", "original-link"]));
+        assert!(app
+            .gcx
+            .knowledge_index
+            .lock()
+            .await
+            .content_for_path(&path)
+            .unwrap()
+            .contains("New retrieval body"));
+        op.payload.canonical.as_mut().unwrap().content = "Drops the anchor".into();
+        assert!(apply_memory_lifecycle_op(app, &op).await.is_err());
+        assert_eq!(tokio::fs::read_to_string(path).await.unwrap(), text);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -37,6 +37,20 @@ static ENRICHMENT_SEARCH_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 const ROOT_CHAT_MEMO_CAPACITY: usize = 8_192;
 static ROOT_CHAT_MEMO: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
+static MEMORY_MUTATION_LOCK: AMutex<()> = AMutex::const_new(());
+
+tokio::task_local! {
+    static MEMORY_MUTATION_HELD: ();
+}
+
+pub async fn with_memory_mutation_lock<F: std::future::Future>(future: F) -> F::Output {
+    if MEMORY_MUTATION_HELD.try_with(|_| ()).is_ok() {
+        return future.await;
+    }
+    let _guard = MEMORY_MUTATION_LOCK.lock().await;
+    MEMORY_MUTATION_HELD.scope((), future).await
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum StorageScope {
@@ -703,45 +717,52 @@ pub async fn memories_add(
     frontmatter: &KnowledgeFrontmatter,
     content: &str,
 ) -> Result<PathBuf, String> {
-    let knowledge_dir = get_first_knowledge_dir(gcx.clone()).await?;
-    fs::create_dir_all(&knowledge_dir)
-        .await
-        .map_err(|e| format!("Failed to create knowledge dir: {}", e))?;
+    with_memory_mutation_lock(async {
+        let knowledge_dir = get_first_knowledge_dir(gcx.clone()).await?;
+        fs::create_dir_all(&knowledge_dir)
+            .await
+            .map_err(|e| format!("Failed to create knowledge dir: {}", e))?;
 
-    let filename = generate_filename(content);
-    let file_path = knowledge_dir.join(&filename);
+        let filename = generate_filename(content);
+        let file_path = knowledge_dir.join(&filename);
 
-    if file_path.exists() {
-        return Err(format!("File already exists: {}", file_path.display()));
-    }
+        if file_path.exists() {
+            return Err(format!("File already exists: {}", file_path.display()));
+        }
 
-    let md_content = format!("{}\n\n{}", frontmatter.to_yaml(), content);
-    atomic_write_text(&file_path, &md_content).await?;
-    gcx.enrichment_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let md_content = format!("{}\n\n{}", frontmatter.to_yaml(), content);
+        atomic_write_text(&file_path, &md_content).await?;
+        gcx.enrichment_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    info!("Created knowledge entry: {}", file_path.display());
+        info!("Created knowledge entry: {}", file_path.display());
 
-    // Update fast in-memory knowledge index (best-effort, new docs going forward).
-    {
-        let gcx_read = gcx.clone();
-        let mut idx = gcx_read.knowledge_index.lock().await;
-        idx.add_signature(
-            refact_buddy_core::memory_dedup::content_signature(content),
-            file_path.clone(),
-        );
-        idx.add_from_frontmatter(file_path.clone(), frontmatter, Some(content));
-    }
+        // Update fast in-memory knowledge index (best-effort, new docs going forward).
+        {
+            let gcx_read = gcx.clone();
+            let mut idx = gcx_read.knowledge_index.lock().await;
+            idx.add_signature(
+                refact_buddy_core::memory_dedup::content_signature(content),
+                file_path.clone(),
+            );
+            idx.add_from_frontmatter(file_path.clone(), frontmatter, Some(content));
+        }
 
-    let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
-    let vec_db = gcx.vec_db.clone();
-    if let Some(vecdb) = vec_db.lock().await.clone() {
-        vecdb
-            .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], true, roots)
-            .await;
-    }
+        let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
+        let vec_db = gcx.vec_db.clone();
+        if let Some(vecdb) = vec_db.lock().await.clone() {
+            vecdb
+                .vectorizer_enqueue_files(
+                    &vec![file_path.to_string_lossy().to_string()],
+                    true,
+                    roots,
+                )
+                .await;
+        }
 
-    Ok(file_path)
+        Ok(file_path)
+    })
+    .await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -799,7 +820,17 @@ async fn find_duplicate_memory(
             find_duplicate_in_index(&idx, frontmatter, content)
         };
         let path = candidate?;
+        // A local create must never touch a matching global/other-project memory.
+        let root = get_first_knowledge_dir(gcx.clone()).await.ok()?;
+        let canonical_root = tokio::fs::canonicalize(&root).await.ok()?;
+        if !path.starts_with(&root) {
+            return None;
+        }
         if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            let canonical = tokio::fs::canonicalize(&path).await.ok()?;
+            if canonical != path || !canonical.starts_with(&canonical_root) {
+                return None;
+            }
             return Some(path);
         }
         evict_stale_index_path(gcx.clone(), &path).await;
@@ -843,26 +874,29 @@ pub async fn memories_add_dedup(
     frontmatter: &KnowledgeFrontmatter,
     content: &str,
 ) -> Result<MemoryWriteOutcome, String> {
-    if let Some(existing) = find_duplicate_memory(gcx.clone(), frontmatter, content).await {
-        info!(
-            "memories: duplicate content detected, touching {} instead of creating a new file",
-            existing.display()
-        );
-        match touch_memory_observation(gcx.clone(), &existing).await {
-            Ok(()) => return Ok(MemoryWriteOutcome::DuplicateTouched(existing)),
-            Err(err) => {
-                warn!(
-                    "memories: failed to touch duplicate {}: {}, creating instead",
-                    existing.display(),
-                    err
-                );
-                evict_stale_index_path(gcx.clone(), &existing).await;
+    with_memory_mutation_lock(async {
+        if let Some(existing) = find_duplicate_memory(gcx.clone(), frontmatter, content).await {
+            info!(
+                "memories: duplicate content detected, touching {} instead of creating a new file",
+                existing.display()
+            );
+            match touch_memory_observation(gcx.clone(), &existing).await {
+                Ok(()) => return Ok(MemoryWriteOutcome::DuplicateTouched(existing)),
+                Err(err) => {
+                    warn!(
+                        "memories: failed to touch duplicate {}: {}, creating instead",
+                        existing.display(),
+                        err
+                    );
+                    evict_stale_index_path(gcx.clone(), &existing).await;
+                }
             }
         }
-    }
-    memories_add(gcx, frontmatter, content)
-        .await
-        .map(MemoryWriteOutcome::Created)
+        memories_add(gcx, frontmatter, content)
+            .await
+            .map(MemoryWriteOutcome::Created)
+    })
+    .await
 }
 
 pub async fn memories_upsert_by_signal_key(
@@ -871,85 +905,88 @@ pub async fn memories_upsert_by_signal_key(
     frontmatter: &KnowledgeFrontmatter,
     content: &str,
 ) -> Result<MemoryWriteOutcome, String> {
-    let signal_key = signal_key.trim();
-    if signal_key.is_empty() {
-        return memories_add_dedup(gcx, frontmatter, content).await;
-    }
-    loop {
-        let existing = {
-            let idx = gcx.knowledge_index.lock().await;
-            idx.first_path_for_signal_key(signal_key).cloned()
-        };
-        let Some(doc_path) = existing else {
-            break;
-        };
-        let existing_text = match fs::read_to_string(&doc_path).await {
-            Ok(text) => text,
-            Err(err) => {
+    with_memory_mutation_lock(async {
+        let signal_key = signal_key.trim();
+        if signal_key.is_empty() {
+            return memories_add_dedup(gcx, frontmatter, content).await;
+        }
+        loop {
+            let existing = {
+                let idx = gcx.knowledge_index.lock().await;
+                idx.first_path_for_signal_key(signal_key).cloned()
+            };
+            let Some(doc_path) = existing else {
+                break;
+            };
+            let existing_text = match fs::read_to_string(&doc_path).await {
+                Ok(text) => text,
+                Err(err) => {
+                    warn!(
+                        "memories: failed to read signal doc {}: {}",
+                        doc_path.display(),
+                        err
+                    );
+                    evict_stale_index_path(gcx.clone(), &doc_path).await;
+                    continue;
+                }
+            };
+            let (mut existing_frontmatter, _) = KnowledgeFrontmatter::parse(&existing_text);
+            existing_frontmatter.occurrences =
+                existing_frontmatter.occurrences.saturating_add(1).max(2);
+            existing_frontmatter.last_observed = Some(Utc::now().to_rfc3339());
+            existing_frontmatter.updated = Some(Local::now().format("%Y-%m-%d").to_string());
+            existing_frontmatter.signal_key = Some(signal_key.to_string());
+            if let Some(title) = &frontmatter.title {
+                existing_frontmatter.title = Some(title.clone());
+            }
+            if let Some(kind) = &frontmatter.kind {
+                existing_frontmatter.kind = Some(kind.clone());
+            }
+            for tag in &frontmatter.tags {
+                if !existing_frontmatter.tags.contains(tag) {
+                    existing_frontmatter.tags.push(tag.clone());
+                }
+            }
+            for filename in &frontmatter.filenames {
+                if !existing_frontmatter.filenames.contains(filename) {
+                    existing_frontmatter.filenames.push(filename.clone());
+                }
+            }
+            existing_frontmatter.content_hash = Some(compute_content_hash_hex(content));
+            rewrite_memory_document(gcx, &doc_path, &existing_frontmatter, content).await?;
+            info!(
+                "memories: upserted signal '{}' in place at {}",
+                signal_key,
+                doc_path.display()
+            );
+            return Ok(MemoryWriteOutcome::DuplicateTouched(doc_path));
+        }
+        let mut stamped = frontmatter.clone();
+        stamped.signal_key = Some(signal_key.to_string());
+        stamped.occurrences = stamped.occurrences.max(1);
+        stamped.last_observed = Some(Utc::now().to_rfc3339());
+        let outcome = memories_add_dedup(gcx.clone(), &stamped, content).await?;
+        if let MemoryWriteOutcome::DuplicateTouched(path) = &outcome {
+            let key = signal_key.to_string();
+            let stamp = update_memory_document_frontmatter(gcx.clone(), path, move |fm| {
+                if fm.signal_key.as_deref() == Some(key.as_str()) {
+                    return Ok(false);
+                }
+                fm.signal_key = Some(key);
+                Ok(true)
+            })
+            .await;
+            if let Err(err) = stamp {
                 warn!(
-                    "memories: failed to read signal doc {}: {}",
-                    doc_path.display(),
+                    "memories: failed to stamp signal key on deduped doc {}: {}",
+                    path.display(),
                     err
                 );
-                evict_stale_index_path(gcx.clone(), &doc_path).await;
-                continue;
-            }
-        };
-        let (mut existing_frontmatter, _) = KnowledgeFrontmatter::parse(&existing_text);
-        existing_frontmatter.occurrences =
-            existing_frontmatter.occurrences.saturating_add(1).max(2);
-        existing_frontmatter.last_observed = Some(Utc::now().to_rfc3339());
-        existing_frontmatter.updated = Some(Local::now().format("%Y-%m-%d").to_string());
-        existing_frontmatter.signal_key = Some(signal_key.to_string());
-        if let Some(title) = &frontmatter.title {
-            existing_frontmatter.title = Some(title.clone());
-        }
-        if let Some(kind) = &frontmatter.kind {
-            existing_frontmatter.kind = Some(kind.clone());
-        }
-        for tag in &frontmatter.tags {
-            if !existing_frontmatter.tags.contains(tag) {
-                existing_frontmatter.tags.push(tag.clone());
             }
         }
-        for filename in &frontmatter.filenames {
-            if !existing_frontmatter.filenames.contains(filename) {
-                existing_frontmatter.filenames.push(filename.clone());
-            }
-        }
-        existing_frontmatter.content_hash = Some(compute_content_hash_hex(content));
-        rewrite_memory_document(gcx, &doc_path, &existing_frontmatter, content).await?;
-        info!(
-            "memories: upserted signal '{}' in place at {}",
-            signal_key,
-            doc_path.display()
-        );
-        return Ok(MemoryWriteOutcome::DuplicateTouched(doc_path));
-    }
-    let mut stamped = frontmatter.clone();
-    stamped.signal_key = Some(signal_key.to_string());
-    stamped.occurrences = stamped.occurrences.max(1);
-    stamped.last_observed = Some(Utc::now().to_rfc3339());
-    let outcome = memories_add_dedup(gcx.clone(), &stamped, content).await?;
-    if let MemoryWriteOutcome::DuplicateTouched(path) = &outcome {
-        let key = signal_key.to_string();
-        let stamp = update_memory_document_frontmatter(gcx.clone(), path, move |fm| {
-            if fm.signal_key.as_deref() == Some(key.as_str()) {
-                return Ok(false);
-            }
-            fm.signal_key = Some(key);
-            Ok(true)
-        })
-        .await;
-        if let Err(err) = stamp {
-            warn!(
-                "memories: failed to stamp signal key on deduped doc {}: {}",
-                path.display(),
-                err
-            );
-        }
-    }
-    Ok(outcome)
+        Ok(outcome)
+    })
+    .await
 }
 
 pub async fn load_memories_by_tags(
@@ -1245,54 +1282,58 @@ pub async fn memories_add_preference_if_new(
     evidence: &str,
     confidence: f32,
 ) -> Result<Option<PathBuf>, String> {
-    if !preference_statement_is_safe(statement, confidence) {
-        return Ok(None);
-    }
+    with_memory_mutation_lock(async {
+        if !preference_statement_is_safe(statement, confidence) {
+            return Ok(None);
+        }
 
-    let statement = redact_and_cap_preference_text(statement, PREFERENCE_STATEMENT_MAX_CHARS);
-    let evidence = redact_and_cap_preference_text(evidence, PREFERENCE_EVIDENCE_MAX_CHARS);
-    let normalized_statement = normalize_preference_text_for_dedupe(&statement);
-    if normalized_statement.is_empty() {
-        return Ok(None);
-    }
+        let statement = redact_and_cap_preference_text(statement, PREFERENCE_STATEMENT_MAX_CHARS);
+        let evidence = redact_and_cap_preference_text(evidence, PREFERENCE_EVIDENCE_MAX_CHARS);
+        let normalized_statement = normalize_preference_text_for_dedupe(&statement);
+        if normalized_statement.is_empty() {
+            return Ok(None);
+        }
 
-    let existing = load_memories_by_tags(gcx.clone(), &["preference"], 200).await?;
-    if existing
-        .iter()
-        .any(|memory| preference_matches_existing(memory, &normalized_statement))
-    {
-        return Ok(None);
-    }
+        let existing = load_memories_by_tags(gcx.clone(), &["preference"], 200).await?;
+        if existing
+            .iter()
+            .any(|memory| preference_matches_existing(memory, &normalized_statement))
+        {
+            return Ok(None);
+        }
 
-    let knowledge_dirs = get_all_knowledge_dirs(gcx.clone()).await;
-    if preference_file_already_exists(&knowledge_dirs, &normalized_statement) {
-        return Ok(None);
-    }
+        let knowledge_dirs = get_all_knowledge_dirs(gcx.clone()).await;
+        if preference_file_already_exists(&knowledge_dirs, &normalized_statement) {
+            return Ok(None);
+        }
 
-    let tags = vec![
-        "preference".to_string(),
-        "buddy".to_string(),
-        "behavior_learner".to_string(),
-    ];
-    let empty = Vec::<String>::new();
-    let mut frontmatter = create_frontmatter(Some(&statement), &tags, &empty, &empty, "preference");
-    frontmatter.summary = Some(statement.clone());
-    if !evidence.is_empty() {
-        frontmatter.description = Some(evidence.clone());
-    }
-    frontmatter.content_hash = Some(compute_content_hash_hex(&statement));
-    frontmatter.source_tool = Some("buddy_behavior_learner".to_string());
+        let tags = vec![
+            "preference".to_string(),
+            "buddy".to_string(),
+            "behavior_learner".to_string(),
+        ];
+        let empty = Vec::<String>::new();
+        let mut frontmatter =
+            create_frontmatter(Some(&statement), &tags, &empty, &empty, "preference");
+        frontmatter.summary = Some(statement.clone());
+        if !evidence.is_empty() {
+            frontmatter.description = Some(evidence.clone());
+        }
+        frontmatter.content_hash = Some(compute_content_hash_hex(&statement));
+        frontmatter.source_tool = Some("buddy_behavior_learner".to_string());
 
-    let content = if evidence.is_empty() {
-        format!("# {}\n\nConfidence: {:.2}", statement, confidence)
-    } else {
-        format!(
-            "# {}\n\nEvidence: {}\n\nConfidence: {:.2}",
-            statement, evidence, confidence
-        )
-    };
+        let content = if evidence.is_empty() {
+            format!("# {}\n\nConfidence: {:.2}", statement, confidence)
+        } else {
+            format!(
+                "# {}\n\nEvidence: {}\n\nConfidence: {:.2}",
+                statement, evidence, confidence
+            )
+        };
 
-    memories_add(gcx, &frontmatter, &content).await.map(Some)
+        memories_add(gcx, &frontmatter, &content).await.map(Some)
+    })
+    .await
 }
 
 pub async fn memories_search(
@@ -1925,20 +1966,23 @@ pub async fn update_memory_document_frontmatter<F>(
 where
     F: FnOnce(&mut KnowledgeFrontmatter) -> Result<bool, String>,
 {
-    let existing_text = fs::read_to_string(doc_path)
-        .await
-        .map_err(|e| format!("Failed to read memory file: {}", e))?;
-    let (mut frontmatter, content_start) = KnowledgeFrontmatter::parse(&existing_text);
-    if content_start == 0 && existing_text.starts_with("---") {
-        return Err("Failed to parse memory frontmatter".to_string());
-    }
-    let body = existing_text.get(content_start..).unwrap_or("").to_string();
-    if !update(&mut frontmatter)? {
-        return Ok(false);
-    }
-    rewrite_memory_document(gcx, doc_path, &frontmatter, &body)
-        .await
-        .map(|_| true)
+    with_memory_mutation_lock(async {
+        let existing_text = fs::read_to_string(doc_path)
+            .await
+            .map_err(|e| format!("Failed to read memory file: {}", e))?;
+        let (mut frontmatter, content_start) = KnowledgeFrontmatter::parse(&existing_text);
+        if content_start == 0 && existing_text.starts_with("---") {
+            return Err("Failed to parse memory frontmatter".to_string());
+        }
+        let body = existing_text.get(content_start..).unwrap_or("").to_string();
+        if !update(&mut frontmatter)? {
+            return Ok(false);
+        }
+        rewrite_memory_document(gcx, doc_path, &frontmatter, &body)
+            .await
+            .map(|_| true)
+    })
+    .await
 }
 
 pub async fn rewrite_memory_document(
@@ -1947,48 +1991,51 @@ pub async fn rewrite_memory_document(
     frontmatter: &KnowledgeFrontmatter,
     body: &str,
 ) -> Result<(), String> {
-    let content = format!("{}\n\n{}", frontmatter.to_yaml(), body.trim());
-    atomic_write_text(doc_path, &content).await?;
-    gcx.enrichment_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    with_memory_mutation_lock(async {
+        let content = format!("{}\n\n{}", frontmatter.to_yaml(), body.trim());
+        atomic_write_text(doc_path, &content).await?;
+        gcx.enrichment_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    let path_buf = doc_path.to_path_buf();
-    {
-        let gcx_read = gcx.clone();
-        let mut idx = gcx_read.knowledge_index.lock().await;
-        idx.remove_path(&path_buf);
-        if !frontmatter.is_archived() && !frontmatter.is_deprecated() {
-            idx.add_signature(
-                refact_buddy_core::memory_dedup::content_signature(body),
-                path_buf.clone(),
-            );
-            idx.add_from_frontmatter(path_buf.clone(), frontmatter, Some(body));
+        let path_buf = doc_path.to_path_buf();
+        {
+            let gcx_read = gcx.clone();
+            let mut idx = gcx_read.knowledge_index.lock().await;
+            idx.remove_path(&path_buf);
+            if !frontmatter.is_archived() && !frontmatter.is_deprecated() {
+                idx.add_signature(
+                    refact_buddy_core::memory_dedup::content_signature(body),
+                    path_buf.clone(),
+                );
+                idx.add_from_frontmatter(path_buf.clone(), frontmatter, Some(body));
+            }
         }
-    }
 
-    let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
-    let vec_db = gcx.vec_db.clone();
-    if let Some(vecdb) = vec_db.lock().await.clone() {
-        if frontmatter.is_archived() || frontmatter.is_deprecated() {
-            let _ = vecdb.remove_file(&path_buf).await;
-        } else {
-            vecdb
-                .vectorizer_enqueue_files(
-                    &vec![path_buf.to_string_lossy().to_string()],
-                    true,
-                    roots,
-                )
-                .await;
+        let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
+        let vec_db = gcx.vec_db.clone();
+        if let Some(vecdb) = vec_db.lock().await.clone() {
+            if frontmatter.is_archived() || frontmatter.is_deprecated() {
+                let _ = vecdb.remove_file(&path_buf).await;
+            } else {
+                vecdb
+                    .vectorizer_enqueue_files(
+                        &vec![path_buf.to_string_lossy().to_string()],
+                        true,
+                        roots,
+                    )
+                    .await;
+            }
         }
-    }
 
-    gcx.documents_state
-        .memory_document_map
-        .lock()
-        .await
-        .remove(&path_buf);
+        gcx.documents_state
+            .memory_document_map
+            .lock()
+            .await
+            .remove(&path_buf);
 
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 async fn atomic_write_text(path: &Path, content: &str) -> Result<(), String> {
@@ -2035,30 +2082,33 @@ pub async fn delete_document_from_disk(
     gcx: Arc<GlobalContext>,
     doc_path: &PathBuf,
 ) -> Result<(), String> {
-    match fs::remove_file(doc_path).await {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("Failed to delete document: {}", e)),
-    }
-    gcx.enrichment_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    with_memory_mutation_lock(async {
+        match fs::remove_file(doc_path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Failed to delete document: {}", e)),
+        }
+        gcx.enrichment_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    info!("Deleted document from disk: {}", doc_path.display());
+        info!("Deleted document from disk: {}", doc_path.display());
 
-    gcx.knowledge_index.lock().await.remove_path(doc_path);
+        gcx.knowledge_index.lock().await.remove_path(doc_path);
 
-    let vec_db = gcx.vec_db.clone();
-    if let Some(vecdb) = vec_db.lock().await.clone() {
-        let _ = vecdb.remove_file(doc_path).await;
-    }
+        let vec_db = gcx.vec_db.clone();
+        if let Some(vecdb) = vec_db.lock().await.clone() {
+            let _ = vecdb.remove_file(doc_path).await;
+        }
 
-    gcx.documents_state
-        .memory_document_map
-        .lock()
-        .await
-        .remove(doc_path);
+        gcx.documents_state
+            .memory_document_map
+            .lock()
+            .await
+            .remove(doc_path);
 
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 pub fn extract_entities(content: &str) -> Vec<String> {
@@ -2315,8 +2365,17 @@ pub async fn memories_add_enriched(
     {
         warn!("Auto-linking failed for new memory: {}", e);
     } else if updated_frontmatter.links != frontmatter.links {
-        if let Err(e) =
-            rewrite_memory_document(gcx.clone(), &file_path, &updated_frontmatter, content).await
+        if let Err(e) = update_memory_document_frontmatter(gcx.clone(), &file_path, |current| {
+            let mut changed = false;
+            for link in &updated_frontmatter.links {
+                if !current.links.contains(link) {
+                    current.links.push(link.clone());
+                    changed = true;
+                }
+            }
+            Ok(changed)
+        })
+        .await
         {
             warn!("Failed to update memory with auto-links: {}", e);
         } else {
@@ -2380,6 +2439,149 @@ pub async fn memories_add_enriched(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_dedup_never_touches_other_project_memory() {
+        let local = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let local_root = std::fs::canonicalize(local.path()).unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![local_root.clone()];
+        let foreign_path = foreign.path().join("foreign.md");
+        let fm = create_frontmatter(Some("Foreign"), &[], &[], &[], "domain");
+        let body = "Same exact body but another project's evidence";
+        let original = format!("{}\n\n{}", fm.to_yaml(), body);
+        fs::write(&foreign_path, &original).await.unwrap();
+        {
+            let mut index = gcx.knowledge_index.lock().await;
+            index.add_signature(
+                refact_buddy_core::memory_dedup::content_signature(body),
+                foreign_path.clone(),
+            );
+            index.add_from_frontmatter(foreign_path.clone(), &fm, Some(body));
+        }
+        let outcome = memories_add_dedup(gcx, &fm, body).await.unwrap();
+        assert!(outcome.created());
+        assert!(outcome.path().starts_with(local_root));
+        assert_eq!(fs::read_to_string(foreign_path).await.unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn memory_mutation_lock_nests_and_blocks_native_writer_until_cas_finishes() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let path = memories_add(gcx.clone(), &dedup_test_frontmatter("CAS"), "Original body")
+            .await
+            .unwrap();
+        let contender = with_memory_mutation_lock(async {
+            let before = fs::read_to_string(&path).await.unwrap();
+            let (polled_tx, polled_rx) = tokio::sync::oneshot::channel();
+            let writer_gcx = gcx.clone();
+            let writer_path = path.clone();
+            let contender = tokio::spawn(async move {
+                let mut write = Box::pin(touch_memory_observation(writer_gcx, &writer_path));
+                std::future::poll_fn(|cx| {
+                    assert!(write.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                polled_tx.send(()).unwrap();
+                write.await.unwrap();
+            });
+            polled_rx.await.unwrap();
+            assert_eq!(fs::read_to_string(&path).await.unwrap(), before);
+            with_memory_mutation_lock(update_memory_document_frontmatter(
+                gcx.clone(),
+                &path,
+                |fm| {
+                    fm.title = Some("CAS committed".to_string());
+                    Ok(true)
+                },
+            ))
+            .await
+            .unwrap();
+            contender
+        })
+        .await;
+        contender.await.unwrap();
+        let text = fs::read_to_string(&path).await.unwrap();
+        let (fm, start) = KnowledgeFrontmatter::parse(&text);
+        assert_eq!(fm.title.as_deref(), Some("CAS committed"));
+        assert_eq!(fm.occurrences, 2);
+        assert_eq!(text[start..].trim(), "Original body");
+    }
+
+    #[tokio::test]
+    async fn concurrent_native_dedup_creates_one_document_and_counts_every_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let barrier = Arc::new(tokio::sync::Barrier::new(8));
+        let mut writers = Vec::new();
+        for _ in 0..8 {
+            let gcx = gcx.clone();
+            let barrier = barrier.clone();
+            writers.push(tokio::spawn(async move {
+                barrier.wait().await;
+                memories_add_dedup(
+                    gcx,
+                    &dedup_test_frontmatter("Concurrent"),
+                    "A distinctive canonical observation shared by all concurrent writers.",
+                )
+                .await
+                .unwrap()
+            }));
+        }
+        let mut outcomes = Vec::new();
+        for writer in writers {
+            outcomes.push(writer.await.unwrap());
+        }
+        assert_eq!(
+            outcomes.iter().filter(|outcome| outcome.created()).count(),
+            1
+        );
+        let path = outcomes[0].path();
+        assert!(outcomes.iter().all(|outcome| outcome.path() == path));
+        let text = fs::read_to_string(path).await.unwrap();
+        assert_eq!(KnowledgeFrontmatter::parse(&text).0.occurrences, 8);
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn native_frontmatter_updates_preserve_unknown_fields_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let path = dir.path().join("unknown.md");
+        let original = "---\nid: unknown\ntitle: Original\ncustom_scalar: keep\ncustom_list: [alpha, beta]\ncustom_object:\n  nested: true\n---\nOriginal body";
+        fs::write(&path, original).await.unwrap();
+        let expected = KnowledgeFrontmatter::parse(original).0.extra;
+        with_memory_mutation_lock(async {
+            touch_memory_observation(gcx.clone(), &path).await.unwrap();
+            deprecate_document(gcx.clone(), &path, Some("replacement"), "superseded")
+                .await
+                .unwrap();
+        })
+        .await;
+        let text = fs::read_to_string(&path).await.unwrap();
+        let (fm, start) = KnowledgeFrontmatter::parse(&text);
+        assert_eq!(fm.extra, expected);
+        assert_eq!(fm.extra.len(), 3);
+        assert_eq!(fm.occurrences, 2);
+        assert_eq!(fm.status.as_deref(), Some("deprecated"));
+        assert_eq!(text[start..].trim(), "Original body");
+        with_memory_mutation_lock(delete_document_from_disk(gcx, &path))
+            .await
+            .unwrap();
+        assert!(!path.exists());
+    }
 
     #[tokio::test]
     async fn root_chat_memo_serves_second_resolution_without_trajectory_file() {

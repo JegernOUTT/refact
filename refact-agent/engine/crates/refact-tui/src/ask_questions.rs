@@ -41,6 +41,7 @@ impl AskQuestion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AskQuestionsRequest {
     pub tool_call_id: String,
+    pub asked_at_ms: Option<u64>,
     pub questions: Vec<AskQuestion>,
     malformed_question_positions: Vec<usize>,
 }
@@ -68,6 +69,7 @@ impl AskQuestionsRequest {
         }
         (!questions.is_empty()).then_some(Self {
             tool_call_id,
+            asked_at_ms: None,
             questions,
             malformed_question_positions,
         })
@@ -75,6 +77,78 @@ impl AskQuestionsRequest {
 
     pub fn malformed_question_positions(&self) -> &[usize] {
         &self.malformed_question_positions
+    }
+
+    pub fn from_native_snapshot(raw: &Value) -> Result<Option<Vec<Self>>, String> {
+        let Some(sets) = raw.get("pending_questions") else {
+            return Ok(None);
+        };
+        let sets = sets
+            .as_array()
+            .ok_or("pending_questions must be an array")?;
+        let mut pending = Vec::new();
+        let mut tool_ids = std::collections::HashSet::new();
+        for set in sets {
+            let tool_call_id = set
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .ok_or("invalid question tool_call_id")?;
+            if !tool_ids.insert(tool_call_id) {
+                return Err("duplicate question tool_call_id".to_string());
+            }
+            let asked_at_ms = set
+                .get("asked_at_ms")
+                .and_then(Value::as_u64)
+                .ok_or("invalid question asked_at_ms")?;
+            let status = set
+                .get("status")
+                .and_then(Value::as_str)
+                .ok_or("missing question status")?;
+            if !matches!(status, "pending" | "answered" | "cancelled") {
+                return Err("invalid question status".to_string());
+            }
+            let questions = set
+                .get("questions")
+                .and_then(Value::as_array)
+                .ok_or("invalid questions")?;
+            let mut ids = std::collections::HashSet::new();
+            let mut parsed = Vec::new();
+            for question in questions {
+                if let Some(options) = question.get("options").filter(|value| !value.is_null()) {
+                    let options = options
+                        .as_array()
+                        .ok_or("invalid native question options")?;
+                    let mut seen = std::collections::HashSet::new();
+                    for option in options {
+                        let option = option
+                            .as_str()
+                            .filter(|value| !value.trim().is_empty())
+                            .ok_or("invalid native question option")?;
+                        if !seen.insert(option) {
+                            return Err("duplicate native question option".to_string());
+                        }
+                    }
+                }
+                let question = parse_question(question).ok_or("malformed native question")?;
+                if !ids.insert(question.id.clone()) {
+                    return Err("duplicate question id".to_string());
+                }
+                parsed.push(question);
+            }
+            if parsed.is_empty() {
+                return Err("empty native question set".to_string());
+            }
+            if status == "pending" {
+                pending.push(Self {
+                    tool_call_id: tool_call_id.to_string(),
+                    asked_at_ms: Some(asked_at_ms),
+                    questions: parsed,
+                    malformed_question_positions: Vec::new(),
+                });
+            }
+        }
+        Ok(Some(pending))
     }
 
     pub fn format_manual_reply(&self, answer: &str) -> String {
@@ -372,6 +446,41 @@ impl AskQuestionsForm {
         lines.join("\n").trim().to_string()
     }
 
+    pub fn native_answers(&self) -> Vec<crate::client::QuestionAnswer> {
+        self.request
+            .questions
+            .iter()
+            .enumerate()
+            .map(|(index, question)| {
+                let answer = match &self.answers[index] {
+                    AskAnswerState::Choice { selected, .. }
+                        if question.question_type == AskQuestionType::YesNo =>
+                    {
+                        Value::Bool(*selected == 0)
+                    }
+                    AskAnswerState::Choice { selected, .. } => {
+                        Value::String(question.options[*selected].clone())
+                    }
+                    AskAnswerState::Multi { selected, .. } => Value::Array(
+                        question
+                            .options
+                            .iter()
+                            .zip(selected)
+                            .filter_map(|(option, selected)| {
+                                selected.then(|| Value::String(option.clone()))
+                            })
+                            .collect(),
+                    ),
+                    AskAnswerState::Text { value } => Value::String(value.trim().to_string()),
+                };
+                crate::client::QuestionAnswer {
+                    id: question.id.clone(),
+                    answer,
+                }
+            })
+            .collect()
+    }
+
     pub fn current_question_answered(&self) -> bool {
         self.answer_is_explicit(self.current)
     }
@@ -479,6 +588,69 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn native_answers_preserve_typed_values() {
+        let request = request_with_questions(json!([
+            {"id":"yes","type":"yes_no","text":"Continue?"},
+            {"id":"one","type":"single_select","text":"Pick","options":["a","b"]},
+            {"id":"many","type":"multi_select","text":"Pick","options":["a","b"]},
+            {"id":"text","type":"free_text","text":"Notes?"}
+        ]));
+        let mut form = AskQuestionsForm::new(request);
+        form.choose_yes_no(false);
+        form.next_question();
+        form.next_option();
+        form.next_question();
+        form.toggle_current_multi();
+        form.next_question();
+        form.insert_text(" two\nlines ");
+        assert_eq!(
+            serde_json::to_value(form.native_answers()).unwrap(),
+            json!([
+                {"id":"yes","answer":false}, {"id":"one","answer":"b"},
+                {"id":"many","answer":["a"]}, {"id":"text","answer":"two\nlines"}
+            ])
+        );
+    }
+
+    #[test]
+    fn native_snapshot_requires_identity_and_complete_valid_questions() {
+        assert_eq!(
+            AskQuestionsRequest::from_native_snapshot(&json!({})).unwrap(),
+            None
+        );
+        assert_eq!(
+            AskQuestionsRequest::from_native_snapshot(&json!({"pending_questions":[]})).unwrap(),
+            Some(Vec::new())
+        );
+        let valid = json!({"pending_questions":[{
+            "tool_call_id":"ask", "asked_at_ms":42, "status":"pending",
+            "questions":[{"id":"yes","type":"yes_no","text":"Continue?"}]
+        }]});
+        assert_eq!(
+            AskQuestionsRequest::from_native_snapshot(&valid)
+                .unwrap()
+                .unwrap()[0]
+                .asked_at_ms,
+            Some(42)
+        );
+        for (key, value) in [
+            ("asked_at_ms", json!("42")),
+            ("status", json!("unknown")),
+            ("questions", json!([])),
+        ] {
+            let mut invalid = valid.clone();
+            invalid["pending_questions"][0][key] = value;
+            assert!(AskQuestionsRequest::from_native_snapshot(&invalid).is_err());
+        }
+        let mut invalid = valid.clone();
+        invalid["pending_questions"][0]["questions"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"broken"}));
+        assert!(AskQuestionsRequest::from_native_snapshot(&invalid).is_err());
     }
 
     #[test]

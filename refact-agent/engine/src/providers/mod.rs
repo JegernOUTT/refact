@@ -1,5 +1,6 @@
 pub mod http;
 pub mod oauth_refresh;
+pub mod operator_defaults;
 pub mod pricing;
 pub mod quota;
 pub mod runtime_credential;

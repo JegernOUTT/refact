@@ -212,6 +212,7 @@ impl Tool for ToolBuddySpeak {
             );
         };
         svc.update_speech_user_initiated(BuddySpeechItem {
+            editorial_delivery_required: false,
             id: Uuid::new_v4().to_string(),
             text: text.clone(),
             mood,

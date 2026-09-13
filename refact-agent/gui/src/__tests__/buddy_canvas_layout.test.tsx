@@ -91,6 +91,39 @@ describe("BuddyCanvas compact speech layout", () => {
     if (callback) callback(0);
   }
 
+  it("stops frame scheduling when hidden or unmounted and resumes once visible", () => {
+    let hidden = false;
+    const original = Object.getOwnPropertyDescriptor(document, "hidden");
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => hidden,
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    try {
+      const { unmount } = render(
+        <BuddyCanvas state={makeSemanticState()} displaySize={76} />,
+      );
+      expect(requestAnimationFrame).toHaveBeenCalledTimes(1);
+      runAnimationFrame();
+      expect(requestAnimationFrame).toHaveBeenCalledTimes(2);
+      hidden = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+      runAnimationFrame();
+      expect(requestAnimationFrame).toHaveBeenCalledTimes(2);
+      hidden = false;
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(requestAnimationFrame).toHaveBeenCalledTimes(3);
+      unmount();
+      runAnimationFrame();
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(requestAnimationFrame).toHaveBeenCalledTimes(3);
+      expect(cancelAnimationFrame).toHaveBeenCalled();
+    } finally {
+      if (original) Object.defineProperty(document, "hidden", original);
+      else Reflect.deleteProperty(document, "hidden");
+    }
+  });
+
   it("caps long compact world speech with real bubble rendering", async () => {
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
       noopContext,

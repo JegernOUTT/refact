@@ -8,6 +8,8 @@ pub mod events;
 pub mod facts;
 pub mod memory_dedup;
 pub mod memory_lifecycle_model;
+pub mod operator_events;
+pub mod operator_types;
 pub mod opportunities;
 pub mod policy;
 pub mod queue;
