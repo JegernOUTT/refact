@@ -11,13 +11,6 @@ export type AgenticDetailRow = {
   value: string;
 };
 
-export type AgenticMessageBody = {
-  sender: string;
-  recipient: string;
-  text: string;
-  expectsReply: boolean;
-};
-
 export type AgenticAgentRow = {
   agentId: string;
   title: string;
@@ -33,7 +26,6 @@ export type AgenticToolViewModel = {
   subtitle: string | null;
   status: AgenticToolStatus;
   statusLabel: string | null;
-  message: AgenticMessageBody | null;
   agents: AgenticAgentRow[];
   details: AgenticDetailRow[];
   childChatId: string | null;
@@ -93,13 +85,6 @@ function readString(args: ArgRecord, ...keys: string[]): string | null {
     }
   }
   return null;
-}
-
-function readBoolean(args: ArgRecord, ...keys: string[]): boolean {
-  for (const key of keys) {
-    if (args[key] === true) return true;
-  }
-  return false;
 }
 
 function truncate(text: string, max: number): string {
@@ -212,34 +197,6 @@ function stripStructure(content: string | null): string | null {
   return body === "" ? null : body;
 }
 
-function messageFor(
-  family: AgenticFamily,
-  args: ArgRecord,
-  isSelfReport: boolean,
-): AgenticMessageBody | null {
-  if (family === "message") {
-    const text = readString(args, "text", "message", "note");
-    if (!text) return null;
-    return {
-      sender: isSelfReport ? "this agent" : "this agent",
-      recipient: readString(args, "to", "target", "recipient") ?? "peers",
-      text,
-      expectsReply: readBoolean(args, "expects_reply"),
-    };
-  }
-  if (family === "progress") {
-    const text = readString(args, "status_line", "text", "note");
-    if (!text) return null;
-    return {
-      sender: "this agent",
-      recipient: "parent",
-      text,
-      expectsReply: false,
-    };
-  }
-  return null;
-}
-
 function headlineFor(
   family: AgenticFamily,
   label: string,
@@ -287,10 +244,7 @@ export function buildAgenticToolViewModel(
     family === "overview"
       ? [...parseOverviewRows(content), ...parseTableRows(content)]
       : [];
-  const details =
-    family === "inspect" || family === "goal" || family === "plan"
-      ? parseDetailLines(content)
-      : [];
+  const details = parseDetailLines(content);
 
   const errorText =
     status === "failed" && content ? truncate(content, 400) : null;
@@ -317,7 +271,6 @@ export function buildAgenticToolViewModel(
         : status === "failed"
           ? "failed"
           : null,
-    message: messageFor(family, args, family === "progress"),
     agents,
     details,
     childChatId: extractChildChatId(content),

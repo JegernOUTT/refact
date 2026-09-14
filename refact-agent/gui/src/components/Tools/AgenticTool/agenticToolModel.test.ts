@@ -71,7 +71,7 @@ const AGENT_STATUS_OUTPUT = [
 
 const CASES: Case[] = [
   {
-    name: "agent_message renders sender to recipient",
+    name: "agent_message keeps the recipient in the headline",
     toolName: "agent_message",
     args: JSON.stringify({
       to: "bgagent-7",
@@ -82,9 +82,6 @@ const CASES: Case[] = [
     hasResult: true,
     family: "message",
     expect: (model) => {
-      expect(model.message?.recipient).toBe("bgagent-7");
-      expect(model.message?.text).toBe("Please rebase");
-      expect(model.message?.expectsReply).toBe(true);
       expect(model.headline).toBe("Agent message → bgagent-7");
     },
   },
@@ -122,8 +119,8 @@ const CASES: Case[] = [
     hasResult: true,
     family: "progress",
     expect: (model) => {
-      expect(model.message?.text).toBe("Half done");
-      expect(model.message?.recipient).toBe("parent");
+      expect(model.headline).toBe("Progress report");
+      expect(model.body).toBe("Progress updated: Half done");
     },
   },
   {
@@ -341,7 +338,7 @@ const CASES: Case[] = [
     hasResult: true,
     family: "message",
     expect: (model) => {
-      expect(model.message?.recipient).toBe("all");
+      expect(model.headline).toBe("Broadcast → all");
     },
   },
   {
@@ -405,7 +402,6 @@ describe("buildAgenticToolViewModel", () => {
     });
     expect(model?.malformedArgs).toBe(true);
     expect(model?.argsJson).toBe("{not json");
-    expect(model?.message).toBeNull();
   });
 
   test("tolerates array arguments and empty payloads", () => {

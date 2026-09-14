@@ -265,6 +265,43 @@ export const DEDICATED_TOOL_CARD_NAMES: readonly string[] = [
   "task_done",
 ];
 
+/// Accessible card label rendered for each agentic family. Every family must
+/// resolve to a dedicated card here; the inventory test fails otherwise.
+export const AGENTIC_CARD_LABELS: Record<AgenticFamily, string> = {
+  spawn: "Agent spawn receipt",
+  message: "Agent message receipt",
+  overview: "Agents overview",
+  progress: "Progress receipt",
+  inspect: "Agent inspection",
+  control: "Agent control receipt",
+  goal: "Goal receipt",
+  plan: "Plan receipt",
+  task: "Task board receipt",
+  doc: "Task document receipt",
+  memory: "Task memory receipt",
+};
+
+/// Tool names whose dedicated card differs from their family default.
+const TOOL_CARD_LABELS: Partial<Record<string, string>> = {
+  agent_update: "Agent message receipt",
+  work_overview: "Work snapshot",
+  work_inspect: "Work snapshot",
+  agent_approval: "Child command approval",
+  agent_resume: "Child resume",
+  pause_goal: "Goal receipt",
+  snooze_goal: "Goal receipt",
+};
+
+export function agenticCardLabel(toolName: string | undefined): string | null {
+  if (!toolName) return null;
+  const normalized = normalizeToolName(toolName);
+  if (!normalized) return null;
+  const override = TOOL_CARD_LABELS[normalized];
+  if (override !== undefined) return override;
+  const descriptor = FAMILY_TABLE[normalized];
+  return descriptor ? AGENTIC_CARD_LABELS[descriptor.family] : null;
+}
+
 export function lookupAgenticFamily(
   toolName: string | undefined,
 ): AgenticFamilyDescriptor | null {

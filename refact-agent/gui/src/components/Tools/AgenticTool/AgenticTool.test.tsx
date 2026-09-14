@@ -12,9 +12,14 @@ import type {
 } from "../../../services/refact/types";
 import { ToolContent } from "../../ChatContent/ToolsContent";
 import {
+  AGENTIC_CARD_LABELS,
   AGENTIC_TOOL_NAMES,
   BOARD_RUNTIME_TOOL_NAMES,
   DEDICATED_TOOL_CARD_NAMES,
+  agenticCardLabel,
+  hasDedicatedToolCard,
+  isAgenticToolName,
+  lookupAgenticFamily,
 } from "./agenticFamilies";
 import { PAGE_CHARS } from "./PagedText";
 import { resumeReceipt } from "./resumeFixtures";
@@ -59,6 +64,57 @@ function renderTools(messages: ChatMessages, calls: ToolCall[]) {
     preloadedState: { chat },
   });
 }
+
+const INVENTORY = Array.from(
+  new Set([...AGENTIC_TOOL_NAMES, ...BOARD_RUNTIME_TOOL_NAMES]),
+).filter((name) => isAgenticToolName(name));
+
+describe("AgenticTool card inventory", () => {
+  test("every agentic family and tool name owns a dedicated card", () => {
+    const families = AGENTIC_TOOL_NAMES.map(
+      (name) => lookupAgenticFamily(name)?.family,
+    );
+    for (const family of Object.keys(AGENTIC_CARD_LABELS)) {
+      expect(families, family).toContain(family);
+    }
+    for (const name of AGENTIC_TOOL_NAMES) {
+      expect(agenticCardLabel(name), name).not.toBeNull();
+    }
+    for (const name of BOARD_RUNTIME_TOOL_NAMES) {
+      expect(hasDedicatedToolCard(name), name).toBe(true);
+    }
+  });
+
+  test.each(INVENTORY.map((name) => [name] as const))(
+    "%s renders a dedicated card and never the generic fallback",
+    (name) => {
+      const label = agenticCardLabel(name);
+      expect(label, name).not.toBeNull();
+      const { unmount } = renderTools(
+        [toolResult(name, "# Outcome\n\n- Status: running\n\nrecorded")],
+        [
+          toolCall(name, {
+            agent_id: "abc",
+            card_id: "T-1",
+            task_id: "task-1",
+            to: "peer-1",
+            text: "hello",
+            status_line: "hello",
+          }),
+        ],
+      );
+      expect(screen.getByTestId("agentic-tool")).toBeInTheDocument();
+      expect(screen.queryByTestId("generic-tool")).toBeNull();
+      expect(screen.queryByTestId("agentic-tool-view")).toBeNull();
+      const dedicated =
+        screen.queryAllByLabelText(label ?? "").length +
+        screen.queryAllByRole("alert").length +
+        screen.queryAllByRole("status").length;
+      expect(dedicated, name).toBeGreaterThan(0);
+      unmount();
+    },
+  );
+});
 
 describe("AgenticTool registry wiring", () => {
   test.each([

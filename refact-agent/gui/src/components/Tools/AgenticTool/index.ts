@@ -1,5 +1,4 @@
 export { AgenticTool } from "./AgenticTool";
-export { AgenticToolView } from "./AgenticToolView";
 export { agenticIcon } from "./agenticIcons";
 export {
   buildAgenticToolViewModel,
@@ -14,12 +13,23 @@ export type {
   AgenticToolStatus,
 } from "./agenticToolModel";
 export {
+  AGENTIC_CARD_LABELS,
   AGENTIC_TOOL_NAMES,
   BOARD_RUNTIME_TOOL_NAMES,
   DEDICATED_TOOL_CARD_NAMES,
+  agenticCardLabel,
   hasDedicatedToolCard,
   isAgenticToolName,
   lookupAgenticFamily,
 } from "./agenticFamilies";
 export { PagedText, PAGE_CHARS } from "./PagedText";
+export { parseFamilyReport, reportIsStructured } from "./familyReport";
+export type { FamilyReport } from "./familyReport";
+export { SpawnToolView } from "./SpawnToolView";
+export { OverviewToolView } from "./OverviewToolView";
+export { InspectToolView } from "./InspectToolView";
+export { ControlToolView } from "./ControlToolView";
+export { BoardToolView } from "./BoardToolView";
+export { DocToolView } from "./DocToolView";
+export { MemoryToolView } from "./MemoryToolView";
 export type { AgenticFamily, AgenticIconKey } from "./agenticFamilies";

@@ -103,6 +103,22 @@
   font-size: var(--rf-text-1);
 }
 
+.table {
+  width: 100%;
+  min-width: 0;
+  border-collapse: collapse;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-1);
+  table-layout: fixed;
+}
+
+.tableCell {
+  padding: var(--rf-space-1);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
 .detailGrid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
