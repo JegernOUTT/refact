@@ -1,8 +1,10 @@
 # Multi-agent parity program
 
-Status: PROPOSED — awaiting user approval. Planning only; no implementation authorized yet.
+Status: APPROVED — implementation authorized and under way, with the scope amendment recorded below.
 
 **Approval update:** The user approved implementation of M1–M10 in this session in worktree `481322af-2e95-4924-ac25-c2b3089ea601`. All operational caps must be editable in Settings with generous defaults; periodic significant trajectory/task changes may refresh model context. This approval supersedes the proposal status above and earlier numerical defaults. Initial implementation defaults are 32 active per engine, 16 per project/root, 1,024 pending and 4,096 outstanding runs; other limits follow the shared settings schema. Goals retain unlimited-by-default effort budgets. Milestones remain subject to their test/review gates; approval is not a completion claim.
+
+**Scope amendment:** After approval the user narrowed the program to local-only coordination. The previously numbered M7 (external harness, ACP client/server, experimental A2A), M8 (remote/federated coordination) and M9 (autonomous evolution) milestones are dropped in full, as are M4's aggregate whole-tree resource budgets; the hook control work that lived in M7 survives and moves to M2/M10. Capacity limits — concurrency caps, queue bounds and rate limits — stay, and are not budgets. Eight collaboration additions (A–H) are adopted and specified in section 10. M6's governed code-mode orchestration is explicitly retained. This paragraph is the only remaining reference to the dropped milestone numbers and exists for traceability with earlier revisions.
 
 Baseline inspected: Refact `0e93e01c9`. Local competitor checkouts are research evidence, not a claim about current commercial releases. Recheck source anchors when execution begins.
 
@@ -10,13 +12,13 @@ Baseline inspected: Refact `0e93e01c9`. Local competitor checkouts are research 
 
 The user selected:
 
-- One full-parity implementation program, including remote agents, adaptive scheduling, experimental interoperability and autonomous evolution.
+- One full-parity implementation program for local coordination, interaction, evidence and adaptive scheduling. Coordination across machines, control of third-party agent binaries and autonomous self-evolution are outside it.
 - Keep chat/subagent and task-board runtimes distinct. Share coordination, scheduling, verification and related infrastructure; do not replace them with a third workflow runtime.
 - Automatically provide same-project live-work summaries and relevant overlaps to a new chat. Retrieve detailed transcripts on demand, with provenance. Cross-project access is explicitly scoped.
-- Preserve unlimited-by-default goal budgets and configurable nesting. Bound active concurrency; make aggregate tree resource budgets optional.
+- Preserve unlimited-by-default goal budgets and configurable nesting. Bound active concurrency through capacity limits; aggregate tree resource budgets are dropped.
 - Make the first production milestone implementation-ready; outline the rest. Wait for explicit confirmation before implementing.
 
-Parity means matching the useful, observable capabilities researched, not copying every tool spelling, duplicating each competitor's architecture, reproducing bugs, or claiming an experimental feature is production-ready. Every capability below must ultimately have a runnable acceptance scenario. Advanced features are in the program, not silently dropped; they may ship disabled until their conformance/security gates pass.
+Parity means matching the useful, observable capabilities researched, not copying every tool spelling, duplicating each competitor's architecture, reproducing bugs, or claiming an experimental feature is production-ready. Every capability below must ultimately have a runnable acceptance scenario. Advanced features that remain in the program are not silently dropped; they may ship disabled until their security gates pass. Capabilities the user removed in the scope amendment are recorded as dropped above, not quietly omitted here.
 
 ### Corrections to the research used by this plan
 
@@ -46,13 +48,13 @@ Introduce shared services with adapters at existing boundaries:
 | File coordination | Visible-read stamps, attributed writes, overlap signals, cooperative locks, explicit claims | A promise that arbitrary shell/editor writes are intercepted |
 | Evidence/verification | Explicit verification specs, policy-gated execution, artifacts, verdicts and freshness | A shell executor for arbitrary recalled prose |
 | Recovery/ownership | Run generations, durable intents, leases, outbox, reconciliation | Blind replay of side effects |
-| Backend adapters | Native Refact, external harnesses, ACP, remote execution | A way to bypass local privacy or tool authority |
+| Backend adapters | Native Refact execution backends; capability description and model/tool restriction validation | A way to bypass local privacy or tool authority |
 
 Add a small dependency-light `refact-work-core` crate for shared identities, scheduler state machine and projection contracts. Put engine adapters in `src/coordination/`. Future persistence can be a separate module/crate if dependencies warrant it. Neither `refact-agents-core` nor `refact-tasks` should depend on each other. Existing transcript and board stores remain authoritative for their own content.
 
 ### Stable identity model
 
-- `ProjectKey`: canonical local repository common-dir/source-root identity, compatible with existing worktree project hashes. Non-git projects use canonical workspace roots. Do not key on basename, branch or remote URL alone. Multiple independent clones do not silently share authority.
+- `ProjectKey`: canonical local repository common-dir/source-root identity, compatible with existing worktree project hashes. Non-git projects use canonical workspace roots. Do not key on basename, branch or git origin URL alone. Multiple independent clones do not silently share authority.
 - `CheckoutKey`: canonical effective filesystem checkout/worktree, separate from logical project identity.
 - `WorkKey`: project + runtime kind + stable chat/card/agent reference. It survives an engine restart; engine-instance identity is not part of this stable key.
 - `RunKey`: WorkKey + attempt/generation. Current ownership separately records host/engine-instance identity. Resuming an attempt is distinguishable from replaying a stale completion. Board agents inherit the owning planner/task root for aggregate scheduling, rather than inventing a new root to bypass a cap.
@@ -68,7 +70,7 @@ Reuse the existing project/worktree resolver and extend it with alias tests; do 
 3. User input, cancellation, explicit pause and approval denials take precedence over autonomous continuation.
 4. Accepted, queued, delivered, consumed, completed, verified and merged are distinct states. Never report one as another.
 5. Schema-valid output is not verified success. Budget exhaustion, timeout, unavailable evidence and unknown outcome are not success.
-6. Do not hold application/session/board locks while awaiting permits, user input, model responses, remote calls or subprocesses. Acquire application context before inner locks; copy identifiers and drop guards before coordination waits.
+6. Do not hold application/session/board locks while awaiting permits, user input, model responses, network calls or subprocesses. Acquire application context before inner locks; copy identifiers and drop guards before coordination waits.
 7. Any spawned monitor/worker has an owner, cancellation path and joined shutdown. No unattended retry loop or notification amplification loop.
 8. Capacity is reserved atomically before execution side effects. Retrying an accepted request does not spawn another child.
 9. Protect existing user changes and preserve interrupted worktrees. A merge conflict never triggers silent discard or overwrite.
@@ -81,15 +83,12 @@ Reuse the existing project/worktree resolver and extend it with alias tests; do 
 | **M1 — Local safe coordination** | A new chat sees other project work; both agent runtimes share bounded scheduling; built-in edits detect stale reads; board claims are serialized across cooperating local engines | Approval |
 | **M2 — First-class interaction and scope** | Peer messaging, blocking questions, delivery receipts, shared task claiming and enforceable scoped tool access | M1 |
 | **M3 — Durable execution and recovery** | Cross-process presence/scheduling, resumable children, safe replay, durable file activity and worktree integration | M1; M2 interaction contracts |
-| **M4 — Resource governance and adaptive scheduling** | Optional whole-tree budgets, provider fairness/AIMD, bounded retries, residency control | M1; M3 durable accounting |
+| **M4 — Resource governance and adaptive scheduling** | Capacity limits, provider fairness/AIMD, bounded retries, residency control | M1; M3 durable accounting |
 | **M5 — Evidence-backed goals and plans** | Executable verification contracts, independent review, wait barriers, goal decomposition and bounded durable plans | M1; M2; M3 for crash recovery |
 | **M6 — Teams, DAGs and convergence** | Shared task DAGs, reusable teams, wave scheduling, structured outcomes, governed workflow scripts | M2–M5 |
-| **M7 — External harness and protocol parity** | External coding agents behave like capability-described backends; ACP client/server and experimental A2A conformance | M2–M5 |
-| **M8 — Remote/federated work** | Authorized cross-host discovery, remote runs, durable streams, workspace transport and reconnect | M3, M4, M7 |
-| **M9 — Autonomous evolution** | Evidence-driven Ralph/evolution loops, repair chains, escalation and isolated multi-model tournaments | M4–M8 |
-| **M10 — Full observability and rollout qualification** | Consistent GUI/TUI/IDE controls, inspectable provenance, interoperable recovery, end-to-end parity certification | Incremental throughout; final gate after M9 |
+| **M10 — Full observability and rollout qualification** | Consistent GUI/TUI/IDE controls, inspectable provenance, interoperable recovery, end-to-end parity certification | Incremental throughout; final gate after M6 |
 
-M5's runner extraction and M7's protocol contract work can proceed in parallel after their foundation contracts stabilize. Do not run multiple implementation agents against shared scheduler/session/board files simultaneously. M1 is itself several reviewable changes, not a single large commit.
+Do not run multiple implementation agents against shared scheduler/session/board files simultaneously. M1 is itself several reviewable changes, not a single large commit.
 
 ## 4. M1: implementation-ready specification
 
@@ -104,7 +103,7 @@ M1 ships a usable local vertical slice, not speculative distributed infrastructu
 - Cooperative local cross-process file critical sections and board transaction locks.
 - Existing history, worktree merge and task workflows remain available.
 
-M1 does **not** claim cross-process live attribution, cross-host coordination, persistent queued execution, crash-resume, tree-wide billing enforcement, external-agent control or universally intercepted writes. Those have assigned milestones. Restarted queued/running work is reported interrupted; it is not automatically replayed. Goals and their current defaults are unchanged.
+M1 does **not** claim cross-process live attribution, persistent queued execution, crash-resume or universally intercepted writes. Those have assigned milestones. Coordination across machines, control of third-party agent binaries and tree-wide billing enforcement are outside the program entirely. Restarted queued/running work is reported interrupted; it is not automatically replayed. Goals and their current defaults are unchanged.
 
 ### 4.2 Shared work projection
 
@@ -118,7 +117,7 @@ Define a `WorkSummary` with:
 - Declared target paths and observed reads/writes kept separately, each with provenance and observation time.
 - Usage fields only where measured; unknown values are null, not zero.
 
-`live` means a source-validated session/runner in this engine, not simply an uncompleted disk record. An idle loaded session remains idle; it is not advertised as running. Persisted status without a live source is recent/stale/unknown. Proposed recent-window default: 15 minutes. Deleted/merged worktrees lose active-location status but remain inspectable historical records.
+`live` means a source-validated session/runner in this engine, not simply an uncompleted disk record. An idle loaded session remains idle; it is not advertised as running. Persisted status without a live source is recent/stale/unknown. Recent-window default: 60 minutes (`recent_window_secs=3600`). Deleted/merged worktrees lose active-location status but remain inspectable historical records.
 
 Build the catalog from narrow snapshots of the session map, background-agent registry, indexed board metadata and worktree inventory. Do not scan every trajectory JSON or every board on each model turn. Bootstrap indexed summaries once, then update through events; missing/stale sources carry explicit coverage flags. Root and project projections share the same logic, while existing root-scoped tools keep their defaults.
 
@@ -141,7 +140,7 @@ Cursors are opaque, versioned, expiry-bounded tokens tied to project, caller vis
 
 Model output uses the existing destination boundary `src/privacy/destinations.rs::clear_for_model`, `Destination::from_model_record`, and privacy records/registered worktree aliases in `src/privacy/records.rs`; do not substitute the generic `AllowToSendAnywhere` filesystem predicate for a destination-model decision. Carry source attribution into a privacy-audited projection wrapper; unknown/unavailable policy or unresolved destination fails closed with `policy_unavailable` and no sensitive rows. Authorize the filesystem/project scope before collecting bodies; re-evaluate at preparation/delivery time using current policy/model generation. Cached capsules are keyed by both and discarded on change. No denied-row counts are exposed to a model that cannot know those rows exist.
 
-HTTP work routes use a scope resolver deriving the allowed project from trusted engine/workspace state, not a request-supplied filesystem root. Require and validate the existing daemon bearer credential when configured (reuse the authorization helper/pattern in `src/http/routers/v1/hooks.rs`); worker-only compatibility must not silently make a new remotely reachable endpoint public. Legacy no-token mode is limited to the already-supported local transport and local operator view, with no new cross-project/remote access; M8 supplies authenticated federation. A model-scoped HTTP request also resolves an existing caller chat rather than trusting a spoofable root ID as authority.
+HTTP work routes use a scope resolver deriving the allowed project from trusted engine/workspace state, not a request-supplied filesystem root. Require and validate the existing daemon bearer credential when configured (reuse the authorization helper/pattern in `src/http/routers/v1/hooks.rs`); worker-only compatibility must not silently make a new remotely reachable endpoint public. Legacy no-token mode is limited to the already-supported local transport and local operator view, with no new cross-project access. Work routes stay on the local transport plus the existing bearer credential; there is no successor milestone that opens them to other hosts. A model-scoped HTTP request also resolves an existing caller chat rather than trusting a spoofable root ID as authority.
 
 Cross-project recall is denied by default on model-facing tools. A later explicitly scoped grant identifies source and destination projects, read versus control permissions, requesting principal and expiry; a guessed trajectory ID, common user directory or common model is not a grant. Same-project recall returns source trajectory/range/revision/time, labels content historical and untrusted, and never inherits operational instructions from it.
 
@@ -149,7 +148,7 @@ Cross-project recall is denied by default on model-facing tools. A later explici
 
 At the first prepared model turn, and after a material state change at a safe later boundary, add a project-work context capsule:
 
-- Proposed cap: 600 tokens, at most 12 rows; prioritize actual physical-file overlap, waiting decisions and active work.
+- Cap: 1,600 tokens, at most 24 rows (`capsule_token_budget`, `capsule_max_rows`); prioritize actual physical-file overlap, waiting decisions and active work.
 - Include sanitized title/IDs/state/location and relevant approved relative paths. Never automatically include another chat's transcript, raw tool output or reasoning.
 - Count overflow and provide a tool cursor; do not inline large registries.
 - Include source timestamp and scope. Empty means "no observed work in this engine/scope", not "safe to edit".
@@ -163,11 +162,11 @@ Top-level chats also record their work state and tool activity. Introspection th
 
 ### 4.5 Shared scheduler semantics
 
-Proposed release defaults (configuration, not hard-coded product assumptions):
+Release defaults as implemented in `crates/refact-work-core/src/settings.rs` (configuration, not hard-coded product assumptions):
 
-- 8 active background execution permits per engine, shared across both runtimes.
-- 4 active permits per project and 4 per root tree, with effective limits being their intersection.
-- 128 pending admission requests per engine; reject excess explicitly instead of allocating unbounded coroutine/task state.
+- 32 active background execution permits per engine, shared across both runtimes.
+- 16 active permits per project and 16 per root tree, with effective limits being their intersection.
+- 1,024 pending admission requests per engine; reject excess explicitly instead of allocating unbounded coroutine/task state.
 - Keep the existing effective depth behavior; expose its configuration without accidentally adding or removing a level through off-by-one changes.
 - Goals remain unlimited by default. No hidden cost/token cap is introduced by M1.
 
@@ -210,9 +209,9 @@ Preserve current public wait defaults and maximums after verifying them in sourc
 
 #### M1 configuration and bounded-state contract
 
-Use existing runtime-settings loading and validation, with a namespaced coordination section. Proposed defaults: `max_active_engine=8`, `max_active_project=4`, `max_active_root=4`, `max_pending=128`, `recent_window_seconds=900`, `capsule_max_tokens=600`, `capsule_max_rows=12`, `max_read_stamps_per_chat=4096`, `max_write_records_per_project=16384`, `max_outstanding_background_runs=512`, `sidecar_lock_timeout_ms=5000`. Validate active/queue/record limits as positive integers; zero does not mean unlimited capacity. GoalBudget zero/None semantics remain unchanged. Active-limit changes apply to future acquisition; never shrink or discard accepted state. Cancellation, resume and completion are not refused because a creation limit is full.
+Use existing runtime-settings loading and validation, with a namespaced coordination section. Implemented defaults in `crates/refact-work-core/src/settings.rs`: `max_active_engine=32`, `max_active_project=16`, `max_active_root=16`, `max_pending=1024`, `max_outstanding=4096`, `recent_window_secs=3600`, `capsule_token_budget=1600`, `capsule_max_rows=24`, `max_read_stamps=16384`, `max_write_records=65536`, `lock_timeout_secs=30`, `lock_poll_interval_ms=25`. Validate active/queue/record limits as positive integers; zero does not mean unlimited capacity. GoalBudget zero/None semantics remain unchanged. Active-limit changes apply to future acquisition; never shrink or discard accepted state. Cancellation, resume and completion are not refused because a creation limit is full.
 
-The outstanding-run ceiling bounds active + parked + queued resident work and rejects new spawns explicitly. Configuration precedence is explicit per-run narrowing (cannot widen administrator limits), per-project override, then user-global defaults, with existing environment override conventions applied by the settings loader and tested. Add `max_subchat_depth` defaulting to the current constant value of 5 and centralize admission through a predicate that preserves today's effective boundary at every call site; tests pin the old behavior before removing hardcoded guards. `capsule_debounce_ms` defaults to 5000. Invalid settings are rejected, not coerced into unlimited execution. It is separate from goals' effort budgets and from the pending queue bound. Evicted read stamps mean `unknown_read`, not a fabricated current observation. Record eviction is deterministic LRU, with active write transactions pinned until completion. Sidecar lock files are stable keys and are not deleted while cooperating engines can hold them; metadata GC must not create two independent lock domains for the same path.
+The outstanding-run ceiling bounds active + parked + queued resident work and rejects new spawns explicitly. Configuration precedence is explicit per-run narrowing (cannot widen administrator limits), per-project override, then user-global defaults, with existing environment override conventions applied by the settings loader and tested. Add `max_subchat_depth` defaulting to the current constant value of 5 and centralize admission through a predicate that preserves today's effective boundary at every call site; tests pin the old behavior before removing hardcoded guards. `debounce_secs` defaults to 5 and `min_interval_secs` to 60. Invalid settings are rejected, not coerced into unlimited execution. It is separate from goals' effort budgets and from the pending queue bound. Evicted read stamps mean `unknown_read`, not a fabricated current observation. Record eviction is deterministic LRU, with active write transactions pinned until completion. Sidecar lock files are stable keys and are not deleted while cooperating engines can hold them; metadata GC must not create two independent lock domains for the same path.
 
 For new queued work, persist/record immutable validated launch arguments under the runtime's existing record and deduplicate by `(root, tool_call_id, batch_index, caller_request_id when supplied)`. The dispatcher never derives authority from an edited display summary. User-requested retries after a terminal failure create a new attempt ID; transport retries of the same accepted request do not. M1 accepts bounded launch intents but does not resume them after an engine crash.
 
@@ -232,7 +231,7 @@ At built-in editing boundaries, resolve and authorize paths first, acquire an OS
 - Creating a genuinely new file uses an absence precondition; it cannot silently overwrite a file another writer just created.
 - Apply the same protection to create, replace, regex, anchored, line, patch, rename/delete and undo paths where supported. Audit HTTP/IDE saves and buffer-vs-disk behavior explicitly; no bypass through a forgotten mutation tool.
 - Preserve current permissions, encoding, newline and symlink/hardlink semantics. Atomic replacement/crash durability is separately qualified in M3; no claim that compare-and-write alone is crash-safe.
-- Sidecar locks serialize cooperating Refact writers across local processes. They do not constrain arbitrary shells, editors, formatters, remote hosts or older Refact versions. Rechecking a digest reduces external-race risk but cannot make non-cooperating writes atomic.
+- Sidecar locks serialize cooperating Refact writers across local processes. They do not constrain arbitrary shells, editors, formatters, processes on other machines or older Refact versions. Rechecking a digest reduces external-race risk but cannot make non-cooperating writes atomic.
 
 Same physical file + stale read is a write conflict. Same logical path across separate worktrees is an advisory integration overlap. No OS-wide lowercase normalization; symlink and hardlink alias behavior gets platform tests. Retain unknown coverage rather than inventing attribution from a shell command string. Filesystem watchers can invalidate digests but cannot identify a writer reliably.
 
@@ -318,12 +317,13 @@ Extend the existing delivery path with a stable envelope: message ID, sender/rec
 - Separate reusable agent profile (model, tools, role, skills, effort, hooks, scope) from run instance. Support fresh, shared-completed-prefix/fork and resumable contexts, with prompt-cache preservation and privacy gating.
 - Enforce explicit path scope on built-in mutations, tool allow/deny lists at both visibility and execution, inherited deny ceilings and sandbox policy. `target_files` remains declared intent unless strict edit scope is active; shell/MCP authority requires actual sandbox/integration restrictions. Never market an edit-tool allowlist as a shell sandbox.
 - Add explicit team/task board discovery and atomic claims, dependency checks, owner/reviewer role validation and safe handoff. The board stays the board runtime's authority; teams may reference cards rather than create a shadow copy of them.
+- Extend existing hooks: tool pre/post, permissions, session/agent start/stop, compaction pre/post, user input, notification and goal/verification events. Trusted command/MCP/prompt/agent handlers, synchronous control vs asynchronous observation, deterministic deny precedence, rewritten-input revalidation and recursion caps. Untrusted project hooks are not auto-executed. M10 exposes hook activity, denials and rewrites in the observability surfaces.
 
 Gate: one root can discover a permitted peer, send a correlated question, wait without occupying execution capacity, receive an answer exactly once at the logical layer, and cannot use that address to exceed permissions or overwrite the peer's work.
 
 ## 6. M3 — Durable presence, recovery and integration
 
-Add a versioned per-user **local** coordination store (SQLite using existing dependency versions), with project-scoped authorization and durable records for engine instances, run intents/generations, queued work, leases, delivery outbox and observed activity. Existing trajectories and boards are not replaced. Do not place a SQLite WAL database on a shared network filesystem and call it cross-host consensus.
+Add a versioned per-user **local** coordination store (SQLite using existing dependency versions), with project-scoped authorization and durable records for engine instances, run intents/generations, queued work, leases, delivery outbox and observed activity. Existing trajectories and boards are not replaced. Do not place a SQLite WAL database on a shared network filesystem and call it coordination consensus; this store is local to one user on one machine.
 
 - Engine presence includes PID, process-start identity, host identity and heartbeat. Distinguish alive-but-idle, unreachable and dead; PID reuse is not proof of ownership.
 - Durable admission and claims use atomic transactions, owner tokens and fencing generations. A worker whose lease expires loses authorization to perform coordinator-mediated actions. Reclaiming a lease is not sufficient protection from stale writers unless their writes are fenced too.
@@ -335,18 +335,18 @@ Add a versioned per-user **local** coordination store (SQLite using existing dep
 - Qualify crash-safe file replacement separately: temporary file, flush policy, atomic rename and metadata/encoding/link handling. Multi-file patch commits are journaled or explicitly partial, never advertised as atomic without implementation.
 - Add durable summary indexes for who worked on/touched a file, source message ranges and omission artifacts. Rebuild in the background; no bulk parse at chat startup. Historical records are labeled historical.
 
-Gate: kill the owning engine between each launch/delivery/claim/merge boundary; restart does not double-run, silently replay unknown writes, lose acknowledged messages or report dead work active. Two local engines share limits and claims without split-brain. Remote federation remains M8.
+Gate: kill the owning engine between each launch/delivery/claim/merge boundary; restart does not double-run, silently replay unknown writes, lose acknowledged messages or report dead work active. Two local engines share limits and claims without split-brain. Coordination stays inside one machine; no cross-machine successor is planned.
 
-## 7. M4 — Budgets, fairness and adaptive execution
+## 7. M4 — Capacity limits, fairness and adaptive execution
 
 - Scope limits independently: machine/host, engine, provider credential/rate bucket, project, root tree, team, resident sessions, active runs, concurrent model requests, subprocesses and verification jobs.
-- Optional aggregate turn/token/time/cost/spawn budgets with per-child reservations and reconciliation. Count descendants/retries/verifiers/external harnesses once, avoid double-counting cached/reported usage, and expose unavailable pricing. Monetary ceilings include outstanding reservations and possible streaming overshoot; do not promise exact billing enforcement on unknown provider costs.
-- Unlimited remains the default for goal budgets. Capacity limits are not goal budgets. New explicit limits preserve provenance and can be relaxed/resumed by authorized users.
+- Aggregate whole-tree turn/token/time/cost/spawn budgets are out of scope, together with per-child reservations and reconciliation, monetary ceilings, cached-usage double-counting rules and pricing exposure. Usage may be measured and displayed; it is never enforced as a spend ceiling.
+- Capacity limits are not budgets. They bound how much work runs at once — concurrency, queue depth, resident sessions, request rate — and never terminate work for exceeding a token, time or money total. GoalBudget stays unlimited by default, and M4 introduces no implicit cap on it. New explicit limits preserve provenance and can be relaxed/resumed by authorized users.
 - AIMD uses provider-specific concurrency/rate-limit signals: halve on qualifying pressure, honor Retry-After, grow after sustained success, never exceed configured ceilings. Separate quota exhaustion, auth failures, malformed requests and real 429 pressure. Jittered bounded retries, circuit breakers and explicit cooldown reason.
 - Fairness, starvation tests, backpressure, shared-request vs active-agent metrics and parked-session checkpoint/eviction. Live user input gets priority without starving background work permanently.
 - Distinguish no activity from no material progress: repeated identical tool/input/output, unchanged evidence/worktree, blocked reasons, provider transport failures and deliberate wait barriers. Do not abort a legitimately slow stream based only on a generic short silence timer.
 
-Gate: fake quota/rate/error traces prove the limiter adapts only to the correct signals, never exceeds reservation-aware limits, yields fairly and cannot conceal unaccounted child work.
+Gate: fake quota/rate/error traces prove the limiter adapts only to the correct signals, never exceeds its configured capacity limits, yields fairly and cannot lose track of active child work.
 
 ## 8. M5 — Evidence-backed goals and bounded durable plans
 
@@ -379,61 +379,51 @@ Gate: fake success text cannot defeat a failing required gate; skipped verificat
 - Typed assignment TASK / DELIVERABLE / SCOPE / VERIFY generated from the same accepted contract later validated. Optional undispatched lanes are explicit; an unrun lane is never "found nothing".
 - Structured output schemas with at most a configured bounded correction retry, context-headroom-aware result budgets and recoverable omitted artifacts.
 - Outcomes with declared required sections, source-run/evidence provenance, authenticated review ownership and finalize gate. Self-review is explicitly marked or forbidden by policy; unresolved contradictory/rejected required fragments block finalization, unlike a weak "one approved fragment exists" check.
-- Governed code/workflow mode for model-authored orchestration: schema-described host tools, confined interpreter/worker, no ambient fs/net/eval authority, cancellation and aggregate budgets. Worker threads are not a security boundary; OS isolation when needed. Durable DAG execution is implemented as a service used by the existing runtimes, not a third product workflow.
+- Governed code/workflow mode for model-authored orchestration: schema-described host tools, confined interpreter/worker, no ambient fs/net/eval authority, cancellation and capacity limits. Worker threads are not a security boundary; OS isolation when needed. Durable DAG execution is implemented as a service used by the existing runtimes, not a third product workflow.
 - Context isolation and memory: fresh/forked/reused team members, project summaries/decisions/corrections, provenance-aware history search, per-agent private vs shared memory. Prevent stale/foreign text from becoming instructions. Eventual structured result+artifact convergence is distinct from git integration.
 
 Gate: a mixed-runtime DAG with fan-out, failed/optional lane, dependency, review and merge cannot finalize before all required verified outcomes; messages and claims remain correct across restart.
 
-## 10. M7 — External agents, ACP and experimental A2A
+## 10. Adopted collaboration additions
 
-Define a capability-described backend interface: discover/ensure session, start turn, stream events, terminal result, status, cancel, close, resume/fork, model/mode selection, tool restrictions, workspace/isolation, structured output and steering modes. Separate the live event stream from terminal outcome; losing a stream is not success or proof the remote process stopped.
+Eight additions were adopted with the scope amendment. All are local, reuse the shared services above and add no new runtime. Each has a coverage-ledger row below and is complete only under the same completion definition.
 
-- Native Refact backend plus external harness adapters for the researched ecosystems where public SDK/CLI/protocols permit it: Codex, Claude-compatible SDK/harnesses, DeepSeek harness and ACP agents (Hermes/OpenCode and compatible clients). Do not copy unavailable commercial internals.
-- Explicit model selection must fail if unsupported; an inherited default may degrade only with a visible applied/dropped report and allowed policy. Detect capability before launch, including depth/tool restrictions and fork behavior.
-- ACP server and client: pinned implemented protocol version, initialize/auth, session new/load/list/resume/fork/close where negotiated, prompt/cancel, mode/model/config, streaming plans/usage/tools and permission requests. Serialize simultaneous approvals, distinguish timeout/denial/cancel, fail closed, keep protocol stdout clean. Standard ACP client-agent semantics remain distinct from our peer protocol.
-- Extend existing hooks: tool pre/post, permissions, session/agent start/stop, compaction pre/post, user input, notification and goal/verification events. Trusted command/MCP/prompt/agent handlers, synchronous control vs asynchronous observation, deterministic deny precedence, rewritten-input revalidation and recursion caps. Untrusted project hooks are not auto-executed.
-- Experimental Google A2A adapter is an explicit program item, not a claim found in competitors: versioned agent cards/capability discovery, task/message/artifact lifecycle, streaming/reconnect and authorization, tested against a chosen public conformance fixture. Unsupported extensions report unsupported, not simulated success.
+| ID | Addition | Slot |
+|---|---|---|
+| A | Wait-graph deadlock detection | M2 graph; M4 detector |
+| B | Handoff sufficiency feedback | M2 transport; M5 evidence link |
+| C | Human attention budget | M2 accounting; M10 surface |
+| D | Structured disagreement and adjudication | M5, M6 |
+| E | Shared fact ledger with contradiction detection | M6 |
+| F | Cross-agent causal trace and deterministic replay | Recorded from M1; viewer in M10 |
+| G | Decomposition advisor | M4, M6 |
+| H | Value-based priority | M4 |
 
-Gate: the same orchestration contract suite runs against native, fake external, real supported local harnesses and protocol fixtures; unavailable licensed/network adapters are reported unverified, never counted as parity by their schemas alone.
+- **A — Wait-graph deadlock detection.** Every wait edge — child, approval, tracked question, cooperative lock, permit — is recorded in the M2 interaction graph; M4 runs a bounded cycle detector over it. A detected cycle produces a structured diagnosis naming the edges and an authorized break action (cancel, park or escalate to the user), never an automatic kill chosen by the detector. Unsupported opaque dependency waits are reported unknown, not proven deadlock-free.
+- **B — Handoff sufficiency feedback.** A receiving agent scores the handoff it was given against the accepted contract: missing files, unstated constraints, absent evidence, ambiguous acceptance. M2 carries the feedback to the delivering work; M5 attaches it to that run's evidence so later decomposition can use it. Feedback is advisory and never silently rewrites an accepted contract.
+- **C — Human attention budget.** Every user-facing interrupt — approval, tracked question, notification — is a counted, deduplicated request carrying a reason and urgency in M2, and M10 shows the budget with its current consumers. Exceeding the budget coalesces or defers low-urgency interrupts only; it never auto-answers a question, auto-approves a decision or drops a required approval.
+- **D — Structured disagreement and adjudication.** Conflicting required outcomes become a typed disagreement record (claim, evidence references, confidence, author) instead of a last-writer-wins overwrite. M5 supplies the evidence references; M6 routes the record to an adjudicator role and stores the decision with its rationale. An unresolved required disagreement blocks finalization.
+- **E — Shared fact ledger.** M6 keeps a project-scoped ledger of asserted facts with source run, evidence reference, observation time and validity window. Contradiction detection flags conflicting assertions about the same subject. Each fact is labeled asserted, verified or stale; an unverified or stale fact is context, never an instruction, and never replaces a verification verdict.
+- **F — Cross-agent causal trace and deterministic replay.** From M1 onward every admission, delivery, claim, edit, verification and terminal transition records its causal parents and a monotonic sequence; M10 ships the viewer. Replay reconstructs the recorded decision sequence and does not re-execute side effects; effects that were never recorded are reported unknown rather than reconstructed.
+- **G — Decomposition advisor.** M4's observed overlap, wait graphs and queue behavior, together with M6's handoff feedback, produce proposals for a different split: more or fewer lanes, different boundaries, different ordering. Proposals are advisory and require planner or user acceptance before any DAG changes.
+- **H — Value-based priority.** Admission accepts an explicit priority/value label per run and uses it as a lane weight inside M4's existing fairness rules. Priority reorders admission opportunities only; it never raises a cap, cancels other work or starves a lane, because aging still applies.
 
-## 11. M8 — Remote and cross-host coordination
-
-- Opt-in registered hosts with authenticated encrypted channels, narrowly scoped capabilities, per-host health and identity; scoped catalog across project mappings, not raw global transcript disclosure.
-- Explicit mapping between local ProjectKey and remote project; path namespace conversion, content/commit-addressed worktree bundles, safe sync, returned patches/artifacts and local integration verification. Never assume two identical path strings refer to the same checkout.
-- Remote process/container/worktree isolation with sanitized credentials and environment, supported filesystem/tool permissions and noninteractive approval relay through the host.
-- Reconnect cursors, bounded durable event streams, terminal-result reconciliation, retry taxonomy and rate limits. Network partitions leave work unknown until ownership/outcome is established. No duplicate failover while an old remote worker may still write.
-- Distributed ownership uses an authoritative broker/store and fencing, not a shared SQLite file or TTL alone. Cross-host locks require verified filesystem/protocol semantics. Health failover applies only at safe/idempotent boundaries.
-- Cross-session messaging/control grants, audit trails, revocation, retention/deletion and secret filtering. Remote results never auto-declassify simply because they are summaries.
-
-Gate: partition/reconnect, expired credentials, stale generation, double delivery and late-result tests prove no hidden duplicate work, authority expansion or data leakage.
-
-## 12. M9 — Autonomous evolution, repair and tournaments
-
-- Immutable approved seed/goal with acceptance criteria, constraints, non-goals and stop conditions. Replanning may change tactics; changing approved direction requires a recorded user decision.
-- Durable run → evaluate → bounded repair/Ralph successor chains with one elected successor per generation. No automatic successor if the contract disables it. Missing dependencies fail visibly rather than silently dropping evaluation.
-- Fresh-agent iteration with bounded structured handoff, workspace/evidence continuity, complete/continue/blocked/wait outcomes and explicit budget-limited termination. Persist generation state for interruption/resume.
-- Progress watchdog distinguishes idle, transport failure and activity without material progress. Failure fingerprints, oscillation/stagnation detection, max generations and cost-aware escalation prevent waste without redefining failure as success.
-- Policy-selected role/model/harness escalation; lateral alternatives; N-version tournament in isolated worktrees. Verification-passing candidate selection followed by integration/reverification; losers are retained/discarded according to explicit policy, never merged together blindly.
-- No self-modification of permissions, budgets, approval gates or runtime policy. Background schedules and successor creation honor pause/shutdown and shared admission.
-
-Gate: a fixed synthetic task demonstrates fail→repair→verify→complete, persistent blocker→blocked, wait→resume, divergent candidate→reject and exactly one successor despite duplicate evaluation events.
-
-## 13. Coverage ledger for everything researched
+## 11. Coverage ledger for everything researched
 
 Each row becomes an executable parity scenario during its milestone; this is the scope checklist, not proof it is already implemented.
 
 | Capability family | Research inspiration / evidence category | Delivery |
 |---|---|---|
-| New-chat live project overview; unrelated-root work; attention/current tool | Kilo Agent Manager; Claude PID registry; Refact existing session/worktree projections | M1; cross-process M3; cross-host M8 |
+| New-chat live project overview; unrelated-root work; attention/current tool | Kilo Agent Manager; Claude PID registry; Refact existing session/worktree projections | M1; cross-process M3 |
 | Historical search/read, worktree-family scoping, source ranges and untrusted labels | Kilo recall; Codex indexed listing; Refact knowledge/trajectory search | M1 boundaries; M3 indexes; M6 recall |
 | Shared project memory, session digests, corrections, consolidation, recoverable omitted output | Claude memory; Hermes locked memory; Kilo memory; Repowise omission references | M3, M6 |
 | Read stamps, named writer warnings, per-path serialization, integration overlaps | Hermes file state; Claude stale reads; OpenCode edit mutex; Refact preimages/worktrees | M1; durable M3 |
 | Cross-process claim, lease/fencing, stale-holder/PID-reuse detection | Claude atomic task claims; Codex internal leases; Hermes session leases; Ouroboros worktree ownership | M1 board lock; M3 |
 | Active concurrency vs launch cap; fair queues, parked parents, structured errors | Cline team queue; Codex admission; OpenClaw reservations; Refact separate stacks | M1, M4 |
-| Per-provider AIMD, Retry-After, quota handling, tree cost/turn/token/time accounting | Ouroboros adaptive control; Codex shared token budget; Cline cost telemetry | M4 |
+| Per-provider AIMD, Retry-After, quota handling and rate/capacity limits (no tree cost/token accounting) | Ouroboros adaptive control; Codex shared token budget; Cline cost telemetry | M4 |
 | Parent/child/peer live mail, broadcast, no-wake vs follow-up, interrupt, missed steer | Codex; Cline; Hermes; Claude; Ouroboros Synapse; current Refact delivery | M2, durable M3 |
 | Generic questions/waits, plan/permission escalation, graceful shutdown | Codex mailbox wait; Claude approval; Refact tracked questions | M2 |
-| Fresh/fork/full or bounded history, resumable/cold children, background promotion/extension | Claude fork; Codex; Kilo/OpenCode jobs; DeepSeek continuable agents | M2, M3, M7 |
+| Fresh/fork/full or bounded history, resumable/cold children, background promotion/extension | Claude fork; Codex; Kilo/OpenCode jobs; DeepSeek continuable agents | M2, M3 |
 | Profiles/personas, tool/model/effort selection, deny ceilings, mode/file constraints | Roo modes; Claude profiles; ProxyAI Task; OpenCode/Kilo permissions | M2 |
 | Worktree creation, inventory, nested integration, post-merge validation, conflict resolver | Refact existing merge; Kilo AM; Ouroboros coordinator; Hermes retention | M1 inventory; M3 integration |
 | Typed assignment, task DAG/claiming, parallel/sequence/pipeline/waves | Ouroboros assignments; Cline teams; Kilo waves | M6 |
@@ -442,40 +432,44 @@ Each row becomes an executable parity scenario during its milestone; this is the
 | Executed gates/artifacts/assertions, adversarial review, stale verdict guards, cached evidence | Hermes gates; Ouroboros evidence; Claude reviewer; Refact board runner | M5 |
 | Wait barriers on child/process/CI/deadline, no wasted continuation | Hermes goal wait; Refact process/scheduler/snooze infrastructure | M2 wait; M5 goal integration |
 | Plan approval, files/task state, bounded compaction-safe current plan + full audit | Refact hidden roles; Roo/Claude/OpenCode plan artifacts; DeepSeek event plan state | M5 |
-| Hook control events/types and safe extensions | Codex and Claude; Refact existing hooks | M7 |
-| External harness provider registry, explicit capability rejection, SDK backend contracts | DeepSeek providers; OpenClaw ACP runtime; Hermes/OpenCode ACP | M7 |
-| Cross-host catalog, remote sandbox/PTY/streaming and failure reconciliation | OpenClaw catalog; Claude remote path; DeepSeek sandbox backends | M8 |
+| Hook control events/types and safe extensions | Codex and Claude; Refact existing hooks | M2 control; M10 visibility |
 | Governed code-mode orchestration, tool catalog search, bounded intermediate data | Kilo CodeMode; DeepSeek workflow engine; Refact lazy catalog | M6 |
-| Ralph/evolution, immutable seed, successor single-flight, progress/oscillation, tournaments | Ouroboros; DeepSeek Ralph; Hermes goal loop | M9 |
-| Google A2A interoperable experimental surface | Explicit user-selected experimental scope; not verified competitor parity | M7–M8 |
 | Human surfaces and diagnostic visibility | All applicable runtimes; Refact GUI/TUI/IDE clients | M1 minimal, M10 complete |
+| Wait-graph deadlock detection with authorized break actions | Adopted addition A | M2 graph; M4 detector |
+| Handoff sufficiency feedback into later decomposition | Adopted addition B | M2, M5 |
+| Human attention budget for approvals, questions and notifications | Adopted addition C | M2, M10 |
+| Structured disagreement records and adjudication decisions | Adopted addition D | M5, M6 |
+| Shared fact ledger with contradiction detection and trust labels | Adopted addition E | M6 |
+| Cross-agent causal trace and deterministic replay of recorded decisions | Adopted addition F | Recorded M1; viewer M10 |
+| Decomposition advisor proposals requiring acceptance | Adopted addition G | M4, M6 |
+| Value-based priority as a fairness weight in admission | Adopted addition H | M4 |
 
-Continue/Repowise are not assumed to be agent orchestrators. Antigravity internals are unavailable; cover documented custom-agent/model/nesting/goal/background lifecycle behavior with our own contracts. Unreached DeepSeek introspection paths remain evidence gaps to close before their parity claim; the required capability is nevertheless explicitly covered above.
+Continue/Repowise are not assumed to be agent orchestrators. Antigravity internals are unavailable; cover documented custom-agent/model/nesting/goal/background lifecycle behavior with our own contracts. Unreached DeepSeek introspection paths remain evidence gaps to close before their parity claim; the capabilities they inspired that survive the scope amendment are covered above, and the external-backend rows they also inspired are recorded as dropped rather than quietly claimed.
 
 ### Dependency and guarantee clarifications
 
 - M3 supplies **execution checkpoints** for parked-session residency control in M4. M5's approved plan/goal projection checkpoint is a different feature; M4 does not depend on rewriting or compacting approved plan text.
-- M9 requires M5 evidence, M6 DAG/successor ownership, M3 recovery and M4 governance explicitly. M7/M8 are required for cross-harness/remote tournament variants, not for the first native local evolution scenario.
+- M4's capacity limits are not budgets. An unlimited GoalBudget is never overridden by an admission cap, and no milestone enforces a token, time or monetary ceiling on a work tree.
 - Workflow/DAG support in M6 has no separate session identity, transcript store, queue or autonomous permission policy: it submits runs through a chosen existing runtime adapter and shared services. This enforces the two-runtime decision beyond a naming convention.
 - M1 cross-process stale-write failures identify an **unknown/external writer**, even if the other process is Refact; named cross-process attribution arrives in M3. M1 only claims serialization for cooperating local writers, never global file ownership.
 
-## 14. M10: qualification, observability and completion definition
+## 12. M10: qualification, observability and completion definition
 
-Throughout the program, expose the same concepts in tools, HTTP, GUI, TUI and IDE clients: queued/running/parked/stale, waiting questions, budget reasons, controlled peer actions, workspace/file attribution, merge state, evidence verdicts, remote ownership and recovery actions. Prefer extending existing panels/routes over a parallel dashboard. Metadata is cheap and bounded; transcript/artifact bodies load on demand.
+Throughout the program, expose the same concepts in tools, HTTP, GUI, TUI and IDE clients: queued/running/parked/stale, waiting questions, capacity-limit reasons, controlled peer actions, workspace/file attribution, merge state, evidence verdicts, hook activity, attention-budget consumers, causal trace and recovery actions. Prefer extending existing panels/routes over a parallel dashboard. Metadata is cheap and bounded; transcript/artifact bodies load on demand.
 
 Add structured metrics and traces for queue latency, permit counts, provider pressure, unknown attribution, stale-write rejections, delivery lag/duplicates/expiry, abandoned claims, recovery decisions, evidence cache validity, generation progress and context payload size. Metrics omit secrets. Log an auditable explanation for automatic pause, denial, retry, merge refusal and goal completion.
 
 Program-wide test matrix:
 
-- Chat and board runtimes; root/child/peer; one/two engines; same/separate checkout; git/non-git; Linux/macOS/Windows; local/remote; approved/denied privacy destination.
+- Chat and board runtimes; root/child/peer; one/two engines; same/separate checkout; git/non-git; Linux/macOS/Windows; approved/denied privacy destination.
 - Active/queued/parked/cancelled/stale/restarted; absent/index-only/loaded histories; streams/tool batches in flight; lost notifications and duplicate completion.
-- Unit state-machine/property tests, deterministic fake-provider integration, real cooperative subprocess locks, browser interaction and provider-protocol conformance fixtures.
+- Unit state-machine/property tests, deterministic fake-provider integration, real cooperative subprocess locks and browser interaction.
 - Fault injection at persistence/claim/launch/execute/verify/merge/ack boundaries. Slow/memory/IO measurements belong to the explicit performance suite.
 
 Completion requires each coverage-ledger row to link to an implemented path, a public/agent-facing reachability test, a failure-path test and an observed passing verification result. A type definition, passing unit test of an unused helper, UI-only feature when the agent needs it, or a marketing statement is not parity.
 
-## 15. Approval and execution discipline
+## 13. Approval and execution discipline
 
-This document is the proposed plan. M1 target defaults and behavior changes are proposals included for approval, not silently applied settings. Only this Markdown plan is created during planning; no task board, source edits, migrations, external-agent launches, commits or pushes.
+This document is the approved plan of record, as amended above. Its defaults and behavior changes are the ones implementation must match; where code and this document disagree, report the discrepancy and fix whichever is wrong rather than letting them drift.
 
 After approval: install the approved revision as execution ground truth, start M1-01, run targeted tests after each unit, perform spec review before quality review, and run combined component gates before each milestone is considered complete. Later milestones receive similarly detailed implementation cards immediately before execution, within the scope and architectural decisions approved here. Newly discovered conflicts with this plan must be reported and resolved explicitly; full parity does not authorize unrelated rewrites.
