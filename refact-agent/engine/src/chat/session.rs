@@ -83,6 +83,12 @@ fn is_active_compression_phase(phase: Option<CompressionPhase>) -> bool {
     )
 }
 
+/// A chat session's pending-delivery queue is bounded by the session queue cap
+/// and by the coordination delivery cap; the tighter of the two wins.
+fn max_pending_deliveries(settings: &refact_work_core::CoordinationSettings) -> usize {
+    max_queue_size().min(settings.delivery_max_pending)
+}
+
 fn epoch_ms_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1975,7 +1981,7 @@ impl ChatSession {
         }
         self.supersede_pending(&delivery);
         // Reject before any side effect rather than dropping an accepted delivery.
-        if self.pending_deliveries.len() >= settings.delivery_max_pending
+        if self.pending_deliveries.len() >= max_pending_deliveries(&settings)
             && delivery.push != PushMode::Preempt
         {
             return Err("chat delivery queue is full".to_string());
@@ -4213,7 +4219,7 @@ mod tests {
     fn delivery_full_and_invalid_rejections_have_no_side_effects() {
         let mut session = make_session();
         session.start_stream().unwrap();
-        let capacity = crate::file_activity::settings().delivery_max_pending;
+        let capacity = max_pending_deliveries(&crate::file_activity::settings());
         for n in 0..capacity {
             session
                 .enqueue_delivery(delivery_fixture(&format!("{n}"), PushMode::Append))

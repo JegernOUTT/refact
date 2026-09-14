@@ -2274,6 +2274,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_recurring_occurrence_is_retried_not_skipped() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(due_task("cron_recurring_retry_after_rejection", now))
+            .await
+            .unwrap();
+        let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
+        {
+            let session_arc = session(&gcx).await;
+            let mut session = session_arc.lock().await;
+            for idx in 0..max_queue_size() {
+                session.pending_deliveries.push_back(
+                    refact_core::chat_types::PendingDelivery::with_id(
+                        format!("queued-{idx}"),
+                        vec![scheduled_prompt_message("queued".into())],
+                        PushMode::Append,
+                        "test",
+                        false,
+                    ),
+                );
+            }
+        }
+        let mut runner = CronRunner::new(store.clone(), gcx.clone());
+
+        runner.fire_due_tasks(now).await;
+
+        let stored = store
+            .get("cron_recurring_retry_after_rejection")
+            .await
+            .unwrap();
+        assert_eq!(stored.last_status.as_deref(), Some("deferred"));
+        assert_eq!(stored.fire_count, 0);
+        assert!(!runner.task_is_due(&stored, now + IDLE_DEFER_MS - 1));
+        assert!(runner.task_is_due(&stored, now + IDLE_DEFER_MS));
+
+        let arc = session(&gcx).await;
+        arc.lock().await.pending_deliveries.clear();
+
+        runner.fire_due_tasks(now + IDLE_DEFER_MS).await;
+
+        let stored = store
+            .get("cron_recurring_retry_after_rejection")
+            .await
+            .unwrap();
+        assert_eq!(stored.last_status.as_deref(), Some("fired"));
+        assert_eq!(stored.fire_count, 1);
+        assert_eq!(stored.last_fired_at_ms, Some(now + IDLE_DEFER_MS));
+        assert!(stored.recent_runs.iter().all(|run| run.status != "skipped"));
+        assert_eq!(
+            arc.lock()
+                .await
+                .messages
+                .iter()
+                .filter(|m| m.role == "user")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn interval_job_fires_on_cadence() {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
