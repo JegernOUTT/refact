@@ -105,7 +105,7 @@ fn path_is_excluded_from_watch(
     path: &Path,
     indexing_everywhere: &IndexingEverywhere,
 ) -> bool {
-    if path_is_refact_internal(path) {
+    if path_is_refact_internal(path) || path_is_trajectory_watcher_owned(path) {
         return true;
     }
     let rel_path = path.strip_prefix(scan_root).unwrap_or(path);
@@ -1294,6 +1294,23 @@ fn path_is_refact_internal(path: &Path) -> bool {
     path_is_refact_import_internal(path)
         || path_is_refact_runtime_state(path)
         || crate::file_filter::is_refact_codegraph_path(path)
+}
+
+const REFACT_TRAJECTORY_WATCHER_ROOTS: &[&str] = &["trajectories", "tasks"];
+
+fn path_is_trajectory_watcher_owned(path: &Path) -> bool {
+    let mut directly_under_refact = false;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        let name = name.to_string_lossy();
+        if directly_under_refact && REFACT_TRAJECTORY_WATCHER_ROOTS.contains(&name.as_ref()) {
+            return true;
+        }
+        directly_under_refact = name == ".refact";
+    }
+    false
 }
 
 fn path_triggers_registry_reload(path: &Path) -> bool {
@@ -2959,6 +2976,15 @@ mod tests {
         entries
     }
 
+    fn plan_covers(plan: &[WatchRegistration], path: &Path) -> bool {
+        plan.iter().any(|registration| match registration.mode {
+            WatchRegistrationMode::Recursive => path.starts_with(&registration.path),
+            WatchRegistrationMode::NonRecursive => {
+                path == registration.path || path.parent() == Some(registration.path.as_path())
+            }
+        })
+    }
+
     fn write_file(path: &Path, content: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, content).unwrap();
@@ -3358,6 +3384,164 @@ mod tests {
         assert!(!entries.iter().any(|(path, _)| path == Path::new(".git")));
         assert!(!entries.iter().any(|(path, _)| path == Path::new(".venv")));
         assert!(!entries.iter().any(|(path, _)| path == Path::new("dist")));
+    }
+
+    #[test]
+    fn watch_plan_excludes_trajectory_and_task_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = normalized(temp.path());
+        let refact = root.join(".refact");
+        write_file(
+            &refact.join("trajectories").join("chat-1").join("chat.json"),
+            "{}\n",
+        );
+        write_file(
+            &refact
+                .join("tasks")
+                .join("task-1")
+                .join("trajectories")
+                .join("agent.json"),
+            "{}\n",
+        );
+        write_file(
+            &refact
+                .join("tasks")
+                .join("task-1")
+                .join("documents")
+                .join("master-plan.md"),
+            "# plan\n",
+        );
+        write_file(&refact.join("modes").join("agent.yaml"), "name: agent\n");
+
+        let indexing_everywhere = IndexingEverywhere::default();
+        let plan = build_watch_plan(&[root.clone()], &indexing_everywhere);
+        let entries = registration_modes(&plan, &root);
+
+        let trajectories = Path::new(".refact").join("trajectories");
+        let tasks = Path::new(".refact").join("tasks");
+        assert!(
+            !entries
+                .iter()
+                .any(|(path, _)| path.starts_with(&trajectories)),
+            "trajectory watcher owns .refact/trajectories, plan was {:?}",
+            entries
+        );
+        assert!(
+            !entries.iter().any(|(path, _)| path.starts_with(&tasks)),
+            "trajectory watcher owns .refact/tasks, plan was {:?}",
+            entries
+        );
+        assert!(entries.contains(&(
+            Path::new(".refact").join("modes"),
+            WatchRegistrationMode::Recursive
+        )));
+    }
+
+    #[test]
+    fn watch_plan_still_includes_required_refact_subpaths() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = normalized(temp.path());
+        let refact = root.join(".refact");
+        write_file(&refact.join("modes").join("agent.yaml"), "name: agent\n");
+        write_file(
+            &refact.join("subagents").join("agent.yaml"),
+            "name: agent\n",
+        );
+        write_file(
+            &refact.join("toolbox_commands").join("ship.yaml"),
+            "name: ship\n",
+        );
+        write_file(&refact.join("code_lens").join("lens.yaml"), "name: lens\n");
+        write_file(
+            &refact.join("integrations.d").join("github.yaml"),
+            "token: x\n",
+        );
+        write_file(&refact.join("knowledge").join("note.md"), "# note\n");
+        write_file(
+            &refact.join("skills").join("example").join("SKILL.md"),
+            "# skill\n",
+        );
+        write_file(&refact.join("indexing.yaml"), "blocklist: []\n");
+        write_file(&refact.join("privacy.yaml"), "blocked: []\n");
+        write_file(
+            &refact.join("tasks").join("task-1").join("meta.yaml"),
+            "id: task-1\n",
+        );
+
+        let indexing_everywhere = IndexingEverywhere::default();
+        let plan = build_watch_plan(&[root.clone()], &indexing_everywhere);
+        let entries = registration_modes(&plan, &root);
+
+        for kept in [
+            PathBuf::from("indexing.yaml"),
+            PathBuf::from("privacy.yaml"),
+            Path::new("modes").join("agent.yaml"),
+            Path::new("subagents").join("agent.yaml"),
+            Path::new("toolbox_commands").join("ship.yaml"),
+            Path::new("code_lens").join("lens.yaml"),
+            Path::new("integrations.d").join("github.yaml"),
+            Path::new("knowledge").join("note.md"),
+            Path::new("skills").join("example").join("SKILL.md"),
+        ] {
+            assert!(
+                plan_covers(&plan, &refact.join(&kept)),
+                ".refact/{} must stay watched, plan was {:?}",
+                kept.display(),
+                entries
+            );
+        }
+    }
+
+    #[test]
+    fn watch_plan_still_includes_ordinary_source_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = normalized(temp.path());
+        write_file(&root.join("src").join("lib.rs"), "pub fn ok() {}\n");
+        write_file(
+            &root.join("src").join("tasks").join("runner.rs"),
+            "pub fn run() {}\n",
+        );
+        write_file(
+            &root.join("src").join("trajectories").join("store.rs"),
+            "pub fn store() {}\n",
+        );
+        write_file(&root.join("docs").join("guide.md"), "# guide\n");
+        write_file(
+            &root
+                .join(".refact")
+                .join("tasks")
+                .join("task-1")
+                .join("documents")
+                .join("doc.md"),
+            "# task doc\n",
+        );
+
+        let indexing_everywhere = IndexingEverywhere::default();
+        let plan = build_watch_plan(&[root.clone()], &indexing_everywhere);
+        let entries = registration_modes(&plan, &root);
+
+        for watched in [
+            Path::new("src").join("lib.rs"),
+            Path::new("src").join("tasks").join("runner.rs"),
+            Path::new("src").join("trajectories").join("store.rs"),
+            Path::new("docs").join("guide.md"),
+        ] {
+            assert!(
+                plan_covers(&plan, &root.join(&watched)),
+                "{} must stay watched, plan was {:?}",
+                watched.display(),
+                entries
+            );
+        }
+        assert!(!plan_covers(
+            &plan,
+            &root
+                .join(".refact")
+                .join("tasks")
+                .join("task-1")
+                .join("documents")
+                .join("doc.md")
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
