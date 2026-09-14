@@ -79,6 +79,12 @@ pub struct CoordinationSettings {
     pub launch_source_bytes: usize,
     pub agent_profile_max_count: usize,
     pub agent_profile_max_bytes: usize,
+    /// Gap entries kept from one child's handoff-sufficiency declaration.
+    pub handoff_report_max_entries: usize,
+    /// Characters kept per declared handoff field before explicit truncation.
+    pub handoff_report_max_chars: usize,
+    /// Finished children scanned when aggregating the handoff metric.
+    pub handoff_metric_max_records: usize,
     /// Upgrades a declared-intent `reject` path scope to canonical enforcement.
     pub strict_path_scope_default: bool,
     pub max_path_scope_entries: usize,
@@ -158,6 +164,9 @@ impl Default for CoordinationSettings {
             launch_source_bytes: 4 * 1024 * 1024,
             agent_profile_max_count: 256,
             agent_profile_max_bytes: 64 * 1024,
+            handoff_report_max_entries: 16,
+            handoff_report_max_chars: 512,
+            handoff_metric_max_records: 512,
             strict_path_scope_default: false,
             max_path_scope_entries: 256,
             agent_closed_retained_max: 64,
@@ -265,6 +274,18 @@ impl CoordinationSettings {
             (
                 "agent_profile_max_bytes",
                 self.agent_profile_max_bytes as u64,
+            ),
+            (
+                "handoff_report_max_entries",
+                self.handoff_report_max_entries as u64,
+            ),
+            (
+                "handoff_report_max_chars",
+                self.handoff_report_max_chars as u64,
+            ),
+            (
+                "handoff_metric_max_records",
+                self.handoff_metric_max_records as u64,
             ),
             ("max_path_scope_entries", self.max_path_scope_entries as u64),
             ("max_work_views", self.max_work_views as u64),
@@ -660,6 +681,24 @@ mod tests {
             |settings: &mut CoordinationSettings| {
                 settings.mailbox_default_rows = settings.mailbox_max_rows + 1
             },
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn handoff_bounds_default_usable_and_reject_zero() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(settings.handoff_report_max_entries >= 1);
+        assert!(settings.handoff_report_max_chars >= 64);
+        assert!(settings.handoff_metric_max_records >= 1);
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.handoff_report_max_entries = 0,
+            |settings: &mut CoordinationSettings| settings.handoff_report_max_chars = 0,
+            |settings: &mut CoordinationSettings| settings.handoff_metric_max_records = 0,
         ] {
             let mut settings = CoordinationSettings::default();
             mutate(&mut settings);

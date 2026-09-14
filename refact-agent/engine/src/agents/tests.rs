@@ -48,6 +48,7 @@ fn completion(child_chat_id: &str) -> AgentCompletion {
         conflict_summary: None,
         child_chat_id: Some(child_chat_id.to_string()),
         deliverable_status: None,
+        handoff: None,
     }
 }
 
@@ -583,6 +584,8 @@ fn summary_maps_introspection_and_question_state() {
         cost_usd: Some(0.42),
         deliverable: None,
         deliverable_status: None,
+        profile_name: None,
+        handoff: None,
         created_at: now,
         started_at: Some(now),
         finished_at: None,

@@ -195,6 +195,13 @@ pub struct BackgroundAgent {
     pub deliverable: Option<refact_chat_api::DeliverableContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deliverable_status: Option<refact_chat_api::DeliverableStatus>,
+    /// The reusable profile this child was launched from, when any; the key the
+    /// handoff-sufficiency metric is grouped by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_name: Option<String>,
+    /// The child's own claim about the brief it was given. Absent is `unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<refact_chat_api::HandoffReport>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -243,6 +250,7 @@ impl From<&BackgroundAgent> for BackgroundAgentSummary {
             cost_usd: record.cost_usd,
             deliverable: record.deliverable.clone(),
             deliverable_status: record.deliverable_status.clone(),
+            handoff: record.handoff.clone(),
             questions: record
                 .questions
                 .iter()
@@ -295,4 +303,52 @@ pub struct AgentCompletion {
     pub conflict_summary: Option<String>,
     pub child_chat_id: Option<String>,
     pub deliverable_status: Option<refact_chat_api::DeliverableStatus>,
+    /// Declared by the child at finish; `None` is `unknown`, never "sufficient".
+    pub handoff: Option<refact_chat_api::HandoffReport>,
+}
+
+#[cfg(test)]
+mod handoff_record_tests {
+    use super::BackgroundAgent;
+
+    #[test]
+    fn a_legacy_record_without_the_handoff_fields_still_loads() {
+        let legacy = serde_json::json!({
+            "schema_version": 1,
+            "agent_id": "agent-1",
+            "parent_chat_id": "parent",
+            "parent_root_chat_id": null,
+            "parent_tool_call_id": null,
+            "child_chat_id": null,
+            "kind": "subagent",
+            "config_name": "subagent",
+            "title": "legacy",
+            "prompt": "prompt",
+            "target_files": [],
+            "status": "completed",
+            "progress": null,
+            "step_count": 0,
+            "last_activity": null,
+            "result_summary": null,
+            "result_payload_path": null,
+            "error": null,
+            "edited_files": [],
+            "diff_summary": null,
+            "conflict_summary": null,
+            "completion_message_id": null,
+            "completion_pushed_at": null,
+            "model": "model",
+            "created_at": "2026-01-01T00:00:00Z",
+            "started_at": null,
+            "finished_at": null,
+            "last_update_at": "2026-01-01T00:00:00Z",
+            "change_seq": 1
+        });
+        let record: BackgroundAgent = serde_json::from_value(legacy).unwrap();
+        assert!(record.handoff.is_none());
+        assert!(record.profile_name.is_none());
+        let reserialized = serde_json::to_value(&record).unwrap();
+        assert!(reserialized.get("handoff").is_none());
+        assert!(reserialized.get("profile_name").is_none());
+    }
 }

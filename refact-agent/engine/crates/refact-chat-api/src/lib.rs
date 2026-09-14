@@ -8,6 +8,7 @@ pub mod deliverable;
 pub mod diagnostics;
 pub mod goal_ledger;
 pub mod goal_role;
+pub mod handoff;
 pub mod internal_roles;
 pub mod notification_event;
 pub mod plan_role;
@@ -30,6 +31,10 @@ pub use question::{
     QuestionSettlement, QuestionState, QUESTION_MAX_EXPIRY_SECS,
 };
 pub use deliverable::{DeliverableContract, DeliverableStatus, DELIVERABLE_CHECK_STRUCTURAL};
+pub use handoff::{
+    HandoffGap, HandoffGapCategory, HandoffLimits, HandoffMetric, HandoffReport,
+    HandoffSufficiency, HANDOFF_BLOCK_TAG, HANDOFF_SOURCE_CHILD_DECLARATION,
+};
 pub use tool_enrichment::{
     attach_tool_enrichment, attach_tool_enrichment_to_extra, redact_tool_enrichment,
     sanitize_http_url, tool_enrichment_from_extra, ToolEnrichment, ToolEnrichmentKind,
@@ -689,6 +694,8 @@ pub struct BackgroundAgentSummary {
     pub deliverable: Option<DeliverableContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deliverable_status: Option<DeliverableStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<HandoffReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1266,6 +1273,7 @@ mod tests {
             questions: Vec::new(),
             deliverable: None,
             deliverable_status: None,
+            handoff: None,
         }
     }
 

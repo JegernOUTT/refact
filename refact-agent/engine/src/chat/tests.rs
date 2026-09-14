@@ -244,6 +244,7 @@ mod tests {
                     conflict_summary: None,
                     child_chat_id: Some("completed-child".to_string()),
                     deliverable_status: None,
+                    handoff: None,
                 },
             )
             .await

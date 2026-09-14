@@ -3,6 +3,7 @@ pub(crate) mod approval_target;
 pub mod command_approval;
 pub mod delivery;
 pub mod execution;
+pub mod handoff;
 pub mod launch_spec;
 pub mod lifecycle;
 pub mod monitor;

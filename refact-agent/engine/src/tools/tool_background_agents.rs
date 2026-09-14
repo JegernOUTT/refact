@@ -1650,6 +1650,7 @@ mod tests {
             conflict_summary: Some("no conflicts".to_string()),
             child_chat_id: Some("subchat-frog".to_string()),
             deliverable_status: None,
+            handoff: None,
         }
     }
 

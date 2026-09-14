@@ -439,6 +439,24 @@ against a JSON-schema subset (`type`, `required`, `properties`, `items`, `enum`,
 and the GUI card. It is a structural contract check, never proof of verified success; a declared
 contract without a completed final message stays "not evaluated".
 
+#### Handoff sufficiency
+
+Every subagent prompt carries optional handoff-sufficiency instructions. A child may close its final
+message with exactly one ```handoff block (`{"gaps":[{category, detail, path?, extra_steps?}]}`,
+categories `missing_file`, `missing_decision`, `missing_message_context`, `ambiguous_requirement`,
+`missing_verification_command`, `other`) — a deliberately different fence from the deliverable
+contract's single ```json block. `refact_chat_api::handoff::parse_report` turns it into
+`BackgroundAgent.handoff` with provenance (`source: "child_declaration"`, `claimed_by`,
+`claimed_at_ms`). Absent is `unknown`, never "sufficient", and never blocks completion; an
+unreadable or scope-widening declaration (unknown fields are refused) also stays `unknown` with an
+explicit note. Entries and per-field characters are bounded by `handoff_report_max_entries` /
+`handoff_report_max_chars`, over-long input is truncated with a visible marker. Declared paths pass
+the same destination-model privacy filtering as any other content before they reach the parent, and
+`handoff_metric_max_records` finished children are aggregated per `profile:<name>` / `config:<name>`
+into a `handoff_metric` shown in the launch preview. Suggested sources are a suggestion only: the
+report is the child's claim about its brief and can never widen tool authority, path scope or
+budget.
+
 ### CodeGraph tools
 
 CodeGraph-dependent tools are visible only when `gcx.codegraph` is available. `search_symbol_definition` is the compatibility definition lookup tool, backed by CodeGraph definitions, fuzzy suggestions, and `type_hierarchy` inheritance context; it does not read an old AST database. The dedicated CodeGraph analysis tool set is:

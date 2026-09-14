@@ -551,6 +551,16 @@ async fn accept_prepared_launch(
             return Err(error);
         }
     }
+    if let Some(profile) = req.profile.as_ref() {
+        if let Err(error) = app
+            .agents
+            .install_profile_name(&agent_id, profile.name.clone())
+            .await
+        {
+            app.agents.mark_failed(&agent_id, error.clone()).await?;
+            return Err(error);
+        }
+    }
     if launch_stopping(&app) {
         app.agents
             .mark_cancelled(&agent_id, Some("launch cancelled during acceptance".into()))
@@ -1994,6 +2004,7 @@ pub(super) async fn resume_agent_inner(
                     let result_summary = final_assistant_text(&result.messages);
                     let deliverable_status =
                         deliverable_status_for(&app, &agent_id, &result_summary).await;
+                    let handoff = handoff_report_for(&app, &agent_id, &result_summary).await;
                     app.agents
                         .mark_completed(
                             &agent_id,
@@ -2004,6 +2015,7 @@ pub(super) async fn resume_agent_inner(
                                 conflict_summary: conflicts.or(old.conflict_summary),
                                 child_chat_id: Some(child_chat_id.clone()),
                                 deliverable_status,
+                                handoff,
                             },
                         )
                         .await
@@ -2431,6 +2443,7 @@ async fn run_spawned_agent(
         Ok(result) => {
             let result_summary = final_assistant_text(&result.messages);
             let deliverable_status = deliverable_status_for(&app, &agent_id, &result_summary).await;
+            let handoff = handoff_report_for(&app, &agent_id, &result_summary).await;
             let (edited_files, diff_summary, conflict_summary) =
                 collect_workspace_changes(scope_worktree, &dirty_baseline, &req.target_files).await;
             app.agents
@@ -2443,6 +2456,7 @@ async fn run_spawned_agent(
                         conflict_summary,
                         child_chat_id: Some(child_chat_id),
                         deliverable_status,
+                        handoff,
                     },
                 )
                 .await
@@ -3086,6 +3100,8 @@ fn fallback_failed_record(agent_id: String, req: SpawnRequest, error: String) ->
         cost_usd: None,
         deliverable,
         deliverable_status: None,
+        profile_name: None,
+        handoff: None,
         created_at: now,
         started_at: None,
         finished_at: Some(now),
@@ -3111,6 +3127,31 @@ async fn deliverable_status_for(
 ) -> Option<refact_chat_api::DeliverableStatus> {
     let contract = app.agents.get_any(agent_id).await.ok()?.deliverable?;
     Some(contract.evaluate(final_text))
+}
+
+/// Reads the child's optional handoff-sufficiency declaration and filters every
+/// path it names for the parent destination before the claim is stored.
+async fn handoff_report_for(
+    app: &AppState,
+    agent_id: &str,
+    final_text: &str,
+) -> Option<refact_chat_api::HandoffReport> {
+    let limits = crate::agents::handoff::current_limits();
+    let mut report = refact_chat_api::handoff::parse_report(
+        final_text,
+        agent_id,
+        chrono::Utc::now().timestamp_millis(),
+        &limits,
+    )?;
+    let parent_chat_id = app
+        .agents
+        .get_any(agent_id)
+        .await
+        .map(|record| record.parent_chat_id)
+        .unwrap_or_default();
+    let destination = crate::agents::handoff::parent_destination(app, &parent_chat_id).await;
+    crate::agents::handoff::redact_for_destination(&app.gcx, destination.as_ref(), &mut report);
+    Some(report)
 }
 
 #[cfg(test)]

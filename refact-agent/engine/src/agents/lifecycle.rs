@@ -186,6 +186,7 @@ mod tests {
                     conflict_summary: None,
                     child_chat_id: None,
                     deliverable_status: None,
+                    handoff: None,
                 },
             )
             .await

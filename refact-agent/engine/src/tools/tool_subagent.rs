@@ -319,6 +319,8 @@ impl Tool for ToolSubagent {
             }
         }
         spawn_tools.sort();
+        let handoff_limits = crate::agents::handoff::limits_from(&limits);
+        let handoff_metric_max_records = limits.handoff_metric_max_records;
         let launch_scope = if let Some(caller) = caller {
             let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
                 .await
@@ -362,6 +364,7 @@ impl Tool for ToolSubagent {
             &peer_snapshot,
             goal.is_some(),
             deliverable.as_ref(),
+            &handoff_limits,
         );
         let req = SpawnRequest {
             kind: BgAgentKind::Subagent,
@@ -432,6 +435,31 @@ impl Tool for ToolSubagent {
                             text.push_str(&format!("\n\n## Launch Blocked\n- {error}"));
                         }
                     }
+                }
+            }
+            let mut handoff_metric = crate::agents::handoff::metric_for(
+                &app.agents.list_all().await,
+                &crate::agents::handoff::metric_key(
+                    resolved_profile
+                        .as_ref()
+                        .map(|profile| profile.name.as_str()),
+                    &req.config_name,
+                ),
+                &handoff_limits,
+                handoff_metric_max_records,
+            );
+            if let Some(metric) = handoff_metric.as_mut() {
+                let destination =
+                    crate::agents::handoff::parent_destination(&app, &parent_chat_id).await;
+                crate::agents::handoff::redact_metric(&gcx, destination.as_ref(), metric);
+            }
+            if let (Some(metric), ContextEnum::ChatMessage(message)) =
+                (&handoff_metric, &mut preview)
+            {
+                message.extra.insert("handoff_metric".into(), json!(metric));
+                if let ChatContent::SimpleText(text) = &mut message.content {
+                    text.push_str("\n\n## Handoff Sufficiency (prior children)\n");
+                    text.push_str(&metric.summary_lines().join("\n"));
                 }
             }
             if let (Some(scope), Some(resolved), ContextEnum::ChatMessage(message)) =
@@ -913,6 +941,7 @@ fn build_subagent_prompt(
     peers: &str,
     goal_installed: bool,
     deliverable: Option<&refact_chat_api::DeliverableContract>,
+    handoff_limits: &refact_chat_api::HandoffLimits,
 ) -> String {
     let mut prompt = format!("# Your Task\n{task}\n\n# Expected Result\n{expected_result}\n\n");
     if !target_files.is_empty() {
@@ -927,6 +956,10 @@ fn build_subagent_prompt(
         prompt.push_str(&contract.render_instructions());
         prompt.push_str("\n\n");
     }
+    prompt.push_str(&refact_chat_api::handoff::render_instructions(
+        handoff_limits,
+    ));
+    prompt.push_str("\n\n");
     prompt.push_str("# Constraints\n- Work independently in this background trajectory.\n- You MAY run tests, compilation, lint, or other verification when your tools allow it.\n- Publish progress with `tasks_set` and `progress_report`.\n- Sibling digest notices arrive in your context automatically; coordinate with `agents_overview` and `agent_message`.\n");
     if goal_installed {
         prompt.push_str("- An installed goal is ground truth. You MUST call `validate_goal` before finishing and report any unmet criteria.\n");
@@ -1642,6 +1675,185 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("is pinned"), "{error}");
+    }
+
+    fn handoff_block(path: &str) -> String {
+        format!(
+            "Status: DONE\n\n```handoff\n{{\"gaps\":[{{\"category\":\"missing_file\",\"detail\":\"needed the retry rule\",\"path\":\"{path}\",\"extra_steps\":3}}]}}\n```\n"
+        )
+    }
+
+    #[tokio::test]
+    #[serial(test_runner)]
+    async fn a_child_handoff_declaration_is_recorded_and_an_absent_one_stays_unknown() {
+        for declared in [true, false] {
+            let (ccx, app, _parent, workspace) = profile_parent().await;
+            let file = workspace.path().join("retry.rs");
+            std::fs::write(&file, "fn retry() {}\n").unwrap();
+            let path = file.to_string_lossy().into_owned();
+            let final_text = if declared {
+                handoff_block(&path)
+            } else {
+                "Status: DONE\nnothing declared".to_string()
+            };
+            let captured = Arc::new(std::sync::Mutex::new(None));
+            let output = captured.clone();
+            let _runner = crate::agents::spawn::install_test_runner(Arc::new(
+                move |_gcx, mut messages, config| {
+                    *output.lock().unwrap() = Some(messages.clone());
+                    messages.push(ChatMessage::new("assistant".into(), final_text.clone()));
+                    Box::pin(async move {
+                        Ok(SubchatResult {
+                            messages,
+                            metering: Map::new(),
+                            chat_id: config.chat_id,
+                            aborted: false,
+                        })
+                    })
+                },
+            ));
+            let launched = run_subagent(&app, &ccx, "handoff", args()).await.unwrap();
+            let agent = launched[0].extra["background_agent_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let record = app
+                .agents
+                .wait("profile-parent", &agent, Duration::from_secs(5))
+                .await
+                .unwrap();
+            assert_eq!(
+                record.status,
+                crate::agents::types::BgAgentStatus::Completed,
+                "an absent declaration must never block completion"
+            );
+            let prompt = captured
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap()
+                .iter()
+                .map(|message| message.content.content_text_only())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(prompt.contains("# Handoff sufficiency (optional)"));
+            assert!(prompt.contains("recorded as `unknown`, never as `sufficient`"));
+            match (&record.handoff, declared) {
+                (Some(report), true) => {
+                    assert_eq!(
+                        report.sufficiency,
+                        refact_chat_api::HandoffSufficiency::GapsReported
+                    );
+                    assert_eq!(
+                        report.source,
+                        refact_chat_api::HANDOFF_SOURCE_CHILD_DECLARATION
+                    );
+                    assert_eq!(report.claimed_by, agent);
+                    assert!(report.claimed_at_ms > 0);
+                    assert_eq!(
+                        report.gaps[0].category,
+                        refact_chat_api::HandoffGapCategory::MissingFile
+                    );
+                    assert_eq!(report.gaps[0].path.as_deref(), Some(path.as_str()));
+                    assert_eq!(report.gaps[0].extra_steps, Some(3));
+                }
+                (None, false) => {}
+                other => panic!("unexpected handoff state: {other:?}"),
+            }
+            let summary = crate::agents::types::BackgroundAgentSummary::from(&record);
+            assert_eq!(summary.handoff.is_some(), declared);
+        }
+    }
+
+    #[tokio::test]
+    async fn prior_handoff_gaps_surface_in_the_preview_without_widening_scope_or_authority() {
+        let (ccx, app, _parent, workspace) = profile_parent().await;
+        install_profile(&app.gcx, &reviewer_profile("[cat]")).await;
+        let mut request = args();
+        request.insert("profile".into(), json!("reviewer"));
+        request.insert("action".into(), json!("preview"));
+        let before = run_subagent(&app, &ccx, "before", request.clone())
+            .await
+            .unwrap();
+        assert!(before[0].extra.get("handoff_metric").is_none());
+
+        let file = workspace.path().join("retry.rs");
+        std::fs::write(&file, "fn retry() {}\n").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let report = refact_chat_api::handoff::parse_report(
+            &handoff_block(&path),
+            "finished",
+            7,
+            &refact_chat_api::HandoffLimits::default(),
+        )
+        .unwrap();
+        let (finished, _, _) = app
+            .agents
+            .create(crate::agents::types::CreateAgentRequest {
+                parent_chat_id: "profile-parent".to_string(),
+                parent_root_chat_id: Some("root-chat".to_string()),
+                parent_tool_call_id: None,
+                kind: BgAgentKind::Subagent,
+                config_name: "subagent".to_string(),
+                title: "Earlier reviewer child".to_string(),
+                prompt: String::new(),
+                target_files: Vec::new(),
+                model: "test/default".to_string(),
+                model_type: None,
+                goal_summary: None,
+                plan_present: false,
+                worktree_id: None,
+                worktree_branch: None,
+            })
+            .await
+            .unwrap();
+        app.agents
+            .install_profile_name(&finished.agent_id, "reviewer".to_string())
+            .await
+            .unwrap();
+        app.agents
+            .mark_completed(
+                &finished.agent_id,
+                crate::agents::types::AgentCompletion {
+                    result_summary: "done".to_string(),
+                    edited_files: Vec::new(),
+                    diff_summary: None,
+                    conflict_summary: None,
+                    child_chat_id: Some("earlier-child".to_string()),
+                    deliverable_status: None,
+                    handoff: Some(report),
+                },
+            )
+            .await
+            .unwrap();
+
+        let after = run_subagent(&app, &ccx, "after", request).await.unwrap();
+        let metric = &after[0].extra["handoff_metric"];
+        assert_eq!(metric["key"], "profile:reviewer");
+        assert_eq!(metric["completions"], 1);
+        assert_eq!(metric["with_gaps"], 1);
+        assert_eq!(metric["gaps_by_category"]["missing_file"], 1);
+        assert_eq!(metric["suggested_sources"], json!([path]));
+        assert_eq!(metric["withheld_sources"], 0);
+        let text = after[0].content.content_text_only();
+        assert!(text.contains("## Handoff Sufficiency (prior children)"));
+        assert!(text.contains("suggestion only; this launch's scope and authority are unchanged"));
+        assert_eq!(
+            after[0].extra["effective_tools"],
+            before[0].extra["effective_tools"]
+        );
+        assert_eq!(
+            after[0].extra["effective_launch"]["tools"],
+            before[0].extra["effective_launch"]["tools"]
+        );
+        assert_eq!(
+            after[0].extra["effective_launch"]["max_steps"],
+            before[0].extra["effective_launch"]["max_steps"]
+        );
+        assert_eq!(
+            after[0].extra["profile"]["provenance"],
+            before[0].extra["profile"]["provenance"]
+        );
     }
 
     #[tokio::test]

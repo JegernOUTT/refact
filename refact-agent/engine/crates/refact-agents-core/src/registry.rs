@@ -160,6 +160,8 @@ impl BackgroundAgentRegistry {
             cost_usd: None,
             deliverable: None,
             deliverable_status: None,
+            profile_name: None,
+            handoff: None,
             created_at: now,
             started_at: None,
             finished_at: None,
@@ -475,6 +477,25 @@ impl BackgroundAgentRegistry {
         .await
     }
 
+    /// Records which reusable profile this child was launched from. Grouping
+    /// data only: it confers no authority and cannot change after acceptance.
+    pub async fn install_profile_name(
+        &self,
+        agent_id: &str,
+        profile_name: String,
+    ) -> Result<BackgroundAgent, String> {
+        self.update_record(agent_id, |record, _| {
+            if record.status != BgAgentStatus::Queued || record.run_generation != 1 {
+                return Err(
+                    "profile name can only be installed on the initial queued attempt".into(),
+                );
+            }
+            record.profile_name = Some(profile_name);
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn set_merge_outcome(
         &self,
         agent_id: &str,
@@ -613,6 +634,7 @@ impl BackgroundAgentRegistry {
                 conflict_summary,
                 child_chat_id,
                 deliverable_status,
+                handoff,
             } = completion;
             let payload = serde_json::json!({
                 "agent_id": agent_id,
@@ -622,6 +644,7 @@ impl BackgroundAgentRegistry {
                 "conflict_summary": conflict_summary.clone(),
                 "child_chat_id": child_chat_id.clone(),
                 "deliverable_status": deliverable_status.clone(),
+                "handoff": handoff.clone(),
             });
             let result_payload_path =
                 storage::save_result_payload(&self.storage_root, agent_id, &payload).await?;
@@ -634,6 +657,7 @@ impl BackgroundAgentRegistry {
             updated.diff_summary = diff_summary;
             updated.conflict_summary = conflict_summary;
             updated.deliverable_status = deliverable_status;
+            updated.handoff = handoff;
             updated.current_tool = None;
             if child_chat_id.is_some() {
                 updated.child_chat_id = child_chat_id;
@@ -2156,6 +2180,7 @@ mod tests {
             conflict_summary: None,
             child_chat_id: None,
             deliverable_status: None,
+            handoff: None,
         }
     }
 

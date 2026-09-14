@@ -681,6 +681,8 @@ mod tests {
             cost_usd: None,
             deliverable: None,
             deliverable_status: None,
+            profile_name: None,
+            handoff: None,
             created_at,
             started_at: None,
             finished_at,

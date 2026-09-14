@@ -198,6 +198,8 @@ fn build_completion_event(record: &BackgroundAgent) -> refact_core::chat_types::
             "tokens_used": record.tokens_used,
             "cost_usd": record.cost_usd,
             "deliverable_status": record.deliverable_status,
+            "profile_name": record.profile_name,
+            "handoff": record.handoff,
             "created_at": record.created_at,
             "last_update_at": record.last_update_at,
         }),
@@ -248,6 +250,20 @@ fn build_push_message(record: &BackgroundAgent) -> String {
         lines.push("deliverable_contract: not evaluated (no completed final message)".into());
         lines.push(String::new());
     }
+    match &record.handoff {
+        Some(report) => {
+            lines.extend(report.summary_lines());
+            lines.push(
+                "(the child's claim about the brief it was given; it changes nothing on its own)"
+                    .into(),
+            );
+        }
+        None if record.status == BgAgentStatus::Completed => {
+            lines.push("handoff_sufficiency: unknown (the child declared nothing)".into());
+        }
+        None => {}
+    }
+    lines.push(String::new());
     if !record.edited_files.is_empty() {
         lines.push("Edited files:".to_string());
         lines.extend(
@@ -389,6 +405,7 @@ mod tests {
                     conflict_summary: None,
                     child_chat_id: Some("child".to_string()),
                     deliverable_status: None,
+                    handoff: None,
                 },
             )
             .await
@@ -469,6 +486,7 @@ mod tests {
                     conflict_summary: None,
                     child_chat_id: Some("child".to_string()),
                     deliverable_status: None,
+                    handoff: None,
                 },
             )
             .await
