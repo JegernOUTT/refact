@@ -23,7 +23,10 @@ use crate::yaml_configs::customization_registry::{
     get_mode_config, map_legacy_mode_to_id, match_tool_confirm_action,
 };
 use crate::ext::hooks::HookEvent;
-use crate::ext::hooks_runner::{HookPayload, first_block_reason, get_project_dir_string, run_hooks};
+use crate::ext::hooks_runner::{
+    ControlVerdict, HookPayload, get_project_dir_string, revalidate_rewritten_arguments,
+    run_control_hooks,
+};
 use refact_runtime_api::{ToolCatalogSnapshot, TurnToolPool};
 use refact_tool_api::MatchConfirmDenyResult;
 use crate::exec::command_policy::escalation_from_args;
@@ -2394,6 +2397,16 @@ pub async fn process_tool_calls_once(
     };
     let mut pre_hook_blocked_ids: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    let mut pre_hook_rewrites: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let hook_authority = (!allowed_tools.is_empty()).then(|| {
+        crate::subchat::ToolsPolicy::Only(
+            allowed_tools
+                .iter()
+                .map(|name| crate::agents::tool_authority::canonical(name))
+                .collect(),
+        )
+    });
     let pre_hook_item_count = tools_to_execute.len() as u64;
     let pre_hook_span = perf_diagnostics::span(PerfComponent::ToolPreHook, None, None);
     for tc in &tools_to_execute {
@@ -2402,18 +2415,32 @@ pub async fn process_tool_calls_once(
             .parse_args()
             .ok()
             .map(|m| serde_json::Value::Object(m.into_iter().collect()));
-        let payload = HookPayload {
-            hook_event_name: "PreToolUse".to_string(),
-            session_id: session_id.clone(),
-            project_dir: project_dir.clone(),
-            tool_name: Some(tc.function.name.clone()),
-            tool_input: args_value,
-            tool_output: None,
-            user_prompt: None,
-            extra: std::collections::HashMap::new(),
+        let payload = HookPayload::new(
+            &HookEvent::PreToolUse,
+            session_id.clone(),
+            project_dir.clone(),
+        )
+        .with_tool(&tc.function.name, args_value);
+        let verdict = run_control_hooks(app.clone(), HookEvent::PreToolUse, payload).await;
+        let denial = match verdict {
+            ControlVerdict::Allow => None,
+            ControlVerdict::Deny(reason) => Some(reason),
+            ControlVerdict::Rewrite(value) => match revalidate_rewritten_arguments(
+                &tc.function.name,
+                &value,
+                hook_authority.as_ref(),
+            ) {
+                Ok(args) => match serde_json::to_string(&serde_json::Value::Object(args)) {
+                    Ok(encoded) => {
+                        pre_hook_rewrites.insert(tc.id.clone(), encoded);
+                        None
+                    }
+                    Err(e) => Some(format!("hook rewrite could not be encoded: {e}")),
+                },
+                Err(e) => Some(e.to_string()),
+            },
         };
-        let results = run_hooks(app.clone(), HookEvent::PreToolUse, payload).await;
-        if let Some(reason) = first_block_reason(&results) {
+        if let Some(reason) = denial {
             pre_hook_blocked_ids.insert(tc.id.clone());
             let block_message = ChatMessage {
                 message_id: Uuid::new_v4().to_string(),
@@ -2439,6 +2466,13 @@ pub async fn process_tool_calls_once(
     );
     if !pre_hook_blocked_ids.is_empty() {
         tools_to_execute.retain(|tc| !pre_hook_blocked_ids.contains(&tc.id));
+    }
+    if !pre_hook_rewrites.is_empty() {
+        for tc in tools_to_execute.iter_mut() {
+            if let Some(arguments) = pre_hook_rewrites.remove(&tc.id) {
+                tc.function.arguments = arguments;
+            }
+        }
     }
 
     if tools_to_execute.is_empty() {
@@ -3335,18 +3369,11 @@ async fn execute_single_tool(
         .parse_args()
         .ok()
         .map(|m| serde_json::Value::Object(m.into_iter().collect()));
-    let post_payload = HookPayload {
-        hook_event_name: "PostToolUse".to_string(),
-        session_id,
-        project_dir,
-        tool_name: Some(tool_call.function.name.clone()),
-        tool_input: args_value,
-        tool_output: Some(tool_output_text),
-        user_prompt: None,
-        extra: std::collections::HashMap::new(),
-    };
+    let post_payload = HookPayload::new(&HookEvent::PostToolUse, session_id, project_dir)
+        .with_tool(&tool_call.function.name, args_value)
+        .with_tool_output(tool_output_text);
     let post_hook_span = perf_diagnostics::span(PerfComponent::ToolPostHook, None, None);
-    let post_results = run_hooks(app.clone(), HookEvent::PostToolUse, post_payload).await;
+    let post_verdict = run_control_hooks(app.clone(), HookEvent::PostToolUse, post_payload).await;
     drop(post_hook_permit);
     if let Some(runner) = post_hook_runner {
         if let Err(error) =
@@ -3355,7 +3382,7 @@ async fn execute_single_tool(
             return runner_capacity_error(idx, &tool_call, &error);
         }
     }
-    if let Some(reason) = first_block_reason(&post_results) {
+    if let ControlVerdict::Deny(reason) = post_verdict {
         post_hook_span.finish_tool(
             PerfOutcome::Failure,
             batch_size as u64,

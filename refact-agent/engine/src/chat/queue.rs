@@ -13,7 +13,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextFile};
 use refact_buddy_core::user_action::UserAction;
 use crate::files_correction::get_project_dirs;
 use crate::ext::hooks::HookEvent;
-use crate::ext::hooks_runner::{HookPayload, first_block_reason, get_project_dir_string, run_hooks};
+use crate::ext::hooks_runner::{ControlVerdict, HookPayload, get_project_dir_string, run_control_hooks};
 use crate::chat::internal_roles::{self, mode_switch_event_with_diff, EventSubkind};
 use crate::chat::plan_role;
 use crate::yaml_configs::customization_registry::get_mode_config;
@@ -219,22 +219,14 @@ pub async fn inject_priority_messages_if_any(
                 serde_json::Value::String(s) => s.clone(),
                 other => serde_json::to_string(other).unwrap_or_default(),
             };
-            let hook_results = run_hooks(
+            let hook_verdict = run_control_hooks(
                 app.clone(),
                 HookEvent::UserPromptSubmit,
-                HookPayload {
-                    hook_event_name: "UserPromptSubmit".to_string(),
-                    session_id,
-                    project_dir,
-                    tool_name: None,
-                    tool_input: None,
-                    tool_output: None,
-                    user_prompt: Some(prompt_text),
-                    extra: std::collections::HashMap::new(),
-                },
+                HookPayload::new(&HookEvent::UserPromptSubmit, session_id, project_dir)
+                    .with_user_prompt(prompt_text),
             )
             .await;
-            if first_block_reason(&hook_results).is_some() {
+            if matches!(hook_verdict, ControlVerdict::Deny(_)) {
                 continue;
             }
 
@@ -1569,19 +1561,16 @@ async fn process_command_queue_inner(
                         serde_json::Value::String(s) => s.clone(),
                         other => serde_json::to_string(other).unwrap_or_default(),
                     };
-                    let prompt_payload = HookPayload {
-                        hook_event_name: "UserPromptSubmit".to_string(),
-                        session_id: session_id_for_hook.clone(),
-                        project_dir: project_dir_for_hook.clone(),
-                        tool_name: None,
-                        tool_input: None,
-                        tool_output: None,
-                        user_prompt: Some(prompt_text),
-                        extra: std::collections::HashMap::new(),
-                    };
-                    let prompt_results =
-                        run_hooks(app.clone(), HookEvent::UserPromptSubmit, prompt_payload).await;
-                    if let Some(reason) = first_block_reason(&prompt_results) {
+                    let prompt_payload = HookPayload::new(
+                        &HookEvent::UserPromptSubmit,
+                        session_id_for_hook.clone(),
+                        project_dir_for_hook.clone(),
+                    )
+                    .with_user_prompt(prompt_text);
+                    let prompt_verdict =
+                        run_control_hooks(app.clone(), HookEvent::UserPromptSubmit, prompt_payload)
+                            .await;
+                    if let ControlVerdict::Deny(reason) = prompt_verdict {
                         let mut session = session_arc.lock().await;
                         let compression_phase = session.compression_phase;
                         let compression_reason = session.compression_reason;
@@ -1611,22 +1600,18 @@ async fn process_command_queue_inner(
                                 approved.push(additional);
                                 continue;
                             };
-                            let add_results = run_hooks(
+                            let add_verdict = run_control_hooks(
                                 app.clone(),
                                 HookEvent::UserPromptSubmit,
-                                HookPayload {
-                                    hook_event_name: "UserPromptSubmit".to_string(),
-                                    session_id: session_id_for_hook.clone(),
-                                    project_dir: project_dir_for_hook.clone(),
-                                    tool_name: None,
-                                    tool_input: None,
-                                    tool_output: None,
-                                    user_prompt: Some(text),
-                                    extra: std::collections::HashMap::new(),
-                                },
+                                HookPayload::new(
+                                    &HookEvent::UserPromptSubmit,
+                                    session_id_for_hook.clone(),
+                                    project_dir_for_hook.clone(),
+                                )
+                                .with_user_prompt(text),
                             )
                             .await;
-                            if first_block_reason(&add_results).is_none() {
+                            if !matches!(add_verdict, ControlVerdict::Deny(_)) {
                                 approved.push(additional);
                             }
                         }

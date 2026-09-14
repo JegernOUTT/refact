@@ -10,7 +10,7 @@ use crate::agents::types::AgentListFilter;
 use crate::app_state::AppState;
 use crate::exec::{ExecMode, ExecProcessFilter, ExecProcessSnapshot, ExecStatusKind};
 use crate::ext::hooks::HookEvent;
-use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_hooks};
+use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_observation_hooks};
 
 use super::session::{SessionsMap, should_replace_background_agent};
 use super::types::*;
@@ -266,17 +266,8 @@ pub async fn get_or_create_session_with_trajectory(
         let chat_id_clone = chat_id.to_string();
         tokio::spawn(async move {
             let project_dir = get_project_dir_string(app_hook.clone()).await;
-            let payload = HookPayload {
-                hook_event_name: "SessionStart".to_string(),
-                session_id: chat_id_clone,
-                project_dir,
-                tool_name: None,
-                tool_input: None,
-                tool_output: None,
-                user_prompt: None,
-                extra: std::collections::HashMap::new(),
-            };
-            run_hooks(app_hook, HookEvent::SessionStart, payload).await;
+            let payload = HookPayload::new(&HookEvent::SessionStart, chat_id_clone, project_dir);
+            run_observation_hooks(app_hook, HookEvent::SessionStart, payload).await;
         });
     }
 
@@ -585,17 +576,9 @@ pub fn start_session_cleanup_task(app: AppState) {
                 let chat_id_hook = chat_id.clone();
                 tokio::spawn(async move {
                     let project_dir = get_project_dir_string(app_hook.clone()).await;
-                    let payload = HookPayload {
-                        hook_event_name: "SessionEnd".to_string(),
-                        session_id: chat_id_hook,
-                        project_dir,
-                        tool_name: None,
-                        tool_input: None,
-                        tool_output: None,
-                        user_prompt: None,
-                        extra: std::collections::HashMap::new(),
-                    };
-                    run_hooks(app_hook, HookEvent::SessionEnd, payload).await;
+                    let payload =
+                        HookPayload::new(&HookEvent::SessionEnd, chat_id_hook, project_dir);
+                    run_observation_hooks(app_hook, HookEvent::SessionEnd, payload).await;
                 });
 
                 info!("Saved trajectory for closed session {}", chat_id);

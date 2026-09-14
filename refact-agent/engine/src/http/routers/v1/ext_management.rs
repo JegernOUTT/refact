@@ -418,17 +418,7 @@ fn make_scope_ext_dirs(base_dir: PathBuf, scope: &str) -> ExtDirs {
 }
 
 fn hook_event_to_str(event: &HookEvent) -> &'static str {
-    match event {
-        HookEvent::PreToolUse => "PreToolUse",
-        HookEvent::PostToolUse => "PostToolUse",
-        HookEvent::UserPromptSubmit => "UserPromptSubmit",
-        HookEvent::SessionStart => "SessionStart",
-        HookEvent::SessionEnd => "SessionEnd",
-        HookEvent::Stop => "Stop",
-        HookEvent::SubagentStop => "SubagentStop",
-        HookEvent::Notification => "Notification",
-        HookEvent::PreCompact => "PreCompact",
-    }
+    event.as_str()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

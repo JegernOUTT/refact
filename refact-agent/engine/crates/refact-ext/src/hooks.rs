@@ -10,13 +10,127 @@ use crate::config_dirs::{is_claude_dir, source_for_dir, CommandSource, ExtDirs};
 /// otherwise ship a `.refact/hooks.yaml` that runs arbitrary shell commands on
 /// session start. Global hooks (`~/.config/refact/hooks.yaml`) always run.
 ///
-/// To run project hooks, the user lists the trusted project roots in
-/// `hooks.trusted_projects`. Only hooks whose project root matches an entry are
-/// executed, so trusting one repository never trusts another.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+/// "Trusted" has one precise meaning: the project root of the hook's source
+/// directory appears, as a canonicalised path, in the `hooks.trusted_projects`
+/// list of the global `privacy.yaml` (`~/.config/refact/privacy.yaml`, or the
+/// file named by `--privacy-yaml`). That file lives outside any repository, so
+/// a clone can never mark itself trusted, and the list is read once at engine
+/// startup into `GlobalContext::hooks_config`. Matching is exact per project
+/// root, so trusting one repository never trusts another, and hooks shipped by
+/// an installed plugin are never executed at all.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct HooksConfig {
+    #[serde(default = "default_hooks_enabled")]
+    pub enabled: bool,
     #[serde(default)]
     pub trusted_projects: Vec<String>,
+    #[serde(
+        default = "default_hook_timeout_secs",
+        deserialize_with = "deserialize_hook_timeout_secs"
+    )]
+    pub default_timeout_secs: u64,
+    #[serde(
+        default = "default_hook_recursion_depth",
+        deserialize_with = "deserialize_hook_recursion_depth"
+    )]
+    pub max_recursion_depth: u32,
+    #[serde(
+        default = "default_hook_output_bytes",
+        deserialize_with = "deserialize_hook_output_bytes"
+    )]
+    pub max_output_bytes: usize,
+}
+
+pub const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 30;
+pub const MIN_HOOK_TIMEOUT_SECS: u64 = 1;
+pub const MAX_HOOK_TIMEOUT_SECS: u64 = 600;
+pub const DEFAULT_HOOK_OUTPUT_BYTES: usize = 10 * 1024;
+pub const MIN_HOOK_OUTPUT_BYTES: usize = 1024;
+pub const MAX_HOOK_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+pub const DEFAULT_HOOK_RECURSION_DEPTH: u32 = 2;
+pub const MIN_HOOK_RECURSION_DEPTH: u32 = 1;
+pub const MAX_HOOK_RECURSION_DEPTH: u32 = 16;
+
+fn default_hooks_enabled() -> bool {
+    true
+}
+
+fn default_hook_timeout_secs() -> u64 {
+    DEFAULT_HOOK_TIMEOUT_SECS
+}
+
+fn default_hook_recursion_depth() -> u32 {
+    DEFAULT_HOOK_RECURSION_DEPTH
+}
+
+fn default_hook_output_bytes() -> usize {
+    DEFAULT_HOOK_OUTPUT_BYTES
+}
+
+pub fn validate_hook_timeout_secs(value: u64) -> Result<u64, String> {
+    if (MIN_HOOK_TIMEOUT_SECS..=MAX_HOOK_TIMEOUT_SECS).contains(&value) {
+        Ok(value)
+    } else {
+        Err(format!(
+            "hook timeout must be between {MIN_HOOK_TIMEOUT_SECS} and {MAX_HOOK_TIMEOUT_SECS} seconds, got {value}"
+        ))
+    }
+}
+
+pub fn validate_hook_recursion_depth(value: u32) -> Result<u32, String> {
+    if (MIN_HOOK_RECURSION_DEPTH..=MAX_HOOK_RECURSION_DEPTH).contains(&value) {
+        Ok(value)
+    } else {
+        Err(format!(
+            "hook max_recursion_depth must be between {MIN_HOOK_RECURSION_DEPTH} and {MAX_HOOK_RECURSION_DEPTH}, got {value}"
+        ))
+    }
+}
+
+pub fn validate_hook_output_bytes(value: usize) -> Result<usize, String> {
+    if (MIN_HOOK_OUTPUT_BYTES..=MAX_HOOK_OUTPUT_BYTES).contains(&value) {
+        Ok(value)
+    } else {
+        Err(format!(
+            "hook max_output_bytes must be between {MIN_HOOK_OUTPUT_BYTES} and {MAX_HOOK_OUTPUT_BYTES}, got {value}"
+        ))
+    }
+}
+
+fn deserialize_hook_timeout_secs<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    validate_hook_timeout_secs(value).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_hook_recursion_depth<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    validate_hook_recursion_depth(value).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_hook_output_bytes<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = usize::deserialize(deserializer)?;
+    validate_hook_output_bytes(value).map_err(serde::de::Error::custom)
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_hooks_enabled(),
+            trusted_projects: Vec::new(),
+            default_timeout_secs: DEFAULT_HOOK_TIMEOUT_SECS,
+            max_recursion_depth: DEFAULT_HOOK_RECURSION_DEPTH,
+            max_output_bytes: DEFAULT_HOOK_OUTPUT_BYTES,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -24,12 +138,63 @@ pub enum HookEvent {
     PreToolUse,
     PostToolUse,
     UserPromptSubmit,
+    PermissionDecision,
     SessionStart,
     SessionEnd,
     Stop,
+    SubagentStart,
     SubagentStop,
     Notification,
     PreCompact,
+    PostCompact,
+    GoalValidation,
+}
+
+/// A control hook is waited for and may allow, deny or rewrite. An observation
+/// hook is told what happened and can change nothing. The distinction is a
+/// property of the event, so a hook definition cannot opt itself into control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookKind {
+    Control,
+    Observation,
+}
+
+impl HookEvent {
+    pub fn kind(&self) -> HookKind {
+        match self {
+            HookEvent::PreToolUse
+            | HookEvent::PostToolUse
+            | HookEvent::UserPromptSubmit
+            | HookEvent::PermissionDecision
+            | HookEvent::PreCompact => HookKind::Control,
+            HookEvent::SessionStart
+            | HookEvent::SessionEnd
+            | HookEvent::Stop
+            | HookEvent::SubagentStart
+            | HookEvent::SubagentStop
+            | HookEvent::Notification
+            | HookEvent::PostCompact
+            | HookEvent::GoalValidation => HookKind::Observation,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HookEvent::PreToolUse => "PreToolUse",
+            HookEvent::PostToolUse => "PostToolUse",
+            HookEvent::UserPromptSubmit => "UserPromptSubmit",
+            HookEvent::PermissionDecision => "PermissionDecision",
+            HookEvent::SessionStart => "SessionStart",
+            HookEvent::SessionEnd => "SessionEnd",
+            HookEvent::Stop => "Stop",
+            HookEvent::SubagentStart => "SubagentStart",
+            HookEvent::SubagentStop => "SubagentStop",
+            HookEvent::Notification => "Notification",
+            HookEvent::PreCompact => "PreCompact",
+            HookEvent::PostCompact => "PostCompact",
+            HookEvent::GoalValidation => "GoalValidation",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,12 +211,16 @@ fn event_from_str(s: &str) -> Option<HookEvent> {
         "PreToolUse" => Some(HookEvent::PreToolUse),
         "PostToolUse" => Some(HookEvent::PostToolUse),
         "UserPromptSubmit" => Some(HookEvent::UserPromptSubmit),
+        "PermissionDecision" => Some(HookEvent::PermissionDecision),
         "SessionStart" => Some(HookEvent::SessionStart),
         "SessionEnd" => Some(HookEvent::SessionEnd),
         "Stop" => Some(HookEvent::Stop),
+        "SubagentStart" => Some(HookEvent::SubagentStart),
         "SubagentStop" => Some(HookEvent::SubagentStop),
         "Notification" => Some(HookEvent::Notification),
         "PreCompact" => Some(HookEvent::PreCompact),
+        "PostCompact" => Some(HookEvent::PostCompact),
+        "GoalValidation" => Some(HookEvent::GoalValidation),
         _ => None,
     }
 }
@@ -102,6 +271,12 @@ fn hooks_from_map(
                 if hook_cmd.command.is_empty() {
                     tracing::warn!("Hook entry has empty command, skipping");
                     continue;
+                }
+                if let Some(timeout) = hook_cmd.timeout {
+                    if let Err(e) = validate_hook_timeout_secs(timeout) {
+                        tracing::warn!("Hook '{}' rejected: {}", hook_cmd.command, e);
+                        continue;
+                    }
                 }
                 result.push(HookConfig {
                     event: event.clone(),
@@ -671,7 +846,169 @@ hooks:
             Some(HookEvent::Notification)
         );
         assert_eq!(event_from_str("PreCompact"), Some(HookEvent::PreCompact));
+        assert_eq!(
+            event_from_str("PermissionDecision"),
+            Some(HookEvent::PermissionDecision)
+        );
+        assert_eq!(
+            event_from_str("SubagentStart"),
+            Some(HookEvent::SubagentStart)
+        );
+        assert_eq!(event_from_str("PostCompact"), Some(HookEvent::PostCompact));
+        assert_eq!(
+            event_from_str("GoalValidation"),
+            Some(HookEvent::GoalValidation)
+        );
         assert_eq!(event_from_str("Unknown"), None);
         assert_eq!(event_from_str(""), None);
+    }
+
+    #[test]
+    fn test_every_event_round_trips_through_name_and_has_a_kind() {
+        let all = [
+            HookEvent::PreToolUse,
+            HookEvent::PostToolUse,
+            HookEvent::UserPromptSubmit,
+            HookEvent::PermissionDecision,
+            HookEvent::SessionStart,
+            HookEvent::SessionEnd,
+            HookEvent::Stop,
+            HookEvent::SubagentStart,
+            HookEvent::SubagentStop,
+            HookEvent::Notification,
+            HookEvent::PreCompact,
+            HookEvent::PostCompact,
+            HookEvent::GoalValidation,
+        ];
+        for event in all {
+            assert_eq!(event_from_str(event.as_str()), Some(event.clone()));
+        }
+    }
+
+    #[test]
+    fn test_control_and_observation_events_are_partitioned() {
+        assert_eq!(HookEvent::PreToolUse.kind(), HookKind::Control);
+        assert_eq!(HookEvent::PostToolUse.kind(), HookKind::Control);
+        assert_eq!(HookEvent::UserPromptSubmit.kind(), HookKind::Control);
+        assert_eq!(HookEvent::PermissionDecision.kind(), HookKind::Control);
+        assert_eq!(HookEvent::PreCompact.kind(), HookKind::Control);
+        assert_eq!(HookEvent::SessionStart.kind(), HookKind::Observation);
+        assert_eq!(HookEvent::SessionEnd.kind(), HookKind::Observation);
+        assert_eq!(HookEvent::Stop.kind(), HookKind::Observation);
+        assert_eq!(HookEvent::SubagentStart.kind(), HookKind::Observation);
+        assert_eq!(HookEvent::SubagentStop.kind(), HookKind::Observation);
+        assert_eq!(HookEvent::Notification.kind(), HookKind::Observation);
+        assert_eq!(HookEvent::PostCompact.kind(), HookKind::Observation);
+        assert_eq!(HookEvent::GoalValidation.kind(), HookKind::Observation);
+    }
+
+    #[test]
+    fn test_hooks_config_defaults_are_enabled_and_bounded() {
+        let config = HooksConfig::default();
+        assert!(config.enabled);
+        assert!(config.trusted_projects.is_empty());
+        assert_eq!(config.default_timeout_secs, DEFAULT_HOOK_TIMEOUT_SECS);
+        assert_eq!(config.max_recursion_depth, DEFAULT_HOOK_RECURSION_DEPTH);
+        assert_eq!(config.max_output_bytes, DEFAULT_HOOK_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn test_hooks_config_empty_yaml_keeps_defaults() {
+        let config: HooksConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(config, HooksConfig::default());
+    }
+
+    #[test]
+    fn test_hooks_config_rejects_invalid_values_instead_of_coercing() {
+        assert!(serde_yaml::from_str::<HooksConfig>("default_timeout_secs: 0").is_err());
+        assert!(serde_yaml::from_str::<HooksConfig>("default_timeout_secs: 100000").is_err());
+        assert!(serde_yaml::from_str::<HooksConfig>("max_recursion_depth: 0").is_err());
+        assert!(serde_yaml::from_str::<HooksConfig>("max_recursion_depth: 9999").is_err());
+        assert!(serde_yaml::from_str::<HooksConfig>("max_output_bytes: 1").is_err());
+        assert!(serde_yaml::from_str::<HooksConfig>("max_output_bytes: 999999999").is_err());
+    }
+
+    #[test]
+    fn test_hooks_config_accepts_valid_values() {
+        let config: HooksConfig = serde_yaml::from_str(
+            "enabled: false\ndefault_timeout_secs: 5\nmax_recursion_depth: 4\nmax_output_bytes: 2048",
+        )
+        .unwrap();
+        assert!(!config.enabled);
+        assert_eq!(config.default_timeout_secs, 5);
+        assert_eq!(config.max_recursion_depth, 4);
+        assert_eq!(config.max_output_bytes, 2048);
+    }
+
+    #[tokio::test]
+    async fn test_hook_with_invalid_timeout_is_rejected_not_coerced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_yaml = r#"
+hooks:
+  PreToolUse:
+    - hooks:
+        - type: command
+          command: "./zero_timeout.sh"
+          timeout: 0
+        - type: command
+          command: "./huge_timeout.sh"
+          timeout: 100000
+        - type: command
+          command: "./ok.sh"
+          timeout: 30
+"#;
+        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml)
+            .await
+            .unwrap();
+
+        let ext_dirs = ExtDirs {
+            global_dirs: vec![tmp.path().to_path_buf()],
+            installed_dirs: vec![],
+            project_dirs: vec![],
+        };
+        let hooks = load_hooks(&ext_dirs).await;
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].command, "./ok.sh");
+    }
+
+    #[tokio::test]
+    async fn test_new_events_load_from_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks_yaml = r#"
+hooks:
+  PermissionDecision:
+    - hooks:
+        - type: command
+          command: "perm"
+  SubagentStart:
+    - hooks:
+        - type: command
+          command: "sub_start"
+  PostCompact:
+    - hooks:
+        - type: command
+          command: "post_compact"
+  GoalValidation:
+    - hooks:
+        - type: command
+          command: "goal"
+"#;
+        tokio::fs::write(tmp.path().join("hooks.yaml"), hooks_yaml)
+            .await
+            .unwrap();
+
+        let ext_dirs = ExtDirs {
+            global_dirs: vec![tmp.path().to_path_buf()],
+            installed_dirs: vec![],
+            project_dirs: vec![],
+        };
+        let hooks = load_hooks(&ext_dirs).await;
+        assert_eq!(hooks.len(), 4);
+        assert!(hooks
+            .iter()
+            .any(|h| h.event == HookEvent::PermissionDecision));
+        assert!(hooks.iter().any(|h| h.event == HookEvent::SubagentStart));
+        assert!(hooks.iter().any(|h| h.event == HookEvent::PostCompact));
+        assert!(hooks.iter().any(|h| h.event == HookEvent::GoalValidation));
     }
 }

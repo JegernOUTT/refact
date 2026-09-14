@@ -46,7 +46,7 @@ use super::stream_core::{
 };
 use super::config::tokens;
 use crate::ext::hooks::HookEvent;
-use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_hooks};
+use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_observation_hooks};
 use crate::chat::diagnostics::{
     make_ui_only_error_message, make_ui_only_retry_status_message, safe_provider_error_diagnostic,
 };
@@ -1085,17 +1085,8 @@ async fn spawn_chat_completion_side_effects(
     let handle = tokio::spawn(async move {
         if run_stop_hook {
             let project_dir = get_project_dir_string(app.clone()).await;
-            let payload = HookPayload {
-                hook_event_name: "Stop".to_string(),
-                session_id: chat_id.clone(),
-                project_dir,
-                tool_name: None,
-                tool_input: None,
-                tool_output: None,
-                user_prompt: None,
-                extra: std::collections::HashMap::new(),
-            };
-            run_hooks(app.clone(), HookEvent::Stop, payload).await;
+            let payload = HookPayload::new(&HookEvent::Stop, chat_id.clone(), project_dir);
+            run_observation_hooks(app.clone(), HookEvent::Stop, payload).await;
         }
 
         let mut event = make_runtime_event(
