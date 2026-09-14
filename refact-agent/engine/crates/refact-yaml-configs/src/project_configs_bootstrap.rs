@@ -362,6 +362,30 @@ mod tests {
     use super::*;
     use tokio::fs;
 
+    #[test]
+    fn embedded_defaults_are_enumerable() {
+        let total = DefaultConfigs::iter().count();
+        assert!(
+            total > 0,
+            "DefaultConfigs enumerated zero files: the embedded default registry is empty, \
+             so every mode/subagent lookup will silently miss"
+        );
+
+        for kind in &BOOTSTRAP_KINDS {
+            assert!(
+                !get_defaults_for_kind(kind).is_empty(),
+                "no embedded defaults enumerated for kind {kind}"
+            );
+        }
+
+        assert!(
+            get_defaults_for_kind("subagents")
+                .iter()
+                .any(|(filename, _)| filename == "buddy_skill_author.yaml"),
+            "known shipped default subagents/buddy_skill_author.yaml did not resolve"
+        );
+    }
+
     #[tokio::test]
     async fn test_bootstrap_creates_root_dir() {
         let temp = tempfile::tempdir().unwrap();
