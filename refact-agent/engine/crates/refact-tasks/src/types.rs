@@ -53,6 +53,7 @@ pub enum ScopeGuardMode {
     Off,
     Warn,
     Reject,
+    Strict,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

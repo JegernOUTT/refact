@@ -19,7 +19,7 @@ use crate::files_in_workspace::{
     remove_memory_documents_under_path,
 };
 use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel};
-use crate::tools::file_edit::auxiliary::resolve_path_with_scope;
+use crate::tools::file_edit::auxiliary::{check_scope_guard, resolve_path_with_scope};
 use crate::tools::tools_description::{
     MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
     json_schema_from_params,
@@ -216,6 +216,8 @@ impl Tool for ToolRm {
                 let corrections = path_str != corrected_path;
                 (true_path, corrected_path, Vec::new(), corrections)
             };
+
+        check_scope_guard(&ccx, &true_path).await?;
 
         // Check if path exists.
         if !true_path.exists() {

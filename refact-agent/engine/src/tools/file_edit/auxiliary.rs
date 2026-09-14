@@ -9,7 +9,6 @@ use crate::files_correction::{
 use crate::files_in_workspace::{get_file_text_from_memory_or_disk, remove_memory_document_for_path};
 use crate::global_context::GlobalContext;
 use crate::privacy::{check_file_privacy, FilePrivacyLevel, PrivacySettings};
-use crate::tasks::types::ScopeGuardMode;
 use crate::worktrees::scope::ExecutionScope;
 use regex::{Match, Regex};
 use serde_json::Value;
@@ -84,7 +83,9 @@ pub async fn check_scope_guard(
     ccx: &Arc<AMutex<AtCommandsContext>>,
     edit_path: &Path,
 ) -> Result<(), String> {
-    let (gcx, task_id, card_id) = {
+    use crate::agents::path_scope::{self, ScopeOutcome};
+
+    let (app, task_id, card_id, root) = {
         let ccx_lock = ccx.lock().await;
         let meta = match ccx_lock.task_meta.as_ref() {
             Some(meta) if meta.role == "agents" => meta.clone(),
@@ -94,56 +95,57 @@ pub async fn check_scope_guard(
             Some(card_id) => card_id.clone(),
             None => return Ok(()),
         };
-        (ccx_lock.app.gcx.clone(), meta.task_id, card_id)
+        let root = active_execution_scope(ccx_lock.execution_scope.as_ref())
+            .map(|scope| scope.effective_root().to_path_buf())
+            .or_else(|| {
+                ccx_lock
+                    .app
+                    .gcx
+                    .documents_state
+                    .workspace_folders
+                    .lock()
+                    .unwrap()
+                    .first()
+                    .cloned()
+            });
+        (ccx_lock.app.clone(), meta.task_id, card_id, root)
     };
 
-    let board = crate::tasks::storage::load_board(gcx, &task_id).await?;
+    let board = crate::tasks::storage::load_board(app.gcx.clone(), &task_id).await?;
     let card = match board.get_card(&card_id) {
         Some(card) => card,
         None => return Ok(()),
     };
 
-    if matches!(card.scope_guard_mode, ScopeGuardMode::Off) {
-        return Ok(());
-    }
-    if card.target_files.is_empty() {
-        return Ok(());
-    }
+    let limits = crate::file_activity::settings();
+    let declared = path_scope::scope_for_mode(card.scope_guard_mode, &card.target_files, &limits);
+    let effective = app
+        .agent_executions
+        .narrow_path_scope(&format!("{task_id}/{card_id}"), declared);
+    let root = match root {
+        Some(root) => root,
+        None if effective.is_enforced() => {
+            return Err(
+                "an enforced path scope needs an active project or worktree root, and none is available"
+                    .into(),
+            )
+        }
+        None => return Ok(()),
+    };
 
-    let canon_path = dunce::canonicalize(edit_path)
-        .map(|path| dunce::simplified(&path).to_path_buf())
-        .unwrap_or_else(|_| edit_path.to_path_buf());
-    let canon = canon_path.to_string_lossy().to_string();
-    let allowed = card.target_files.iter().any(|target| {
-        let target = Path::new(target.trim_start_matches(|c| c == '/' || c == '\\'));
-        canon_path.ends_with(target)
-    });
-    if allowed {
-        return Ok(());
-    }
-
-    let is_test = canon.contains("/tests/")
-        || canon.ends_with("_test.rs")
-        || canon.ends_with(".test.ts")
-        || canon.ends_with(".test.tsx");
-    if is_test {
-        return Ok(());
-    }
-
-    match card.scope_guard_mode {
-        ScopeGuardMode::Warn => {
+    match path_scope::decide(card.scope_guard_mode, &effective, &root, edit_path, &limits)? {
+        ScopeOutcome::Allowed => Ok(()),
+        ScopeOutcome::Warned { path, .. } => {
             tracing::warn!(
                 "Scope warning: edited {} not in target_files for card {}",
-                canon,
+                path,
                 card_id
             );
             Ok(())
         }
-        ScopeGuardMode::Reject => Err(format!(
-            "Path {} is outside the card's target_files scope. Add it to target_files or change scope_guard_mode to 'warn'.",
-            canon
-        )),
-        ScopeGuardMode::Off => Ok(()),
+        ScopeOutcome::Refused { path, scope } => {
+            Err(path_scope::refusal_message(&path, &scope, effective.strict))
+        }
     }
 }
 
@@ -1105,7 +1107,7 @@ mod tests {
         use crate::tools::file_edit::auxiliary::{check_scope_guard, fast_enqueue_for_edit};
         use crate::tools::file_edit::tool_apply_patch::tool_apply_patch_exec;
         use crate::tools::file_edit::tool_create_textdoc::tool_create_text_doc_exec;
-        use crate::tools::file_edit::tool_undo_textdoc::tool_undo_text_doc_exec;
+        use crate::tools::file_edit::tool_undo_textdoc::{tool_undo_text_doc_exec, ToolUndoTextDoc};
         use crate::tools::file_edit::tool_update_textdoc::tool_update_text_doc_exec;
         use crate::tools::file_edit::tool_update_textdoc_anchored::tool_update_text_doc_anchored_exec;
         use crate::tools::file_edit::tool_update_textdoc_by_lines::tool_update_text_doc_by_lines_exec;
@@ -2239,6 +2241,357 @@ mod tests {
                 .join("\n")
                 .contains("outside active worktree"));
             assert_eq!(fs::read_to_string(&outside_file).unwrap(), "outside new\n");
+        }
+
+        const MUTATION_FAMILIES: &[&str] = &[
+            "create", "replace", "regex", "anchored", "line", "patch", "rename", "delete", "undo",
+        ];
+
+        const GUARDED: &str = "head\nanchor\nbody\n";
+
+        async fn prepare_family(family: &str, path: &Path) {
+            let _ = fs::remove_file(path);
+            if family != "create" {
+                fs::write(path, GUARDED).unwrap();
+            }
+            if family == "undo" {
+                crate::tools::file_edit::undo_history::record_edit(
+                    &path.to_path_buf(),
+                    Some("older\n"),
+                    Some(GUARDED),
+                );
+            }
+        }
+
+        async fn run_family(
+            f: &Fixture,
+            ccx: &Arc<AMutex<AtCommandsContext>>,
+            family: &str,
+            path: &Path,
+        ) -> Result<(), String> {
+            let value = path_value(path);
+            let destination = path_value(&path.with_extension("moved"));
+            match family {
+                "create" => tool_create_text_doc_exec(
+                    f.gcx.clone(),
+                    &args(vec![("path", value), ("content", json!("created"))]),
+                    false,
+                    Some(&f.scope),
+                    Some(ccx),
+                )
+                .await
+                .map(|_| ()),
+                "replace" => tool_update_text_doc_exec(
+                    f.gcx.clone(),
+                    &args(vec![
+                        ("path", value),
+                        ("old_str", json!("body")),
+                        ("replacement", json!("changed")),
+                    ]),
+                    false,
+                    Some(&f.scope),
+                    Some(ccx),
+                )
+                .await
+                .map(|_| ()),
+                "regex" => tool_update_text_doc_regex_exec(
+                    f.gcx.clone(),
+                    &args(vec![
+                        ("path", value),
+                        ("pattern", json!("body")),
+                        ("replacement", json!("changed")),
+                    ]),
+                    false,
+                    Some(&f.scope),
+                    Some(ccx),
+                )
+                .await
+                .map(|_| ()),
+                "anchored" => tool_update_text_doc_anchored_exec(
+                    f.gcx.clone(),
+                    &args(vec![
+                        ("path", value),
+                        ("mode", json!("insert_after")),
+                        ("anchor", json!("anchor")),
+                        ("content", json!("\nchanged")),
+                    ]),
+                    false,
+                    Some(&f.scope),
+                    Some(ccx),
+                )
+                .await
+                .map(|_| ()),
+                "line" => tool_update_text_doc_by_lines_exec(
+                    f.gcx.clone(),
+                    &args(vec![
+                        ("path", value),
+                        ("content", json!("changed")),
+                        ("ranges", json!("3")),
+                    ]),
+                    false,
+                    Some(&f.scope),
+                    Some(ccx),
+                )
+                .await
+                .map(|_| ()),
+                "patch" => tool_apply_patch_exec(
+                    f.gcx.clone(),
+                    &args(vec![(
+                        "patch",
+                        json!(format!(
+                            "*** Begin Patch\n*** Update File: {}\n@@\n-body\n+changed\n*** End Patch",
+                            path.display()
+                        )),
+                    )]),
+                    false,
+                    Some(&f.scope),
+                    Some(ccx),
+                )
+                .await
+                .map(|_| ()),
+                "rename" => ToolMv {
+                    config_path: String::new(),
+                }
+                .tool_execute(
+                    ccx.clone(),
+                    &"mv".to_string(),
+                    &args(vec![("source", value), ("destination", destination)]),
+                )
+                .await
+                .map(|_| ()),
+                "delete" => ToolRm {
+                    config_path: String::new(),
+                }
+                .tool_execute(
+                    ccx.clone(),
+                    &"rm".to_string(),
+                    &args(vec![("path", value)]),
+                )
+                .await
+                .map(|_| ()),
+                "undo" => ToolUndoTextDoc {
+                    config_path: String::new(),
+                }
+                .tool_execute(ccx.clone(), &"undo".to_string(), &args(vec![("path", value)]))
+                .await
+                .map(|_| ()),
+                other => panic!("unknown mutation family {other}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn strict_scope_admits_and_refuses_every_built_in_mutation_family() {
+            let f = fixture().await;
+            fs::create_dir_all(f.root.join("src/scoped")).unwrap();
+            let ccx = scope_guard_ccx(
+                &f,
+                ScopeGuardMode::Strict,
+                vec!["src/scoped".to_string()],
+                "agents",
+            )
+            .await;
+
+            for family in MUTATION_FAMILIES.iter().copied() {
+                let inside = f.root.join(format!("src/scoped/{family}.rs"));
+                prepare_family(family, &inside).await;
+                run_family(&f, &ccx, family, &inside)
+                    .await
+                    .unwrap_or_else(|error| panic!("in-scope {family} was refused: {error}"));
+
+                let outside = f.root.join(format!("src/out_{family}.rs"));
+                prepare_family(family, &outside).await;
+                let error = run_family(&f, &ccx, family, &outside)
+                    .await
+                    .expect_err(family);
+                assert!(
+                    error.contains("enforced path scope"),
+                    "{family}: refusal did not name enforcement: {error}"
+                );
+                assert!(
+                    error.contains("src/scoped"),
+                    "{family}: refusal did not name the violated scope: {error}"
+                );
+                if family == "create" {
+                    assert!(!outside.exists(), "{family} created an out-of-scope file");
+                } else {
+                    assert_eq!(
+                        fs::read_to_string(&outside).unwrap(),
+                        GUARDED,
+                        "{family} mutated an out-of-scope file"
+                    );
+                }
+                assert!(
+                    !outside.with_extension("moved").exists(),
+                    "{family} produced an out-of-scope destination"
+                );
+            }
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn strict_scope_cannot_be_escaped_through_a_symlink_alias() {
+            let f = fixture().await;
+            fs::create_dir_all(f.root.join("src/scoped")).unwrap();
+            fs::write(f.outside.join("secret.rs"), GUARDED).unwrap();
+            std::os::unix::fs::symlink(
+                f.outside.join("secret.rs"),
+                f.root.join("src/scoped/alias.rs"),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(&f.outside, f.root.join("src/scoped/gate")).unwrap();
+            let ccx = scope_guard_ccx(
+                &f,
+                ScopeGuardMode::Strict,
+                vec!["src/scoped".to_string()],
+                "agents",
+            )
+            .await;
+
+            let aliased = run_family(&f, &ccx, "replace", &f.root.join("src/scoped/alias.rs"))
+                .await
+                .unwrap_err();
+            assert!(aliased.contains("enforced path scope"), "{aliased}");
+            assert_eq!(
+                fs::read_to_string(f.outside.join("secret.rs")).unwrap(),
+                GUARDED
+            );
+
+            // A symlinked directory is already refused one layer earlier, by
+            // worktree path resolution, so the escape never reaches the scope
+            // guard at all. Assert the refusal and that nothing was written.
+            let through_dir = tool_create_text_doc_exec(
+                f.gcx.clone(),
+                &args(vec![
+                    ("path", path_value(&f.root.join("src/scoped/gate/new.rs"))),
+                    ("content", json!("escaped")),
+                ]),
+                false,
+                Some(&f.scope),
+                Some(&ccx),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                through_dir.contains("escapes active worktree root"),
+                "{through_dir}"
+            );
+            assert!(!f.outside.join("new.rs").exists());
+
+            // Without the worktree layer the path scope guard alone still
+            // refuses the same escape.
+            assert!(matches!(
+                crate::agents::path_scope::decide(
+                    ScopeGuardMode::Strict,
+                    &crate::agents::path_scope::PathScope::declared(
+                        vec!["src/scoped".to_string()],
+                        true,
+                    ),
+                    &f.root,
+                    &f.root.join("src/scoped/gate/new.rs"),
+                    &refact_work_core::CoordinationSettings::default(),
+                )
+                .unwrap(),
+                crate::agents::path_scope::ScopeOutcome::Refused { .. }
+            ));
+        }
+
+        #[tokio::test]
+        async fn resume_may_narrow_the_enforced_scope_but_not_widen_it() {
+            let f = fixture().await;
+            fs::create_dir_all(f.root.join("src/scoped")).unwrap();
+            fs::create_dir_all(f.root.join("src/extra")).unwrap();
+            fs::write(f.root.join("src/scoped/a.rs"), GUARDED).unwrap();
+            fs::write(f.root.join("src/extra/b.rs"), GUARDED).unwrap();
+
+            let accepted = scope_guard_ccx(
+                &f,
+                ScopeGuardMode::Strict,
+                vec!["src/scoped".to_string(), "src/extra".to_string()],
+                "agents",
+            )
+            .await;
+            run_family(&f, &accepted, "replace", &f.root.join("src/extra/b.rs"))
+                .await
+                .unwrap();
+
+            fs::write(f.root.join("src/extra/b.rs"), GUARDED).unwrap();
+            let narrowed = scope_guard_ccx(
+                &f,
+                ScopeGuardMode::Strict,
+                vec!["src/scoped".to_string()],
+                "agents",
+            )
+            .await;
+            assert!(
+                run_family(&f, &narrowed, "replace", &f.root.join("src/extra/b.rs"))
+                    .await
+                    .unwrap_err()
+                    .contains("enforced path scope")
+            );
+
+            fs::create_dir_all(f.root.join("src/widened")).unwrap();
+            fs::write(f.root.join("src/widened/c.rs"), GUARDED).unwrap();
+            let widened = scope_guard_ccx(
+                &f,
+                ScopeGuardMode::Strict,
+                vec![
+                    "src/scoped".to_string(),
+                    "src/extra".to_string(),
+                    "src/widened".to_string(),
+                ],
+                "agents",
+            )
+            .await;
+            for path in ["src/extra/b.rs", "src/widened/c.rs"] {
+                assert!(
+                    run_family(&f, &widened, "replace", &f.root.join(path))
+                        .await
+                        .unwrap_err()
+                        .contains("enforced path scope"),
+                    "{path} was re-granted by a widening resume"
+                );
+            }
+            run_family(&f, &widened, "replace", &f.root.join("src/scoped/a.rs"))
+                .await
+                .unwrap();
+        }
+
+        #[tokio::test]
+        async fn a_run_without_a_declared_scope_is_unchanged_by_strict_mode() {
+            let f = fixture().await;
+            let ccx = scope_guard_ccx(&f, ScopeGuardMode::Strict, vec![], "agents").await;
+            let path = f.root.join("src/anywhere.rs");
+            fs::write(&path, GUARDED).unwrap();
+
+            run_family(&f, &ccx, "replace", &path).await.unwrap();
+            assert!(fs::read_to_string(&path).unwrap().contains("changed"));
+        }
+
+        #[tokio::test]
+        async fn non_strict_target_files_are_reported_as_declared_intent_only() {
+            use crate::agents::path_scope::scope_for_mode;
+            let limits = refact_work_core::CoordinationSettings::default();
+            let files = vec!["src/scoped/a.rs".to_string()];
+
+            let declared = scope_for_mode(ScopeGuardMode::Reject, &files, &limits);
+            assert!(!declared.is_enforced());
+            assert!(declared
+                .describe()
+                .contains("declared intent only, not enforced"));
+
+            let enforced = scope_for_mode(ScopeGuardMode::Strict, &files, &limits);
+            assert!(enforced.is_enforced());
+            assert!(enforced
+                .describe()
+                .contains("enforced on every built-in mutation"));
+
+            let f = fixture().await;
+            let ccx = scope_guard_ccx(&f, ScopeGuardMode::Reject, files.clone(), "agents").await;
+            let path = f.root.join("src/other.rs");
+            fs::write(&path, GUARDED).unwrap();
+            let error = run_family(&f, &ccx, "replace", &path).await.unwrap_err();
+            assert!(error.contains("target_files scope"), "{error}");
+            assert!(!error.contains("enforced path scope"), "{error}");
         }
 
         #[tokio::test]

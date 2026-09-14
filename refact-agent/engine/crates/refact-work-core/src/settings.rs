@@ -71,6 +71,9 @@ pub struct CoordinationSettings {
     pub launch_source_bytes: usize,
     pub agent_profile_max_count: usize,
     pub agent_profile_max_bytes: usize,
+    /// Upgrades a declared-intent `reject` path scope to canonical enforcement.
+    pub strict_path_scope_default: bool,
+    pub max_path_scope_entries: usize,
 }
 
 impl Default for CoordinationSettings {
@@ -137,6 +140,8 @@ impl Default for CoordinationSettings {
             launch_source_bytes: 4 * 1024 * 1024,
             agent_profile_max_count: 256,
             agent_profile_max_bytes: 64 * 1024,
+            strict_path_scope_default: false,
+            max_path_scope_entries: 256,
         }
     }
 }
@@ -242,6 +247,7 @@ impl CoordinationSettings {
                 "agent_profile_max_bytes",
                 self.agent_profile_max_bytes as u64,
             ),
+            ("max_path_scope_entries", self.max_path_scope_entries as u64),
             ("max_work_views", self.max_work_views as u64),
             ("max_work_cursors", self.max_work_cursors as u64),
             ("max_work_history_rows", self.max_work_history_rows as u64),
@@ -534,6 +540,17 @@ mod tests {
         assert!(settings.validate().is_err());
         let mut settings = CoordinationSettings::default();
         settings.agent_wait_default_ms = settings.agent_wait_max_ms + 1;
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn path_scope_bounds_default_declared_and_reject_zero_entries() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(!settings.strict_path_scope_default);
+        assert!(settings.max_path_scope_entries >= 1);
+        let mut settings = CoordinationSettings::default();
+        settings.max_path_scope_entries = 0;
         assert!(settings.validate().is_err());
     }
 

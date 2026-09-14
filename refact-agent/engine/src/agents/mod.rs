@@ -5,8 +5,10 @@ pub mod delivery;
 pub mod execution;
 pub mod launch_spec;
 pub mod monitor;
+pub mod path_scope;
 pub mod profile;
 pub mod push;
+pub mod sandbox_contract;
 pub mod spawn;
 pub(crate) mod tool_authority;
 

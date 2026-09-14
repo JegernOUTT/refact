@@ -290,7 +290,7 @@ impl AgentProfile {
         }
         if !self.spec.path_scope.is_empty() {
             sections.push(format!(
-                "## Path scope\nOnly these paths are in scope for this profile:\n{}",
+                "## Path scope\nDeclared intent, not enforcement: these paths are the ones this profile expects to touch. Built-in mutations are only restricted to them when the run's scope guard is strict.\n{}",
                 self.spec
                     .path_scope
                     .iter()

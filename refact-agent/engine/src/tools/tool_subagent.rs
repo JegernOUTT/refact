@@ -57,6 +57,7 @@ struct SubagentArgs {
     launch_spec: Option<LaunchSpec>,
     profile: Option<ProfileReference>,
     preview_only: bool,
+    sandbox: Option<crate::exec::types::ExecSandboxMode>,
 }
 
 #[derive(Clone)]
@@ -95,7 +96,8 @@ impl Tool for ToolSubagent {
                 "properties": {
                     "task": {"type": "string", "description": "Focused instructions for the background subagent."},
                     "expected_result": {"type": "string", "description": "Concrete outcome the subagent should deliver."},
-                    "target_files": {"type": "array", "items": {"type": "string"}, "description": "Optional expected edit targets. When set, the child may edit only these files."},
+                    "target_files": {"type": "array", "items": {"type": "string"}, "description": "Optional declared edit targets, used as collision hints. This is declared intent, not an enforced sandbox: it only restricts built-in mutations when the run's scope guard is strict."},
+                    "sandbox": {"type": "string", "enum": ["read_only", "workspace_write", "full_access"], "description": "Optional confinement this run requires for shell execution. If this engine and terminal security mode cannot enforce it, the launch fails before dispatch instead of running unsandboxed. Omit to accept the engine default."},
                     "tools": {"type": "string", "description": "Optional comma-separated tool names. Omit to inherit all parent-chat tools."},
                     "model_type": {"type": "string", "enum": MODEL_TYPES, "description": "Configured model slot. Ignored when model_name is supplied."},
                     "model_name": {"type": "string", "description": "Concrete chat model id. Takes precedence over model_type."},
@@ -205,6 +207,12 @@ impl Tool for ToolSubagent {
             None => crate::file_activity::settings(),
         };
         let args = parse_subagent_args_with_limits(args, &limits)?;
+        crate::agents::sandbox_contract::preflight(
+            args.sandbox.clone(),
+            crate::exec::command_policy::baseline_sandbox_mode(Some("agent")),
+            gcx.terminal_security_config.mode,
+            refact_sandbox::sandbox_status(),
+        )?;
         let profile = match args.profile.as_ref() {
             Some(reference) => Some(
                 crate::agents::profile::load_profile(gcx.clone(), &reference.name, &limits)
@@ -551,6 +559,10 @@ fn parse_subagent_args_with_limits(
     };
     let launch_spec = launch_spec::parse_launch_spec_with_limits(args, limits)?;
     let profile = parse_profile_reference(args)?;
+    let sandbox = match args.get("sandbox") {
+        Some(value) => crate::agents::sandbox_contract::parse_requested(value)?,
+        None => None,
+    };
     Ok(SubagentArgs {
         task,
         expected_result,
@@ -565,6 +577,7 @@ fn parse_subagent_args_with_limits(
         launch_spec,
         profile,
         preview_only,
+        sandbox,
     })
 }
 
@@ -1234,6 +1247,67 @@ mod tests {
             .await,
         ));
         (context, workspace)
+    }
+
+    #[serial(test_runner)]
+    #[tokio::test]
+    async fn an_unenforceable_sandbox_request_refuses_the_launch_before_dispatch() {
+        let (ccx, _workspace) = test_context("parent").await;
+        let app = ccx.lock().await.app.clone();
+        let _runner =
+            crate::agents::spawn::install_test_runner(Arc::new(|_gcx, _messages, _cfg| {
+                panic!("a child was dispatched despite an unenforceable sandbox request")
+            }));
+        let mut args = args();
+        args.insert("sandbox".to_string(), json!("workspace_write"));
+
+        let error = ToolSubagent {
+            config_path: String::new(),
+        }
+        .tool_execute(ccx.clone(), &"call".to_string(), &args)
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("launch refused before dispatch"), "{error}");
+        assert!(error.contains("workspace_write"), "{error}");
+        assert!(
+            error.contains("would otherwise have run unsandboxed"),
+            "{error}"
+        );
+        assert!(
+            app.agents.list_all().await.is_empty(),
+            "an agent record was created for a refused launch"
+        );
+
+        let mut accepted = args.clone();
+        accepted.remove("sandbox");
+        assert!(!ToolSubagent {
+            config_path: String::new(),
+        }
+        .tool_execute(ccx, &"call".to_string(), &accepted)
+        .await
+        .is_err_and(|error| error.contains("launch refused before dispatch")));
+    }
+
+    #[test]
+    fn the_target_files_schema_never_claims_enforcement_it_does_not_perform() {
+        let schema = ToolSubagent {
+            config_path: String::new(),
+        }
+        .tool_description()
+        .input_schema;
+        let target_files = schema["properties"]["target_files"]["description"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        assert!(!target_files.contains("may edit only"));
+        assert!(target_files.contains("declared intent"));
+        assert!(target_files.contains("scope guard is strict"));
+        assert!(schema["properties"]["sandbox"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("fails before dispatch"));
     }
 
     fn message(contexts: Vec<ContextEnum>) -> ChatMessage {

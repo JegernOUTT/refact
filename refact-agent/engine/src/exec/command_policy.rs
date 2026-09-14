@@ -233,6 +233,11 @@ fn requested_sandbox_mode(
     }
 }
 
+/// The sandbox level a chat mode resolves to when nothing escalates it.
+pub fn baseline_sandbox_mode(chat_mode: Option<&str>) -> ExecSandboxMode {
+    requested_sandbox_mode(chat_mode, None)
+}
+
 fn sandbox_mode_rank(mode: &ExecSandboxMode) -> u8 {
     match mode {
         ExecSandboxMode::ReadOnly => 0,

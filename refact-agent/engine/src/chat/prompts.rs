@@ -117,7 +117,18 @@ async fn task_brief_for_plan_template(
                             card.id, card.title, card.column, card.priority
                         ));
                         if !card.target_files.is_empty() {
-                            lines.push(format!("Target files: {}", card.target_files.join(", ")));
+                            lines.push(format!(
+                                "Target files ({}): {}",
+                                crate::agents::path_scope::scope_for_mode(
+                                    card.scope_guard_mode,
+                                    &card.target_files,
+                                    &crate::file_activity::settings(),
+                                )
+                                .is_enforced()
+                                .then_some("enforced")
+                                .unwrap_or("declared intent, not enforced"),
+                                card.target_files.join(", ")
+                            ));
                         }
                         if !card.instructions.trim().is_empty() {
                             lines.push(

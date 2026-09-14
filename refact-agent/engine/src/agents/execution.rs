@@ -447,6 +447,7 @@ pub struct ExecutionRegistry {
     tasks: Mutex<ExecutionTasks>,
     configs: Mutex<HashMap<String, crate::subchat::SubchatConfig>>,
     scopes: Mutex<HashMap<String, std::path::PathBuf>>,
+    path_scopes: Mutex<HashMap<String, crate::agents::path_scope::PathScope>>,
     launch_provenance: Mutex<HashMap<String, (Vec<refact_privacy::FileRecord>, bool)>>,
     resume_intents: Mutex<std::collections::HashSet<String>>,
     pub(crate) board_admission_closed: std::sync::atomic::AtomicBool,
@@ -607,6 +608,34 @@ impl ExecutionRegistry {
             .insert(agent_id.into(), root);
     }
 
+    /// Records the scope this run was accepted with and returns the scope that
+    /// is in force now. Re-declaring at dispatch or resume may narrow the
+    /// accepted scope or turn enforcement on; anything wider is discarded.
+    pub fn narrow_path_scope(
+        &self,
+        key: &str,
+        current: crate::agents::path_scope::PathScope,
+    ) -> crate::agents::path_scope::PathScope {
+        let mut scopes = self.path_scopes.lock().unwrap_or_else(|e| e.into_inner());
+        let effective = match scopes.get(key) {
+            Some(accepted) => crate::agents::path_scope::narrow(accepted, &current),
+            None if scopes.len() >= crate::file_activity::settings().max_outstanding => {
+                return current
+            }
+            None => current,
+        };
+        scopes.insert(key.to_string(), effective.clone());
+        effective
+    }
+
+    pub fn accepted_path_scope(&self, key: &str) -> Option<crate::agents::path_scope::PathScope> {
+        self.path_scopes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .cloned()
+    }
+
     pub fn saved_scope(&self, agent_id: &str) -> Option<std::path::PathBuf> {
         self.scopes
             .lock()
@@ -760,6 +789,10 @@ impl ExecutionRegistry {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.scopes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.path_scopes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
