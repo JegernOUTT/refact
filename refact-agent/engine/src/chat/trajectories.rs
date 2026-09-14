@@ -89,7 +89,7 @@ async fn atomic_write_json_with_tmp_path(
         let json = json_result?;
         let self_write = match self_write_source {
             Some(source) if trajectory_watcher_self_write_rollout_enabled() => {
-                register_trajectory_self_write(path, source, &json).await
+                register_trajectory_self_write(path, source, md5::compute(&json).0).await
             }
             None => None,
             Some(_) => None,
@@ -100,6 +100,90 @@ async fn atomic_write_json_with_tmp_path(
                 .map(|prefix| format!("{}: {}", prefix, error))
                 .unwrap_or_else(|| error.to_string()));
         }
+        if let Err(error) = atomic_write_file(tmp_path, path).await {
+            discard_trajectory_self_write(self_write);
+            return Err(error);
+        }
+        complete_trajectory_self_write(self_write).await;
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = fs::remove_file(tmp_path).await;
+    }
+    result
+}
+
+struct TrajectoryPrettyWrite {
+    byte_len: u64,
+    content_hash: [u8; 16],
+}
+
+struct TrajectoryPrettyWriter {
+    inner: std::io::BufWriter<std::fs::File>,
+    context: md5::Context,
+    byte_len: u64,
+}
+
+impl std::io::Write for TrajectoryPrettyWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.context.consume(&buf[..written]);
+        self.byte_len += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl TrajectoryPrettyWriter {
+    fn finish(mut self) -> Result<TrajectoryPrettyWrite, String> {
+        use std::io::Write;
+        self.inner
+            .flush()
+            .map_err(|error| format!("Failed to write trajectory: {}", error))?;
+        Ok(TrajectoryPrettyWrite {
+            byte_len: self.byte_len,
+            content_hash: self.context.compute().0,
+        })
+    }
+}
+
+/// Byte-identical to `serde_json::to_string_pretty` (same `PrettyFormatter`), without
+/// materialising the whole document as a `String` first. The pretty on-disk layout is a hard
+/// product constraint; `pretty_output_bytes_are_unchanged` pins it.
+fn write_pretty_json_to_tmp_file(
+    tmp_path: &Path,
+    value: &serde_json::Value,
+) -> Result<TrajectoryPrettyWrite, String> {
+    let file = std::fs::File::create(tmp_path)
+        .map_err(|error| format!("Failed to write trajectory: {}", error))?;
+    let mut writer = TrajectoryPrettyWriter {
+        inner: std::io::BufWriter::new(file),
+        context: md5::Context::new(),
+        byte_len: 0,
+    };
+    serde_json::to_writer_pretty(&mut writer, value)
+        .map_err(|error| format!("Failed to serialize trajectory: {}", error))?;
+    writer.finish()
+}
+
+async fn atomic_finish_trajectory_write(
+    path: &Path,
+    tmp_path: &Path,
+    write_result: Result<TrajectoryPrettyWrite, String>,
+    self_write_source: Option<TrajectorySourceIdentity>,
+) -> Result<(), String> {
+    let result = async {
+        let write = write_result?;
+        let self_write = match self_write_source {
+            Some(source) if trajectory_watcher_self_write_rollout_enabled() => {
+                register_trajectory_self_write(path, source, write.content_hash).await
+            }
+            _ => None,
+        };
         if let Err(error) = atomic_write_file(tmp_path, path).await {
             discard_trajectory_self_write(self_write);
             return Err(error);
@@ -129,6 +213,10 @@ pub const TRAJECTORY_WRITER_ENV: &str = "REFACT_TRAJECTORY_WRITER";
 pub const TRAJECTORY_WATCHER_SELF_WRITE_ENV: &str = "REFACT_TRAJECTORY_WATCHER_SELF_WRITE";
 const TRAJECTORY_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 const TRAJECTORY_COMMIT_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a `Checkpoint` save may sit in the pending slot before it is written. Every save
+/// rewrites the whole trajectory, so batching a burst into one physical write is what keeps the
+/// cost from growing quadratically with conversation length. Durability-critical intents bypass it.
+const TRAJECTORY_CHECKPOINT_COALESCE_WINDOW: Duration = Duration::from_millis(400);
 #[cfg(test)]
 const TITLE_GENERATION_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 #[cfg(not(test))]
@@ -401,7 +489,7 @@ async fn trajectory_fingerprint_matches(
 async fn register_trajectory_self_write(
     path: &Path,
     source: TrajectorySourceIdentity,
-    content: &str,
+    content_hash: [u8; 16],
 ) -> Option<TrajectorySelfWriteHandle> {
     let key = (
         canonical_trajectory_write_path(path).await?,
@@ -418,7 +506,7 @@ async fn register_trajectory_self_write(
         .push_back(TrajectorySelfWriteRecord {
             nonce,
             created_at: Instant::now(),
-            expected_content_hash: md5::compute(content).0,
+            expected_content_hash: content_hash,
             fingerprint: None,
         });
     prune_trajectory_self_writes(&mut registry, Instant::now());
@@ -2348,6 +2436,36 @@ fn trajectory_metadata_disk_reads_for_chat(chat_id: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Per-chat physical full-file rewrite counters, used only by tests.
+///
+/// Keyed by `chat_id` for the same reason as the metadata read counters above: the write happens
+/// on a detached writer task, so a task-local scope would never observe it.
+#[cfg(test)]
+fn trajectory_physical_writes_by_chat(
+) -> &'static StdMutex<std::collections::HashMap<String, usize>> {
+    static WRITES: OnceLock<StdMutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
+    WRITES.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn record_trajectory_physical_write(chat_id: &str) {
+    *trajectory_physical_writes_by_chat()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(chat_id.to_string())
+        .or_insert(0) += 1;
+}
+
+#[cfg(test)]
+fn trajectory_physical_writes_for_chat(chat_id: &str) -> usize {
+    trajectory_physical_writes_by_chat()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(chat_id)
+        .copied()
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 fn reset_test_trajectory_watcher_task() {
     let mut guard = TRAJECTORY_WATCHER_TASK
@@ -3733,12 +3851,15 @@ pub async fn save_trajectory_snapshot(
 
 struct DetachedTrajectoryWriterState {
     pending: Option<(u64, TrajectorySnapshot)>,
+    coalesce_deadline: Option<Instant>,
     requested_version: u64,
     committed_version: u64,
     in_flight: bool,
     error: Option<String>,
     error_version: u64,
     notify: Arc<Notify>,
+    wake: Arc<Notify>,
+    worker: Option<tokio::task::JoinHandle<()>>,
     write_cache: Arc<AMutex<DetachedTrajectoryWriteCache>>,
 }
 
@@ -3914,12 +4035,15 @@ impl Default for DetachedTrajectoryWriterState {
     fn default() -> Self {
         Self {
             pending: None,
+            coalesce_deadline: None,
             requested_version: 0,
             committed_version: 0,
             in_flight: false,
             error: None,
             error_version: 0,
             notify: Arc::new(Notify::new()),
+            wake: Arc::new(Notify::new()),
+            worker: None,
             write_cache: Arc::new(AMutex::new(Default::default())),
         }
     }
@@ -3942,9 +4066,23 @@ fn detached_trajectory_writers() -> &'static StdMutex<DetachedTrajectoryWriterRe
     WRITERS.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
 }
 
-fn detached_trajectory_writer_key(
+fn detached_trajectory_writer_source(
+    task_meta: Option<&TaskMeta>,
+    buddy_meta_present: bool,
+) -> TrajectorySourceIdentity {
+    if let Some(task_meta) = task_meta {
+        TrajectorySourceIdentity::from_task_meta(task_meta)
+    } else if buddy_meta_present {
+        TrajectorySourceIdentity::Buddy
+    } else {
+        TrajectorySourceIdentity::Normal
+    }
+}
+
+fn detached_trajectory_writer_key_for(
     gcx: &Arc<GlobalContext>,
-    snapshot: &TrajectorySnapshot,
+    chat_id: &str,
+    source: TrajectorySourceIdentity,
 ) -> DetachedTrajectoryWriterKey {
     let workspace_folders = gcx
         .documents_state
@@ -3952,18 +4090,25 @@ fn detached_trajectory_writer_key(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
-    let source = if let Some(task_meta) = snapshot.task_meta.as_ref() {
-        TrajectorySourceIdentity::from_task_meta(task_meta)
-    } else if snapshot.buddy_meta.is_some() {
-        TrajectorySourceIdentity::Buddy
-    } else {
-        TrajectorySourceIdentity::Normal
-    };
     DetachedTrajectoryWriterKey {
         workspace_folders,
         source,
-        chat_id: snapshot.chat_id.clone(),
+        chat_id: chat_id.to_string(),
     }
+}
+
+fn detached_trajectory_writer_key(
+    gcx: &Arc<GlobalContext>,
+    snapshot: &TrajectorySnapshot,
+) -> DetachedTrajectoryWriterKey {
+    detached_trajectory_writer_key_for(
+        gcx,
+        &snapshot.chat_id,
+        detached_trajectory_writer_source(
+            snapshot.task_meta.as_ref(),
+            snapshot.buddy_meta.is_some(),
+        ),
+    )
 }
 
 fn detached_trajectory_writer(
@@ -4003,7 +4148,7 @@ async fn flush_detached_trajectory_writers() -> Result<(), Vec<String>> {
                 .collect::<Vec<_>>()
         };
         futures::future::join_all(writers.into_iter().map(|writer| async move {
-            let target_version = writer.lock().await.requested_version;
+            let target_version = release_detached_trajectory_coalescing(&writer).await;
             if target_version == 0 {
                 Ok(())
             } else {
@@ -4023,13 +4168,93 @@ async fn flush_detached_trajectory_writers() -> Result<(), Vec<String>> {
     }
 }
 
+/// Drops the coalescing window of a writer and wakes it, returning its latest requested version.
+async fn release_detached_trajectory_coalescing(
+    writer: &Arc<AMutex<DetachedTrajectoryWriterState>>,
+) -> u64 {
+    let (requested_version, wake) = {
+        let mut state = writer.lock().await;
+        state.coalesce_deadline = None;
+        (state.requested_version, state.wake.clone())
+    };
+    wake.notify_one();
+    requested_version
+}
+
+/// Forces any write still sitting in the coalescing window for one trajectory out to disk.
+/// Used by durability-critical session saves, which must not return while bytes are still pending.
+async fn flush_detached_trajectory_writer_for(
+    gcx: &Arc<GlobalContext>,
+    chat_id: &str,
+    source: TrajectorySourceIdentity,
+) -> Result<(), String> {
+    let key = detached_trajectory_writer_key_for(gcx, chat_id, source);
+    let writer = {
+        let mut writers = detached_trajectory_writers()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        writers.retain(|_, writer| writer.strong_count() > 0);
+        writers.get(&key).and_then(Weak::upgrade)
+    };
+    let Some(writer) = writer else {
+        return Ok(());
+    };
+    let target_version = release_detached_trajectory_coalescing(&writer).await;
+    if target_version == 0 {
+        return Ok(());
+    }
+    let result = wait_for_detached_trajectory_commit(writer, target_version).await;
+    prune_detached_trajectory_writers();
+    result
+}
+
+async fn flush_detached_trajectory_writer_for_session(
+    gcx: &Arc<GlobalContext>,
+    session_arc: &Arc<AMutex<ChatSession>>,
+) -> Result<(), String> {
+    let (chat_id, source) = {
+        let session = session_arc.lock().await;
+        (
+            session.chat_id.clone(),
+            detached_trajectory_writer_source(
+                session.thread.task_meta.as_ref(),
+                session.thread.buddy_meta.is_some(),
+            ),
+        )
+    };
+    flush_detached_trajectory_writer_for(gcx, &chat_id, source).await
+}
+
 pub(crate) async fn persist_trajectory_snapshot_with_intent(
     gcx: Arc<GlobalContext>,
     snapshot: TrajectorySnapshot,
     intent: TrajectoryCommitIntent,
 ) -> Result<(), String> {
+    let await_commit = intent.requires_durability();
+    persist_trajectory_snapshot_awaiting(gcx, snapshot, intent, await_commit).await
+}
+
+/// Schedules a save and waits for it to reach disk even when the intent only asks for a
+/// checkpoint. The session writer needs this: it owns `trajectory_committed_version` and
+/// `trajectory_save_error`, so it may only mark a version committed once the bytes landed.
+/// Coalescing still applies — the caller simply waits out the window instead of skipping it,
+/// which is what lets a burst of save requests collapse into the single queued snapshot.
+async fn persist_trajectory_snapshot_awaiting_commit(
+    gcx: Arc<GlobalContext>,
+    snapshot: TrajectorySnapshot,
+    intent: TrajectoryCommitIntent,
+) -> Result<(), String> {
+    persist_trajectory_snapshot_awaiting(gcx, snapshot, intent, true).await
+}
+
+async fn persist_trajectory_snapshot_awaiting(
+    gcx: Arc<GlobalContext>,
+    snapshot: TrajectorySnapshot,
+    intent: TrajectoryCommitIntent,
+    await_commit: bool,
+) -> Result<(), String> {
     if trajectory_writer_rollout_enabled() {
-        schedule_detached_trajectory_writer(gcx, snapshot, intent).await
+        schedule_detached_trajectory_writer(gcx, snapshot, intent, await_commit).await
     } else {
         save_trajectory_snapshot_inner(gcx, snapshot, None).await
     }
@@ -4039,23 +4264,29 @@ async fn schedule_detached_trajectory_writer(
     gcx: Arc<GlobalContext>,
     snapshot: TrajectorySnapshot,
     intent: TrajectoryCommitIntent,
+    await_commit: bool,
 ) -> Result<(), String> {
     let writer = detached_trajectory_writer(&gcx, &snapshot);
-    let target_version = {
+    let coalesce = !intent.requires_durability() && !gcx.shutdown_flag.load(Ordering::Relaxed);
+    let (target_version, wake) = {
         let mut state = writer.lock().await;
         state.requested_version = state.requested_version.saturating_add(1);
         let target_version = state.requested_version;
         state.pending = Some((target_version, snapshot));
+        state.coalesce_deadline =
+            coalesce.then(|| Instant::now() + TRAJECTORY_CHECKPOINT_COALESCE_WINDOW);
         if !state.in_flight {
             state.in_flight = true;
-            let writer = writer.clone();
-            tokio::spawn(async move {
-                run_detached_trajectory_writer(gcx, writer).await;
-            });
+            let worker_writer = writer.clone();
+            let worker_gcx = gcx.clone();
+            state.worker = Some(tokio::spawn(async move {
+                run_detached_trajectory_writer(worker_gcx, worker_writer).await;
+            }));
         }
-        target_version
+        (target_version, state.wake.clone())
     };
-    if intent.requires_durability() {
+    wake.notify_one();
+    if await_commit {
         let result = wait_for_detached_trajectory_commit(writer.clone(), target_version).await;
         prune_detached_trajectory_writers();
         result?;
@@ -4068,14 +4299,33 @@ async fn run_detached_trajectory_writer(
     writer: Arc<AMutex<DetachedTrajectoryWriterState>>,
 ) {
     loop {
-        let (version, snapshot, write_cache) = {
-            let mut state = writer.lock().await;
-            let Some((version, snapshot)) = state.pending.take() else {
-                state.in_flight = false;
-                state.notify.notify_waiters();
-                return;
+        let (version, snapshot, write_cache) = loop {
+            let (deadline, wake) = {
+                let mut state = writer.lock().await;
+                if state.pending.is_none() {
+                    state.in_flight = false;
+                    state.notify.notify_waiters();
+                    return;
+                }
+                let deadline = state
+                    .coalesce_deadline
+                    .filter(|deadline| *deadline > Instant::now())
+                    .filter(|_| !gcx.shutdown_flag.load(Ordering::Relaxed));
+                match deadline {
+                    Some(deadline) => (deadline, state.wake.clone()),
+                    None => {
+                        state.coalesce_deadline = None;
+                        let (version, snapshot) = state
+                            .pending
+                            .take()
+                            .expect("pending write was just checked");
+                        break (version, snapshot, state.write_cache.clone());
+                    }
+                }
             };
-            (version, snapshot, state.write_cache.clone())
+            let _ =
+                tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), wake.notified())
+                    .await;
         };
         #[cfg(test)]
         let hook_chat_id = snapshot.chat_id.clone();
@@ -4578,26 +4828,26 @@ async fn save_trajectory_snapshot_inner(
 
     let tmp_path = unique_trajectory_tmp_path(&file_path);
     serialize_span.resume();
+    let serialize_tmp_path = tmp_path.clone();
     let serialized = tokio::task::spawn_blocking(move || {
-        let json_result = serde_json::to_string_pretty(&trajectory)
-            .map_err(|e| format!("Failed to serialize trajectory: {}", e));
-        (trajectory, json_result)
+        let write_result = write_pretty_json_to_tmp_file(&serialize_tmp_path, &trajectory);
+        (trajectory, write_result)
     })
     .await;
-    let (trajectory, json_result) = match serialized {
-        Ok((trajectory, json_result)) => {
+    let (trajectory, write_result) = match serialized {
+        Ok((trajectory, write_result)) => {
             serialize_span.finish(
-                if json_result.is_ok() {
+                if write_result.is_ok() {
                     PerfOutcome::Success
                 } else {
                     PerfOutcome::Failure
                 },
-                json_result.as_ref().ok().map(|json| json.len() as u64),
+                write_result.as_ref().ok().map(|write| write.byte_len),
                 Some(message_count as u64),
                 Some(snapshot.version),
                 None,
             );
-            (trajectory, json_result)
+            (trajectory, write_result)
         }
         Err(error) => {
             serialize_span.finish(
@@ -4607,6 +4857,7 @@ async fn save_trajectory_snapshot_inner(
                 Some(snapshot.version),
                 None,
             );
+            let _ = fs::remove_file(&tmp_path).await;
             return Err(format!("Trajectory serialization task failed: {}", error));
         }
     };
@@ -4615,14 +4866,9 @@ async fn save_trajectory_snapshot_inner(
         Some(&snapshot.chat_id),
         Some(&file_path),
     );
-    let atomic_write_result = atomic_write_json_with_tmp_path(
-        &file_path,
-        &tmp_path,
-        json_result,
-        Some("Failed to write trajectory"),
-        Some(source.clone()),
-    )
-    .await;
+    let atomic_write_result =
+        atomic_finish_trajectory_write(&file_path, &tmp_path, write_result, Some(source.clone()))
+            .await;
     atomic_write_span.finish(
         if atomic_write_result.is_ok() {
             PerfOutcome::Success
@@ -4635,6 +4881,8 @@ async fn save_trajectory_snapshot_inner(
         None,
     );
     atomic_write_result?;
+    #[cfg(test)]
+    record_trajectory_physical_write(&snapshot.chat_id);
 
     let backing_stamp =
         cache_written_trajectory_metadata(&file_path, &snapshot.chat_id, &trajectory).await;
@@ -4819,15 +5067,20 @@ pub async fn try_save_trajectory_with_intent(
     if !trajectory_writer_rollout_enabled() {
         return try_save_trajectory_legacy_with_intent(app, session_arc, intent).await;
     }
-    {
-        let session = session_arc.lock().await;
-        if !session.trajectory_dirty {
-            return Ok(true);
+    let dirty = session_arc.lock().await.trajectory_dirty;
+    if !dirty {
+        // A clean session can still have a coalesced checkpoint sitting in the detached writer,
+        // so a durability-critical save has to drain it instead of returning straight away.
+        if intent.requires_durability() {
+            flush_detached_trajectory_writer_for_session(&app.gcx, &session_arc).await?;
         }
+        return Ok(true);
     }
-    let target_version = schedule_trajectory_writer(app, session_arc.clone(), intent).await?;
+    let target_version =
+        schedule_trajectory_writer(app.clone(), session_arc.clone(), intent).await?;
     if intent.requires_durability() {
         wait_for_trajectory_commit(session_arc.clone(), target_version).await?;
+        flush_detached_trajectory_writer_for_session(&app.gcx, &session_arc).await?;
     }
     let session = session_arc.lock().await;
     Ok(!session.trajectory_dirty)
@@ -4893,9 +5146,7 @@ async fn commit_trajectory_snapshot_for_session(
         }
     }
 
-    let result =
-        persist_trajectory_snapshot_with_intent(gcx, snapshot, TrajectoryCommitIntent::Required)
-            .await;
+    let result = persist_trajectory_snapshot_awaiting_commit(gcx, snapshot, intent).await;
     span.finish(
         if result.is_ok() {
             PerfOutcome::Success
@@ -4967,7 +5218,7 @@ async fn schedule_trajectory_writer(
                 gcx.clone(),
                 writer_session_arc.clone(),
                 snapshot,
-                TrajectoryCommitIntent::Checkpoint,
+                intent,
             )
             .await;
             let mut session = writer_session_arc.lock().await;
@@ -9617,6 +9868,184 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
         assert_eq!(saved["id"], "other-chat");
+    }
+
+    fn coalesce_test_snapshot(chat_id: &str, index: usize) -> TrajectorySnapshot {
+        test_snapshot(
+            chat_id,
+            &format!("Title {index}"),
+            vec![ChatMessage::new(
+                "user".to_string(),
+                format!("message {index}"),
+            )],
+        )
+    }
+
+    #[test]
+    fn pretty_output_bytes_are_unchanged() {
+        let fixture = json!({
+            "id": "pretty-bytes-fixture",
+            "title": "Ünïcøde ✓ \"quoted\" \\ backslash\n\ttabbed",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "hello",
+                    "nested": {"deep": [1, 2.5, true, null, -0.125]}
+                },
+                {"role": "assistant", "content": [], "empty_object": {}}
+            ],
+            "counts": {"a": 0, "b": -17, "c": 1234567890},
+            "control_chars": "\u{1}\u{7f}"
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pretty-bytes-fixture.json.tmp");
+
+        let write = write_pretty_json_to_tmp_file(&path, &fixture).unwrap();
+        let written = std::fs::read(&path).unwrap();
+        let expected = serde_json::to_string_pretty(&fixture).unwrap();
+
+        assert_eq!(written, expected.as_bytes());
+        assert_eq!(write.byte_len, expected.len() as u64);
+        assert_eq!(write.content_hash, md5::compute(expected.as_bytes()).0);
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn checkpoint_writes_coalesce_within_window() {
+        let _lock = serial_test_guard();
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "detached-writer-coalesce-window";
+        let writer = Arc::new(AMutex::new(DetachedTrajectoryWriterState {
+            pending: Some((1, coalesce_test_snapshot(chat_id, 0))),
+            coalesce_deadline: Some(Instant::now() + TRAJECTORY_CHECKPOINT_COALESCE_WINDOW),
+            requested_version: 1,
+            in_flight: true,
+            ..Default::default()
+        }));
+        let worker = tokio::spawn(run_detached_trajectory_writer(gcx.clone(), writer.clone()));
+
+        for index in 1..5usize {
+            let wake = {
+                let mut state = writer.lock().await;
+                state.requested_version = index as u64 + 1;
+                state.pending = Some((index as u64 + 1, coalesce_test_snapshot(chat_id, index)));
+                state.coalesce_deadline =
+                    Some(Instant::now() + TRAJECTORY_CHECKPOINT_COALESCE_WINDOW);
+                state.wake.clone()
+            };
+            wake.notify_one();
+        }
+        assert_eq!(
+            trajectory_physical_writes_for_chat(chat_id),
+            0,
+            "checkpoints must not reach disk while the coalescing window is open"
+        );
+
+        let target_version = release_detached_trajectory_coalescing(&writer).await;
+        wait_for_detached_trajectory_commit(writer.clone(), target_version)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("writer should stop once the pending slot is drained")
+            .unwrap();
+
+        assert_eq!(
+            trajectory_physical_writes_for_chat(chat_id),
+            1,
+            "a burst of checkpoints must collapse into a single physical write"
+        );
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(loaded.thread.title, "Title 4");
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].content.content_text_only(), "message 4");
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn durable_intent_bypasses_coalescing() {
+        let _lock = serial_test_guard();
+        let _rollout = TrajectoryWriterRolloutGuard::set(true);
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "detached-writer-durable-bypass";
+        let writer = detached_trajectory_writer(&gcx, &coalesce_test_snapshot(chat_id, 0));
+
+        persist_trajectory_snapshot_with_intent(
+            gcx.clone(),
+            coalesce_test_snapshot(chat_id, 0),
+            TrajectoryCommitIntent::Checkpoint,
+        )
+        .await
+        .unwrap();
+        assert!(
+            writer.lock().await.coalesce_deadline.is_some(),
+            "a checkpoint intent must arm the coalescing window"
+        );
+
+        persist_trajectory_snapshot_with_intent(
+            gcx.clone(),
+            coalesce_test_snapshot(chat_id, 1),
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap();
+
+        {
+            let state = writer.lock().await;
+            assert!(state.coalesce_deadline.is_none());
+            assert!(state.pending.is_none());
+            assert_eq!(state.committed_version, 2);
+        }
+        assert_eq!(trajectory_physical_writes_for_chat(chat_id), 1);
+        let path = workspace
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(chat_id)
+            .join(format!("{chat_id}.json"));
+        let saved: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        assert_eq!(saved["title"], "Title 1");
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn pending_coalesced_write_is_flushed_on_shutdown() {
+        let _lock = serial_test_guard();
+        let _rollout = TrajectoryWriterRolloutGuard::set(true);
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "detached-writer-shutdown-flush";
+        let writer = detached_trajectory_writer(&gcx, &coalesce_test_snapshot(chat_id, 0));
+
+        for index in 0..3usize {
+            persist_trajectory_snapshot_with_intent(
+                gcx.clone(),
+                coalesce_test_snapshot(chat_id, index),
+                TrajectoryCommitIntent::Checkpoint,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(trajectory_physical_writes_for_chat(chat_id), 0);
+
+        gcx.shutdown_flag.store(true, Ordering::Relaxed);
+        if let Err(errors) = flush_detached_trajectory_writers().await {
+            assert!(
+                !errors.iter().any(|error| error.contains(chat_id)),
+                "{errors:?}"
+            );
+        }
+        gcx.shutdown_flag.store(false, Ordering::Relaxed);
+
+        assert_eq!(trajectory_physical_writes_for_chat(chat_id), 1);
+        assert!(writer.lock().await.pending.is_none());
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(loaded.thread.title, "Title 2");
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].content.content_text_only(), "message 2");
     }
 
     #[serial(trajectory_perf)]
@@ -22313,10 +22742,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("self-write.json");
         let content = "{\"id\":\"self-write\"}";
-        let handle =
-            register_trajectory_self_write(&path, TrajectorySourceIdentity::Normal, content)
-                .await
-                .unwrap();
+        let handle = register_trajectory_self_write(
+            &path,
+            TrajectorySourceIdentity::Normal,
+            md5::compute(content).0,
+        )
+        .await
+        .unwrap();
         fs::write(&path, content).await.unwrap();
         complete_trajectory_self_write(Some(handle)).await;
 
@@ -22334,7 +22766,7 @@ mod tests {
         let handle = register_trajectory_self_write(
             &path,
             TrajectorySourceIdentity::Normal,
-            "{\"id\":\"external-write\"}",
+            md5::compute("{\"id\":\"external-write\"}").0,
         )
         .await
         .unwrap();
@@ -22367,7 +22799,7 @@ mod tests {
             None,
         );
         let content = "{\"id\":\"same-id\"}";
-        let handle = register_trajectory_self_write(&path, normal.clone(), content)
+        let handle = register_trajectory_self_write(&path, normal.clone(), md5::compute(content).0)
             .await
             .unwrap();
         fs::write(&path, content).await.unwrap();
@@ -22520,14 +22952,14 @@ mod tests {
         let first_handle = register_trajectory_self_write(
             &first_path,
             TrajectorySourceIdentity::Normal,
-            "{\"id\":\"first\"}",
+            md5::compute("{\"id\":\"first\"}").0,
         )
         .await
         .unwrap();
         let second_handle = register_trajectory_self_write(
             &second_path,
             TrajectorySourceIdentity::Normal,
-            "{\"id\":\"second\"}",
+            md5::compute("{\"id\":\"second\"}").0,
         )
         .await
         .unwrap();
