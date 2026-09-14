@@ -67,6 +67,8 @@ pub struct CoordinationSettings {
     pub launch_context_entries: usize,
     pub launch_context_bytes: usize,
     pub launch_source_bytes: usize,
+    pub agent_profile_max_count: usize,
+    pub agent_profile_max_bytes: usize,
 }
 
 impl Default for CoordinationSettings {
@@ -129,6 +131,8 @@ impl Default for CoordinationSettings {
             launch_context_entries: 256,
             launch_context_bytes: 16 * 1024 * 1024,
             launch_source_bytes: 4 * 1024 * 1024,
+            agent_profile_max_count: 256,
+            agent_profile_max_bytes: 64 * 1024,
         }
     }
 }
@@ -226,6 +230,14 @@ impl CoordinationSettings {
             ("launch_context_entries", self.launch_context_entries as u64),
             ("launch_context_bytes", self.launch_context_bytes as u64),
             ("launch_source_bytes", self.launch_source_bytes as u64),
+            (
+                "agent_profile_max_count",
+                self.agent_profile_max_count as u64,
+            ),
+            (
+                "agent_profile_max_bytes",
+                self.agent_profile_max_bytes as u64,
+            ),
             ("max_work_views", self.max_work_views as u64),
             ("max_work_cursors", self.max_work_cursors as u64),
             ("max_work_history_rows", self.max_work_history_rows as u64),
@@ -518,6 +530,22 @@ mod tests {
         let mut settings = CoordinationSettings::default();
         settings.agent_wait_default_ms = settings.agent_wait_max_ms + 1;
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn agent_profile_bounds_default_usable_and_reject_zero() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(settings.agent_profile_max_count >= 1);
+        assert!(settings.agent_profile_max_bytes >= 1024);
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.agent_profile_max_count = 0,
+            |settings: &mut CoordinationSettings| settings.agent_profile_max_bytes = 0,
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
     }
 }
 

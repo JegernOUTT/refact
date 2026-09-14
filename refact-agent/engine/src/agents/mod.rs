@@ -5,6 +5,7 @@ pub mod delivery;
 pub mod execution;
 pub mod launch_spec;
 pub mod monitor;
+pub mod profile;
 pub mod push;
 pub mod spawn;
 pub(crate) mod tool_authority;

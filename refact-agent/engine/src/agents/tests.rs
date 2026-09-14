@@ -1721,6 +1721,8 @@ async fn spawn_rejects_missing_configuration_before_admission() {
         goal: None,
         plan: None,
         deliverable: None,
+
+        profile: None,
         worktree_mode: crate::agents::spawn::SpawnWorktreeMode::Inherit,
         parent_subchat_tx: None,
         parent_worktree: None,
@@ -1793,6 +1795,8 @@ pub(super) fn subagent_spawn_request(
         goal: None,
         plan: None,
         deliverable: None,
+
+        profile: None,
         worktree_mode: crate::agents::spawn::SpawnWorktreeMode::Inherit,
         parent_subchat_tx: None,
         parent_worktree: None,

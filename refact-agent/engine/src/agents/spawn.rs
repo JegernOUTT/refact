@@ -86,6 +86,7 @@ pub struct SpawnRequest {
     pub goal: Option<SpawnGoal>,
     pub plan: Option<String>,
     pub deliverable: Option<refact_chat_api::DeliverableContract>,
+    pub profile: Option<super::profile::ResolvedProfile>,
     pub worktree_mode: SpawnWorktreeMode,
     pub parent_subchat_tx: Option<Arc<AMutex<UnboundedSender<Value>>>>,
     pub parent_worktree: Option<WorktreeMeta>,
@@ -144,6 +145,8 @@ struct PreparedLaunch {
     messages: Vec<ChatMessage>,
     project_root: PathBuf,
     worktree_mode: SpawnWorktreeMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile: Option<super::profile::ResolvedProfile>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -348,6 +351,8 @@ pub struct LaunchEffective {
     pub messages: usize,
     pub accepted_bytes: usize,
     pub accepted_byte_limit: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<super::profile::ResolvedProfile>,
 }
 
 async fn validate_launch_request(app: &AppState, req: &SpawnRequest) -> Result<PathBuf, String> {
@@ -420,6 +425,7 @@ pub async fn preview_launch(app: &AppState, req: &SpawnRequest) -> Result<Launch
         messages: prepared.messages.len(),
         accepted_bytes: payload.as_bytes().len(),
         accepted_byte_limit: limits.launch_context_bytes,
+        profile: prepared.profile,
     })
 }
 
@@ -853,6 +859,7 @@ async fn prepare_launch(
                 &req.goal,
                 &req.target_files,
                 &req.tools,
+                &req.profile,
             ),
             limits.launch_context_bytes,
         )
@@ -868,6 +875,11 @@ async fn prepare_launch(
         .filter(|n| *n > 0)
         .map(|n| req.max_steps.min(n as usize))
         .unwrap_or(req.max_steps);
+    let max_steps = req
+        .profile
+        .as_ref()
+        .and_then(|profile| profile.max_steps)
+        .map_or(max_steps, |cap| max_steps.min(cap));
     let resolve_config = async {
         resolve_subchat_config_with_parent(
             app.gcx.clone(),
@@ -942,6 +954,18 @@ async fn prepare_launch(
     let mut config = config_result?;
     config.model = req.model.clone();
     config.history_source_model = req.history_source_model.clone();
+    if let Some(profile) = &req.profile {
+        if let Some(effort) = &profile.reasoning_effort {
+            config.reasoning_effort = Some(effort.clone());
+        }
+        config.autonomous_no_confirm &= profile.approval.autonomous_no_confirm.unwrap_or(true);
+        config.auto_approve_editing_tools &=
+            profile.approval.auto_approve_editing_tools.unwrap_or(true);
+        config.auto_approve_dangerous_commands &= profile
+            .approval
+            .auto_approve_dangerous_commands
+            .unwrap_or(true);
+    }
     narrow_parent_approval(app, req, &mut config).await;
     config.tools = super::tool_authority::freeze(
         app,
@@ -960,6 +984,9 @@ async fn prepare_launch(
     )
     .await?;
     let mut context = req.initial_context_messages.clone();
+    if let Some(instructions) = req.profile.as_ref().and_then(|p| p.instructions.as_ref()) {
+        context.push(ChatMessage::new("user".to_string(), instructions.clone()));
+    }
     if let Some(instructions) = req.custom_instructions.as_ref() {
         context.push(ChatMessage::new(
             "user".to_string(),
@@ -990,6 +1017,7 @@ async fn prepare_launch(
         messages,
         project_root,
         worktree_mode: req.worktree_mode.clone(),
+        profile: req.profile.clone(),
     };
     let payload = refact_agents_core::storage::AcceptedLaunchPayload::serialize(
         &prepared,
@@ -1270,6 +1298,90 @@ mod accepted_launch_tests {
         .unwrap();
         assert!(payload.as_bytes().len() <= 32768);
         assert!(payload.decode::<PreparedLaunch>().is_ok());
+    }
+
+    fn resolved_profile(revision: u64, max_steps: usize) -> super::super::profile::ResolvedProfile {
+        super::super::profile::ResolvedProfile {
+            schema_version: super::super::profile::PROFILE_SCHEMA_VERSION,
+            name: "reviewer".into(),
+            revision,
+            model: None,
+            model_type: None,
+            tools: None,
+            target_files: Vec::new(),
+            max_steps: Some(max_steps),
+            reasoning_effort: Some(refact_core::chat_types::ReasoningEffort::High),
+            approval: super::super::profile::ProfileApproval {
+                autonomous_no_confirm: Some(false),
+                auto_approve_editing_tools: Some(false),
+                auto_approve_dangerous_commands: Some(false),
+            },
+            budget: None,
+            instructions: Some("# Agent Profile: reviewer\n## Role\nCareful reviewer".into()),
+            provenance: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_bytes_pin_the_profile_revision_and_omit_it_entirely_without_one() {
+        let (_gcx, app, parent, workspace) =
+            super::super::tests::app_with_parent_session("profile-parent").await;
+        parent.lock().await.thread.autonomous_no_confirm = true;
+        parent.lock().await.thread.auto_approve_editing_tools = true;
+        parent.lock().await.thread.auto_approve_dangerous_commands = true;
+        let root = workspace.path().canonicalize().unwrap();
+        let mut req = super::super::tests::subagent_spawn_request("profile-parent", "src/a.rs");
+        req.max_steps = 9;
+
+        let (plain, plain_payload) = prepare_launch(&app, &req, "subchat-plain", root.clone())
+            .await
+            .unwrap();
+        let plain_value: Value = serde_json::from_slice(plain_payload.as_bytes()).unwrap();
+        assert!(plain_value.get("profile").is_none());
+        assert_eq!(plain.config.max_steps, 9);
+        assert!(plain.config.autonomous_no_confirm);
+        assert!(plain.config.reasoning_effort.is_none());
+        assert!(plain.profile.is_none());
+        assert!(!plain.messages.iter().any(|message| message
+            .content
+            .content_text_only()
+            .contains("Agent Profile")));
+
+        let mut accepted_req = req.clone();
+        accepted_req.profile = Some(resolved_profile(7, 3));
+        let (prepared, accepted) =
+            prepare_launch(&app, &accepted_req, "subchat-profile", root.clone())
+                .await
+                .unwrap();
+        assert_eq!(prepared.config.max_steps, 3);
+        assert!(!prepared.config.autonomous_no_confirm);
+        assert!(!prepared.config.auto_approve_editing_tools);
+        assert!(!prepared.config.auto_approve_dangerous_commands);
+        assert_eq!(
+            prepared.config.reasoning_effort,
+            Some(refact_core::chat_types::ReasoningEffort::High)
+        );
+        assert!(prepared.messages.iter().any(|message| message
+            .content
+            .content_text_only()
+            .contains("Careful reviewer")));
+        let accepted_value: Value = serde_json::from_slice(accepted.as_bytes()).unwrap();
+        assert_eq!(accepted_value["profile"]["revision"], 7);
+        assert_eq!(accepted_value["profile"]["name"], "reviewer");
+        let accepted_digest = launch_digest(&accepted);
+
+        let mut edited_req = req.clone();
+        edited_req.profile = Some(resolved_profile(8, 3));
+        let (_, edited) = prepare_launch(&app, &edited_req, "subchat-profile", root)
+            .await
+            .unwrap();
+        assert_ne!(edited.as_bytes(), accepted.as_bytes());
+        assert_ne!(launch_digest(&edited), accepted_digest);
+        assert_eq!(
+            serde_json::from_slice::<Value>(accepted.as_bytes()).unwrap()["profile"]["revision"],
+            7
+        );
+        assert_eq!(launch_digest(&accepted), accepted_digest);
     }
 }
 

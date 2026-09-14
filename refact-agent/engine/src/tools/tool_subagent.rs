@@ -55,7 +55,14 @@ struct SubagentArgs {
     worktree_mode: SpawnWorktreeMode,
     completion_push: PushMode,
     launch_spec: Option<LaunchSpec>,
+    profile: Option<ProfileReference>,
     preview_only: bool,
+}
+
+#[derive(Clone)]
+struct ProfileReference {
+    name: String,
+    revision: Option<u64>,
 }
 
 #[async_trait]
@@ -98,6 +105,20 @@ impl Tool for ToolSubagent {
                     "push": PushMode::schema(),
                     "auto_merge": {"type": "boolean", "default": true, "description": "Only for worktree=isolated. Squash-merge completion automatically."},
                     "action": {"type": "string", "enum": ["run", "preview"], "default": "run", "description": "Use `preview` to resolve prompts/context and effective settings without spawning a child."},
+                    "profile": {
+                        "description": "Optional reusable agent profile: a name string, or {name, revision} to pin an exact revision. The profile supplies defaults (model, tools, role, skills, effort, hooks, path scope, approval, budget); this run may only narrow them. A profile never widens authority.",
+                        "oneOf": [
+                            {"type": "string"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "revision": {"type": "integer", "minimum": 1}
+                                },
+                                "required": ["name"]
+                            }
+                        ]
+                    },
                     "launch_spec": {
                         "type": "object",
                         "description": "Optional parent-controlled child launch specification: custom instructions/profile augmentation and explicit initial context.",
@@ -184,17 +205,86 @@ impl Tool for ToolSubagent {
             None => crate::file_activity::settings(),
         };
         let args = parse_subagent_args_with_limits(args, &limits)?;
+        let profile = match args.profile.as_ref() {
+            Some(reference) => Some(
+                crate::agents::profile::load_profile(gcx.clone(), &reference.name, &limits)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            ),
+            None => None,
+        };
+        if let Some(model_type) = profile.as_ref().and_then(|p| p.spec.model_type.as_deref()) {
+            if !MODEL_TYPES.contains(&model_type) {
+                return Err(crate::agents::profile::ProfileError::ProfileMalformed {
+                    name: profile.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
+                    detail: format!(
+                        "model_type `{model_type}` must be one of: {}",
+                        MODEL_TYPES.join(", ")
+                    ),
+                }
+                .to_string());
+            }
+        }
         let (model, model_type) = resolve_model(
             gcx.clone(),
-            args.model_name.as_deref(),
-            args.model_type.as_deref(),
+            args.model_name
+                .as_deref()
+                .or_else(|| profile.as_ref().and_then(|p| p.spec.model.as_deref())),
+            args.model_type
+                .as_deref()
+                .or_else(|| profile.as_ref().and_then(|p| p.spec.model_type.as_deref())),
             &current_model,
         )
         .await?;
         let ceiling =
             crate::agents::tool_authority::current_ceiling(&app, &parent_chat_id, &model, "agent")
                 .await?;
-        let requested = match args.tools.as_ref() {
+        let resolved_profile = match &profile {
+            Some(profile) => Some(
+                crate::agents::profile::resolve_profile_instance(
+                    profile,
+                    args.profile
+                        .as_ref()
+                        .and_then(|reference| reference.revision),
+                    &crate::agents::profile::RunNarrowing {
+                        tools: args.tools.clone(),
+                        model: args.model_name.clone(),
+                        model_type: args.model_type.clone(),
+                        target_files: args.target_files.clone(),
+                        max_steps: args
+                            .goal
+                            .as_ref()
+                            .and_then(|goal| goal.budget.as_ref())
+                            .and_then(|budget| budget.max_turns)
+                            .filter(|turns| *turns > 0)
+                            .map(|turns| turns as usize),
+                    },
+                    &ceiling,
+                )
+                .map_err(|error| error.to_string())?,
+            ),
+            None => None,
+        };
+        let target_files = resolved_profile
+            .as_ref()
+            .map(|profile| profile.target_files.clone())
+            .unwrap_or_else(|| args.target_files.clone());
+        let mut goal = args.goal.clone();
+        if let (Some(goal), Some(budget)) = (
+            goal.as_mut(),
+            resolved_profile
+                .as_ref()
+                .and_then(|profile| profile.budget.clone()),
+        ) {
+            if goal.budget.is_none() {
+                goal.budget = Some(budget);
+            }
+        }
+        let requested_tools = match resolved_profile.as_ref() {
+            Some(profile) => profile.tools.clone(),
+            None => args.tools.clone(),
+        };
+        let requested = match requested_tools.as_ref() {
             Some(requested) => crate::subchat::ToolsPolicy::from_option(Some(
                 normalize_explicit_tools(requested, &available_tools(gcx.clone()).await)?,
             )),
@@ -252,7 +342,7 @@ impl Tool for ToolSubagent {
         let max_steps = crate::runtime_settings::current()
             .coordination
             .subagent_default_steps;
-        let peer_snapshot = peer_snapshot(&app, &parent_root_chat_id, &args.target_files).await;
+        let peer_snapshot = peer_snapshot(&app, &parent_root_chat_id, &target_files).await;
         let deliverable = args
             .launch_spec
             .as_ref()
@@ -260,9 +350,9 @@ impl Tool for ToolSubagent {
         let prompt = build_subagent_prompt(
             &args.task,
             &args.expected_result,
-            &args.target_files,
+            &target_files,
             &peer_snapshot,
-            args.goal.is_some(),
+            goal.is_some(),
             deliverable.as_ref(),
         );
         let req = SpawnRequest {
@@ -286,13 +376,14 @@ impl Tool for ToolSubagent {
                 .map(|_| current_model.clone()),
             custom_instructions: None,
             tools: Some(spawn_tools.clone()),
-            target_files: args.target_files.clone(),
+            target_files: target_files.clone(),
             max_steps,
             model: model.clone(),
             model_type: model_type.clone(),
-            goal: args.goal.clone(),
+            goal: goal.clone(),
             plan: args.plan.clone(),
             deliverable,
+            profile: resolved_profile.clone(),
             worktree_mode: args.worktree_mode.clone(),
             parent_subchat_tx: Some(parent_subchat_tx),
             parent_worktree,
@@ -303,8 +394,12 @@ impl Tool for ToolSubagent {
         };
         if args.preview_only {
             let effective = crate::agents::spawn::preview_launch(&app, &req).await;
-            let mut preview =
-                build_launch_preview_tool_result(&args, resolved_launch.as_ref(), tool_call_id);
+            let mut preview = build_launch_preview_tool_result(
+                &args,
+                resolved_launch.as_ref(),
+                resolved_profile.as_ref(),
+                tool_call_id,
+            );
             if let ContextEnum::ChatMessage(message) = &mut preview {
                 message
                     .extra
@@ -455,6 +550,7 @@ fn parse_subagent_args_with_limits(
         }
     };
     let launch_spec = launch_spec::parse_launch_spec_with_limits(args, limits)?;
+    let profile = parse_profile_reference(args)?;
     Ok(SubagentArgs {
         task,
         expected_result,
@@ -467,8 +563,58 @@ fn parse_subagent_args_with_limits(
         worktree_mode,
         completion_push: PushMode::from_args(args)?,
         launch_spec,
+        profile,
         preview_only,
     })
+}
+
+fn parse_profile_reference(
+    args: &HashMap<String, Value>,
+) -> Result<Option<ProfileReference>, String> {
+    let name_of = |value: &Value| -> Result<String, String> {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| "argument `profile.name` must be a non-empty string".to_string())
+    };
+    match args.get("profile") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value @ Value::String(_)) => Ok(Some(ProfileReference {
+            name: name_of(value)?,
+            revision: None,
+        })),
+        Some(Value::Object(object)) => {
+            if object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "name" | "revision"))
+            {
+                return Err("unsupported field in argument `profile`".to_string());
+            }
+            let name = name_of(object.get("name").unwrap_or(&Value::Null))?;
+            let revision = match object.get("revision") {
+                None | Some(Value::Null) => None,
+                Some(Value::Number(number)) => Some(
+                    number
+                        .as_u64()
+                        .filter(|revision| *revision > 0)
+                        .ok_or_else(|| {
+                            "argument `profile.revision` must be a positive integer".to_string()
+                        })?,
+                ),
+                other => {
+                    return Err(format!(
+                        "argument `profile.revision` must be a positive integer: {other:?}"
+                    ))
+                }
+            };
+            Ok(Some(ProfileReference { name, revision }))
+        }
+        other => Err(format!(
+            "argument `profile` must be a string or object: {other:?}"
+        )),
+    }
 }
 
 fn parse_required_string(args: &HashMap<String, Value>, name: &str) -> Result<String, String> {
@@ -846,6 +992,7 @@ fn build_background_start_tool_result(
 fn build_launch_preview_tool_result(
     args: &SubagentArgs,
     resolved: Option<&ResolvedLaunchContext>,
+    profile: Option<&crate::agents::profile::ResolvedProfile>,
     tool_call_id: &str,
 ) -> ContextEnum {
     let mut lines = vec![
@@ -868,6 +1015,28 @@ fn build_launch_preview_tool_result(
                 .unwrap_or_else(|| "(inherit all)".to_string())
         ),
     ];
+    match profile {
+        None => lines.push("- profile: (none; run-only configuration)".to_string()),
+        Some(profile) => {
+            lines.push(String::new());
+            lines.push("## Profile Provenance".to_string());
+            lines.push(format!(
+                "- profile: {} (revision {})",
+                profile.name, profile.revision
+            ));
+            lines.push(format!(
+                "- contributed: {}",
+                label_or_dash(&profile.provenance.contributed)
+            ));
+            lines.push(format!(
+                "- narrowed by this run: {}",
+                label_or_dash(&profile.provenance.narrowed)
+            ));
+            for note in &profile.provenance.notes {
+                lines.push(format!("- note: {note}"));
+            }
+        }
+    }
     match resolved {
         None => lines.push("- launch_spec: (not provided; legacy defaults apply)".to_string()),
         Some(resolved) => {
@@ -901,7 +1070,7 @@ fn build_launch_preview_tool_result(
             lines.push(format!("- estimated_tokens: {}", resolved.estimated_tokens));
         }
     }
-    let extra = Map::from_iter([
+    let mut extra = Map::from_iter([
         ("preview".to_string(), json!(true)),
         (
             "skipped_count".to_string(),
@@ -934,7 +1103,18 @@ fn build_launch_preview_tool_result(
             json!(resolved.map(|r| r.excluded.clone()).unwrap_or_default()),
         ),
     ]);
+    if let Some(profile) = profile {
+        extra.insert("profile".into(), json!(profile));
+    }
     tool_message(lines.join("\n"), tool_call_id, extra)
+}
+
+fn label_or_dash(values: &[String]) -> String {
+    if values.is_empty() {
+        "-".to_string()
+    } else {
+        values.join(", ")
+    }
 }
 
 fn tool_message(content: String, tool_call_id: &str, extra: Map<String, Value>) -> ContextEnum {
@@ -1209,6 +1389,294 @@ mod tests {
         request.insert("action".into(), json!("preview"));
         request.insert("model_name".into(), json!("missing/model"));
         assert!(execute(request).await.is_err());
+    }
+
+    async fn install_profile(gcx: &Arc<crate::global_context::GlobalContext>, yaml: &str) {
+        let mut registry =
+            crate::yaml_configs::customization_registry::get_project_registry(gcx.clone())
+                .await
+                .expect("project registry");
+        let config: crate::yaml_configs::customization_types::SubagentConfig =
+            serde_yaml::from_str(yaml).expect("profile config");
+        registry.subagents.insert(config.id.clone(), config);
+        let root = crate::files_correction::get_project_dirs(gcx.clone())
+            .await
+            .first()
+            .cloned()
+            .expect("project root");
+        gcx.project_registry_cache
+            .write()
+            .unwrap()
+            .insert(root, registry);
+    }
+
+    fn reviewer_profile(tools: &str) -> String {
+        format!(
+            "schema_version: 7\nid: reviewer\ntitle: Reviewer\nmessages:\n  system_prompt: reviewer\nagent_profile:\n  tools: {tools}\n  role: Careful reviewer\n  max_steps: 4\n"
+        )
+    }
+
+    async fn profile_parent() -> (
+        Arc<AMutex<AtCommandsContext>>,
+        AppState,
+        Arc<AMutex<crate::chat::types::ChatSession>>,
+        tempfile::TempDir,
+    ) {
+        let (ccx, workspace) = test_context("profile-parent").await;
+        let app = ccx.lock().await.app.clone();
+        let mut parent = crate::chat::types::ChatSession::new("profile-parent".into());
+        parent.thread.model = "test/default".into();
+        parent.thread.mode = "agent".into();
+        parent.work_project_root = Some(workspace.path().into());
+        let parent = Arc::new(AMutex::new(parent));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("profile-parent".into(), parent.clone());
+        let (root, _) = crate::caps::project_model_defaults_state(app.gcx.clone()).await;
+        app.gcx.caps_state.write().await.loaded_project_root = Some(root);
+        (ccx, app, parent, workspace)
+    }
+
+    async fn run_subagent(
+        app: &AppState,
+        ccx: &Arc<AMutex<AtCommandsContext>>,
+        call: &str,
+        request: HashMap<String, Value>,
+    ) -> Result<Vec<ChatMessage>, String> {
+        app.tool_registry
+            .execute_tool(
+                ccx,
+                "agent",
+                Some("test/default"),
+                call,
+                "subagent",
+                request.into_iter().collect(),
+            )
+            .await
+            .map(|result| {
+                result
+                    .expect("subagent must be publicly reachable")
+                    .messages
+            })
+    }
+
+    #[tokio::test]
+    #[serial(test_runner)]
+    async fn accepted_profile_revision_is_pinned_against_a_later_profile_edit() {
+        let (ccx, app, _parent, _workspace) = profile_parent().await;
+        install_profile(&app.gcx, &reviewer_profile("[cat]")).await;
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let output = captured.clone();
+        let _runner =
+            crate::agents::spawn::install_test_runner(Arc::new(move |_gcx, messages, config| {
+                *output.lock().unwrap() = Some((messages.clone(), config.tools.clone()));
+                Box::pin(async move {
+                    Ok(SubchatResult {
+                        messages,
+                        metering: Map::new(),
+                        chat_id: config.chat_id,
+                        aborted: false,
+                    })
+                })
+            }));
+        let mut request = args();
+        request.insert("profile".into(), json!("reviewer"));
+
+        let mut preview = request.clone();
+        preview.insert("action".into(), json!("preview"));
+        let previewed = run_subagent(&app, &ccx, "preview", preview.clone())
+            .await
+            .unwrap();
+        let message = &previewed[0];
+        assert_eq!(message.extra["profile"]["name"], "reviewer");
+        let revision = message.extra["profile"]["revision"].as_u64().unwrap();
+        assert!(revision > 0);
+        assert!(message
+            .content
+            .content_text_only()
+            .contains("## Profile Provenance"));
+        assert!(message
+            .content
+            .content_text_only()
+            .contains("- contributed: "));
+        let contributed = message.extra["profile"]["provenance"]["contributed"]
+            .as_array()
+            .unwrap();
+        assert!(contributed.iter().any(|entry| entry == "tools"));
+        assert!(contributed.iter().any(|entry| entry == "instructions"));
+        assert!(contributed.iter().any(|entry| entry == "max_steps"));
+        let effective_tools = message.extra["effective_tools"].as_array().unwrap();
+        assert!(effective_tools.iter().any(|tool| tool == "cat"));
+        assert!(!effective_tools.iter().any(|tool| tool == "shell"));
+        assert_eq!(message.extra["effective_launch"]["max_steps"], 4);
+        assert!(app.agents.list_all().await.is_empty());
+
+        let launched = run_subagent(&app, &ccx, "launch", request.clone())
+            .await
+            .unwrap();
+        let agent = launched[0].extra["background_agent_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        app.agents
+            .wait("profile-parent", &agent, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let (child_messages, child_tools) = captured.lock().unwrap().clone().expect("child ran");
+        assert!(child_messages.iter().any(|message| message
+            .content
+            .content_text_only()
+            .contains("Careful reviewer")));
+        assert!(child_tools.allows_tool("cat"));
+        assert!(!child_tools.allows_tool("shell"));
+        let accepted = app
+            .agents
+            .accepted_launch("profile-parent", &agent, 1024 * 1024)
+            .await
+            .unwrap();
+        let accepted_bytes = accepted.as_bytes().to_vec();
+        assert_eq!(
+            accepted.decode::<Value>().unwrap()["profile"]["revision"],
+            revision
+        );
+
+        install_profile(&app.gcx, &reviewer_profile("[cat, shell]")).await;
+        let after_edit = run_subagent(&app, &ccx, "preview-2", preview.clone())
+            .await
+            .unwrap();
+        let edited_revision = after_edit[0].extra["profile"]["revision"].as_u64().unwrap();
+        assert_ne!(edited_revision, revision);
+        let unchanged = app
+            .agents
+            .accepted_launch("profile-parent", &agent, 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(unchanged.as_bytes(), accepted_bytes.as_slice());
+        assert_eq!(
+            unchanged.decode::<Value>().unwrap()["profile"]["revision"],
+            revision
+        );
+
+        let mut pinned = preview;
+        pinned.insert(
+            "profile".into(),
+            json!({"name": "reviewer", "revision": revision}),
+        );
+        let error = run_subagent(&app, &ccx, "pinned", pinned)
+            .await
+            .unwrap_err();
+        assert!(error.contains("is pinned"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn unknown_profile_is_refused_before_any_record_or_ticket() {
+        let (ccx, app, _parent, _workspace) = profile_parent().await;
+        let mut request = args();
+        request.insert("profile".into(), json!("not-defined"));
+        let error = run_subagent(&app, &ccx, "unknown", request.clone())
+            .await
+            .unwrap_err();
+        assert!(error.contains("not defined"), "{error}");
+        assert!(app.agents.list_all().await.is_empty());
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+
+        install_profile(
+            &app.gcx,
+            "schema_version: 7\nid: broken\nmessages:\n  system_prompt: broken\nagent_profile:\n  mdoel: typo\n",
+        )
+        .await;
+        request.insert("profile".into(), json!("broken"));
+        let error = run_subagent(&app, &ccx, "malformed", request)
+            .await
+            .unwrap_err();
+        assert!(error.contains("is malformed"), "{error}");
+        assert!(app.agents.list_all().await.is_empty());
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+    }
+
+    #[tokio::test]
+    async fn profile_tools_narrow_to_the_caller_ceiling_and_runs_cannot_widen_the_profile() {
+        let (ccx, app, parent, _workspace) = profile_parent().await;
+        install_profile(&app.gcx, &reviewer_profile("[cat, shell]")).await;
+        parent.lock().await.active_command.allowed_tools = vec!["cat".into()];
+        let mut request = args();
+        request.insert("profile".into(), json!("reviewer"));
+        request.insert("action".into(), json!("preview"));
+        let narrowed = run_subagent(&app, &ccx, "narrowed", request.clone())
+            .await
+            .unwrap();
+        let message = &narrowed[0];
+        assert_eq!(message.extra["effective_tools"], json!(["cat"]));
+        let notes = message.extra["profile"]["provenance"]["notes"]
+            .as_array()
+            .unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].as_str().unwrap().contains("shell"));
+        assert!(notes[0].as_str().unwrap().contains("not granted"));
+        assert!(message.extra.get("launch_blocked").is_none());
+        assert!(app.agents.list_all().await.is_empty());
+
+        request.insert("tools".into(), json!("apply"));
+        let error = run_subagent(&app, &ccx, "widened", request)
+            .await
+            .unwrap_err();
+        assert!(error.contains("cannot widen"), "{error}");
+        assert!(app.agents.list_all().await.is_empty());
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+    }
+
+    #[tokio::test]
+    async fn a_launch_without_a_profile_keeps_its_current_behaviour() {
+        let (ccx, app, _parent, _workspace) = profile_parent().await;
+        install_profile(&app.gcx, &reviewer_profile("[cat]")).await;
+        let mut request = args();
+        request.insert("action".into(), json!("preview"));
+        let previewed = run_subagent(&app, &ccx, "no-profile", request)
+            .await
+            .unwrap();
+        let message = &previewed[0];
+        assert!(message.extra.get("profile").is_none());
+        assert!(message
+            .content
+            .content_text_only()
+            .contains("- profile: (none; run-only configuration)"));
+        assert!(message.extra["effective_tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool == "cat"));
+        assert_eq!(
+            message.extra["effective_launch"]["max_steps"],
+            crate::runtime_settings::current()
+                .coordination
+                .subagent_default_steps
+        );
+        assert!(app.agents.list_all().await.is_empty());
+    }
+
+    #[test]
+    fn profile_reference_accepts_a_name_or_a_pinned_revision() {
+        let mut values = args();
+        assert!(parse_subagent_args(&values).unwrap().profile.is_none());
+        values.insert("profile".into(), json!("reviewer"));
+        let parsed = parse_subagent_args(&values).unwrap().profile.unwrap();
+        assert_eq!(parsed.name, "reviewer");
+        assert_eq!(parsed.revision, None);
+        values.insert("profile".into(), json!({"name":"reviewer","revision":42}));
+        let parsed = parse_subagent_args(&values).unwrap().profile.unwrap();
+        assert_eq!(parsed.revision, Some(42));
+        for invalid in [
+            json!(""),
+            json!({}),
+            json!({"name":"reviewer","revision":0}),
+            json!({"name":"reviewer","tools":"cat"}),
+            json!(7),
+        ] {
+            values.insert("profile".into(), invalid);
+            assert!(parse_subagent_args(&values).is_err());
+        }
     }
 
     #[test]

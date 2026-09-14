@@ -145,6 +145,8 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("launch_context_entries", 1, 100_000),
     coordination_integer("launch_context_bytes", 1, 1_073_741_824),
     coordination_integer("launch_source_bytes", 1, 1_073_741_824),
+    coordination_integer("agent_profile_max_count", 1, 100_000),
+    coordination_integer("agent_profile_max_bytes", 1_024, 16_777_216),
 ];
 
 pub fn coordination_field_bounds() -> &'static [CoordinationFieldBound] {

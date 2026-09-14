@@ -144,6 +144,8 @@ fn spawn_request(parent_chat_id: &str, kind: BgAgentKind) -> SpawnRequest {
         goal: None,
         plan: None,
         deliverable: None,
+
+        profile: None,
         worktree_mode: SpawnWorktreeMode::Inherit,
         parent_subchat_tx: None,
         parent_worktree: None,

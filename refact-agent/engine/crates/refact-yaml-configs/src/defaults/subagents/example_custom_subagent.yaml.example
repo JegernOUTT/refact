@@ -55,3 +55,34 @@ tools:
   - search_pattern
   - search_semantic
   - knowledge
+
+# Optional reusable agent profile. Referenced by `subagent(profile: "my_custom_subagent")`
+# or `subagent(profile: {name: "my_custom_subagent", revision: <revision>})` to pin an
+# exact revision. The revision is derived from this block's content, so editing it never
+# changes a launch that was already accepted.
+#
+# A profile supplies defaults only. A run instance may narrow them and can never widen
+# them: tools are intersected with the caller's concrete tool ceiling and anything outside
+# it is dropped with an explicit note, never granted.
+agent_profile:
+  model_type: default
+  tools:
+    - cat
+    - glob
+  deny_tools:
+    - shell
+  role: Read-only analyst that never edits files
+  skills:
+    - static analysis
+  reasoning_effort: high
+  hooks:
+    - report findings before finishing
+  path_scope:
+    - src/lib.rs
+  approval:
+    autonomous_no_confirm: false
+    auto_approve_editing_tools: false
+    auto_approve_dangerous_commands: false
+  budget:
+    max_turns: 20
+  max_steps: 20
