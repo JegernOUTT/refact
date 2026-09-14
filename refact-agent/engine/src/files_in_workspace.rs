@@ -9,7 +9,7 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind};
 use ropey::Rope;
 use tokio::io::AsyncReadExt;
-use tokio::sync::{RwLock as ARwLock, Mutex as AMutex, Notify};
+use tokio::sync::{RwLock as ARwLock, Mutex as AMutex, Notify, mpsc};
 use walkdir::WalkDir;
 use which::which;
 use tracing::info;
@@ -638,9 +638,8 @@ fn debounced_file_event_kind_for_path(
 
 #[derive(Debug, Clone)]
 pub struct DebouncedFileEvent {
-    read_path: PathBuf,
     at: Instant,
-    kind: DebouncedFileEventKind,
+    is_remove_event: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -708,11 +707,15 @@ pub struct DocumentsState {
     pub git_branch_heads: Arc<StdMutex<HashMap<PathBuf, String>>>,
     pub branch_reindex_last_ts: Arc<AtomicU64>,
     pub file_event_debounce: Arc<StdMutex<HashMap<PathBuf, DebouncedFileEvent>>>,
+    pub file_event_resolutions: Arc<AtomicU64>,
+    pub file_watcher_dropped_events: Arc<AtomicU64>,
     file_event_debounce_task: Arc<StdMutex<Option<tokio::task::JoinHandle<()>>>>,
     file_event_debounce_notify: Arc<Notify>,
+    file_watcher_event_task: Arc<StdMutex<Option<tokio::task::JoinHandle<()>>>>,
     branch_head_debounce: Arc<StdMutex<HashMap<PathBuf, PendingBranchHeadChange>>>,
     branch_head_debounce_tasks: Arc<StdMutex<HashMap<PathBuf, tokio::task::JoinHandle<()>>>>,
     watch_registration_tasks: Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>,
+    watch_registration_drops: Arc<AtomicU64>,
 }
 
 async fn mem_overwrite_or_create_document(
@@ -752,25 +755,84 @@ impl DocumentsState {
             git_branch_heads: Arc::new(StdMutex::new(HashMap::new())),
             branch_reindex_last_ts: Arc::new(AtomicU64::new(0)),
             file_event_debounce: Arc::new(StdMutex::new(HashMap::new())),
+            file_event_resolutions: Arc::new(AtomicU64::new(0)),
+            file_watcher_dropped_events: Arc::new(AtomicU64::new(0)),
             file_event_debounce_task: Arc::new(StdMutex::new(None)),
             file_event_debounce_notify: Arc::new(Notify::new()),
+            file_watcher_event_task: Arc::new(StdMutex::new(None)),
             branch_head_debounce: Arc::new(StdMutex::new(HashMap::new())),
             branch_head_debounce_tasks: Arc::new(StdMutex::new(HashMap::new())),
             watch_registration_tasks: Arc::new(StdMutex::new(Vec::new())),
+            watch_registration_drops: Arc::new(AtomicU64::new(0)),
         }
+    }
+}
+
+const WATCHER_EVENT_CHANNEL_CAPACITY: usize = 4096;
+
+fn watcher_event_is_actionable(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(_)
+            | EventKind::Modify(_)
+            | EventKind::Remove(_)
+            | EventKind::Access(AccessKind::Close(AccessMode::Write))
+    )
+}
+
+fn enqueue_watcher_event(tx: &mpsc::Sender<Event>, dropped_events: &AtomicU64, event: Event) {
+    if !watcher_event_is_actionable(&event.kind) {
+        return;
+    }
+    if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
+        let dropped = dropped_events.fetch_add(1, Ordering::Relaxed) + 1;
+        if dropped == 1 || dropped % 100 == 0 {
+            tracing::warn!(
+                "File watcher dropped {} events because the queue is full",
+                dropped
+            );
+        }
+    }
+}
+
+fn make_watcher_event_callback(
+    tx: mpsc::Sender<Event>,
+    dropped_events: Arc<AtomicU64>,
+) -> impl Fn(notify::Result<Event>) + Send + 'static {
+    move |res| {
+        if let Ok(event) = res {
+            enqueue_watcher_event(&tx, &dropped_events, event);
+        }
+    }
+}
+
+async fn run_file_watcher_event_queue(
+    gcx_weak: Weak<GlobalContext>,
+    mut receiver: mpsc::Receiver<Event>,
+) {
+    let shutdown_flag = match gcx_weak.upgrade() {
+        Some(gcx) => gcx.shutdown_flag.clone(),
+        None => return,
+    };
+    loop {
+        let event = tokio::select! {
+            event = receiver.recv() => event,
+            _ = wait_for_shutdown_flag(shutdown_flag.clone()) => return,
+        };
+        let Some(event) = event else {
+            return;
+        };
+        file_watcher_event(event, gcx_weak.clone()).await;
     }
 }
 
 pub async fn watcher_init(gcx: Arc<GlobalContext>) {
     let gcx_weak = Arc::downgrade(&gcx);
-    let rt = tokio::runtime::Handle::current();
-    let event_callback = move |res| {
-        rt.block_on(async {
-            if let Ok(event) = res {
-                file_watcher_event(event, gcx_weak.clone()).await;
-            }
-        });
-    };
+    let (event_tx, event_rx) = mpsc::channel::<Event>(WATCHER_EVENT_CHANNEL_CAPACITY);
+    let event_callback = make_watcher_event_callback(
+        event_tx,
+        gcx.documents_state.file_watcher_dropped_events.clone(),
+    );
     let watcher = match RecommendedWatcher::new(event_callback, Config::default()) {
         Ok(w) => w,
         Err(e) => {
@@ -778,6 +840,15 @@ pub async fn watcher_init(gcx: Arc<GlobalContext>) {
             return;
         }
     };
+    let old_event_task = std::mem::replace(
+        &mut *gcx.documents_state.file_watcher_event_task.lock().unwrap(),
+        Some(tokio::spawn(run_file_watcher_event_queue(
+            gcx_weak, event_rx,
+        ))),
+    );
+    if let Some(handle) = old_event_task {
+        handle.abort();
+    }
 
     let mut watch_folders = crate::files_correction::get_raw_project_dirs(gcx.clone()).await;
     watch_folders.extend(crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await);
@@ -2089,6 +2160,7 @@ const FILE_EVENT_DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
 #[cfg(test)]
 const FILE_EVENT_DEBOUNCE_WINDOW: Duration = Duration::from_millis(100);
 const FILE_EVENT_DEBOUNCE_RETAIN: Duration = Duration::from_secs(10);
+const MAX_IN_FLIGHT_WATCH_REGISTRATIONS: usize = 64;
 #[cfg(not(test))]
 const BRANCH_HEAD_DEBOUNCE_WINDOW: Duration = Duration::from_secs(2);
 #[cfg(test)]
@@ -2423,8 +2495,8 @@ pub async fn on_explicit_branch_change(gcx: Arc<GlobalContext>, repo_path: &Path
 
 fn schedule_debounced_file_event(
     gcx: Arc<GlobalContext>,
-    queue_path: QueuedPath,
-    kind: DebouncedFileEventKind,
+    raw_path: PathBuf,
+    is_remove_event: bool,
     now: Instant,
 ) {
     {
@@ -2433,11 +2505,10 @@ fn schedule_debounced_file_event(
             now.saturating_duration_since(event.at) <= FILE_EVENT_DEBOUNCE_RETAIN
         });
         debounce.insert(
-            PathBuf::from(queue_path.store_path),
+            raw_path,
             DebouncedFileEvent {
-                read_path: PathBuf::from(queue_path.read_path),
                 at: now,
-                kind,
+                is_remove_event,
             },
         );
     }
@@ -2457,37 +2528,29 @@ fn schedule_debounced_file_event(
     gcx.documents_state.file_event_debounce_notify.notify_one();
 }
 
-fn take_all_debounced_file_events(gcx: &Arc<GlobalContext>) -> Vec<PendingFileEvent> {
+fn take_all_debounced_file_events(gcx: &Arc<GlobalContext>) -> Vec<(PathBuf, bool)> {
     let mut debounce = gcx.documents_state.file_event_debounce.lock().unwrap();
     let mut events = debounce
         .drain()
-        .map(|(store_path, event)| PendingFileEvent {
-            store_path,
-            read_path: event.read_path,
-            kind: event.kind,
-        })
+        .map(|(raw_path, event)| (raw_path, event.is_remove_event))
         .collect::<Vec<_>>();
-    events.sort_by(|a, b| {
-        a.kind_order()
-            .cmp(&b.kind_order())
-            .then_with(|| a.store_path.cmp(&b.store_path))
-    });
+    events.sort();
     events
 }
 
 fn take_due_debounced_file_events(
     gcx: &Arc<GlobalContext>,
     now: Instant,
-) -> (Vec<PendingFileEvent>, Option<Duration>) {
+) -> (Vec<(PathBuf, bool)>, Option<Duration>) {
     let mut debounce = gcx.documents_state.file_event_debounce.lock().unwrap();
     debounce
         .retain(|_, event| now.saturating_duration_since(event.at) <= FILE_EVENT_DEBOUNCE_RETAIN);
     let mut due_paths = Vec::new();
     let mut wait_for: Option<Duration> = None;
-    for (store_path, event) in debounce.iter() {
+    for (raw_path, event) in debounce.iter() {
         let elapsed = now.saturating_duration_since(event.at);
         if elapsed >= FILE_EVENT_DEBOUNCE_WINDOW {
-            due_paths.push(store_path.clone());
+            due_paths.push(raw_path.clone());
         } else {
             let remaining = FILE_EVENT_DEBOUNCE_WINDOW.saturating_sub(elapsed);
             wait_for = Some(wait_for.map_or(remaining, |current| current.min(remaining)));
@@ -2496,19 +2559,88 @@ fn take_due_debounced_file_events(
     let mut due = Vec::new();
     for path in due_paths {
         if let Some(event) = debounce.remove(&path) {
-            due.push(PendingFileEvent {
-                store_path: path,
-                read_path: event.read_path,
-                kind: event.kind,
-            });
+            due.push((path, event.is_remove_event));
         }
     }
-    due.sort_by(|a, b| {
+    due.sort();
+    (due, wait_for)
+}
+
+async fn blocklist_roots_for_file_events(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
+    let mut roots = gcx
+        .documents_state
+        .workspace_vcs_roots
+        .lock()
+        .unwrap()
+        .clone();
+    roots.extend(crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await);
+    let mut roots = roots
+        .into_iter()
+        .map(crate::files_correction::canonicalize_normalized_path)
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+async fn resolve_debounced_file_events(
+    gcx: Arc<GlobalContext>,
+    raw_events: Vec<(PathBuf, bool)>,
+) -> Vec<PendingFileEvent> {
+    if raw_events.is_empty() {
+        return Vec::new();
+    }
+    let indexing_everywhere = reload_indexing_everywhere_if_needed(gcx.clone()).await;
+    let blocklist_roots = blocklist_roots_for_file_events(gcx.clone()).await;
+    let worktree_mappings =
+        crate::files_correction::registered_worktree_path_mappings(gcx.cache_dir.as_path());
+    let global_config_roots = vec![gcx.config_dir.clone()];
+
+    let mut resolved: HashMap<PathBuf, PendingFileEvent> = HashMap::new();
+    for (raw_path, is_remove_event) in raw_events {
+        gcx.documents_state
+            .file_event_resolutions
+            .fetch_add(1, Ordering::Relaxed);
+        let queue_path = resolve_codegraph_queue_path(&raw_path, &worktree_mappings);
+        let store_path = PathBuf::from(&queue_path.store_path);
+        let read_path = PathBuf::from(&queue_path.read_path);
+        let indexing_settings = indexing_everywhere.indexing_for_path(&store_path);
+        let blocklist_path = path_for_blocklist(&store_path, &blocklist_roots);
+        if is_blocklisted(&indexing_settings, &blocklist_path) {
+            continue;
+        }
+        if crate::file_filter::is_generated_index_path_with_global_config_roots(
+            &store_path,
+            &global_config_roots,
+        ) {
+            continue;
+        }
+        let Some(kind) = debounced_file_event_kind_for_path(
+            is_remove_event,
+            &read_path,
+            &store_path,
+            &blocklist_roots,
+            &global_config_roots,
+        ) else {
+            continue;
+        };
+        resolved.insert(
+            store_path.clone(),
+            PendingFileEvent {
+                store_path,
+                read_path,
+                kind,
+            },
+        );
+    }
+
+    let mut events = resolved.into_values().collect::<Vec<_>>();
+    events.sort_by(|a, b| {
         a.kind_order()
             .cmp(&b.kind_order())
             .then_with(|| a.store_path.cmp(&b.store_path))
     });
-    (due, wait_for)
+    events
 }
 
 fn finish_file_event_debounce_worker(gcx: &Arc<GlobalContext>) -> bool {
@@ -2566,17 +2698,19 @@ async fn flush_debounced_file_paths(gcx: Arc<GlobalContext>, events: Vec<Pending
 async fn flush_debounced_file_event_worker(gcx: Arc<GlobalContext>) {
     loop {
         if gcx.shutdown_flag.load(Ordering::Relaxed) {
-            let paths = take_all_debounced_file_events(&gcx);
-            flush_debounced_file_paths(gcx.clone(), paths).await;
+            let raw_events = take_all_debounced_file_events(&gcx);
+            let events = resolve_debounced_file_events(gcx.clone(), raw_events).await;
+            flush_debounced_file_paths(gcx.clone(), events).await;
             if finish_file_event_debounce_worker(&gcx) {
                 return;
             }
             continue;
         }
 
-        let (paths, wait_for) = take_due_debounced_file_events(&gcx, Instant::now());
-        if !paths.is_empty() {
-            flush_debounced_file_paths(gcx.clone(), paths).await;
+        let (raw_events, wait_for) = take_due_debounced_file_events(&gcx, Instant::now());
+        if !raw_events.is_empty() {
+            let events = resolve_debounced_file_events(gcx.clone(), raw_events).await;
+            flush_debounced_file_paths(gcx.clone(), events).await;
             continue;
         }
 
@@ -2675,17 +2809,28 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
         should_watch: bool,
     ) {
         let tasks = gcx.documents_state.watch_registration_tasks.clone();
-        let handle = tokio::spawn(update_directory_watch_registration(
-            gcx,
-            indexing_everywhere,
-            path,
-            should_watch,
-        ));
+        let drops = gcx.documents_state.watch_registration_drops.clone();
         let mut tasks = tasks
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         tasks.retain(|task| !task.is_finished());
-        tasks.push(handle);
+        if tasks.len() >= MAX_IN_FLIGHT_WATCH_REGISTRATIONS {
+            let dropped = drops.fetch_add(1, Ordering::Relaxed) + 1;
+            if dropped == 1 || dropped % 100 == 0 {
+                tracing::warn!(
+                    "File watcher skipped {} directory watch updates because {} subtree rescans are already in flight",
+                    dropped,
+                    MAX_IN_FLIGHT_WATCH_REGISTRATIONS
+                );
+            }
+            return;
+        }
+        tasks.push(tokio::spawn(update_directory_watch_registration(
+            gcx,
+            indexing_everywhere,
+            path,
+            should_watch,
+        )));
     }
 
     async fn on_file_change(gcx_weak: Weak<GlobalContext>, event: Event) {
@@ -2693,7 +2838,6 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
             Some(gcx) => gcx,
             None => return,
         };
-        let indexing_everywhere_arc = reload_indexing_everywhere_if_needed(gcx.clone()).await;
         let maybe_created_dir = match &event.kind {
             EventKind::Create(CreateKind::Folder | CreateKind::Any) => event.paths.first().cloned(),
             EventKind::Modify(ModifyKind::Name(_)) => event.paths.last().cloned(),
@@ -2709,11 +2853,14 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
             }
             _ => None,
         };
-        if let Some(path) = maybe_removed_dir {
-            spawn_watch_registration(gcx.clone(), indexing_everywhere_arc.clone(), path, false);
-        }
-        if let Some(path) = maybe_created_dir {
-            spawn_watch_registration(gcx.clone(), indexing_everywhere_arc.clone(), path, true);
+        if maybe_created_dir.is_some() || maybe_removed_dir.is_some() {
+            let indexing_everywhere_arc = reload_indexing_everywhere_if_needed(gcx.clone()).await;
+            if let Some(path) = maybe_removed_dir {
+                spawn_watch_registration(gcx.clone(), indexing_everywhere_arc.clone(), path, false);
+            }
+            if let Some(path) = maybe_created_dir {
+                spawn_watch_registration(gcx.clone(), indexing_everywhere_arc, path, true);
+            }
         }
         if event.paths.iter().any(|p| path_triggers_registry_reload(p)) {
             crate::yaml_configs::customization_registry::invalidate_all_registry_caches(
@@ -2747,52 +2894,13 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
         {
             gcx.enrichment_generation.fetch_add(1, Ordering::SeqCst);
         }
-        let mut blocklist_roots = gcx
-            .documents_state
-            .workspace_vcs_roots
-            .lock()
-            .unwrap()
-            .clone();
-        blocklist_roots
-            .extend(crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await);
-        blocklist_roots = blocklist_roots
-            .into_iter()
-            .map(crate::files_correction::canonicalize_normalized_path)
-            .collect();
-        blocklist_roots.sort();
-        blocklist_roots.dedup();
-        let worktree_mappings =
-            crate::files_correction::registered_worktree_path_mappings(gcx.cache_dir.as_path());
-        let global_config_roots = vec![gcx.config_dir.clone()];
         let debounce_now = Instant::now();
         let is_remove_event = matches!(&event.kind, EventKind::Remove(_));
         for p in &event.paths {
             if path_is_refact_internal(p) {
                 continue;
             }
-            let queue_path = resolve_codegraph_queue_path(p, &worktree_mappings);
-            let store_path = PathBuf::from(&queue_path.store_path);
-            let read_path = PathBuf::from(&queue_path.read_path);
-            let indexing_settings = indexing_everywhere_arc.indexing_for_path(&store_path);
-            let blocklist_path = path_for_blocklist(&store_path, &blocklist_roots);
-            if is_blocklisted(&indexing_settings, &blocklist_path) {
-                continue;
-            }
-            if crate::file_filter::is_generated_index_path_with_global_config_roots(
-                &store_path,
-                &global_config_roots,
-            ) {
-                continue;
-            }
-            if let Some(kind) = debounced_file_event_kind_for_path(
-                is_remove_event,
-                &read_path,
-                &store_path,
-                &blocklist_roots,
-                &global_config_roots,
-            ) {
-                schedule_debounced_file_event(gcx.clone(), queue_path, kind, debounce_now);
-            }
+            schedule_debounced_file_event(gcx.clone(), p.clone(), is_remove_event, debounce_now);
         }
     }
     async fn on_dot_git_dir_change(gcx_weak: Weak<GlobalContext>, event: Event) {
@@ -4289,6 +4397,148 @@ mod tests {
         assert!(head.is_none());
     }
 
+    fn modify_event(path: &Path) -> notify::Event {
+        notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(path.to_path_buf())
+    }
+
+    #[test]
+    fn target_e2e_is_blocklisted() {
+        let root = normalized(Path::new("/repo"));
+        let indexing_everywhere = IndexingEverywhere::default();
+
+        for blocked in [
+            Path::new("refact-agent").join("engine").join("target"),
+            Path::new("refact-agent").join("engine").join("target-e2e"),
+            Path::new("refact-agent")
+                .join("engine")
+                .join("target-e2e")
+                .join("debug"),
+        ] {
+            assert!(
+                path_is_excluded_from_watch(&root, &root.join(&blocked), &indexing_everywhere),
+                "{} must be excluded from watching",
+                blocked.display()
+            );
+        }
+
+        for kept in [
+            PathBuf::from("targeting"),
+            Path::new("src").join("targeting").join("rules"),
+            PathBuf::from("targets"),
+            Path::new("refact-agent").join("engine").join("src"),
+        ] {
+            assert!(
+                !path_is_excluded_from_watch(&root, &root.join(&kept), &indexing_everywhere),
+                "{} must stay watched",
+                kept.display()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn watcher_callback_does_not_block_on_runtime() {
+        let (tx, mut rx) = mpsc::channel::<Event>(8);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let callback = make_watcher_event_callback(tx, dropped.clone());
+        let path = PathBuf::from("/tmp/refact-watcher-callback/lib.rs");
+        let event = modify_event(&path);
+
+        // notify delivers events on its own thread, which has no tokio runtime:
+        // any block_on/Handle::current() in the callback would panic here.
+        std::thread::spawn(move || callback(Ok(event)))
+            .join()
+            .unwrap();
+
+        let received = rx.try_recv().expect("callback must enqueue the event");
+        assert_eq!(received.paths, vec![path]);
+        assert!(rx.try_recv().is_err(), "callback must enqueue exactly once");
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn dropped_events_are_counted_under_backpressure() {
+        let (tx, _rx) = mpsc::channel::<Event>(1);
+        let dropped = AtomicU64::new(0);
+
+        enqueue_watcher_event(&tx, &dropped, modify_event(Path::new("/tmp/a.rs")));
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+
+        enqueue_watcher_event(&tx, &dropped, modify_event(Path::new("/tmp/b.rs")));
+        enqueue_watcher_event(&tx, &dropped, modify_event(Path::new("/tmp/c.rs")));
+        assert_eq!(
+            dropped.load(Ordering::Relaxed),
+            2,
+            "events refused by a full queue must be counted"
+        );
+
+        let ignored = notify::Event::new(notify::EventKind::Access(AccessKind::Open(
+            AccessMode::Read,
+        )))
+        .add_path(PathBuf::from("/tmp/d.rs"));
+        enqueue_watcher_event(&tx, &dropped, ignored);
+        assert_eq!(
+            dropped.load(Ordering::Relaxed),
+            2,
+            "events the watcher never acts on are filtered, not dropped"
+        );
+
+        assert!(watcher_event_is_actionable(&EventKind::Access(
+            AccessKind::Close(AccessMode::Write)
+        )));
+        assert!(!watcher_event_is_actionable(&EventKind::Any));
+        assert!(!watcher_event_is_actionable(&EventKind::Other));
+    }
+
+    #[tokio::test]
+    async fn expensive_path_resolution_happens_after_debounce() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        allow_all_privacy(&gcx);
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("src").join("hot.rs");
+        write_file(&file, "pub fn hot() {}\n");
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![normalized(temp.path())];
+        let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        *gcx.codegraph.lock().await = Some(service.clone());
+
+        for _ in 0..10 {
+            file_watcher_event(modify_event(&file), Arc::downgrade(&gcx)).await;
+        }
+
+        assert_eq!(
+            gcx.documents_state
+                .file_event_debounce
+                .lock()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            gcx.documents_state
+                .file_event_resolutions
+                .load(Ordering::Relaxed),
+            0,
+            "no path resolution may happen before the debounce window elapses"
+        );
+
+        tokio::time::sleep(FILE_EVENT_DEBOUNCE_WINDOW + Duration::from_millis(80)).await;
+
+        assert_eq!(
+            gcx.documents_state
+                .file_event_resolutions
+                .load(Ordering::Relaxed),
+            1,
+            "10 rapid events on one path must resolve the path exactly once"
+        );
+        assert_eq!(
+            service.drain_batch(10),
+            vec![normalized(&file).to_string_lossy().to_string()]
+        );
+
+        gcx.shutdown_flag.store(true, Ordering::Relaxed);
+        gcx.documents_state.file_event_debounce_notify.notify_one();
+    }
+
     #[tokio::test]
     async fn debounced_duplicate_events_single_enqueue() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -4449,21 +4699,17 @@ mod tests {
         write_worktree_registry(&cache_dir, &source, &worktree);
         let mappings = crate::files_correction::registered_worktree_path_mappings(&cache_dir);
         let queue_path = resolve_codegraph_queue_path(&worktree_file, &mappings);
-        let mut debounce = HashMap::new();
 
-        debounce.insert(
+        assert_eq!(
             PathBuf::from(&queue_path.store_path),
-            DebouncedFileEvent {
-                read_path: PathBuf::from(&queue_path.read_path),
-                at: Instant::now(),
-                kind: DebouncedFileEventKind::Upsert,
-            },
+            normalized(&source_file),
+            "index key should be the canonical source path"
         );
-
-        let event = debounce
-            .remove(&normalized(&source_file))
-            .expect("debounce key should be canonical source path");
-        assert_eq!(event.read_path, normalized(&worktree_file));
+        assert_eq!(
+            PathBuf::from(&queue_path.read_path),
+            normalized(&worktree_file),
+            "content must still be read from the worktree"
+        );
     }
 
     #[tokio::test]
@@ -4493,16 +4739,18 @@ mod tests {
             .add_path(worktree_file.clone());
         file_watcher_event(event, Arc::downgrade(&gcx)).await;
 
-        let event = gcx
-            .documents_state
-            .file_event_debounce
-            .lock()
-            .unwrap()
-            .get(&normalized(&source_file))
-            .cloned()
-            .expect("remove event should be keyed by canonical source path");
-        assert_eq!(event.kind, DebouncedFileEventKind::Remove);
-        assert_eq!(event.read_path, normalized(&worktree_file));
+        let raw_events = take_all_debounced_file_events(&gcx);
+        assert_eq!(
+            raw_events,
+            vec![(worktree_file.clone(), true)],
+            "the debounce key must stay the raw event path, no canonicalization yet"
+        );
+
+        let resolved = resolve_debounced_file_events(gcx.clone(), raw_events).await;
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].kind, DebouncedFileEventKind::Remove);
+        assert_eq!(resolved[0].store_path, normalized(&source_file));
+        assert_eq!(resolved[0].read_path, normalized(&worktree_file));
         gcx.shutdown_flag.store(true, Ordering::Relaxed);
         gcx.documents_state.file_event_debounce_notify.notify_one();
     }
@@ -4520,24 +4768,8 @@ mod tests {
         *gcx.codegraph.lock().await = Some(service.clone());
 
         let now = Instant::now();
-        schedule_debounced_file_event(
-            gcx.clone(),
-            QueuedPath::new(
-                normalized(&first).to_string_lossy().to_string(),
-                normalized(&first).to_string_lossy().to_string(),
-            ),
-            DebouncedFileEventKind::Upsert,
-            now,
-        );
-        schedule_debounced_file_event(
-            gcx.clone(),
-            QueuedPath::new(
-                normalized(&second).to_string_lossy().to_string(),
-                normalized(&second).to_string_lossy().to_string(),
-            ),
-            DebouncedFileEventKind::Upsert,
-            now,
-        );
+        schedule_debounced_file_event(gcx.clone(), normalized(&first), false, now);
+        schedule_debounced_file_event(gcx.clone(), normalized(&second), false, now);
         {
             let task = gcx.documents_state.file_event_debounce_task.lock().unwrap();
             assert!(task.is_some());

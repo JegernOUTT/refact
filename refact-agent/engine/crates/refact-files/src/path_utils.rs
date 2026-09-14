@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
 use serde::Deserialize;
 use tokio::process::Command;
 
@@ -131,18 +134,49 @@ pub fn canonicalize_normalized_path(p: PathBuf) -> PathBuf {
         })
 }
 
+const GLOB_PATTERN_CACHE_CAPACITY: usize = 1024;
+
+static GLOB_PATTERN_CACHE: OnceLock<RwLock<HashMap<String, Option<Arc<glob::Pattern>>>>> =
+    OnceLock::new();
+static GLOB_PATTERN_COMPILATIONS: AtomicU64 = AtomicU64::new(0);
+
+pub fn glob_pattern_compile_count() -> u64 {
+    GLOB_PATTERN_COMPILATIONS.load(Ordering::Relaxed)
+}
+
+fn compiled_glob_pattern(glob: &str) -> Option<Arc<glob::Pattern>> {
+    let cache = GLOB_PATTERN_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Some(cached) = cache
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(glob)
+    {
+        return cached.clone();
+    }
+    let compiled = match glob::Pattern::new(glob) {
+        Ok(pattern) => Some(Arc::new(pattern)),
+        Err(error) => {
+            tracing::warn!("Invalid glob pattern '{}': {}", glob, error);
+            None
+        }
+    };
+    GLOB_PATTERN_COMPILATIONS.fetch_add(1, Ordering::Relaxed);
+    let mut cache = cache
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.len() >= GLOB_PATTERN_CACHE_CAPACITY {
+        cache.clear();
+    }
+    cache.insert(glob.to_string(), compiled.clone());
+    compiled
+}
+
 pub fn any_glob_matches_path(globs: &[String], path: &Path) -> bool {
     globs.iter().any(|glob| {
-        let pattern = match glob::Pattern::new(glob) {
-            Ok(pattern) => pattern,
-            Err(error) => {
-                tracing::warn!("Invalid glob pattern '{}': {}", glob, error);
-                return false;
-            }
+        let Some(pattern) = compiled_glob_pattern(glob) else {
+            return false;
         };
-        let mut matches = pattern.matches_path(path);
-        matches |= path.to_str().map_or(false, |s: &str| s.ends_with(glob));
-        matches
+        pattern.matches_path(path) || path.to_str().is_some_and(|s: &str| s.ends_with(glob))
     })
 }
 
@@ -198,6 +232,49 @@ mod tests {
     #[test]
     fn test_any_glob_matches_path_rejects_malformed_glob() {
         assert!(!any_glob_matches_path(&["[".to_string()], Path::new("/a")));
+    }
+
+    #[test]
+    fn target_sibling_build_dirs_need_the_hyphen_glob() {
+        let target = Path::new("__root__/refact-agent/engine/target/__probe__");
+        let target_e2e = Path::new("__root__/refact-agent/engine/target-e2e/__probe__");
+        let target_e2e_debug = Path::new("__root__/refact-agent/engine/target-e2e/debug/__probe__");
+        let targeting = Path::new("__root__/refact-agent/engine/targeting/__probe__");
+        let before_fix = vec!["*/target/*".to_string()];
+        let after_fix = vec!["*/target/*".to_string(), "*/target-*/*".to_string()];
+
+        assert!(any_glob_matches_path(&before_fix, target));
+        assert!(
+            !any_glob_matches_path(&before_fix, target_e2e),
+            "this is the gap the extra glob closes"
+        );
+
+        assert!(any_glob_matches_path(&after_fix, target));
+        assert!(any_glob_matches_path(&after_fix, target_e2e));
+        assert!(any_glob_matches_path(&after_fix, target_e2e_debug));
+        assert!(
+            !any_glob_matches_path(&after_fix, targeting),
+            "a source dir whose name merely starts with target must stay indexed"
+        );
+    }
+
+    #[test]
+    fn glob_patterns_compiled_once_per_generation() {
+        let path = Path::new("/repo/refact-agent/engine/target-e2e/debug/app");
+        let globs = vec![
+            "[".to_string(),
+            "*/target/*".to_string(),
+            "*/target-*/*".to_string(),
+        ];
+
+        assert!(any_glob_matches_path(&globs, path));
+        let compilations_after_warmup = glob_pattern_compile_count();
+
+        for _ in 0..256 {
+            assert!(any_glob_matches_path(&globs, path));
+        }
+
+        assert_eq!(glob_pattern_compile_count(), compilations_after_warmup);
     }
 
     #[test]
