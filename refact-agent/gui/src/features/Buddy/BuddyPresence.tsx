@@ -11,15 +11,17 @@ export function BuddyPresence({
   state,
   headline,
   speech,
-  playOpen,
-  onPlay,
+  sceneMounted,
+  sceneToggleLabel,
+  onToggleScene,
   onControl,
 }: {
   state: BuddySemanticState;
   headline: string;
   speech: BuddySceneSpeech | null;
-  playOpen: boolean;
-  onPlay: () => void;
+  sceneMounted: boolean;
+  sceneToggleLabel: string;
+  onToggleScene: () => void;
   onControl: (control: BuddyControl) => void | Promise<void>;
 }) {
   const [pendingId, setPendingId] = useState<string | null>(null);
@@ -58,7 +60,7 @@ export function BuddyPresence({
       data-testid="buddy-presence"
     >
       <header className={styles.header}>
-        {!playOpen && !textOnly && (
+        {!sceneMounted && !textOnly && (
           <div
             className={styles.avatar}
             aria-hidden="true"
@@ -78,10 +80,10 @@ export function BuddyPresence({
         <Button
           size="sm"
           variant="ghost"
-          onClick={onPlay}
-          aria-expanded={playOpen}
+          onClick={onToggleScene}
+          aria-expanded={sceneMounted}
         >
-          {playOpen ? "Close Play" : "Open Play"}
+          {sceneToggleLabel}
         </Button>
         <Button
           size="sm"

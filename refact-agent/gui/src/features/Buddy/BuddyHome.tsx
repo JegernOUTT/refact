@@ -1047,8 +1047,9 @@ const BuddyHomeContent: React.FC = () => {
             state={state}
             headline={snapshot.state.semantic.headline}
             speech={activeTab === "play" ? null : heroSpeech}
-            playOpen={sceneOpen}
-            onPlay={handleToggleScene}
+            sceneMounted={sceneOpen}
+            sceneToggleLabel={sceneOpen ? "Close Play" : "Open Play"}
+            onToggleScene={handleToggleScene}
             onControl={handleSpeechControl}
           />
         </div>

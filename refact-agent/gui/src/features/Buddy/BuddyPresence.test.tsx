@@ -22,13 +22,43 @@ describe("Buddy presence", () => {
   afterEach(() =>
     window.localStorage.removeItem("refact.buddy.text-presence.v1"),
   );
+  it("hides the mini avatar while the full scene is mounted and shows it when it is not", () => {
+    const props = {
+      state: createInitialSemanticState(),
+      headline: "Ready",
+      speech,
+      onToggleScene: vi.fn(),
+      onControl: vi.fn(),
+    };
+    const view = render(
+      <BuddyPresence {...props} sceneMounted sceneToggleLabel="Close Play" />,
+    );
+    expect(screen.queryByTestId("buddy-presence-avatar")).toBeNull();
+    expect(screen.getByRole("button", { name: "Close Play" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    view.rerender(
+      <BuddyPresence
+        {...props}
+        sceneMounted={false}
+        sceneToggleLabel="Open Play"
+      />,
+    );
+    expect(screen.getByTestId("buddy-presence-avatar")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open Play" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
   it("unmounts the decorative avatar in text-only mode while keeping controls usable", () => {
     const props = {
       state: createInitialSemanticState(),
       headline: "Ready",
       speech,
-      playOpen: false,
-      onPlay: vi.fn(),
+      sceneMounted: false,
+      sceneToggleLabel: "Open Play",
+      onToggleScene: vi.fn(),
       onControl: vi.fn(),
     };
     const view = render(<BuddyPresence {...props} />);
@@ -57,8 +87,9 @@ describe("Buddy presence", () => {
         state={createInitialSemanticState()}
         headline="Ready"
         speech={speech}
-        playOpen={false}
-        onPlay={vi.fn()}
+        sceneMounted={false}
+        sceneToggleLabel="Open Play"
+        onToggleScene={vi.fn()}
         onControl={onControl}
       />,
     );
@@ -81,8 +112,9 @@ describe("Buddy presence", () => {
     const props = {
       state: createInitialSemanticState(),
       headline: "Ready",
-      playOpen: false,
-      onPlay: vi.fn(),
+      sceneMounted: false,
+      sceneToggleLabel: "Open Play",
+      onToggleScene: vi.fn(),
       onControl,
     };
     const view = render(<BuddyPresence {...props} speech={speech} />);
