@@ -201,16 +201,21 @@ impl DeliveryReport {
                 let state = prior_state
                     .map(|state| state.to_string())
                     .unwrap_or_else(|| "unavailable".to_string());
+                // Exhaustive on purpose: a new dropped outcome must not fall
+                // through into the phrasing reserved for a delivery that landed.
                 match outcome {
                     DeliveryOutcome::Duplicate => format!(
-                        "{} message was NOT delivered: the delivery layer recognised it as a duplicate of an already-sent message.",
-                        action
+                        "{action} message was NOT delivered: the delivery layer recognised it as a duplicate of an already-sent message."
                     ),
-                    _ => format!(
-                        "{} message {}; prior agent state: {}",
-                        action,
-                        self.short_status(),
-                        state
+                    DeliveryOutcome::Expired => format!(
+                        "{action} message was NOT delivered: its deadline passed before a boundary opened."
+                    ),
+                    DeliveryOutcome::Superseded => format!(
+                        "{action} message was NOT delivered: a newer message with the same key replaced it."
+                    ),
+                    DeliveryOutcome::Queued | DeliveryOutcome::Delivered => format!(
+                        "{action} message {}; prior agent state: {state}",
+                        self.short_status()
                     ),
                 }
             }
@@ -494,22 +499,38 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_outcome_is_never_reported_as_reaching_the_agent() {
-        let duplicate = DeliveryReport::Delivered {
-            outcome: DeliveryOutcome::Duplicate,
-            prior_state: Some(SessionState::Idle),
-        };
-        assert!(!duplicate.reached_agent());
-        assert!(duplicate.short_status().starts_with("not delivered"));
-        assert!(duplicate.describe("Steer").contains("NOT delivered"));
+    fn dropped_outcomes_are_never_reported_as_reaching_the_agent() {
+        for (outcome, wire) in [
+            (DeliveryOutcome::Duplicate, "duplicate"),
+            (DeliveryOutcome::Expired, "expired"),
+            (DeliveryOutcome::Superseded, "superseded"),
+        ] {
+            let report = DeliveryReport::Delivered {
+                outcome,
+                prior_state: Some(SessionState::Idle),
+            };
+            assert!(!report.reached_agent(), "{wire}");
+            assert!(report.short_status().starts_with("not delivered"), "{wire}");
+            assert!(report.describe("Steer").contains("NOT delivered"), "{wire}");
+            let receipt = report.receipt();
+            assert_eq!(receipt["outcome"], wire);
+            assert_eq!(receipt["reached"], false, "{wire}");
+        }
 
-        for outcome in [DeliveryOutcome::Queued, DeliveryOutcome::Delivered] {
+        for (outcome, wire) in [
+            (DeliveryOutcome::Queued, "queued"),
+            (DeliveryOutcome::Delivered, "delivered"),
+        ] {
             let report = DeliveryReport::Delivered {
                 outcome,
                 prior_state: None,
             };
-            assert!(report.reached_agent());
-            assert!(!report.short_status().starts_with("not delivered"));
+            assert!(report.reached_agent(), "{wire}");
+            assert!(
+                !report.short_status().starts_with("not delivered"),
+                "{wire}"
+            );
+            assert_eq!(report.receipt()["outcome"], wire);
         }
     }
 

@@ -1461,6 +1461,45 @@ impl PendingDelivery {
         }
     }
 
+    /// Absolute deadline `base_ms + ttl_secs * 1000`. Saturating in both steps,
+    /// so a caller-supplied ttl can never wrap the epoch into the past and turn
+    /// a long-lived delivery into an instantly expired one.
+    pub fn deadline_ms(base_ms: u64, ttl_secs: u64) -> u64 {
+        base_ms.saturating_add(ttl_secs.saturating_mul(1000))
+    }
+
+    /// Stamp the deadline from this delivery's own enqueue time, so a delivery
+    /// that sat on disk across a restart keeps its original lifetime.
+    pub fn set_ttl_secs(&mut self, ttl_secs: u64) {
+        self.expires_at_ms = Some(Self::deadline_ms(self.enqueued_at_ms, ttl_secs));
+    }
+
+    /// Fill a missing deadline with the configured default ttl. An unknown
+    /// enqueue time (legacy record) is treated as `now_ms` rather than 1970.
+    pub fn ensure_ttl_secs(&mut self, now_ms: u64, ttl_secs: u64) {
+        if self.enqueued_at_ms == 0 {
+            self.enqueued_at_ms = now_ms;
+        }
+        if self.expires_at_ms.is_none() {
+            self.set_ttl_secs(ttl_secs);
+        }
+    }
+
+    pub fn is_expired_at(&self, now_ms: u64) -> bool {
+        self.expires_at_ms
+            .is_some_and(|deadline| deadline <= now_ms)
+    }
+
+    /// Two deliveries belong to the same logical stream only when both carry
+    /// the same non-empty supersede key.
+    pub fn supersedes(&self, other: &Self) -> bool {
+        self.id != other.id
+            && self
+                .supersede_key
+                .as_deref()
+                .is_some_and(|key| other.supersede_key.as_deref() == Some(key))
+    }
+
     /// Short human-readable text used for queue previews and UI rows.
     pub fn preview_text(&self) -> String {
         self.messages
@@ -1588,5 +1627,61 @@ mod delivery_tests {
         assert_eq!(minimal.push, PushMode::Append);
         assert!(!minimal.wake);
         assert!(minimal.messages.is_empty());
+        assert!(minimal.expires_at_ms.is_none());
+        assert!(minimal.supersede_key.is_none());
+    }
+
+    #[test]
+    fn delivery_deadline_saturates_instead_of_wrapping_into_the_past() {
+        assert_eq!(PendingDelivery::deadline_ms(1_000, 2), 3_000);
+        assert_eq!(PendingDelivery::deadline_ms(1_000, u64::MAX), u64::MAX);
+        assert_eq!(PendingDelivery::deadline_ms(u64::MAX, 1), u64::MAX);
+
+        let mut delivery =
+            PendingDelivery::with_id("huge", Vec::new(), PushMode::Append, "test", false);
+        delivery.enqueued_at_ms = 5_000;
+        delivery.set_ttl_secs(u64::MAX);
+        assert_eq!(delivery.expires_at_ms, Some(u64::MAX));
+        assert!(!delivery.is_expired_at(u64::MAX - 1));
+    }
+
+    #[test]
+    fn ensure_ttl_measures_from_enqueue_and_heals_unknown_enqueue_time() {
+        let mut kept =
+            PendingDelivery::with_id("kept", Vec::new(), PushMode::Append, "test", false);
+        kept.enqueued_at_ms = 10_000;
+        kept.expires_at_ms = Some(11_000);
+        kept.ensure_ttl_secs(90_000, 60);
+        assert_eq!(kept.expires_at_ms, Some(11_000));
+
+        let mut aged =
+            PendingDelivery::with_id("aged", Vec::new(), PushMode::Append, "test", false);
+        aged.enqueued_at_ms = 10_000;
+        aged.ensure_ttl_secs(90_000, 60);
+        assert_eq!(aged.expires_at_ms, Some(70_000));
+        assert!(aged.is_expired_at(90_000));
+
+        let mut legacy: PendingDelivery =
+            serde_json::from_value(serde_json::json!({"id": "legacy"})).unwrap();
+        legacy.ensure_ttl_secs(90_000, 60);
+        assert_eq!(legacy.enqueued_at_ms, 90_000);
+        assert_eq!(legacy.expires_at_ms, Some(150_000));
+        assert!(!legacy.is_expired_at(90_000));
+    }
+
+    #[test]
+    fn supersession_only_matches_the_same_non_empty_key() {
+        let keyed = |id: &str, key: Option<&str>| {
+            let mut delivery =
+                PendingDelivery::with_id(id, Vec::new(), PushMode::Append, "test", false);
+            delivery.supersede_key = key.map(str::to_string);
+            delivery
+        };
+        let newer = keyed("b", Some("steer:card-1"));
+        assert!(newer.supersedes(&keyed("a", Some("steer:card-1"))));
+        assert!(!newer.supersedes(&keyed("a", Some("steer:card-2"))));
+        assert!(!newer.supersedes(&keyed("a", None)));
+        assert!(!newer.supersedes(&newer));
+        assert!(!keyed("c", None).supersedes(&keyed("a", None)));
     }
 }

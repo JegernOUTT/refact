@@ -3406,6 +3406,12 @@ async fn runner_capacity_wait<T>(
     }
 }
 
+/// Tools whose whole job is to block: the runner parks its execution permit for
+/// the duration instead of occupying a slot while idle.
+pub(crate) fn is_recognized_runner_wait_name(name: &str) -> bool {
+    matches!(name, "agent_wait" | "process_wait" | "sleep")
+}
+
 fn recognized_runner_wait(catalog: &ToolCatalogSnapshot, call: &ChatToolCall) -> bool {
     let name = if catalog
         .index
@@ -3417,7 +3423,7 @@ fn recognized_runner_wait(catalog: &ToolCatalogSnapshot, call: &ChatToolCall) ->
     } else {
         crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(&call.function.name)
     };
-    matches!(name.as_str(), "agent_wait" | "process_wait" | "sleep")
+    is_recognized_runner_wait_name(&name)
         && catalog.index.tools.iter().any(|desc| {
             desc.name == name
                 && matches!(

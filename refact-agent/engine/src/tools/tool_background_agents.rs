@@ -1211,11 +1211,18 @@ impl Tool for ToolAgentWait {
         }
         // Every id is authorized before any wait starts, so a guessed id can
         // neither leak a peer's status nor keep the caller waiting.
+        let mut already_terminal = None;
         for agent_id in &targets {
-            app.agents
+            let record = app
+                .agents
                 .get(&parent_chat_id, agent_id)
                 .await
                 .map_err(|error| map_registry_error(agent_id, error))?;
+            // Argument order is the tie-break, so several already-finished
+            // agents always settle on the same one.
+            if already_terminal.is_none() && record.status.is_terminal() {
+                already_terminal = Some((agent_id.clone(), record));
+            }
         }
         let waits = targets.iter().map(|agent_id| {
             let app = app.clone();
@@ -1234,18 +1241,20 @@ impl Tool for ToolAgentWait {
                 (agent_id, record)
             })
         });
-        let mut pending: Vec<_> = waits.collect();
-        let mut first_terminal = None;
-        while !pending.is_empty() {
-            let ((agent_id, result), _, rest) = futures::future::select_all(pending).await;
-            pending = rest;
-            match result {
-                Ok(record) if record.status.is_terminal() => {
-                    first_terminal = Some((agent_id, record));
-                    break;
+        let mut first_terminal = already_terminal;
+        if first_terminal.is_none() {
+            let mut pending: Vec<_> = waits.collect();
+            while !pending.is_empty() {
+                let ((agent_id, result), _, rest) = futures::future::select_all(pending).await;
+                pending = rest;
+                match result {
+                    Ok(record) if record.status.is_terminal() => {
+                        first_terminal = Some((agent_id, record));
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error) => return Err(error),
                 }
-                Ok(_) => {}
-                Err(error) => return Err(error),
             }
         }
         let mut lines = Vec::new();
@@ -1991,6 +2000,231 @@ mod tests {
         );
         assert!(timed_out.contains("Timed out"));
         assert!(timed_out.contains("still running"));
+    }
+
+    #[test]
+    fn agent_wait_targets_dedupe_and_respect_the_settings_bound() {
+        let max = 3;
+        assert_eq!(
+            parse_wait_targets(
+                &args(&[
+                    ("agent_ids", json!(["a", "b", "a", " b ", "c"])),
+                    ("agent_id", json!("b")),
+                ]),
+                max
+            )
+            .unwrap(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        );
+        assert!(parse_wait_targets(&args(&[("agent_ids", json!([]))]), max).is_err());
+        assert!(parse_wait_targets(&args(&[]), max).is_err());
+        assert!(parse_wait_targets(&args(&[("agent_ids", json!(["a", 7]))]), max).is_err());
+        assert!(parse_wait_targets(&args(&[("agent_ids", json!("a"))]), max).is_err());
+        let over = parse_wait_targets(&args(&[("agent_ids", json!(["a", "b", "c", "d"]))]), max)
+            .unwrap_err();
+        assert!(over.contains("at most 3"), "{over}");
+
+        let settings = refact_work_core::coordination_settings();
+        assert!(parse_wait_timeout_ms(
+            &args(&[("timeout_ms", json!(settings.agent_wait_max_ms + 1))]),
+            settings.agent_wait_default_ms,
+            settings.agent_wait_max_ms,
+        )
+        .is_err());
+        assert!(parse_wait_timeout_ms(
+            &args(&[("timeout_ms", json!(0))]),
+            settings.agent_wait_default_ms,
+            settings.agent_wait_max_ms,
+        )
+        .is_err());
+        assert_eq!(
+            parse_wait_timeout_ms(
+                &args(&[]),
+                settings.agent_wait_default_ms,
+                settings.agent_wait_max_ms
+            )
+            .unwrap(),
+            settings.agent_wait_default_ms
+        );
+    }
+
+    #[test]
+    fn agent_wait_is_a_recognized_runner_wait_so_no_permit_is_held() {
+        let desc = ToolAgentWait {
+            config_path: String::new(),
+        }
+        .tool_description();
+        assert!(
+            crate::chat::tools::is_recognized_runner_wait_name(&desc.name),
+            "agent_wait must park the runner's execution permit instead of holding it"
+        );
+        assert!(matches!(
+            desc.source.source_type,
+            crate::tools::tools_description::ToolSourceType::Builtin
+        ));
+    }
+
+    #[tokio::test]
+    async fn agent_wait_any_rejects_every_unauthorized_id_before_disclosing_anything() {
+        let (_temp, app, ccx) = test_context(PARENT).await;
+        let mine = create_agent(&app, PARENT, BgAgentKind::Subagent, "Mine").await;
+        let foreign = create_agent(&app, OTHER_PARENT, BgAgentKind::Subagent, "Foreign").await;
+        app.agents
+            .mark_completed(&foreign.agent_id, completion("foreign secret"))
+            .await
+            .unwrap();
+
+        for ids in [
+            json!([foreign.agent_id.clone(), mine.agent_id.clone()]),
+            json!([mine.agent_id.clone(), foreign.agent_id.clone()]),
+            json!([mine.agent_id.clone(), "bgagent-guessed".to_string()]),
+        ] {
+            let error = ToolAgentWait {
+                config_path: String::new(),
+            }
+            .tool_execute(
+                ccx.clone(),
+                &"denied".to_string(),
+                &args(&[("agent_ids", ids.clone()), ("timeout_ms", json!(1000))]),
+            )
+            .await
+            .unwrap_err();
+            assert!(!error.contains("foreign secret"), "{error}");
+            assert!(!error.contains("Foreign"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_wait_any_settles_once_on_argument_order_when_several_are_terminal() {
+        let (_temp, app, ccx) = test_context(PARENT).await;
+        let first = create_agent(&app, PARENT, BgAgentKind::Subagent, "First done").await;
+        let second = create_agent(&app, PARENT, BgAgentKind::Subagent, "Second done").await;
+        for (record, summary) in [(&first, "first result"), (&second, "second result")] {
+            app.agents
+                .mark_completed(&record.agent_id, completion(summary))
+                .await
+                .unwrap();
+        }
+
+        for _ in 0..5 {
+            let output = output_text(
+                ToolAgentWait {
+                    config_path: String::new(),
+                }
+                .tool_execute(
+                    ccx.clone(),
+                    &"any".to_string(),
+                    &args(&[
+                        (
+                            "agent_ids",
+                            json!([first.agent_id.clone(), second.agent_id.clone()]),
+                        ),
+                        ("timeout_ms", json!(1000)),
+                    ]),
+                )
+                .await
+                .unwrap(),
+            );
+            assert!(output.contains(&format!("First terminal agent: {}", first.agent_id)));
+            assert!(output.contains("first result"));
+            assert!(!output.contains("Timed out"));
+            assert_eq!(
+                output.matches("First terminal agent:").count(),
+                1,
+                "a wait settles exactly once"
+            );
+            assert!(output.contains(&format!("- {}: completed", second.agent_id)));
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_wait_any_timeout_lists_still_pending_ids_truthfully() {
+        let (_temp, app, ccx) = test_context(PARENT).await;
+        let running = create_agent(&app, PARENT, BgAgentKind::Subagent, "Running").await;
+        let queued = create_agent(&app, PARENT, BgAgentKind::Subagent, "Queued").await;
+        app.agents
+            .mark_running(&running.agent_id, "subchat-running".to_string())
+            .await
+            .unwrap();
+
+        let output = output_text(
+            ToolAgentWait {
+                config_path: String::new(),
+            }
+            .tool_execute(
+                ccx,
+                &"timeout".to_string(),
+                &args(&[
+                    (
+                        "agent_ids",
+                        json!([running.agent_id.clone(), queued.agent_id.clone()]),
+                    ),
+                    ("timeout_ms", json!(20)),
+                ]),
+            )
+            .await
+            .unwrap(),
+        );
+
+        assert!(output.contains("⏰ Timed out after 20ms — none of 2 agents finished."));
+        assert!(!output.contains("First terminal agent:"));
+        assert!(output.contains(&format!("- {}: running", running.agent_id)));
+        assert!(output.contains(&format!("- {}: queued", queued.agent_id)));
+    }
+
+    #[tokio::test]
+    async fn agent_wait_any_cancellation_racing_a_timeout_settles_exactly_once() {
+        for delay_ms in [0, 10, 20, 30] {
+            let (_temp, app, ccx) = test_context(PARENT).await;
+            let racer = create_agent(&app, PARENT, BgAgentKind::Subagent, "Racer").await;
+            let other = create_agent(&app, PARENT, BgAgentKind::Subagent, "Other").await;
+            for record in [&racer, &other] {
+                app.agents
+                    .mark_running(&record.agent_id, format!("subchat-{}", record.agent_id))
+                    .await
+                    .unwrap();
+            }
+            let racer_id = racer.agent_id.clone();
+            let registry = app.agents.clone();
+            let canceller = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                registry
+                    .cancel(PARENT, &racer_id, Some("raced".to_string()))
+                    .await
+                    .unwrap();
+            });
+
+            let output = output_text(
+                ToolAgentWait {
+                    config_path: String::new(),
+                }
+                .tool_execute(
+                    ccx,
+                    &"race".to_string(),
+                    &args(&[
+                        (
+                            "agent_ids",
+                            json!([racer.agent_id.clone(), other.agent_id.clone()]),
+                        ),
+                        ("timeout_ms", json!(20)),
+                    ]),
+                )
+                .await
+                .unwrap(),
+            );
+            canceller.await.unwrap();
+
+            let settled = output.contains("First terminal agent:");
+            let timed_out = output.contains("⏰ Timed out after 20ms");
+            assert!(settled ^ timed_out, "delay {delay_ms}: {output}");
+            if settled {
+                assert!(output.contains(&format!("First terminal agent: {}", racer.agent_id)));
+                assert!(output.contains(&format!("- {}: running", other.agent_id)));
+            } else {
+                assert!(output.contains(&format!("- {}: ", racer.agent_id)));
+                assert!(output.contains(&format!("- {}: running", other.agent_id)));
+            }
+        }
     }
 
     #[tokio::test]

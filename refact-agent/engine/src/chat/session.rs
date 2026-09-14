@@ -1967,17 +1967,9 @@ impl ChatSession {
             return Ok(DeliveryOutcome::Duplicate);
         }
         let settings = crate::file_activity::settings();
-        if delivery.expires_at_ms.is_none() {
-            delivery.expires_at_ms = Some(
-                delivery
-                    .enqueued_at_ms
-                    .saturating_add(settings.delivery_default_ttl_secs.saturating_mul(1000)),
-            );
-        }
-        if delivery
-            .expires_at_ms
-            .is_some_and(|deadline| deadline <= delivery_now_ms())
-        {
+        let now = delivery_now_ms();
+        delivery.ensure_ttl_secs(now, settings.delivery_default_ttl_secs);
+        if delivery.is_expired_at(now) {
             self.record_dropped_delivery(delivery.id.clone(), DeliveryStatus::Expired);
             return Ok(DeliveryOutcome::Expired);
         }
@@ -2057,11 +2049,7 @@ impl ChatSession {
         let expired: Vec<String> = self
             .pending_deliveries
             .iter()
-            .filter(|pending| {
-                pending
-                    .expires_at_ms
-                    .is_some_and(|deadline| deadline <= now)
-            })
+            .filter(|pending| pending.is_expired_at(now))
             .map(|pending| pending.id.clone())
             .collect();
         if expired.is_empty() {
@@ -2078,15 +2066,13 @@ impl ChatSession {
     /// A newer delivery with the same supersede key replaces older pending
     /// ones; the older ids are reported superseded rather than landing late.
     fn supersede_pending(&mut self, incoming: &PendingDelivery) {
-        let Some(key) = incoming.supersede_key.as_deref() else {
+        if incoming.supersede_key.is_none() {
             return;
-        };
+        }
         let superseded: Vec<String> = self
             .pending_deliveries
             .iter()
-            .filter(|pending| {
-                pending.id != incoming.id && pending.supersede_key.as_deref() == Some(key)
-            })
+            .filter(|pending| incoming.supersedes(pending))
             .map(|pending| pending.id.clone())
             .collect();
         if superseded.is_empty() {
@@ -2236,15 +2222,8 @@ impl ChatSession {
             {
                 continue;
             }
-            if delivery.expires_at_ms.is_none() {
-                delivery.expires_at_ms = Some(
-                    now.saturating_add(settings.delivery_default_ttl_secs.saturating_mul(1000)),
-                );
-            }
-            if delivery
-                .expires_at_ms
-                .is_some_and(|deadline| deadline <= now)
-            {
+            delivery.ensure_ttl_secs(now, settings.delivery_default_ttl_secs);
+            if delivery.is_expired_at(now) {
                 self.record_dropped_delivery(delivery.id, DeliveryStatus::Expired);
                 continue;
             }
@@ -3786,6 +3765,221 @@ mod tests {
             session.delivery_status("steer-2"),
             DeliveryStatus::Delivered
         );
+    }
+
+    #[test]
+    fn delivery_supersession_only_drops_the_same_logical_stream() {
+        let mut session = make_session();
+        session.turn_depth = 1;
+        let keyed = |id: &str, key: Option<&str>| {
+            let mut delivery = delivery_fixture(id, PushMode::WhenIdle);
+            delivery.supersede_key = key.map(str::to_string);
+            delivery
+        };
+        for delivery in [
+            keyed("steer-card-1-old", Some("agent_steer:T-1")),
+            keyed("steer-card-2", Some("agent_steer:T-2")),
+            keyed("plain-message", None),
+            keyed("question", Some("planner_qna:Q-7")),
+        ] {
+            assert_eq!(
+                session.enqueue_delivery(delivery).unwrap(),
+                DeliveryOutcome::Queued
+            );
+        }
+
+        assert_eq!(
+            session
+                .enqueue_delivery(keyed("steer-card-1-new", Some("agent_steer:T-1")))
+                .unwrap(),
+            DeliveryOutcome::Queued
+        );
+
+        assert_eq!(
+            session.delivery_status("steer-card-1-old"),
+            DeliveryStatus::Superseded
+        );
+        for survivor in ["steer-card-2", "plain-message", "question"] {
+            assert_eq!(
+                session.delivery_status(survivor),
+                DeliveryStatus::Pending,
+                "{survivor} is a different logical stream and must survive"
+            );
+        }
+
+        assert_eq!(
+            session
+                .enqueue_delivery(keyed("keyless-later", None))
+                .unwrap(),
+            DeliveryOutcome::Queued
+        );
+        assert_eq!(
+            session.delivery_status("plain-message"),
+            DeliveryStatus::Pending,
+            "a keyless delivery supersedes nothing"
+        );
+
+        session.turn_depth = 0;
+        assert_eq!(
+            session.drain_pending_deliveries().0,
+            vec![
+                "steer-card-2".to_string(),
+                "plain-message".to_string(),
+                "question".to_string(),
+                "steer-card-1-new".to_string(),
+                "keyless-later".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn delivery_expiry_and_supersession_never_wake_the_recipient() {
+        let mut session = make_session();
+        session.turn_depth = 1;
+        let mut soon = delivery_fixture("soon", PushMode::WhenIdle);
+        soon.expires_at_ms = Some(delivery_now_ms() + 40);
+        let mut old_steer = delivery_fixture("old-steer", PushMode::WhenIdle);
+        old_steer.supersede_key = Some("agent_steer:T-1".into());
+        let mut new_steer = delivery_fixture("new-steer", PushMode::WhenIdle);
+        new_steer.supersede_key = Some("agent_steer:T-1".into());
+        new_steer.expires_at_ms = Some(delivery_now_ms() + 40);
+        for delivery in [soon, old_steer, new_steer] {
+            assert!(delivery.wake);
+            session.enqueue_delivery(delivery).unwrap();
+        }
+        assert_eq!(
+            session.delivery_status("old-steer"),
+            DeliveryStatus::Superseded
+        );
+        assert!(session.delivery_wake_sources.is_empty());
+
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        session.turn_depth = 0;
+        assert_eq!(
+            session.drain_pending_deliveries(),
+            (Vec::new(), false),
+            "expiring and superseding must never wake the recipient"
+        );
+        assert!(session.delivery_wake_sources.is_empty());
+        assert!(session.messages.is_empty());
+        assert_eq!(session.delivery_status("soon"), DeliveryStatus::Expired);
+        assert_eq!(
+            session.delivery_status("new-steer"),
+            DeliveryStatus::Expired
+        );
+
+        let mut expired_at_enqueue = delivery_fixture("stale", PushMode::Append);
+        expired_at_enqueue.expires_at_ms = Some(delivery_now_ms().saturating_sub(1));
+        assert_eq!(
+            session.enqueue_delivery(expired_at_enqueue).unwrap(),
+            DeliveryOutcome::Expired
+        );
+        assert!(session.delivery_wake_sources.is_empty());
+        assert!(session.messages.is_empty());
+    }
+
+    #[test]
+    fn delivery_status_reports_unknown_once_the_dropped_audit_is_evicted() {
+        let mut session = make_session();
+        let retention = crate::file_activity::settings().delivery_status_retention;
+        session.dropped_deliveries = (0..retention)
+            .map(|index| DeliveryStatusRecord {
+                id: format!("dropped-{index}"),
+                status: DeliveryStatus::Expired,
+            })
+            .collect();
+        assert_eq!(
+            session.delivery_status("dropped-0"),
+            DeliveryStatus::Expired
+        );
+
+        session.merge_dropped_deliveries(vec![DeliveryStatusRecord {
+            id: "newest".to_string(),
+            status: DeliveryStatus::Superseded,
+        }]);
+
+        assert_eq!(session.dropped_deliveries.len(), retention);
+        assert_eq!(
+            session.delivery_status("dropped-0"),
+            DeliveryStatus::Unknown,
+            "an evicted record must report unknown, never a fabricated outcome"
+        );
+        assert_eq!(
+            session.delivery_status("dropped-1"),
+            DeliveryStatus::Expired
+        );
+        assert_eq!(
+            session.delivery_status("newest"),
+            DeliveryStatus::Superseded
+        );
+        assert_eq!(
+            session.delivery_status("never-seen"),
+            DeliveryStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn delivery_restore_keeps_the_original_lifetime_and_tolerates_legacy_records() {
+        let ttl_ms = crate::file_activity::settings()
+            .delivery_default_ttl_secs
+            .saturating_mul(1000);
+        let now = delivery_now_ms();
+
+        let mut stale = delivery_fixture("stale", PushMode::Append);
+        stale.enqueued_at_ms = now.saturating_sub(ttl_ms + 1_000);
+        stale.expires_at_ms = None;
+        let mut fresh = delivery_fixture("fresh", PushMode::WhenIdle);
+        fresh.enqueued_at_ms = now.saturating_sub(1_000);
+        fresh.expires_at_ms = None;
+        let mut legacy: PendingDelivery = serde_json::from_value(json!({
+            "id": "legacy",
+            "messages": [serde_json::to_value(event(
+                EventSubkind::CancellationNote,
+                "test",
+                json!({}),
+                "legacy".to_string(),
+            ))
+            .unwrap()],
+        }))
+        .unwrap();
+        assert_eq!(legacy.enqueued_at_ms, 0);
+        assert!(legacy.expires_at_ms.is_none());
+        legacy.push = PushMode::WhenIdle;
+
+        let mut session = make_session();
+        session.turn_depth = 1;
+        session.restore_pending_deliveries(vec![stale, fresh, legacy]);
+
+        assert_eq!(session.delivery_status("stale"), DeliveryStatus::Expired);
+        assert_eq!(session.delivery_status("fresh"), DeliveryStatus::Pending);
+        assert_eq!(session.delivery_status("legacy"), DeliveryStatus::Pending);
+        let restored = session
+            .pending_deliveries
+            .iter()
+            .find(|pending| pending.id == "fresh")
+            .unwrap();
+        assert_eq!(
+            restored.expires_at_ms,
+            Some(restored.enqueued_at_ms.saturating_add(ttl_ms)),
+            "a restart must not hand a restored delivery a fresh lifetime"
+        );
+    }
+
+    #[test]
+    fn delivery_huge_ttl_saturates_instead_of_expiring_immediately() {
+        let mut session = make_session();
+        session.turn_depth = 1;
+        let mut forever = delivery_fixture("forever", PushMode::WhenIdle);
+        forever.set_ttl_secs(u64::MAX);
+        assert_eq!(forever.expires_at_ms, Some(u64::MAX));
+
+        assert_eq!(
+            session.enqueue_delivery(forever).unwrap(),
+            DeliveryOutcome::Queued
+        );
+        assert_eq!(session.delivery_status("forever"), DeliveryStatus::Pending);
+        session.turn_depth = 0;
+        assert_eq!(session.drain_pending_deliveries().0, vec!["forever"]);
     }
 
     #[test]

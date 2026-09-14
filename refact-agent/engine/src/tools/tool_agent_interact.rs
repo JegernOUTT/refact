@@ -211,6 +211,26 @@ fn delivery_now_ms() -> u64 {
     Utc::now().timestamp_millis().max(0) as u64
 }
 
+/// One sentence per outcome, so a receipt never claims a message reached an
+/// agent when the delivery layer dropped it. Acceptance for transport only —
+/// delivery is at-least-once with logical dedup, never proof of consumption.
+fn delivery_outcome_text(to: &str, outcome: refact_chat_api::DeliveryOutcome) -> String {
+    use refact_chat_api::DeliveryOutcome;
+    match outcome {
+        DeliveryOutcome::Queued => format!("Message queued for {to}."),
+        DeliveryOutcome::Delivered => format!("Message delivered to {to}."),
+        DeliveryOutcome::Duplicate => format!(
+            "Message NOT queued for {to}: the delivery layer already accepted this message id."
+        ),
+        DeliveryOutcome::Expired => {
+            format!("Message NOT queued for {to}: its ttl elapsed before it could be accepted.")
+        }
+        DeliveryOutcome::Superseded => {
+            format!("Message NOT queued for {to}: a newer message on the same stream replaced it.")
+        }
+    }
+}
+
 #[async_trait]
 impl Tool for ToolAgentPeerGrant {
     fn tool_description(&self) -> ToolDesc {
@@ -570,19 +590,10 @@ impl Tool for ToolAgentMessage {
             "agents.message".to_string(),
             true,
         );
-        delivery.expires_at_ms = Some(
-            delivery
-                .enqueued_at_ms
-                .saturating_add(ttl_secs.saturating_mul(1000)),
-        );
+        delivery.set_ttl_secs(ttl_secs);
         let delivery_id = delivery.id.clone();
         let outcome = crate::agents::delivery::deliver_to_agent(app, &to, delivery).await?;
-        let text = match outcome {
-            refact_chat_api::DeliveryOutcome::Expired => {
-                format!("Message to {to} expired before it could be queued.")
-            }
-            _ => format!("Message queued for {to}."),
-        };
+        let text = delivery_outcome_text(&to, outcome);
         let mut result = output(tool_call_id, text);
         if let Some(ContextEnum::ChatMessage(message)) = result.1.first_mut() {
             message.extra.insert(
@@ -591,7 +602,13 @@ impl Tool for ToolAgentMessage {
                     "kind": "agent_message",
                     "delivery_id": delivery_id,
                     "outcome": outcome,
+                    "accepted": matches!(
+                        outcome,
+                        refact_chat_api::DeliveryOutcome::Queued
+                            | refact_chat_api::DeliveryOutcome::Delivered
+                    ),
                     "ttl_secs": ttl_secs,
+                    "push": push,
                 }),
             );
         }
@@ -750,6 +767,13 @@ mod tests {
             .collect()
     }
 
+    fn receipt_of(result: &(bool, Vec<ContextEnum>)) -> Value {
+        match &result.1[0] {
+            ContextEnum::ChatMessage(message) => message.extra["delivery_receipt"].clone(),
+            _ => panic!("expected tool message"),
+        }
+    }
+
     fn text(result: (bool, Vec<ContextEnum>)) -> String {
         let ContextEnum::ChatMessage(message) = result.1.into_iter().next().unwrap() else {
             panic!("expected tool message")
@@ -844,6 +868,168 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![PushMode::Append, PushMode::Preempt, PushMode::WhenIdle]
         );
+    }
+
+    #[tokio::test]
+    async fn agent_message_validates_ttl_against_settings_bounds() {
+        let (app, ccx) = test_context("root", "root", None).await;
+        let child = create(&app, "root", "child").await;
+        let settings = refact_work_core::coordination_settings();
+        let mut tool = ToolAgentMessage {
+            config_path: String::new(),
+        };
+        for bad in [
+            json!(0),
+            json!(settings.delivery_max_ttl_secs + 1),
+            json!(-1),
+            json!("forever"),
+        ] {
+            let error = tool
+                .tool_execute(
+                    ccx.clone(),
+                    &"bad".to_string(),
+                    &args(&[
+                        ("to", json!(child.agent_id)),
+                        ("text", json!("hello")),
+                        ("ttl_secs", bad.clone()),
+                    ]),
+                )
+                .await
+                .unwrap_err();
+            assert!(error.contains("ttl_secs"), "{bad}: {error}");
+        }
+        assert!(app
+            .agents
+            .get_any(&child.agent_id)
+            .await
+            .unwrap()
+            .pending_deliveries
+            .is_empty());
+
+        tool.tool_execute(
+            ccx,
+            &"ok".to_string(),
+            &args(&[
+                ("to", json!(child.agent_id)),
+                ("text", json!("hello")),
+                ("ttl_secs", json!(settings.delivery_max_ttl_secs)),
+            ]),
+        )
+        .await
+        .unwrap();
+        let pending = app
+            .agents
+            .get_any(&child.agent_id)
+            .await
+            .unwrap()
+            .pending_deliveries;
+        assert_eq!(
+            pending[0].expires_at_ms,
+            Some(PendingDelivery::deadline_ms(
+                pending[0].enqueued_at_ms,
+                settings.delivery_max_ttl_secs
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_message_receipt_never_claims_a_dropped_message_was_queued() {
+        let (app, ccx) = test_context("root", "root", None).await;
+        let child = create(&app, "root", "child").await;
+        let mut tool = ToolAgentMessage {
+            config_path: String::new(),
+        };
+        let request = args(&[("to", json!(child.agent_id)), ("text", json!("hello"))]);
+
+        let accepted = tool
+            .tool_execute(ccx.clone(), &"first".to_string(), &request)
+            .await
+            .unwrap();
+        let receipt = receipt_of(&accepted);
+        assert_eq!(receipt["outcome"], "queued");
+        assert_eq!(receipt["accepted"], true);
+        assert!(text(accepted).contains("Message queued"));
+
+        let delivery_id = receipt["delivery_id"].as_str().unwrap().to_string();
+        app.agents
+            .record_delivery_status(
+                &child.agent_id,
+                &delivery_id,
+                refact_chat_api::DeliveryStatus::Expired,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            app.agents
+                .delivery_status(&child.agent_id, &delivery_id)
+                .await,
+            refact_chat_api::DeliveryStatus::Expired
+        );
+
+        let mut replay = PendingDelivery::with_id(
+            delivery_id.clone(),
+            vec![crate::chat::internal_roles::event(
+                crate::chat::internal_roles::EventSubkind::SystemNotice,
+                "agents.message",
+                json!({}),
+                "replay".to_string(),
+            )],
+            PushMode::Append,
+            "agents.message".to_string(),
+            true,
+        );
+        replay.set_ttl_secs(60);
+        assert_eq!(
+            crate::agents::delivery::deliver_to_agent(app.clone(), &child.agent_id, replay)
+                .await
+                .unwrap(),
+            refact_chat_api::DeliveryOutcome::Duplicate,
+            "a terminal delivery id must never be silently reused"
+        );
+
+        for (outcome, expected) in [
+            (refact_chat_api::DeliveryOutcome::Duplicate, "NOT queued"),
+            (refact_chat_api::DeliveryOutcome::Expired, "NOT queued"),
+            (refact_chat_api::DeliveryOutcome::Superseded, "NOT queued"),
+            (refact_chat_api::DeliveryOutcome::Queued, "queued for"),
+            (refact_chat_api::DeliveryOutcome::Delivered, "delivered to"),
+        ] {
+            assert!(
+                delivery_outcome_text("child", outcome).contains(expected),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_message_rejects_oversized_text_before_queueing_anything() {
+        let (app, ccx) = test_context("root", "root", None).await;
+        let child = create(&app, "root", "child").await;
+        let settings = refact_work_core::coordination_settings();
+        let error = ToolAgentMessage {
+            config_path: String::new(),
+        }
+        .tool_execute(
+            ccx,
+            &"oversized".to_string(),
+            &args(&[
+                ("to", json!(child.agent_id)),
+                (
+                    "text",
+                    json!("x".repeat(settings.agent_message_max_chars + 1)),
+                ),
+            ]),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("characters"), "{error}");
+        assert!(app
+            .agents
+            .get_any(&child.agent_id)
+            .await
+            .unwrap()
+            .pending_deliveries
+            .is_empty());
     }
 
     #[tokio::test]

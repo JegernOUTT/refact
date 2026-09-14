@@ -1136,13 +1136,7 @@ impl BackgroundAgentRegistry {
         let preempt = delivery.push == PushMode::Preempt;
         let claimed = state.claimed.clone();
         let settings = refact_work_core::coordination_settings();
-        if delivery.expires_at_ms.is_none() {
-            delivery.expires_at_ms = Some(
-                delivery
-                    .enqueued_at_ms
-                    .saturating_add(settings.delivery_default_ttl_secs.saturating_mul(1000)),
-            );
-        }
+        delivery.ensure_ttl_secs(now_ms(), settings.delivery_default_ttl_secs);
         self.update_record(agent_id, |record, now| {
             if record.delivery_ids.contains(&delivery.id)
                 || record
@@ -1160,21 +1154,17 @@ impl BackgroundAgentRegistry {
             if record.status.is_terminal() {
                 return Err("agent already finished".to_string());
             }
-            if delivery
-                .expires_at_ms
-                .is_some_and(|deadline| deadline <= now.timestamp_millis().max(0) as u64)
-            {
+            if delivery.is_expired_at(now.timestamp_millis().max(0) as u64) {
                 record_dropped_delivery(record, delivery.id.clone(), DeliveryStatus::Expired);
                 outcome = DeliveryOutcome::Expired;
                 return Ok(());
             }
-            if let Some(key) = delivery.supersede_key.as_deref() {
+            if delivery.supersede_key.is_some() {
                 let superseded: Vec<String> = record
                     .pending_deliveries
                     .iter()
                     .filter(|pending| {
-                        pending.supersede_key.as_deref() == Some(key)
-                            && !claimed.contains(&pending.id)
+                        delivery.supersedes(pending) && !claimed.contains(&pending.id)
                     })
                     .map(|pending| pending.id.clone())
                     .collect();
@@ -1339,7 +1329,7 @@ impl BackgroundAgentRegistry {
     }
 
     async fn expire_deliveries(&self, agent_id: &str, claimed: &HashSet<String>) {
-        let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+        let now_ms = now_ms();
         let expired: Vec<String> = self
             .records
             .read()
@@ -1350,10 +1340,7 @@ impl BackgroundAgentRegistry {
                     .pending_deliveries
                     .iter()
                     .filter(|pending| {
-                        !claimed.contains(&pending.id)
-                            && pending
-                                .expires_at_ms
-                                .is_some_and(|deadline| deadline <= now_ms)
+                        !claimed.contains(&pending.id) && pending.is_expired_at(now_ms)
                     })
                     .map(|pending| pending.id.clone())
                     .collect()
@@ -1656,21 +1643,14 @@ impl BackgroundAgentRegistry {
 
 fn normalize_delivery_state(records: &mut HashMap<String, BackgroundAgent>) {
     let settings = refact_work_core::coordination_settings();
-    let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+    let now_ms = now_ms();
     for record in records.values_mut() {
         let mut superseded = Vec::new();
         let mut expired = Vec::new();
         let mut newest_by_key: HashMap<String, String> = HashMap::new();
         for delivery in &mut record.pending_deliveries {
-            if delivery.expires_at_ms.is_none() {
-                delivery.expires_at_ms = Some(
-                    now_ms.saturating_add(settings.delivery_default_ttl_secs.saturating_mul(1000)),
-                );
-            }
-            if delivery
-                .expires_at_ms
-                .is_some_and(|deadline| deadline <= now_ms)
-            {
+            delivery.ensure_ttl_secs(now_ms, settings.delivery_default_ttl_secs);
+            if delivery.is_expired_at(now_ms) {
                 expired.push(delivery.id.clone());
             }
             if let Some(key) = &delivery.supersede_key {
@@ -1704,6 +1684,10 @@ fn normalize_delivery_state(records: &mut HashMap<String, BackgroundAgent>) {
             record.dropped_deliveries.drain(..overflow);
         }
     }
+}
+
+fn now_ms() -> u64 {
+    Utc::now().timestamp_millis().max(0) as u64
 }
 
 fn record_dropped_delivery(record: &mut BackgroundAgent, id: String, status: DeliveryStatus) {
@@ -2236,6 +2220,169 @@ mod tests {
         let persisted = registry.get_any(&record.agent_id).await.unwrap();
         assert_eq!(persisted.dropped_deliveries.len(), 4);
         assert!(persisted.pending_deliveries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn runner_supersession_only_drops_the_same_logical_stream() {
+        let (_temp, registry) = registry().await;
+        let (record, _cancel, _) = registry.create(request("parent")).await.unwrap();
+        let keyed = |key: Option<&str>| {
+            let mut pending = delivery(PushMode::Append);
+            pending.supersede_key = key.map(str::to_string);
+            pending
+        };
+        let old_steer = keyed(Some("agent_steer:T-1"));
+        let other_card = keyed(Some("agent_steer:T-2"));
+        let plain = keyed(None);
+        let question = keyed(Some("planner_qna:Q-7"));
+        for pending in [
+            old_steer.clone(),
+            other_card.clone(),
+            plain.clone(),
+            question.clone(),
+        ] {
+            assert_eq!(
+                registry
+                    .enqueue_delivery(&record.agent_id, pending)
+                    .await
+                    .unwrap(),
+                DeliveryOutcome::Queued
+            );
+        }
+        let new_steer = keyed(Some("agent_steer:T-1"));
+        assert_eq!(
+            registry
+                .enqueue_delivery(&record.agent_id, new_steer.clone())
+                .await
+                .unwrap(),
+            DeliveryOutcome::Queued
+        );
+
+        assert_eq!(
+            registry
+                .delivery_status(&record.agent_id, &old_steer.id)
+                .await,
+            DeliveryStatus::Superseded
+        );
+        for survivor in [&other_card, &plain, &question, &new_steer] {
+            assert_eq!(
+                registry
+                    .delivery_status(&record.agent_id, &survivor.id)
+                    .await,
+                DeliveryStatus::Pending,
+                "a different logical stream must survive supersession"
+            );
+        }
+
+        registry
+            .enqueue_delivery(&record.agent_id, keyed(None))
+            .await
+            .unwrap();
+        assert_eq!(
+            registry.delivery_status(&record.agent_id, &plain.id).await,
+            DeliveryStatus::Pending,
+            "a keyless delivery supersedes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn runner_expired_delivery_never_arms_a_preempt_wake() {
+        let (_temp, registry) = registry().await;
+        let (record, cancel, _) = registry.create(request("parent")).await.unwrap();
+        let mut stale = delivery(PushMode::Preempt);
+        stale.expires_at_ms = Some(now_ms().saturating_sub(1));
+        assert_eq!(
+            registry
+                .enqueue_delivery(&record.agent_id, stale.clone())
+                .await
+                .unwrap(),
+            DeliveryOutcome::Expired
+        );
+        assert!(
+            !registry.has_preempt(&record.agent_id).await,
+            "an expired delivery must not wake the runner"
+        );
+        assert!(!cancel.load(Ordering::SeqCst));
+
+        let mut old_steer = delivery(PushMode::Preempt);
+        old_steer.supersede_key = Some("agent_steer:T-1".into());
+        let mut new_steer = delivery(PushMode::Preempt);
+        new_steer.supersede_key = Some("agent_steer:T-1".into());
+        new_steer.expires_at_ms = Some(now_ms() + 40);
+        registry
+            .enqueue_delivery(&record.agent_id, old_steer.clone())
+            .await
+            .unwrap();
+        registry
+            .enqueue_delivery(&record.agent_id, new_steer.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .delivery_status(&record.agent_id, &old_steer.id)
+                .await,
+            DeliveryStatus::Superseded
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(registry
+            .drain_deliveries(&record.agent_id, true)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(
+            !registry.has_preempt(&record.agent_id).await,
+            "a superseded or expired preempt must leave nothing to wake for"
+        );
+    }
+
+    #[tokio::test]
+    async fn runner_delivery_saturates_a_huge_ttl_and_heals_legacy_records() {
+        let (_temp, registry) = registry().await;
+        let (record, _cancel, _) = registry.create(request("parent")).await.unwrap();
+        let mut forever = delivery(PushMode::Append);
+        forever.set_ttl_secs(u64::MAX);
+        assert_eq!(forever.expires_at_ms, Some(u64::MAX));
+        assert_eq!(
+            registry
+                .enqueue_delivery(&record.agent_id, forever.clone())
+                .await
+                .unwrap(),
+            DeliveryOutcome::Queued
+        );
+        assert_eq!(
+            registry
+                .delivery_status(&record.agent_id, &forever.id)
+                .await,
+            DeliveryStatus::Pending
+        );
+
+        let legacy: BackgroundAgent = serde_json::from_value(
+            serde_json::to_value(&record)
+                .map(|mut value| {
+                    let object = value.as_object_mut().unwrap();
+                    object.remove("dropped_deliveries");
+                    object.remove("pending_deliveries");
+                    object.insert(
+                        "pending_deliveries".to_string(),
+                        serde_json::json!([{"id": "legacy-pending"}]),
+                    );
+                    value
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(legacy.dropped_deliveries.is_empty());
+        assert_eq!(legacy.pending_deliveries[0].enqueued_at_ms, 0);
+        let mut records = HashMap::from([(legacy.agent_id.clone(), legacy)]);
+        normalize_delivery_state(&mut records);
+        let healed = &records[&record.agent_id];
+        assert_eq!(
+            healed.pending_deliveries.len(),
+            1,
+            "an unknown enqueue time must not be read as 1970 and expired away"
+        );
+        assert!(healed.pending_deliveries[0].enqueued_at_ms > 0);
+        assert!(healed.dropped_deliveries.is_empty());
     }
 
     #[tokio::test]
