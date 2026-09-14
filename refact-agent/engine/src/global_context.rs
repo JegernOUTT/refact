@@ -367,6 +367,7 @@ pub struct GlobalContext {
     pub cache_dir: PathBuf,
     pub config_dir: PathBuf,
     pub caps_state: Arc<ARwLock<CapsState>>,
+    pub caps_config_probe: Arc<StdMutex<Option<CapsConfigProbe>>>,
     pub tokenizer_state: Arc<StdRwLock<TokenizerState>>,
     pub completions_cache: Arc<StdRwLock<CompletionCache>>,
     pub vec_db: Arc<AMutex<Option<Arc<dyn refact_core::vecdb_types::VecdbSearch>>>>,
@@ -585,6 +586,63 @@ impl HttpClientAccess for GlobalContext {
 const CAPS_RELOAD_BACKOFF: u64 = 60; // seconds
 const CAPS_BACKGROUND_RELOAD: u64 = 3600; // seconds
 
+const CAPS_CONFIG_PROBE_TTL: u64 = 1; // seconds, matches provider mtime granularity
+
+#[derive(Clone)]
+pub struct CapsConfigProbe {
+    pub probed_at_ts: u64,
+    pub latest_mtime: u64,
+    pub project_root: Option<PathBuf>,
+}
+
+#[cfg(test)]
+fn provider_scan_counters() -> &'static StdMutex<HashMap<PathBuf, usize>> {
+    static COUNTERS: std::sync::OnceLock<StdMutex<HashMap<PathBuf, usize>>> =
+        std::sync::OnceLock::new();
+    COUNTERS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn provider_scan_count(config_dir: &PathBuf) -> usize {
+    provider_scan_counters()
+        .lock()
+        .unwrap()
+        .get(config_dir)
+        .copied()
+        .unwrap_or(0)
+}
+
+pub(crate) async fn caps_config_probe(gcx: &Arc<GlobalContext>, now: u64) -> CapsConfigProbe {
+    let cached = { gcx.caps_config_probe.lock().unwrap().clone() };
+    if let Some(cached) = cached {
+        if now.saturating_sub(cached.probed_at_ts) < CAPS_CONFIG_PROBE_TTL {
+            return cached;
+        }
+    }
+
+    #[cfg(test)]
+    {
+        *provider_scan_counters()
+            .lock()
+            .unwrap()
+            .entry(gcx.config_dir.clone())
+            .or_insert(0) += 1;
+    }
+
+    let provider_mtime = get_latest_provider_mtime(&gcx.config_dir)
+        .await
+        .unwrap_or(0);
+    let (project_root, project_defaults_mtime) =
+        crate::caps::project_model_defaults_state(gcx.clone()).await;
+    let probe = CapsConfigProbe {
+        probed_at_ts: now,
+        latest_mtime: provider_mtime.max(project_defaults_mtime),
+        project_root,
+    };
+    *gcx.caps_config_probe.lock().unwrap() = Some(probe.clone());
+    probe
+}
+
 pub async fn migrate_to_config_folder(config_dir: &PathBuf, cache_dir: &PathBuf) -> io::Result<()> {
     let mut entries = tokio::fs::read_dir(cache_dir).await?;
     while let Some(entry) = entries.next_entry().await? {
@@ -660,7 +718,7 @@ pub async fn try_load_caps_quickly_if_not_present(
     max_age_seconds: u64,
 ) -> Result<Arc<CodeAssistantCaps>, ScratchError> {
     let cmdline = gcx.cmdline.clone();
-    let (caps_state, config_dir) = { (gcx.caps_state.clone(), gcx.config_dir.clone()) };
+    let caps_state = gcx.caps_state.clone();
     let caps_reading_lock = caps_state.read().await.reading_lock.clone();
 
     let now = std::time::SystemTime::now()
@@ -668,14 +726,14 @@ pub async fn try_load_caps_quickly_if_not_present(
         .unwrap()
         .as_secs();
     let caps_last_attempted_ts;
-    let latest_provider_mtime = get_latest_provider_mtime(&config_dir).await.unwrap_or(0);
-    let (project_defaults_root, project_defaults_mtime) =
-        crate::caps::project_model_defaults_state(gcx.clone()).await;
-    let latest_provider_mtime = latest_provider_mtime.max(project_defaults_mtime);
 
     {
         // gcx is not locked, but a specialized async mutex is, up until caps are saved
         let _caps_reading_locked = caps_reading_lock.lock().await;
+
+        let probe = caps_config_probe(&gcx, now).await;
+        let latest_provider_mtime = probe.latest_mtime;
+        let project_defaults_root = probe.project_root;
 
         let max_age = if max_age_seconds > 0 {
             max_age_seconds
@@ -882,6 +940,7 @@ pub async fn create_global_context(
             models_dev_startup_refresh_attempted: false,
             loaded_project_root: None,
         })),
+        caps_config_probe: Arc::new(StdMutex::new(None)),
         tokenizer_state: Arc::new(StdRwLock::new(TokenizerState {
             map: HashMap::new(),
             download_lock: Arc::new(AMutex::<bool>::new(false)),
@@ -1132,6 +1191,83 @@ pub mod tests {
         }
     }
 
+    #[cfg(test)]
+    async fn write_provider_yaml(config_dir: &PathBuf, file_name: &str) {
+        let providers_dir = config_dir.join("providers.d");
+        tokio::fs::create_dir_all(&providers_dir).await.unwrap();
+        tokio::fs::write(
+            providers_dir.join(file_name),
+            "enabled: true\napi_key: sk-test\nenabled_models:\n  - my-model\n",
+        )
+        .await
+        .unwrap();
+    }
+
+    #[cfg(test)]
+    #[tokio::test]
+    async fn provider_dir_not_scanned_when_caps_are_fresh() {
+        let gcx = make_test_gcx().await;
+        write_provider_yaml(&gcx.config_dir, "custom.yaml").await;
+        let now = 1_700_000_000u64;
+
+        let first = caps_config_probe(&gcx, now).await;
+        assert_eq!(provider_scan_count(&gcx.config_dir), 1);
+
+        let second = caps_config_probe(&gcx, now).await;
+        assert_eq!(provider_scan_count(&gcx.config_dir), 1);
+        assert_eq!(first.latest_mtime, second.latest_mtime);
+        assert_eq!(first.project_root, second.project_root);
+
+        let expired = caps_config_probe(&gcx, now + CAPS_CONFIG_PROBE_TTL).await;
+        assert_eq!(provider_scan_count(&gcx.config_dir), 2);
+        assert_eq!(expired.latest_mtime, first.latest_mtime);
+    }
+
+    #[cfg(test)]
+    #[tokio::test]
+    async fn caps_refresh_still_triggers_on_provider_change() {
+        let gcx = make_test_gcx().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (project_root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
+        {
+            let mut caps_state = gcx.caps_state.write().await;
+            caps_state.caps = Some(Arc::new(CodeAssistantCaps::default()));
+            caps_state.last_attempted_ts = now;
+            caps_state.loaded_project_root = Some(project_root);
+        }
+        let generation_before = gcx
+            .tool_catalog_generations
+            .capabilities
+            .load(Ordering::SeqCst);
+
+        assert!(
+            try_load_caps_quickly_if_not_present(gcx.clone(), CAPS_BACKGROUND_RELOAD)
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            gcx.tool_catalog_generations
+                .capabilities
+                .load(Ordering::SeqCst),
+            generation_before
+        );
+
+        write_provider_yaml(&gcx.config_dir, "custom.yaml").await;
+        *gcx.caps_config_probe.lock().unwrap() = None;
+
+        let _ = try_load_caps_quickly_if_not_present(gcx.clone(), CAPS_BACKGROUND_RELOAD).await;
+
+        assert!(
+            gcx.tool_catalog_generations
+                .capabilities
+                .load(Ordering::SeqCst)
+                > generation_before
+        );
+    }
+
     pub async fn make_test_gcx() -> Arc<GlobalContext> {
         let cache_dir = std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4()));
         let config_dir = std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()));
@@ -1215,6 +1351,7 @@ pub mod tests {
                 models_dev_startup_refresh_attempted: true,
                 loaded_project_root: None,
             })),
+            caps_config_probe: Arc::new(StdMutex::new(None)),
             tokenizer_state: Arc::new(StdRwLock::new(TokenizerState {
                 map: HashMap::new(),
                 download_lock: Arc::new(AMutex::<bool>::new(false)),

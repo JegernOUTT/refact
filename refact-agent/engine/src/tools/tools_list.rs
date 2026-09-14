@@ -288,41 +288,79 @@ pub(crate) fn catalog_policy_for_tools(
         .collect()
 }
 
-async fn tool_available_from_gcx(
-    gcx: Arc<GlobalContext>,
-) -> impl Fn(&Box<dyn Tool + Send>) -> bool {
-    let (codegraph_on, vecdb_on, allow_experimental) = {
+#[cfg(test)]
+fn availability_build_counters() -> &'static std::sync::Mutex<HashMap<PathBuf, usize>> {
+    static COUNTERS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, usize>>> =
+        std::sync::OnceLock::new();
+    COUNTERS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn availability_build_count(config_dir: &PathBuf) -> usize {
+    availability_build_counters()
+        .lock()
+        .unwrap()
+        .get(config_dir)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[derive(Clone, Copy)]
+struct ToolAvailability {
+    codegraph_on: bool,
+    vecdb_on: bool,
+    is_there_a_thinking_model: bool,
+    allow_knowledge: bool,
+    allow_experimental: bool,
+}
+
+impl ToolAvailability {
+    async fn from_gcx(gcx: Arc<GlobalContext>) -> Self {
+        #[cfg(test)]
+        {
+            *availability_build_counters()
+                .lock()
+                .unwrap()
+                .entry(gcx.config_dir.clone())
+                .or_insert(0) += 1;
+        }
+
         let vecdb_on = gcx.vec_db.lock().await.is_some();
         let codegraph_on = gcx.codegraph.lock().await.is_some();
-        (codegraph_on, vecdb_on, gcx.cmdline.experimental)
-    };
 
-    let is_there_a_thinking_model = match try_load_caps_quickly_if_not_present(gcx.clone(), 0).await
-    {
-        Ok(caps) => caps
-            .chat_models
-            .get(&caps.defaults.chat_thinking_model)
-            .is_some(),
-        Err(_) => false,
-    };
-    let allow_knowledge = true;
+        let is_there_a_thinking_model =
+            match try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
+                Ok(caps) => caps
+                    .chat_models
+                    .get(&caps.defaults.chat_thinking_model)
+                    .is_some(),
+                Err(_) => false,
+            };
 
-    move |tool: &Box<dyn Tool + Send>| {
-        tool_available(
-            tool,
+        Self {
             codegraph_on,
             vecdb_on,
             is_there_a_thinking_model,
-            allow_knowledge,
-            allow_experimental,
+            allow_knowledge: true,
+            allow_experimental: gcx.cmdline.experimental,
+        }
+    }
+
+    fn allows(&self, tool: &Box<dyn Tool + Send>) -> bool {
+        tool_available(
+            tool,
+            self.codegraph_on,
+            self.vecdb_on,
+            self.is_there_a_thinking_model,
+            self.allow_knowledge,
+            self.allow_experimental,
         )
     }
 }
 
 impl ToolGroup {
-    pub async fn retain_available_tools(&mut self, gcx: Arc<GlobalContext>) {
-        let tool_available = tool_available_from_gcx(gcx.clone()).await;
-        self.tools.retain(|tool| tool_available(tool));
+    fn retain_available_tools(&mut self, availability: &ToolAvailability) {
+        self.tools.retain(|tool| availability.allows(tool));
     }
 }
 
@@ -388,7 +426,10 @@ pub(crate) fn builtin_system_tools(config_path: String) -> Vec<Box<dyn Tool + Se
     ]
 }
 
-async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
+async fn get_builtin_tools(
+    gcx: Arc<GlobalContext>,
+    availability: &ToolAvailability,
+) -> Vec<ToolGroup> {
     let config_dir = gcx.config_dir.clone();
     let config_path = config_dir
         .join("builtin_tools.yaml")
@@ -849,13 +890,21 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
     ];
 
     for tool_group in tool_groups.iter_mut() {
-        tool_group.retain_available_tools(gcx.clone()).await;
+        tool_group.retain_available_tools(availability);
     }
 
     tool_groups
 }
 
 pub async fn get_integration_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
+    let availability = ToolAvailability::from_gcx(gcx.clone()).await;
+    build_integration_tool_groups(gcx, &availability).await
+}
+
+async fn build_integration_tool_groups(
+    gcx: Arc<GlobalContext>,
+    availability: &ToolAvailability,
+) -> Vec<ToolGroup> {
     let mut integrations_group = ToolGroup {
         name: "Integrations".to_string(),
         description: "Integration tools".to_string(),
@@ -903,7 +952,7 @@ pub async fn get_integration_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
     tool_groups.extend(sorted_mcp.into_iter().map(|(_, group)| group));
 
     for tool_group in tool_groups.iter_mut() {
-        tool_group.retain_available_tools(gcx.clone()).await;
+        tool_group.retain_available_tools(availability);
     }
 
     span.finish_tool(PerfOutcome::Success, 1, tool_groups.len() as u64, None);
@@ -943,7 +992,7 @@ async fn collect_mcp_integration_tools(
 ) -> Vec<Box<dyn Tool + Send>> {
     let span = perf_diagnostics::span(PerfComponent::ToolIntegrationToolsBuild, None, None);
     let integrations_map = load_integrations_cached(gcx.clone()).await;
-    let is_available = tool_available_from_gcx(gcx.clone()).await;
+    let availability = ToolAvailability::from_gcx(gcx.clone()).await;
 
     let mut integr_names: Vec<&String> = integrations_map.keys().collect();
     integr_names.sort();
@@ -956,7 +1005,7 @@ async fn collect_mcp_integration_tools(
         };
         for tool in integr.integr_tools(integr_name).await {
             let tool_desc = tool.tool_description();
-            if !tool_desc.name.starts_with("mcp") || !is_available(&tool) {
+            if !tool_desc.name.starts_with("mcp") || !availability.allows(&tool) {
                 continue;
             }
             let server = std::path::Path::new(&tool_desc.source.config_path)
@@ -1057,7 +1106,8 @@ mod tests {
     #[tokio::test]
     async fn builtin_catalog_registers_set_trajectory_label() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let names = get_builtin_tools(gcx)
+        let availability = ToolAvailability::from_gcx(gcx.clone()).await;
+        let names = get_builtin_tools(gcx, &availability)
             .await
             .into_iter()
             .flat_map(|group| group.tools)
@@ -2320,6 +2370,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn availability_predicate_computed_once_per_build() {
+        let gcx = task_prompt_contract_gcx().await;
+        let before = availability_build_count(&gcx.config_dir);
+
+        let groups = get_available_tool_groups(gcx.clone()).await;
+
+        assert!(groups.len() > 5, "{}", groups.len());
+        assert_eq!(availability_build_count(&gcx.config_dir), before + 1);
+    }
+
+    #[tokio::test]
+    async fn tool_availability_decisions_unchanged() {
+        let disabled = crate::global_context::tests::make_test_gcx().await;
+        crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all(
+            &disabled.config_dir,
+        )
+        .await
+        .unwrap();
+        let names_disabled = get_available_tools(disabled)
+            .await
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect::<HashSet<_>>();
+        assert!(!names_disabled.contains("search_symbol_definition"));
+        assert!(!names_disabled.contains("search_semantic"));
+
+        let enabled = task_prompt_contract_gcx().await;
+        let availability = ToolAvailability::from_gcx(enabled.clone()).await;
+        let groups = get_available_tool_groups(enabled).await;
+        let names_enabled = groups
+            .iter()
+            .flat_map(|group| group.tools.iter())
+            .map(|tool| tool.tool_description().name)
+            .collect::<HashSet<_>>();
+        assert!(names_enabled.contains("search_symbol_definition"));
+        assert!(names_enabled.contains("search_semantic"));
+
+        for group in &groups {
+            for tool in &group.tools {
+                assert!(
+                    availability.allows(tool),
+                    "{} survived a predicate that rejects it",
+                    tool.tool_description().name
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn mode_tool_order_follows_the_mode_config_tool_list() {
         let gcx = task_prompt_contract_gcx().await;
         let mode = read_default_task_mode("shell");
@@ -2342,8 +2441,9 @@ mod tests {
 }
 
 pub async fn get_available_tool_groups(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
-    let mut tools_all = get_builtin_tools(gcx.clone()).await;
-    tools_all.extend(get_integration_tools(gcx.clone()).await);
+    let availability = ToolAvailability::from_gcx(gcx.clone()).await;
+    let mut tools_all = get_builtin_tools(gcx.clone(), &availability).await;
+    tools_all.extend(build_integration_tool_groups(gcx.clone(), &availability).await);
 
     let config_subagent_group = get_config_subagent_tools(gcx).await;
     if !config_subagent_group.tools.is_empty() {
