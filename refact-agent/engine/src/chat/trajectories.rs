@@ -2014,6 +2014,31 @@ async fn indexed_candidate_paths_in_dirs(
     paths
 }
 
+// O(1) in the number of trajectory directories: the coordinator resolves the chat id through its
+// cross-directory id map instead of listing every directory. A miss returns nothing and the caller
+// falls back to the full scan, so this can only ever save work, never change the answer.
+async fn indexed_candidate_paths_by_id(
+    gcx: &Arc<GlobalContext>,
+    chat_id: &str,
+    caller: trajectory_index::TrajectoryIndexListingCaller,
+) -> Vec<PathBuf> {
+    let app = AppState::from_gcx(gcx.clone()).await;
+    let mut paths = Vec::new();
+    for (dir, entry) in app
+        .chat
+        .trajectory_index_coordinator
+        .find_entries_by_id(chat_id, caller)
+        .await
+    {
+        if trajectory_index::trajectory_index_entry_is_fresh(&dir, &entry).await {
+            paths.push(trajectory_index::trajectory_file_path_for_entry(
+                &dir, &entry,
+            ));
+        }
+    }
+    paths
+}
+
 async fn normal_trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -2165,6 +2190,20 @@ async fn find_trajectory_file(
     let normal = normal_trajectory_candidate_paths(gcx.clone(), chat_id).await;
     let mut seen: std::collections::HashSet<PathBuf> = normal.iter().cloned().collect();
     if let Some(found) = first_valid_trajectory_candidate(normal, chat_id).await {
+        return Some(found);
+    }
+    let mut direct = Vec::new();
+    extend_unique_paths(
+        &mut direct,
+        &mut seen,
+        indexed_candidate_paths_by_id(
+            &gcx,
+            chat_id,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        )
+        .await,
+    );
+    if let Some(found) = first_valid_trajectory_candidate(direct, chat_id).await {
         return Some(found);
     }
     let mut candidates = Vec::new();
@@ -6122,6 +6161,13 @@ async fn remove_stale_trajectory_index_entries(gcx: Arc<GlobalContext>, chat_id:
         None => Vec::new(),
     };
     let dirs = if dirs.is_empty() {
+        app.chat
+            .trajectory_index_coordinator
+            .entry_dirs_for_id(chat_id)
+    } else {
+        dirs
+    };
+    let dirs = if dirs.is_empty() {
         list_trajectory_dirs(&gcx).await
     } else {
         dirs
@@ -7987,6 +8033,32 @@ async fn hydrate_trajectory_list_page(
     (items, has_more)
 }
 
+// Directories the coordinator already indexed and that hold no renderable chat are skipped
+// without a listing call, so a displayable-only refresh stops sweeping every task trajectory
+// directory. An unknown directory is never skipped, so the first refresh still sees everything.
+async fn list_trajectory_entries_for_listing(
+    app: &AppState,
+    dir: &Path,
+    displayable_only: bool,
+    caller: trajectory_index::TrajectoryIndexListingCaller,
+) -> Result<Option<Arc<Vec<trajectory_index::TrajectoryIndexEntry>>>, String> {
+    let coordinator = &app.chat.trajectory_index_coordinator;
+    if displayable_only && coordinator.directory_has_displayable_entries(dir) == Some(false) {
+        return Ok(None);
+    }
+    if !is_real_dir(dir).await {
+        return Ok(None);
+    }
+    trajectory_index::list_trajectory_entries_with_rollout_shared_for(
+        coordinator,
+        dir,
+        None,
+        caller,
+    )
+    .await
+    .map(Some)
+}
+
 async fn collect_trajectory_list_candidates(
     gcx: &Arc<GlobalContext>,
     cursor_filter: Option<&(String, String)>,
@@ -7998,18 +8070,16 @@ async fn collect_trajectory_list_candidates(
     let app = AppState::from_gcx(gcx.clone()).await;
 
     for trajectories_dir in list_trajectory_dirs(gcx).await {
-        if !is_real_dir(&trajectories_dir).await {
-            continue;
-        }
-        let entries = match trajectory_index::list_trajectory_entries_with_rollout_shared_for(
-            &app.chat.trajectory_index_coordinator,
+        let entries = match list_trajectory_entries_for_listing(
+            &app,
             &trajectories_dir,
-            None,
+            displayable_only,
             caller,
         )
         .await
         {
-            Ok(entries) => entries,
+            Ok(Some(entries)) => entries,
+            Ok(None) => continue,
             Err(e) => {
                 warn!(
                     "Failed to list trajectory index {:?}: {}",
@@ -8328,18 +8398,16 @@ pub async fn list_all_trajectories_meta(
     let task_roots = get_all_task_roots(gcx.clone()).await;
 
     for trajectories_dir in list_trajectory_dirs(&gcx).await {
-        if !is_real_dir(&trajectories_dir).await {
-            continue;
-        }
-        let entries = match trajectory_index::list_trajectory_entries_with_rollout_shared_for(
-            &app.chat.trajectory_index_coordinator,
+        let entries = match list_trajectory_entries_for_listing(
+            &app,
             &trajectories_dir,
-            None,
+            displayable_only,
             trajectory_index::TrajectoryIndexListingCaller::AllTrajectoriesMetadata,
         )
         .await
         {
-            Ok(entries) => entries,
+            Ok(Some(entries)) => entries,
+            Ok(None) => continue,
             Err(e) => {
                 warn!(
                     "Failed to list trajectory index {:?}: {}",
