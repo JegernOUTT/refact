@@ -49,13 +49,12 @@ struct MemoryOpsFileStamp {
 }
 
 struct MemoryOpsCacheEntry {
-    root: PathBuf,
     stamp: MemoryOpsFileStamp,
     state: MemoryOpsState,
 }
 
-static MEMORY_OPS_CACHE: std::sync::Mutex<Option<MemoryOpsCacheEntry>> =
-    std::sync::Mutex::new(None);
+static MEMORY_OPS_CACHE: std::sync::Mutex<BTreeMap<PathBuf, MemoryOpsCacheEntry>> =
+    std::sync::Mutex::new(BTreeMap::new());
 
 async fn memory_ops_file_stamp(project_root: &Path) -> Option<MemoryOpsFileStamp> {
     let metadata = fs::metadata(memory_ops_path(project_root)).await.ok()?;
@@ -73,8 +72,8 @@ fn cached_memory_ops_state(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     cache
-        .as_ref()
-        .filter(|entry| entry.root == project_root && &entry.stamp == stamp)
+        .get(project_root)
+        .filter(|entry| &entry.stamp == stamp)
         .map(|entry| entry.state.clone())
 }
 
@@ -82,11 +81,20 @@ fn store_memory_ops_state(project_root: &Path, stamp: MemoryOpsFileStamp, state:
     let mut cache = MEMORY_OPS_CACHE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *cache = Some(MemoryOpsCacheEntry {
-        root: project_root.to_path_buf(),
-        stamp,
-        state: state.clone(),
-    });
+    cache.insert(
+        project_root.to_path_buf(),
+        MemoryOpsCacheEntry {
+            stamp,
+            state: state.clone(),
+        },
+    );
+}
+
+fn invalidate_memory_ops_state(project_root: &Path) {
+    MEMORY_OPS_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(project_root);
 }
 
 fn memory_ops_path(project_root: &Path) -> PathBuf {
@@ -690,6 +698,7 @@ async fn merge_processed_ops_and_rewrite(
         malformed_lines,
     );
     rewrite_memory_ops_records(&memory_ops_path(project_root), state.canonical_records()).await?;
+    invalidate_memory_ops_state(project_root);
     Ok(state)
 }
 
@@ -1794,6 +1803,70 @@ mod tests {
         tokio::fs::write(&path, "not json\n").await.unwrap();
         let reread = load_memory_ops(root).await;
         assert!(reread.ops.is_empty());
+    }
+
+    #[tokio::test]
+    async fn loading_another_root_does_not_evict_the_first_root_cache() {
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let first_root = first_dir.path();
+        let second_root = second_dir.path();
+        let first_op = op_with_time(
+            "op-first-root",
+            MemorySource::MemoryGarden,
+            MemoryOpStatus::Pending,
+            Utc::now(),
+        );
+        let second_op = op_with_time(
+            "op-second-root",
+            MemorySource::MemoryGarden,
+            MemoryOpStatus::Applied,
+            Utc::now(),
+        );
+        write_memory_ops_records_for_test(first_root, vec![first_op.clone()]).await;
+        write_memory_ops_records_for_test(second_root, vec![second_op.clone()]).await;
+
+        let first_state = load_memory_ops(first_root).await;
+        let second_state = load_memory_ops(second_root).await;
+
+        let first_stamp = memory_ops_file_stamp(first_root).await.unwrap();
+        let cached_first = cached_memory_ops_state(first_root, &first_stamp)
+            .expect("first root must stay cached after a second root is loaded");
+        assert_eq!(cached_first.ops, first_state.ops);
+        assert_eq!(cached_first.ops, vec![first_op.normalized()]);
+
+        let second_stamp = memory_ops_file_stamp(second_root).await.unwrap();
+        let cached_second = cached_memory_ops_state(second_root, &second_stamp)
+            .expect("second root must be cached independently");
+        assert_eq!(cached_second.ops, second_state.ops);
+        assert_eq!(cached_second.ops, vec![second_op.normalized()]);
+    }
+
+    #[tokio::test]
+    async fn merge_processed_ops_drops_the_pre_merge_cache_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let original = test_op("op-merge-cache", "pending body", MemoryOpStatus::Pending);
+        enqueue_memory_op(root, original.clone()).await.unwrap();
+        let warm = load_memory_ops(root).await;
+        assert_eq!(warm.pending_count, 1);
+        let pre_merge_stamp = memory_ops_file_stamp(root).await.unwrap();
+        assert!(cached_memory_ops_state(root, &pre_merge_stamp).is_some());
+
+        let expected = original.normalized();
+        let mut updated = expected.clone();
+        updated.status = MemoryOpStatus::Applied;
+        merge_processed_ops_and_rewrite(root, vec![(expected, updated)])
+            .await
+            .unwrap();
+
+        assert!(
+            cached_memory_ops_state(root, &pre_merge_stamp).is_none(),
+            "rewriting the queue must drop the cached pre-merge state"
+        );
+        let reloaded = load_memory_ops(root).await;
+        assert_eq!(reloaded.ops[0].status, MemoryOpStatus::Applied);
+        assert_eq!(reloaded.pending_count, 0);
     }
 
     #[tokio::test]
