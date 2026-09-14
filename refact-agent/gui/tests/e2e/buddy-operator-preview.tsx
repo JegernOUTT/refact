@@ -7,9 +7,10 @@ import { BuddyDeskPreview } from "../../src/features/Buddy/preview/BuddyDeskPrev
 import { BuddyDesk } from "../../src/features/Buddy/BuddyDesk";
 import { BuddyNativeDecisions } from "../../src/features/Buddy/BuddyNativeDecisions";
 import { BuddyOperatorPlayPreview } from "../../src/features/Buddy/BuddyOperatorPlayPreview";
-import { BuddyPresencePreviewProvider } from "../../src/features/Buddy/BuddyPresencePreviewProvider";
+import { BuddyPresenceProvider } from "../../src/features/Buddy/BuddyPresenceProvider";
 import { BuddyWorld } from "../../src/features/Buddy/BuddyWorld";
 import { createInitialSemanticState } from "../../src/features/Buddy/state";
+import { setBuddyTextPresence } from "../../src/features/Buddy/useBuddyTextPresence";
 import { PALETTES, STAGES } from "../../src/features/Buddy/constants";
 import "../../src/lib/render/web.css";
 
@@ -27,19 +28,14 @@ const store = setUpStore({
   },
 });
 const connected = params.get("connected") === "1";
-// Default-disabled prototype (plan B34/B35/B37). It is only mounted when the
-// fixture URL explicitly opts in; it never activates production avatar polish.
 const playPreviewEnabled = params.get("play") === "1";
 const lowPower = params.get("lowpower") === "1";
+setBuddyTextPresence(params.get("textonly") === "1");
 const sceneState = { ...createInitialSemanticState(), name: "Pixel" };
 const noAction = () => undefined;
 function PlayFixture() {
   return (
-    <BuddyPresencePreviewProvider
-      connected={connected}
-      lowPower={lowPower}
-      textOnly={params.get("textonly") === "1"}
-    >
+    <BuddyPresenceProvider lowPower={lowPower}>
       <BuddyWorld
         palette={PALETTES[sceneState.paletteIndex]}
         stage={STAGES[sceneState.progress.stage]}
@@ -58,7 +54,7 @@ function PlayFixture() {
         onSpeechControl={noAction}
       />
       <BuddyOperatorPlayPreview enabled lowPower={lowPower} />
-    </BuddyPresencePreviewProvider>
+    </BuddyPresenceProvider>
   );
 }
 createRoot(root).render(

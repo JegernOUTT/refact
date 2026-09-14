@@ -9,7 +9,6 @@ import type { BuddyScenePose } from "./types";
 import type { WorkItem } from "./operatorTypes";
 import type { NativeWorkView } from "../../services/refact/buddyNativeWork";
 
-/** Fixture-only approval boundary. No production provider enables this. */
 export const BuddyPresencePreviewContext = createContext({
   enabled: false,
   lowPower: false,
@@ -59,9 +58,8 @@ export function useBuddySurfaceVisible(ref: RefObject<Element>) {
 /**
  * Shared, side-effect-free motion / work-state grammar (plan B34, B37).
  *
- * This module only describes motion; it never activates new avatar polish and
- * never changes an existing scene, palette, or cosmetic. Callers keep their own
- * rendering. Nothing here can grant authority or mutate work.
+ * This module only describes motion; callers keep their own rendering. Nothing
+ * here can grant authority or mutate work.
  */
 
 export type BuddyWorkState =

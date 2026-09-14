@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen } from "../../utils/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BuddyCanvas } from "./BuddyCanvas";
 import { BuddyDreamCanvas } from "./BuddyDreamCanvas";
-import { BuddyPresencePreviewProvider } from "./BuddyPresencePreviewProvider";
+import { BuddyPresenceProvider } from "./BuddyPresenceProvider";
 import { BuddyWorld } from "./BuddyWorld";
 import {
   BuddyPresencePreviewContext,
@@ -70,9 +70,9 @@ describe("mounted presence integrations", () => {
   });
   it("does not describe unavailable provider facts as idle", () => {
     render(
-      <BuddyPresencePreviewProvider>
+      <BuddyPresenceProvider>
         <PresenceLabel />
-      </BuddyPresencePreviewProvider>,
+      </BuddyPresenceProvider>,
     );
     expect(screen.getByRole("status")).toHaveTextContent(
       "Current work presence unavailable; no execution is inferred.",

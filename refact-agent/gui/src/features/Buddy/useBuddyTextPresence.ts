@@ -22,7 +22,7 @@ function subscribe(notify: () => void): () => void {
     window.removeEventListener(eventName, notify);
   };
 }
-function setTextPresence(enabled: boolean): void {
+export function setBuddyTextPresence(enabled: boolean): void {
   localValue = enabled;
   try {
     window.localStorage.setItem(key, String(enabled));
@@ -35,5 +35,8 @@ export function useBuddyTextPresence(): readonly [
   boolean,
   (enabled: boolean) => void,
 ] {
-  return [useSyncExternalStore(subscribe, read, () => false), setTextPresence];
+  return [
+    useSyncExternalStore(subscribe, read, () => false),
+    setBuddyTextPresence,
+  ];
 }

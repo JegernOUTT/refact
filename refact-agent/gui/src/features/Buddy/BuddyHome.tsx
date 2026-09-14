@@ -114,6 +114,7 @@ import { computeXpFill } from "./buddyUtils";
 import { useGetStatsSummaryQuery } from "../../services/refact/stats";
 import { useGetSetupStatusQuery } from "../../services/refact/setupStatus";
 import { SETUP_MODES } from "../Setup/setupModes";
+import { BuddyPresenceProvider } from "./BuddyPresenceProvider";
 import styles from "./BuddyHome.module.css";
 
 const NEED_ROWS: {
@@ -332,7 +333,7 @@ const BuddyHomeDraftReview: React.FC<{ draftId: string }> = ({ draftId }) => {
   );
 };
 
-export const BuddyHome: React.FC = () => {
+const BuddyHomeContent: React.FC = () => {
   const dispatch = useAppDispatch();
   const currentPage = useAppSelector(selectCurrentPage);
   const draftId =
@@ -1408,3 +1409,9 @@ export const BuddyHome: React.FC = () => {
     </div>
   );
 };
+
+export const BuddyHome: React.FC = () => (
+  <BuddyPresenceProvider>
+    <BuddyHomeContent />
+  </BuddyPresenceProvider>
+);
