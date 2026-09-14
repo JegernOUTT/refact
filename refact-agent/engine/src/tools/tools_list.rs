@@ -1933,6 +1933,180 @@ mod tests {
             );
         }
     }
+
+    struct CountingTool {
+        desc: ToolDesc,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for CountingTool {
+        async fn tool_execute(
+            &mut self,
+            _ccx: Arc<tokio::sync::Mutex<crate::at_commands::at_commands::AtCommandsContext>>,
+            _tool_call_id: &String,
+            _args: &HashMap<String, serde_json::Value>,
+        ) -> Result<(bool, Vec<crate::call_validation::ContextEnum>), String> {
+            unreachable!("test tools are only used to build the catalog")
+        }
+
+        fn tool_description(&self) -> ToolDesc {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.desc.clone()
+        }
+
+        fn config(&self) -> Result<crate::tools::tools_description::ToolConfig, String> {
+            Ok(crate::tools::tools_description::ToolConfig::default())
+        }
+    }
+
+    fn described_builtin(name: &str) -> DescribedTool {
+        let tool_desc = builtin_desc(name);
+        (
+            ToolGroupCategory::Builtin,
+            tool_desc.clone(),
+            Box::new(TestTool(tool_desc)) as Box<dyn Tool + Send>,
+        )
+    }
+
+    fn described_integration(name: &str) -> DescribedTool {
+        let tool_desc = mcp_desc("stdio_test.yaml", name);
+        (
+            ToolGroupCategory::Integration,
+            tool_desc.clone(),
+            Box::new(TestTool(tool_desc)) as Box<dyn Tool + Send>,
+        )
+    }
+
+    fn selected_names(tools: Vec<Box<dyn Tool + Send>>) -> Vec<String> {
+        tools
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect()
+    }
+
+    #[test]
+    fn tool_ordering_is_unchanged_after_cached_key_sort() {
+        let mode_tools = vec!["shell".to_string(), "cat".to_string(), "tree".to_string()];
+        let described = vec![
+            described_builtin("tree"),
+            described_builtin("glob"),
+            described_builtin("shell"),
+            described_builtin("cat"),
+        ];
+
+        let names = selected_names(select_and_order_mode_tools(
+            described,
+            &mode_tools,
+            false,
+            false,
+            false,
+            false,
+            None,
+        ));
+
+        assert_eq!(names, vec!["shell", "cat", "tree"]);
+    }
+
+    #[test]
+    fn tools_missing_from_order_map_sort_last_by_name() {
+        let mode_tools = vec!["shell".to_string(), "cat".to_string()];
+        let described = vec![
+            described_integration("mcp_zeta"),
+            described_builtin("cat"),
+            described_integration("mcp_alpha"),
+            described_builtin("shell"),
+        ];
+
+        let names = selected_names(select_and_order_mode_tools(
+            described,
+            &mode_tools,
+            true,
+            false,
+            false,
+            false,
+            None,
+        ));
+
+        assert_eq!(names, vec!["shell", "cat", "mcp_alpha", "mcp_zeta"]);
+    }
+
+    #[test]
+    fn web_search_is_dropped_when_the_model_has_native_web_search() {
+        let mode_tools = vec!["web_search".to_string(), "cat".to_string()];
+        let build = || vec![described_builtin("web_search"), described_builtin("cat")];
+
+        let kept = selected_names(select_and_order_mode_tools(
+            build(),
+            &mode_tools,
+            false,
+            false,
+            false,
+            false,
+            None,
+        ));
+        let dropped = selected_names(select_and_order_mode_tools(
+            build(),
+            &mode_tools,
+            false,
+            false,
+            false,
+            true,
+            None,
+        ));
+
+        assert_eq!(kept, vec!["web_search", "cat"]);
+        assert_eq!(dropped, vec!["cat"]);
+    }
+
+    #[test]
+    fn tool_description_is_called_once_per_tool_per_catalog_build() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mode_tools = vec!["shell".to_string(), "cat".to_string(), "tree".to_string()];
+        let described: Vec<DescribedTool> = ["tree", "cat", "shell"]
+            .into_iter()
+            .map(|name| {
+                let tool = CountingTool {
+                    desc: builtin_desc(name),
+                    calls: calls.clone(),
+                };
+                let tool_desc = tool.tool_description();
+                (
+                    ToolGroupCategory::Builtin,
+                    tool_desc,
+                    Box::new(tool) as Box<dyn Tool + Send>,
+                )
+            })
+            .collect();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        let selected =
+            select_and_order_mode_tools(described, &mode_tools, false, false, false, false, None);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(selected.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn mode_tool_order_follows_the_mode_config_tool_list() {
+        let gcx = task_prompt_contract_gcx().await;
+        let mode = read_default_task_mode("shell");
+
+        let names = get_tools_for_mode(gcx, "shell", None)
+            .await
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect::<Vec<_>>();
+        let expected = mode
+            .tools
+            .iter()
+            .filter(|name| names.contains(name))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert!(!names.is_empty());
+        assert_eq!(names, expected);
+    }
 }
 
 pub async fn get_available_tool_groups(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
@@ -1953,6 +2127,57 @@ pub async fn get_available_tools(gcx: Arc<GlobalContext>) -> Vec<Box<dyn Tool + 
         .into_iter()
         .flat_map(|g| g.tools)
         .collect()
+}
+
+type DescribedTool = (ToolGroupCategory, ToolDesc, Box<dyn Tool + Send>);
+
+fn select_and_order_mode_tools(
+    described_tools: Vec<DescribedTool>,
+    mode_tools: &[String],
+    allow_integrations: bool,
+    allow_mcp: bool,
+    allow_subagents: bool,
+    model_supports_web_search: bool,
+    mcp_access: Option<(&refact_privacy::PrivacyPolicy, &str)>,
+) -> Vec<Box<dyn Tool + Send>> {
+    let allowed_tools: std::collections::HashSet<&str> =
+        mode_tools.iter().map(|name| name.as_str()).collect();
+    let tool_order: HashMap<&str, usize> = mode_tools
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect();
+
+    let mut selected: Vec<(ToolDesc, Box<dyn Tool + Send>)> = described_tools
+        .into_iter()
+        .filter(|(_, _, tool)| tool.config().unwrap_or_default().enabled)
+        .filter(|(_, desc, _)| !(desc.name == "web_search" && model_supports_web_search))
+        .filter(|(category, desc, _)| match category {
+            ToolGroupCategory::Integration if allow_integrations => true,
+            ToolGroupCategory::MCP if allow_mcp => true,
+            ToolGroupCategory::ConfigSubagent if allow_subagents => true,
+            _ => allowed_tools.contains(desc.name.as_str()),
+        })
+        .filter(|(_, desc, _)| match mcp_access {
+            Some((policy, provider)) => mcp_tool_allowed(policy, provider, desc),
+            None => true,
+        })
+        .map(|(_, desc, tool)| (desc, tool))
+        .collect();
+
+    selected.sort_by(|(a, _), (b, _)| {
+        let a_order = tool_order
+            .get(a.name.as_str())
+            .copied()
+            .unwrap_or(usize::MAX);
+        let b_order = tool_order
+            .get(b.name.as_str())
+            .copied()
+            .unwrap_or(usize::MAX);
+        a_order.cmp(&b_order).then_with(|| a.name.cmp(&b.name))
+    });
+
+    selected.into_iter().map(|(_, tool)| tool).collect()
 }
 
 pub async fn get_tools_for_mode(
@@ -1977,8 +2202,6 @@ pub async fn get_tools_for_mode(
         return vec![];
     }
 
-    let allowed_tools: HashSet<&str> = mode_config.tools.iter().map(|s| s.as_str()).collect();
-
     let model_supports_web_search = if let Some(mid) = model_id {
         match try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
             Ok(caps) => resolve_chat_model(caps, mid)
@@ -1990,23 +2213,21 @@ pub async fn get_tools_for_mode(
         false
     };
 
-    let allow_integrations = mode_config.allow_integrations;
-    let allow_mcp = mode_config.allow_mcp;
-    let allow_subagents = mode_config.allow_subagents;
-
-    let all_tool_groups: Vec<(ToolGroupCategory, Box<dyn Tool + Send>)> =
-        get_available_tool_groups(gcx.clone())
-            .await
-            .into_iter()
-            .flat_map(|g| {
-                let cat = g.category;
-                g.tools.into_iter().map(move |t| (cat, t))
+    let described_tools: Vec<DescribedTool> = get_available_tool_groups(gcx.clone())
+        .await
+        .into_iter()
+        .flat_map(|group| {
+            let category = group.category;
+            group.tools.into_iter().map(move |tool| {
+                let desc = tool.tool_description();
+                (category, desc, tool)
             })
-            .collect();
+        })
+        .collect();
 
-    let registered_tool_names: HashSet<String> = all_tool_groups
+    let registered_tool_names: HashSet<String> = described_tools
         .iter()
-        .map(|(_, tool)| tool.tool_description().name)
+        .map(|(_, desc, _)| desc.name.clone())
         .collect();
     crate::yaml_configs::mode_validation::warn_unknown_mode_tools(
         gcx.clone(),
@@ -2016,56 +2237,27 @@ pub async fn get_tools_for_mode(
     )
     .await;
 
-    let all_tools: Vec<(ToolGroupCategory, Box<dyn Tool + Send>)> = all_tool_groups
-        .into_iter()
-        .filter(|(_, tool)| tool.config().unwrap_or_default().enabled)
-        .filter(|(_, tool)| {
-            if tool.tool_description().name == "web_search" && model_supports_web_search {
-                return false;
+    let mcp_access = match model_id {
+        Some(mid) => {
+            let policy = tool_access_policy(gcx.clone()).await;
+            if policy.tool_access.providers.is_empty() {
+                None
+            } else {
+                Some((policy, provider_of_model(mid).to_string()))
             }
-            true
-        })
-        .collect();
-
-    let tool_order: HashMap<&str, usize> = mode_config
-        .tools
-        .iter()
-        .enumerate()
-        .map(|(i, name)| (name.as_str(), i))
-        .collect();
-
-    let mut result: Vec<Box<dyn Tool + Send>> = all_tools
-        .into_iter()
-        .filter(|(cat, tool)| match cat {
-            ToolGroupCategory::Integration if allow_integrations => true,
-            ToolGroupCategory::MCP if allow_mcp => true,
-            ToolGroupCategory::ConfigSubagent if allow_subagents => true,
-            _ => allowed_tools.contains(tool.tool_description().name.as_str()),
-        })
-        .map(|(_, tool)| tool)
-        .collect();
-
-    if let Some(mid) = model_id {
-        let policy = tool_access_policy(gcx.clone()).await;
-        if !policy.tool_access.providers.is_empty() {
-            let provider = provider_of_model(mid).to_string();
-            result.retain(|tool| mcp_tool_allowed(&policy, &provider, &tool.tool_description()));
         }
-    }
+        None => None,
+    };
 
-    result.sort_by(|a, b| {
-        let a_order = tool_order
-            .get(a.tool_description().name.as_str())
-            .copied()
-            .unwrap_or(usize::MAX);
-        let b_order = tool_order
-            .get(b.tool_description().name.as_str())
-            .copied()
-            .unwrap_or(usize::MAX);
-        a_order
-            .cmp(&b_order)
-            .then_with(|| a.tool_description().name.cmp(&b.tool_description().name))
-    });
-
-    result
+    select_and_order_mode_tools(
+        described_tools,
+        &mode_config.tools,
+        mode_config.allow_integrations,
+        mode_config.allow_mcp,
+        mode_config.allow_subagents,
+        model_supports_web_search,
+        mcp_access
+            .as_ref()
+            .map(|(policy, provider)| (policy.as_ref(), provider.as_str())),
+    )
 }
