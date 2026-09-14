@@ -246,6 +246,42 @@ impl WorldManager {
         )
     }
 
+    /// Counts locator matches by value without materializing element handles, returning up to
+    /// `preview_limit` outerHTML previews. Strict-mode callers use this so an ambiguous locator
+    /// over hundreds of elements costs one CDP round trip instead of one handle release each.
+    pub fn count_injected_matches(
+        &self,
+        tab: &Tab,
+        locator: Value,
+        preview_limit: usize,
+    ) -> Result<(usize, Vec<String>), String> {
+        let locator = serde_json::to_string(&locator)
+            .map_err(|error| format!("Failed to serialize browser locator: {error}"))?;
+        let value = self.eval_in_utility(
+            tab,
+            &format!(
+                "(() => {{ const instance = globalThis[{instance_name:?}]; if (!instance) throw new Error('RefactInjected is not installed'); const elements = instance.resolveAll({locator}); return {{count: elements.length, previews: elements.slice(0, {preview_limit}).map((el) => String(el.outerHTML ?? el).substring(0, 200))}}; }})()",
+                instance_name = INJECTED_INSTANCE_NAME,
+            ),
+        )?;
+        let count = value
+            .get("count")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "Locator match count did not return a number".to_string())?
+            as usize;
+        let previews = value
+            .get("previews")
+            .and_then(Value::as_array)
+            .map(|previews| {
+                previews
+                    .iter()
+                    .filter_map(|preview| preview.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok((count, previews))
+    }
+
     pub fn call_injected_handle(
         &self,
         tab: &Tab,

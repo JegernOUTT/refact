@@ -25,6 +25,7 @@ pub struct BrowserLaunchSettings {
     pub downloads_dir: String,
     pub proxy_server: String,
     pub proxy_bypass: String,
+    pub gpu: refact_browser::BrowserGpuMode,
 }
 
 impl Default for BrowserLaunchSettings {
@@ -40,6 +41,7 @@ impl Default for BrowserLaunchSettings {
             downloads_dir: String::new(),
             proxy_server: String::new(),
             proxy_bypass: String::new(),
+            gpu: defaults.gpu,
         }
     }
 }
@@ -146,6 +148,7 @@ pub struct BrowserCaptureSettings {
     pub max_extract_links: usize,
     pub max_extract_table_rows: usize,
     pub default_all_texts: usize,
+    pub max_eval_result_chars: usize,
 }
 
 impl Default for BrowserCaptureSettings {
@@ -158,6 +161,7 @@ impl Default for BrowserCaptureSettings {
             max_extract_links: 500,
             max_extract_table_rows: 100,
             default_all_texts: 50,
+            max_eval_result_chars: 64 * 1024,
         }
     }
 }
@@ -203,6 +207,7 @@ impl BrowserSettings {
                 .then(|| PathBuf::from(launch.downloads_dir.clone())),
             ignore_https_errors: launch.ignore_https_errors,
             evict_idle_attached: self.lifecycle.evict_idle_attached,
+            gpu: launch.gpu,
             ..Default::default()
         }
     }

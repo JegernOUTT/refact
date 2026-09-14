@@ -28,6 +28,31 @@ pub struct ScreenshotCapture {
     pub quality: Option<u32>,
     pub clip: Page::Viewport,
     pub capture_beyond_viewport: bool,
+    /// Extra scale applied in the browser so the raw capture stays decodable; `None` when the
+    /// requested geometry already fits inside `MAX_CAPTURE_SIDE`/`MAX_CAPTURE_PIXELS`.
+    pub downscale: Option<f64>,
+}
+
+/// Chrome refuses (or silently clips) captures beyond this many device pixels per side, and the
+/// decoder would need several gigabytes for anything near it; keep raw captures well below.
+pub const MAX_CAPTURE_SIDE: f64 = 16_384.0;
+/// Raw RGBA decode budget: 24 Mpx ≈ 96 MiB, comfortably inside the image crate's limits.
+pub const MAX_CAPTURE_PIXELS: f64 = 24_000_000.0;
+
+pub fn capture_downscale(output_width: f64, output_height: f64) -> Option<f64> {
+    if !output_width.is_finite() || !output_height.is_finite() {
+        return None;
+    }
+    let mut factor: f64 = 1.0;
+    let longest = output_width.max(output_height);
+    if longest > MAX_CAPTURE_SIDE {
+        factor = factor.min(MAX_CAPTURE_SIDE / longest);
+    }
+    let pixels = output_width * output_height;
+    if pixels > MAX_CAPTURE_PIXELS {
+        factor = factor.min((MAX_CAPTURE_PIXELS / pixels).sqrt());
+    }
+    (factor < 1.0).then_some(factor)
 }
 
 pub fn screenshot_capture(
@@ -99,6 +124,24 @@ pub fn screenshot_capture(
     if options.scale == Some(BrowserScreenshotScale::Css) {
         scale /= metrics.device_scale_factor.max(f64::EPSILON);
     }
+    let clip_width = if viewport_relative {
+        (rect.width / metrics.viewport_scale.max(f64::EPSILON)).ceil()
+    } else {
+        rect.width.ceil()
+    };
+    let clip_height = if viewport_relative {
+        (rect.height / metrics.viewport_scale.max(f64::EPSILON)).ceil()
+    } else {
+        rect.height.ceil()
+    };
+    let device_scale = metrics.device_scale_factor.max(f64::EPSILON);
+    let downscale = capture_downscale(
+        clip_width * scale * device_scale,
+        clip_height * scale * device_scale,
+    );
+    if let Some(factor) = downscale {
+        scale *= factor;
+    }
     Ok(ScreenshotCapture {
         format,
         mime,
@@ -114,19 +157,12 @@ pub fn screenshot_capture(
             } else {
                 rect.y
             },
-            width: if viewport_relative {
-                (rect.width / metrics.viewport_scale.max(f64::EPSILON)).ceil()
-            } else {
-                rect.width.ceil()
-            },
-            height: if viewport_relative {
-                (rect.height / metrics.viewport_scale.max(f64::EPSILON)).ceil()
-            } else {
-                rect.height.ceil()
-            },
+            width: clip_width,
+            height: clip_height,
             scale,
         },
         capture_beyond_viewport,
+        downscale,
     })
 }
 
@@ -679,6 +715,40 @@ mod tests {
         assert_eq!(capture.clip.height, 2000.0);
         assert_eq!(capture.clip.scale, 0.5);
         assert!(capture.capture_beyond_viewport);
+        assert_eq!(capture.downscale, None);
+    }
+
+    #[test]
+    fn oversized_full_page_captures_are_downscaled_in_the_browser() {
+        let tall = ScreenshotMetrics {
+            content_width: 1600.0,
+            content_height: 120_000.0,
+            ..metrics()
+        };
+        let capture = screenshot_capture(
+            &BrowserScreenshotOptions {
+                full_page: true,
+                ..Default::default()
+            },
+            tall,
+            None,
+        )
+        .unwrap();
+        let factor = capture
+            .downscale
+            .expect("a 240k px tall capture must be downscaled");
+        assert!(factor < 1.0);
+        assert_eq!(capture.clip.width, 1600.0);
+        assert_eq!(capture.clip.height, 120_000.0);
+        let output_height = capture.clip.height * capture.clip.scale * 2.0;
+        let output_width = capture.clip.width * capture.clip.scale * 2.0;
+        assert!(output_height <= MAX_CAPTURE_SIDE + 1.0, "{output_height}");
+        assert!(output_width * output_height <= MAX_CAPTURE_PIXELS + 1.0);
+
+        assert_eq!(capture_downscale(1600.0, 1200.0), None);
+        assert_eq!(capture_downscale(f64::NAN, 10.0), None);
+        let by_pixels = capture_downscale(6000.0, 6000.0).unwrap();
+        assert!((6000.0 * by_pixels).powi(2) <= MAX_CAPTURE_PIXELS + 1.0);
     }
 
     #[test]

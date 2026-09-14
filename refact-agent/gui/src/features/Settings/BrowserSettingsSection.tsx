@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 
 import {
   Button,
+  FieldSelect,
   FieldSwitch,
   FieldText,
   SettingItem,
@@ -13,6 +14,7 @@ import {
 } from "../../services/refact/browserSettings";
 import type {
   BrowserCaptureSettings,
+  BrowserGpuMode,
   BrowserLaunchSettings,
   BrowserLifecycleSettings,
   BrowserSettings,
@@ -22,6 +24,12 @@ import type {
 } from "../../services/refact/browserSettings";
 import { SettingsGroup, SettingsSection } from "./SettingsSection";
 import styles from "./BrowserSettingsSection.module.css";
+
+const GPU_OPTIONS: { value: BrowserGpuMode; label: string }[] = [
+  { value: "disabled", label: "Disabled (no WebGL)" },
+  { value: "software", label: "Software (SwiftShader WebGL)" },
+  { value: "hardware", label: "Hardware" },
+];
 
 function errorMessage(error: unknown): string {
   if (!error || typeof error !== "object") return "The request failed.";
@@ -296,6 +304,17 @@ export const BrowserSettingsSection: React.FC = () => {
           />
         </SettingItem>
         <SettingItem
+          title="GPU"
+          description="Disabled keeps Chrome's --disable-gpu (no WebGL). Software renders WebGL through SwiftShader; hardware uses the machine's GPU."
+        >
+          <FieldSelect
+            aria-label="GPU"
+            options={GPU_OPTIONS}
+            value={draft.launch.gpu}
+            onChange={(value) => updateLaunch("gpu", value as BrowserGpuMode)}
+          />
+        </SettingItem>
+        <SettingItem
           title="Extra arguments"
           description="Separate arguments with commas or new lines."
         >
@@ -434,6 +453,11 @@ export const BrowserSettingsSection: React.FC = () => {
           label="Default all texts"
           value={draft.capture.default_all_texts}
           onChange={(value) => updateCapture("default_all_texts", value)}
+        />
+        <NumberSetting
+          label="Maximum inlined eval result characters"
+          value={draft.capture.max_eval_result_chars}
+          onChange={(value) => updateCapture("max_eval_result_chars", value)}
         />
         {saveError ? (
           <p className={styles.error} role="alert">

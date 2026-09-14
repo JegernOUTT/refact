@@ -22,6 +22,56 @@ pub const MANDATORY_CHROME_ARGS: [&str; 7] = [
 
 pub const IGNORED_CHROME_DEFAULT_ARGS: [&str; 1] = ["--enable-automation"];
 
+pub const SOFTWARE_GPU_CHROME_ARGS: [&str; 3] = [
+    "--use-gl=angle",
+    "--use-angle=swiftshader",
+    "--enable-unsafe-swiftshader",
+];
+
+pub const HARDWARE_GPU_CHROME_ARGS: [&str; 1] = ["--ignore-gpu-blocklist"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BrowserGpuMode {
+    #[default]
+    Disabled,
+    Software,
+    Hardware,
+}
+
+impl BrowserGpuMode {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "disabled" | "off" | "false" | "none" => Ok(Self::Disabled),
+            "software" | "swiftshader" | "angle" => Ok(Self::Software),
+            "hardware" | "on" | "true" | "gpu" => Ok(Self::Hardware),
+            other => Err(format!(
+                "unsupported gpu mode `{other}`; expected disabled, software or hardware"
+            )),
+        }
+    }
+
+    pub fn enables_gpu(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Software => "software",
+            Self::Hardware => "hardware",
+        }
+    }
+
+    fn chrome_args(self) -> &'static [&'static str] {
+        match self {
+            Self::Disabled => &[],
+            Self::Software => &SOFTWARE_GPU_CHROME_ARGS,
+            Self::Hardware => &HARDWARE_GPU_CHROME_ARGS,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserProxyOptions {
     pub server: String,
@@ -43,6 +93,7 @@ pub struct BrowserLaunchOptions {
     pub downloads_dir: Option<PathBuf>,
     pub ignore_https_errors: bool,
     pub evict_idle_attached: bool,
+    pub gpu: BrowserGpuMode,
 }
 
 impl Default for BrowserLaunchOptions {
@@ -59,6 +110,7 @@ impl Default for BrowserLaunchOptions {
             downloads_dir: None,
             ignore_https_errors: true,
             evict_idle_attached: false,
+            gpu: BrowserGpuMode::Disabled,
         }
     }
 }
@@ -96,6 +148,7 @@ impl BrowserLaunchOptions {
         if let Some(bypass) = self.proxy.as_ref().and_then(|proxy| proxy.bypass.as_ref()) {
             args.push(OsString::from(format!("--proxy-bypass-list={bypass}")));
         }
+        args.extend(self.gpu.chrome_args().iter().map(OsString::from));
         args.extend(self.extra_args.iter().map(OsString::from));
         args
     }
@@ -250,5 +303,52 @@ mod tests {
             "headless"
         );
         assert_eq!(BrowserLaunchOptions::headless(false).mode_label(), "headed");
+    }
+
+    #[test]
+    fn gpu_mode_reaches_dependency_launch_options() {
+        let disabled = BrowserLaunchOptions::default();
+        assert_eq!(disabled.gpu, BrowserGpuMode::Disabled);
+        assert!(!disabled.gpu.enables_gpu());
+        assert!(!args_of(&disabled)
+            .iter()
+            .any(|arg| arg.contains("swiftshader") || arg.contains("gpu")));
+
+        let software = BrowserLaunchOptions {
+            gpu: BrowserGpuMode::Software,
+            ..BrowserLaunchOptions::default()
+        };
+        assert!(software.gpu.enables_gpu());
+        let args = args_of(&software);
+        for flag in SOFTWARE_GPU_CHROME_ARGS {
+            assert!(args.contains(&flag.to_string()), "missing {flag}");
+        }
+
+        let hardware = BrowserLaunchOptions {
+            gpu: BrowserGpuMode::Hardware,
+            extra_args: vec!["--mute-audio".to_string()],
+            ..BrowserLaunchOptions::default()
+        };
+        let args = args_of(&hardware);
+        let blocklist = args
+            .iter()
+            .position(|arg| arg == "--ignore-gpu-blocklist")
+            .expect("hardware flag missing");
+        let extra = args
+            .iter()
+            .position(|arg| arg == "--mute-audio")
+            .expect("extra arg missing");
+        assert!(blocklist < extra, "gpu flags precede extra args");
+
+        assert_eq!(BrowserGpuMode::parse("").unwrap(), BrowserGpuMode::Disabled);
+        assert_eq!(
+            BrowserGpuMode::parse("SwiftShader").unwrap(),
+            BrowserGpuMode::Software
+        );
+        assert_eq!(
+            BrowserGpuMode::parse("hardware").unwrap(),
+            BrowserGpuMode::Hardware
+        );
+        assert!(BrowserGpuMode::parse("metal").is_err());
     }
 }

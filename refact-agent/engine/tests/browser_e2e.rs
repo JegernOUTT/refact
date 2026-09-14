@@ -985,7 +985,7 @@ async fn dead_cdp_transport_is_relaunched_and_the_batch_is_retried_once() {
     {
         let mut rt = live_runtime.lock().await;
         assert!(rt.check_connection());
-        assert_eq!(rt.attached_chat_id.as_deref(), Some(CHAT_ID));
+        assert_eq!(rt.attached_chat_id().as_deref(), Some(CHAT_ID));
         assert_eq!(rt.profile_dir, case._profile.path());
     }
 
@@ -7383,4 +7383,108 @@ async fn design_tools_scope_the_aria_snapshot_and_compose_with_refs() {
     .expect("a ref emitted by mark_elements must compose as a ui_probe target");
     let payload = design_tool_payload(messages);
     assert_eq!(payload["matrix"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn contrast_audit_composites_real_computed_styles() {
+    use refact_lsp::tools::design_tools::{
+        measure_contrast_sample, ContrastSampleOutcome, RawContrastSample,
+        CONTRAST_AUDIT_EXPRESSION,
+    };
+
+    let Some(mut case) = BrowserCase::start("states.html").await else {
+        return;
+    };
+    case.setup_world();
+    let html = concat!(
+        "<p id=\"plain\">Black on nothing</p>",
+        "<div style=\"background:rgba(0,0,0,0.5)\"><p id=\"veiled\" style=\"color:#fff\">White under a veil</p></div>",
+        "<div style=\"opacity:0.5;background:#000\"><p id=\"faded\" style=\"color:#fff\">White in a faded group</p></div>",
+        "<p id=\"oklab\" style=\"color:oklab(0.2 0 0);background:oklch(0.97 0.01 90)\">Color 4 text</p>",
+        "<p id=\"gradient\" style=\"background:linear-gradient(#fff,#000)\">Text on a gradient</p>",
+        "<button id=\"faint\" style=\"background:#f5f5f5;border:1px solid #cfcfcf;color:#000\">Faint</button>",
+        "<button id=\"filled\" style=\"background:#2563eb;border:0;color:#fff\">Filled</button>",
+        "<button id=\"ghost\" style=\"background:transparent;border:0;color:#000\">Ghost</button>",
+        "<button id=\"off\" disabled style=\"color:#eee;background:#fff\">Off</button>"
+    );
+    case.tab
+        .evaluate(
+            &format!(
+                "document.body.style.margin='0';document.body.style.background='';document.body.innerHTML={};true",
+                serde_json::to_string(html).unwrap()
+            ),
+            false,
+        )
+        .expect("fixture body must be replaceable");
+
+    let raw = case
+        .runtime
+        .world_manager
+        .eval_in_utility(&case.tab, CONTRAST_AUDIT_EXPRESSION)
+        .expect("sampler must run in the utility world");
+    let samples: Vec<RawContrastSample> = serde_json::from_value(raw).unwrap();
+    let find = |kind: &str, selector: &str| {
+        samples
+            .iter()
+            .find(|sample| sample.kind == kind && sample.selector == selector)
+            .unwrap_or_else(|| panic!("{kind} sample {selector} missing from {samples:?}"))
+    };
+    let ratio_of = |kind: &str, selector: &str| match measure_contrast_sample(find(kind, selector))
+    {
+        ContrastSampleOutcome::Measured { ratio, .. } => ratio,
+        other => panic!("{selector}: expected a measurement, got {other:?}"),
+    };
+
+    assert!(
+        find("text", "#plain").layers.len() >= 3,
+        "layers walk up to the root: {:?}",
+        find("text", "#plain").layers
+    );
+    assert!(
+        (ratio_of("text", "#plain") - 21.0).abs() < 0.05,
+        "black text over transparent ancestors sits on the white canvas"
+    );
+    let veiled = ratio_of("text", "#veiled");
+    assert!(
+        veiled > 3.0 && veiled < 6.0,
+        "white on a 50% black veil over white is mid-gray: {veiled}"
+    );
+    let faded = ratio_of("text", "#faded");
+    assert!(
+        faded > 3.0 && faded < 6.0,
+        "a 50% opacity black group over white is mid-gray: {faded}"
+    );
+    assert!(
+        ratio_of("text", "#oklab") > 7.0,
+        "oklab/oklch computed colors are converted"
+    );
+    assert!(
+        matches!(
+            measure_contrast_sample(find("text", "#gradient")),
+            ContrastSampleOutcome::Unmeasurable(_)
+        ),
+        "gradient backdrops are not rated"
+    );
+    assert!(
+        samples.iter().all(|sample| sample.selector != "#off"),
+        "disabled controls are exempt from the audit"
+    );
+    let faint = ratio_of("non_text", "#faint");
+    assert!(
+        faint < 3.0,
+        "a #cfcfcf border on white fails non-text contrast: {faint}"
+    );
+    assert!(
+        matches!(
+            measure_contrast_sample(find("non_text", "#filled")),
+            ContrastSampleOutcome::Measured { boundary: "fill", ratio, .. } if ratio > 3.0
+        ),
+        "a borderless filled button is rated on its fill against the page"
+    );
+    assert_eq!(
+        measure_contrast_sample(find("non_text", "#ghost")),
+        ContrastSampleOutcome::Skipped,
+        "a control with no border and no fill has no non-text boundary"
+    );
 }

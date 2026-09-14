@@ -26,6 +26,7 @@ const browserSettings: BrowserSettings = {
     downloads_dir: "/tmp/downloads",
     proxy_server: "http://proxy.test",
     proxy_bypass: "localhost",
+    gpu: "disabled",
   },
   lifecycle: {
     idle_timeout_secs: 600,
@@ -51,6 +52,7 @@ const browserSettings: BrowserSettings = {
     max_extract_links: 500,
     max_extract_table_rows: 100,
     default_all_texts: 50,
+    max_eval_result_chars: 65536,
   },
 };
 

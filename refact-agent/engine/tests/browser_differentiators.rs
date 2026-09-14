@@ -876,11 +876,11 @@ async fn differentiator_14_per_chat_runtime_preserves_profile_and_lifecycle() {
     assert_eq!(case.runtime.profile_dir, case._profile.path());
     assert!(case.runtime.profile_dir.is_dir());
     case.runtime.reattach("chat-a");
-    assert_eq!(case.runtime.attached_chat_id.as_deref(), Some("chat-a"));
+    assert_eq!(case.runtime.attached_chat_id().as_deref(), Some("chat-a"));
     case.runtime.reattach("chat-b");
-    assert_eq!(case.runtime.attached_chat_id.as_deref(), Some("chat-b"));
+    assert_eq!(case.runtime.attached_chat_id().as_deref(), Some("chat-b"));
     case.runtime.detach();
-    assert_eq!(case.runtime.attached_chat_id, None);
+    assert_eq!(case.runtime.attached_chat_id(), None);
     case.runtime.idle_timeout = Duration::from_millis(1);
     tokio::time::sleep(Duration::from_millis(5)).await;
     assert!(case.runtime.is_idle_expired());

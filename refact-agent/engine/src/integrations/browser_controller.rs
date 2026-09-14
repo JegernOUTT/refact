@@ -116,6 +116,11 @@ pub fn resolve_tab(runtime: &BrowserRuntime, target: &TabTarget) -> Result<Arc<T
 }
 
 pub fn session_tab(runtime: &mut BrowserRuntime) -> Result<Arc<Tab>, String> {
+    if let Some(reason) = &runtime.recovery_fence {
+        return Err(crate::integrations::browser_runtime::recovery_fence_error(
+            reason,
+        ));
+    }
     refact_browser::adopt_new_tabs(runtime, None);
     resolve_tab(runtime, &TabTarget::Active)
 }
@@ -142,6 +147,27 @@ fn eval_js_json(tab: &Tab, js: &str) -> Result<serde_json::Value, String> {
 
 fn eval_js_ok(tab: &Tab, js: &str) -> Result<serde_json::Value, String> {
     let result = eval_js_json(tab, js)?;
+    if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+        return Err(err.to_string());
+    }
+    Ok(result)
+}
+
+/// Same contract as `eval_js_ok`, but the script runs in the isolated utility world: pages
+/// that override `JSON.stringify`, `Array.prototype` or other globals cannot poison the
+/// engine's own probes there, while the DOM stays fully readable.
+fn eval_js_ok_in_utility(
+    tab: &Tab,
+    world: &WorldManager,
+    js: &str,
+) -> Result<serde_json::Value, String> {
+    let value = world.eval_in_utility(tab, js)?;
+    let result = match value.as_str() {
+        Some(text) => serde_json::from_str(text)
+            .map_err(|error| format!("Failed to parse JS JSON result: {error}"))?,
+        None if value.is_object() || value.is_array() => value,
+        None => return Err(format!("Unexpected JS result type: {value:?}")),
+    };
     if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
         return Err(err.to_string());
     }
@@ -514,7 +540,10 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
             Ok(HitTargetResult::Intercepted { description }) => {
                 Err(intercepts_pointer_events(description))
             }
-            Ok(HitTargetResult::NotConnected) => Err(ActionabilityDiagnostic::Detached),
+            Ok(HitTargetResult::NotConnected) => Ok(resolved.info.tag.clone()),
+            Err(error) if action_outcome_is_lost_to_navigation(&error.to_string()) => {
+                Ok(resolved.info.tag.clone())
+            }
             Err(error) => Err(ActionabilityDiagnostic::PrecheckFailed {
                 description: error.to_string(),
             }),
@@ -549,6 +578,24 @@ fn intercepts_pointer_events(description: String) -> ActionabilityDiagnostic {
             .unwrap_or(&description)
             .to_string(),
     }
+}
+
+/// Errors that mean the document the action was dispatched into no longer exists, so the
+/// dispatched pointer event cannot be verified, only trusted.
+pub fn action_outcome_is_lost_to_navigation(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        "cannot find context with specified id",
+        "execution context was destroyed",
+        "inspected target navigated or closed",
+        "no frame for given id",
+        "cannot find object with given id",
+        "object couldn't be returned by value",
+        "target closed",
+        "invalidated",
+    ]
+    .iter()
+    .any(|marker| error.contains(marker))
 }
 
 fn generate_locator_echo(
@@ -588,6 +635,18 @@ fn resolve_element_typed(
     world: &WorldManager,
     locator: &BrowserLocator,
 ) -> Result<ResolvedElement, ResolveElementError> {
+    if locator_supports_count_precheck(locator) {
+        let value = locator_without_frames(locator).map_err(ResolveElementError::Other)?;
+        match world.count_injected_matches(tab, value, STRICT_PREVIEW_LIMIT) {
+            Ok((0, _)) => {
+                return Err(ResolveElementError::Other("Element not found".to_string()));
+            }
+            Ok((count, previews)) if count > 1 => {
+                return Err(ResolveElementError::MultipleMatches { count, previews });
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
     let handles =
         resolve_locator_handles(tab, world, locator).map_err(ResolveElementError::Other)?;
     let handle = match strict_locator_handle_result(tab, world, handles) {
@@ -600,6 +659,15 @@ fn resolve_element_typed(
         }
     };
     inspect_resolved_element(tab, world, handle).map_err(ResolveElementError::Other)
+}
+
+const STRICT_PREVIEW_LIMIT: usize = 5;
+
+/// Ref locators resolve through the ref registry and frame-scoped locators through the frame
+/// resolver; every other locator can be counted by value first, so strict-mode ambiguity
+/// over hundreds of matches costs one round trip instead of one handle release per match.
+fn locator_supports_count_precheck(locator: &BrowserLocator) -> bool {
+    !matches!(locator.strategy, LocatorStrategy::Ref { .. }) && locator.frames.is_empty()
 }
 
 pub fn resolve_locator_element(
@@ -1927,12 +1995,14 @@ fn capture_frame_burst(
     } else {
         "the screencast produced too few frames, captured with timed screenshots instead"
     };
-    let frames = capture_timed_frames(
+    let capture = capture_timed_frames(
         plan,
         || capture_scoped_frame(tab, world, locator, &options, policy),
         |remaining| std::thread::sleep(remaining),
     )?;
-    Ok((frames, vec![reason.to_string()]))
+    let mut warnings = vec![reason.to_string()];
+    warnings.extend(capture.warning());
+    Ok((capture.frames, warnings))
 }
 
 fn filmstrip_step_data(result: &FilmstripResult) -> Value {
@@ -1980,6 +2050,11 @@ fn execute_screencast_step(
                     image_policy,
                 )?;
                 let captured = frames.len();
+                let elapsed_note = warnings
+                    .iter()
+                    .any(|warning| warning.contains("wall-clock budget"))
+                    .then(|| " (wall-clock budget exhausted, see warnings)")
+                    .unwrap_or("");
                 let filmstrip = build_filmstrip(
                     &frames,
                     &runtime.artifacts_dir,
@@ -1989,7 +2064,10 @@ fn execute_screencast_step(
                 )?;
                 Ok(StepResult::success(
                     idx,
-                    format!("Captured {captured} frame(s) over {}ms", plan.duration_ms),
+                    format!(
+                        "Captured {captured} of {} planned frame(s) over {}ms{elapsed_note}",
+                        plan.frame_count, plan.duration_ms
+                    ),
                 )
                 .with_data(filmstrip_step_data(&filmstrip)))
             }
@@ -2553,8 +2631,7 @@ pub async fn execute_request_with_runtime_validated(
 
     let plan = {
         let rt = runtime_arc.lock().await;
-        rt.attached_chat_id
-            .clone()
+        rt.attached_chat_id()
             .filter(|_| rt.owns_browser_process())
             .map(|chat_id| (chat_id, rt.profile_dir.clone(), rt.launch_options.clone()))
     };
@@ -2570,6 +2647,7 @@ pub async fn execute_request_with_runtime_validated(
     };
 
     let mut resume = None;
+    let dead_runtime = runtime_arc.clone();
     if transport_alive {
         let outcome =
             execute_request_with_runtime(runtime_arc, request.clone(), image_policy).await;
@@ -2580,16 +2658,53 @@ pub async fn execute_request_with_runtime_validated(
             resume = Some(plan_resume(attempt, total_steps));
         }
     }
+    let last_known_url = last_committed_url(&dead_runtime).await;
+    drop(dead_runtime);
 
     let runtime_arc = relaunch_and_resolve(app, &chat_id, profile_dir, launch_options).await?;
     let Some(resume) = resume else {
-        let mut report = execute_request_with_runtime(runtime_arc, request, image_policy).await?;
-        report
-            .warnings
-            .push(crate::integrations::browser_runtime::RELAUNCH_WARNING.to_string());
+        let restore = last_known_url
+            .filter(|_| !request.steps.iter().any(restores_document_after_relaunch))
+            .map(|url| restore_document_step(&url));
+        let mut retry_request = request;
+        if let Some(step) = restore.clone() {
+            retry_request.steps.insert(0, step);
+        }
+        let mut report =
+            execute_request_with_runtime(runtime_arc, retry_request, image_policy).await?;
+        if let Some(BrowserStep::Navigate { url, .. }) = restore {
+            let restored = (!report.steps.is_empty()).then(|| report.steps.remove(0));
+            match restored {
+                Some(result) if result.ok => {
+                    for step in &mut report.steps {
+                        step.step_index = step.step_index.saturating_sub(1);
+                    }
+                    report.warnings.push(
+                        crate::integrations::browser_runtime::relaunch_url_restore_warning(&url, 0),
+                    );
+                }
+                other => {
+                    let detail = other
+                        .map(|result| result.error.unwrap_or(result.summary))
+                        .unwrap_or_else(|| "no result was produced".to_string());
+                    let mut steps = vec![StepResult::failure(
+                        0,
+                        "Resume after browser relaunch",
+                        format!("reopening the last document {url} failed: {detail}"),
+                    )];
+                    mark_unexecuted_steps_skipped(&mut steps, total_steps);
+                    report.steps = steps;
+                    report.ok = false;
+                }
+            }
+        } else {
+            report
+                .warnings
+                .push(crate::integrations::browser_runtime::RELAUNCH_WARNING.to_string());
+        }
         return Ok(report);
     };
-    let resume = resume.with_replay_from(&request.steps);
+    let resume = resume.with_replay_from(&request.steps, last_known_url.as_deref());
     if resume.resume_index > 0 && resume.replay.is_none() {
         return Ok(resume_refused_without_page_context(resume));
     }
@@ -2611,19 +2726,78 @@ struct ResumePlan {
     completed_steps: Vec<StepResult>,
     warnings: Vec<String>,
     replay: Option<(usize, BrowserStep)>,
+    restored_url: Option<String>,
 }
 
 impl ResumePlan {
-    fn with_replay_from(mut self, steps: &[BrowserStep]) -> Self {
-        self.replay = steps
+    /// Chooses how to bring the relaunched browser back to the document the dead one showed.
+    /// The last committed URL wins over an older navigate step in the batch: clicks after
+    /// that step may have moved the document on, and replaying the stale navigate would
+    /// silently roll the page back. `set_content` documents can only be restored by replay.
+    fn with_replay_from(mut self, steps: &[BrowserStep], last_known_url: Option<&str>) -> Self {
+        let replayable = steps
             .iter()
             .take(self.resume_index)
             .enumerate()
             .rev()
             .find(|(_, step)| restores_document_after_relaunch(step))
             .map(|(idx, step)| (idx, step.clone()));
+        let restorable_url = last_known_url.filter(|url| url_is_restorable(url));
+        self.replay = match (replayable, restorable_url) {
+            (Some((idx, step @ BrowserStep::SetContent { .. })), _) => Some((idx, step)),
+            (Some((idx, step)), Some(url)) => {
+                if step_targets_url(&step, url) {
+                    Some((idx, step))
+                } else {
+                    self.restored_url = Some(url.to_string());
+                    Some((idx, restore_document_step(url)))
+                }
+            }
+            (Some(replay), None) => Some(replay),
+            (None, Some(url)) => {
+                self.restored_url = Some(url.to_string());
+                Some((
+                    self.resume_index.saturating_sub(1),
+                    restore_document_step(url),
+                ))
+            }
+            (None, None) => None,
+        };
         self
     }
+}
+
+fn url_is_restorable(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://") || url.starts_with("file://")
+}
+
+fn step_targets_url(step: &BrowserStep, url: &str) -> bool {
+    match step {
+        BrowserStep::Navigate { url: target, .. } => target == url,
+        BrowserStep::OpenTab {
+            url: Some(target), ..
+        } => target == url,
+        _ => false,
+    }
+}
+
+fn restore_document_step(url: &str) -> BrowserStep {
+    BrowserStep::Navigate {
+        url: url.to_string(),
+        timeout_ms: None,
+    }
+}
+
+async fn last_committed_url(runtime_arc: &Arc<AMutex<BrowserRuntime>>) -> Option<String> {
+    let rt = tokio::time::timeout(
+        crate::integrations::browser_runtime::RUNTIME_LOCK_GRACE,
+        runtime_arc.lock(),
+    )
+    .await
+    .ok()?;
+    rt.get_active_tab()
+        .map(|tab| tab.get_url())
+        .filter(|url| url_is_restorable(url))
 }
 
 fn restores_document_after_relaunch(step: &BrowserStep) -> bool {
@@ -2646,6 +2820,7 @@ fn plan_resume(attempt: &ExecutionReport, total_steps: usize) -> ResumePlan {
         completed_steps: (0..resume_index).filter_map(step_at).cloned().collect(),
         warnings: attempt.warnings.clone(),
         replay: None,
+        restored_url: None,
     }
 }
 
@@ -2681,13 +2856,19 @@ fn merge_resumed_report(resume: ResumePlan, mut retry: ExecutionReport) -> Execu
             let replay_result = (!retried.is_empty()).then(|| retried.remove(0));
             match replay_result {
                 Some(result) if result.ok => {
-                    warnings.push(
-                        crate::integrations::browser_runtime::relaunch_replay_warning(
+                    warnings.push(match &resume.restored_url {
+                        Some(url) => {
+                            crate::integrations::browser_runtime::relaunch_url_restore_warning(
+                                url,
+                                resume.resume_index,
+                            )
+                        }
+                        None => crate::integrations::browser_runtime::relaunch_replay_warning(
                             *replayed_index,
                             resume.resume_index,
                             &result.summary,
                         ),
-                    );
+                    });
                     resume.resume_index - 1
                 }
                 other => {
@@ -2919,6 +3100,7 @@ pub async fn execute_request_with_runtime(
         rt.drain_raw_events();
         (rt.known_tab_ids(), rt.console_buffer.len())
     };
+    let mut recovery_fence = runtime_arc.lock().await.recovery_fence.clone();
     let mut results: Vec<StepResult> = Vec::new();
     let mut locator_handlers = Vec::new();
     let mut all_ok = true;
@@ -2932,7 +3114,13 @@ pub async fn execute_request_with_runtime(
             let _ = tab.evaluate(NETWORK_INFLIGHT_TRACKER_JS, false);
         }
         let file_chooser_was_armed = file_chooser_manager.is_armed();
-        let mut result = if let BrowserStep::WaitForPopup { timeout_ms } = step {
+        let fenced = recovery_fence
+            .as_deref()
+            .filter(|_| step_needs_live_document(step))
+            .map(crate::integrations::browser_runtime::recovery_fence_error);
+        let mut result = if let Some(error) = fenced {
+            StepResult::failure(idx, "Browser page was lost", error)
+        } else if let BrowserStep::WaitForPopup { timeout_ms } = step {
             match popup_wait_conflict(pending_popup_wait.as_ref().map(|wait| wait.step_index)) {
                 Some(error) => StepResult::failure(idx, "Wait for popup", error),
                 None => {
@@ -3225,6 +3413,10 @@ pub async fn execute_request_with_runtime(
             }
         }
         result.step_index = idx;
+        if result.ok && recovery_fence.is_some() && restores_document_after_relaunch(step) {
+            recovery_fence = None;
+            runtime_arc.lock().await.lift_recovery_fence();
+        }
 
         let resolves_popup_wait = pending_popup_wait.is_some()
             && !matches!(step, BrowserStep::WaitForPopup { .. })
@@ -4087,6 +4279,42 @@ fn is_navigation_step(step: &BrowserStep) -> bool {
     )
 }
 
+/// Steps that read or drive the current document. Everything else (session, network, clock,
+/// tab and emulation management, offline help) is meaningful on a freshly relaunched browser
+/// and therefore passes the post-relaunch fence.
+fn step_needs_live_document(step: &BrowserStep) -> bool {
+    !(restores_document_after_relaunch(step)
+        || is_tab_management_step(step)
+        || is_context_management_step(step)
+        || is_instrumentation_step(step)
+        || is_clock_step(step)
+        || matches!(
+            step,
+            BrowserStep::Route { .. }
+                | BrowserStep::Unroute { .. }
+                | BrowserStep::ListRoutes
+                | BrowserStep::RouteWebSocket { .. }
+                | BrowserStep::UnrouteWebSocket { .. }
+                | BrowserStep::StartHarRecording { .. }
+                | BrowserStep::StopHarRecording
+                | BrowserStep::RouteFromHar { .. }
+                | BrowserStep::Reset
+                | BrowserStep::TabLog
+                | BrowserStep::Help { .. }
+                | BrowserStep::WaitForPopup { .. }
+                | BrowserStep::WaitForDownload { .. }
+                | BrowserStep::CancelDownload { .. }
+                | BrowserStep::WaitForConsoleMessage { .. }
+                | BrowserStep::WaitForWebSocketFrame { .. }
+                | BrowserStep::HttpRequest { .. }
+                | BrowserStep::SetWindowBounds { .. }
+                | BrowserStep::AddInitScript { .. }
+                | BrowserStep::RemoveInitScript { .. }
+                | BrowserStep::AddLocatorHandler { .. }
+                | BrowserStep::RemoveLocatorHandler { .. }
+        ))
+}
+
 fn execute_runtime_network_step(
     tab: &Tab,
     world: &WorldManager,
@@ -4420,20 +4648,23 @@ fn probe_locator_handler(
     handler: &LocatorHandler,
 ) -> Result<LocatorHandlerProbe, String> {
     if matches!(handler.operation, LocatorHandlerOperation::DismissOverlays) {
-        return eval_js_ok(tab, &browser_locators::js_dismiss_overlays(true, false)).map(
-            |result| {
-                if result
-                    .get("count")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(0)
-                    == 0
-                {
-                    LocatorHandlerProbe::Hidden
-                } else {
-                    LocatorHandlerProbe::Visible
-                }
-            },
-        );
+        return eval_js_ok_in_utility(
+            tab,
+            world,
+            &browser_locators::js_dismiss_overlays(true, false),
+        )
+        .map(|result| {
+            if result
+                .get("count")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0)
+                == 0
+            {
+                LocatorHandlerProbe::Hidden
+            } else {
+                LocatorHandlerProbe::Visible
+            }
+        });
     }
     let locator = serde_json::to_value(&handler.locator)
         .map_err(|error| format!("Failed to serialize locator handler: {error}"))?;
@@ -4482,7 +4713,7 @@ fn execute_locator_handler(
     aggressive: bool,
 ) -> Result<String, String> {
     let outcome = match &lease.handler.operation {
-        LocatorHandlerOperation::DismissOverlays => dismiss_overlays(tab, aggressive),
+        LocatorHandlerOperation::DismissOverlays => dismiss_overlays(tab, world, aggressive),
         LocatorHandlerOperation::Action(LocatorHandlerAction::Click) => {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -8046,6 +8277,17 @@ fn step_bounding_box(
 }
 
 fn step_count(tab: &Tab, world: &WorldManager, idx: usize, locator: &BrowserLocator) -> StepResult {
+    if locator_supports_count_precheck(locator) {
+        let counted = locator_without_frames(locator)
+            .and_then(|value| world.count_injected_matches(tab, value, 0));
+        if let Ok((count, _)) = counted {
+            return StepResult::success(
+                idx,
+                format!("Matched {count} element(s) ({})", describe_locator(locator)),
+            )
+            .with_data(serde_json::json!({"count": count}));
+        }
+    }
     match resolve_locator_handles(tab, world, locator) {
         Ok(handles) => {
             let count = handles.len();
@@ -9351,8 +9593,50 @@ fn step_eval(tab: &Tab, idx: usize, expression: &str, timeout_ms: Option<u64>) -
             None => evaluated.result,
         };
     let (value, description) = eval_remote_object_value(tab, remote);
-    StepResult::success(idx, "Eval completed".to_string())
-        .with_data(serde_json::json!({"value": value, "description": description}))
+    let limit = browser_settings::current().capture.max_eval_result_chars;
+    let (value, truncation) = bound_eval_value(value, limit);
+    let mut data = serde_json::json!({"value": value, "description": description});
+    if let Some(truncation) = truncation {
+        data["truncated"] = serde_json::json!(true);
+        data["total_chars"] = serde_json::json!(truncation.total_chars);
+        data["max_chars"] = serde_json::json!(limit);
+        data["note"] = serde_json::json!(format!(
+            "eval result was {} characters; only the first {} are inlined — return a smaller value, write the data to the page, or fetch it in slices",
+            truncation.total_chars, limit
+        ));
+    }
+    StepResult::success(idx, "Eval completed".to_string()).with_data(data)
+}
+
+struct EvalTruncation {
+    total_chars: usize,
+}
+
+/// Caps an eval result at `limit` characters of JSON: strings keep their head, anything
+/// else becomes a JSON-text preview, so one `'x'.repeat(5e6)` cannot swamp the tool result.
+fn bound_eval_value(value: Value, limit: usize) -> (Value, Option<EvalTruncation>) {
+    if limit == 0 {
+        return (value, None);
+    }
+    match value {
+        Value::String(text) => {
+            let total_chars = text.chars().count();
+            if total_chars <= limit {
+                return (Value::String(text), None);
+            }
+            let head = text.chars().take(limit).collect::<String>();
+            (Value::String(head), Some(EvalTruncation { total_chars }))
+        }
+        other => {
+            let serialized = other.to_string();
+            let total_chars = serialized.chars().count();
+            if total_chars <= limit {
+                return (other, None);
+            }
+            let head = serialized.chars().take(limit).collect::<String>();
+            (Value::String(head), Some(EvalTruncation { total_chars }))
+        }
+    }
 }
 
 fn eval_remote_object_value(tab: &Tab, remote: Runtime::RemoteObject) -> (Value, String) {
@@ -9871,9 +10155,10 @@ fn step_remove_locator_handler(
     }
 }
 
-fn dismiss_overlays(tab: &Tab, aggressive: bool) -> Result<String, String> {
-    match eval_js_ok(
+fn dismiss_overlays(tab: &Tab, world: &WorldManager, aggressive: bool) -> Result<String, String> {
+    match eval_js_ok_in_utility(
         tab,
+        world,
         &browser_locators::js_dismiss_overlays(false, aggressive),
     ) {
         Ok(result) => {
@@ -9895,7 +10180,7 @@ fn step_dismiss_overlays(
 ) -> StepResult {
     let settings = browser_settings::current();
     let Some(handlers) = handlers else {
-        return match dismiss_overlays(tab, aggressive) {
+        return match dismiss_overlays(tab, world, aggressive) {
             Ok(outcome) => StepResult::success(idx, outcome),
             Err(error) => StepResult::failure(idx, "Dismiss overlays failed", error),
         };
@@ -10598,7 +10883,7 @@ mod tests {
             StepResult::failure(3, "Screenshot", DEAD_TRANSPORT),
             StepResult::skipped(4, 3),
         ]);
-        let resume = plan_resume(&attempt, steps.len()).with_replay_from(&steps);
+        let resume = plan_resume(&attempt, steps.len()).with_replay_from(&steps, None);
         assert_eq!(resume.resume_index, 3);
         let (replayed_index, replayed) = resume.replay.clone().expect("navigation to replay");
         assert_eq!(replayed_index, 2);
@@ -10647,7 +10932,7 @@ mod tests {
             StepResult::success(1, "Filled #q"),
             StepResult::failure(2, "Screenshot", DEAD_TRANSPORT),
         ]);
-        let resume = plan_resume(&attempt, steps.len()).with_replay_from(&steps);
+        let resume = plan_resume(&attempt, steps.len()).with_replay_from(&steps, None);
         assert_eq!(resume.replay.as_ref().map(|(idx, _)| *idx), Some(0));
         let retry = report_with_steps(vec![
             StepResult::success(0, "Navigated to a"),
@@ -10673,7 +10958,7 @@ mod tests {
             StepResult::failure(1, "Screenshot", DEAD_TRANSPORT),
             StepResult::skipped(2, 1),
         ]);
-        let resume = plan_resume(&attempt, steps.len()).with_replay_from(&steps);
+        let resume = plan_resume(&attempt, steps.len()).with_replay_from(&steps, None);
         let retry = report_with_steps(vec![
             StepResult::failure(0, "Navigate", "net::ERR_CONNECTION_REFUSED"),
             StepResult::skipped(1, 0),
@@ -10698,7 +10983,7 @@ mod tests {
             StepResult::failure(1, "Screenshot", DEAD_TRANSPORT),
             StepResult::skipped(2, 1),
         ]);
-        let resume = plan_resume(&attempt, steps.len()).with_replay_from(&steps);
+        let resume = plan_resume(&attempt, steps.len()).with_replay_from(&steps, None);
         assert!(resume.replay.is_none());
         assert_eq!(resume.resume_index, 1);
 
@@ -10712,6 +10997,90 @@ mod tests {
         assert!(refused.warnings.iter().any(
             |warning| warning.contains("no navigate/open_tab/set_content step precedes step 1")
         ));
+    }
+
+    #[test]
+    fn resume_reopens_the_last_committed_url_instead_of_a_stale_navigate() {
+        let steps = vec![
+            navigate_step("https://example.test/a"),
+            serde_json::from_value(serde_json::json!({
+                "action": "click",
+                "locator": {"by": "text", "value": "next"}
+            }))
+            .unwrap(),
+            screenshot_step(),
+        ];
+        let attempt = report_with_steps(vec![
+            StepResult::success(0, "Navigated to a"),
+            StepResult::success(1, "Clicked next"),
+            StepResult::failure(2, "Screenshot", DEAD_TRANSPORT),
+        ]);
+        let resume = plan_resume(&attempt, steps.len())
+            .with_replay_from(&steps, Some("https://example.test/page-2"));
+        let (replayed_index, replayed) = resume.replay.clone().expect("document restore");
+        assert_eq!(replayed_index, 0);
+        assert!(
+            matches!(replayed, BrowserStep::Navigate { ref url, .. } if url.ends_with("/page-2"))
+        );
+        assert_eq!(
+            resume.restored_url.as_deref(),
+            Some("https://example.test/page-2")
+        );
+
+        let retry = report_with_steps(vec![
+            StepResult::success(0, "Navigated to page-2"),
+            StepResult::success(1, "Screenshot"),
+        ]);
+        let merged = merge_resumed_report(resume, retry);
+        assert!(merged.ok);
+        assert!(merged.warnings.iter().any(|warning| warning
+            .contains("reopened the last committed document https://example.test/page-2")));
+    }
+
+    #[test]
+    fn resume_uses_the_last_committed_url_when_no_navigate_precedes_the_dead_step() {
+        let steps = vec![screenshot_step(), screenshot_step()];
+        let attempt = report_with_steps(vec![
+            StepResult::success(0, "Screenshot"),
+            StepResult::failure(1, "Screenshot", DEAD_TRANSPORT),
+        ]);
+        let resume = plan_resume(&attempt, steps.len())
+            .with_replay_from(&steps, Some("https://example.test/from-earlier-batch"));
+        assert!(resume.replay.is_some());
+        assert_eq!(
+            resume.restored_url.as_deref(),
+            Some("https://example.test/from-earlier-batch")
+        );
+
+        let blank =
+            plan_resume(&attempt, steps.len()).with_replay_from(&steps, Some("about:blank"));
+        assert!(blank.replay.is_none());
+        assert!(!url_is_restorable("about:blank"));
+        assert!(!url_is_restorable("blob:https://example.test/x"));
+        assert!(url_is_restorable("https://example.test/x"));
+    }
+
+    #[test]
+    fn set_content_documents_are_always_restored_by_replay() {
+        let steps = vec![
+            serde_json::from_value(serde_json::json!({
+                "action": "set_content",
+                "html": "<h1>hi</h1>"
+            }))
+            .unwrap(),
+            screenshot_step(),
+        ];
+        let attempt = report_with_steps(vec![
+            StepResult::success(0, "Set content"),
+            StepResult::failure(1, "Screenshot", DEAD_TRANSPORT),
+        ]);
+        let resume = plan_resume(&attempt, steps.len())
+            .with_replay_from(&steps, Some("https://example.test/unrelated"));
+        assert!(matches!(
+            resume.replay,
+            Some((0, BrowserStep::SetContent { .. }))
+        ));
+        assert!(resume.restored_url.is_none());
     }
 
     fn actionable_state() -> refact_browser::ElementState {

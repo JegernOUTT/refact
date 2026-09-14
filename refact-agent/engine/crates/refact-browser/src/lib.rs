@@ -76,8 +76,8 @@ pub use keyboard::{
     KeyboardDispatcher, KeyboardModifier, modifier_bitmask,
 };
 pub use launch::{
-    BrowserLaunchOptions, BrowserProxyOptions, DEFAULT_IDLE_TIMEOUT, IGNORED_CHROME_DEFAULT_ARGS,
-    MANDATORY_CHROME_ARGS, TRANSPORT_READ_TIMEOUT,
+    BrowserGpuMode, BrowserLaunchOptions, BrowserProxyOptions, DEFAULT_IDLE_TIMEOUT,
+    IGNORED_CHROME_DEFAULT_ARGS, MANDATORY_CHROME_ARGS, TRANSPORT_READ_TIMEOUT,
 };
 pub use locator_handlers::{
     DEFAULT_DISMISS_OVERLAYS_HANDLER, LocatorHandler, LocatorHandlerLease, LocatorHandlerOperation,
@@ -490,7 +490,8 @@ impl BrowserBuffers {
 
 pub struct BrowserRuntime {
     pub runtime_id: String,
-    pub attached_chat_id: Option<String>,
+    pub ownership: Arc<RuntimeOwnership>,
+    pub recovery_fence: Option<String>,
     pub browser: Browser,
     pub world_manager: WorldManager,
     pub dialog_manager: DialogManager,
@@ -527,6 +528,153 @@ pub struct BrowserRuntime {
     pub locator_handlers: Arc<std::sync::Mutex<LocatorHandlerRegistry>>,
 }
 
+/// Ownership and health facts about a runtime that must stay readable while the runtime's
+/// execution mutex is held by a long CDP call. Lookups by chat id and health probes read this
+/// record instead of locking the runtime, so one wedged browser cannot stall the others.
+pub struct RuntimeOwnership {
+    runtime_id: String,
+    browser: Browser,
+    profile_dir: PathBuf,
+    launch_options: BrowserLaunchOptions,
+    state: Mutex<RuntimeOwnershipState>,
+    probe_in_flight: std::sync::atomic::AtomicBool,
+}
+
+impl std::fmt::Debug for RuntimeOwnership {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeOwnership")
+            .field("runtime_id", &self.runtime_id)
+            .field("state", &self.snapshot())
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeOwnershipState {
+    pub attached_chat_id: Option<String>,
+    pub connected: bool,
+    pub unresponsive_probes: u32,
+}
+
+impl RuntimeOwnership {
+    fn new(
+        runtime_id: &str,
+        browser: Browser,
+        profile_dir: PathBuf,
+        launch_options: BrowserLaunchOptions,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            runtime_id: runtime_id.to_string(),
+            browser,
+            profile_dir,
+            launch_options,
+            state: Mutex::new(RuntimeOwnershipState {
+                attached_chat_id: None,
+                connected: true,
+                unresponsive_probes: 0,
+            }),
+            probe_in_flight: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    pub fn runtime_id(&self) -> &str {
+        &self.runtime_id
+    }
+
+    pub fn profile_dir(&self) -> &std::path::Path {
+        &self.profile_dir
+    }
+
+    pub fn launch_options(&self) -> &BrowserLaunchOptions {
+        &self.launch_options
+    }
+
+    pub fn owns_browser_process(&self) -> bool {
+        !self.profile_dir.as_os_str().is_empty()
+    }
+
+    pub fn snapshot(&self) -> RuntimeOwnershipState {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn attached_chat_id(&self) -> Option<String> {
+        self.snapshot().attached_chat_id
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.snapshot().connected
+    }
+
+    fn set_attached(&self, chat_id: Option<String>) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .attached_chat_id = chat_id;
+    }
+
+    /// Adopts the runtime for `chat_id` only while it is still unowned (or already owned by
+    /// `chat_id`), so two chats racing for one free runtime cannot both win it.
+    pub fn claim_if_unowned(&self, chat_id: &str) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        match state.attached_chat_id.as_deref() {
+            None | Some("") => {
+                state.attached_chat_id = Some(chat_id.to_string());
+                true
+            }
+            Some(owner) => owner == chat_id,
+        }
+    }
+
+    /// Re-targets a runtime that a chat lookup found through one of its ancestor ids.
+    pub fn transfer_to(&self, chat_id: &str) {
+        self.set_attached(Some(chat_id.to_string()));
+    }
+
+    pub fn set_connected(&self, connected: bool) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.connected = connected;
+        if connected {
+            state.unresponsive_probes = 0;
+        }
+    }
+
+    /// Runs a CDP health probe on a clone of the browser transport, which does not need the
+    /// runtime mutex. Returns `None` when a probe is already in flight, so a wedged transport
+    /// never stacks up probe threads.
+    pub fn probe_connection(self: &Arc<Self>) -> Option<bool> {
+        if self
+            .probe_in_flight
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return None;
+        }
+        let connected = self.browser.get_version().is_ok();
+        self.probe_in_flight
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.set_connected(connected);
+        Some(connected)
+    }
+
+    pub fn probe_is_in_flight(&self) -> bool {
+        self.probe_in_flight
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Records that a bounded probe did not answer in time; returns the consecutive count.
+    pub fn record_unresponsive_probe(&self) -> u32 {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.unresponsive_probes = state.unresponsive_probes.saturating_add(1);
+        state.unresponsive_probes
+    }
+
+    pub fn process_id(&self) -> Option<u32> {
+        self.browser.get_process_id()
+    }
+}
+
 impl std::ops::Deref for BrowserRuntime {
     type Target = BrowserBuffers;
     fn deref(&self) -> &BrowserBuffers {
@@ -549,6 +697,7 @@ pub fn chrome_launch_options<'a>(
     headless_chrome::LaunchOptions {
         headless: options.headless,
         sandbox: options.chromium_sandbox,
+        enable_gpu: options.gpu.enables_gpu(),
         ignore_certificate_errors: options.ignore_https_errors,
         window_size: options.window_size(),
         idle_browser_timeout: options.transport_read_timeout(),
@@ -579,6 +728,12 @@ impl BrowserRuntime {
 
         let browser = Browser::new(launch_options).map_err(|e| e.to_string())?;
         let runtime_id = Uuid::new_v4().to_string();
+        let ownership = RuntimeOwnership::new(
+            &runtime_id,
+            browser.clone(),
+            profile_dir.clone(),
+            options.clone(),
+        );
         let downloads_dir = options
             .downloads_dir
             .clone()
@@ -590,15 +745,17 @@ impl BrowserRuntime {
         )?);
 
         info!(
-            "BrowserRuntime {} launched {} with profile {:?}",
+            "BrowserRuntime {} launched {} (gpu {}) with profile {:?}",
             runtime_id,
             options.mode_label(),
+            options.gpu.label(),
             profile_dir
         );
 
         Ok(Self {
             runtime_id,
-            attached_chat_id: None,
+            ownership,
+            recovery_fence: None,
             browser,
             world_manager: WorldManager::default(),
             dialog_manager: DialogManager::default(),
@@ -643,6 +800,12 @@ impl BrowserRuntime {
             Browser::connect_with_timeout(ws_url.clone(), options.transport_read_timeout())
                 .map_err(|e| format!("Failed to connect to browser at {}: {}", ws_url, e))?;
         let runtime_id = Uuid::new_v4().to_string();
+        let ownership = RuntimeOwnership::new(
+            &runtime_id,
+            browser.clone(),
+            PathBuf::new(),
+            options.clone(),
+        );
         let downloads_dir = options.downloads_dir.clone().unwrap_or_else(|| {
             std::env::temp_dir()
                 .join("refact-browser-downloads")
@@ -660,7 +823,8 @@ impl BrowserRuntime {
 
         Ok(Self {
             runtime_id,
-            attached_chat_id: None,
+            ownership,
+            recovery_fence: None,
             browser,
             world_manager: WorldManager::default(),
             dialog_manager: DialogManager::default(),
@@ -861,21 +1025,28 @@ impl BrowserRuntime {
         Ok(())
     }
 
+    pub fn attached_chat_id(&self) -> Option<String> {
+        self.ownership.attached_chat_id()
+    }
+
     pub fn reattach(&mut self, chat_id: &str) {
         info!(
             "BrowserRuntime {} reattached from {:?} to {}",
-            self.runtime_id, self.attached_chat_id, chat_id
+            self.runtime_id,
+            self.attached_chat_id(),
+            chat_id
         );
-        self.attached_chat_id = Some(chat_id.to_string());
+        self.ownership.set_attached(Some(chat_id.to_string()));
         self.last_activity = Instant::now();
     }
 
     pub fn detach(&mut self) {
         info!(
             "BrowserRuntime {} detached from {:?}",
-            self.runtime_id, self.attached_chat_id
+            self.runtime_id,
+            self.attached_chat_id()
         );
-        self.attached_chat_id = None;
+        self.ownership.set_attached(None);
     }
 
     pub fn check_connection(&mut self) -> bool {
@@ -892,7 +1063,18 @@ impl BrowserRuntime {
             }
         };
         self.is_connected = connected;
+        self.ownership.set_connected(connected);
         connected
+    }
+
+    /// Marks the runtime as relaunched without its previous documents: page-dependent steps
+    /// are refused until a navigate/open_tab/set_content step succeeds.
+    pub fn fence_after_relaunch(&mut self, reason: impl Into<String>) {
+        self.recovery_fence = Some(reason.into());
+    }
+
+    pub fn lift_recovery_fence(&mut self) {
+        self.recovery_fence = None;
     }
 
     pub fn is_idle_expired(&self) -> bool {

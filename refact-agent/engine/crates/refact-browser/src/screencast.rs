@@ -100,26 +100,105 @@ pub struct CapturedFrame {
     pub data: Vec<u8>,
 }
 
+pub const TIMED_CAPTURE_MIN_OVERRUN_MS: u64 = 5_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TimedCapture {
+    pub frames: Vec<CapturedFrame>,
+    pub planned: usize,
+    pub dropped_frames: usize,
+    pub budget_ms: u64,
+    pub elapsed_ms: u64,
+    pub budget_exhausted: bool,
+}
+
+impl TimedCapture {
+    pub fn warning(&self) -> Option<String> {
+        if !self.budget_exhausted && self.dropped_frames == 0 {
+            return None;
+        }
+        Some(format!(
+            "capture_frames recorded {} of {} planned frames: each capture took longer than the requested cadence and the {}ms wall-clock budget was exhausted after {}ms",
+            self.frames.len(),
+            self.planned,
+            self.budget_ms,
+            self.elapsed_ms
+        ))
+    }
+}
+
+/// Wall-clock ceiling for a timed burst: the requested span plus at least
+/// `TIMED_CAPTURE_MIN_OVERRUN_MS` (or the span again, whichever is larger) for slow captures.
+pub fn timed_capture_budget(plan: &FrameBurstPlan) -> Duration {
+    Duration::from_millis(plan.duration_ms + plan.duration_ms.max(TIMED_CAPTURE_MIN_OVERRUN_MS))
+}
+
 pub fn capture_timed_frames(
     plan: &FrameBurstPlan,
+    capture: impl FnMut() -> Result<Vec<u8>, String>,
+    wait_until: impl FnMut(Duration),
+) -> Result<TimedCapture, String> {
+    capture_timed_frames_within(
+        plan,
+        timed_capture_budget(plan),
+        capture_now,
+        capture,
+        wait_until,
+    )
+}
+
+fn capture_now() -> Instant {
+    Instant::now()
+}
+
+/// Captures every planned frame as soon as its offset arrives (or immediately when the
+/// previous capture already overran it) while staying inside `budget`, so a slow capture
+/// path can stretch a burst but never multiply it; timestamps are always the real elapsed
+/// time of each capture.
+pub fn capture_timed_frames_within(
+    plan: &FrameBurstPlan,
+    budget: Duration,
+    mut now: impl FnMut() -> Instant,
     mut capture: impl FnMut() -> Result<Vec<u8>, String>,
     mut wait_until: impl FnMut(Duration),
-) -> Result<Vec<CapturedFrame>, String> {
-    let started = Instant::now();
-    let mut frames = Vec::with_capacity(plan.frame_count);
-    for offset_ms in plan.offsets() {
+) -> Result<TimedCapture, String> {
+    let started = now();
+    let offsets = plan.offsets();
+    let planned = offsets.len();
+    let mut frames = Vec::with_capacity(planned);
+    let mut budget_exhausted = false;
+    for offset_ms in offsets {
         let target = started + Duration::from_millis(offset_ms);
-        let remaining = target.saturating_duration_since(Instant::now());
+        let current = now();
+        if !frames.is_empty() && current.saturating_duration_since(started) >= budget {
+            budget_exhausted = true;
+            break;
+        }
+        let remaining = target.saturating_duration_since(current);
         if !remaining.is_zero() {
             wait_until(remaining);
         }
-        let elapsed = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let elapsed = now()
+            .saturating_duration_since(started)
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
         frames.push(CapturedFrame {
             offset_ms: elapsed,
             data: capture()?,
         });
     }
-    Ok(frames)
+    let elapsed_ms = now()
+        .saturating_duration_since(started)
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    Ok(TimedCapture {
+        dropped_frames: planned.saturating_sub(frames.len()),
+        frames,
+        planned,
+        budget_ms: budget.as_millis().min(u64::MAX as u128) as u64,
+        elapsed_ms,
+        budget_exhausted,
+    })
 }
 
 pub fn select_evenly_spaced(frames: Vec<CapturedFrame>, wanted: usize) -> Vec<CapturedFrame> {
@@ -853,7 +932,7 @@ mod tests {
         let mut captured = 0;
         let mut waited = Vec::new();
 
-        let frames = capture_timed_frames(
+        let capture = capture_timed_frames(
             &plan,
             || {
                 captured += 1;
@@ -862,6 +941,10 @@ mod tests {
             |remaining| waited.push(remaining),
         )
         .unwrap();
+        assert_eq!(capture.dropped_frames, 0);
+        assert!(!capture.budget_exhausted);
+        assert_eq!(capture.warning(), None);
+        let frames = capture.frames;
 
         assert_eq!(frames.len(), 5);
         assert_eq!(
@@ -872,6 +955,118 @@ mod tests {
             .windows(2)
             .all(|pair| pair[0].offset_ms <= pair[1].offset_ms));
         assert_eq!(waited.len(), 4);
+    }
+
+    struct FakeClock {
+        now: std::cell::Cell<Instant>,
+    }
+
+    impl FakeClock {
+        fn new() -> Self {
+            Self {
+                now: std::cell::Cell::new(Instant::now()),
+            }
+        }
+
+        fn advance(&self, duration: Duration) {
+            self.now.set(self.now.get() + duration);
+        }
+    }
+
+    #[test]
+    fn slow_captures_still_record_every_planned_frame_inside_the_budget() {
+        let plan = FrameBurstPlan::resolve(Some(1_000), Some(8), None).unwrap();
+        let clock = FakeClock::new();
+        let mut captured = 0u8;
+
+        let capture = capture_timed_frames_within(
+            &plan,
+            timed_capture_budget(&plan),
+            || clock.now.get(),
+            || {
+                captured += 1;
+                clock.advance(Duration::from_millis(400));
+                Ok(vec![captured])
+            },
+            |remaining| clock.advance(remaining),
+        )
+        .unwrap();
+
+        let offsets = capture
+            .frames
+            .iter()
+            .map(|frame| frame.offset_ms)
+            .collect::<Vec<_>>();
+        assert_eq!(offsets, vec![0, 400, 800, 1200, 1600, 2000, 2400, 2800]);
+        assert_eq!(capture.planned, 8);
+        assert_eq!(capture.dropped_frames, 0);
+        assert!(!capture.budget_exhausted);
+        assert_eq!(capture.warning(), None);
+    }
+
+    #[test]
+    fn a_burst_stops_at_the_budget_and_reports_the_dropped_frames() {
+        let plan = FrameBurstPlan::resolve(Some(1_000), Some(8), None).unwrap();
+        let clock = FakeClock::new();
+        let mut captured = 0u8;
+
+        let capture = capture_timed_frames_within(
+            &plan,
+            timed_capture_budget(&plan),
+            || clock.now.get(),
+            || {
+                captured += 1;
+                clock.advance(Duration::from_millis(1_500));
+                Ok(vec![captured])
+            },
+            |remaining| clock.advance(remaining),
+        )
+        .unwrap();
+
+        assert_eq!(capture.frames.len(), 4);
+        assert_eq!(capture.dropped_frames, 4);
+        assert!(capture.budget_exhausted);
+        assert_eq!(capture.budget_ms, 6_000);
+        let warning = capture.warning().unwrap();
+        assert!(warning.contains("4 of 8 planned frames"), "{warning}");
+        assert!(warning.contains("6000ms wall-clock budget"), "{warning}");
+    }
+
+    #[test]
+    fn a_capture_path_slower_than_the_budget_stops_after_the_first_frame() {
+        let plan = FrameBurstPlan::resolve(Some(300), Some(3), None).unwrap();
+        let clock = FakeClock::new();
+        let mut captured = 0u8;
+
+        let capture = capture_timed_frames_within(
+            &plan,
+            timed_capture_budget(&plan),
+            || clock.now.get(),
+            || {
+                captured += 1;
+                clock.advance(Duration::from_millis(15_000));
+                Ok(vec![captured])
+            },
+            |remaining| clock.advance(remaining),
+        )
+        .unwrap();
+
+        assert_eq!(capture.frames.len(), 1);
+        assert_eq!(capture.budget_ms, 5_300);
+        assert!(capture.budget_exhausted);
+        assert_eq!(capture.elapsed_ms, 15_000);
+        assert_eq!(capture.dropped_frames, 2);
+        let warning = capture.warning().unwrap();
+        assert!(warning.contains("1 of 3 planned frames"), "{warning}");
+        assert!(warning.contains("5300ms wall-clock budget"), "{warning}");
+    }
+
+    #[test]
+    fn timed_capture_budget_allows_at_least_five_seconds_of_overrun() {
+        let short = FrameBurstPlan::resolve(Some(200), Some(2), None).unwrap();
+        assert_eq!(timed_capture_budget(&short), Duration::from_millis(5_200));
+        let long = FrameBurstPlan::resolve(Some(10_000), Some(2), None).unwrap();
+        assert_eq!(timed_capture_budget(&long), Duration::from_millis(20_000));
     }
 
     #[test]

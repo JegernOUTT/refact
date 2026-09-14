@@ -49,7 +49,7 @@ const TOKEN_DISCOVERY_SKIPPED_DIRS: &[&str] = &[
 const TOKEN_DISCOVERY_MAX_DEPTH: usize = 6;
 const TOKEN_DISCOVERY_MAX_FILES: usize = 8;
 const TOKEN_DISCOVERY_MAX_DIRS: usize = 2_000;
-const PAGE_NOT_INSTRUMENTED_ERROR: &str = "page not instrumented for design tools: the page has no `globalThis.__refact_injected__` runtime, so styles, refs and element states cannot be measured. Open an instrumented page instead: run the GUI dev server (`cd refact-agent/gui && npm run dev`, Vite serves http://localhost:5173) with the `refact-agent/vite-plugin-design` plugin (`@refact/vite-plugin-design`) enabled in its vite config, then point the `chrome` tool at that dev-server URL and retry. Production builds and third-party sites are never instrumented.";
+const PAGE_NOT_INSTRUMENTED_ERROR: &str = "the browser's measurement runtime (`globalThis.__refact_injected__`, installed by the `chrome` tool in an isolated world on every page it opens) is not available in the active tab, so styles, refs and element states cannot be measured right now. This happens when the page navigated or reloaded under the tool, when the browser was relaunched, or when the active tab is a blank/internal page. Re-run the `chrome` navigate step for the page and retry. Any page works, instrumentation by a build plugin is not required; the optional `refact-agent/vite-plugin-design` (`cd refact-agent/gui && npm run dev`, Vite on http://localhost:5173) only adds `data-refact-src`/`data-refact-cmp` source attribution to elements.";
 const INSTRUMENTATION_ERROR_MARKERS: &[&str] = &[
     "Unknown RefactInjected method",
     "RefactInjected is not installed",
@@ -80,7 +80,7 @@ const PROBE_FUNCTION: &str = r#"function(properties) {
     }
   };
 }"#;
-const CONTRAST_AUDIT_EXPRESSION: &str = r#"(() => {
+pub const CONTRAST_AUDIT_EXPRESSION: &str = r#"(() => {
   const selectorFor = (el) => {
     if (el.id) return '#' + CSS.escape(el.id);
     const parts = [];
@@ -94,6 +94,23 @@ const CONTRAST_AUDIT_EXPRESSION: &str = r#"(() => {
     }
     return parts.join(' > ');
   };
+  const layerStack = (start) => {
+    const layers = [];
+    let cursor = start;
+    while (cursor && cursor.nodeType === Node.ELEMENT_NODE) {
+      const cs = getComputedStyle(cursor);
+      layers.push({
+        background: cs.backgroundColor,
+        opacity: Number.isFinite(parseFloat(cs.opacity)) ? parseFloat(cs.opacity) : 1,
+        image: !!cs.backgroundImage && cs.backgroundImage !== 'none'
+      });
+      cursor = cursor.parentElement;
+    }
+    return layers;
+  };
+  const rootStyle = getComputedStyle(document.documentElement);
+  const canvas = (rootStyle.colorScheme || '').trim() === 'dark' ? 'dark' : 'light';
+  const inactive = (el) => !!el.closest('[disabled],[aria-disabled="true"]');
   const result = [];
   const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
   while (walker.nextNode()) {
@@ -101,24 +118,19 @@ const CONTRAST_AUDIT_EXPRESSION: &str = r#"(() => {
     const text = (node.textContent || '').trim();
     const el = node.parentElement;
     if (!text || !el) continue;
+    if (el.closest('script,style,noscript,template')) continue;
     const rect = el.getBoundingClientRect();
     const style = getComputedStyle(el);
     if (!rect.width || !rect.height || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) continue;
-    let background = 'rgba(0, 0, 0, 0)';
-    let cursor = el;
-    while (cursor) {
-      const candidate = getComputedStyle(cursor).backgroundColor;
-      if (candidate && candidate !== 'transparent' && !candidate.endsWith(', 0)')) { background = candidate; break; }
-      cursor = cursor.parentElement;
-    }
-    if (background === 'rgba(0, 0, 0, 0)') background = getComputedStyle(document.documentElement).backgroundColor || 'rgb(255, 255, 255)';
-    result.push({kind:'text', selector: selectorFor(el), text: text.slice(0, 120), foreground: style.color, background, fontSize: parseFloat(style.fontSize) || 16, fontWeight: style.fontWeight});
+    if (inactive(el)) continue;
+    result.push({kind:'text', selector: selectorFor(el), text: text.slice(0, 120), foreground: style.color, layers: layerStack(el), canvas, fontSize: parseFloat(style.fontSize) || 16, fontWeight: style.fontWeight});
   }
   for (const el of document.querySelectorAll('button,input,select,textarea,[role=button],[role=checkbox],[role=radio],[role=switch]')) {
     const rect = el.getBoundingClientRect();
     const style = getComputedStyle(el);
-    if (!rect.width || !rect.height || style.display === 'none' || style.visibility === 'hidden') continue;
-    result.push({kind:'non_text', selector: selectorFor(el), text: '', foreground: style.borderColor || style.color, background: style.backgroundColor, fontSize: 0, fontWeight: '400'});
+    if (!rect.width || !rect.height || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) continue;
+    if (inactive(el)) continue;
+    result.push({kind:'non_text', selector: selectorFor(el), text: '', foreground: style.borderTopColor || style.color, borderWidth: parseFloat(style.borderTopWidth) || 0, layers: layerStack(el), canvas, fontSize: 0, fontWeight: '400'});
   }
   return result;
 })()"#;
@@ -335,29 +347,353 @@ pub struct Rgb {
     pub b: f64,
 }
 
-fn parse_color_component(value: &str) -> Result<f64, String> {
-    value
-        .trim()
-        .parse::<f64>()
-        .map(|value| value.clamp(0.0, 255.0))
-        .map_err(|_| format!("invalid color component `{value}`"))
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CssColor {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+    pub a: f64,
 }
 
-pub fn parse_css_color(value: &str) -> Result<Rgb, String> {
+impl CssColor {
+    pub const TRANSPARENT: CssColor = CssColor {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
+
+    pub fn opaque(self) -> Rgb {
+        Rgb {
+            r: self.r,
+            g: self.g,
+            b: self.b,
+        }
+    }
+
+    fn from_rgb(rgb: Rgb, a: f64) -> Self {
+        Self {
+            r: rgb.r,
+            g: rgb.g,
+            b: rgb.b,
+            a: a.clamp(0.0, 1.0),
+        }
+    }
+
+    fn from_linear(r: f64, g: f64, b: f64, a: f64) -> Self {
+        fn encode(value: f64) -> f64 {
+            let value = value.clamp(0.0, 1.0);
+            let encoded = if value <= 0.003_130_8 {
+                12.92 * value
+            } else {
+                1.055 * value.powf(1.0 / 2.4) - 0.055
+            };
+            (encoded * 255.0).clamp(0.0, 255.0)
+        }
+        Self {
+            r: encode(r),
+            g: encode(g),
+            b: encode(b),
+            a: a.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Source-over compositing of `self` on top of `below`, both straight (non-premultiplied).
+    pub fn over(self, below: CssColor) -> CssColor {
+        let alpha = self.a + below.a * (1.0 - self.a);
+        if alpha <= f64::EPSILON {
+            return CssColor::TRANSPARENT;
+        }
+        let blend =
+            |top: f64, bottom: f64| (top * self.a + bottom * below.a * (1.0 - self.a)) / alpha;
+        CssColor {
+            r: blend(self.r, below.r),
+            g: blend(self.g, below.g),
+            b: blend(self.b, below.b),
+            a: alpha,
+        }
+    }
+}
+
+/// A paint layer as seen from a text node outwards: the element's own background, the group
+/// opacity it applies to everything painted inside it, and whether an image or gradient makes
+/// the real backdrop unknowable from computed colors alone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaintLayer {
+    pub background: CssColor,
+    pub opacity: f64,
+    pub image: bool,
+}
+
+/// Composites `innermost` (text, border or nothing) through `layers` (nearest first) onto the
+/// opaque `canvas`, honouring alpha backgrounds and CSS `opacity` isolation groups.
+pub fn composite_layers(layers: &[PaintLayer], innermost: Option<CssColor>, canvas: Rgb) -> Rgb {
+    let mut content = innermost.unwrap_or(CssColor::TRANSPARENT);
+    for layer in layers {
+        content = content.over(layer.background);
+        content.a *= layer.opacity.clamp(0.0, 1.0);
+    }
+    content.over(CssColor::from_rgb(canvas, 1.0)).opaque()
+}
+
+pub const LIGHT_CANVAS: Rgb = Rgb {
+    r: 255.0,
+    g: 255.0,
+    b: 255.0,
+};
+
+pub const DARK_CANVAS: Rgb = Rgb {
+    r: 18.0,
+    g: 18.0,
+    b: 18.0,
+};
+
+pub fn canvas_color(scheme: &str) -> Rgb {
+    if scheme.eq_ignore_ascii_case("dark") {
+        DARK_CANVAS
+    } else {
+        LIGHT_CANVAS
+    }
+}
+
+fn parse_hex_pair(pair: &str, channel: &str) -> Result<f64, String> {
+    u8::from_str_radix(pair, 16)
+        .map(f64::from)
+        .map_err(|_| format!("invalid {channel}"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ColorArg {
+    Number(f64),
+    Percent(f64),
+    Angle(f64),
+    None,
+    Keyword,
+}
+
+impl ColorArg {
+    fn parse(raw: &str) -> Result<Self, String> {
+        let raw = raw.trim();
+        if raw.eq_ignore_ascii_case("none") {
+            return Ok(Self::None);
+        }
+        if let Some(percent) = raw.strip_suffix('%') {
+            return percent
+                .trim()
+                .parse::<f64>()
+                .map(Self::Percent)
+                .map_err(|_| format!("invalid percentage `{raw}`"));
+        }
+        let lower = raw.to_ascii_lowercase();
+        for (suffix, per_turn) in [
+            ("deg", 360.0),
+            ("grad", 400.0),
+            ("rad", std::f64::consts::TAU),
+            ("turn", 1.0),
+        ] {
+            if let Some(number) = lower.strip_suffix(suffix) {
+                return number
+                    .trim()
+                    .parse::<f64>()
+                    .map(|value| Self::Angle(value * 360.0 / per_turn))
+                    .map_err(|_| format!("invalid angle `{raw}`"));
+            }
+        }
+        if let Ok(number) = raw.parse::<f64>() {
+            return Ok(Self::Number(number));
+        }
+        if raw
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+            && !raw.is_empty()
+        {
+            return Ok(Self::Keyword);
+        }
+        Err(format!("invalid color component `{raw}`"))
+    }
+
+    /// Value on a `0..=reference` scale where `100%` maps to `reference`.
+    fn scaled(self, reference: f64) -> Result<f64, String> {
+        match self {
+            Self::Number(value) => Ok(value),
+            Self::Percent(percent) => Ok(percent / 100.0 * reference),
+            Self::None => Ok(0.0),
+            Self::Angle(_) => Err("angle used where a number was expected".to_string()),
+            Self::Keyword => Err("keyword used where a number was expected".to_string()),
+        }
+    }
+
+    fn hue_degrees(self) -> Result<f64, String> {
+        match self {
+            Self::Number(value) | Self::Angle(value) => Ok(value.rem_euclid(360.0)),
+            Self::None => Ok(0.0),
+            Self::Percent(_) => Err("percentage used where a hue was expected".to_string()),
+            Self::Keyword => Err("keyword used where a hue was expected".to_string()),
+        }
+    }
+
+    fn alpha(self) -> Result<f64, String> {
+        match self {
+            Self::Number(value) => Ok(value.clamp(0.0, 1.0)),
+            Self::Percent(percent) => Ok((percent / 100.0).clamp(0.0, 1.0)),
+            Self::None => Ok(0.0),
+            Self::Angle(_) | Self::Keyword => Err("invalid alpha".to_string()),
+        }
+    }
+}
+
+fn split_color_args(inner: &str) -> (Vec<&str>, Option<&str>) {
+    let (components, alpha) = match inner.split_once('/') {
+        Some((components, alpha)) => (components, Some(alpha.trim())),
+        None => (inner, None),
+    };
+    if components.contains(',') {
+        let mut parts = components.split(',').map(str::trim).collect::<Vec<_>>();
+        if alpha.is_none() && parts.len() == 4 {
+            let last = parts.pop();
+            return (parts, last);
+        }
+        return (parts, alpha);
+    }
+    (components.split_whitespace().collect(), alpha)
+}
+
+fn linear_from_xyz_d65(x: f64, y: f64, z: f64) -> (f64, f64, f64) {
+    (
+        3.240_969_941_904_522_6 * x - 1.537_383_177_570_094 * y - 0.498_610_760_293_003_4 * z,
+        -0.969_243_636_280_879_6 * x + 1.875_967_501_507_720_2 * y + 0.041_555_057_407_175_59 * z,
+        0.055_630_079_696_993_66 * x - 0.203_976_958_888_976_52 * y + 1.056_971_514_242_878_6 * z,
+    )
+}
+
+fn xyz_d65_from_d50(x: f64, y: f64, z: f64) -> (f64, f64, f64) {
+    (
+        0.955_473_452_704_218_2 * x - 0.023_098_536_874_261_423 * y + 0.063_259_308_661_021_7 * z,
+        -0.028_369_706_963_208_136 * x
+            + 1.009_995_458_005_822_6 * y
+            + 0.021_041_398_966_943_008 * z,
+        0.012_314_001_688_319_899 * x - 0.020_507_696_433_477_912 * y + 1.330_365_936_608_075_3 * z,
+    )
+}
+
+fn xyz_d65_from_display_p3(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+    (
+        0.486_570_948_648_216_2 * r + 0.265_667_693_169_093_06 * g + 0.198_217_285_234_362_5 * b,
+        0.228_974_564_069_748_8 * r + 0.691_738_521_836_506_4 * g + 0.079_286_914_093_745 * b,
+        0.045_113_381_858_902_64 * g + 1.043_944_368_900_976 * b,
+    )
+}
+
+fn srgb_decode(value: f64) -> f64 {
+    let value = value.clamp(0.0, 1.0);
+    if value <= 0.040_45 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn rgba_from_oklab(l: f64, a: f64, b: f64, alpha: f64) -> CssColor {
+    let l_ = l + 0.396_337_777_4 * a + 0.215_803_757_3 * b;
+    let m_ = l - 0.105_561_345_8 * a - 0.063_854_172_8 * b;
+    let s_ = l - 0.089_484_177_5 * a - 1.291_485_548 * b;
+    let (l3, m3, s3) = (l_.powi(3), m_.powi(3), s_.powi(3));
+    CssColor::from_linear(
+        4.076_741_662_1 * l3 - 3.307_711_591_3 * m3 + 0.230_969_929_2 * s3,
+        -1.268_438_004_6 * l3 + 2.609_757_401_1 * m3 - 0.341_319_396_5 * s3,
+        -0.004_196_086_3 * l3 - 0.703_418_614_7 * m3 + 1.707_614_701 * s3,
+        alpha,
+    )
+}
+
+fn rgba_from_cielab(l: f64, a: f64, b: f64, alpha: f64) -> CssColor {
+    const EPSILON: f64 = 216.0 / 24389.0;
+    const KAPPA: f64 = 24389.0 / 27.0;
+    const WHITE_D50: (f64, f64, f64) = (0.964_22, 1.0, 0.825_21);
+    let fy = (l + 16.0) / 116.0;
+    let fx = a / 500.0 + fy;
+    let fz = fy - b / 200.0;
+    let xr = if fx.powi(3) > EPSILON {
+        fx.powi(3)
+    } else {
+        (116.0 * fx - 16.0) / KAPPA
+    };
+    let yr = if l > KAPPA * EPSILON {
+        ((l + 16.0) / 116.0).powi(3)
+    } else {
+        l / KAPPA
+    };
+    let zr = if fz.powi(3) > EPSILON {
+        fz.powi(3)
+    } else {
+        (116.0 * fz - 16.0) / KAPPA
+    };
+    let (x, y, z) = xyz_d65_from_d50(xr * WHITE_D50.0, yr * WHITE_D50.1, zr * WHITE_D50.2);
+    let (r, g, b) = linear_from_xyz_d65(x, y, z);
+    CssColor::from_linear(r, g, b, alpha)
+}
+
+fn rgba_from_hsl(hue: f64, saturation: f64, lightness: f64, alpha: f64) -> CssColor {
+    let saturation = saturation.clamp(0.0, 1.0);
+    let lightness = lightness.clamp(0.0, 1.0);
+    let channel = |n: f64| {
+        let k = (n + hue / 30.0).rem_euclid(12.0);
+        let a = saturation * lightness.min(1.0 - lightness);
+        lightness - a * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
+    };
+    CssColor {
+        r: channel(0.0) * 255.0,
+        g: channel(8.0) * 255.0,
+        b: channel(4.0) * 255.0,
+        a: alpha,
+    }
+}
+
+fn rgba_from_hwb(hue: f64, white: f64, black: f64, alpha: f64) -> CssColor {
+    let (white, black) = (white.clamp(0.0, 1.0), black.clamp(0.0, 1.0));
+    if white + black >= 1.0 {
+        let gray = white / (white + black) * 255.0;
+        return CssColor {
+            r: gray,
+            g: gray,
+            b: gray,
+            a: alpha,
+        };
+    }
+    let pure = rgba_from_hsl(hue, 1.0, 0.5, 1.0);
+    let mix = |channel: f64| (channel / 255.0 * (1.0 - white - black) + white) * 255.0;
+    CssColor {
+        r: mix(pure.r),
+        g: mix(pure.g),
+        b: mix(pure.b),
+        a: alpha,
+    }
+}
+
+/// Parses every color serialization Chrome emits from `getComputedStyle`: legacy and modern
+/// `rgb()`/`rgba()`, hex 3/4/6/8, `transparent`, `hsl()`, `hwb()`, `lab()`, `lch()`,
+/// `oklab()`, `oklch()` and `color()` in the srgb, srgb-linear, display-p3 and xyz spaces.
+pub fn parse_css_color_alpha(value: &str) -> Result<CssColor, String> {
     let value = value.trim();
+    if value.eq_ignore_ascii_case("transparent") {
+        return Ok(CssColor::TRANSPARENT);
+    }
     if let Some(hex) = value.strip_prefix('#') {
         let expanded = match hex.len() {
-            3 => hex.chars().flat_map(|ch| [ch, ch]).collect::<String>(),
-            6 => hex.to_string(),
+            3 | 4 => hex.chars().flat_map(|ch| [ch, ch]).collect::<String>(),
+            6 | 8 => hex.to_string(),
             _ => return Err(format!("unsupported hex color `{value}`")),
         };
-        return Ok(Rgb {
-            r: u8::from_str_radix(&expanded[0..2], 16).map_err(|_| "invalid red".to_string())?
-                as f64,
-            g: u8::from_str_radix(&expanded[2..4], 16).map_err(|_| "invalid green".to_string())?
-                as f64,
-            b: u8::from_str_radix(&expanded[4..6], 16).map_err(|_| "invalid blue".to_string())?
-                as f64,
+        let alpha = if expanded.len() == 8 {
+            parse_hex_pair(&expanded[6..8], "alpha")? / 255.0
+        } else {
+            1.0
+        };
+        return Ok(CssColor {
+            r: parse_hex_pair(&expanded[0..2], "red")?,
+            g: parse_hex_pair(&expanded[2..4], "green")?,
+            b: parse_hex_pair(&expanded[4..6], "blue")?,
+            a: alpha,
         });
     }
     let open = value
@@ -366,21 +702,137 @@ pub fn parse_css_color(value: &str) -> Result<Rgb, String> {
     let close = value
         .rfind(')')
         .ok_or_else(|| format!("unsupported color `{value}`"))?;
-    if !matches!(&value[..open], "rgb" | "rgba") {
-        return Err(format!("unsupported color `{value}`"));
+    let function = value[..open].trim().to_ascii_lowercase();
+    let (raw_components, raw_alpha) = split_color_args(&value[open + 1..close]);
+    let alpha = match raw_alpha {
+        Some(raw) => ColorArg::parse(raw)?.alpha()?,
+        None => 1.0,
+    };
+    let need = |count: usize| -> Result<Vec<ColorArg>, String> {
+        if raw_components.len() < count {
+            return Err(format!("unsupported color `{value}`"));
+        }
+        raw_components[..count]
+            .iter()
+            .map(|raw| ColorArg::parse(raw))
+            .collect()
+    };
+    match function.as_str() {
+        "rgb" | "rgba" => {
+            let args = need(3)?;
+            Ok(CssColor {
+                r: args[0].scaled(255.0)?.clamp(0.0, 255.0),
+                g: args[1].scaled(255.0)?.clamp(0.0, 255.0),
+                b: args[2].scaled(255.0)?.clamp(0.0, 255.0),
+                a: alpha,
+            })
+        }
+        "hsl" | "hsla" => {
+            let args = need(3)?;
+            Ok(rgba_from_hsl(
+                args[0].hue_degrees()?,
+                args[1].scaled(100.0)? / 100.0,
+                args[2].scaled(100.0)? / 100.0,
+                alpha,
+            ))
+        }
+        "hwb" => {
+            let args = need(3)?;
+            Ok(rgba_from_hwb(
+                args[0].hue_degrees()?,
+                args[1].scaled(100.0)? / 100.0,
+                args[2].scaled(100.0)? / 100.0,
+                alpha,
+            ))
+        }
+        "lab" => {
+            let args = need(3)?;
+            Ok(rgba_from_cielab(
+                args[0].scaled(100.0)?,
+                args[1].scaled(125.0)?,
+                args[2].scaled(125.0)?,
+                alpha,
+            ))
+        }
+        "lch" => {
+            let args = need(3)?;
+            let (l, c, h) = (
+                args[0].scaled(100.0)?,
+                args[1].scaled(150.0)?,
+                args[2].hue_degrees()?.to_radians(),
+            );
+            Ok(rgba_from_cielab(l, c * h.cos(), c * h.sin(), alpha))
+        }
+        "oklab" => {
+            let args = need(3)?;
+            Ok(rgba_from_oklab(
+                args[0].scaled(1.0)?,
+                args[1].scaled(0.4)?,
+                args[2].scaled(0.4)?,
+                alpha,
+            ))
+        }
+        "oklch" => {
+            let args = need(3)?;
+            let (l, c, h) = (
+                args[0].scaled(1.0)?,
+                args[1].scaled(0.4)?,
+                args[2].hue_degrees()?.to_radians(),
+            );
+            Ok(rgba_from_oklab(l, c * h.cos(), c * h.sin(), alpha))
+        }
+        "color" => {
+            let space = raw_components
+                .first()
+                .map(|space| space.trim().to_ascii_lowercase())
+                .ok_or_else(|| format!("unsupported color `{value}`"))?;
+            if raw_components.len() < 4 {
+                return Err(format!("unsupported color `{value}`"));
+            }
+            let channels = raw_components[1..4]
+                .iter()
+                .map(|raw| ColorArg::parse(raw).and_then(|arg| arg.scaled(1.0)))
+                .collect::<Result<Vec<_>, _>>()?;
+            let (c1, c2, c3) = (channels[0], channels[1], channels[2]);
+            match space.as_str() {
+                "srgb" => Ok(CssColor {
+                    r: (c1 * 255.0).clamp(0.0, 255.0),
+                    g: (c2 * 255.0).clamp(0.0, 255.0),
+                    b: (c3 * 255.0).clamp(0.0, 255.0),
+                    a: alpha,
+                }),
+                "srgb-linear" => Ok(CssColor::from_linear(c1, c2, c3, alpha)),
+                "display-p3" => {
+                    let (x, y, z) =
+                        xyz_d65_from_display_p3(srgb_decode(c1), srgb_decode(c2), srgb_decode(c3));
+                    let (r, g, b) = linear_from_xyz_d65(x, y, z);
+                    Ok(CssColor::from_linear(r, g, b, alpha))
+                }
+                "xyz" | "xyz-d65" => {
+                    let (r, g, b) = linear_from_xyz_d65(c1, c2, c3);
+                    Ok(CssColor::from_linear(r, g, b, alpha))
+                }
+                "xyz-d50" => {
+                    let (x, y, z) = xyz_d65_from_d50(c1, c2, c3);
+                    let (r, g, b) = linear_from_xyz_d65(x, y, z);
+                    Ok(CssColor::from_linear(r, g, b, alpha))
+                }
+                other => Err(format!("unsupported color space `{other}` in `{value}`")),
+            }
+        }
+        _ => Err(format!("unsupported color `{value}`")),
     }
-    let parts = value[open + 1..close]
-        .split(',')
-        .map(str::trim)
-        .collect::<Vec<_>>();
-    if parts.len() < 3 {
-        return Err(format!("unsupported color `{value}`"));
+}
+
+/// Opaque color for callers that compare pixels directly; fully transparent values are an
+/// error here because they have no color of their own — composite them with
+/// `composite_layers` instead.
+pub fn parse_css_color(value: &str) -> Result<Rgb, String> {
+    let color = parse_css_color_alpha(value)?;
+    if color.a <= 0.0 {
+        return Err(format!("color `{value}` is fully transparent"));
     }
-    Ok(Rgb {
-        r: parse_color_component(parts[0])?,
-        g: parse_color_component(parts[1])?,
-        b: parse_color_component(parts[2])?,
-    })
+    Ok(color.opaque())
 }
 
 fn relative_luminance(color: Rgb) -> f64 {
@@ -714,16 +1166,158 @@ pub struct ContrastAuditArgs {
     pub level: WcagLevel,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-struct RawContrastSample {
-    kind: String,
-    selector: String,
-    text: String,
-    foreground: String,
-    background: String,
-    font_size: f64,
-    font_weight: String,
+pub struct RawContrastLayer {
+    pub background: String,
+    #[serde(default = "full_opacity")]
+    pub opacity: f64,
+    #[serde(default)]
+    pub image: bool,
+}
+
+fn full_opacity() -> f64 {
+    1.0
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RawContrastSample {
+    pub kind: String,
+    pub selector: String,
+    #[serde(default)]
+    pub text: String,
+    pub foreground: String,
+    #[serde(default)]
+    pub background: String,
+    #[serde(default)]
+    pub layers: Vec<RawContrastLayer>,
+    #[serde(default)]
+    pub canvas: String,
+    #[serde(default)]
+    pub border_width: f64,
+    #[serde(default)]
+    pub font_size: f64,
+    #[serde(default = "regular_weight")]
+    pub font_weight: String,
+}
+
+fn regular_weight() -> String {
+    "400".to_string()
+}
+
+/// What one sampled element contributes to the audit once its colors are composited.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContrastSampleOutcome {
+    Measured {
+        ratio: f64,
+        foreground: Rgb,
+        background: Rgb,
+        boundary: &'static str,
+    },
+    /// An image or gradient sits in the backdrop, so computed colors cannot tell the truth.
+    Unmeasurable(String),
+    /// A control with neither a visible border nor a fill has no non-text boundary to test.
+    Skipped,
+    /// A color value the parser does not understand; reported per sample, never fatal.
+    Unsupported(String),
+}
+
+fn parse_paint_layers(sample: &RawContrastSample) -> Result<Vec<PaintLayer>, String> {
+    let raw = if sample.layers.is_empty() && !sample.background.is_empty() {
+        vec![RawContrastLayer {
+            background: sample.background.clone(),
+            opacity: 1.0,
+            image: false,
+        }]
+    } else {
+        sample.layers.clone()
+    };
+    raw.iter()
+        .map(|layer| {
+            parse_css_color_alpha(&layer.background)
+                .map(|background| PaintLayer {
+                    background,
+                    opacity: layer.opacity,
+                    image: layer.image,
+                })
+                .map_err(|error| format!("background {error}"))
+        })
+        .collect()
+}
+
+/// Truncates the backdrop at the first fully opaque layer and reports an image or gradient
+/// that would be visible under the element instead of inventing a ratio for it.
+fn visible_backdrop(layers: &[PaintLayer]) -> Result<&[PaintLayer], String> {
+    for (index, layer) in layers.iter().enumerate() {
+        if layer.image {
+            return Err("a background image or gradient sits under the element, so the backdrop color is not measurable from computed styles".to_string());
+        }
+        if layer.background.a >= 1.0 && layer.opacity >= 1.0 {
+            return Ok(&layers[..=index]);
+        }
+    }
+    Ok(layers)
+}
+
+pub fn measure_contrast_sample(sample: &RawContrastSample) -> ContrastSampleOutcome {
+    let canvas = canvas_color(&sample.canvas);
+    let layers = match parse_paint_layers(sample) {
+        Ok(layers) => layers,
+        Err(error) => return ContrastSampleOutcome::Unsupported(error),
+    };
+    let foreground = match parse_css_color_alpha(&sample.foreground) {
+        Ok(color) => color,
+        Err(error) => return ContrastSampleOutcome::Unsupported(format!("foreground {error}")),
+    };
+    if sample.kind == "non_text" {
+        let Some((own, exterior_layers)) = layers.split_first() else {
+            return ContrastSampleOutcome::Unmeasurable("no paint layers".to_string());
+        };
+        let exterior_layers = match visible_backdrop(exterior_layers) {
+            Ok(layers) => layers,
+            Err(error) => return ContrastSampleOutcome::Unmeasurable(error),
+        };
+        let exterior = composite_layers(exterior_layers, None, canvas);
+        let border_visible = sample.border_width > 0.0 && foreground.a > 0.0;
+        let (boundary_color, boundary) = if border_visible {
+            (
+                composite_layers(&layers, Some(foreground), canvas),
+                "border",
+            )
+        } else if own.background.a > 0.0 {
+            (composite_layers(&layers, None, canvas), "fill")
+        } else {
+            return ContrastSampleOutcome::Skipped;
+        };
+        return ContrastSampleOutcome::Measured {
+            ratio: contrast_ratio(boundary_color, exterior),
+            foreground: boundary_color,
+            background: exterior,
+            boundary,
+        };
+    }
+    let layers = match visible_backdrop(&layers) {
+        Ok(layers) => layers,
+        Err(error) => return ContrastSampleOutcome::Unmeasurable(error),
+    };
+    let background = composite_layers(layers, None, canvas);
+    let effective_foreground = composite_layers(layers, Some(foreground), canvas);
+    ContrastSampleOutcome::Measured {
+        ratio: contrast_ratio(effective_foreground, background),
+        foreground: effective_foreground,
+        background,
+        boundary: "text",
+    }
+}
+
+pub fn rgb_hex(color: Rgb) -> String {
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        color.r.round().clamp(0.0, 255.0) as u8,
+        color.g.round().clamp(0.0, 255.0) as u8,
+        color.b.round().clamp(0.0, 255.0) as u8
+    )
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -732,6 +1326,9 @@ struct ContrastFinding {
     text: String,
     foreground: String,
     background: String,
+    effective_foreground: String,
+    effective_background: String,
+    boundary: &'static str,
     ratio: f64,
     required_ratio: f64,
     level: &'static str,
@@ -1139,6 +1736,46 @@ pub struct ContrastAuditVerdict {
     pub warning: Option<String>,
 }
 
+impl ContrastAuditVerdict {
+    /// Appends what could not be measured so a clean-looking count never hides unparsed
+    /// colors or image backdrops.
+    pub fn with_coverage(
+        mut self,
+        unsupported: usize,
+        unmeasurable: usize,
+        skipped: usize,
+    ) -> Self {
+        let mut notes = Vec::new();
+        if unsupported > 0 {
+            notes.push(format!(
+                "{unsupported} sample(s) used color values the parser does not support"
+            ));
+        }
+        if unmeasurable > 0 {
+            notes.push(format!(
+                "{unmeasurable} sample(s) sit on image or gradient backdrops and were not rated"
+            ));
+        }
+        if skipped > 0 {
+            notes.push(format!(
+                "{skipped} control(s) had no visible border or fill boundary"
+            ));
+        }
+        if notes.is_empty() {
+            return self;
+        }
+        let note = notes.join("; ");
+        self.summary = format!("{}. {note}", self.summary);
+        if unsupported > 0 || unmeasurable > 0 {
+            self.warning = Some(match self.warning.take() {
+                Some(existing) => format!("{existing}; {note}"),
+                None => note,
+            });
+        }
+        self
+    }
+}
+
 pub fn contrast_audit_verdict(
     elements_scanned: usize,
     level: WcagLevel,
@@ -1412,6 +2049,58 @@ pub struct ToolUiProbe {
     pub config_path: String,
 }
 
+/// Measures one matrix cell. Errors stay local to the cell so an offscreen target or a
+/// missing selector cannot discard the rest of the table; the caller restores the original
+/// viewport and media once the loop is done regardless of how many cells failed.
+fn probe_matrix_cell(
+    tab: &Tab,
+    world: &WorldManager,
+    viewport: &ViewportState,
+    media: &MediaState,
+    target: &TargetInput,
+    state: BrowserElementState,
+    properties_argument: &Value,
+) -> Result<Value, String> {
+    refact_browser::context_state::apply_viewport(tab, viewport)?;
+    refact_browser::context_state::apply_media(tab, media)?;
+    let handle = resolve_target_handle(tab, world, target)?;
+    let mut scrolled_into_view = false;
+    if state != BrowserElementState::Default {
+        scrolled_into_view = world
+            .call_function_on(
+                tab,
+                &handle,
+                "function() { const r = this.getBoundingClientRect(); const inside = r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth; if (!inside) this.scrollIntoView({block: 'center', inline: 'center'}); return !inside; }",
+                Vec::new(),
+            )
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+    }
+    let probed =
+        browser_controller::run_element_state_sequence(tab, world, &handle, &[state], |_| {
+            world
+                .call_function_on(
+                    tab,
+                    &handle,
+                    PROBE_FUNCTION,
+                    vec![properties_argument.clone()],
+                )
+                .map_err(|error| {
+                    map_design_runtime_error(&format!("failed to probe {}: {error}", target.key()))
+                })
+        });
+    let _ = world.release_handle(tab, &handle);
+    let mut data = probed?
+        .pop()
+        .map(|(_, data)| data)
+        .ok_or_else(|| format!("probe of {} produced no measurement", target.key()))?;
+    if scrolled_into_view {
+        data["scrolled_into_view"] = json!(true);
+    }
+    Ok(data)
+}
+
 #[async_trait]
 impl Tool for ToolUiProbe {
     async fn tool_execute(
@@ -1456,10 +2145,18 @@ impl Tool for ToolUiProbe {
         let properties_argument =
             serde_json::to_value(&properties).map_err(|error| error.to_string())?;
         let mut table = Vec::with_capacity(cells.len());
+        let mut applied_context = false;
         for cell in cells {
             let viewport = &args.viewports[cell.viewport];
             let theme = &args.themes[cell.theme];
             let state = states[cell.state];
+            let target = &args.targets[cell.target];
+            let mut row = json!({
+                "target": target.key(),
+                "viewport": {"width":viewport.width,"height":viewport.height},
+                "theme": theme,
+                "state": state.label(),
+            });
             let viewport_state = ViewportState {
                 width: viewport.width,
                 height: viewport.height,
@@ -1467,68 +2164,69 @@ impl Tool for ToolUiProbe {
                 is_mobile: false,
                 has_touch: false,
             };
-            refact_browser::context_state::apply_viewport(&tab, &viewport_state)?;
-            refact_browser::context_state::apply_media(
-                &tab,
-                &MediaState {
-                    color_scheme: Some(theme.clone()),
-                    ..Default::default()
-                },
-            )?;
-            let target = &args.targets[cell.target];
-            let handle = resolve_target_handle(&tab, &runtime.world_manager, target)?;
-            let probed = browser_controller::run_element_state_sequence(
+            let media = MediaState {
+                color_scheme: Some(theme.clone()),
+                ..Default::default()
+            };
+            applied_context = true;
+            match probe_matrix_cell(
                 &tab,
                 &runtime.world_manager,
-                &handle,
-                &[state],
-                |_| {
-                    runtime
-                        .world_manager
-                        .call_function_on(
-                            &tab,
-                            &handle,
-                            PROBE_FUNCTION,
-                            vec![properties_argument.clone()],
-                        )
-                        .map_err(|error| {
-                            map_design_runtime_error(&format!(
-                                "failed to probe {}: {error}",
-                                target.key()
-                            ))
-                        })
-                },
-            );
-            let _ = runtime.world_manager.release_handle(&tab, &handle);
-            let data = probed?
-                .pop()
-                .map(|(_, data)| data)
-                .ok_or_else(|| format!("probe of {} produced no measurement", target.key()))?;
-            table.push(json!({
-                "target": target.key(),
-                "viewport": {"width":viewport.width,"height":viewport.height},
-                "theme": theme,
-                "state": state.label(),
-                "box": data.get("box").cloned().unwrap_or(Value::Null),
-                "styles": data.get("styles").cloned().unwrap_or(Value::Null),
-                "overflow": data.get("overflow").cloned().unwrap_or(Value::Null)
-            }));
+                &viewport_state,
+                &media,
+                target,
+                state,
+                &properties_argument,
+            ) {
+                Ok(data) => {
+                    row["box"] = data.get("box").cloned().unwrap_or(Value::Null);
+                    row["styles"] = data.get("styles").cloned().unwrap_or(Value::Null);
+                    row["overflow"] = data.get("overflow").cloned().unwrap_or(Value::Null);
+                    if let Some(scrolled) = data.get("scrolled_into_view") {
+                        row["scrolled_into_view"] = scrolled.clone();
+                    }
+                }
+                Err(error) => {
+                    row["error"] = json!(error);
+                }
+            }
+            table.push(row);
         }
-        if let Some(viewport) = original_viewport.as_ref() {
-            let _ = refact_browser::context_state::apply_viewport(&tab, viewport);
-        } else {
-            let _ = tab.call_method(Emulation::ClearDeviceMetricsOverride(None));
+        if applied_context {
+            if let Some(viewport) = original_viewport.as_ref() {
+                let _ = refact_browser::context_state::apply_viewport(&tab, viewport);
+            } else {
+                let _ = tab.call_method(Emulation::ClearDeviceMetricsOverride(None));
+            }
+            let _ = refact_browser::context_state::apply_media(&tab, &original_media);
         }
-        let _ = refact_browser::context_state::apply_media(&tab, &original_media);
         runtime.touch();
         let cells_measured = table.iter().filter(|cell| cell_is_measured(cell)).count();
+        let cell_errors = table
+            .iter()
+            .filter_map(|cell| cell.get("error").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
         if cells_measured == 0 {
-            return Err(PROBE_ZERO_MEASUREMENT_FAILURE.to_string());
+            return Err(match cell_errors.first() {
+                Some(error) => {
+                    format!("{PROBE_ZERO_MEASUREMENT_FAILURE}; first cell error: {error}")
+                }
+                None => PROBE_ZERO_MEASUREMENT_FAILURE.to_string(),
+            });
         }
-        let summary = format!(
-            "Probed {} target-state combinations ({cells_measured} measured) without screenshots",
-            table.len()
-        );
+        let summary = if cell_errors.is_empty() {
+            format!(
+                "Probed {} target-state combinations ({cells_measured} measured) without screenshots",
+                table.len()
+            )
+        } else {
+            format!(
+                "Probed {} target-state combinations ({cells_measured} measured, {} failed — see per-cell `error`) without screenshots",
+                table.len(),
+                cell_errors.len()
+            )
+        };
         tool_message(
             tool_call_id,
             ToolJson::new(
@@ -1537,6 +2235,7 @@ impl Tool for ToolUiProbe {
                 json!({
                     "matrix": table,
                     "cells_measured": cells_measured,
+                    "cells_failed": cell_errors.len(),
                     "target_count":args.targets.len(),
                     "viewport_count":args.viewports.len(),
                     "theme_count":args.themes.len(),
@@ -1552,7 +2251,7 @@ impl Tool for ToolUiProbe {
             &self.config_path,
             "ui_probe",
             "UI Probe",
-            "Measure live DOM targets across a viewport × theme × state matrix. Returns computed styles, rectangles, and overflow flags without screenshots. Open the page with the `chrome` tool first: this tool measures whatever browser session that call created. The page must be instrumented, i.e. expose `globalThis.__refact_injected__` — run the GUI dev server (`cd refact-agent/gui && npm run dev`, Vite on http://localhost:5173) with the `refact-agent/vite-plugin-design` plugin enabled; production builds and third-party sites return a page-not-instrumented error. Fails closed: measuring 0 cells is a tool error rather than an empty pass.",
+            "Measure live DOM targets across a viewport × theme × state matrix. Returns computed styles, rectangles, and overflow flags without screenshots. Open the page with the `chrome` tool first: this tool measures the active tab of the browser session that call created, and works on any page (the `chrome` tool installs the `globalThis.__refact_injected__` measurement runtime itself; the optional `refact-agent/vite-plugin-design` for `cd refact-agent/gui && npm run dev` on http://localhost:5173 only adds source attribution). Themes are emulated through `prefers-color-scheme`, so an app that switches themes by class or attribute must be toggled through the `chrome` tool instead. Hover/focus/active cells scroll the target into view; each cell reports its own `error` instead of aborting the matrix, and the original viewport and media are restored afterwards. Fails closed: measuring 0 cells is a tool error rather than an empty pass.",
             json!({
                 "type":"object",
                 "properties":{
@@ -1709,11 +2408,34 @@ impl Tool for ToolContrastAudit {
             return Err(ZERO_SCAN_FAILURE.to_string());
         }
         let mut findings = Vec::new();
+        let mut unsupported = Vec::new();
+        let mut unmeasurable = Vec::new();
+        let mut skipped = 0usize;
         for sample in samples {
-            let ratio = contrast_ratio(
-                parse_css_color(&sample.foreground)?,
-                parse_css_color(&sample.background)?,
-            );
+            let (ratio, foreground, background, boundary) = match measure_contrast_sample(&sample) {
+                ContrastSampleOutcome::Measured {
+                    ratio,
+                    foreground,
+                    background,
+                    boundary,
+                } => (ratio, foreground, background, boundary),
+                ContrastSampleOutcome::Unsupported(error) => {
+                    if unsupported.len() < MAX_AUDIT_FINDINGS {
+                        unsupported.push(json!({"selector": sample.selector, "error": error}));
+                    }
+                    continue;
+                }
+                ContrastSampleOutcome::Unmeasurable(reason) => {
+                    if unmeasurable.len() < MAX_AUDIT_FINDINGS {
+                        unmeasurable.push(json!({"selector": sample.selector, "reason": reason}));
+                    }
+                    continue;
+                }
+                ContrastSampleOutcome::Skipped => {
+                    skipped += 1;
+                    continue;
+                }
+            };
             let evaluation = evaluate_contrast(
                 ratio,
                 args.level,
@@ -1722,11 +2444,19 @@ impl Tool for ToolContrastAudit {
                 &sample.font_weight,
             );
             if evaluation.emitted {
+                let backdrop = sample
+                    .layers
+                    .first()
+                    .map(|layer| layer.background.clone())
+                    .unwrap_or(sample.background);
                 findings.push(ContrastFinding {
                     selector: sample.selector,
                     text: sample.text,
                     foreground: sample.foreground,
-                    background: sample.background,
+                    background: backdrop,
+                    effective_foreground: rgb_hex(foreground),
+                    effective_background: rgb_hex(background),
+                    boundary,
                     ratio: (ratio * 100.0).round() / 100.0,
                     required_ratio: evaluation.required_ratio,
                     level: args.level.label(),
@@ -1755,7 +2485,8 @@ impl Tool for ToolContrastAudit {
             findings.len(),
             raw_colors.len(),
             token_scan.resolved_files.len(),
-        );
+        )
+        .with_coverage(unsupported.len(), unmeasurable.len(), skipped);
         tool_message(
             tool_call_id,
             ToolJson::new(
@@ -1776,6 +2507,9 @@ impl Tool for ToolContrastAudit {
                     "token_files_resolved":token_scan.resolved_files,
                     "token_color_count":token_scan.colors.len(),
                     "elements_scanned":elements_scanned,
+                    "unsupported_colors":unsupported,
+                    "unmeasurable_backdrops":unmeasurable,
+                    "skipped_without_boundary":skipped,
                     "warning":verdict.warning
                 }),
             )
@@ -1788,7 +2522,7 @@ impl Tool for ToolContrastAudit {
             &self.config_path,
             "contrast_audit",
             "Contrast Audit",
-            "Audit live DOM contrast against the requested WCAG level: AA requires 4.5 for normal text and 3.0 for large text, AAA requires 7.0 for normal text and 4.5 for large text, and non-text UI contrast requires 3.0. A finding is emitted only when the measured ratio is below the requirement for the audited level and text size class. Open the page with the `chrome` tool first, and point it at an instrumented page that exposes `globalThis.__refact_injected__` — run the GUI dev server (`cd refact-agent/gui && npm run dev`, Vite on http://localhost:5173) with the `refact-agent/vite-plugin-design` plugin enabled. Also reports raw stylesheet colors absent from the token files; when token_files is omitted they are discovered under the workspace by name (tokens/theme/variables/palette .css/.scss/.less). Fails closed: scanning 0 elements is a tool error rather than a pass, and resolving 0 token files leads the summary with a warning.",
+            "Audit live DOM contrast against the requested WCAG level: AA requires 4.5 for normal text and 3.0 for large text, AAA requires 7.0 for normal text and 4.5 for large text, and non-text UI contrast requires 3.0. Colors are composited the way the page paints them (translucent backgrounds and CSS opacity over the ancestors down to the canvas, CSS Color 4 values such as oklab/oklch/lab/lch/color() included); controls are rated on their visible boundary (border, else fill) against the surrounding backdrop, disabled controls are exempt, and samples on image or gradient backdrops or with unparseable colors are listed separately instead of being rated. A finding is emitted only when the measured ratio is below the requirement for the audited level and text size class. Open the page with the `chrome` tool first: the audit runs in the active tab of that session and works on any page (the `chrome` tool installs the `globalThis.__refact_injected__` measurement runtime itself; the optional `refact-agent/vite-plugin-design` for `cd refact-agent/gui && npm run dev` only adds source attribution). Also reports raw stylesheet colors absent from the token files; when token_files is omitted they are discovered under the workspace by name (tokens/theme/variables/palette .css/.scss/.less). Fails closed: scanning 0 elements is a tool error rather than a pass, and resolving 0 token files leads the summary with a warning.",
             json!({"type":"object","properties":{
                 "token_files":{"type":"array","items":{"type":"string"},"description":"Repository-relative design-token CSS files; omitted means discover them under the workspace"},
                 "level":{"type":"string","enum":["AA","AAA"],"default":"AA","description":"WCAG conformance level to audit against"}
@@ -2047,6 +2781,282 @@ mod tests {
         assert!(parse_css_color("transparent").is_err());
     }
 
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1.5
+    }
+
+    #[test]
+    fn color4_values_convert_or_return_sample_error() {
+        let white = parse_css_color_alpha("oklab(1 0 0)").unwrap();
+        assert!(close(white.r, 255.0) && close(white.g, 255.0) && close(white.b, 255.0));
+        let radix = parse_css_color_alpha("oklab(0.675566 0.00194338 -0.105024 / 0.12)").unwrap();
+        assert!((radix.a - 0.12).abs() < 1e-6);
+        assert!(radix.b > radix.r, "negative b axis is blue-ish: {radix:?}");
+        let red = parse_css_color_alpha("oklch(0.628 0.2577 29.23)").unwrap();
+        assert!(red.r > 240.0 && red.g < 20.0 && red.b < 20.0, "{red:?}");
+        let lab_white = parse_css_color_alpha("lab(100% 0 0)").unwrap();
+        assert!(
+            close(lab_white.r, 255.0) && close(lab_white.b, 255.0),
+            "{lab_white:?}"
+        );
+        let lch_gray = parse_css_color_alpha("lch(53.59 0 0)").unwrap();
+        assert!(
+            close(lch_gray.r, 128.0) && close(lch_gray.g, 128.0),
+            "{lch_gray:?}"
+        );
+        let srgb = parse_css_color_alpha("color(srgb 1 0.5 0 / 50%)").unwrap();
+        assert!(close(srgb.r, 255.0) && close(srgb.g, 127.5) && (srgb.a - 0.5).abs() < 1e-9);
+        let linear = parse_css_color_alpha("color(srgb-linear 0.2140 0.2140 0.2140)").unwrap();
+        assert!(close(linear.r, 128.0), "{linear:?}");
+        let p3 = parse_css_color_alpha("color(display-p3 1 1 1)").unwrap();
+        assert!(
+            close(p3.r, 255.0) && close(p3.g, 255.0) && close(p3.b, 255.0),
+            "{p3:?}"
+        );
+        let hsl = parse_css_color_alpha("hsl(120 100% 25%)").unwrap();
+        assert!(
+            close(hsl.r, 0.0) && close(hsl.g, 127.5) && close(hsl.b, 0.0),
+            "{hsl:?}"
+        );
+        let hsla = parse_css_color_alpha("hsla(0, 100%, 50%, 0.25)").unwrap();
+        assert!(close(hsla.r, 255.0) && (hsla.a - 0.25).abs() < 1e-9);
+        let hwb = parse_css_color_alpha("hwb(0 50% 50%)").unwrap();
+        assert!(close(hwb.r, 127.5) && close(hwb.g, 127.5), "{hwb:?}");
+        let modern = parse_css_color_alpha("rgb(10 20 30 / 0.5)").unwrap();
+        assert_eq!(
+            (modern.r, modern.g, modern.b, modern.a),
+            (10.0, 20.0, 30.0, 0.5)
+        );
+        let legacy = parse_css_color_alpha("rgba(10, 20, 30, 0.5)").unwrap();
+        assert_eq!(legacy, modern);
+        let short = parse_css_color_alpha("#fff8").unwrap();
+        assert!(close(short.a * 255.0, 136.0));
+        assert_eq!(parse_css_color_alpha("transparent").unwrap().a, 0.0);
+        assert!(parse_css_color_alpha("color(rec2020 1 0 0)").is_err());
+        assert!(parse_css_color_alpha("currentcolor").is_err());
+        assert!(parse_css_color_alpha("rgb(1 2)").is_err());
+    }
+
+    fn layer(background: &str, opacity: f64) -> RawContrastLayer {
+        RawContrastLayer {
+            background: background.to_string(),
+            opacity,
+            image: false,
+        }
+    }
+
+    fn text_sample(foreground: &str, layers: Vec<RawContrastLayer>) -> RawContrastSample {
+        RawContrastSample {
+            kind: "text".to_string(),
+            selector: "p".to_string(),
+            text: "hello".to_string(),
+            foreground: foreground.to_string(),
+            background: String::new(),
+            layers,
+            canvas: "light".to_string(),
+            border_width: 0.0,
+            font_size: 16.0,
+            font_weight: "400".to_string(),
+        }
+    }
+
+    fn measured_ratio(outcome: ContrastSampleOutcome) -> f64 {
+        match outcome {
+            ContrastSampleOutcome::Measured { ratio, .. } => ratio,
+            other => panic!("expected a measurement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transparent_root_uses_effective_canvas_color() {
+        let sample = text_sample(
+            "rgb(0, 0, 0)",
+            vec![
+                layer("rgba(0, 0, 0, 0)", 1.0),
+                layer("rgba(0, 0, 0, 0)", 1.0),
+                layer("rgba(0, 0, 0, 0)", 1.0),
+            ],
+        );
+        let ratio = measured_ratio(measure_contrast_sample(&sample));
+        assert!(
+            (ratio - 21.0).abs() < 0.01,
+            "black on default canvas: {ratio}"
+        );
+
+        let mut dark = sample.clone();
+        dark.canvas = "dark".to_string();
+        let ratio = measured_ratio(measure_contrast_sample(&dark));
+        assert!(
+            ratio < 1.5,
+            "black on the dark canvas is near-invisible: {ratio}"
+        );
+    }
+
+    #[test]
+    fn alpha_stack_is_composited() {
+        let sample = text_sample(
+            "rgba(0, 0, 0, 0.5)",
+            vec![
+                layer("rgba(255, 255, 255, 0.5)", 1.0),
+                layer("rgb(0, 0, 0)", 1.0),
+            ],
+        );
+        match measure_contrast_sample(&sample) {
+            ContrastSampleOutcome::Measured {
+                foreground,
+                background,
+                ratio,
+                ..
+            } => {
+                assert!(close(background.r, 127.5), "{background:?}");
+                assert!(close(foreground.r, 63.75), "{foreground:?}");
+                assert!(ratio > 1.0 && ratio < 4.5, "{ratio}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let faded = text_sample("rgb(255, 255, 255)", vec![layer("rgb(0, 0, 0)", 0.5)]);
+        match measure_contrast_sample(&faded) {
+            ContrastSampleOutcome::Measured {
+                foreground,
+                background,
+                ..
+            } => {
+                assert!(
+                    close(background.r, 127.5),
+                    "50% black group over white: {background:?}"
+                );
+                assert!(
+                    close(foreground.r, 255.0),
+                    "white text stays white: {foreground:?}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_colors_and_image_backdrops_are_reported_per_sample() {
+        let mut unsupported = text_sample("rgb(0, 0, 0)", vec![layer("rgb(255, 255, 255)", 1.0)]);
+        unsupported.foreground = "color(rec2020 1 0 0)".to_string();
+        assert!(matches!(
+            measure_contrast_sample(&unsupported),
+            ContrastSampleOutcome::Unsupported(error) if error.contains("rec2020")
+        ));
+
+        let mut on_image = text_sample("rgb(0, 0, 0)", vec![layer("rgba(0, 0, 0, 0)", 1.0)]);
+        on_image.layers[0].image = true;
+        assert!(matches!(
+            measure_contrast_sample(&on_image),
+            ContrastSampleOutcome::Unmeasurable(_)
+        ));
+
+        let mut covered = text_sample(
+            "rgb(0, 0, 0)",
+            vec![layer("rgb(255, 255, 255)", 1.0), layer("rgb(0, 0, 0)", 1.0)],
+        );
+        covered.layers[1].image = true;
+        assert!(
+            matches!(
+                measure_contrast_sample(&covered),
+                ContrastSampleOutcome::Measured { .. }
+            ),
+            "an image hidden under an opaque layer does not matter"
+        );
+
+        let oklab = text_sample(
+            "oklab(0.2 0 0 / 1)",
+            vec![
+                layer("oklab(0.675566 0.00194338 -0.105024 / 0.12)", 1.0),
+                layer("rgb(255, 255, 255)", 1.0),
+            ],
+        );
+        assert!(measured_ratio(measure_contrast_sample(&oklab)) > 4.5);
+    }
+
+    #[test]
+    fn filled_button_uses_meaningful_boundary() {
+        let mut filled = text_sample(
+            "rgb(37, 99, 235)",
+            vec![
+                layer("rgb(37, 99, 235)", 1.0),
+                layer("rgb(255, 255, 255)", 1.0),
+            ],
+        );
+        filled.kind = "non_text".to_string();
+        filled.border_width = 1.0;
+        match measure_contrast_sample(&filled) {
+            ContrastSampleOutcome::Measured {
+                ratio, boundary, ..
+            } => {
+                assert_eq!(boundary, "border");
+                assert!(ratio > 3.0, "blue fill/border against white: {ratio}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let mut borderless = filled.clone();
+        borderless.border_width = 0.0;
+        assert!(matches!(
+            measure_contrast_sample(&borderless),
+            ContrastSampleOutcome::Measured {
+                boundary: "fill",
+                ..
+            }
+        ));
+
+        let mut ghost = filled.clone();
+        ghost.border_width = 0.0;
+        ghost.layers[0] = layer("rgba(0, 0, 0, 0)", 1.0);
+        assert_eq!(
+            measure_contrast_sample(&ghost),
+            ContrastSampleOutcome::Skipped
+        );
+
+        let mut faint_outline = filled.clone();
+        faint_outline.foreground = "rgb(207, 207, 207)".to_string();
+        faint_outline.layers[0] = layer("rgb(245, 245, 245)", 1.0);
+        let ratio = measured_ratio(measure_contrast_sample(&faint_outline));
+        assert!(
+            ratio < 3.0,
+            "a faint outline on white is a real failure: {ratio}"
+        );
+    }
+
+    #[test]
+    fn legacy_single_background_samples_still_measure() {
+        let legacy: RawContrastSample = serde_json::from_value(json!({
+            "kind": "text",
+            "selector": "p",
+            "text": "x",
+            "foreground": "rgb(0, 0, 0)",
+            "background": "rgb(255, 255, 255)",
+            "fontSize": 16,
+            "fontWeight": "400"
+        }))
+        .unwrap();
+        assert!((measured_ratio(measure_contrast_sample(&legacy)) - 21.0).abs() < 0.01);
+        assert_eq!(rgb_hex(LIGHT_CANVAS), "#ffffff");
+        assert_eq!(rgb_hex(DARK_CANVAS), "#121212");
+    }
+
+    #[test]
+    fn contrast_verdict_reports_what_could_not_be_rated() {
+        let verdict = contrast_audit_verdict(12, WcagLevel::Aa, 1, 0, 1).with_coverage(2, 3, 1);
+        assert!(verdict.summary.contains("2 sample(s) used color values"));
+        assert!(verdict.summary.contains("3 sample(s) sit on image"));
+        assert!(verdict
+            .summary
+            .contains("1 control(s) had no visible border"));
+        assert!(verdict
+            .warning
+            .as_deref()
+            .unwrap()
+            .contains("image or gradient"));
+        let clean = contrast_audit_verdict(12, WcagLevel::Aa, 1, 0, 1).with_coverage(0, 0, 0);
+        assert_eq!(clean.warning, None);
+    }
+
     #[test]
     fn wcag_requirements_follow_the_audited_level_and_text_size_class() {
         assert_eq!(required_contrast_ratio(WcagLevel::Aa, false), 4.5);
@@ -2246,6 +3256,7 @@ mod tests {
         let owned_by_root = vec![RuntimeOwner {
             runtime_id: "rt-root".to_string(),
             attached_chat_id: Some("root-chat".to_string()),
+            connected: true,
         }];
         let selection = select_runtime_for_chat(&owned_by_root, &lookup)
             .expect("a stale turn id must not fail the first exact-match miss");
@@ -2255,6 +3266,7 @@ mod tests {
         let sole_stranger = vec![RuntimeOwner {
             runtime_id: "rt-only".to_string(),
             attached_chat_id: Some("subchat-turn-1".to_string()),
+            connected: true,
         }];
         assert!(
             select_runtime_for_chat(
@@ -2267,6 +3279,7 @@ mod tests {
         let sole_unattached = vec![RuntimeOwner {
             runtime_id: "rt-only".to_string(),
             attached_chat_id: None,
+            connected: true,
         }];
         assert_eq!(
             select_runtime_for_chat(&sole_unattached, &lookup)
@@ -2295,19 +3308,25 @@ mod tests {
     }
 
     #[test]
-    fn instrumentation_error_names_the_plugin_the_command_and_the_marker() {
+    fn instrumentation_error_names_the_real_cause_and_the_way_out() {
         for remedy in [
             "__refact_injected__",
+            "isolated world",
+            "navigated or reloaded",
+            "relaunched",
+            "Any page works",
             "vite-plugin-design",
-            "npm run dev",
-            "localhost:5173",
-            "chrome",
+            "`chrome`",
         ] {
             assert!(
                 PAGE_NOT_INSTRUMENTED_ERROR.contains(remedy),
                 "instrumentation error lost `{remedy}`: {PAGE_NOT_INSTRUMENTED_ERROR}"
             );
         }
+        assert!(
+            !PAGE_NOT_INSTRUMENTED_ERROR.contains("never instrumented"),
+            "the error must not claim third-party pages cannot be measured"
+        );
         for description in [
             ToolUiProbe {
                 config_path: "builtin".to_string(),
@@ -2320,11 +3339,21 @@ mod tests {
             .tool_description()
             .description,
         ] {
+            assert!(description.contains("works on any page"), "{description}");
             assert!(description.contains("__refact_injected__"), "{description}");
             assert!(description.contains("vite-plugin-design"), "{description}");
-            assert!(description.contains("npm run dev"), "{description}");
             assert!(description.contains("`chrome`"), "{description}");
+            assert!(
+                !description.contains("must be instrumented"),
+                "descriptions must not demand an instrumented build: {description}"
+            );
         }
+        assert!(ToolUiProbe {
+            config_path: "builtin".to_string()
+        }
+        .tool_description()
+        .description
+        .contains("prefers-color-scheme"));
     }
 
     #[test]

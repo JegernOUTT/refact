@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex as AMutex;
 use tracing::{info, warn};
@@ -23,6 +23,77 @@ fn workspace_roots(app: &crate::app_state::AppState) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+/// Ownership records of every registered runtime, readable without touching any runtime's
+/// execution mutex. Lookups by chat id, status reads and health probes go through this index
+/// so a browser wedged inside one CDP call cannot stall unrelated chats. Entries are weak:
+/// the runtime owns its record, so dropping a runtime still closes its Chrome.
+static RUNTIME_OWNERS: OnceLock<StdMutex<HashMap<String, Weak<RuntimeOwnership>>>> =
+    OnceLock::new();
+
+fn owners_index() -> &'static StdMutex<HashMap<String, Weak<RuntimeOwnership>>> {
+    RUNTIME_OWNERS.get_or_init(Default::default)
+}
+
+fn index_runtime_owner(ownership: &Arc<RuntimeOwnership>) {
+    let mut index = owners_index()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    index.retain(|_, record| record.strong_count() > 0);
+    index.insert(
+        ownership.runtime_id().to_string(),
+        Arc::downgrade(ownership),
+    );
+}
+
+fn unindex_runtime_owner(runtime_id: &str) -> Option<Arc<RuntimeOwnership>> {
+    owners_index()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(runtime_id)
+        .and_then(|record| record.upgrade())
+}
+
+pub fn runtime_owner_record(runtime_id: &str) -> Option<Arc<RuntimeOwnership>> {
+    owners_index()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(runtime_id)
+        .and_then(Weak::upgrade)
+}
+
+fn indexed_runtime_owners() -> Vec<Arc<RuntimeOwnership>> {
+    owners_index()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .values()
+        .filter_map(Weak::upgrade)
+        .collect()
+}
+
+async fn registered_runtime_ids(app: &crate::app_state::AppState) -> HashSet<String> {
+    app.integrations
+        .browser_runtimes
+        .lock()
+        .await
+        .keys()
+        .cloned()
+        .collect()
+}
+
+/// Ownership records for the runtimes currently in the registry.
+pub async fn registered_runtime_owners(
+    app: &crate::app_state::AppState,
+) -> Vec<Arc<RuntimeOwnership>> {
+    let ids = registered_runtime_ids(app).await;
+    indexed_runtime_owners()
+        .into_iter()
+        .filter(|ownership| ids.contains(ownership.runtime_id()))
+        .collect()
+}
+
+/// Registers a runtime and keeps exactly one generation per owning chat: any other runtime
+/// still registered for the same chat is shut down first, so lookups can never pick a stale
+/// generation while the chrome tool drives a fresh one.
 pub async fn register_browser_runtime(
     app: crate::app_state::AppState,
     runtime: BrowserRuntime,
@@ -30,22 +101,63 @@ pub async fn register_browser_runtime(
     let mut runtime = runtime;
     runtime.set_allowed_roots(workspace_roots(&app));
     let runtime_id = runtime.runtime_id.clone();
-    let arc = Arc::new(AMutex::new(runtime));
+    let ownership = runtime.ownership.clone();
+    if let Some(chat_id) = ownership.attached_chat_id().filter(|id| !id.is_empty()) {
+        let stale: Vec<String> = registered_runtime_owners(&app)
+            .await
+            .into_iter()
+            .filter(|other| {
+                other.runtime_id() != runtime_id
+                    && other.attached_chat_id().as_deref() == Some(chat_id.as_str())
+            })
+            .map(|other| other.runtime_id().to_string())
+            .collect();
+        for stale_id in stale {
+            warn!(
+                "BrowserRuntime {stale_id} was still registered for chat {chat_id}; \
+                 replacing it with {runtime_id}"
+            );
+            take_browser_runtime(&app, &stale_id, false).await;
+        }
+    }
+    index_runtime_owner(&ownership);
+    drop(ownership);
     app.integrations
         .browser_runtimes
         .lock()
         .await
-        .insert(runtime_id.clone(), arc);
+        .insert(runtime_id.clone(), Arc::new(AMutex::new(runtime)));
     runtime_id
 }
 
 pub const PROCESS_TERM_GRACE: Duration = Duration::from_millis(1500);
 
+/// A zombie (`Z`) or dead (`X`) process still answers `kill(pid, 0)` but owns nothing any
+/// more: its profile lock is stale and there is no point signalling it again.
+fn process_is_defunct(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit(')')
+                    .next()
+                    .and_then(|rest| rest.trim_start().chars().next())
+            })
+            .is_some_and(|state| matches!(state, 'Z' | 'X'))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 pub fn pid_is_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
-            return true;
+            return !process_is_defunct(pid);
         }
         std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
@@ -124,12 +236,74 @@ fn process_owns_profile(pid: u32, profile_dir: &Path) -> bool {
     cmdline.contains(&*profile_dir.to_string_lossy())
 }
 
-fn shutdown_runtime_process(pid: Option<u32>, profile_dir: &Path, delete_profile: bool) {
-    if let Some(pid) = pid.filter(|pid| pid_is_alive(*pid)) {
-        terminate_process(pid);
+/// Which process a removed runtime is allowed to terminate. Only the generation being removed
+/// dies: a live profile-lock owner that is not that process is a replacement launched by
+/// someone else and must be left alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownTarget {
+    Own(u32),
+    LeaveReplacement { own: Option<u32>, lock_owner: u32 },
+    Nothing,
+}
+
+pub fn shutdown_target(own_pid: Option<u32>, lock_owner: Option<u32>) -> ShutdownTarget {
+    match (own_pid, lock_owner) {
+        (Some(own), _) if pid_is_alive(own) => ShutdownTarget::Own(own),
+        (own, Some(lock_owner)) if own != Some(lock_owner) => {
+            ShutdownTarget::LeaveReplacement { own, lock_owner }
+        }
+        _ => ShutdownTarget::Nothing,
     }
-    if let Some(lock_pid) = profile_lock_is_live(profile_dir) {
-        terminate_process(lock_pid);
+}
+
+const PROFILE_SINGLETON_FILES: [&str; 3] = ["SingletonLock", "SingletonSocket", "SingletonCookie"];
+
+/// Removes singleton artifacts left by a Chrome that is no longer running. Never touches a
+/// profile whose lock is held by a live process.
+pub fn clear_stale_profile_lock(profile_dir: &Path) -> Result<(), String> {
+    let Some(pid) = profile_lock_pid(profile_dir) else {
+        return Ok(());
+    };
+    if let Some(live) = profile_lock_is_live(profile_dir) {
+        return Err(format!(
+            "profile {} is locked by live Chrome process {live}",
+            profile_dir.display()
+        ));
+    }
+    for name in PROFILE_SINGLETON_FILES {
+        let path = profile_dir.join(name);
+        if std::fs::symlink_metadata(&path).is_err() {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                warn!(
+                    "Failed to remove stale {} of dead Chrome {pid} in {}: {error}",
+                    name,
+                    profile_dir.display()
+                );
+            }
+        }
+    }
+    info!(
+        "Cleared stale singleton lock of dead Chrome {pid} in {}",
+        profile_dir.display()
+    );
+    Ok(())
+}
+
+fn shutdown_runtime_process(pid: Option<u32>, profile_dir: &Path, delete_profile: bool) {
+    match shutdown_target(pid, profile_lock_is_live(profile_dir)) {
+        ShutdownTarget::Own(own) => terminate_process(own),
+        ShutdownTarget::LeaveReplacement { own, lock_owner } => warn!(
+            "Profile {} is now locked by live Chrome {lock_owner}, not by the removed \
+             runtime's process {own:?}; leaving the replacement alive",
+            profile_dir.display()
+        ),
+        ShutdownTarget::Nothing => {}
+    }
+    if !profile_dir.as_os_str().is_empty() {
+        let _ = clear_stale_profile_lock(profile_dir);
     }
     if !delete_profile {
         return;
@@ -152,6 +326,10 @@ fn shutdown_runtime_process(pid: Option<u32>, profile_dir: &Path, delete_profile
     }
 }
 
+/// How long removal waits for a runtime's execution mutex before falling back to the
+/// ownership record; a wedged CDP call must never block eviction.
+pub const RUNTIME_LOCK_GRACE: Duration = Duration::from_secs(2);
+
 async fn take_browser_runtime(
     app: &crate::app_state::AppState,
     runtime_id: &str,
@@ -163,9 +341,21 @@ async fn take_browser_runtime(
         .lock()
         .await
         .remove(runtime_id)?;
-    let (pid, profile_dir) = {
-        let rt = removed.lock().await;
-        (rt.browser.get_process_id(), rt.profile_dir.clone())
+    let (pid, profile_dir) = match unindex_runtime_owner(runtime_id) {
+        Some(ownership) => (
+            ownership.process_id(),
+            ownership.profile_dir().to_path_buf(),
+        ),
+        None => match tokio::time::timeout(RUNTIME_LOCK_GRACE, removed.lock()).await {
+            Ok(rt) => (rt.browser.get_process_id(), rt.profile_dir.clone()),
+            Err(_) => {
+                warn!(
+                    "BrowserRuntime {runtime_id} is busy and has no ownership record; \
+                     removing it without terminating its process"
+                );
+                (None, PathBuf::new())
+            }
+        },
     };
     let runtime_id = runtime_id.to_string();
     if let Err(error) = tokio::task::spawn_blocking(move || {
@@ -178,18 +368,41 @@ async fn take_browser_runtime(
     Some(removed)
 }
 
-pub async fn remove_browser_runtime(
-    app: crate::app_state::AppState,
-    runtime_id: &str,
-) -> Option<Arc<AMutex<BrowserRuntime>>> {
-    take_browser_runtime(&app, runtime_id, false).await
+/// Dropping the last handle of a runtime makes headless_chrome `wait()` for its Chrome child;
+/// a Chrome whose exit is stuck in the kernel (a `Zl` zombie with one thread in D state)
+/// would then block the dropping thread forever. Runtimes are therefore always released on
+/// a detached OS thread, never on an executor thread or inside a relaunch.
+fn release_runtime_off_thread(removed: Arc<AMutex<BrowserRuntime>>, runtime_id: &str) {
+    let name = format!(
+        "browser-runtime-drop-{}",
+        &runtime_id[..runtime_id.len().min(8)]
+    );
+    if let Err(error) = std::thread::Builder::new()
+        .name(name)
+        .spawn(move || drop(removed))
+    {
+        warn!("Failed to release BrowserRuntime {runtime_id} on a worker thread: {error}");
+    }
 }
 
-pub async fn discard_browser_runtime(
-    app: crate::app_state::AppState,
-    runtime_id: &str,
-) -> Option<Arc<AMutex<BrowserRuntime>>> {
-    take_browser_runtime(&app, runtime_id, true).await
+pub async fn remove_browser_runtime(app: crate::app_state::AppState, runtime_id: &str) -> bool {
+    match take_browser_runtime(&app, runtime_id, false).await {
+        Some(removed) => {
+            release_runtime_off_thread(removed, runtime_id);
+            true
+        }
+        None => false,
+    }
+}
+
+pub async fn discard_browser_runtime(app: crate::app_state::AppState, runtime_id: &str) -> bool {
+    match take_browser_runtime(&app, runtime_id, true).await {
+        Some(removed) => {
+            release_runtime_off_thread(removed, runtime_id);
+            true
+        }
+        None => false,
+    }
 }
 
 pub const RUNTIME_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -212,7 +425,7 @@ async fn release_runtime_and_wait(removed: Option<Arc<AMutex<BrowserRuntime>>>, 
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    tokio::task::block_in_place(move || drop(removed));
+    release_runtime_off_thread(removed, runtime_id);
 }
 
 fn profile_lock_pid(profile_dir: &Path) -> Option<u32> {
@@ -337,14 +550,11 @@ pub fn sweep_stale_browser_profiles_excluding(
 }
 
 pub async fn sweep_registered_browser_profiles(app: &crate::app_state::AppState) -> usize {
-    let runtimes: Vec<_> = {
-        let runtimes = app.integrations.browser_runtimes.lock().await;
-        runtimes.values().cloned().collect()
-    };
-    let mut registered = Vec::with_capacity(runtimes.len());
-    for runtime in runtimes {
-        registered.push(runtime.lock().await.profile_dir.clone());
-    }
+    let registered: Vec<PathBuf> = registered_runtime_owners(app)
+        .await
+        .into_iter()
+        .map(|ownership| ownership.profile_dir().to_path_buf())
+        .collect();
     let cache_dir = app.gcx.cache_dir.clone();
     tokio::task::spawn_blocking(move || {
         sweep_stale_browser_profiles_excluding(&cache_dir, &registered)
@@ -400,17 +610,13 @@ impl ChatRuntimeLookup {
         }
         ids
     }
-
-    fn owned_by_ancestor(&self, owner: &str) -> bool {
-        self.ordered_ids().iter().any(|id| id == owner)
-            || (!owner.is_empty() && self.chat_id.starts_with(owner))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeOwner {
     pub runtime_id: String,
     pub attached_chat_id: Option<String>,
+    pub connected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,14 +625,22 @@ pub struct RuntimeSelection {
     pub adopted: bool,
 }
 
+/// Picks the runtime for a chat from ownership facts alone. Exact ids (the chat, then its
+/// root chat, then its background agent) win, a connected generation beats a dead one, and
+/// only a runtime nobody owns can be adopted; a lexical prefix is never ancestry.
 pub fn select_runtime_for_chat(
     owners: &[RuntimeOwner],
     lookup: &ChatRuntimeLookup,
 ) -> Option<RuntimeSelection> {
     for id in lookup.ordered_ids() {
-        if let Some(owner) = owners
+        let candidates = owners
             .iter()
-            .find(|owner| owner.attached_chat_id.as_deref() == Some(id.as_str()))
+            .filter(|owner| owner.attached_chat_id.as_deref() == Some(id.as_str()))
+            .collect::<Vec<_>>();
+        if let Some(owner) = candidates
+            .iter()
+            .find(|owner| owner.connected)
+            .or_else(|| candidates.first())
         {
             return Some(RuntimeSelection {
                 runtime_id: owner.runtime_id.clone(),
@@ -434,48 +648,60 @@ pub fn select_runtime_for_chat(
             });
         }
     }
-    let only = match owners {
-        [only] => only,
-        _ => return None,
-    };
-    let adoptable = match only.attached_chat_id.as_deref() {
-        None => true,
-        Some(owner) => owner.is_empty() || lookup.owned_by_ancestor(owner),
-    };
-    adoptable.then(|| RuntimeSelection {
-        runtime_id: only.runtime_id.clone(),
-        adopted: true,
-    })
+    let unowned = owners
+        .iter()
+        .filter(|owner| owner.attached_chat_id.as_deref().is_none_or(str::is_empty))
+        .collect::<Vec<_>>();
+    match unowned.as_slice() {
+        [only] => Some(RuntimeSelection {
+            runtime_id: only.runtime_id.clone(),
+            adopted: true,
+        }),
+        _ => None,
+    }
 }
 
 pub async fn find_runtime_for_chat(
     app: crate::app_state::AppState,
     lookup: &ChatRuntimeLookup,
 ) -> Option<(String, Arc<AMutex<BrowserRuntime>>)> {
-    let runtime_arcs: Vec<(String, Arc<AMutex<BrowserRuntime>>)> = {
-        let browser_runtimes = app.integrations.browser_runtimes.clone();
-        let browser_runtimes = browser_runtimes.lock().await;
-        browser_runtimes
-            .iter()
-            .map(|(rid, arc)| (rid.clone(), arc.clone()))
-            .collect()
-    };
-    let mut owners = Vec::with_capacity(runtime_arcs.len());
-    for (rid, arc) in &runtime_arcs {
-        let rt = arc.lock().await;
-        owners.push(RuntimeOwner {
-            runtime_id: rid.clone(),
-            attached_chat_id: rt.attached_chat_id.clone(),
-        });
-    }
+    let records = registered_runtime_owners(&app).await;
+    let owners = records
+        .iter()
+        .map(|record| {
+            let state = record.snapshot();
+            RuntimeOwner {
+                runtime_id: record.runtime_id().to_string(),
+                attached_chat_id: state.attached_chat_id,
+                connected: state.connected,
+            }
+        })
+        .collect::<Vec<_>>();
     let selection = select_runtime_for_chat(&owners, lookup)?;
-    let (rid, arc) = runtime_arcs
-        .into_iter()
-        .find(|(rid, _)| *rid == selection.runtime_id)?;
-    if selection.adopted {
-        arc.lock().await.reattach(&lookup.chat_id);
+    let record = records
+        .iter()
+        .find(|record| record.runtime_id() == selection.runtime_id)?;
+    if selection.adopted
+        && record
+            .attached_chat_id()
+            .is_none_or(|owner| owner.is_empty())
+    {
+        if !record.claim_if_unowned(&lookup.chat_id) {
+            return None;
+        }
+        info!(
+            "BrowserRuntime {} adopted by chat {}",
+            selection.runtime_id, lookup.chat_id
+        );
     }
-    Some((rid, arc))
+    let arc = app
+        .integrations
+        .browser_runtimes
+        .lock()
+        .await
+        .get(&selection.runtime_id)
+        .cloned()?;
+    Some((selection.runtime_id, arc))
 }
 
 pub async fn find_runtime_by_chat_id(
@@ -490,6 +716,14 @@ pub const RELAUNCH_SETTLE: Duration = Duration::from_millis(800);
 
 pub const RELAUNCH_WARNING: &str =
     "browser session was dead; relaunched and retried (open tabs lost, cookies/localStorage kept)";
+
+pub const RELAUNCH_FENCE: &str = "the browser was relaunched after its previous process died, so every tab and all page state from before are gone and the active tab is about:blank";
+
+pub fn recovery_fence_error(reason: &str) -> String {
+    format!(
+        "{reason}; this step needs a live document, so it was refused — start the batch with navigate, open_tab or set_content and retry"
+    )
+}
 
 pub fn relaunch_resume_warning(resume_index: usize) -> String {
     format!(
@@ -516,15 +750,23 @@ pub fn relaunch_replay_warning(
     )
 }
 
+pub fn relaunch_url_restore_warning(url: &str, resume_index: usize) -> String {
+    format!(
+        "browser session was dead; relaunched, reopened the last committed document {url} (reached through earlier clicks or an earlier batch), then resumed from step {resume_index} — open tabs and in-page state were lost, cookies/storage persist via profile"
+    )
+}
+
 pub fn relaunch_without_page_context_warning(resume_index: usize) -> String {
     format!(
-        "browser session was dead and was relaunched, but no navigate/open_tab/set_content step precedes step {resume_index} in this batch, so the page could not be restored and the relaunched browser is at about:blank; steps {resume_index}+ were not run — navigate again and retry them"
+        "browser session was dead and was relaunched, but no navigate/open_tab/set_content step precedes step {resume_index} in this batch and the last document URL is not restorable, so the page could not be restored and the relaunched browser is at about:blank; steps {resume_index}+ were not run — navigate again and retry them"
     )
 }
 
 static RELAUNCH_LOCKS: OnceLock<StdMutex<HashMap<String, Arc<AMutex<()>>>>> = OnceLock::new();
 
-fn relaunch_lock_for_chat(chat_id: &str) -> Arc<AMutex<()>> {
+/// One guard per chat shared by every create/relaunch path, so a monitor relaunch and a tool
+/// launch for the same chat serialize instead of racing for one profile.
+pub fn relaunch_lock_for_chat(chat_id: &str) -> Arc<AMutex<()>> {
     let locks = RELAUNCH_LOCKS.get_or_init(Default::default);
     let mut locks = locks.lock().unwrap_or_else(|error| error.into_inner());
     locks.retain(|key, lock| key == chat_id || Arc::strong_count(lock) > 1);
@@ -589,12 +831,23 @@ pub async fn relaunch_runtime_for_chat(
 
     let previous_emitter_active = match find_runtime_by_chat_id(app.clone(), chat_id).await {
         Some((runtime_id, runtime_arc)) => {
-            let (emitter_active, usable) = {
-                let mut rt = runtime_arc.lock().await;
-                let same_mode = rt.launch_options.headless == options.headless;
-                let usable = same_mode && tokio::task::block_in_place(|| rt.check_connection());
-                (rt.frame_emitter_active, usable)
-            };
+            let (emitter_active, usable) =
+                match tokio::time::timeout(RUNTIME_LOCK_GRACE, runtime_arc.lock()).await {
+                    Ok(mut rt) => {
+                        let same_mode = rt.launch_options.headless == options.headless;
+                        let usable =
+                            same_mode && tokio::task::block_in_place(|| rt.check_connection());
+                        (rt.frame_emitter_active, usable)
+                    }
+                    Err(_) => {
+                        warn!(
+                            "BrowserRuntime {} for chat {} did not release its lock within {:?}; \
+                             replacing it without waiting",
+                            runtime_id, chat_id, RUNTIME_LOCK_GRACE
+                        );
+                        (false, false)
+                    }
+                };
             if usable {
                 info!(
                     "BrowserRuntime {} is already live for chat {}, reusing it instead of relaunching",
@@ -603,7 +856,7 @@ pub async fn relaunch_runtime_for_chat(
                 return Ok(runtime_id);
             }
             drop(runtime_arc);
-            let removed = remove_browser_runtime(app.clone(), &runtime_id).await;
+            let removed = take_browser_runtime(&app, &runtime_id, false).await;
             release_runtime_and_wait(removed, &runtime_id).await;
             tokio::time::sleep(browser_settings::current().relaunch_settle()).await;
             emitter_active
@@ -612,6 +865,11 @@ pub async fn relaunch_runtime_for_chat(
     };
 
     let mode = options.mode_label();
+    if let Err(error) = clear_stale_profile_lock(&profile_dir) {
+        return Err(format!(
+            "Failed to relaunch browser in {mode} mode: {error}; the previous browser never exited"
+        ));
+    }
     let mut runtime = BrowserRuntime::launch(profile_dir.clone(), options).map_err(|e| {
         format!(
             "Failed to relaunch browser in {} mode: {}",
@@ -620,6 +878,7 @@ pub async fn relaunch_runtime_for_chat(
         )
     })?;
     runtime.reattach(chat_id);
+    runtime.fence_after_relaunch(RELAUNCH_FENCE);
     let runtime_id = register_browser_runtime(app.clone(), runtime).await;
 
     let runtime_arc = {
@@ -648,12 +907,27 @@ pub async fn relaunch_runtime_for_chat(
     Ok(runtime_id)
 }
 
+/// How long a state snapshot waits for a busy runtime before reporting ownership facts only.
+pub const SNAPSHOT_LOCK_GRACE: Duration = Duration::from_millis(250);
+
 pub async fn browser_snapshot_for_chat(
     app: crate::app_state::AppState,
     chat_id: &str,
 ) -> Option<crate::chat::types::BrowserSnapshot> {
     let (runtime_id, runtime_arc) = find_runtime_by_chat_id(app, chat_id).await?;
-    let mut rt = runtime_arc.lock().await;
+    let Ok(mut rt) = tokio::time::timeout(SNAPSHOT_LOCK_GRACE, runtime_arc.lock()).await else {
+        let connected = runtime_owner_record(&runtime_id)
+            .map(|record| record.is_connected())
+            .unwrap_or(false);
+        return Some(crate::chat::types::BrowserSnapshot {
+            runtime_id,
+            connected,
+            active_tab: None,
+            url: None,
+            title: None,
+            tabs: Vec::new(),
+        });
+    };
     refact_browser::adopt_new_tabs(&mut rt, None);
     let tabs = rt
         .list_tab_infos()
@@ -681,6 +955,96 @@ pub async fn browser_snapshot_for_chat(
     })
 }
 
+pub const MONITOR_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+pub const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+pub const MAX_UNRESPONSIVE_PROBES: u32 = 3;
+pub const RELAUNCH_MAX_FAILURES: u32 = 3;
+pub const RELAUNCH_BACKOFF_BASE: Duration = Duration::from_secs(5);
+pub const RELAUNCH_BACKOFF_MAX: Duration = Duration::from_secs(300);
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelaunchBudget {
+    pub failures: u32,
+    pub next_allowed: Option<Instant>,
+}
+
+impl RelaunchBudget {
+    pub fn exhausted(&self) -> bool {
+        self.failures >= RELAUNCH_MAX_FAILURES
+    }
+
+    pub fn may_attempt(&self, now: Instant) -> bool {
+        !self.exhausted() && self.next_allowed.is_none_or(|allowed| now >= allowed)
+    }
+
+    pub fn record_failure(&mut self, now: Instant) -> Duration {
+        self.failures = self.failures.saturating_add(1);
+        let exponent = self.failures.saturating_sub(1).min(16);
+        let delay = RELAUNCH_BACKOFF_BASE
+            .saturating_mul(1u32 << exponent)
+            .min(RELAUNCH_BACKOFF_MAX);
+        self.next_allowed = Some(now + delay);
+        delay
+    }
+
+    pub fn record_success(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryDecision {
+    Relaunch,
+    Wait,
+    Retire(String),
+}
+
+/// A dead runtime is relaunched only while someone can use it right away: the chat is busy
+/// generating or executing tools, or Browser Mode is streaming its frames. Idle, finished and
+/// unloaded chats get their browser back on demand from the next tool call instead of the
+/// monitor respawning Chrome for nobody.
+pub fn decide_recovery(
+    chat_active: Option<bool>,
+    frame_emitter_active: bool,
+    budget: &RelaunchBudget,
+    now: Instant,
+) -> RecoveryDecision {
+    let wanted = frame_emitter_active || chat_active == Some(true);
+    if !wanted {
+        return RecoveryDecision::Retire(match chat_active {
+            None => "its chat is not loaded".to_string(),
+            _ => "its chat is idle; the next chrome call relaunches it on demand".to_string(),
+        });
+    }
+    if budget.exhausted() {
+        return RecoveryDecision::Retire(format!(
+            "relaunch failed {} times in a row; the next chrome call retries on demand",
+            budget.failures
+        ));
+    }
+    if !budget.may_attempt(now) {
+        return RecoveryDecision::Wait;
+    }
+    RecoveryDecision::Relaunch
+}
+
+pub fn chat_is_disposable(chat_id: &str) -> bool {
+    chat_id.starts_with("subchat-")
+}
+
+async fn chat_is_active(app: &crate::app_state::AppState, chat_id: &str) -> Option<bool> {
+    let session = app.chat.sessions.read().await.get(chat_id).cloned()?;
+    let active = match tokio::time::timeout(Duration::from_millis(100), session.lock()).await {
+        Ok(session) => matches!(
+            session.runtime.state,
+            refact_chat_api::SessionState::Generating
+                | refact_chat_api::SessionState::ExecutingTools
+        ),
+        Err(_) => true,
+    };
+    Some(active)
+}
+
 struct RuntimeHealth {
     chat_id: Option<String>,
     was_connected: bool,
@@ -689,6 +1053,60 @@ struct RuntimeHealth {
     idle_timeout: Duration,
     profile_dir: PathBuf,
     launch_options: BrowserLaunchOptions,
+    frame_emitter_active: bool,
+}
+
+enum RuntimeCheck {
+    Healthy,
+    Inspected(RuntimeHealth),
+}
+
+/// Health of a runtime whose execution mutex is busy: probe through the ownership record on
+/// a blocking thread with a hard deadline, and only after repeated silence treat the browser
+/// as wedged so its process gets replaced.
+async fn check_busy_runtime(runtime_id: &str, ownership: Arc<RuntimeOwnership>) -> RuntimeCheck {
+    let probe = ownership.clone();
+    let outcome = tokio::time::timeout(
+        HEALTH_PROBE_TIMEOUT,
+        tokio::task::spawn_blocking(move || probe.probe_connection()),
+    )
+    .await;
+    let connected = match outcome {
+        Ok(Ok(Some(connected))) => Some(connected),
+        Ok(Ok(None)) | Ok(Err(_)) | Err(_) => None,
+    };
+    match connected {
+        Some(true) => return RuntimeCheck::Healthy,
+        Some(false) => {
+            warn!("BrowserRuntime {runtime_id} is busy and its transport is closed");
+        }
+        None => {
+            let silent = ownership.record_unresponsive_probe();
+            if silent < MAX_UNRESPONSIVE_PROBES {
+                warn!(
+                    "BrowserRuntime {runtime_id} did not answer a health probe within {:?} \
+                     ({silent}/{MAX_UNRESPONSIVE_PROBES})",
+                    HEALTH_PROBE_TIMEOUT
+                );
+                return RuntimeCheck::Healthy;
+            }
+            warn!(
+                "BrowserRuntime {runtime_id} ignored {silent} consecutive health probes; \
+                 treating it as wedged"
+            );
+        }
+    }
+    let state = ownership.snapshot();
+    RuntimeCheck::Inspected(RuntimeHealth {
+        chat_id: state.attached_chat_id,
+        was_connected: state.connected,
+        still_connected: false,
+        idle_expired: false,
+        idle_timeout: ownership.launch_options().idle_timeout_or_default(),
+        profile_dir: ownership.profile_dir().to_path_buf(),
+        launch_options: ownership.launch_options().clone(),
+        frame_emitter_active: false,
+    })
 }
 
 pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
@@ -698,6 +1116,7 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
         Ok(_) => {}
         Err(error) => warn!("Stale browser profile sweep failed: {error}"),
     }
+    let mut budgets: HashMap<String, RelaunchBudget> = HashMap::new();
     loop {
         let monitor_interval = browser_settings::current().monitor_interval();
         let shutdown_flag = app.runtime.shutdown_flag.clone();
@@ -718,7 +1137,7 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
             browser_runtimes.keys().cloned().collect()
         };
 
-        let mut to_remove: Vec<(String, bool)> = Vec::new();
+        let mut to_remove: Vec<(String, bool, String)> = Vec::new();
         let mut to_relaunch: Vec<RuntimeRecoveryPlan> = Vec::new();
         for rid in &runtime_ids {
             let runtime_arc = {
@@ -730,6 +1149,27 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                 }
             };
 
+            let check = match tokio::time::timeout(MONITOR_LOCK_TIMEOUT, runtime_arc.lock()).await {
+                Ok(mut rt) => RuntimeCheck::Inspected(tokio::task::block_in_place(|| {
+                    refact_browser::adopt_new_tabs(&mut rt, None);
+                    let was_connected = rt.is_connected;
+                    let still_connected = rt.check_connection();
+                    RuntimeHealth {
+                        chat_id: rt.attached_chat_id(),
+                        was_connected,
+                        still_connected,
+                        idle_expired: rt.is_idle_expired(),
+                        idle_timeout: rt.idle_timeout,
+                        profile_dir: rt.profile_dir.clone(),
+                        launch_options: rt.launch_options.clone(),
+                        frame_emitter_active: rt.frame_emitter_active,
+                    }
+                })),
+                Err(_) => match runtime_owner_record(rid) {
+                    Some(ownership) => check_busy_runtime(rid, ownership).await,
+                    None => continue,
+                },
+            };
             let RuntimeHealth {
                 chat_id,
                 was_connected,
@@ -738,22 +1178,10 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                 idle_timeout,
                 profile_dir,
                 launch_options,
-            } = {
-                let mut rt = runtime_arc.lock().await;
-                tokio::task::block_in_place(|| {
-                    refact_browser::adopt_new_tabs(&mut rt, None);
-                    let was_connected = rt.is_connected;
-                    let still_connected = rt.check_connection();
-                    RuntimeHealth {
-                        chat_id: rt.attached_chat_id.clone(),
-                        was_connected,
-                        still_connected,
-                        idle_expired: rt.is_idle_expired(),
-                        idle_timeout: rt.idle_timeout,
-                        profile_dir: rt.profile_dir.clone(),
-                        launch_options: rt.launch_options.clone(),
-                    }
-                })
+                frame_emitter_active,
+            } = match check {
+                RuntimeCheck::Healthy => continue,
+                RuntimeCheck::Inspected(health) => health,
             };
 
             if was_connected && !still_connected {
@@ -763,34 +1191,60 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                 );
             }
 
-            let evict_idle =
-                idle_expired && (chat_id.is_none() || launch_options.evict_idle_attached);
+            let chat_active = match &chat_id {
+                Some(chat_id) => chat_is_active(&app, chat_id).await,
+                None => None,
+            };
+            let disposable_idle = chat_id
+                .as_deref()
+                .is_some_and(|chat_id| chat_is_disposable(chat_id) && chat_active != Some(true));
+            let evict_idle = idle_expired
+                && (chat_id.is_none() || launch_options.evict_idle_attached || disposable_idle);
             if evict_idle {
                 warn!(
                     "BrowserRuntime {} idle timeout ({:?}) for chat {:?}",
                     rid, idle_timeout, chat_id
                 );
-                to_remove.push((rid.clone(), true));
+                to_remove.push((rid.clone(), true, "idle timeout".to_string()));
                 continue;
             }
 
-            if !still_connected {
-                match chat_id {
-                    Some(chat_id) if !profile_dir.as_os_str().is_empty() => {
-                        to_relaunch.push(RuntimeRecoveryPlan {
+            if still_connected {
+                if let Some(chat_id) = &chat_id {
+                    budgets.remove(chat_id);
+                }
+                continue;
+            }
+
+            match chat_id {
+                Some(chat_id) if !profile_dir.as_os_str().is_empty() => {
+                    let budget = budgets.entry(chat_id.clone()).or_default();
+                    match decide_recovery(chat_active, frame_emitter_active, budget, Instant::now())
+                    {
+                        RecoveryDecision::Relaunch => to_relaunch.push(RuntimeRecoveryPlan {
                             runtime_id: rid.clone(),
                             chat_id,
                             profile_dir,
                             launch_options,
-                        })
+                        }),
+                        RecoveryDecision::Wait => {}
+                        RecoveryDecision::Retire(reason) => {
+                            budgets.remove(&chat_id);
+                            to_remove.push((rid.clone(), false, reason));
+                        }
                     }
-                    Some(_) => to_remove.push((rid.clone(), false)),
-                    None => to_remove.push((rid.clone(), true)),
                 }
+                Some(_) => to_remove.push((
+                    rid.clone(),
+                    false,
+                    "a connected (not launched) runtime cannot be relaunched".to_string(),
+                )),
+                None => to_remove.push((rid.clone(), true, "no chat owns it".to_string())),
             }
         }
 
-        for (rid, delete_profile) in to_remove {
+        for (rid, delete_profile, reason) in to_remove {
+            info!("Retiring BrowserRuntime {rid}: {reason}");
             if delete_profile {
                 discard_browser_runtime(app.clone(), &rid).await;
             } else {
@@ -803,7 +1257,7 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                 "BrowserRuntime {} is dead while attached to chat {}, relaunching",
                 plan.runtime_id, plan.chat_id
             );
-            if let Err(error) = relaunch_runtime_for_chat(
+            match relaunch_runtime_for_chat(
                 app.clone(),
                 &plan.chat_id,
                 plan.profile_dir.clone(),
@@ -812,11 +1266,23 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
             )
             .await
             {
-                warn!(
-                    "Failed to relaunch dead BrowserRuntime {} for chat {}: {}",
-                    plan.runtime_id, plan.chat_id, error
-                );
-                remove_browser_runtime(app.clone(), &plan.runtime_id).await;
+                Ok(_) => {
+                    budgets.remove(&plan.chat_id);
+                }
+                Err(error) => {
+                    let budget = budgets.entry(plan.chat_id.clone()).or_default();
+                    let delay = budget.record_failure(Instant::now());
+                    warn!(
+                        "Failed to relaunch dead BrowserRuntime {} for chat {} (attempt {}/{}, next in {:?}): {}",
+                        plan.runtime_id,
+                        plan.chat_id,
+                        budget.failures,
+                        RELAUNCH_MAX_FAILURES,
+                        delay,
+                        error
+                    );
+                    remove_browser_runtime(app.clone(), &plan.runtime_id).await;
+                }
             }
         }
     }
@@ -852,19 +1318,29 @@ mod tests {
             !monitor.contains("if !still_connected && rt.attached_chat_id.is_none()"),
             "dead runtimes attached to a chat are still leaked forever"
         );
-        assert!(monitor.contains("if !still_connected {"));
-        assert!(monitor.contains(
-            "Some(chat_id) if !profile_dir.as_os_str().is_empty() => {\n                        to_relaunch.push(RuntimeRecoveryPlan {"
-        ));
+        assert!(monitor
+            .contains("RecoveryDecision::Relaunch => to_relaunch.push(RuntimeRecoveryPlan {"));
         assert!(
-            monitor.contains("Some(_) => to_remove.push((rid.clone(), false)),"),
+            monitor.contains("a connected (not launched) runtime cannot be relaunched"),
             "a dead connected (not launched) runtime must be dropped, never relaunched from an empty profile"
         );
-        assert!(monitor.contains("None => to_remove.push((rid.clone(), true)),"));
+        assert!(monitor.contains("None => to_remove.push((rid.clone(), true,"));
         assert!(monitor.contains("relaunch_runtime_for_chat("));
         assert!(
             monitor.contains("tokio::task::block_in_place(|| {"),
             "sync CDP calls still run on a worker thread while holding the runtime mutex"
+        );
+        assert!(
+            monitor.contains("tokio::time::timeout(MONITOR_LOCK_TIMEOUT, runtime_arc.lock())"),
+            "the monitor must never wait unboundedly for a busy runtime"
+        );
+        assert!(
+            monitor.contains("check_busy_runtime(rid, ownership).await"),
+            "busy runtimes are probed through their ownership record"
+        );
+        assert!(
+            monitor.contains("budget.record_failure(Instant::now())"),
+            "failed relaunches must back off"
         );
     }
 
@@ -908,7 +1384,7 @@ mod tests {
         }
         assert!(
             helper.find("let _relaunch_guard").unwrap()
-                < helper.find("remove_browser_runtime(").unwrap(),
+                < helper.find("take_browser_runtime(").unwrap(),
             "the per-chat guard must be held across remove, launch and register"
         );
     }
@@ -932,7 +1408,8 @@ mod tests {
             .0;
 
         for step in [
-            "remove_browser_runtime(app.clone(), &runtime_id)",
+            "take_browser_runtime(&app, &runtime_id, false)",
+            "release_runtime_and_wait(removed, &runtime_id)",
             "tokio::time::sleep(browser_settings::current().relaunch_settle())",
             "BrowserRuntime::launch(",
             "runtime.reattach(chat_id)",
@@ -996,7 +1473,186 @@ mod tests {
         RuntimeOwner {
             runtime_id: runtime_id.to_string(),
             attached_chat_id: attached.map(str::to_string),
+            connected: true,
         }
+    }
+
+    #[test]
+    fn lexical_prefix_is_not_ancestry() {
+        let owners = vec![owner("rt-one", Some("chat-1"))];
+        let lookup = ChatRuntimeLookup::for_chat("chat-10");
+        assert_eq!(select_runtime_for_chat(&owners, &lookup), None);
+
+        let owners = vec![owner("rt-root", Some("root"))];
+        let lookup = ChatRuntimeLookup::for_chat("root-child");
+        assert_eq!(select_runtime_for_chat(&owners, &lookup), None);
+    }
+
+    #[test]
+    fn a_connected_generation_beats_a_dead_one_for_the_same_owner() {
+        let owners = vec![
+            RuntimeOwner {
+                runtime_id: "rt-dead".to_string(),
+                attached_chat_id: Some("chat".to_string()),
+                connected: false,
+            },
+            owner("rt-live", Some("chat")),
+        ];
+        let selection =
+            select_runtime_for_chat(&owners, &ChatRuntimeLookup::for_chat("chat")).unwrap();
+        assert_eq!(selection.runtime_id, "rt-live");
+        assert!(!selection.adopted);
+
+        let only_dead = vec![RuntimeOwner {
+            runtime_id: "rt-dead".to_string(),
+            attached_chat_id: Some("chat".to_string()),
+            connected: false,
+        }];
+        let selection =
+            select_runtime_for_chat(&only_dead, &ChatRuntimeLookup::for_chat("chat")).unwrap();
+        assert_eq!(selection.runtime_id, "rt-dead");
+    }
+
+    #[test]
+    fn a_lone_unowned_runtime_is_adopted_even_beside_owned_ones() {
+        let owners = vec![
+            owner("rt-a", Some("chat-a")),
+            owner("rt-free", None),
+            owner("rt-b", Some("chat-b")),
+        ];
+        let selection =
+            select_runtime_for_chat(&owners, &ChatRuntimeLookup::for_chat("chat-new")).unwrap();
+        assert_eq!(selection.runtime_id, "rt-free");
+        assert!(selection.adopted);
+    }
+
+    #[test]
+    fn stale_cleanup_cannot_kill_replacement() {
+        let own = std::process::id();
+        let dead = 4_294_000_002u32;
+        assert_eq!(
+            shutdown_target(Some(own), Some(own)),
+            ShutdownTarget::Own(own)
+        );
+        assert_eq!(shutdown_target(Some(own), None), ShutdownTarget::Own(own));
+        assert_eq!(
+            shutdown_target(Some(dead), Some(own)),
+            ShutdownTarget::LeaveReplacement {
+                own: Some(dead),
+                lock_owner: own
+            }
+        );
+        assert_eq!(
+            shutdown_target(None, Some(own)),
+            ShutdownTarget::LeaveReplacement {
+                own: None,
+                lock_owner: own
+            }
+        );
+        assert_eq!(shutdown_target(Some(dead), None), ShutdownTarget::Nothing);
+        assert_eq!(shutdown_target(None, None), ShutdownTarget::Nothing);
+    }
+
+    #[test]
+    fn dead_singleton_locks_are_cleared_before_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(clear_stale_profile_lock(dir.path()), Ok(()));
+        #[cfg(unix)]
+        {
+            let dead_pid = 4_294_000_003u32;
+            std::os::unix::fs::symlink(
+                format!("hostname-{dead_pid}"),
+                dir.path().join("SingletonLock"),
+            )
+            .unwrap();
+            std::fs::write(dir.path().join("SingletonCookie"), b"cookie").unwrap();
+            assert_eq!(clear_stale_profile_lock(dir.path()), Ok(()));
+            assert!(std::fs::symlink_metadata(dir.path().join("SingletonLock")).is_err());
+            assert!(!dir.path().join("SingletonCookie").exists());
+        }
+    }
+
+    #[test]
+    fn relaunch_backoff_is_bounded() {
+        let now = Instant::now();
+        let mut budget = RelaunchBudget::default();
+        assert!(budget.may_attempt(now));
+        assert_eq!(budget.record_failure(now), Duration::from_secs(5));
+        assert!(!budget.may_attempt(now));
+        assert!(budget.may_attempt(now + Duration::from_secs(5)));
+        assert_eq!(
+            budget.record_failure(now + Duration::from_secs(5)),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            budget.record_failure(now + Duration::from_secs(15)),
+            Duration::from_secs(20)
+        );
+        assert!(budget.exhausted());
+        assert!(!budget.may_attempt(now + Duration::from_secs(3600)));
+        budget.record_success();
+        assert_eq!(budget, RelaunchBudget::default());
+
+        let mut many = RelaunchBudget::default();
+        for _ in 0..40 {
+            many.failures = 0;
+            let _ = many.record_failure(now);
+        }
+        many.failures = 20;
+        assert!(many.record_failure(now) <= RELAUNCH_BACKOFF_MAX);
+    }
+
+    #[test]
+    fn finished_chat_is_retired_without_relaunch() {
+        let now = Instant::now();
+        let fresh = RelaunchBudget::default();
+        assert!(matches!(
+            decide_recovery(Some(false), false, &fresh, now),
+            RecoveryDecision::Retire(reason) if reason.contains("idle")
+        ));
+        assert!(matches!(
+            decide_recovery(None, false, &fresh, now),
+            RecoveryDecision::Retire(reason) if reason.contains("not loaded")
+        ));
+        assert_eq!(
+            decide_recovery(Some(true), false, &fresh, now),
+            RecoveryDecision::Relaunch
+        );
+        assert_eq!(
+            decide_recovery(Some(false), true, &fresh, now),
+            RecoveryDecision::Relaunch
+        );
+
+        let mut waiting = RelaunchBudget::default();
+        waiting.record_failure(now);
+        assert_eq!(
+            decide_recovery(Some(true), false, &waiting, now),
+            RecoveryDecision::Wait
+        );
+        assert_eq!(
+            decide_recovery(Some(true), false, &waiting, now + Duration::from_secs(5)),
+            RecoveryDecision::Relaunch
+        );
+
+        let mut exhausted = RelaunchBudget::default();
+        for _ in 0..RELAUNCH_MAX_FAILURES {
+            exhausted.record_failure(now);
+        }
+        assert!(matches!(
+            decide_recovery(Some(true), true, &exhausted, now + Duration::from_secs(3600)),
+            RecoveryDecision::Retire(reason) if reason.contains("3 times")
+        ));
+        assert!(chat_is_disposable("subchat-abc"));
+        assert!(!chat_is_disposable("chat-abc"));
+    }
+
+    #[test]
+    fn recovery_fence_names_the_way_out() {
+        let error = recovery_fence_error(RELAUNCH_FENCE);
+        assert!(error.contains("about:blank"));
+        assert!(error.contains("navigate, open_tab or set_content"));
+        assert!(relaunch_url_restore_warning("https://example.test/a", 3)
+            .contains("resumed from step 3"));
     }
 
     #[test]
@@ -1153,7 +1809,11 @@ mod tests {
             .split_once("\n}\n")
             .unwrap()
             .0;
-        assert!(helper.contains("terminate_process(pid)"));
+        assert!(helper.contains("ShutdownTarget::Own(own) => terminate_process(own)"));
+        assert!(
+            helper.contains("ShutdownTarget::LeaveReplacement { own, lock_owner } => warn!("),
+            "a replacement Chrome on the same profile must never be killed"
+        );
         assert!(helper.contains("std::fs::remove_dir_all(profile_dir)"));
 
         let terminate = source

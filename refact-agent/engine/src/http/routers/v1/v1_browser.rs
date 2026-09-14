@@ -139,6 +139,8 @@ pub struct BrowserStartBody {
     pub downloads_dir: Option<PathBuf>,
     #[serde(default)]
     pub ignore_https_errors: Option<bool>,
+    #[serde(default)]
+    pub gpu: Option<crate::integrations::browser_runtime::BrowserGpuMode>,
 }
 
 impl BrowserStartBody {
@@ -151,6 +153,7 @@ impl BrowserStartBody {
             proxy: self.proxy.clone().or(base.proxy),
             downloads_dir: self.downloads_dir.clone().or(base.downloads_dir),
             ignore_https_errors: self.ignore_https_errors.unwrap_or(base.ignore_https_errors),
+            gpu: self.gpu.unwrap_or(base.gpu),
             ..base
         }
     }
@@ -1461,7 +1464,28 @@ pub async fn handle_browser_status(
 
     match find_runtime_by_chat_id(app.clone(), &post.chat_id).await {
         Some((rid, runtime_arc)) => {
-            let rt = runtime_arc.lock().await;
+            let Ok(rt) = tokio::time::timeout(
+                crate::integrations::browser_runtime::SNAPSHOT_LOCK_GRACE,
+                runtime_arc.lock(),
+            )
+            .await
+            else {
+                let record = crate::integrations::browser_runtime::runtime_owner_record(&rid);
+                let (connected, headless) = record
+                    .map(|record| (record.is_connected(), record.launch_options().headless))
+                    .unwrap_or((false, false));
+                return Ok(json_response(
+                    StatusCode::OK,
+                    serde_json::json!({
+                        "runtime_id": rid,
+                        "connected": connected,
+                        "headless": headless,
+                        "busy": true,
+                        "tabs": [],
+                        "tab_urls": []
+                    }),
+                ));
+            };
             let tab_infos = rt.list_tab_infos();
             let tab_urls: Vec<String> = tab_infos.iter().map(|t| t.url.clone()).collect();
             let (url, title) = match rt.get_active_tab() {
