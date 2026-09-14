@@ -89,7 +89,13 @@ async fn atomic_write_json_with_tmp_path(
         let json = json_result?;
         let self_write = match self_write_source {
             Some(source) if trajectory_watcher_self_write_rollout_enabled() => {
-                register_trajectory_self_write(path, source, md5::compute(&json).0).await
+                register_trajectory_self_write(
+                    path,
+                    source,
+                    json.len() as u64,
+                    md5::compute(&json).0,
+                )
+                .await
             }
             None => None,
             Some(_) => None,
@@ -180,7 +186,8 @@ async fn atomic_finish_trajectory_write(
         let write = write_result?;
         let self_write = match self_write_source {
             Some(source) if trajectory_watcher_self_write_rollout_enabled() => {
-                register_trajectory_self_write(path, source, write.content_hash).await
+                register_trajectory_self_write(path, source, write.byte_len, write.content_hash)
+                    .await
             }
             _ => None,
         };
@@ -335,12 +342,13 @@ struct TrajectoryWriteFingerprint {
 struct TrajectorySelfWriteHandle {
     key: (PathBuf, TrajectorySourceIdentity),
     nonce: Uuid,
+    byte_len: u64,
+    content_hash: [u8; 16],
 }
 
 struct TrajectorySelfWriteRecord {
     nonce: Uuid,
     created_at: Instant,
-    expected_content_hash: [u8; 16],
     fingerprint: Option<TrajectoryWriteFingerprint>,
 }
 
@@ -410,38 +418,41 @@ async fn canonical_trajectory_write_path(path: &Path) -> Option<PathBuf> {
     Some(dunce::simplified(&parent).join(file_name))
 }
 
-async fn trajectory_write_fingerprint(path: &Path) -> Option<TrajectoryWriteFingerprint> {
-    let before = fs::symlink_metadata(path).await.ok()?;
-    if before.file_type().is_symlink() || !before.is_file() {
-        return None;
+/// Per-path self-write content-read counters, used only by tests. Keyed by path for the same
+/// reason as the metadata-read counters below: the reads happen on detached writer and watcher
+/// tasks, where a task-local scope would never observe them.
+#[cfg(test)]
+fn test_trajectory_self_write_read_counters(
+) -> &'static StdMutex<std::collections::HashMap<PathBuf, Weak<AtomicUsize>>> {
+    static COUNTERS: OnceLock<StdMutex<std::collections::HashMap<PathBuf, Weak<AtomicUsize>>>> =
+        OnceLock::new();
+    COUNTERS.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn count_test_trajectory_self_write_reads(path: &Path) -> Arc<AtomicUsize> {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut counters = test_trajectory_self_write_read_counters()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counters.retain(|_, counter| counter.strong_count() > 0);
+    counters.insert(trajectory_metadata_cache_key(path), Arc::downgrade(&reads));
+    reads
+}
+
+/// The only place the self-write machinery reads trajectory bytes back off disk, and it sits on
+/// the watcher side: the write path fingerprints from the hash streamed while writing.
+async fn read_trajectory_file_for_fingerprint(path: &Path) -> Option<Vec<u8>> {
+    #[cfg(test)]
+    if let Some(reads) = test_trajectory_self_write_read_counters()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&trajectory_metadata_cache_key(path))
+        .and_then(Weak::upgrade)
+    {
+        reads.fetch_add(1, Ordering::Relaxed);
     }
-    let before_modified = before
-        .modified()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_millis();
-    let before_modified = i64::try_from(before_modified).ok()?;
-    let content = fs::read(path).await.ok()?;
-    let after = fs::symlink_metadata(path).await.ok()?;
-    if after.file_type().is_symlink() || !after.is_file() || after.len() != before.len() {
-        return None;
-    }
-    let after_modified = after
-        .modified()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_millis();
-    let after_modified = i64::try_from(after_modified).ok()?;
-    if after_modified != before_modified || content.len() as u64 != after.len() {
-        return None;
-    }
-    Some(TrajectoryWriteFingerprint {
-        file_len: after.len(),
-        file_modified_unix_ms: after_modified,
-        content_hash: md5::compute(content).0,
-    })
+    fs::read(path).await.ok()
 }
 
 async fn trajectory_fingerprint_matches(
@@ -464,8 +475,8 @@ async fn trajectory_fingerprint_matches(
     if before.len() != expected.file_len || before_modified != expected.file_modified_unix_ms {
         return false;
     }
-    let content = match fs::read(path).await {
-        Ok(content) if md5::compute(&content).0 == expected.content_hash => content,
+    let content = match read_trajectory_file_for_fingerprint(path).await {
+        Some(content) if md5::compute(&content).0 == expected.content_hash => content,
         _ => return false,
     };
     let after = match fs::symlink_metadata(path).await {
@@ -489,6 +500,7 @@ async fn trajectory_fingerprint_matches(
 async fn register_trajectory_self_write(
     path: &Path,
     source: TrajectorySourceIdentity,
+    byte_len: u64,
     content_hash: [u8; 16],
 ) -> Option<TrajectorySelfWriteHandle> {
     let key = (
@@ -506,11 +518,15 @@ async fn register_trajectory_self_write(
         .push_back(TrajectorySelfWriteRecord {
             nonce,
             created_at: Instant::now(),
-            expected_content_hash: content_hash,
             fingerprint: None,
         });
     prune_trajectory_self_writes(&mut registry, Instant::now());
-    Some(TrajectorySelfWriteHandle { key, nonce })
+    Some(TrajectorySelfWriteHandle {
+        key,
+        nonce,
+        byte_len,
+        content_hash,
+    })
 }
 
 fn discard_trajectory_self_write(handle: Option<TrajectorySelfWriteHandle>) {
@@ -528,11 +544,22 @@ fn discard_trajectory_self_write(handle: Option<TrajectorySelfWriteHandle>) {
     }
 }
 
+/// Stamps the renamed file with a single `stat`. The content hash was computed once while the
+/// bytes streamed to the temp file, so nothing has to be read back here; a size that disagrees
+/// with what we wrote means somebody replaced the file already, and that record is dropped rather
+/// than left able to suppress their change.
 async fn complete_trajectory_self_write(handle: Option<TrajectorySelfWriteHandle>) {
     let Some(handle) = handle else {
         return;
     };
-    let fingerprint = trajectory_write_fingerprint(&handle.key.0).await;
+    let fingerprint = trajectory_file_stamp(&handle.key.0)
+        .await
+        .filter(|stamp| stamp.len == handle.byte_len)
+        .map(|stamp| TrajectoryWriteFingerprint {
+            file_len: stamp.len,
+            file_modified_unix_ms: stamp.modified_unix_ms,
+            content_hash: handle.content_hash,
+        });
     let mut registry = trajectory_self_writes()
         .lock()
         .expect("trajectory self-write registry poisoned");
@@ -540,19 +567,16 @@ async fn complete_trajectory_self_write(handle: Option<TrajectorySelfWriteHandle
     let Some(records) = registry.get_mut(&handle.key) else {
         return;
     };
-    let Some(record) = records
-        .iter_mut()
-        .find(|record| record.nonce == handle.nonce)
-    else {
-        return;
-    };
-    if fingerprint
-        .as_ref()
-        .is_some_and(|fingerprint| fingerprint.content_hash == record.expected_content_hash)
-    {
-        record.fingerprint = fingerprint;
-    } else {
-        records.retain(|record| record.nonce != handle.nonce);
+    match fingerprint {
+        Some(fingerprint) => {
+            if let Some(record) = records
+                .iter_mut()
+                .find(|record| record.nonce == handle.nonce)
+            {
+                record.fingerprint = Some(fingerprint);
+            }
+        }
+        None => records.retain(|record| record.nonce != handle.nonce),
     }
     if records.is_empty() {
         registry.remove(&handle.key);
@@ -22977,6 +23001,197 @@ mod tests {
         assert_eq!(leftovers, 0);
     }
 
+    async fn engine_write_trajectory_json(path: &Path, value: &serde_json::Value) {
+        let tmp_path = unique_trajectory_tmp_path(path);
+        let write_result = write_pretty_json_to_tmp_file(&tmp_path, value);
+        atomic_finish_trajectory_write(
+            path,
+            &tmp_path,
+            write_result,
+            Some(TrajectorySourceIdentity::Normal),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn insert_idle_session_for_trajectory(
+        app: &AppState,
+        chat_id: &str,
+        title: &str,
+    ) -> Arc<AMutex<ChatSession>> {
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.title = title.to_string();
+            session
+                .messages
+                .push(ChatMessage::new("user".to_string(), "before".to_string()));
+            session.trajectory_dirty = false;
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+        session_arc
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn self_write_fingerprint_computed_without_reading_file_back() {
+        crate::runtime_settings::reset_for_test();
+        clear_all_trajectory_self_writes();
+        let dir = tempfile::tempdir().unwrap();
+        let path = canonical_trajectory_write_path(&dir.path().join("no-read-back.json"))
+            .await
+            .unwrap();
+        let on_disk = "{\"id\":\"on-disk-bytes\"}";
+        let in_memory = "{\"id\":\"in-memory-buf\"}";
+        assert_eq!(on_disk.len(), in_memory.len());
+        let reads = count_test_trajectory_self_write_reads(&path);
+
+        let handle = register_trajectory_self_write(
+            &path,
+            TrajectorySourceIdentity::Normal,
+            in_memory.len() as u64,
+            md5::compute(in_memory).0,
+        )
+        .await
+        .unwrap();
+        fs::write(&path, on_disk).await.unwrap();
+        complete_trajectory_self_write(Some(handle)).await;
+
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        let fingerprint = {
+            let registry = trajectory_self_writes()
+                .lock()
+                .expect("trajectory self-write registry poisoned");
+            registry
+                .get(&(path.clone(), TrajectorySourceIdentity::Normal))
+                .and_then(|records| records.front())
+                .and_then(|record| record.fingerprint.clone())
+                .unwrap()
+        };
+        assert_eq!(fingerprint.content_hash, md5::compute(in_memory).0);
+        assert_ne!(fingerprint.content_hash, md5::compute(on_disk).0);
+
+        assert!(!consume_trajectory_self_write(&path, &TrajectorySourceIdentity::Normal).await);
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+        clear_all_trajectory_self_writes();
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn self_write_is_suppressed() {
+        crate::runtime_settings::reset_for_test();
+        clear_all_trajectory_self_writes();
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "self-write-suppressed";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(&path, chat_id, "Before Self Write", "before")
+            .await;
+        let session_arc =
+            insert_idle_session_for_trajectory(&app, chat_id, "Before Self Write").await;
+        let mut trajectory_events = app.chat.trajectory_events_tx.subscribe();
+
+        let mut value: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        value["title"] = json!("Written By The Engine");
+        engine_write_trajectory_json(&path, &value).await;
+
+        process_trajectory_watcher_change(
+            gcx,
+            chat_id.to_string(),
+            false,
+            TrajectorySourceIdentity::Normal,
+            path,
+        )
+        .await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.thread.title, "Before Self Write");
+        assert_eq!(session.external_reload_pending, None);
+        drop(session);
+        assert!(trajectory_events.try_recv().is_err());
+        clear_all_trajectory_self_writes();
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn external_edit_is_not_suppressed() {
+        crate::runtime_settings::reset_for_test();
+        clear_all_trajectory_self_writes();
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "external-edit-detected";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(&path, chat_id, "Before Self Write", "before")
+            .await;
+        let session_arc =
+            insert_idle_session_for_trajectory(&app, chat_id, "Before Self Write").await;
+        let mut trajectory_events = app.chat.trajectory_events_tx.subscribe();
+
+        let mut value: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        value["title"] = json!("Written By The Engine");
+        engine_write_trajectory_json(&path, &value).await;
+        value["title"] = json!("Edited Outside The Engine");
+        tokio::fs::write(&path, serde_json::to_string(&value).unwrap())
+            .await
+            .unwrap();
+
+        process_trajectory_watcher_change(
+            gcx,
+            chat_id.to_string(),
+            false,
+            TrajectorySourceIdentity::Normal,
+            path,
+        )
+        .await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.thread.title, "Edited Outside The Engine");
+        drop(session);
+        assert_eq!(trajectory_events.try_recv().unwrap().id, chat_id);
+        clear_all_trajectory_self_writes();
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn suppression_respects_runtime_switch() {
+        crate::runtime_settings::reset_for_test();
+        clear_all_trajectory_self_writes();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime-switch.json");
+        let value = json!({ "id": "runtime-switch" });
+
+        let mut disabled = crate::runtime_settings::TrajectoryRuntimeSettings::default();
+        disabled.trajectory_watcher_self_write_enabled = false;
+        crate::runtime_settings::install_live(&disabled);
+        assert!(!trajectory_watcher_self_write_rollout_enabled());
+        engine_write_trajectory_json(&path, &value).await;
+        assert!(!consume_trajectory_self_write(&path, &TrajectorySourceIdentity::Normal).await);
+
+        crate::runtime_settings::install_live(
+            &crate::runtime_settings::TrajectoryRuntimeSettings::default(),
+        );
+        assert!(trajectory_watcher_self_write_rollout_enabled());
+        engine_write_trajectory_json(&path, &value).await;
+        assert!(consume_trajectory_self_write(&path, &TrajectorySourceIdentity::Normal).await);
+
+        crate::runtime_settings::reset_for_test();
+        clear_all_trajectory_self_writes();
+    }
+
     #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_watcher_self_write_consumes_exact_fingerprint_once() {
@@ -22987,6 +23202,7 @@ mod tests {
         let handle = register_trajectory_self_write(
             &path,
             TrajectorySourceIdentity::Normal,
+            content.len() as u64,
             md5::compute(content).0,
         )
         .await
@@ -23008,6 +23224,7 @@ mod tests {
         let handle = register_trajectory_self_write(
             &path,
             TrajectorySourceIdentity::Normal,
+            "{\"id\":\"external-write\"}".len() as u64,
             md5::compute("{\"id\":\"external-write\"}").0,
         )
         .await
@@ -23041,9 +23258,14 @@ mod tests {
             None,
         );
         let content = "{\"id\":\"same-id\"}";
-        let handle = register_trajectory_self_write(&path, normal.clone(), md5::compute(content).0)
-            .await
-            .unwrap();
+        let handle = register_trajectory_self_write(
+            &path,
+            normal.clone(),
+            content.len() as u64,
+            md5::compute(content).0,
+        )
+        .await
+        .unwrap();
         fs::write(&path, content).await.unwrap();
         complete_trajectory_self_write(Some(handle)).await;
 
@@ -23194,6 +23416,7 @@ mod tests {
         let first_handle = register_trajectory_self_write(
             &first_path,
             TrajectorySourceIdentity::Normal,
+            "{\"id\":\"first\"}".len() as u64,
             md5::compute("{\"id\":\"first\"}").0,
         )
         .await
@@ -23201,6 +23424,7 @@ mod tests {
         let second_handle = register_trajectory_self_write(
             &second_path,
             TrajectorySourceIdentity::Normal,
+            "{\"id\":\"second\"}".len() as u64,
             md5::compute("{\"id\":\"second\"}").0,
         )
         .await
