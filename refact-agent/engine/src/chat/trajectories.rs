@@ -4622,19 +4622,8 @@ async fn save_trajectory_snapshot_inner(
         .then(|| perf_diagnostics::span(PerfComponent::TrajectoryMetricScan, Some(&chat_id), None));
     let metric_scan = tokio::task::spawn_blocking(move || {
         let background_messages_json = retain_background_messages.then(|| messages_json.clone());
-        let line_changes =
-            collect_metrics.then(|| calculate_line_changes_from_chat_messages(&messages));
-        let task_progress =
-            collect_metrics.then(|| calculate_task_progress_from_chat_messages(&messages));
-        let token_totals =
-            collect_metrics.then(|| calculate_token_totals_from_chat_messages(&messages));
-        (
-            messages_json,
-            background_messages_json,
-            line_changes,
-            task_progress,
-            token_totals,
-        )
+        let metrics = collect_metrics.then(|| scan_trajectory_metrics(&messages));
+        (messages_json, background_messages_json, metrics)
     })
     .await;
     if let Some(span) = metric_scan_span {
@@ -4650,20 +4639,19 @@ async fn save_trajectory_snapshot_inner(
             None,
         );
     }
-    let (messages_json, background_messages_json, line_changes, task_progress, token_totals) =
-        match metric_scan {
-            Ok(result) => result,
-            Err(error) => {
-                serialize_span.finish(
-                    PerfOutcome::Failure,
-                    None,
-                    Some(message_count as u64),
-                    Some(snapshot.version),
-                    None,
-                );
-                return Err(format!("Trajectory metric scan task failed: {}", error));
-            }
-        };
+    let (messages_json, background_messages_json, metrics) = match metric_scan {
+        Ok(result) => result,
+        Err(error) => {
+            serialize_span.finish(
+                PerfOutcome::Failure,
+                None,
+                Some(message_count as u64),
+                Some(snapshot.version),
+                None,
+            );
+            return Err(format!("Trajectory metric scan task failed: {}", error));
+        }
+    };
 
     let mut trajectory = json!({
         "id": snapshot.chat_id,
@@ -5002,9 +4990,10 @@ async fn save_trajectory_snapshot_inner(
             None if live_session.is_none() => (Some(SessionState::Idle.to_string()), None, None),
             None => (None, None, None),
         };
-        let (total_lines_added, total_lines_removed) = line_changes.unwrap_or_default();
-        let (tasks_total, tasks_done, tasks_failed) = task_progress.unwrap_or_default();
-        let token_totals = token_totals.unwrap_or_default();
+        let metrics = metrics.unwrap_or_default();
+        let (total_lines_added, total_lines_removed) = metrics.line_changes;
+        let (tasks_total, tasks_done, tasks_failed) = metrics.task_progress;
+        let token_totals = metrics.token_totals;
         let tx = &app.chat.trajectory_events_tx;
         {
             let event = TrajectoryEvent {
@@ -7480,100 +7469,6 @@ pub(crate) fn calculate_task_progress_from_messages(
     (0, 0, 0)
 }
 
-fn calculate_line_changes_from_chat_messages(messages: &[ChatMessage]) -> (i64, i64) {
-    let mut total_added: i64 = 0;
-    let mut total_removed: i64 = 0;
-
-    for msg in messages {
-        if msg.role != "diff" {
-            continue;
-        }
-
-        let content = match &msg.content {
-            ChatContent::SimpleText(s) => s.as_str(),
-            _ => continue,
-        };
-
-        if let Ok(chunks) = serde_json::from_str::<Vec<serde_json::Value>>(content) {
-            for chunk in chunks {
-                if let Some(lines_add) = chunk.get("lines_add").and_then(|v| v.as_str()) {
-                    if !lines_add.is_empty() {
-                        total_added += lines_add.lines().count() as i64;
-                    }
-                }
-                if let Some(lines_remove) = chunk.get("lines_remove").and_then(|v| v.as_str()) {
-                    if !lines_remove.is_empty() {
-                        total_removed += lines_remove.lines().count() as i64;
-                    }
-                }
-            }
-        }
-    }
-
-    (total_added, total_removed)
-}
-
-fn calculate_task_progress_from_chat_messages(messages: &[ChatMessage]) -> (i32, i32, i32) {
-    // Build a set of successful tool call IDs (tool messages without tool_failed=true)
-    let mut successful_tool_ids: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    for msg in messages {
-        if msg.role != "tool" {
-            continue;
-        }
-        let tool_failed = msg.tool_failed.unwrap_or(false);
-        if !tool_failed && !msg.tool_call_id.is_empty() {
-            successful_tool_ids.insert(msg.tool_call_id.clone());
-        }
-    }
-
-    // Find the last successful tasks_set tool call (iterate in reverse)
-    for msg in messages.iter().rev() {
-        if msg.role != "assistant" {
-            continue;
-        }
-
-        let tool_calls = match &msg.tool_calls {
-            Some(tc) => tc,
-            None => continue,
-        };
-
-        // Iterate tool_calls in reverse to find the last tasks_set
-        for tc in tool_calls.iter().rev() {
-            if tc.function.name != "tasks_set" {
-                continue;
-            }
-
-            if tc.id.is_empty() || !successful_tool_ids.contains(&tc.id) {
-                continue;
-            }
-
-            // Parse the arguments
-            if let Ok(args) = serde_json::from_str::<serde_json::Value>(&tc.function.arguments) {
-                if let Some(tasks) = args.get("tasks").and_then(|t| t.as_array()) {
-                    let mut total = 0i32;
-                    let mut done = 0i32;
-                    let mut failed = 0i32;
-
-                    for task in tasks {
-                        total += 1;
-                        let status = task.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                        match status.to_lowercase().as_str() {
-                            "completed" | "done" | "complete" => done += 1,
-                            "failed" | "error" => failed += 1,
-                            _ => {}
-                        }
-                    }
-
-                    return (total, done, failed);
-                }
-            }
-        }
-    }
-
-    (0, 0, 0)
-}
-
 #[derive(Default)]
 pub(crate) struct TokenTotals {
     pub(crate) prompt_tokens: u64,
@@ -7637,40 +7532,115 @@ pub(crate) fn calculate_token_totals_from_messages(messages: &[serde_json::Value
     }
 }
 
-fn calculate_token_totals_from_chat_messages(messages: &[ChatMessage]) -> TokenTotals {
-    let mut prompt_tokens: u64 = 0;
-    let mut completion_tokens: u64 = 0;
-    let mut total_tokens: u64 = 0;
-    let mut cache_read_tokens: u64 = 0;
-    let mut cache_creation_tokens: u64 = 0;
-    let mut cost_usd: Option<f64> = None;
+#[derive(Default)]
+pub(crate) struct TrajectoryMetrics {
+    pub(crate) line_changes: (i64, i64),
+    pub(crate) task_progress: (i32, i32, i32),
+    pub(crate) token_totals: TokenTotals,
+}
+
+fn task_progress_from_tasks_set_arguments(arguments: &str) -> Option<(i32, i32, i32)> {
+    let args = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
+    let tasks = args.get("tasks")?.as_array()?;
+    let mut total = 0i32;
+    let mut done = 0i32;
+    let mut failed = 0i32;
+    for task in tasks {
+        total += 1;
+        match task
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .as_str()
+        {
+            "completed" | "done" | "complete" => done += 1,
+            "failed" | "error" => failed += 1,
+            _ => {}
+        }
+    }
+    Some((total, done, failed))
+}
+
+/// Every per-save trajectory metric in one forward pass. Task progress keeps its "last successful
+/// `tasks_set` carrying a task list" semantics: candidates are collected in message order and
+/// resolved in reverse, the exact order the previous reverse scan visited them in.
+fn scan_trajectory_metrics<'a, I>(messages: I) -> TrajectoryMetrics
+where
+    I: IntoIterator<Item = &'a ChatMessage>,
+{
+    let mut total_added: i64 = 0;
+    let mut total_removed: i64 = 0;
+    let mut token_totals = TokenTotals::default();
+    let mut successful_tool_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut tasks_set_calls: Vec<(&str, &str)> = Vec::new();
 
     for msg in messages {
-        let usage = match &msg.usage {
-            Some(u) => u,
-            None => continue,
-        };
-        prompt_tokens += usage.prompt_tokens as u64;
-        completion_tokens += usage.completion_tokens as u64;
-        total_tokens += usage.total_tokens as u64;
-        if let Some(v) = usage.cache_read_tokens {
-            cache_read_tokens += v as u64;
+        if let Some(usage) = msg.usage.as_ref() {
+            token_totals.prompt_tokens += usage.prompt_tokens as u64;
+            token_totals.completion_tokens += usage.completion_tokens as u64;
+            token_totals.total_tokens += usage.total_tokens as u64;
+            if let Some(cache_read_tokens) = usage.cache_read_tokens {
+                token_totals.cache_read_tokens += cache_read_tokens as u64;
+            }
+            if let Some(cache_creation_tokens) = usage.cache_creation_tokens {
+                token_totals.cache_creation_tokens += cache_creation_tokens as u64;
+            }
+            if let Some(metering) = usage.metering_usd.as_ref() {
+                *token_totals.cost_usd.get_or_insert(0.0) += metering.total_usd;
+            }
         }
-        if let Some(v) = usage.cache_creation_tokens {
-            cache_creation_tokens += v as u64;
-        }
-        if let Some(ref m) = usage.metering_usd {
-            *cost_usd.get_or_insert(0.0) += m.total_usd;
+
+        match msg.role.as_str() {
+            "diff" => {
+                if let ChatContent::SimpleText(content) = &msg.content {
+                    if let Ok(chunks) = serde_json::from_str::<Vec<serde_json::Value>>(content) {
+                        for chunk in chunks {
+                            if let Some(lines_add) = chunk.get("lines_add").and_then(|v| v.as_str())
+                            {
+                                if !lines_add.is_empty() {
+                                    total_added += lines_add.lines().count() as i64;
+                                }
+                            }
+                            if let Some(lines_remove) =
+                                chunk.get("lines_remove").and_then(|v| v.as_str())
+                            {
+                                if !lines_remove.is_empty() {
+                                    total_removed += lines_remove.lines().count() as i64;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "tool" => {
+                if !msg.tool_failed.unwrap_or(false) && !msg.tool_call_id.is_empty() {
+                    successful_tool_ids.insert(msg.tool_call_id.as_str());
+                }
+            }
+            "assistant" => {
+                for tool_call in msg.tool_calls.iter().flatten() {
+                    if tool_call.function.name == "tasks_set" && !tool_call.id.is_empty() {
+                        tasks_set_calls
+                            .push((tool_call.id.as_str(), tool_call.function.arguments.as_str()));
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
-    TokenTotals {
-        prompt_tokens,
-        completion_tokens,
-        total_tokens,
-        cache_read_tokens,
-        cache_creation_tokens,
-        cost_usd,
+    let task_progress = tasks_set_calls
+        .iter()
+        .rev()
+        .filter(|(id, _)| successful_tool_ids.contains(id))
+        .find_map(|(_, arguments)| task_progress_from_tasks_set_arguments(arguments))
+        .unwrap_or_default();
+
+    TrajectoryMetrics {
+        line_changes: (total_added, total_removed),
+        task_progress,
+        token_totals,
     }
 }
 
@@ -7807,11 +7777,10 @@ fn loaded_trajectory_to_meta(loaded: &LoadedTrajectory, task_roots: &[PathBuf]) 
     let source = loaded_trajectory_source(loaded, task_roots);
     let (task_id, task_role, agent_id, card_id) =
         task_context_from_task_meta(loaded.thread.task_meta.as_ref());
-    let (total_lines_added, total_lines_removed) =
-        calculate_line_changes_from_chat_messages(&loaded.messages);
-    let (tasks_total, tasks_done, tasks_failed) =
-        calculate_task_progress_from_chat_messages(&loaded.messages);
-    let token_totals = calculate_token_totals_from_chat_messages(&loaded.messages);
+    let metrics = scan_trajectory_metrics(&loaded.messages);
+    let (total_lines_added, total_lines_removed) = metrics.line_changes;
+    let (tasks_total, tasks_done, tasks_failed) = metrics.task_progress;
+    let token_totals = metrics.token_totals;
 
     let mut meta = TrajectoryMeta {
         id: loaded.thread.id.clone(),
@@ -16379,7 +16348,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let totals = calculate_token_totals_from_chat_messages(&messages);
+        let totals = scan_trajectory_metrics(&messages).token_totals;
         assert_eq!(totals.prompt_tokens, 300);
         assert_eq!(totals.completion_tokens, 150);
         assert_eq!(totals.total_tokens, 450);
@@ -16395,9 +16364,214 @@ mod tests {
             role: "user".to_string(),
             ..Default::default()
         }];
-        let totals = calculate_token_totals_from_chat_messages(&messages);
+        let totals = scan_trajectory_metrics(&messages).token_totals;
         assert_eq!(totals.prompt_tokens, 0);
         assert!(totals.cost_usd.is_none());
+    }
+
+    fn metric_scan_tool_call(
+        id: &str,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> crate::call_validation::ChatToolCall {
+        crate::call_validation::ChatToolCall {
+            id: id.to_string(),
+            index: None,
+            function: crate::call_validation::ChatToolFunction {
+                arguments: arguments.to_string(),
+                name: name.to_string(),
+            },
+            tool_type: "function".to_string(),
+            extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
+        }
+    }
+
+    fn metric_scan_usage(
+        prompt: usize,
+        completion: usize,
+        total: usize,
+        cache_read: Option<usize>,
+        cache_creation: Option<usize>,
+        total_usd: Option<f64>,
+    ) -> crate::call_validation::ChatUsage {
+        crate::call_validation::ChatUsage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: total,
+            cache_read_tokens: cache_read,
+            cache_creation_tokens: cache_creation,
+            metering_usd: total_usd.map(|total_usd| crate::call_validation::MeteringUsd {
+                prompt_usd: 0.0,
+                generated_usd: 0.0,
+                cache_read_usd: None,
+                cache_creation_usd: None,
+                total_usd,
+            }),
+        }
+    }
+
+    fn metric_scan_fixture_messages() -> Vec<ChatMessage> {
+        vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: ChatContent::Multimodal(vec![
+                    crate::call_validation::MultimodalElement {
+                        m_type: "text".to_string(),
+                        m_content: "please refactor".to_string(),
+                    },
+                    crate::call_validation::MultimodalElement {
+                        m_type: "image/png".to_string(),
+                        m_content: "base64".to_string(),
+                    },
+                ]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                thinking_blocks: Some(vec![json!({"type": "thinking", "thinking": "plan it"})]),
+                tool_calls: Some(vec![
+                    metric_scan_tool_call(
+                        "call-a",
+                        "tasks_set",
+                        json!({"tasks": [
+                            {"status": "completed"},
+                            {"status": "FAILED"},
+                            {"status": "in_progress"},
+                        ]}),
+                    ),
+                    metric_scan_tool_call("call-r", "cat", json!({"paths": "a.rs"})),
+                ]),
+                usage: Some(metric_scan_usage(
+                    100,
+                    50,
+                    150,
+                    Some(10),
+                    Some(5),
+                    Some(0.03),
+                )),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                tool_call_id: "call-a".to_string(),
+                usage: Some(metric_scan_usage(1, 2, 3, None, None, None)),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                tool_call_id: "call-r".to_string(),
+                tool_failed: Some(true),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "diff".to_string(),
+                content: ChatContent::SimpleText(
+                    json!([
+                        {"file_name": "a.rs", "lines_add": "a\nb\nc", "lines_remove": "y\nz"},
+                        {"file_name": "b.rs", "lines_add": "x\n", "lines_remove": ""},
+                    ])
+                    .to_string(),
+                ),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                tool_calls: Some(vec![metric_scan_tool_call(
+                    "call-b",
+                    "tasks_set",
+                    json!({"tasks": [{"status": "done"}, {"status": "done"}]}),
+                )]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                tool_call_id: "call-b".to_string(),
+                tool_failed: Some(true),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                tool_calls: Some(vec![metric_scan_tool_call(
+                    "call-c",
+                    "tasks_set",
+                    json!({"not_tasks": []}),
+                )]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                tool_call_id: "call-c".to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "diff".to_string(),
+                content: ChatContent::SimpleText("not json".to_string()),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("done".to_string()),
+                usage: Some(metric_scan_usage(200, 100, 300, None, None, None)),
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn metric_scan_results_identical_to_previous_implementation() {
+        let messages = metric_scan_fixture_messages();
+        let metrics = scan_trajectory_metrics(&messages);
+        assert_eq!(metrics.line_changes, (4, 2));
+        assert_eq!(metrics.task_progress, (3, 1, 1));
+        assert_eq!(metrics.token_totals.prompt_tokens, 301);
+        assert_eq!(metrics.token_totals.completion_tokens, 152);
+        assert_eq!(metrics.token_totals.total_tokens, 453);
+        assert_eq!(metrics.token_totals.cache_read_tokens, 10);
+        assert_eq!(metrics.token_totals.cache_creation_tokens, 5);
+        assert_eq!(metrics.token_totals.cost_usd, Some(0.03));
+    }
+
+    #[test]
+    fn metric_scan_visits_each_message_once() {
+        let messages = metric_scan_fixture_messages();
+        let visits = std::cell::Cell::new(0usize);
+        let metrics =
+            scan_trajectory_metrics(messages.iter().inspect(|_| visits.set(visits.get() + 1)));
+        assert_eq!(visits.get(), messages.len());
+        assert_eq!(metrics.line_changes, (4, 2));
+        assert_eq!(metrics.task_progress, (3, 1, 1));
+    }
+
+    #[test]
+    fn metric_scan_correct_after_history_truncation() {
+        let messages = metric_scan_fixture_messages();
+        for (tail, expected_lines, expected_progress) in [
+            (2usize, (0i64, 0i64), (0i32, 0i32, 0i32)),
+            (4, (0, 0), (3, 1, 1)),
+            (5, (4, 2), (3, 1, 1)),
+            (8, (4, 2), (3, 1, 1)),
+        ] {
+            let truncated = messages[..tail].to_vec();
+            let metrics = scan_trajectory_metrics(&truncated);
+            assert_eq!(metrics.line_changes, expected_lines, "truncated to {tail}");
+            assert_eq!(
+                metrics.task_progress, expected_progress,
+                "truncated to {tail}"
+            );
+        }
+
+        let rewritten = messages[5..].to_vec();
+        let metrics = scan_trajectory_metrics(&rewritten);
+        assert_eq!(metrics.line_changes, (0, 0));
+        assert_eq!(metrics.task_progress, (0, 0, 0));
+        assert_eq!(metrics.token_totals.prompt_tokens, 200);
+        assert_eq!(metrics.token_totals.completion_tokens, 100);
+        assert_eq!(metrics.token_totals.total_tokens, 300);
+        assert_eq!(metrics.token_totals.cache_read_tokens, 0);
+        assert_eq!(metrics.token_totals.cache_creation_tokens, 0);
+        assert_eq!(metrics.token_totals.cost_usd, None);
     }
 
     fn mark_active_compression(session: &mut ChatSession, phase: CompressionPhase) {
