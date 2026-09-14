@@ -92,25 +92,34 @@ impl ComponentCounters {
         self.batch_size_sum.store(0, Ordering::Relaxed);
     }
 
-    fn snapshot(&self, component: Option<&'static str>) -> PerformanceComponentAggregate {
+    fn snapshot(&self, component: Option<PerfComponent>) -> PerformanceComponentAggregate {
         let sample_count = self.sample_count.load(Ordering::Acquire);
+        let counter_only = component.is_some_and(PerfComponent::is_counter_only);
+        let has_latency = sample_count > 0 && !counter_only;
         let histogram = self
             .histogram
             .iter()
             .map(|bucket| bucket.load(Ordering::Relaxed))
             .collect::<Vec<_>>();
         PerformanceComponentAggregate {
-            component,
+            component: component.map(PerfComponent::as_str),
+            counter_only,
             sample_count,
             success_count: self.success_count.load(Ordering::Relaxed),
             failure_count: self.failure_count.load(Ordering::Relaxed),
             skipped_count: self.skipped_count.load(Ordering::Relaxed),
             cancelled_count: self.cancelled_count.load(Ordering::Relaxed),
-            min_us: (sample_count > 0).then(|| self.min_us.load(Ordering::Relaxed)),
-            max_us: (sample_count > 0).then(|| self.max_us.load(Ordering::Relaxed)),
-            p50_us: percentile_bucket_us(&histogram, sample_count, 50),
-            p95_us: percentile_bucket_us(&histogram, sample_count, 95),
-            p99_us: percentile_bucket_us(&histogram, sample_count, 99),
+            min_us: has_latency.then(|| self.min_us.load(Ordering::Relaxed)),
+            max_us: has_latency.then(|| self.max_us.load(Ordering::Relaxed)),
+            p50_us: has_latency
+                .then(|| percentile_bucket_us(&histogram, sample_count, 50))
+                .flatten(),
+            p95_us: has_latency
+                .then(|| percentile_bucket_us(&histogram, sample_count, 95))
+                .flatten(),
+            p99_us: has_latency
+                .then(|| percentile_bucket_us(&histogram, sample_count, 99))
+                .flatten(),
             last_sample_at_ms: (sample_count > 0)
                 .then(|| self.last_sample_at_ms.load(Ordering::Relaxed)),
             size_bytes_sum: self.size_bytes_sum.load(Ordering::Relaxed),
@@ -190,7 +199,7 @@ impl PerformanceTelemetry {
             components: PerfComponent::ALL
                 .iter()
                 .enumerate()
-                .map(|(index, component)| self.components[index].snapshot(Some(component.as_str())))
+                .map(|(index, component)| self.components[index].snapshot(Some(*component)))
                 .collect(),
             rollups: PerformanceTelemetryRollups {
                 advancement: self.aggregate_components(&[
@@ -356,6 +365,7 @@ pub struct PerformanceTelemetrySnapshot {
 pub struct PerformanceComponentAggregate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub component: Option<&'static str>,
+    pub counter_only: bool,
     pub sample_count: u64,
     pub success_count: u64,
     pub failure_count: u64,
@@ -467,6 +477,7 @@ impl AggregateAccumulator {
     fn finish(self) -> PerformanceComponentAggregate {
         PerformanceComponentAggregate {
             component: None,
+            counter_only: false,
             sample_count: self.sample_count,
             success_count: self.success_count,
             failure_count: self.failure_count,
@@ -664,6 +675,62 @@ mod tests {
         assert!(
             rendered["rollups"]["index_watcher_vecdb_amplification"]["calls_by_caller"].is_array()
         );
+    }
+
+    #[test]
+    fn counter_only_components_do_not_report_misleading_latency() {
+        let telemetry = PerformanceTelemetry::new(true);
+        let counter_only = [
+            PerfComponent::TrajectoryIndexEnqueue,
+            PerfComponent::TrajectoryIndexJournalAppend,
+            PerfComponent::TrajectoryIndexCheckpoint,
+        ];
+        for component in counter_only {
+            assert!(telemetry.record(&event(
+                component,
+                PerfOutcome::Success,
+                0,
+                None,
+                Some(1),
+                None
+            )));
+        }
+        assert!(telemetry.record(&event(
+            PerfComponent::TrajectoryIndexCacheHit,
+            PerfOutcome::Success,
+            37,
+            None,
+            Some(1),
+            None
+        )));
+
+        let snapshot = telemetry.snapshot();
+        let rendered = serde_json::to_value(&snapshot).unwrap();
+        for component in counter_only {
+            assert!(component.is_counter_only());
+            let aggregate = &snapshot.components[component.index()];
+            assert_eq!(aggregate.component, Some(component.as_str()));
+            assert!(aggregate.counter_only);
+            assert_eq!(aggregate.sample_count, 1);
+            assert_eq!(aggregate.item_count_sum, 1);
+            assert_eq!(aggregate.min_us, None);
+            assert_eq!(aggregate.max_us, None);
+            assert_eq!(aggregate.p50_us, None);
+            assert_eq!(aggregate.p95_us, None);
+            assert_eq!(aggregate.p99_us, None);
+            let component = &rendered["components"][component.index()];
+            assert_eq!(component["counter_only"], true);
+            for latency in ["min_us", "max_us", "p50_us", "p95_us", "p99_us"] {
+                assert!(component[latency].is_null(), "{component}");
+            }
+        }
+
+        let cache_hit = &snapshot.components[PerfComponent::TrajectoryIndexCacheHit.index()];
+        assert!(!PerfComponent::TrajectoryIndexCacheHit.is_counter_only());
+        assert!(!cache_hit.counter_only);
+        assert_eq!(cache_hit.min_us, Some(37));
+        assert_eq!(cache_hit.max_us, Some(37));
+        assert_eq!(cache_hit.p50_us, Some(63));
     }
 
     #[test]

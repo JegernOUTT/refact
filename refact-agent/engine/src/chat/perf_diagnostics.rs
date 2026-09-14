@@ -254,6 +254,15 @@ impl PerfComponent {
     pub const fn index(self) -> usize {
         self as usize
     }
+
+    pub const fn is_counter_only(self) -> bool {
+        matches!(
+            self,
+            Self::TrajectoryIndexEnqueue
+                | Self::TrajectoryIndexJournalAppend
+                | Self::TrajectoryIndexCheckpoint
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -459,6 +468,13 @@ impl PerfSpan {
         if active.active_started_us.is_none() {
             active.active_started_us = Some(active.recorder.clock.now_us());
         }
+    }
+
+    pub fn discard(mut self) {
+        let Self::Active(active) = &mut self else {
+            return;
+        };
+        active.finished = true;
     }
 
     pub fn finish(

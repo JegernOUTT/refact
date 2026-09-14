@@ -847,7 +847,11 @@ fn finish_coordinator_span(
     }
 }
 
-fn record_coordinator_count(component: PerfComponent) {
+fn record_coordinator_event(component: PerfComponent) {
+    debug_assert!(
+        component.is_counter_only(),
+        "{component:?} carries real work and must be recorded as a timed span"
+    );
     if !perf_diagnostics::is_enabled() {
         return;
     }
@@ -1146,6 +1150,26 @@ impl TrajectoryIndexCoordinator {
         dir: &Path,
         source_hint: Option<TrajectorySourceIdentity>,
     ) -> Result<Arc<Vec<TrajectoryIndexEntry>>, String> {
+        let span = perf_diagnostics::span(PerfComponent::TrajectoryIndexCacheHit, None, None);
+        let listing = self.list_entries_shared_inner(dir, source_hint).await;
+        match &listing {
+            Ok((entries, true)) => span.finish(
+                PerfOutcome::Success,
+                None,
+                Some(entries.len() as u64),
+                None,
+                None,
+            ),
+            _ => span.discard(),
+        }
+        listing.map(|(entries, _)| entries)
+    }
+
+    async fn list_entries_shared_inner(
+        &self,
+        dir: &Path,
+        source_hint: Option<TrajectorySourceIdentity>,
+    ) -> Result<(Arc<Vec<TrajectoryIndexEntry>>, bool), String> {
         let state = self.ensure_loaded(dir, source_hint.clone()).await?;
         if state.lock().await.recovery_flush_required {
             self.flush_directory(dir).await?;
@@ -1184,11 +1208,10 @@ impl TrajectoryIndexCoordinator {
                 drop(state_guard);
                 self.flush_directory(dir).await?;
             }
-            return Ok(Arc::new(entries));
+            return Ok((Arc::new(entries), false));
         }
         self.listing_counter_scope.record_listing_cache_hit();
-        record_coordinator_count(PerfComponent::TrajectoryIndexCacheHit);
-        shared_entries(&state).await
+        Ok((shared_entries(&state).await?, true))
     }
 
     async fn generation_matches_disk(
@@ -1401,8 +1424,8 @@ async fn shared_entries(
     if let Some(cached) = cached {
         return Ok(cached);
     }
-    let index = index
-        .ok_or_else(|| "Trajectory index coordinator did not load an index".to_string())?;
+    let index =
+        index.ok_or_else(|| "Trajectory index coordinator did not load an index".to_string())?;
     let entries = Arc::new(index.entries.clone());
     let mut state_guard = state.lock().await;
     if state_guard
@@ -1424,7 +1447,7 @@ fn push_pending_mutation(
         sequence: state.next_sequence,
         mutation,
     });
-    record_coordinator_count(PerfComponent::TrajectoryIndexEnqueue);
+    record_coordinator_event(PerfComponent::TrajectoryIndexEnqueue);
 }
 
 pub fn trajectory_index_path(dir: &Path) -> PathBuf {
@@ -2249,7 +2272,7 @@ fn checkpoint_index_sync(
     );
     write_result?;
     listing_counter_scope.record_checkpoint_write();
-    record_coordinator_count(PerfComponent::TrajectoryIndexCheckpoint);
+    record_coordinator_event(PerfComponent::TrajectoryIndexCheckpoint);
     let cursor = TrajectoryIndexJournalCursor {
         checkpoint: regular_file_generation(&trajectory_index_path(dir))?,
         journal_offset: 0,
@@ -2382,7 +2405,7 @@ fn flush_trajectory_index_mutations_sync(
         );
         let journal_offset = append_result?;
         listing_counter_scope.record_journal_append();
-        record_coordinator_count(PerfComponent::TrajectoryIndexJournalAppend);
+        record_coordinator_event(PerfComponent::TrajectoryIndexJournalAppend);
         index.applied_seq = seq;
         cursor.journal_offset = journal_offset;
         cursor.last_seq = seq;
@@ -3782,6 +3805,20 @@ mod tests {
         }
     }
 
+    struct WallClock {
+        origin: Instant,
+    }
+
+    impl PerfClock for WallClock {
+        fn now_us(&self) -> u64 {
+            self.origin
+                .elapsed()
+                .as_micros()
+                .try_into()
+                .unwrap_or(u64::MAX)
+        }
+    }
+
     fn install_perf_recorder() -> (perf_diagnostics::TestRecorderGuard, Arc<MemoryPerfSink>) {
         let sink = Arc::new(MemoryPerfSink::new());
         let recorder = Arc::new(PerfRecorder::with_salt(
@@ -3917,7 +3954,7 @@ mod tests {
 
     #[serial_test::serial(trajectory_perf)]
     #[tokio::test]
-    async fn coordinator_cache_hit_records_a_counter_without_an_index_read() {
+    async fn coordinator_cache_hit_records_a_timed_span_without_an_index_read() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("trajectories");
         let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
@@ -3940,6 +3977,53 @@ mod tests {
             PerfComponent::TrajectoryIndexCacheHit.as_str()
         );
         assert_eq!(events[0].item_count, Some(1));
+        assert!(events[0].elapsed_us > 0);
+    }
+
+    #[serial_test::serial(trajectory_perf)]
+    #[tokio::test]
+    async fn cache_hit_records_nonzero_elapsed_for_real_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        for number in 0..64 {
+            write_trajectory(&dir, &format!("chat-{number}"), "Title", "agent").await;
+        }
+        let coordinator =
+            TrajectoryIndexCoordinator::new().with_generation_ttl(Duration::from_secs(30));
+        coordinator.list_entries(&dir, None).await.unwrap();
+        coordinator.flush_all().await.unwrap();
+        coordinator.list_entries(&dir, None).await.unwrap();
+
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let sink = Arc::new(MemoryPerfSink::new());
+        let recorder = Arc::new(PerfRecorder::with_salt(
+            Arc::new(WallClock {
+                origin: Instant::now(),
+            }),
+            sink.clone(),
+            [11; 32],
+        ));
+        let _guard = perf_diagnostics::install_test_recorder(recorder);
+        assert_eq!(
+            coordinator.list_entries(&dir, None).await.unwrap().len(),
+            64
+        );
+
+        let telemetry = crate::chat::perf_telemetry::PerformanceTelemetry::new(true);
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert!(telemetry.record(&events[0]));
+        let aggregate =
+            telemetry.snapshot().components[PerfComponent::TrajectoryIndexCacheHit.index()].clone();
+
+        assert!(!aggregate.counter_only);
+        assert_eq!(aggregate.sample_count, 1);
+        assert_eq!(aggregate.item_count_sum, 64);
+        assert!(
+            aggregate.max_us.is_some_and(|max_us| max_us > 0),
+            "cache hits must report their real cost: {aggregate:?}"
+        );
+        assert!(aggregate.min_us.is_some_and(|min_us| min_us > 0));
     }
 
     #[serial_test::serial(trajectory_perf)]
