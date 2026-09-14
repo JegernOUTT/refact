@@ -160,10 +160,12 @@ describe("Buddy native decisions", () => {
   it("keeps an acknowledged card visible after the list drops it and never claims resolution", async () => {
     let listed = [row];
     let state = "pending";
+    let lists = 0;
     server.use(
-      http.get("*/v1/buddy/decisions/current", () =>
-        HttpResponse.json({ ...snapshot, questions: listed }),
-      ),
+      http.get("*/v1/buddy/decisions/current", () => {
+        lists++;
+        return HttpResponse.json({ ...snapshot, questions: listed });
+      }),
       http.get("*/v1/buddy/decisions/questions/chat-a/ask-1", () =>
         HttpResponse.json({ ...row, question: { ...question, status: state } }),
       ),
@@ -178,11 +180,11 @@ describe("Buddy native decisions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Submit answer" }));
     expect(await screen.findByText(/Answer queued/)).toBeTruthy();
     listed = [];
+    const seen = lists;
     fireEvent.click(screen.getByRole("button", { name: "Refresh questions" }));
-    await waitFor(() =>
-      expect(screen.getByText(/No pending questions were found/)).toBeTruthy(),
-    );
+    await waitFor(() => expect(lists).toBeGreaterThan(seen));
     expect(screen.getByText(/Question from chat chat-a/)).toBeTruthy();
+    expect(screen.queryByText(/No pending questions/)).toBeNull();
     expect(screen.queryByText(/Answered — confirmed/)).toBeNull();
     state = "answered";
     fireEvent.click(
@@ -256,8 +258,77 @@ describe("Buddy native decisions", () => {
     fireEvent.click(choice);
     current = { ...snapshot, project_root: "/other", questions: [] };
     fireEvent.click(screen.getByRole("button", { name: "Refresh questions" }));
-    await screen.findByText(/No pending questions were found/);
-    expect(screen.queryByText(/Question from chat chat-a/)).toBeNull();
+    await waitFor(() =>
+      expect(screen.queryByText(/Question from chat chat-a/)).toBeNull(),
+    );
     expect(screen.queryByRole("button", { name: "Submit answer" })).toBeNull();
+  });
+
+  it("renders nothing at all when there are no questions", async () => {
+    let lists = 0;
+    server.use(
+      http.get("*/v1/buddy/decisions/current", () => {
+        lists++;
+        return HttpResponse.json({ ...snapshot, questions: [] });
+      }),
+    );
+    render(<BuddyNativeDecisions />, { preloadedState: config });
+    await waitFor(() => expect(lists).toBeGreaterThan(0));
+    expect(screen.queryByLabelText("Native questions")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Refresh questions" }),
+    ).toBeNull();
+  });
+
+  it("shows an error with a retry instead of an empty state when the request fails", async () => {
+    let lists = 0;
+    let offline = true;
+    server.use(
+      http.get("*/v1/buddy/decisions/current", () => {
+        lists++;
+        return offline
+          ? HttpResponse.json({ error: "mode down" }, { status: 503 })
+          : HttpResponse.json({ ...snapshot, questions: [] });
+      }),
+    );
+    render(<BuddyNativeDecisions />, { preloadedState: config });
+    expect(
+      await screen.findByText(/Native questions could not be loaded/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/No pending questions/)).toBeNull();
+    const retry = screen.getByRole("button", { name: "Retry" });
+    const seen = lists;
+    offline = false;
+    fireEvent.click(retry);
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/Native questions could not be loaded/),
+      ).toBeNull(),
+    );
+    expect(lists).toBeGreaterThan(seen);
+    expect(screen.queryByLabelText("Native questions")).toBeNull();
+  });
+
+  it("stops the repoll loop while the request keeps failing", async () => {
+    let lists = 0;
+    server.use(
+      http.get("*/v1/buddy/decisions/current", () => {
+        lists++;
+        return HttpResponse.json({ error: "mode down" }, { status: 503 });
+      }),
+    );
+    const view = render(<BuddyNativeDecisions />, { preloadedState: config });
+    try {
+      await screen.findByText(/Native questions could not be loaded/);
+      const settled = lists;
+      vi.useFakeTimers();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30000);
+      });
+      expect(lists).toBe(settled);
+    } finally {
+      vi.useRealTimers();
+      view.unmount();
+    }
   });
 });

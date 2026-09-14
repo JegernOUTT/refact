@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Button } from "../../components/ui";
+import { CircleHelp, ShieldAlert } from "lucide-react";
+import { Badge, Button, Icon, Surface, Text } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import { v4 as uuidv4 } from "uuid";
@@ -11,6 +12,7 @@ import {
   type NativeQuestionView,
 } from "../../services/refact/buddyDecisions";
 import type { PendingQuestionAnswer } from "../../services/refact/types";
+import { BuddySectionHeader } from "./BuddySectionHeader";
 import styles from "./BuddyNativeDecisions.module.css";
 import { BuddyNativeWork } from "./BuddyNativeWork";
 
@@ -88,6 +90,8 @@ function QuestionForm({
       (typeof answer === "string" && answer.trim().length > 0)
     );
   });
+  const fieldsDisabled =
+    !pending || !sameQuestions || sent || sending || Boolean(status.error);
   const submit = async () => {
     if (
       lock.current ||
@@ -135,156 +139,182 @@ function QuestionForm({
     }
   };
   return (
-    <article className={styles.question} aria-label="Native decision">
-      <h4>Question from chat {initial.chat_id}</h4>
-      {initial.question.questions.map((q) => (
-        <fieldset
-          key={q.id}
+    <Surface
+      as="article"
+      variant="surface-1"
+      radius="control"
+      className={styles.question}
+      aria-label="Native decision"
+    >
+      <Text as="p" size="2" weight="medium" className={styles.questionTitle}>
+        Question from chat {initial.chat_id}
+      </Text>
+      {initial.question.questions.map((q) => {
+        const group = `${initial.chat_id}:${initial.question.tool_call_id}:${q.id}`;
+        return (
+          <div
+            key={q.id}
+            role="group"
+            aria-labelledby={`${group}:label`}
+            className={styles.answerGroup}
+            data-disabled={fieldsDisabled ? "true" : undefined}
+          >
+            <Text
+              as="p"
+              size="1"
+              id={`${group}:label`}
+              className={styles.answerLabel}
+            >
+              {q.text}
+            </Text>
+            {q.type === "free_text" ? (
+              <textarea
+                className={styles.answerInput}
+                aria-label={q.text}
+                disabled={fieldsDisabled}
+                value={typeof answers[q.id] === "string" ? answers[q.id] : ""}
+                onChange={(event) =>
+                  setAnswers((a) => ({ ...a, [q.id]: event.target.value }))
+                }
+              />
+            ) : (
+              (q.type === "yes_no" ? ["Yes", "No"] : q.options ?? []).map(
+                (option) => (
+                  <label key={option} className={styles.choice}>
+                    <input
+                      type={q.type === "multi_select" ? "checkbox" : "radio"}
+                      name={group}
+                      disabled={fieldsDisabled}
+                      checked={
+                        q.type === "multi_select"
+                          ? Array.isArray(answers[q.id]) &&
+                            answers[q.id].includes(option)
+                          : answers[q.id] === option
+                      }
+                      onChange={(event) =>
+                        setAnswers((a) => {
+                          const value = a[q.id];
+                          const selected = Array.isArray(value) ? value : [];
+                          return {
+                            ...a,
+                            [q.id]:
+                              q.type !== "multi_select"
+                                ? option
+                                : event.target.checked
+                                  ? [...selected, option]
+                                  : selected.filter(
+                                      (value) => value !== option,
+                                    ),
+                          };
+                        })
+                      }
+                    />
+                    {option}
+                  </label>
+                ),
+              )
+            )}
+          </div>
+        );
+      })}
+      <div className={styles.actions}>
+        <Button
+          size="sm"
           disabled={
             !pending ||
             !sameQuestions ||
+            !complete ||
             sent ||
             sending ||
-            Boolean(status.error)
+            Boolean(status.error) ||
+            status.isFetching
           }
+          onClick={() => void submit()}
         >
-          <legend>{q.text}</legend>
-          {q.type === "free_text" ? (
-            <textarea
-              aria-label={q.text}
-              value={typeof answers[q.id] === "string" ? answers[q.id] : ""}
-              onChange={(event) =>
-                setAnswers((a) => ({ ...a, [q.id]: event.target.value }))
-              }
-            />
-          ) : (
-            (q.type === "yes_no" ? ["Yes", "No"] : q.options ?? []).map(
-              (option) => (
-                <label key={option}>
-                  <input
-                    type={q.type === "multi_select" ? "checkbox" : "radio"}
-                    name={`${initial.chat_id}:${initial.question.tool_call_id}:${q.id}`}
-                    checked={
-                      q.type === "multi_select"
-                        ? Array.isArray(answers[q.id]) &&
-                          answers[q.id].includes(option)
-                        : answers[q.id] === option
-                    }
-                    onChange={(event) =>
-                      setAnswers((a) => {
-                        const value = a[q.id];
-                        const selected = Array.isArray(value) ? value : [];
-                        return {
-                          ...a,
-                          [q.id]:
-                            q.type !== "multi_select"
-                              ? option
-                              : event.target.checked
-                                ? [...selected, option]
-                                : selected.filter((value) => value !== option),
-                        };
-                      })
-                    }
-                  />
-                  {option}
-                </label>
-              ),
-            )
-          )}
-        </fieldset>
-      ))}
-      <Button
-        size="sm"
-        disabled={
-          !pending ||
-          !sameQuestions ||
-          !complete ||
-          sent ||
-          sending ||
-          Boolean(status.error) ||
-          status.isFetching
-        }
-        onClick={() => void submit()}
-      >
-        {sending ? "Submitting answer…" : "Submit answer"}
-      </Button>
+          {sending ? "Submitting answer…" : "Submit answer"}
+        </Button>
+        {sent && pending && (
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={rechecking}
+            onClick={() => {
+              setRechecking(true);
+              void status
+                .refetch()
+                .unwrap()
+                .then((response) => {
+                  if (
+                    response.question.status === "pending" &&
+                    response.question.asked_at_ms ===
+                      initial.question.asked_at_ms
+                  ) {
+                    setSent(false);
+                    setError(false);
+                  }
+                })
+                .catch(() => setError(true))
+                .finally(() => setRechecking(false));
+            }}
+          >
+            Recheck before answering again
+          </Button>
+        )}
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => {
+            void status.refetch();
+          }}
+        >
+          Refresh decision status
+        </Button>
+      </div>
       {sent && pending && (
-        <p role="status">
+        <Text as="p" size="1" role="status" className={styles.note}>
           Answer queued. Waiting for native resolution; this is not yet
           resolved.
-        </p>
+        </Text>
       )}
       {!status.error &&
         question?.status === "answered" &&
         question.asked_at_ms === initial.question.asked_at_ms &&
         sameQuestions && (
-          <p role="status">Answered — confirmed by the native chat.</p>
+          <Text as="p" size="1" role="status" className={styles.note}>
+            Answered — confirmed by the native chat.
+          </Text>
         )}
       {!status.error &&
         question?.status === "cancelled" &&
         question.asked_at_ms === initial.question.asked_at_ms &&
         sameQuestions && (
-          <p role="status">
+          <Text as="p" size="1" role="status" className={styles.note}>
             Cancelled in the native chat. No answer will be applied.
-          </p>
+          </Text>
         )}
       {question &&
         (!sameQuestions ||
           question.asked_at_ms !== initial.question.asked_at_ms) && (
-          <p role="alert">
+          <Text as="p" size="1" role="alert" className={styles.alert}>
             This question changed. Refresh the question list before answering.
-          </p>
+          </Text>
         )}
       {(error || status.error) && (
-        <p role="alert">
+        <Text as="p" size="1" role="alert" className={styles.alert}>
           Native response is not confirmed. Refresh status before retrying.
-        </p>
+        </Text>
       )}
-      {sent && pending && (
-        <Button
-          size="sm"
-          variant="ghost"
-          disabled={rechecking}
-          onClick={() => {
-            setRechecking(true);
-            void status
-              .refetch()
-              .unwrap()
-              .then((response) => {
-                if (
-                  response.question.status === "pending" &&
-                  response.question.asked_at_ms === initial.question.asked_at_ms
-                ) {
-                  setSent(false);
-                  setError(false);
-                }
-              })
-              .catch(() => setError(true))
-              .finally(() => setRechecking(false));
-          }}
-        >
-          Recheck before answering again
-        </Button>
-      )}
-      <Button
-        size="sm"
-        variant="ghost"
-        onClick={() => {
-          void status.refetch();
-        }}
-      >
-        Refresh decision status
-      </Button>
-    </article>
+    </Surface>
   );
 }
 
 function Decisions({ identity }: { identity: string }) {
   const visible = useIsDocumentVisible();
+  const [halted, setHalted] = useState(false);
   const query = useGetBuddyNativeDecisionsQuery(
     { endpoint_identity: identity },
     {
-      pollingInterval: visible ? DECISION_POLLING_INTERVAL_MS : 0,
+      pollingInterval: visible && !halted ? DECISION_POLLING_INTERVAL_MS : 0,
       skipPollingIfUnfocused: true,
       refetchOnMountOrArgChange: true,
       refetchOnFocus: true,
@@ -294,6 +324,10 @@ function Decisions({ identity }: { identity: string }) {
   const refetch = query.refetch;
   const [rendered, setRendered] = useState<NativeQuestionView[]>([]);
   const snapshot = query.currentData;
+  const failed = Boolean(query.error);
+  useEffect(() => {
+    setHalted(failed);
+  }, [failed]);
   useEffect(() => {
     if (!snapshot) return;
     setRendered((previous) =>
@@ -310,49 +344,61 @@ function Decisions({ identity }: { identity: string }) {
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [refetch]);
+  const questions = rendered.filter(
+    (question) => !snapshot || question.project_root === snapshot.project_root,
+  );
+  const truncated = !failed && Boolean(snapshot?.truncated);
+  if (!failed && !truncated && questions.length === 0) return null;
   return (
-    <section className={styles.decisions} aria-label="Native questions">
-      <h3>Questions that need you</h3>
-      <p>
-        From loaded chats in this project. Tool and privacy approvals remain in
-        their native controls.
-      </p>
-      <Button size="sm" variant="ghost" onClick={() => void refetch()}>
-        Refresh questions
-      </Button>
-      {query.isFetching && !snapshot && (
-        <p role="status">Loading native questions…</p>
+    <Surface
+      as="section"
+      variant="glass"
+      radius="card"
+      className={styles.decisions}
+      aria-label="Native questions"
+    >
+      <BuddySectionHeader
+        icon={CircleHelp}
+        label="Questions that need you"
+        badge={
+          questions.length > 0 ? (
+            <Badge tone="accent">{questions.length}</Badge>
+          ) : undefined
+        }
+        actions={
+          <Button size="sm" variant="ghost" onClick={() => void refetch()}>
+            Refresh questions
+          </Button>
+        }
+      />
+      {failed && (
+        <div className={styles.errorRow} role="alert">
+          <Icon icon={ShieldAlert} size="sm" tone="danger" />
+          <Text as="p" size="1" className={styles.errorText}>
+            Native questions could not be loaded. Pending decisions cannot be
+            listed right now — this is a connection failure, not an empty queue.
+          </Text>
+          <Button size="sm" onClick={() => void refetch()}>
+            Retry
+          </Button>
+        </div>
       )}
-      {Boolean(query.error) && (
-        <p role="alert">
-          Native questions are unavailable. Existing chat controls remain
-          usable.
-        </p>
-      )}
-      {snapshot?.truncated && (
-        <p>
+      {truncated && (
+        <Text as="p" size="1" className={styles.note}>
           Coverage is partial. Open the remaining native chats to inspect their
           decisions.
-        </p>
+        </Text>
       )}
-      {snapshot && !query.error && snapshot.questions.length === 0 && (
-        <p>No pending questions were found in the loaded sessions.</p>
-      )}
-      {rendered
-        .filter(
-          (question) =>
-            !snapshot || question.project_root === snapshot.project_root,
-        )
-        .map((question) => (
-          <QuestionForm
-            key={`${questionKey(question)}:${JSON.stringify(
-              question.question.questions,
-            )}`}
-            initial={question}
-            identity={identity}
-          />
-        ))}
-    </section>
+      {questions.map((question) => (
+        <QuestionForm
+          key={`${questionKey(question)}:${JSON.stringify(
+            question.question.questions,
+          )}`}
+          initial={question}
+          identity={identity}
+        />
+      ))}
+    </Surface>
   );
 }
 export function BuddyNativeDecisions() {

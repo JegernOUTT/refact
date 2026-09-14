@@ -83,6 +83,9 @@ describe("BuddySupervision native controls", () => {
       ),
     );
     render(<BuddySupervision />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Grant a bounded mandate" }),
+    );
     await screen.findByLabelText("Existing mandate ID");
     fireEvent.change(screen.getByLabelText("Existing mandate ID"), {
       target: { value: "mandate" },
@@ -135,6 +138,9 @@ describe("BuddySupervision native controls", () => {
       ),
     );
     render(<BuddySupervision />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Grant a bounded mandate" }),
+    );
     const model = await screen.findByLabelText("Exact model ID");
     fireEvent.change(model, { target: { value: "provider/model" } });
     fireEvent.change(screen.getByLabelText(/Mandate expires/), {

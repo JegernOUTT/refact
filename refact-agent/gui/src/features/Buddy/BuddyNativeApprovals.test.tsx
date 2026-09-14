@@ -154,10 +154,79 @@ describe("Buddy native approvals without intelligence", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Refresh native approvals" }),
     );
-    await screen.findByText(/Native connection or snapshot unavailable/);
+    await screen.findByText(/Native approvals could not be loaded/);
     expect(
       screen.getByRole("radio", { name: "Accept this request" }),
     ).toBeDisabled();
     expect(screen.queryByText(/No approvals or warnings/)).toBeNull();
+  });
+
+  it("renders nothing at all when there is nothing to approve", async () => {
+    let reads = 0;
+    server.use(
+      http.get("*/v1/buddy/approvals/current", () => {
+        reads++;
+        return HttpResponse.json({ ...snapshot, sessions: [] });
+      }),
+    );
+    render(<BuddyNativeApprovals />, { preloadedState: config });
+    await waitFor(() => expect(reads).toBeGreaterThan(0));
+    expect(screen.queryByLabelText("Native approvals")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Refresh native approvals" }),
+    ).toBeNull();
+  });
+
+  it("shows an error with a retry instead of an empty state when the request fails", async () => {
+    let reads = 0;
+    let offline = true;
+    server.use(
+      http.get("*/v1/buddy/approvals/current", () => {
+        reads++;
+        return offline
+          ? HttpResponse.json({ error: "mode down" }, { status: 503 })
+          : HttpResponse.json({ ...snapshot, sessions: [] });
+      }),
+    );
+    render(<BuddyNativeApprovals />, { preloadedState: config });
+    expect(
+      await screen.findByText(/Native approvals could not be loaded/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/No approvals or warnings/)).toBeNull();
+    const seen = reads;
+    offline = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(screen.queryByLabelText("Native approvals")).toBeNull(),
+    );
+    expect(reads).toBeGreaterThan(seen);
+  });
+
+  it("marks a blocked request group as visibly disabled", async () => {
+    server.use(
+      http.get("*/v1/buddy/approvals/current", () =>
+        HttpResponse.json(snapshot),
+      ),
+      http.post("*/v1/buddy/approvals/chat-a/response", () =>
+        HttpResponse.json({ status: "queued" }, { status: 202 }),
+      ),
+    );
+    render(<BuddyNativeApprovals />, { preloadedState: config });
+    const choice = await screen.findByRole("radio", {
+      name: "Accept this request",
+    });
+    await waitFor(() => expect(choice).toBeEnabled());
+    const group = screen.getByRole("group", { name: /shell: tool-1/ });
+    expect(group).not.toHaveAttribute("data-disabled");
+    fireEvent.click(choice);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Submit tool decision" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("group", { name: /shell: tool-1/ }),
+      ).toHaveAttribute("data-disabled", "true"),
+    );
+    expect(choice).toBeDisabled();
   });
 });

@@ -1,6 +1,7 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
-import { Button } from "../../components/ui";
+import { ShieldAlert, ShieldCheck } from "lucide-react";
+import { Badge, Button, Icon, Surface, Text } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import { buddyOperatorIdentity } from "../../services/refact/buddyOperator";
@@ -11,7 +12,10 @@ import {
   type NativeApprovalSession,
   type NativeApprovalsSnapshot,
 } from "../../services/refact/buddyApprovals";
+import { BuddySectionHeader } from "./BuddySectionHeader";
 import styles from "./BuddyNativeApprovals.module.css";
+
+const APPROVAL_POLLING_INTERVAL_MS = 5000;
 
 const warningText = {
   native_provider_error:
@@ -82,41 +86,67 @@ function ApprovalSession({
     }
   };
   return (
-    <article
+    <Surface
+      as="article"
+      variant="surface-1"
+      radius="control"
       className={styles.session}
       aria-label={`Native approvals for chat ${session.chat_id}`}
     >
-      <h4>Chat {session.chat_id}</h4>
+      <Text as="p" size="2" weight="medium" className={styles.sessionTitle}>
+        Chat {session.chat_id}
+      </Text>
       {session.warnings.map((warning) => (
-        <p role="status" key={warning}>
+        <Text
+          as="p"
+          size="1"
+          role="status"
+          key={warning}
+          className={styles.note}
+        >
           {warningText[warning]}
-        </p>
+        </Text>
       ))}
       {session.tools.map((tool) => (
-        <fieldset key={tool.tool_call_id} disabled={blocked}>
-          <legend>
+        <div
+          key={tool.tool_call_id}
+          role="group"
+          aria-labelledby={`${session.chat_id}:${tool.tool_call_id}:label`}
+          className={styles.request}
+          data-disabled={blocked ? "true" : undefined}
+        >
+          <Text
+            as="p"
+            size="1"
+            weight="medium"
+            id={`${session.chat_id}:${tool.tool_call_id}:label`}
+            className={styles.requestTitle}
+          >
             {tool.tool_name}: {tool.tool_call_id}
-          </legend>
+          </Text>
           <pre className={styles.command}>{tool.command}</pre>
-          <p>{tool.rule}</p>
+          <Text as="p" size="1" className={styles.note}>
+            {tool.rule}
+          </Text>
           {tool.rule ===
           "Privacy approval required: command read guarded files" ? (
-            <p>
+            <Text as="p" size="1" className={styles.note}>
               The command already ran and read guarded files. Accept releases
               its guarded output to the model; reject withholds that output.
               This does not undo the command.
-            </p>
+            </Text>
           ) : (
-            <p>
+            <Text as="p" size="1" className={styles.note}>
               This responds only to this native confirmation. It does not change
               permission rules or approve other tools.
-            </p>
+            </Text>
           )}
           {(["accept", "reject"] as const).map((choice) => (
-            <label key={choice}>
+            <label key={choice} className={styles.choice}>
               <input
                 type="radio"
                 name={`${session.chat_id}:${tool.tool_call_id}`}
+                disabled={blocked}
                 checked={selection[tool.tool_call_id] === choice}
                 onChange={() =>
                   setSelection((previous) => ({
@@ -143,22 +173,36 @@ function ApprovalSession({
           >
             Submit tool decision
           </Button>
-        </fieldset>
+        </div>
       ))}
       {session.browser_request_id && (
-        <fieldset disabled={blocked}>
-          <legend>Browser context for the pending message</legend>
-          <p>
+        <div
+          role="group"
+          aria-labelledby={`${session.chat_id}:browser:label`}
+          className={styles.request}
+          data-disabled={blocked ? "true" : undefined}
+        >
+          <Text
+            as="p"
+            size="1"
+            weight="medium"
+            id={`${session.chat_id}:browser:label`}
+            className={styles.requestTitle}
+          >
+            Browser context for the pending message
+          </Text>
+          <Text as="p" size="1" className={styles.note}>
             Choose which current browser data to include with your pending
             message. Console, network and screenshots may contain private
             information. Unselected categories are omitted; submitting with none
             selected still sends your message. This is not permission to control
             the browser.
-          </p>
+          </Text>
           {browserChoices.map((choice) => (
-            <label key={choice}>
+            <label key={choice} className={styles.choice}>
               <input
                 type="checkbox"
+                disabled={blocked}
                 checked={browserSelection.includes(choice)}
                 onChange={(event) => {
                   setBrowserConfirmed(false);
@@ -172,9 +216,10 @@ function ApprovalSession({
               Include {choice}
             </label>
           ))}
-          <label>
+          <label className={styles.choice}>
             <input
               type="checkbox"
+              disabled={blocked}
               checked={browserConfirmed}
               onChange={(event) => setBrowserConfirmed(event.target.checked)}
             />
@@ -198,30 +243,35 @@ function ApprovalSession({
           >
             Send with selected context
           </Button>
-        </fieldset>
+        </div>
       )}
-      {sending && <p role="status">Submitting to the native owner…</p>}
+      {sending && (
+        <Text as="p" size="1" role="status" className={styles.note}>
+          Submitting to the native owner…
+        </Text>
+      )}
       {sent && (
-        <p role="status">
+        <Text as="p" size="1" role="status" className={styles.note}>
           Response queued, not resolved. Waiting for a fresh native snapshot.
-        </p>
+        </Text>
       )}
       {failed && (
-        <p role="alert">
+        <Text as="p" size="1" role="alert" className={styles.alert}>
           Response not confirmed. Check the native chat before retrying; no
           success is assumed.
-        </p>
+        </Text>
       )}
-    </article>
+    </Surface>
   );
 }
 
 function Approvals({ identity }: { identity: string }) {
   const visible = useIsDocumentVisible();
+  const [halted, setHalted] = useState(false);
   const query = useGetBuddyNativeApprovalsQuery(
     { endpoint_identity: identity },
     {
-      pollingInterval: visible ? 5000 : 0,
+      pollingInterval: visible && !halted ? APPROVAL_POLLING_INTERVAL_MS : 0,
       skipPollingIfUnfocused: true,
       refetchOnMountOrArgChange: true,
       refetchOnFocus: true,
@@ -229,58 +279,79 @@ function Approvals({ identity }: { identity: string }) {
     },
   );
   const snapshot = query.currentData;
+  const failed = Boolean(query.error);
+  useEffect(() => {
+    setHalted(failed);
+  }, [failed]);
+  const sessions =
+    snapshot?.sessions.filter(
+      (session) =>
+        session.tools.length ||
+        session.browser_request_id ||
+        session.warnings.length,
+    ) ?? [];
+  const warnings = failed ? [] : snapshot?.warnings ?? [];
+  const truncated = !failed && Boolean(snapshot?.truncated);
+  if (!failed && !truncated && !warnings.length && !sessions.length)
+    return null;
   return (
-    <section className={styles.approvals} aria-label="Native approvals">
-      <h3>Native approvals and warnings</h3>
-      <p>
-        Independent of Buddy intelligence, appearance and storage. Coverage is
-        limited to at most 200 loaded chats and 100 confirmations per chat;
-        unloaded chats and other native permission surfaces are not included.
-      </p>
-      <Button size="sm" variant="ghost" onClick={() => void query.refetch()}>
-        Refresh native approvals
-      </Button>
-      {query.isFetching && (
-        <p role="status">Refreshing native approval state…</p>
+    <Surface
+      as="section"
+      variant="glass"
+      radius="card"
+      className={styles.approvals}
+      aria-label="Native approvals"
+    >
+      <BuddySectionHeader
+        icon={ShieldCheck}
+        label="Native approvals"
+        badge={
+          sessions.length > 0 ? (
+            <Badge tone="accent">{sessions.length}</Badge>
+          ) : undefined
+        }
+        actions={
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => void query.refetch()}
+          >
+            Refresh native approvals
+          </Button>
+        }
+      />
+      {failed && (
+        <div className={styles.errorRow} role="alert">
+          <Icon icon={ShieldAlert} size="sm" tone="danger" />
+          <Text as="p" size="1" className={styles.errorText}>
+            Native approvals could not be loaded, so approval controls are
+            disabled. Pending requests were not resolved — use the native chat
+            or retry.
+          </Text>
+          <Button size="sm" onClick={() => void query.refetch()}>
+            Retry
+          </Button>
+        </div>
       )}
-      {Boolean(query.error) && (
-        <p role="alert">
-          Native connection or snapshot unavailable. Approval controls are
-          disabled; reconnect or use the native chat. This does not mean
-          requests were resolved.
-        </p>
-      )}
-      {snapshot?.truncated && (
-        <p role="status">
+      {truncated && (
+        <Text as="p" size="1" role="status" className={styles.note}>
           Partial coverage: more native requests may exist. Open the remaining
           chats.
-        </p>
+        </Text>
       )}
-      {!query.error &&
-        snapshot?.warnings.map((warning) => (
-          <p role="status" key={warning}>
-            {warningText[warning]}
-          </p>
-        ))}
+      {warnings.map((warning) => (
+        <Text
+          as="p"
+          size="1"
+          role="status"
+          key={warning}
+          className={styles.note}
+        >
+          {warningText[warning]}
+        </Text>
+      ))}
       {snapshot &&
-        !query.error &&
-        !snapshot.warnings.length &&
-        snapshot.sessions.every(
-          (session) =>
-            !session.tools.length &&
-            !session.browser_request_id &&
-            !session.warnings.length,
-        ) && (
-          <p>No approvals or warnings found in the loaded native sessions.</p>
-        )}
-      {snapshot?.sessions
-        .filter(
-          (session) =>
-            session.tools.length ||
-            session.browser_request_id ||
-            session.warnings.length,
-        )
-        .map((session) => (
+        sessions.map((session) => (
           <ApprovalSession
             key={JSON.stringify([
               identity,
@@ -292,13 +363,13 @@ function Approvals({ identity }: { identity: string }) {
             session={session}
             snapshot={snapshot}
             identity={identity}
-            disabled={Boolean(query.error) || query.isFetching}
+            disabled={failed || query.isFetching}
             refresh={() => {
               void query.refetch();
             }}
           />
         ))}
-    </section>
+    </Surface>
   );
 }
 export function BuddyNativeApprovals() {

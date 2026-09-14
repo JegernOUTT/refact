@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { skipToken } from "@reduxjs/toolkit/query";
 import { v4 as uuidv4 } from "uuid";
-import { Button } from "../../components/ui";
+import { ShieldAlert, ShieldCheck } from "lucide-react";
+import { Button, Icon, Surface, Text } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import { buddyOperatorIdentity } from "../../services/refact/buddyOperator";
@@ -30,7 +31,10 @@ import {
 } from "../../services/refact/buddySupervision";
 import { humanizeIdentifier } from "../../utils/displayNames";
 import type { Mandate } from "./operatorTypes";
+import { BuddySectionHeader } from "./BuddySectionHeader";
 import styles from "./BuddySupervision.module.css";
+
+const SUPERVISION_POLLING_INTERVAL_MS = 5000;
 
 function pauseSummary(pause: NativePause | null): string {
   if (!pause)
@@ -48,6 +52,22 @@ function pauseSummary(pause: NativePause | null): string {
       }).`
     : "";
   return `Native worker pause: ${state}.${tool} Queued native notes: ${pause.queued_native_notes}.`;
+}
+
+function blockedReason(
+  context: SupervisionContext,
+  fresh: boolean,
+  visible: boolean,
+): string {
+  if (!visible) return "Paused while this view is in the background.";
+  if (!fresh) return "Reconnecting to the native owner.";
+  if (!context.features.storage)
+    return "Buddy storage is unavailable, so a mandate cannot be recorded.";
+  if (!context.authenticated_owner)
+    return "Sign in to the native owner to grant a mandate.";
+  if (!context.project || !context.worker)
+    return "No project and worker are available in this window.";
+  return "";
 }
 
 function Controls({
@@ -74,6 +94,7 @@ function Controls({
   const [notes, setNotes] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [formOpen, setFormOpen] = useState(false);
   const [mandate, setMandate] = useState<Mandate | null>(null);
   const [scope, setScope] = useState<GrantedScope | null>(null);
   const [id, setId] = useState("");
@@ -87,8 +108,6 @@ function Controls({
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const lock = useRef(false);
-  // Control identities retained across uncertainty so a deliberate re-click
-  // presents the same key (native de-duplicates) instead of a second command.
   const controlKeys = useRef(new Map<string, string>());
   const project = context.project;
   const args =
@@ -98,7 +117,7 @@ function Controls({
   const status = useGetBuddySupervisionStatusQuery(
     args && observe ? args : skipToken,
     {
-      pollingInterval: visible ? 5000 : 0,
+      pollingInterval: visible ? SUPERVISION_POLLING_INTERVAL_MS : 0,
       skipPollingIfUnfocused: true,
       refetchOnMountOrArgChange: true,
       refetchOnFocus: true,
@@ -118,6 +137,8 @@ function Controls({
     context.features.supervision &&
     context.features.storage;
   const blocked = !available || busy || uncertain;
+  const formDisabled = blocked || !!id;
+  const reason = available ? "" : blockedReason(context, fresh, visible);
   useEffect(() => {
     if (status.currentData && !status.error && !status.isFetching)
       setUncertain(false);
@@ -241,165 +262,210 @@ function Controls({
     !snapshot.link.revoked &&
     snapshot.native_worker !== null &&
     snapshot.native_pause !== null;
-  const cancelable =
-    !!snapshot &&
-    snapshot.controls_supported &&
-    snapshot.allowed_operations.includes("steer_worker") &&
-    !snapshot.link.revoked &&
-    snapshot.native_worker !== null &&
-    snapshot.native_pause !== null;
+  const cancelable = steerable;
   const pauseRequested = !!snapshot?.native_pause?.requested;
   const selectedNote = snapshot?.steering_notes.find((n) => n.note_id === note);
   return (
     <div className={styles.controls}>
-      <p>
-        Exact scope: {project?.canonical_root ?? "Project unavailable"} (
-        {project?.project_id ?? "unknown"}). One bounded worker in an isolated
-        worktree. Default is tool-free, read-only analysis; read_project,
-        engineering edit tools, target files and steering controls must be
-        granted explicitly below. read_project exposes only its fixed native
-        read tools. Never: shell, MCP, auto-merge, automatic answers, permission
-        changes or wake/restart guarantees.
-      </p>
-      <fieldset disabled={blocked || !!id} onChange={resetConfirmation}>
-        <legend>Explicit, expiring mandate</legend>
-        <label>
-          Exact model ID
-          <input
-            value={model}
-            onChange={(e) => editMandate(() => setModel(e.target.value))}
-            placeholder="Provider/model ID"
-          />
-        </label>
-        <label>
-          Maximum turns (1–100)
-          <input
-            type="number"
-            min="1"
-            max="100"
-            value={turns}
-            onChange={(e) => editMandate(() => setTurns(e.target.value))}
-          />
-        </label>
-        <label>
-          Maximum tokens (1–1,000,000)
-          <input
-            type="number"
-            min="1"
-            max="1000000"
-            value={tokens}
-            onChange={(e) => editMandate(() => setTokens(e.target.value))}
-          />
-        </label>
-        <label>
-          Maximum whole minutes (1–1,440)
-          <input
-            type="number"
-            min="1"
-            max="1440"
-            value={minutes}
-            onChange={(e) => editMandate(() => setMinutes(e.target.value))}
-          />
-        </label>
-        <label>
-          Optional maximum cost (whole cents)
-          <input
-            type="number"
-            min="1"
-            value={cost}
-            onChange={(e) => editMandate(() => setCost(e.target.value))}
-          />
-        </label>
-        <label>
-          Mandate expires (local time, within 24 hours)
-          <input
-            type="datetime-local"
-            value={expiry}
-            onChange={(e) => editMandate(() => setExpiry(e.target.value))}
-          />
-        </label>
-      </fieldset>
-      <fieldset disabled={blocked || !!id} onChange={resetConfirmation}>
-        <legend>Worker authority (default: tool-free)</legend>
-        <label>
-          Worker scope
-          <select
-            value={mode}
-            onChange={(e) =>
-              editMandate(() => setMode(e.target.value as SupervisionMode))
-            }
-          >
-            <option value="tool_free">Tool-free, read-only analysis</option>
-            <option value="read_only">
-              Read-only with native read tools (
-              {SUPERVISED_READ_TOOLS.join(", ")})
-            </option>
-            <option value="engineering">
-              Exact-file engineering (read tools + selected edit tools)
-            </option>
-          </select>
-        </label>
-        {mode === "engineering" && (
-          <>
-            <fieldset>
-              <legend>Native engineering edit tools</legend>
-              {SUPERVISED_ENGINEERING_TOOLS.map((tool) => (
-                <label key={tool}>
-                  <input
-                    type="checkbox"
-                    checked={tools.includes(tool)}
-                    onChange={(e) =>
-                      editMandate(() =>
-                        setTools(
-                          e.target.checked
-                            ? [...tools, tool]
-                            : tools.filter((t) => t !== tool),
-                        ),
-                      )
-                    }
-                  />
-                  {tool}
-                </label>
-              ))}
-            </fieldset>
-            <label>
-              Exact target files, relative to the project root, one per line (1–
-              {MAX_TARGET_FILES}; no globs, traversal, .git, .refact, target or
-              node_modules)
-              <textarea
-                value={targets}
-                onChange={(e) => editMandate(() => setTargets(e.target.value))}
-              />
-            </label>
-          </>
-        )}
-        <label>
-          <input
-            type="checkbox"
-            checked={steer}
-            onChange={(e) => editMandate(() => setSteer(e.target.checked))}
-          />
-          Allow native pause/resume and pre-written steering notes (sent by note
-          ID only; no free text after grant)
-        </label>
-        {steer && (
-          <label>
-            Pre-authorized steering notes, one per line (up to{" "}
-            {MAX_STEERING_NOTES})
-            <textarea
-              value={notes}
-              onChange={(e) => editMandate(() => setNotes(e.target.value))}
-            />
-          </label>
-        )}
-      </fieldset>
       {!id && (
         <>
-          <p role={authorityError ? "alert" : undefined}>
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-expanded={formOpen}
+            onClick={() => setFormOpen((open) => !open)}
+          >
+            {formOpen ? "Hide mandate setup" : "Grant a bounded mandate"}
+          </Button>
+          {formOpen && reason && (
+            <Text as="p" size="1" role="status" className={styles.reason}>
+              {reason}
+            </Text>
+          )}
+        </>
+      )}
+      {!id && formOpen && (
+        <>
+          <Text as="p" size="1" className={styles.note}>
+            One bounded worker in its own worktree on{" "}
+            {project?.canonical_root ?? "this project"}. Read-only analysis
+            unless you grant more below. Never shell, MCP or auto-merge.
+          </Text>
+          <div
+            role="group"
+            aria-label="Explicit, expiring mandate"
+            className={styles.group}
+            data-disabled={formDisabled ? "true" : undefined}
+          >
+            <label className={styles.field}>
+              Exact model ID
+              <input
+                className={styles.input}
+                disabled={formDisabled}
+                value={model}
+                onChange={(e) => editMandate(() => setModel(e.target.value))}
+                placeholder="Provider/model ID"
+              />
+            </label>
+            <label className={styles.field}>
+              Maximum turns (1–100)
+              <input
+                className={styles.input}
+                type="number"
+                min="1"
+                max="100"
+                disabled={formDisabled}
+                value={turns}
+                onChange={(e) => editMandate(() => setTurns(e.target.value))}
+              />
+            </label>
+            <label className={styles.field}>
+              Maximum tokens (1–1,000,000)
+              <input
+                className={styles.input}
+                type="number"
+                min="1"
+                max="1000000"
+                disabled={formDisabled}
+                value={tokens}
+                onChange={(e) => editMandate(() => setTokens(e.target.value))}
+              />
+            </label>
+            <label className={styles.field}>
+              Maximum whole minutes (1–1,440)
+              <input
+                className={styles.input}
+                type="number"
+                min="1"
+                max="1440"
+                disabled={formDisabled}
+                value={minutes}
+                onChange={(e) => editMandate(() => setMinutes(e.target.value))}
+              />
+            </label>
+            <label className={styles.field}>
+              Optional maximum cost (whole cents)
+              <input
+                className={styles.input}
+                type="number"
+                min="1"
+                disabled={formDisabled}
+                value={cost}
+                onChange={(e) => editMandate(() => setCost(e.target.value))}
+              />
+            </label>
+            <label className={styles.field}>
+              Mandate expires (local time, within 24 hours)
+              <input
+                className={styles.input}
+                type="datetime-local"
+                disabled={formDisabled}
+                value={expiry}
+                onChange={(e) => editMandate(() => setExpiry(e.target.value))}
+              />
+            </label>
+          </div>
+          <div
+            role="group"
+            aria-label="Worker authority"
+            className={styles.group}
+            data-disabled={formDisabled ? "true" : undefined}
+          >
+            <label className={styles.field}>
+              Worker scope
+              <select
+                className={styles.select}
+                disabled={formDisabled}
+                value={mode}
+                onChange={(e) =>
+                  editMandate(() => setMode(e.target.value as SupervisionMode))
+                }
+              >
+                <option value="tool_free">Tool-free analysis</option>
+                <option value="read_only">Read-only with read tools</option>
+                <option value="engineering">Exact-file engineering</option>
+              </select>
+            </label>
+            {mode === "read_only" && (
+              <Text as="p" size="1" className={styles.note}>
+                Read tools: {SUPERVISED_READ_TOOLS.join(", ")}.
+              </Text>
+            )}
+            {mode === "engineering" && (
+              <>
+                <div
+                  role="group"
+                  aria-label="Native engineering edit tools"
+                  className={styles.subgroup}
+                >
+                  {SUPERVISED_ENGINEERING_TOOLS.map((tool) => (
+                    <label key={tool} className={styles.choice}>
+                      <input
+                        type="checkbox"
+                        disabled={formDisabled}
+                        checked={tools.includes(tool)}
+                        onChange={(e) =>
+                          editMandate(() =>
+                            setTools(
+                              e.target.checked
+                                ? [...tools, tool]
+                                : tools.filter((t) => t !== tool),
+                            ),
+                          )
+                        }
+                      />
+                      {tool}
+                    </label>
+                  ))}
+                </div>
+                <label className={styles.field}>
+                  Exact target files, relative to the project root, one per line
+                  (1–{MAX_TARGET_FILES}; no globs, traversal, .git, .refact,
+                  target or node_modules)
+                  <textarea
+                    className={styles.input}
+                    disabled={formDisabled}
+                    value={targets}
+                    onChange={(e) =>
+                      editMandate(() => setTargets(e.target.value))
+                    }
+                  />
+                </label>
+              </>
+            )}
+            <label className={styles.choice}>
+              <input
+                type="checkbox"
+                disabled={formDisabled}
+                checked={steer}
+                onChange={(e) => editMandate(() => setSteer(e.target.checked))}
+              />
+              Allow native pause/resume and pre-written steering notes (sent by
+              note ID only; no free text after grant)
+            </label>
+            {steer && (
+              <label className={styles.field}>
+                Pre-authorized steering notes, one per line (up to{" "}
+                {MAX_STEERING_NOTES})
+                <textarea
+                  className={styles.input}
+                  disabled={formDisabled}
+                  value={notes}
+                  onChange={(e) => editMandate(() => setNotes(e.target.value))}
+                />
+              </label>
+            )}
+          </div>
+          <Text
+            as="p"
+            size="1"
+            role={authorityError ? "alert" : undefined}
+            className={authorityError ? styles.alert : styles.note}
+          >
             {authorityError ? authorityError : `Exact authority: ${authority}`}
-          </p>
+          </Text>
           {mode !== "tool_free" && (
-            <label>
+            <label className={styles.choice}>
               <input
                 type="checkbox"
                 disabled={blocked || !!authorityError}
@@ -410,7 +476,7 @@ function Controls({
               analysis
             </label>
           )}
-          <label>
+          <label className={styles.choice}>
             <input
               type="checkbox"
               disabled={blocked}
@@ -420,59 +486,75 @@ function Controls({
             I grant only the exact project, selected model, budgets and
             authority above for goal intake and one worker dispatch
           </label>
-          <Button
-            disabled={
-              blocked ||
-              !confirmed ||
-              !!authorityError ||
-              (mode !== "tool_free" && !expanded)
-            }
-            onClick={grant}
-          >
-            Grant bounded mandate
-          </Button>
+          <div className={styles.actions}>
+            <Button
+              disabled={
+                blocked ||
+                !confirmed ||
+                !!authorityError ||
+                (mode !== "tool_free" && !expanded)
+              }
+              onClick={grant}
+            >
+              Grant bounded mandate
+            </Button>
+          </div>
+          <div className={styles.actions}>
+            <label className={styles.field}>
+              Existing mandate ID
+              <input
+                className={styles.input}
+                value={lookup}
+                onChange={(e) => setLookup(e.target.value)}
+              />
+            </label>
+            <Button
+              variant="ghost"
+              disabled={!available || !lookup.trim()}
+              onClick={() => {
+                setId(lookup.trim());
+                setObserve(true);
+              }}
+            >
+              Observe existing mandate
+            </Button>
+          </div>
         </>
-      )}
-      {!id && (
-        <div>
-          <label>
-            Existing mandate ID
-            <input value={lookup} onChange={(e) => setLookup(e.target.value)} />
-          </label>
-          <Button
-            disabled={!available || !lookup.trim()}
-            onClick={() => {
-              setId(lookup.trim());
-              setObserve(true);
-            }}
-          >
-            Observe existing mandate
-          </Button>
-        </div>
       )}
       {id && (
         <>
-          <p>
+          <Text as="p" size="1" className={styles.note}>
             Mandate ID: <code>{id}</code>
-          </p>
+          </Text>
           {mandate && (
             <pre className={styles.details}>
               {JSON.stringify({ mandate, granted_scope: scope }, null, 2)}
             </pre>
           )}
           {mandate && !observe && !mandate.revoked_at && (
-            <fieldset disabled={blocked}>
-              <legend>Goal intake (does not start a worker)</legend>
-              <label>
+            <div
+              role="group"
+              aria-label="Goal intake"
+              className={styles.group}
+              data-disabled={blocked ? "true" : undefined}
+            >
+              <Text as="p" size="1" className={styles.note}>
+                Creating a goal does not start a worker.
+              </Text>
+              <label className={styles.field}>
                 Objective
                 <textarea
+                  className={styles.input}
+                  disabled={blocked}
                   value={content}
                   onChange={(e) => setContent(e.target.value)}
                 />
               </label>
-              <label>
+              <label className={styles.field}>
                 Explicit success criteria, one per line
                 <textarea
+                  className={styles.input}
+                  disabled={blocked}
                   value={criteria}
                   onChange={(e) => setCriteria(e.target.value)}
                 />
@@ -491,37 +573,42 @@ function Controls({
               >
                 Create paused native goal
               </Button>
-            </fieldset>
+            </div>
           )}
-          <Button
-            disabled={!available || busy || !args}
-            onClick={() => {
-              if (args) void run({ ...args, operation: "revoke" });
-            }}
-          >
-            Stop and revoke mandate
-          </Button>
-          <Button
-            disabled={!available || busy}
-            onClick={() => {
-              setObserve(true);
-              if (observe) void status.refetch();
-            }}
-          >
-            Refresh native supervision status
-          </Button>
+          <div className={styles.actions}>
+            <Button
+              disabled={!available || busy || !args}
+              onClick={() => {
+                if (args) void run({ ...args, operation: "revoke" });
+              }}
+            >
+              Stop and revoke mandate
+            </Button>
+            <Button
+              variant="ghost"
+              disabled={!available || busy}
+              onClick={() => {
+                setObserve(true);
+                if (observe) void status.refetch();
+              }}
+            >
+              Refresh native supervision status
+            </Button>
+          </div>
           {status.isFetching && (
-            <p role="status">Refreshing native observations…</p>
+            <Text as="p" size="1" role="status" className={styles.note}>
+              Refreshing native observations…
+            </Text>
           )}
           {Boolean(status.error) && (
-            <p role="alert">
+            <Text as="p" size="1" role="alert" className={styles.alert}>
               Native status unavailable. State is unknown/offline, never
               completed.
-            </p>
+            </Text>
           )}
           {snapshot && (
             <>
-              <p>
+              <Text as="p" size="1" className={styles.note}>
                 Native goal:{" "}
                 {humanizeIdentifier(
                   snapshot.native_goal?.status ?? "unknown/offline",
@@ -535,9 +622,11 @@ function Controls({
                   snapshot.native_worker_goal?.status ?? "unknown/offline",
                 )}
                 .
-              </p>
-              <p>{snapshot.coverage}</p>
-              <p>
+              </Text>
+              <Text as="p" size="1" className={styles.note}>
+                {snapshot.coverage}
+              </Text>
+              <Text as="p" size="1" className={styles.note}>
                 Command acknowledgement:{" "}
                 {snapshot.link.command_acknowledged ? "queued" : "unconfirmed"}.
                 Dispatch attempted:{" "}
@@ -545,38 +634,45 @@ function Controls({
                   ? "yes (never replay automatically)"
                   : "no"}
                 . Revoked: {snapshot.link.revoked ? "yes" : "no"}.
-              </p>
+              </Text>
               {snapshot.link.escalation && (
-                <p role="status">{snapshot.link.escalation}</p>
+                <Text as="p" size="1" role="status" className={styles.note}>
+                  {snapshot.link.escalation}
+                </Text>
               )}
-              <p>
+              <Text as="p" size="1" className={styles.note}>
                 {snapshot.link.delivery_run_id
                   ? `Native verified delivery reference: ${snapshot.link.delivery_run_id}`
                   : "No verified delivery observed. A worker completion claim is not objective completion."}
-              </p>
-              <Button
-                disabled={
-                  blocked ||
-                  status.isFetching ||
-                  snapshot.link.revoked ||
-                  snapshot.link.dispatch_attempted ||
-                  snapshot.native_goal?.status !== "paused"
-                }
-                onClick={() => {
-                  if (args) void run({ ...args, operation: "spawn" });
-                }}
-              >
-                Start one bounded analysis worker
-              </Button>
-              <Button
-                disabled={blocked || status.isFetching || snapshot.link.revoked}
-                onClick={() => {
-                  if (args) void run({ ...args, operation: "reconcile" });
-                }}
-              >
-                Check native verification evidence
-              </Button>
-              <p>
+              </Text>
+              <div className={styles.actions}>
+                <Button
+                  disabled={
+                    blocked ||
+                    status.isFetching ||
+                    snapshot.link.revoked ||
+                    snapshot.link.dispatch_attempted ||
+                    snapshot.native_goal?.status !== "paused"
+                  }
+                  onClick={() => {
+                    if (args) void run({ ...args, operation: "spawn" });
+                  }}
+                >
+                  Start one bounded analysis worker
+                </Button>
+                <Button
+                  variant="ghost"
+                  disabled={
+                    blocked || status.isFetching || snapshot.link.revoked
+                  }
+                  onClick={() => {
+                    if (args) void run({ ...args, operation: "reconcile" });
+                  }}
+                >
+                  Check native verification evidence
+                </Button>
+              </div>
+              <Text as="p" size="1" className={styles.note}>
                 {snapshot.controls_supported
                   ? `Native granted operations: ${
                       snapshot.allowed_operations.join(", ") || "none"
@@ -586,35 +682,43 @@ function Controls({
                 {snapshot.link.pause_requested
                   ? " Owner pause intent recorded."
                   : ""}
-              </p>
-              <Button
-                disabled={
-                  blocked || status.isFetching || !steerable || pauseRequested
-                }
-                onClick={() => control("pause")}
-              >
-                Pause native worker
-              </Button>
-              <Button
-                disabled={
-                  blocked || status.isFetching || !steerable || !pauseRequested
-                }
-                onClick={() => control("resume")}
-              >
-                Resume native worker
-              </Button>
-              <Button
-                disabled={
-                  !available || busy || status.isFetching || !cancelable
-                }
-                onClick={() => control("cancel")}
-              >
-                Cancel native worker
-              </Button>
+              </Text>
+              <div className={styles.actions}>
+                <Button
+                  variant="ghost"
+                  disabled={
+                    blocked || status.isFetching || !steerable || pauseRequested
+                  }
+                  onClick={() => control("pause")}
+                >
+                  Pause native worker
+                </Button>
+                <Button
+                  variant="ghost"
+                  disabled={
+                    blocked ||
+                    status.isFetching ||
+                    !steerable ||
+                    !pauseRequested
+                  }
+                  onClick={() => control("resume")}
+                >
+                  Resume native worker
+                </Button>
+                <Button
+                  disabled={
+                    !available || busy || status.isFetching || !cancelable
+                  }
+                  onClick={() => control("cancel")}
+                >
+                  Cancel native worker
+                </Button>
+              </div>
               {snapshot.controls_supported && (
-                <label>
+                <label className={styles.field}>
                   Pre-authorized steering note
                   <select
+                    className={styles.select}
                     disabled={blocked || !steerable}
                     value={selectedNote ? note : ""}
                     onChange={(e) => setNote(e.target.value)}
@@ -628,14 +732,16 @@ function Controls({
                   </select>
                 </label>
               )}
-              <Button
-                disabled={
-                  blocked || status.isFetching || !steerable || !selectedNote
-                }
-                onClick={() => control("message", selectedNote?.note_id)}
-              >
-                Send steering note by ID
-              </Button>
+              <div className={styles.actions}>
+                <Button
+                  disabled={
+                    blocked || status.isFetching || !steerable || !selectedNote
+                  }
+                  onClick={() => control("message", selectedNote?.note_id)}
+                >
+                  Send steering note by ID
+                </Button>
+              </div>
               {snapshot.link.control_history.length > 0 && (
                 <pre className={styles.details}>
                   {snapshot.link.control_history
@@ -652,18 +758,31 @@ function Controls({
           )}
         </>
       )}
-      {busy && <p role="status">Submitting to the native owner…</p>}
-      {message && <p role="status">{message}</p>}
-      {error && <p role="alert">{error}</p>}
+      {busy && (
+        <Text as="p" size="1" role="status" className={styles.note}>
+          Submitting to the native owner…
+        </Text>
+      )}
+      {message && (
+        <Text as="p" size="1" role="status" className={styles.note}>
+          {message}
+        </Text>
+      )}
+      {error && (
+        <Text as="p" size="1" role="alert" className={styles.alert}>
+          {error}
+        </Text>
+      )}
     </div>
   );
 }
 function Supervision({ identity }: { identity: string }) {
   const visible = useIsDocumentVisible();
+  const [halted, setHalted] = useState(false);
   const query = useGetBuddySupervisionContextQuery(
     { endpoint_identity: identity },
     {
-      pollingInterval: visible ? 5000 : 0,
+      pollingInterval: visible && !halted ? SUPERVISION_POLLING_INTERVAL_MS : 0,
       skipPollingIfUnfocused: true,
       refetchOnMountOrArgChange: true,
       refetchOnFocus: true,
@@ -671,44 +790,66 @@ function Supervision({ identity }: { identity: string }) {
     },
   );
   const context = query.currentData;
+  const failed = Boolean(query.error);
+  useEffect(() => {
+    setHalted(failed);
+  }, [failed]);
+  if (failed)
+    return (
+      <Surface
+        as="section"
+        variant="glass"
+        radius="card"
+        className={styles.supervision}
+        aria-label="Buddy supervision"
+      >
+        <BuddySectionHeader icon={ShieldCheck} label="Supervision" />
+        <div className={styles.errorRow} role="alert">
+          <Icon icon={ShieldAlert} size="sm" tone="danger" />
+          <Text as="p" size="1" className={styles.errorText}>
+            Supervision context could not be loaded. No permission or completion
+            is assumed — native approvals and stop controls are unaffected.
+          </Text>
+          <Button size="sm" onClick={() => void query.refetch()}>
+            Retry
+          </Button>
+        </div>
+      </Surface>
+    );
+  if (!context?.features.supervision) return null;
   return (
-    <section className={styles.supervision} aria-label="Buddy supervision">
-      <h3>Buddy supervision</h3>
-      <p>
-        Explicit mandates only. Native approvals and stop controls do not depend
-        on Buddy intelligence.
-      </p>
-      {query.isFetching && (
-        <p role="status">Refreshing rollout and project context…</p>
-      )}
-      {Boolean(query.error) && (
-        <p role="alert">
-          Supervision connection or context unavailable. No permission or
-          completion is assumed.
-        </p>
-      )}
-      {context && !context.features.supervision && (
-        <p role="status">
-          Supervision rollout is disabled. Settings have not been changed.
-        </p>
-      )}
-      <Button variant="ghost" onClick={() => void query.refetch()}>
-        Refresh supervision context
-      </Button>
-      {context && (
-        <Controls
-          key={JSON.stringify([
-            identity,
-            context.project,
-            context.worker,
-            context.authenticated_owner,
-          ])}
-          context={context}
-          identity={identity}
-          fresh={!query.error && !query.isFetching}
-        />
-      )}
-    </section>
+    <Surface
+      as="section"
+      variant="glass"
+      radius="card"
+      className={styles.supervision}
+      aria-label="Buddy supervision"
+    >
+      <BuddySectionHeader
+        icon={ShieldCheck}
+        label="Supervision"
+        actions={
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => void query.refetch()}
+          >
+            Refresh supervision context
+          </Button>
+        }
+      />
+      <Controls
+        key={JSON.stringify([
+          identity,
+          context.project,
+          context.worker,
+          context.authenticated_owner,
+        ])}
+        context={context}
+        identity={identity}
+        fresh={!query.error && !query.isFetching}
+      />
+    </Surface>
   );
 }
 export function BuddySupervision() {

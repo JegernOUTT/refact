@@ -32,6 +32,14 @@ const context: SupervisionContext = {
     improvement: false,
   },
 };
+async function openGrantForm() {
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Grant a bounded mandate" }),
+  );
+  await waitFor(() =>
+    expect(screen.getByLabelText("Exact model ID")).toBeEnabled(),
+  );
+}
 function fillGrant() {
   fireEvent.change(screen.getByLabelText("Exact model ID"), {
     target: { value: "provider/model" },
@@ -59,16 +67,113 @@ describe("Buddy supervision controls", () => {
         return HttpResponse.json({});
       }),
     );
+    let reads = 0;
+    server.use(
+      http.get("*/v1/buddy/supervision/context", () => {
+        reads++;
+        return HttpResponse.json({
+          schema_version: 1,
+          project: null,
+          worker: null,
+          authenticated_owner: null,
+          features: {
+            storage: false,
+            supervision: false,
+            editorial: false,
+            actions: false,
+            improvement: false,
+          },
+        });
+      }),
+    );
+    render(<BuddySupervision />, { preloadedState: config });
+    await waitFor(() => expect(reads).toBeGreaterThan(0));
+    expect(screen.queryByLabelText("Buddy supervision")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Grant a bounded mandate" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Grant bounded mandate" }),
+    ).toBeNull();
+    expect(writes).toBe(0);
+  });
+
+  it("surfaces a failed context load as an error with a retry, never as a silent panel", async () => {
+    let reads = 0;
+    let offline = true;
+    server.use(
+      http.get("*/v1/buddy/supervision/context", () => {
+        reads++;
+        return offline
+          ? HttpResponse.json({}, { status: 503 })
+          : HttpResponse.json(context);
+      }),
+    );
     render(<BuddySupervision />, { preloadedState: config });
     expect(
-      await screen.findByText(
-        "Supervision rollout is disabled. Settings have not been changed.",
-      ),
+      await screen.findByText(/Supervision context could not be loaded/),
     ).toBeInTheDocument();
+    const seen = reads;
+    offline = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(
-      screen.getByRole("button", { name: "Grant bounded mandate" }),
-    ).toBeDisabled();
-    expect(writes).toBe(0);
+      await screen.findByRole("button", { name: "Grant a bounded mandate" }),
+    ).toBeInTheDocument();
+    expect(reads).toBeGreaterThan(seen);
+  });
+
+  it("keeps the grant form collapsed until it is explicitly opened", async () => {
+    server.use(
+      http.get("*/v1/buddy/supervision/context", () =>
+        HttpResponse.json(context),
+      ),
+    );
+    render(<BuddySupervision />, { preloadedState: config });
+    await screen.findByRole("button", { name: "Grant a bounded mandate" });
+    expect(screen.queryByLabelText("Exact model ID")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Grant bounded mandate" }),
+    ).toBeNull();
+    await openGrantForm();
+    expect(screen.getByLabelText("Exact model ID")).toBeInTheDocument();
+  });
+
+  it("keeps the whole read-tool list out of the worker scope options", async () => {
+    server.use(
+      http.get("*/v1/buddy/supervision/context", () =>
+        HttpResponse.json(context),
+      ),
+    );
+    render(<BuddySupervision />, { preloadedState: config });
+    await openGrantForm();
+    const scope = screen.getByLabelText("Worker scope");
+    for (const option of Array.from(scope.querySelectorAll("option")))
+      expect(option.textContent ?? "").not.toMatch(/,/);
+    fireEvent.change(scope, { target: { value: "read_only" } });
+    expect(screen.getByText(/^Read tools:/)).toBeInTheDocument();
+  });
+
+  it("marks the mandate fields as visibly disabled while storage is unavailable", async () => {
+    server.use(
+      http.get("*/v1/buddy/supervision/context", () =>
+        HttpResponse.json({
+          ...context,
+          features: { ...context.features, storage: false },
+        }),
+      ),
+    );
+    render(<BuddySupervision />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Grant a bounded mandate" }),
+    );
+    const group = await screen.findByRole("group", {
+      name: "Explicit, expiring mandate",
+    });
+    expect(group).toHaveAttribute("data-disabled", "true");
+    expect(screen.getByLabelText("Exact model ID")).toBeDisabled();
+    expect(
+      screen.getByText(/Buddy storage is unavailable/),
+    ).toBeInTheDocument();
   });
   it("requires renewed confirmation after editing and never repeats uncertain grant", async () => {
     let writes = 0;
@@ -85,9 +190,7 @@ describe("Buddy supervision controls", () => {
       ),
     );
     render(<BuddySupervision />, { preloadedState: config });
-    await waitFor(() =>
-      expect(screen.getByLabelText("Exact model ID")).toBeEnabled(),
-    );
+    await openGrantForm();
     fillGrant();
     fireEvent.change(screen.getByLabelText("Maximum turns (1–100)"), {
       target: { value: "5" },
@@ -175,9 +278,7 @@ describe("Buddy supervision controls", () => {
       }),
     );
     render(<BuddySupervision />, { preloadedState: config });
-    await waitFor(() =>
-      expect(screen.getByLabelText("Exact model ID")).toBeEnabled(),
-    );
+    await openGrantForm();
     fillGrant();
     fireEvent.click(
       screen.getByRole("button", { name: "Grant bounded mandate" }),

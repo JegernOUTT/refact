@@ -1,33 +1,115 @@
 .decisions,
-.question,
-.question fieldset {
+.question {
   display: flex;
+  box-sizing: border-box;
   flex-direction: column;
   gap: var(--rf-space-2);
   min-width: 0;
+  max-width: 100%;
   overflow-wrap: anywhere;
 }
 
-.question fieldset {
-  border: var(--rf-hairline) solid var(--rf-border);
-  padding: var(--rf-space-2);
+.decisions {
+  padding: var(--rf-panel-pad);
 }
 
-.question textarea {
-  min-width: 0;
+.question {
+  padding: var(--rf-space-3);
+}
+
+.questionTitle {
+  margin: 0;
   color: var(--rf-color-fg);
-  background: var(--rf-surface-1);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-control);
 }
 
-.question label {
+.answerGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.answerGroup[data-disabled="true"] {
+  opacity: 0.55;
+}
+
+.answerGroup[data-disabled="true"] .choice {
+  cursor: not-allowed;
+}
+
+.answerLabel {
+  margin: 0;
+  color: var(--rf-color-muted);
+}
+
+.answerInput {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--rf-space-1) var(--rf-space-2);
+  color: var(--rf-color-fg);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-1);
+  font: inherit;
+}
+
+.answerInput:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-focus-offset);
+}
+
+.answerInput:disabled {
+  cursor: not-allowed;
+  color: var(--rf-color-muted);
+  border-color: var(--rf-border);
+  background: var(--rf-surface-2);
+}
+
+.choice {
   display: flex;
   align-items: center;
   gap: var(--rf-space-2);
+  min-width: 0;
+  max-width: 100%;
+  color: var(--rf-color-fg);
 }
 
-.decisions h3,
-.question h4 {
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.note {
   margin: 0;
+  color: var(--rf-color-muted);
+}
+
+.alert {
+  margin: 0;
+  color: var(--rf-color-danger);
+}
+
+.errorRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-color-danger);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-color-danger-soft);
+}
+
+.errorText {
+  flex: 1 1 12rem;
+  margin: 0;
+  min-width: 0;
+  color: var(--rf-color-fg);
 }
