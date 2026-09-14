@@ -67,6 +67,46 @@ describe("normalizeBackgroundAgentSummary", () => {
     expect(normalized.questions).toHaveLength(1);
   });
 
+  test("normalizes deliverable contract and structural status without inventing verdicts", () => {
+    const normalized = normalizeBackgroundAgentSummary({
+      ...requiredFields,
+      deliverable: {
+        required_sections: ["Findings"],
+        output_schema: { type: "object" },
+        evidence_required: true,
+      },
+      deliverable_status: {
+        check: "structural",
+        met: false,
+        missing_sections: ["Findings"],
+        schema_error: "$: missing required property `status`",
+        evidence_missing: true,
+      },
+    });
+    expect(normalized.deliverable).toEqual({
+      required_sections: ["Findings"],
+      output_schema: { type: "object" },
+      evidence_required: true,
+    });
+    expect(normalized.deliverable_status).toEqual({
+      check: "structural",
+      met: false,
+      missing_sections: ["Findings"],
+      schema_error: "$: missing required property `status`",
+      evidence_missing: true,
+    });
+    const absent = normalizeBackgroundAgentSummary({ ...requiredFields });
+    expect(absent.deliverable).toBeUndefined();
+    expect(absent.deliverable_status).toBeUndefined();
+    const malformed = normalizeBackgroundAgentSummary({
+      ...requiredFields,
+      deliverable: { required_sections: "Findings" },
+      deliverable_status: { check: "structural", met: "yes" },
+    });
+    expect(malformed.deliverable).toBeNull();
+    expect(malformed.deliverable_status).toBeNull();
+  });
+
   test("normalizes all extended camelCase fields and sanitizes malformed values", () => {
     const camelCaseAgent = {
       agentId: "agent-2",

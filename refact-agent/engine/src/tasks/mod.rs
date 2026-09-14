@@ -1,3 +1,5 @@
+pub mod admission;
+pub mod board_lock;
 pub mod comments;
 pub mod events;
 pub mod index;

@@ -432,7 +432,23 @@ pub async fn write_file(
     dry: bool,
     expected_preimage: Option<&str>,
 ) -> Result<(String, String), String> {
-    use crate::tools::file_edit::undo_history::record_before_edit;
+    let intent = if expected_preimage.is_some() {
+        crate::file_activity::WriteIntent::Contextual
+    } else {
+        crate::file_activity::WriteIntent::Overwrite { authorized: false }
+    };
+    write_file_with_intent(gcx, path, file_text, dry, expected_preimage, intent).await
+}
+
+pub async fn write_file_with_intent(
+    gcx: Arc<GlobalContext>,
+    path: &PathBuf,
+    file_text: &String,
+    dry: bool,
+    expected_preimage: Option<&str>,
+    intent: crate::file_activity::WriteIntent,
+) -> Result<(String, String), String> {
+    use crate::tools::file_edit::undo_history::record_edit;
 
     let parent = path.parent().ok_or(format!(
         "Failed to Add: {:?}. Path is invalid.\nReason: path must have had a parent directory",
@@ -449,11 +465,52 @@ pub async fn write_file(
         }
     }
 
+    let write_guard = if dry {
+        None
+    } else {
+        let actor = crate::file_activity::current_actor();
+        Some(
+            crate::file_activity::begin_write(
+                actor.as_deref(),
+                path,
+                if actor.is_some() || matches!(intent, crate::file_activity::WriteIntent::Create) {
+                    intent
+                } else {
+                    crate::file_activity::WriteIntent::Contextual
+                },
+                "file_edit",
+            )
+            .await?,
+        )
+    };
+    let disk_preimage = if dry {
+        None
+    } else {
+        match tokio::fs::read_to_string(path).await {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("Failed to inspect file: {:?}\nERROR: {}", path, e)),
+        }
+    };
     let before_text = if path.exists() {
         get_file_text_from_memory_or_disk(gcx.clone(), path).await?
     } else {
         "".to_string()
     };
+
+    if !dry {
+        let disk_text = disk_preimage.as_deref().unwrap_or("");
+        if before_text != disk_text
+            || expected_preimage.is_some_and(|expected| {
+                normalize_line_endings(disk_text) != normalize_line_endings(expected)
+            })
+        {
+            return Err(format!(
+                "⚠️ {:?} was modified since last read or its buffer differs from disk. 💡 Use cat() to re-read the file and retry",
+                path
+            ));
+        }
+    }
 
     if let Some(expected) = expected_preimage {
         if normalize_line_endings(&before_text) != normalize_line_endings(expected) {
@@ -464,14 +521,32 @@ pub async fn write_file(
         }
     }
 
-    if !dry {
-        record_before_edit(path, &before_text);
-        tokio::fs::write(&path, file_text).await.map_err(|e| {
+    if let Some(write_guard) = write_guard {
+        use tokio::io::AsyncWriteExt;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true);
+        if disk_preimage.is_some() {
+            options.truncate(true);
+        } else {
+            options.create_new(true);
+        }
+        let mut file = options.open(path).await.map_err(|e| e.to_string())?;
+        file.write_all(file_text.as_bytes()).await.map_err(|e| {
             let err = format!("Failed to write file: {:?}\nERROR: {}", path, e);
             warn!("{err}");
             err
         })?;
+        file.flush().await.map_err(|e| e.to_string())?;
+        record_edit(path, disk_preimage.as_deref(), Some(file_text));
         remove_memory_document_for_path(gcx.clone(), path).await;
+        write_guard.commit(
+            if disk_preimage.is_some() {
+                crate::file_activity::WriteKind::Modified
+            } else {
+                crate::file_activity::WriteKind::Created
+            },
+            Some(file_text),
+        );
     }
 
     Ok((before_text, file_text.to_string()))
@@ -743,6 +818,225 @@ pub async fn str_replace_regex(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subprocess_stale_edit() {
+        let Ok(root) = std::env::var("REFACT_TEST_FILE_RACE_ROOT") else {
+            return;
+        };
+        let id = std::env::var("REFACT_TEST_FILE_RACE_ID").unwrap();
+        let root = PathBuf::from(root);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let gcx = crate::global_context::tests::make_test_gcx().await;
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
+            let path = root.join("contended.txt");
+            std::fs::write(root.join(format!("ready-{id}")), "ready").unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !root.join("go").exists() {
+                assert!(std::time::Instant::now() < deadline);
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            let result = write_file(gcx, &path, &format!("edit-{id}"), false, Some("before")).await;
+            std::fs::write(
+                root.join(format!("result-{id}")),
+                match result {
+                    Ok(_) => "won".to_string(),
+                    Err(error) => format!("refused: {error}"),
+                },
+            )
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn cooperating_processes_cannot_both_apply_one_stale_edit() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("contended.txt");
+        std::fs::write(&path, "before").unwrap();
+        let locks = root.path().join("locks");
+        let spawn = |id: &str| {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tools::file_edit::auxiliary::tests::subprocess_stale_edit",
+                    "--nocapture",
+                ])
+                .env("REFACT_TEST_FILE_RACE_ROOT", root.path())
+                .env("REFACT_TEST_FILE_RACE_ID", id)
+                .env("REFACT_FILE_ACTIVITY_LOCK_DIR", &locks)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        let mut a = spawn("a");
+        let mut b = spawn("b");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !root.path().join("ready-a").exists() || !root.path().join("ready-b").exists() {
+            if std::time::Instant::now() >= deadline {
+                let _ = a.kill();
+                let _ = b.kill();
+                let _ = a.wait();
+                let _ = b.wait();
+                panic!("file edit subprocesses did not reach barrier");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::fs::write(root.path().join("go"), "go").unwrap();
+        assert!(a.wait().unwrap().success());
+        assert!(b.wait().unwrap().success());
+        let a = std::fs::read_to_string(root.path().join("result-a")).unwrap();
+        let b = std::fs::read_to_string(root.path().join("result-b")).unwrap();
+        let (winner, refusal) = match (a.as_str(), b.as_str()) {
+            ("won", refusal) => ("a", refusal.to_string()),
+            (refusal, "won") => ("b", refusal.to_string()),
+            _ => panic!("expected exactly one winner: {a} / {b}"),
+        };
+        assert!(refusal.contains("modified since last read"), "{refusal}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("edit-{winner}")
+        );
+        assert!(std::fs::read_dir(&locks).unwrap().next().is_some());
+    }
+
+    #[tokio::test]
+    async fn write_file_serializes_cooperative_writers() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("contended.txt");
+        std::fs::write(&path, "before").unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let writer = |after: String| {
+            let gcx = gcx.clone();
+            let path = path.clone();
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                write_file(gcx, &path, &after, false, Some("before")).await
+            }
+        };
+        let (first, second) = tokio::join!(writer("first".into()), writer("second".into()));
+        assert_ne!(first.is_ok(), second.is_ok());
+        let (success, failure) = if first.is_ok() {
+            (first.unwrap(), second.unwrap_err())
+        } else {
+            (second.unwrap(), first.unwrap_err())
+        };
+        assert!(failure.contains("modified since last read"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), success.1);
+        let observations = crate::file_activity::observations(Some(&path.to_string_lossy()));
+        assert_eq!(observations.writes.len(), 1);
+        assert_eq!(
+            observations.writes[0].kind,
+            crate::file_activity::WriteKind::Modified
+        );
+    }
+
+    #[tokio::test]
+    async fn write_file_rechecks_preimage_after_waiting_for_guard() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("locked.txt");
+        std::fs::write(&path, "before").unwrap();
+        let guard = crate::file_activity::begin_write(
+            None,
+            &path,
+            crate::file_activity::WriteIntent::Contextual,
+            "test_writer",
+        )
+        .await
+        .unwrap();
+        let after = "after".to_string();
+        let pending = write_file(gcx, &path, &after, false, Some("before"));
+        tokio::pin!(pending);
+        assert!(futures::poll!(&mut pending).is_pending());
+        std::fs::write(&path, "other").unwrap();
+        guard.commit(crate::file_activity::WriteKind::Modified, Some("other"));
+        assert!(pending
+            .await
+            .unwrap_err()
+            .contains("modified since last read"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "other");
+        let observations = crate::file_activity::observations(Some(&path.to_string_lossy()));
+        assert_eq!(observations.writes.len(), 1);
+        assert_eq!(observations.writes[0].tool, "test_writer");
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_buffer_disk_divergence() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("buffer.txt");
+        std::fs::write(&path, "disk").unwrap();
+        let key = crate::files_correction::canonical_path(path.to_string_lossy());
+        gcx.documents_state.memory_document_map.lock().await.insert(
+            key.clone(),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::files_in_workspace::Document {
+                    doc_path: key,
+                    doc_text: Some(ropey::Rope::from_str("buffer")),
+                },
+            )),
+        );
+        let error = write_file(gcx, &path, &"after".into(), false, Some("buffer"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("buffer differs from disk"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "disk");
+        assert!(
+            crate::file_activity::observations(Some(&path.to_string_lossy()))
+                .writes
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn write_file_failed_operation_is_not_recorded() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("directory");
+        std::fs::create_dir(&path).unwrap();
+        assert!(write_file(gcx, &path, &"after".into(), false, None)
+            .await
+            .is_err());
+        assert!(path.is_dir());
+        assert!(
+            crate::file_activity::observations(Some(&path.to_string_lossy()))
+                .writes
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn write_file_dry_does_not_create_or_record() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("missing").join("new.txt");
+        let result = write_file(gcx.clone(), &path, &"after".into(), true, None)
+            .await
+            .unwrap();
+        assert_eq!(result, (String::new(), "after".into()));
+        assert!(!path.parent().unwrap().exists());
+        assert!(
+            crate::file_activity::observations(Some(&path.to_string_lossy()))
+                .writes
+                .is_empty()
+        );
+        write_file(gcx, &path, &"after".into(), false, None)
+            .await
+            .unwrap();
+        let observations = crate::file_activity::observations(Some(&path.to_string_lossy()));
+        assert_eq!(observations.writes.len(), 1);
+        assert_eq!(
+            observations.writes[0].kind,
+            crate::file_activity::WriteKind::Created
+        );
+    }
 
     #[test]
     fn test_convert_edit_to_diffchunks_add() {
@@ -1323,6 +1617,200 @@ mod tests {
                 fs::read_to_string(f.source.join("src/undo.txt")).unwrap(),
                 "source\n"
             );
+        }
+
+        #[tokio::test]
+        async fn every_text_mutation_family_rejects_a_stale_model_visible_read() {
+            let f = fixture().await;
+            let path = f.root.join("src/stale.txt");
+            let actor = format!("mutation-{}", uuid::Uuid::new_v4());
+            let old = "head\nanchor\nbody\nend\n";
+            let new = "head\nanchor\nbody\nexternal\n";
+            fs::write(&path, old).unwrap();
+            crate::file_activity::record_read(Some(&actor), &path, old, 1, 4, 4, None);
+            fs::write(&path, new).unwrap();
+            let requests = [
+                args(vec![
+                    ("path", json!("src/stale.txt")),
+                    ("content", json!("replacement")),
+                ]),
+                args(vec![
+                    ("path", json!("src/stale.txt")),
+                    ("old_str", json!("body")),
+                    ("replacement", json!("replacement")),
+                ]),
+                args(vec![
+                    ("path", json!("src/stale.txt")),
+                    ("pattern", json!("body")),
+                    ("replacement", json!("replacement")),
+                ]),
+                args(vec![
+                    ("path", json!("src/stale.txt")),
+                    ("mode", json!("insert_after")),
+                    ("anchor", json!("anchor")),
+                    ("content", json!("replacement")),
+                ]),
+                args(vec![
+                    ("path", json!("src/stale.txt")),
+                    ("ranges", json!("3")),
+                    ("content", json!("replacement")),
+                ]),
+            ];
+            for (kind, request) in requests.into_iter().enumerate() {
+                let result = crate::file_activity::TOOL_ACTOR
+                    .scope(actor.clone(), async {
+                        match kind {
+                            0 => {
+                                tool_create_text_doc_exec(
+                                    f.gcx.clone(),
+                                    &request,
+                                    false,
+                                    Some(&f.scope),
+                                    None,
+                                )
+                                .await
+                            }
+                            1 => {
+                                tool_update_text_doc_exec(
+                                    f.gcx.clone(),
+                                    &request,
+                                    false,
+                                    Some(&f.scope),
+                                    None,
+                                )
+                                .await
+                            }
+                            2 => {
+                                tool_update_text_doc_regex_exec(
+                                    f.gcx.clone(),
+                                    &request,
+                                    false,
+                                    Some(&f.scope),
+                                    None,
+                                )
+                                .await
+                            }
+                            3 => {
+                                tool_update_text_doc_anchored_exec(
+                                    f.gcx.clone(),
+                                    &request,
+                                    false,
+                                    Some(&f.scope),
+                                    None,
+                                )
+                                .await
+                            }
+                            _ => {
+                                tool_update_text_doc_by_lines_exec(
+                                    f.gcx.clone(),
+                                    &request,
+                                    false,
+                                    Some(&f.scope),
+                                    None,
+                                )
+                                .await
+                            }
+                        }
+                    })
+                    .await;
+                assert!(result.is_err(), "mutation kind {kind} accepted stale read");
+                assert_eq!(fs::read_to_string(&path).unwrap(), new);
+            }
+            let patch = args(vec![("patch", json!("*** Begin Patch\n*** Update File: src/stale.txt\n@@\n-body\n+replacement\n*** End Patch"))]);
+            assert!(crate::file_activity::TOOL_ACTOR
+                .scope(
+                    actor.clone(),
+                    tool_apply_patch_exec(f.gcx.clone(), &patch, false, Some(&f.scope), None)
+                )
+                .await
+                .is_err());
+            let context = ccx(&f).await;
+            context.lock().await.chat_id = actor;
+            let mut remove = ToolRm {
+                config_path: String::new(),
+            };
+            assert!(remove
+                .tool_execute(
+                    context.clone(),
+                    &"rm".into(),
+                    &args(vec![("path", json!("src/stale.txt"))])
+                )
+                .await
+                .is_err());
+            let mut mover = ToolMv {
+                config_path: String::new(),
+            };
+            assert!(mover
+                .tool_execute(
+                    context,
+                    &"mv".into(),
+                    &args(vec![
+                        ("source", json!("src/stale.txt")),
+                        ("destination", json!("src/destination.txt"))
+                    ])
+                )
+                .await
+                .is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), new);
+            assert!(!f.root.join("src/destination.txt").exists());
+        }
+
+        #[tokio::test]
+        async fn whole_replacement_requires_a_complete_visible_read_and_new_file_race_has_one_winner(
+        ) {
+            let f = fixture().await;
+            let path = f.root.join("src/whole.txt");
+            fs::write(&path, "one\ntwo\n").unwrap();
+            let actor = format!("partial-{}", uuid::Uuid::new_v4());
+            crate::file_activity::record_read(
+                Some(&actor),
+                &path,
+                "one\ntwo\n",
+                1,
+                1,
+                2,
+                Some("partial".into()),
+            );
+            let request = args(vec![
+                ("path", json!("src/whole.txt")),
+                ("content", json!("new")),
+            ]);
+            assert!(crate::file_activity::TOOL_ACTOR
+                .scope(
+                    actor.clone(),
+                    tool_create_text_doc_exec(f.gcx.clone(), &request, false, Some(&f.scope), None)
+                )
+                .await
+                .is_err());
+            crate::file_activity::record_read(Some(&actor), &path, "one\ntwo\n", 1, 2, 2, None);
+            crate::file_activity::TOOL_ACTOR
+                .scope(
+                    actor,
+                    tool_create_text_doc_exec(f.gcx.clone(), &request, false, Some(&f.scope), None),
+                )
+                .await
+                .unwrap();
+            let path = f.root.join("src/race.txt");
+            let barrier = Arc::new(tokio::sync::Barrier::new(2));
+            let write = |text: &'static str| {
+                let barrier = barrier.clone();
+                let path = path.clone();
+                let gcx = f.gcx.clone();
+                async move {
+                    barrier.wait().await;
+                    crate::tools::file_edit::auxiliary::write_file_with_intent(
+                        gcx,
+                        &path,
+                        &text.into(),
+                        false,
+                        None,
+                        crate::file_activity::WriteIntent::Create,
+                    )
+                    .await
+                }
+            };
+            let (one, two) = tokio::join!(write("one"), write("two"));
+            assert_ne!(one.is_ok(), two.is_ok());
         }
 
         #[tokio::test]

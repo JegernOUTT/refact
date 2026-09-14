@@ -53,7 +53,12 @@ export type PerformanceTelemetryResetResponse = {
   enabled?: boolean;
 };
 
-export type TrajectorySettingValue = boolean | number | string | null;
+export type TrajectorySettingValue =
+  | boolean
+  | number
+  | string
+  | null
+  | { [key: string]: TrajectorySettingValue };
 
 export type TrajectorySettingsConfig = Record<string, TrajectorySettingValue>;
 
@@ -74,6 +79,20 @@ export type TrajectorySettingsResponse = {
   environment_precedence?: string;
 };
 
+export type CoordinationSettingsScope = "global" | "project";
+
+export type CoordinationSettingsResponse = {
+  scope: CoordinationSettingsScope;
+  path: string;
+  config: TrajectorySettingsConfig;
+  global: TrajectorySettingsConfig;
+  effective: TrajectorySettingsConfig;
+  defaults: TrajectorySettingsConfig;
+  fields: TrajectorySettingField[];
+  project_available: boolean;
+  inherited: string[];
+};
+
 export const performanceApi = createApi({
   reducerPath: "performanceApi",
   baseQuery: fetchBaseQuery({
@@ -84,6 +103,40 @@ export const performanceApi = createApi({
     },
   }),
   endpoints: (builder) => ({
+    getCoordinationSettings: builder.query<
+      CoordinationSettingsResponse,
+      CoordinationSettingsScope
+    >({
+      queryFn: async (scope, api, _extraOptions, baseQuery) => {
+        const result = await baseQuery({
+          url: buildApiUrlFromState(
+            api.getState() as RootState,
+            "/v1/coordination-settings",
+          ),
+          params: { scope },
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as CoordinationSettingsResponse };
+      },
+    }),
+    saveCoordinationSettings: builder.mutation<
+      CoordinationSettingsResponse,
+      { scope: CoordinationSettingsScope; config: TrajectorySettingsConfig }
+    >({
+      queryFn: async ({ scope, config }, api, _extraOptions, baseQuery) => {
+        const result = await baseQuery({
+          url: buildApiUrlFromState(
+            api.getState() as RootState,
+            "/v1/coordination-settings",
+          ),
+          params: { scope },
+          method: "POST",
+          body: { config },
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as CoordinationSettingsResponse };
+      },
+    }),
     getPerformanceTelemetry: builder.query<
       PerformanceTelemetryResponse,
       undefined
@@ -157,6 +210,8 @@ export const performanceApi = createApi({
 });
 
 export const {
+  useGetCoordinationSettingsQuery,
+  useSaveCoordinationSettingsMutation,
   useGetTrajectorySettingsQuery,
   useGetPerformanceTelemetryQuery,
   useResetPerformanceTelemetryMutation,

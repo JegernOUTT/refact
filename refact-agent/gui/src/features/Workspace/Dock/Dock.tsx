@@ -16,7 +16,7 @@ import {
   useDelayedUnmount,
 } from "../../../components/shared/useDelayedUnmount";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
-import { AgentsSection } from "../../AgentsPanel";
+import { AgentWorkSection } from "../WorkPanel/AgentWorkSection";
 import { switchToThread } from "../../Chat/Thread";
 import { selectCapabilities } from "../../Config/configSlice";
 import { FilesPanel } from "../FilesPanel";
@@ -150,7 +150,7 @@ export function Dock() {
         {activeSection === "files" ? <FilesPanel /> : null}
         {activeSection === "git" ? <GitDock /> : null}
         {activeSection === "agents" ? (
-          <AgentsSection
+          <AgentWorkSection
             chatId={focusedChatId}
             onNavigate={handleAgentNavigation}
           />

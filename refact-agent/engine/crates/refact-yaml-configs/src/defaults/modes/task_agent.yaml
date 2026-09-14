@@ -251,12 +251,17 @@ tools:
   - subagent
   - agents_overview
   - agent_message
+  - agent_peer_grant
   - progress_report
   - agent_list
   - agent_status
   - agent_wait
   - agent_result
   - agent_cancel
+  - agent_approval
+  - agent_resume
+  - work_overview
+  - work_inspect
   - agent_finish
   - task_mem_save
   - task_mem_search
@@ -314,6 +319,8 @@ tool_confirm:
       action: auto
     - match: "agent_message"
       action: auto
+    - match: "agent_peer_grant"
+      action: ask
     - match: "progress_report"
       action: auto
     - match: "agent_list"
@@ -325,6 +332,14 @@ tool_confirm:
     - match: "agent_result"
       action: auto
     - match: "agent_cancel"
+      action: auto
+    - match: "agent_approval"
+      action: auto
+    - match: "agent_resume"
+      action: auto
+    - match: "work_overview"
+      action: auto
+    - match: "work_inspect"
       action: auto
     - match: "*"
       action: auto

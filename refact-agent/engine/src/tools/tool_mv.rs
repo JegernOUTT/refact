@@ -14,17 +14,14 @@ use crate::files_correction::{
     canonical_path, correct_to_nearest_dir_path, correct_to_nearest_filename,
     get_unscoped_project_dirs, preprocess_path_for_normalization,
 };
-use crate::files_in_workspace::{
-    get_file_text_from_memory_or_disk, remove_memory_document_for_path,
-    remove_memory_documents_under_path,
-};
+use crate::files_in_workspace::remove_memory_documents_under_path;
 use crate::tools::tools_description::{
     MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
     json_schema_from_params,
 };
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::privacy::{FilePrivacyLevel, load_privacy_if_needed, check_file_privacy};
-use crate::tools::file_edit::auxiliary::resolve_path_with_scope;
+use crate::tools::file_edit::auxiliary::{resolve_path_with_scope, check_scope_guard};
 
 pub struct ToolMv {
     pub config_path: String,
@@ -255,34 +252,8 @@ impl Tool for ToolMv {
             )
         })?;
 
-        let mut src_file_content = String::new();
-        if !src_is_dir {
-            src_file_content =
-                get_file_text_from_memory_or_disk(gcx.clone(), &src_true_path).await?;
-        }
-        let mut dst_file_content = String::new();
-        if let Ok(dst_metadata) = fs::metadata(&dst_true_path).await {
-            if !overwrite {
-                return Err(format!("⚠️ Destination '{}' exists. 💡 Use mv(source:'{}', destination:'{}', overwrite:true)", dst_str, src_str, dst_str));
-            }
-            if dst_metadata.is_dir() {
-                fs::remove_dir_all(&dst_true_path).await.map_err(|e| {
-                    format!("Failed to remove existing directory '{}': {}", dst_str, e)
-                })?;
-                remove_memory_documents_under_path(gcx.clone(), &dst_true_path).await;
-            } else {
-                if !dst_metadata.is_dir() {
-                    dst_file_content = fs::read_to_string(&dst_true_path)
-                        .await
-                        .unwrap_or_else(|_| "".to_string());
-                }
-                fs::remove_file(&dst_true_path)
-                    .await
-                    .map_err(|e| format!("Failed to remove existing file '{}': {}", dst_str, e))?;
-                remove_memory_document_for_path(gcx.clone(), &dst_true_path).await;
-            }
-        }
-
+        check_scope_guard(&ccx, &src_true_path).await?;
+        check_scope_guard(&ccx, &dst_true_path).await?;
         if let Some(parent) = dst_true_path.parent() {
             if !parent.exists() {
                 fs::create_dir_all(parent).await.map_err(|e| {
@@ -300,22 +271,51 @@ impl Tool for ToolMv {
             }
         }
 
-        fs::rename(&src_true_path, &dst_true_path)
-            .await
-            .map_err(|e| {
-                format!(
-                    "⚠️ Failed to move '{}' to '{}': {}. 💡 Check permissions and paths",
-                    src_str, dst_str, e
-                )
-            })?;
-
-        if src_is_dir {
+        let (src_file_content, dst_file_content) = if src_is_dir {
+            let actor = ccx.lock().await.chat_id.clone();
+            let mut guards = crate::file_activity::begin_writes(
+                Some(&actor),
+                &[
+                    (
+                        src_true_path.clone(),
+                        crate::file_activity::WriteIntent::Tree,
+                    ),
+                    (
+                        dst_true_path.clone(),
+                        crate::file_activity::WriteIntent::Tree,
+                    ),
+                ],
+                "mv",
+            )
+            .await?;
+            if dst_true_path.exists() {
+                return Err("directory move destination exists; merge files explicitly without discarding either tree".into());
+            }
+            fs::rename(&src_true_path, &dst_true_path)
+                .await
+                .map_err(|e| e.to_string())?;
+            guards
+                .pop()
+                .ok_or("missing destination guard")?
+                .commit(crate::file_activity::WriteKind::Renamed, None);
+            guards
+                .pop()
+                .ok_or("missing source guard")?
+                .commit(crate::file_activity::WriteKind::Deleted, None);
             remove_memory_documents_under_path(gcx.clone(), &src_true_path).await;
             remove_memory_documents_under_path(gcx.clone(), &dst_true_path).await;
+            (String::new(), String::new())
         } else {
-            remove_memory_document_for_path(gcx.clone(), &src_true_path).await;
-            remove_memory_document_for_path(gcx.clone(), &dst_true_path).await;
-        }
+            let actor = ccx.lock().await.chat_id.clone();
+            crate::tools::file_edit::move_file::move_file(
+                gcx.clone(),
+                Some(&actor),
+                &src_true_path,
+                &dst_true_path,
+                overwrite,
+            )
+            .await?
+        };
 
         let mut messages = vec![];
         if !scope_warnings.is_empty() {

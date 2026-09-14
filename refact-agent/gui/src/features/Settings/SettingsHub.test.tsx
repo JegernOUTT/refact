@@ -84,6 +84,10 @@ vi.mock("../Performance/TrajectorySettingsPanel", () => ({
   TrajectorySettingsPanel: () => <div data-testid="limits-section" />,
 }));
 
+vi.mock("../Performance/CoordinationSettingsPanel", () => ({
+  CoordinationSettingsPanel: () => <div data-testid="coordination-section" />,
+}));
+
 function createTestStore(extraPages: Page[] = []) {
   return configureStore({
     reducer: {
@@ -161,6 +165,7 @@ describe("SettingsHub — section routing by page name", () => {
   it("shows Limits & Budgets section for limits settings page", () => {
     renderHub({ name: "limits settings" });
     expect(screen.getByTestId("limits-section")).toBeInTheDocument();
+    expect(screen.getByTestId("coordination-section")).toBeInTheDocument();
   });
 
   it("shows Marketplace section for marketplace hub page", () => {

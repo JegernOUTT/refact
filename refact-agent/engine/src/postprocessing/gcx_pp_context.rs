@@ -10,10 +10,21 @@ use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 
 pub struct GcxPPContext(pub Arc<GlobalContext>);
 
+tokio::task_local! {
+    pub static VISIBLE_READ_SNAPSHOTS: Arc<std::sync::Mutex<std::collections::HashMap<PathBuf, String>>>;
+}
+
 #[async_trait]
 impl PPContextTrait for GcxPPContext {
     async fn read_file(&self, path: &PathBuf) -> Result<String, String> {
-        get_file_text_from_memory_or_disk(self.0.clone(), path).await
+        let text = get_file_text_from_memory_or_disk(self.0.clone(), path).await?;
+        let _ = VISIBLE_READ_SNAPSHOTS.try_with(|snapshots| {
+            snapshots
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(path.clone(), text.clone());
+        });
+        Ok(text)
     }
 
     async fn correct_to_nearest_filename(&self, path: &str, limit: usize) -> Vec<String> {

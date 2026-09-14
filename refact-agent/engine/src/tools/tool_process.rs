@@ -136,6 +136,42 @@ struct ProcessStartArgs {
     push: PushMode,
 }
 
+pub(crate) async fn approval_request(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    args: &HashMap<String, Value>,
+) -> Result<crate::exec::ExecSpawnRequest, String> {
+    let (gcx, scope, chat_id) = {
+        let context = ccx.lock().await;
+        (
+            context.app.gcx.clone(),
+            context.execution_scope.clone(),
+            context.chat_id.clone(),
+        )
+    };
+    let parsed = parse_start_args(gcx.clone(), args, scope.as_ref()).await?;
+    let mut errors = Vec::new();
+    let env = crate::integrations::setting_up_integrations::get_vars_for_replacements(
+        gcx.clone(),
+        &mut errors,
+    )
+    .await;
+    let chat_mode = chat_mode_for_exec(gcx.clone(), &chat_id).await;
+    build_exec_request(
+        gcx,
+        CommandPolicyInput {
+            source: ExecSource::ProcessTool,
+            command: CommandKind::Shell(&parsed.command),
+            cwd: parsed.workdir,
+            env,
+            chat_mode,
+            escalation: parsed.escalation,
+        },
+    )
+    .await
+    .map(|policy| policy.request)
+    .map_err(|error| error.message)
+}
+
 struct ShellServiceAliasArgs {
     service_name: String,
     action: String,
@@ -263,6 +299,14 @@ impl Tool for ToolProcessStart {
         if let Some(readiness) = parsed.readiness.clone() {
             request = request.with_readiness(readiness);
         }
+        crate::agents::command_approval::enforce(
+            &ccx,
+            tool_call_id,
+            "process_start",
+            args,
+            &mut request,
+        )
+        .await?;
         let result = exec_registry.spawn(request).await?;
         let read = exec_registry
             .read(&result.snapshot.meta.process_id, 0, None)

@@ -405,6 +405,40 @@ child's concise status line. Existing lifecycle tools are `agent_list`, `agent_s
 `agent_result`, and `agent_cancel` (which cancels descendants by default). Agent records and their live
 introspection fields are emitted through snapshots and `background_agent_updated` SSE events.
 
+#### Concrete child tool authority
+
+A background child never runs under an open `ToolsPolicy::All`. `agents::tool_authority` derives the
+parent's current ceiling (the parent mode inventory for both the child model and the parent model,
+intersected with the active command allowlist and, for nested children, the parent's own saved child
+authority) and `freeze` turns the requested policy into a concrete `ToolsPolicy::Only` list before the
+launch is accepted; explicitly requested names outside the ceiling are rejected, and
+`SUBAGENT_FORCE_TOOLS` are added only when the ceiling already permits them. Queued dispatch,
+same-child resume and cold recovery intersect the accepted list with the current ceiling again, so
+parent narrowing applies to queued children while the persisted accepted launch bytes stay
+immutable. A persisted seed with `ToolsPolicy::All` is refused until explicitly migrated.
+Enforcement is at execution, not only visibility: `ensure_context_tool` runs inside
+`ToolRegistry::execute_tool*`, the MCP `tool_search`/`call` proxies and their confirmation path, and a
+registered child whose saved configuration is unavailable is deny-all. The proxy names `mcp_call` /
+`mcp_tool_search` are transport only; a concrete `mcp_<server>_<tool>` name must be in the child's
+authority for the target to be searchable or executable. Launch previews expose `effective_tools`
+next to `effective_model`.
+
+#### Launch spec extras and deliverable contracts
+
+`launch_spec.include_parent_goal` / `include_parent_plan` copy the parent's current goal/plan text as
+`context_file` messages tagged `{type: parent_goal|parent_plan, historical: true,
+trusted_as_instructions: false}`; they never install child control state. `launch_spec.deliverable`
+(`required_sections`, `output_schema`, `evidence_required`; shared type
+`refact_chat_api::DeliverableContract`) is validated against the Settings launch bounds, rendered
+into the child prompt, installed once on the queued record (`install_deliverable`) and evaluated
+structurally on the completed final message: section headings, exactly one ```json block checked
+against a JSON-schema subset (`type`, `required`, `properties`, `items`, `enum`, bounds,
+`additionalProperties: false`) and a non-empty `Evidence` section. The result is
+`BackgroundAgent.deliverable_status` (`check: "structural"`, `met`, `missing_sections`,
+`schema_error`, `evidence_missing`), copied into the completion notice, `BackgroundAgentSummary`
+and the GUI card. It is a structural contract check, never proof of verified success; a declared
+contract without a completed final message stays "not evaluated".
+
 ### CodeGraph tools
 
 CodeGraph-dependent tools are visible only when `gcx.codegraph` is available. `search_symbol_definition` is the compatibility definition lookup tool, backed by CodeGraph definitions, fuzzy suggestions, and `type_hierarchy` inheritance context; it does not read an old AST database. The dedicated CodeGraph analysis tool set is:

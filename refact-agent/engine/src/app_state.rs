@@ -336,6 +336,12 @@ pub struct AppState {
     pub buddy_event_sink: Arc<dyn BuddyEventSink>,
     pub tool_registry: Arc<dyn ToolRegistry>,
     pub agents: Arc<BackgroundAgentRegistry>,
+    pub work_scheduler: Arc<refact_work_core::AdmissionScheduler>,
+    pub work_views: Arc<crate::coordination::paging::WorkViews>,
+    pub work_boards: Arc<crate::coordination::board_index::WorkBoardIndex>,
+    pub agent_executions: Arc<crate::agents::execution::ExecutionRegistry>,
+    pub agent_approvals: refact_work_core::ApprovalRegistry,
+    pub peer_grants: crate::coordination::peer_authority::PeerGrantRegistry,
 }
 
 pub struct AppActivitySink {
@@ -1185,6 +1191,15 @@ impl ToolRegistry for AppToolRegistry {
             lookup_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
             return Ok(None);
         };
+        if let Err(error) =
+            crate::agents::tool_authority::ensure_context_tool(&ccx, &tool.tool_description().name)
+                .await
+        {
+            if let Some(pool) = pool.as_ref() {
+                Self::app_turn_tool_pool(pool)?.return_tool(tool).await;
+            }
+            return Err(error);
+        }
         let mut coerced_args: HashMap<String, serde_json::Value> = args.into_iter().collect();
         let coercion_notes = refact_tool_api::coerce_hashmap_to_schema(
             &mut coerced_args,
@@ -1279,6 +1294,13 @@ impl ToolRegistry for AppToolRegistry {
         else {
             return Ok(None);
         };
+        if let Err(error) =
+            crate::agents::tool_authority::ensure_context_tool(&ccx, &tool.tool_description().name)
+                .await
+        {
+            Self::app_turn_tool_pool(pool)?.return_tool(tool).await;
+            return Err(error);
+        }
         let mut coerced_args: HashMap<String, serde_json::Value> = args.into_iter().collect();
         let coercion_notes = refact_tool_api::coerce_hashmap_to_schema(
             &mut coerced_args,

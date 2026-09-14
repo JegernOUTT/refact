@@ -142,6 +142,35 @@ impl DeliveryReport {
         )
     }
 
+    /// Machine-readable receipt: acceptance by the delivery layer, never consumption.
+    pub fn receipt(&self) -> serde_json::Value {
+        let (outcome, reason, prior_state) = match self {
+            DeliveryReport::Delivered {
+                outcome,
+                prior_state,
+            } => (
+                match outcome {
+                    DeliveryOutcome::Queued => "queued",
+                    DeliveryOutcome::Delivered => "delivered",
+                    DeliveryOutcome::Duplicate => "duplicate",
+                    DeliveryOutcome::Expired => "expired",
+                    DeliveryOutcome::Superseded => "superseded",
+                },
+                None,
+                prior_state.map(|state| state.to_string()),
+            ),
+            DeliveryReport::NoLiveSession => ("no_live_session", None, None),
+            DeliveryReport::Skipped { reason } => ("skipped", Some(reason.clone()), None),
+            DeliveryReport::Failed { error } => ("failed", Some(error.clone()), None),
+        };
+        serde_json::json!({
+            "outcome": outcome,
+            "reached": self.reached_agent(),
+            "reason": reason,
+            "prior_state": prior_state,
+        })
+    }
+
     pub fn short_status(&self) -> String {
         match self {
             DeliveryReport::Delivered { outcome, .. } => match outcome {
@@ -149,6 +178,12 @@ impl DeliveryReport {
                 DeliveryOutcome::Delivered => "delivered".to_string(),
                 DeliveryOutcome::Duplicate => {
                     "not delivered (duplicate of an already-sent message)".to_string()
+                }
+                DeliveryOutcome::Expired => {
+                    "not delivered (its deadline passed before a boundary opened)".to_string()
+                }
+                DeliveryOutcome::Superseded => {
+                    "not delivered (replaced by a newer message with the same key)".to_string()
                 }
             },
             DeliveryReport::NoLiveSession => "not delivered (no live agent session)".to_string(),

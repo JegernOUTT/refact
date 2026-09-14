@@ -10,6 +10,13 @@ import { AbortControllerProvider } from "../../src/contexts/AbortControllers";
 import { Dashboard } from "../../src/features/Dashboard";
 import { TabBar } from "../../src/features/Workspace/TabBar";
 import { WorkspaceView } from "../../src/features/Workspace/WorkspaceView";
+import { WorkPanel } from "../../src/features/Workspace/WorkPanel/WorkPanel";
+import { ToolContent } from "../../src/components/ChatContent/ToolsContent";
+import { resumeReceipt } from "../../src/components/Tools/AgenticTool/resumeFixtures";
+import {
+  launchPreviewCall,
+  launchPreviewReceipt,
+} from "../../src/components/Tools/AgenticTool/launchFixtures";
 import { makeSurfaceKey } from "../../src/features/Workspace/surfaceKey";
 import { TrajectoryButton } from "../../src/components/Trajectory";
 import { ModeSelect } from "../../src/components/ChatForm/ModeSelect";
@@ -1592,6 +1599,216 @@ const preloadedState: Partial<RootState> = {
 
 const store = setUpStore(preloadedState);
 
+const messageCall = {
+  id: "message-receipt",
+  index: 0,
+  type: "function" as const,
+  function: {
+    name: "agent_message",
+    arguments: JSON.stringify({
+      to: "child",
+      text: "A".repeat(4096) + "Second message section <script>bad()</script>",
+    }),
+  },
+};
+if (route === "agent-message") {
+  store.dispatch(
+    applyChatEvent({
+      chat_id: chatId,
+      seq: "1",
+      type: "message_added",
+      index: chatRuntime.thread.messages.length,
+      message: {
+        role: "tool",
+        tool_call_id: messageCall.id,
+        content: "Message queued for child.",
+      },
+    }),
+  );
+}
+
+const broadcastCall = {
+  id: "broadcast-receipt",
+  index: 0,
+  type: "function" as const,
+  function: {
+    name: "task_broadcast",
+    arguments: JSON.stringify({ message: "Pause edits in src/shared/" }),
+  },
+};
+if (route === "agent-broadcast") {
+  const cards = Array.from({ length: 7 }, (_, index) => ({
+    card_id: `T-${index}`,
+    title: `Card ${index} <script>inert</script>`,
+    outcome: index % 3 === 0 ? "no_live_session" : "delivered",
+    reached: index % 3 !== 0,
+    reason: index % 3 === 0 ? "agent session closed" : null,
+  }));
+  store.dispatch(
+    applyChatEvent({
+      chat_id: chatId,
+      seq: "1",
+      type: "message_added",
+      index: chatRuntime.thread.messages.length,
+      message: {
+        role: "tool",
+        tool_call_id: broadcastCall.id,
+        content: "Broadcast sent to 4 of 7 agents",
+        extra: {
+          delivery_receipts: {
+            kind: "task_broadcast",
+            notified: 4,
+            total: 7,
+            cards,
+          },
+        },
+      },
+    }),
+  );
+}
+
+const goalCall = {
+  id: "goal-snapshot",
+  index: 0,
+  type: "function" as const,
+  function: { name: "get_goal", arguments: "{}" },
+};
+if (route === "agent-goal") {
+  store.dispatch(
+    applyChatEvent({
+      chat_id: chatId,
+      seq: "1",
+      type: "message_added",
+      index: chatRuntime.thread.messages.length,
+      message: {
+        role: "tool",
+        tool_call_id: goalCall.id,
+        content: JSON.stringify({
+          goal: {
+            content:
+              "Preserve the approved goal. ".padEnd(4096, "x") +
+              "Second goal section: <script>inert evidence constraints</script>",
+            status: "paused",
+            version: 1,
+            delta_count: 8,
+            turns_used: 12,
+            tokens_used: 3210,
+            latest_verdict: null,
+            gaps: [],
+          },
+        }),
+      },
+    }),
+  );
+}
+
+const planCall = {
+  id: "plan-snapshot",
+  index: 0,
+  type: "function" as const,
+  function: { name: "get_plan", arguments: "{}" },
+};
+if (route === "agent-plan") {
+  store.dispatch(
+    applyChatEvent({
+      chat_id: chatId,
+      seq: "1",
+      type: "message_added",
+      index: chatRuntime.thread.messages.length,
+      message: {
+        role: "tool",
+        tool_call_id: planCall.id,
+        content: JSON.stringify({
+          plan: {
+            content:
+              "Approved constraints. ".padEnd(4096, "x") +
+              "Second plan section: preserve verification gates.",
+            mode: "agent",
+            version: 1,
+            delta_count: 7,
+            created_at_ms: 1789233578382,
+          },
+        }),
+      },
+    }),
+  );
+}
+
+if (route === "agent-launch-preview") {
+  store.dispatch(
+    applyChatEvent({
+      chat_id: chatId,
+      seq: "1",
+      type: "message_added",
+      index: chatRuntime.thread.messages.length,
+      message: launchPreviewReceipt(),
+    }),
+  );
+}
+
+const resumeCall = {
+  id: "resume-inspect",
+  index: 0,
+  type: "function" as const,
+  function: {
+    name: "agent_resume",
+    arguments: '{"action":"inspect","agent_id":"stopped-child"}',
+  },
+};
+if (route === "agent-resume") {
+  store.dispatch(
+    applyChatEvent({
+      chat_id: chatId,
+      seq: "1",
+      type: "message_added",
+      index: chatRuntime.thread.messages.length,
+      message: {
+        role: "tool",
+        tool_call_id: resumeCall.id,
+        content: JSON.stringify(resumeReceipt()),
+      },
+    }),
+  );
+}
+
+const approvalCall = {
+  id: "approval-list",
+  index: 0,
+  type: "function" as const,
+  function: { name: "agent_approval", arguments: '{"action":"list"}' },
+};
+if (route === "agent-approval") {
+  store.dispatch(
+    applyChatEvent({
+      chat_id: chatId,
+      seq: "1",
+      type: "message_added",
+      index: chatRuntime.thread.messages.length,
+      message: {
+        role: "tool",
+        tool_call_id: approvalCall.id,
+        content: JSON.stringify({
+          requests: [
+            {
+              request_id: "first-request",
+              agent_id: "first-child",
+              decision: "pending",
+              run_generation: 1,
+            },
+            {
+              request_id: "second-request",
+              agent_id: "second-child",
+              decision: "approved",
+              consumed: true,
+              run_generation: 2,
+            },
+          ],
+        }),
+      },
+    }),
+  );
+}
+
 /**
  * Test-only queue server: the stubbed command endpoint mutates this list and
  * pushes a real `queue_updated` SSE envelope through the real reducer, so the
@@ -2062,6 +2279,22 @@ const ShowcaseSurface = () => {
   if (route === "buddy") {
     return <BuddyHome />;
   }
+
+  if (route === "work") return <WorkPanel />;
+  if (route === "agent-approval")
+    return <ToolContent toolCalls={[approvalCall]} threadId={chatId} />;
+  if (route === "agent-resume")
+    return <ToolContent toolCalls={[resumeCall]} threadId={chatId} />;
+  if (route === "agent-launch-preview")
+    return <ToolContent toolCalls={[launchPreviewCall]} threadId={chatId} />;
+  if (route === "agent-plan")
+    return <ToolContent toolCalls={[planCall]} threadId={chatId} />;
+  if (route === "agent-goal")
+    return <ToolContent toolCalls={[goalCall]} threadId={chatId} />;
+  if (route === "agent-message")
+    return <ToolContent toolCalls={[messageCall]} threadId={chatId} />;
+  if (route === "agent-broadcast")
+    return <ToolContent toolCalls={[broadcastCall]} threadId={chatId} />;
 
   return <Dashboard />;
 };

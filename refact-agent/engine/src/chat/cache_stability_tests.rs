@@ -737,3 +737,156 @@ fn cache_stability_append_only_event_at_tail_preserves_prior_prefix() {
     assert_eq!(prev_hashes.system_sha256, next_hashes.system_sha256);
     assert!(is_append_only_prefix(&prev_body, &next_body));
 }
+
+#[tokio::test]
+async fn completed_prefix_fork_keeps_parent_wire_bytes_and_thinking_signatures_per_provider() {
+    let model = "test/cache-openai";
+    let (gcx, workspace) = gcx_with_models_and_modes(
+        vec![model_record(model, WireFormat::OpenaiChatCompletions, "")],
+        vec![mode_config("agent", "Agent", "Agent")],
+    )
+    .await;
+    let root = workspace.path().canonicalize().unwrap();
+    let thinking = |text: &str, signature: &str| {
+        Some(vec![
+            json!({"type":"thinking","thinking":text,"signature":signature}),
+        ])
+    };
+    let calling: ChatMessage = serde_json::from_value(json!({
+        "message_id":"parent-call","role":"assistant","content":"looking",
+        "thinking_blocks":[{"type":"thinking","thinking":"decide to read","signature":"sig-call"}],
+        "tool_calls":[{"id":"call_1","type":"function","function":{"name":"cat","arguments":"{\"path\":\"a.rs\"}"}}]
+    }))
+    .unwrap();
+    let mut answer = assistant("final parent answer");
+    answer.message_id = "parent-answer".into();
+    answer.thinking_blocks = thinking("conclude", "sig-answer");
+    let pending: ChatMessage = serde_json::from_value(json!({
+        "message_id":"parent-pending","role":"assistant","content":"unfinished",
+        "tool_calls":[{"id":"call_2","type":"function","function":{"name":"shell","arguments":"{}"}}]
+    }))
+    .unwrap();
+    let parent = vec![
+        system("parent policy"),
+        user("please read a.rs"),
+        calling,
+        tool("file body"),
+        answer,
+        pending,
+    ];
+    let base_model = BaseModelRecord {
+        id: model.into(),
+        ..Default::default()
+    };
+    let scope = crate::agents::launch_spec::LaunchScope {
+        caller: crate::coordination::scope::WorkCaller {
+            source_root: root.clone(),
+            checkout_root: root,
+            principal: "parent".into(),
+            root_chat_id: None,
+            model: Some(base_model.clone()),
+        },
+        child_model: base_model,
+        limits: crate::file_activity::settings(),
+    };
+    let spec = crate::agents::launch_spec::LaunchSpec {
+        history_mode: Some(crate::agents::launch_spec::HistoryForkMode::ForkCompletedPrefix),
+        ..Default::default()
+    };
+    let resolved =
+        crate::agents::launch_spec::resolve_scoped_launch_spec(gcx.clone(), &spec, &parent, &scope)
+            .await;
+    assert!(resolved.skipped.is_empty(), "{:?}", resolved.skipped);
+    assert_eq!(resolved.prepended_messages.len(), 4);
+    let config = crate::subchat::SubchatConfig {
+        history_source_model: Some(model.into()),
+        model: model.into(),
+        ..crate::subchat::test_support::minimal_config("subchat-fork", "parent")
+    };
+    let child = crate::subchat::prepare_child_history(&resolved.prepended_messages, &config);
+    assert_eq!(child.len(), 4);
+    assert_eq!(child[1].thinking_blocks, parent[2].thinking_blocks);
+    assert_eq!(child[3].thinking_blocks, parent[4].thinking_blocks);
+    assert!(child
+        .iter()
+        .all(|message| message.message_id != "parent-pending"));
+    let request = |messages: Vec<ChatMessage>| {
+        LlmRequest::new(model.into(), messages).with_params(CommonParams {
+            max_tokens: 1024,
+            ..Default::default()
+        })
+    };
+    let parent_segment = parent[1..5].to_vec();
+    let openai_parent = openai_body(&request(parent_segment.clone()), "cache-openai");
+    let openai_child = openai_body(&request(child.clone()), "cache-openai");
+    assert_eq!(openai_parent["messages"], openai_child["messages"]);
+    let reasoning_body = |req: &LlmRequest| {
+        let mut settings = claude_code_settings("claude-opus-4");
+        settings.supports_reasoning = true;
+        normalize_claude_code_cache_body(
+            AnthropicAdapter
+                .build_http(&refact_privacy::testing::cleared(req.clone()), &settings)
+                .unwrap()
+                .body,
+        )
+    };
+    let claude_parent = reasoning_body(&request(parent_segment));
+    let claude_child = reasoning_body(&request(child.clone()));
+    assert_eq!(claude_parent["messages"], claude_child["messages"]);
+    let serialized = claude_child["messages"].to_string();
+    assert!(serialized.contains("sig-call") && serialized.contains("sig-answer"));
+    assert!(!serialized.contains("call_2"));
+    let mut child_system = vec![system("child runtime policy")];
+    child_system.extend(child.clone());
+    let first_turn =
+        sanitize_body_for_cache_guard(&openai_body(&request(child_system.clone()), "cache-openai"));
+    child_system.push(user("continue in the child"));
+    let second_turn =
+        sanitize_body_for_cache_guard(&openai_body(&request(child_system), "cache-openai"));
+    assert!(is_append_only_prefix(&first_turn, &second_turn));
+}
+
+#[tokio::test]
+async fn work_capsules_append_through_openai_and_anthropic_without_changing_prior_wire_prefix() {
+    let model = "test/cache-openai";
+    let (gcx, workspace) = gcx_with_models_and_modes(
+        vec![model_record(model, WireFormat::OpenaiChatCompletions, "")],
+        vec![mode_config("agent", "Agent", "Agent")],
+    )
+    .await;
+    let (root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
+    gcx.caps_state.write().await.loaded_project_root = Some(root);
+    let app = AppState::from_gcx(gcx).await;
+    let mut session = ChatSession::new("work-wire".into());
+    session.work_project_root = Some(workspace.path().into());
+    session.thread.model = model.into();
+    session.messages = vec![system("stable system"), user("hello"), assistant("answer")];
+    let session = Arc::new(AMutex::new(session));
+    app.chat
+        .sessions
+        .write()
+        .await
+        .insert("work-wire".into(), session.clone());
+    let before = session.lock().await.messages.clone();
+    crate::chat::generation::prepare_project_work_context(&app, &session).await;
+    let after = session.lock().await.messages.clone();
+    assert_eq!(after.len(), before.len() + 1);
+    for anthropic in [false, true] {
+        let body = |messages| {
+            let request = LlmRequest::new(model.into(), messages).with_params(CommonParams {
+                max_tokens: 1024,
+                ..Default::default()
+            });
+            sanitize_body_for_cache_guard(&if anthropic {
+                normalize_claude_code_cache_body(claude_body(&request, "claude-opus-4"))
+            } else {
+                openai_body(&request, "cache-openai")
+            })
+        };
+        let old = body(before.clone());
+        let new = body(after.clone());
+        assert!(is_append_only_prefix(&old, &new), "anthropic={anthropic}");
+        assert!(!new.to_string().contains("policy_key"));
+        assert!(!new.to_string().contains("work_context_capsule"));
+    }
+}

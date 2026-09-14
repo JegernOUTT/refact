@@ -148,6 +148,8 @@ type BackgroundAgentSummaryWithDefaults = Omit<
   | "tokens_used"
   | "cost_usd"
   | "title"
+  | "deliverable"
+  | "deliverable_status"
 > & {
   target_files?: unknown;
   edited_files?: unknown;
@@ -165,6 +167,8 @@ type BackgroundAgentSummaryWithDefaults = Omit<
   tokens_used?: unknown;
   cost_usd?: unknown;
   title?: unknown;
+  deliverable?: unknown;
+  deliverable_status?: unknown;
 };
 
 export type BackgroundAgentSummaryWire =
@@ -201,6 +205,8 @@ type BackgroundAgentSummaryCamelCase = {
   questions?: unknown;
   tokensUsed?: number;
   costUsd?: number | null;
+  deliverable?: unknown;
+  deliverableStatus?: unknown;
 };
 
 export type DeltaOp =
@@ -884,6 +890,69 @@ function normalizeQuestions(
   });
 }
 
+function isStringList(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((entry) => typeof entry === "string")
+  );
+}
+
+function normalizeDeliverable(
+  value: unknown,
+): BackgroundAgentSummary["deliverable"] {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null) return null;
+  const row = value as Record<string, unknown>;
+  const sections = row.required_sections ?? [];
+  if (
+    !isStringList(sections) ||
+    (row.output_schema !== undefined &&
+      row.output_schema !== null &&
+      (typeof row.output_schema !== "object" ||
+        Array.isArray(row.output_schema))) ||
+    (row.evidence_required !== undefined &&
+      typeof row.evidence_required !== "boolean")
+  ) {
+    return null;
+  }
+  return {
+    required_sections: sections,
+    output_schema:
+      row.output_schema === undefined
+        ? null
+        : (row.output_schema as Record<string, unknown> | null),
+    evidence_required: row.evidence_required === true,
+  };
+}
+
+function normalizeDeliverableStatus(
+  value: unknown,
+): BackgroundAgentSummary["deliverable_status"] {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null) return null;
+  const row = value as Record<string, unknown>;
+  const missing = row.missing_sections ?? [];
+  if (
+    typeof row.check !== "string" ||
+    typeof row.met !== "boolean" ||
+    !isStringList(missing) ||
+    (row.schema_error !== undefined &&
+      row.schema_error !== null &&
+      typeof row.schema_error !== "string") ||
+    (row.evidence_missing !== undefined &&
+      typeof row.evidence_missing !== "boolean")
+  ) {
+    return null;
+  }
+  return {
+    check: row.check,
+    met: row.met,
+    missing_sections: missing,
+    schema_error:
+      typeof row.schema_error === "string" ? row.schema_error : null,
+    evidence_missing: row.evidence_missing === true,
+  };
+}
+
 function safeAgent(agent: BackgroundAgentSummaryWire): BackgroundAgentSummary {
   if (!("agent_id" in agent)) {
     return safeAgent({
@@ -916,6 +985,8 @@ function safeAgent(agent: BackgroundAgentSummaryWire): BackgroundAgentSummary {
       questions: agent.questions,
       tokens_used: agent.tokensUsed,
       cost_usd: agent.costUsd,
+      deliverable: agent.deliverable,
+      deliverable_status: agent.deliverableStatus,
     });
   }
 
@@ -957,6 +1028,8 @@ function safeAgent(agent: BackgroundAgentSummaryWire): BackgroundAgentSummary {
       agent.cost_usd === null
         ? null
         : normalizeNonNegativeNumber(agent.cost_usd),
+    deliverable: normalizeDeliverable(agent.deliverable),
+    deliverable_status: normalizeDeliverableStatus(agent.deliverable_status),
   };
 }
 

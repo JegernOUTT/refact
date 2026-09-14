@@ -73,6 +73,20 @@ export type BackgroundAgentStatus =
   | "cancelled"
   | "interrupted";
 
+export type DeliverableContract = {
+  required_sections: string[];
+  output_schema?: Record<string, unknown> | null;
+  evidence_required: boolean;
+};
+
+export type DeliverableStatus = {
+  check: string;
+  met: boolean;
+  missing_sections: string[];
+  schema_error?: string | null;
+  evidence_missing: boolean;
+};
+
 export interface BackgroundAgentToolFields {
   background_agent_id?: string;
   background_agent_kind?: BackgroundAgentKind;
@@ -114,6 +128,8 @@ export interface BackgroundAgentSummary {
   questions?: AgentQuestion[];
   tokens_used?: number;
   cost_usd?: number | null;
+  deliverable?: DeliverableContract | null;
+  deliverable_status?: DeliverableStatus | null;
 }
 
 function isToolCall(call: unknown): call is ToolCall {

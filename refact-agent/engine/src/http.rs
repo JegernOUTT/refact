@@ -279,7 +279,7 @@ pub async fn start_server(
                     crate::chat::close_all_chat_sessions(app).await;
                 };
                 let server = builder
-                    .serve(router.into_make_service())
+                    .serve(router.into_make_service_with_connect_info::<SocketAddr>())
                     .with_graceful_shutdown(shutdown);
                 let resp = server
                     .await

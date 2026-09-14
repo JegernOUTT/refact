@@ -193,6 +193,7 @@ impl Tool for ToolBuddyLaunchInvestigation {
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
             pending_deliveries: Vec::new(),
+            dropped_deliveries: Vec::new(),
         };
 
         chat_facade

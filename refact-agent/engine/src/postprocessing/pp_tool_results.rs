@@ -30,17 +30,22 @@ pub async fn postprocess_tool_results(
 ) -> Vec<ChatMessage> {
     let item_count = postprocess_item_count(&tool_messages, &context_files);
     let span = perf_diagnostics::span(PerfComponent::ToolResultPostprocess, None, None);
-    let mut messages = refact_postprocessing::pp_tool_results::postprocess_tool_results(
-        Arc::new(GcxPPContext(gcx.clone())),
-        tokenizer,
-        tool_messages,
-        context_files,
-        budget,
-        pp_settings,
-        existing_messages,
-        truncation_exempt_tool_call_ids,
-    )
-    .await;
+    let snapshots = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut messages = super::gcx_pp_context::VISIBLE_READ_SNAPSHOTS
+        .scope(
+            snapshots.clone(),
+            refact_postprocessing::pp_tool_results::postprocess_tool_results(
+                Arc::new(GcxPPContext(gcx.clone())),
+                tokenizer,
+                tool_messages,
+                context_files,
+                budget,
+                pp_settings,
+                existing_messages,
+                truncation_exempt_tool_call_ids,
+            ),
+        )
+        .await;
     let outcome = match crate::privacy::records::attach_declared_output_files(&gcx, &mut messages) {
         Ok(()) => PerfOutcome::Success,
         Err(error) => {
@@ -49,6 +54,52 @@ pub async fn postprocess_tool_results(
         }
     };
     enrich_tool_messages(&mut messages);
+    if let Some(actor) = crate::file_activity::current_actor() {
+        let snapshots = snapshots.lock().unwrap_or_else(|e| e.into_inner());
+        for message in &mut messages {
+            if let ChatContent::ContextFiles(files) = &message.content {
+                let mut stamps = Vec::new();
+                for file in files {
+                    let path = std::path::PathBuf::from(&file.file_name);
+                    let Some(text) = snapshots.get(&path) else {
+                        continue;
+                    };
+                    let total = text.lines().count();
+                    let expected: Vec<_> = text.lines().collect();
+                    let shown: Vec<_> = file
+                        .file_content
+                        .lines()
+                        .filter_map(|line| {
+                            let (number, content) = line.split_once(" | ")?;
+                            Some((number.trim().parse::<usize>().ok()?, content))
+                        })
+                        .collect();
+                    let whole = file.line1 <= 1
+                        && file.line2 >= total
+                        && shown.len() == total
+                        && shown.iter().enumerate().all(|(index, (line, content))| {
+                            *line == index + 1 && *content == expected[index]
+                        });
+                    let stamp = crate::file_activity::record_read(
+                        Some(&actor),
+                        &path,
+                        text,
+                        file.line1,
+                        file.line2,
+                        total,
+                        (!whole)
+                            .then(|| "only the rendered range survived output processing".into()),
+                    );
+                    stamps.push(stamp);
+                }
+                if !stamps.is_empty() {
+                    message
+                        .extra
+                        .insert("read_stamps".into(), serde_json::json!(stamps));
+                }
+            }
+        }
+    }
     span.finish_tool(outcome, 1, item_count, None);
     messages
 }

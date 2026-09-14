@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 pub use refact_chat_api::{AgentQuestionSummary, BackgroundAgentSummary};
 use serde::{Deserialize, Serialize};
-use refact_chat_api::{PendingDelivery, PushMode};
+use refact_chat_api::{DeliveryStatusRecord, PendingDelivery, PushMode};
 
 pub const NO_TEXT_RESULT_SUMMARY: &str =
     "<no text response — see child trajectory for full details>";
@@ -58,18 +58,58 @@ impl BgAgentStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentQuestion {
-    pub id: String,
-    pub text: String,
-    pub asked_at: DateTime<Utc>,
-    pub answer: Option<String>,
-    pub answered_at: Option<DateTime<Utc>>,
+pub type AgentQuestion = refact_chat_api::QuestionContract;
+
+pub use refact_work_core::{CapKind, CapScope, CapStop};
+
+#[cfg(test)]
+mod cap_stop_tests {
+    use super::CapStop;
+
+    #[test]
+    fn typed_cap_round_trips() {
+        let stop = CapStop {
+            key: super::CapKind::Steps,
+            scope: super::CapScope::Child,
+            limit: 100,
+            used: 100,
+            resumable: true,
+            run_generation: 3,
+        };
+        assert_eq!(CapStop::from_error(&stop.as_error().unwrap()), Some(stop));
+    }
+
+    #[test]
+    fn legacy_step_envelope_is_readable() {
+        let stop = CapStop::from_error(
+            r#"CAP_STOP:{"key":"max_steps","limit":10,"used":10,"resumable":true}"#,
+        )
+        .unwrap();
+        assert_eq!(stop.scope, super::CapScope::Child);
+        assert_eq!(stop.run_generation, 0);
+    }
+
+    #[test]
+    fn non_caps_and_malformed_or_unreached_caps_are_not_recoverable() {
+        for error in [
+            "queue_full",
+            "provider quota exceeded",
+            "CAP_STOP:not-json",
+            r#"CAP_STOP:{"key":"provider_quota","limit":10,"used":10,"resumable":true}"#,
+            r#"CAP_STOP:{"key":"max_steps","scope":"engine","limit":10,"used":10,"resumable":true}"#,
+            r#"CAP_STOP:{"key":"max_steps","limit":10,"used":9,"resumable":true}"#,
+            r#"CAP_STOP:{"key":"max_steps","limit":0,"used":0,"resumable":true}"#,
+        ] {
+            assert!(CapStop::from_error(error).is_none(), "{error}");
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BackgroundAgent {
     pub schema_version: u32,
+    #[serde(default = "initial_run_generation")]
+    pub run_generation: u64,
     pub agent_id: String,
     pub parent_chat_id: String,
     pub parent_root_chat_id: Option<String>,
@@ -98,6 +138,10 @@ pub struct BackgroundAgent {
     pub pending_deliveries: Vec<PendingDelivery>,
     #[serde(default)]
     pub delivery_ids: Vec<String>,
+    /// Deliveries dropped before the runner consumed them (deadline passed or
+    /// superseded by a newer delivery with the same key); bounded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_deliveries: Vec<DeliveryStatusRecord>,
     #[serde(default)]
     pub deferred_at: Option<DateTime<Utc>>,
     pub model: String,
@@ -121,11 +165,19 @@ pub struct BackgroundAgent {
     pub tokens_used: u64,
     #[serde(default)]
     pub cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliverable: Option<refact_chat_api::DeliverableContract>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliverable_status: Option<refact_chat_api::DeliverableStatus>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub last_update_at: DateTime<Utc>,
     pub change_seq: u64,
+}
+
+fn initial_run_generation() -> u64 {
+    1
 }
 
 impl From<&BackgroundAgent> for BackgroundAgentSummary {
@@ -163,12 +215,17 @@ impl From<&BackgroundAgent> for BackgroundAgentSummary {
                 .count() as u32,
             tokens_used: record.tokens_used,
             cost_usd: record.cost_usd,
+            deliverable: record.deliverable.clone(),
+            deliverable_status: record.deliverable_status.clone(),
             questions: record
                 .questions
                 .iter()
                 .map(|question| AgentQuestionSummary {
                     id: question.id.clone(),
                     text: question.text.clone(),
+                    kind: Some(question.kind),
+                    state: Some(question.state),
+                    correlation_id: Some(question.correlation_id.clone()),
                     answer: question.answer.clone(),
                     asked_at: question.asked_at,
                     answered_at: question.answered_at,
@@ -211,4 +268,5 @@ pub struct AgentCompletion {
     pub diff_summary: Option<String>,
     pub conflict_summary: Option<String>,
     pub child_chat_id: Option<String>,
+    pub deliverable_status: Option<refact_chat_api::DeliverableStatus>,
 }

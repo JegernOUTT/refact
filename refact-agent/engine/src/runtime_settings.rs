@@ -46,6 +46,119 @@ const PROCESS_SUBSCRIBE_PREVIEW_BYTES_DEFAULT: usize = 2_000;
 const REVIEW_DIFF_CHAR_CAP_DEFAULT: usize = 400_000;
 const REVIEW_MAX_DIFF_PATCH_BYTES_DEFAULT: usize = 4_194_304;
 
+pub use refact_work_core::CoordinationSettings;
+
+/// Single source of truth for every coordination bound.
+///
+/// `validate` walks this table generically and the HTTP layer publishes it
+/// verbatim, so engine enforcement and the ranges the GUI offers cannot drift.
+/// Defaults live in `refact_work_core`; only the admissible range lives here.
+pub struct CoordinationFieldBound {
+    pub name: &'static str,
+    pub value_type: &'static str,
+    pub minimum: Option<u64>,
+    pub maximum: Option<u64>,
+}
+
+const fn coordination_bool(name: &'static str) -> CoordinationFieldBound {
+    CoordinationFieldBound {
+        name,
+        value_type: "boolean",
+        minimum: None,
+        maximum: None,
+    }
+}
+
+const fn coordination_integer(
+    name: &'static str,
+    minimum: u64,
+    maximum: u64,
+) -> CoordinationFieldBound {
+    CoordinationFieldBound {
+        name,
+        value_type: "integer",
+        minimum: Some(minimum),
+        maximum: Some(maximum),
+    }
+}
+
+static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
+    coordination_bool("enabled"),
+    coordination_bool("auto_inject_enabled"),
+    coordination_integer("max_active_engine", 1, 4_096),
+    coordination_integer("max_active_project", 1, 4_096),
+    coordination_integer("max_active_root", 1, 4_096),
+    coordination_integer("root_fairness_quantum", 1, 1_024),
+    CoordinationFieldBound {
+        name: "root_weights",
+        value_type: "integer_map",
+        minimum: Some(1),
+        maximum: Some(1_024),
+    },
+    coordination_integer("max_root_weight_entries", 1, 1_000_000),
+    coordination_integer("max_resume_burst", 1, 1_024),
+    coordination_integer("max_pending", 1, 1_000_000),
+    coordination_integer("max_outstanding", 1, 4_000_000),
+    coordination_integer("max_subchat_depth", 1, 64),
+    coordination_integer("max_read_stamps", 64, 1_048_576),
+    coordination_integer("max_write_records", 64, 4_194_304),
+    coordination_integer("max_undo_entries_per_file", 1, 100_000),
+    coordination_integer("max_undo_bytes", 1024, 1_073_741_824),
+    coordination_integer("overview_default_rows", 1, 10_000),
+    coordination_integer("overview_max_rows", 1, 10_000),
+    coordination_integer("max_work_views", 1, 1_000_000),
+    coordination_integer("max_work_cursors", 1, 1_000_000),
+    coordination_integer("max_work_history_rows", 1, 1_000_000),
+    coordination_integer("max_work_history_bytes", 1024, 1_073_741_824),
+    coordination_integer("max_work_provenance_records", 1, 1_000_000),
+    coordination_integer("max_work_provenance_bytes", 1024, 268_435_456),
+    coordination_integer("work_cursor_ttl_secs", 1, 86_400),
+    coordination_integer("work_subscription_interval_ms", 100, 60_000),
+    coordination_integer("work_stream_max_bytes", 1024, 268_435_456),
+    coordination_integer("work_stream_timeout_ms", 30_000, 3_600_000),
+    coordination_integer("work_reconnect_max_ms", 100, 60_000),
+    coordination_integer("inspect_max_paths", 1, 10_000),
+    coordination_integer("capsule_token_budget", 1600, 128_000),
+    coordination_integer("capsule_max_rows", 1, 1_000),
+    coordination_integer("min_interval_secs", 0, 86_400),
+    coordination_integer("debounce_secs", 0, 3_600),
+    coordination_integer("recent_window_secs", 60, 2_592_000),
+    coordination_integer("lock_timeout_secs", 1, 3_600),
+    coordination_integer("lock_poll_interval_ms", 1, 60_000),
+    coordination_integer("approval_timeout_secs", 1, 604_800),
+    coordination_integer("max_pending_approvals", 1, 100_000),
+    coordination_integer("delivery_default_ttl_secs", 1, 2_592_000),
+    coordination_integer("delivery_max_ttl_secs", 1, 2_592_000),
+    coordination_integer("delivery_max_pending", 1, 1_000_000),
+    coordination_integer("delivery_status_retention", 1, 4_000_000),
+    coordination_integer("agent_message_max_chars", 1, 4_000_000),
+    coordination_integer("peer_grant_default_ttl_secs", 1, 2_592_000),
+    coordination_integer("peer_grant_max_ttl_secs", 1, 2_592_000),
+    coordination_integer("board_max_reviewers", 1, 100_000),
+    coordination_integer("agent_wait_default_ms", 1, 3_600_000),
+    coordination_integer("agent_wait_max_ms", 1, 86_400_000),
+    coordination_integer("agent_wait_max_agents", 1, 10_000),
+    coordination_integer("subagent_max_steps", 1, 100_000),
+    coordination_integer("subagent_default_steps", 1, 100_000),
+    coordination_integer("launch_context_tokens", 1, 1_000_000),
+    coordination_integer("launch_context_messages", 1, 100_000),
+    coordination_integer("launch_context_entries", 1, 100_000),
+    coordination_integer("launch_context_bytes", 1, 1_073_741_824),
+    coordination_integer("launch_source_bytes", 1, 1_073_741_824),
+];
+
+pub fn coordination_field_bounds() -> &'static [CoordinationFieldBound] {
+    COORDINATION_FIELD_BOUNDS
+}
+
+/// Dotted names the GUI addresses coordination leaves by, e.g.
+/// `coordination.max_active_engine`.
+pub const COORDINATION_SETTINGS_KEY: &str = "coordination";
+
+pub fn coordination_field_path(name: &str) -> String {
+    format!("{COORDINATION_SETTINGS_KEY}.{name}")
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrajectoryRuntimeSettings {
@@ -96,6 +209,7 @@ pub struct TrajectoryRuntimeSettings {
     pub process_subscribe_preview_bytes: usize,
     pub review_diff_char_cap: usize,
     pub review_max_diff_patch_bytes: usize,
+    pub coordination: CoordinationSettings,
 }
 
 impl Default for TrajectoryRuntimeSettings {
@@ -150,6 +264,7 @@ impl Default for TrajectoryRuntimeSettings {
             process_subscribe_preview_bytes: PROCESS_SUBSCRIBE_PREVIEW_BYTES_DEFAULT,
             review_diff_char_cap: REVIEW_DIFF_CHAR_CAP_DEFAULT,
             review_max_diff_patch_bytes: REVIEW_MAX_DIFF_PATCH_BYTES_DEFAULT,
+            coordination: CoordinationSettings::default(),
         }
     }
 }
@@ -208,6 +323,11 @@ fn install_crate_limits(settings: &TrajectoryRuntimeSettings) {
     refact_vecdb::vdb_thread::install_vecdb_trajectory_split_bytes(
         settings.vecdb_trajectory_split_bytes,
     );
+    if let Err(error) =
+        refact_work_core::install_coordination_settings(settings.coordination.clone())
+    {
+        tracing::warn!("keeping previous coordination settings: {error}");
+    }
 }
 
 pub fn install_startup(settings: TrajectoryRuntimeSettings) {
@@ -519,7 +639,255 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
         settings.review_max_diff_patch_bytes,
         4_096,
         268_435_456,
-    )
+    )?;
+    validate_coordination(&settings.coordination)
+}
+
+/// Range-check every coordination leaf against the published bounds table, then
+/// hand the value to the crate for the invariants only it can express.
+pub fn validate_coordination(coordination: &CoordinationSettings) -> Result<(), String> {
+    let rendered = serde_json::to_value(coordination)
+        .map_err(|error| format!("cannot inspect coordination settings: {error}"))?;
+    let object = rendered
+        .as_object()
+        .ok_or_else(|| "coordination settings must serialize as an object".to_string())?;
+    for bound in coordination_field_bounds() {
+        let value = object.get(bound.name).ok_or_else(|| {
+            format!(
+                "{} is bounded but absent from the coordination settings",
+                coordination_field_path(bound.name)
+            )
+        })?;
+        if bound.value_type == "integer_map" {
+            validate_coordination_integer_map(bound, value)?;
+            continue;
+        }
+        let (minimum, maximum) = match (bound.minimum, bound.maximum) {
+            (Some(minimum), Some(maximum)) => (minimum, maximum),
+            _ => {
+                if !value.is_boolean() {
+                    return Err(format!(
+                        "{} must be true or false",
+                        coordination_field_path(bound.name)
+                    ));
+                }
+                continue;
+            }
+        };
+        let number = value.as_u64().ok_or_else(|| {
+            format!(
+                "{} must be a whole number",
+                coordination_field_path(bound.name)
+            )
+        })?;
+        validate_u64(
+            &coordination_field_path(bound.name),
+            number,
+            minimum,
+            maximum,
+        )?;
+    }
+    let bounded: std::collections::BTreeSet<&str> = coordination_field_bounds()
+        .iter()
+        .map(|bound| bound.name)
+        .collect();
+    if let Some(missing) = object.keys().find(|name| !bounded.contains(name.as_str())) {
+        return Err(format!(
+            "{} has no published range; add it to the coordination bounds table",
+            coordination_field_path(missing)
+        ));
+    }
+    coordination
+        .validate()
+        .map_err(|error| format!("coordination: {error}"))
+}
+
+/// A sparse per-project override: only the coordination leaves the project
+/// actually pins are present, everything else stays inherited.
+pub type CoordinationOverride = std::collections::BTreeMap<String, serde_json::Value>;
+
+fn validate_coordination_integer_map(
+    bound: &CoordinationFieldBound,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let map = value.as_object().ok_or_else(|| {
+        format!(
+            "{} must map root IDs to whole numbers",
+            coordination_field_path(bound.name)
+        )
+    })?;
+    for number in map.values() {
+        let number = number.as_u64().ok_or_else(|| {
+            format!(
+                "{} weights must be whole numbers",
+                coordination_field_path(bound.name)
+            )
+        })?;
+        validate_u64(
+            &coordination_field_path(bound.name),
+            number,
+            bound.minimum.unwrap_or(1),
+            bound.maximum.unwrap_or(u64::MAX),
+        )?;
+    }
+    Ok(())
+}
+
+/// Where a resolved coordination value came from.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinationValueSource {
+    Global,
+    Project,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct CoordinationEffectiveField {
+    pub name: String,
+    pub value: serde_json::Value,
+    pub global_value: serde_json::Value,
+    pub source: CoordinationValueSource,
+    pub inherited: bool,
+}
+
+pub fn project_coordination_path(project_root: &Path) -> PathBuf {
+    project_root.join(".refact").join("coordination.yaml")
+}
+
+pub async fn coordination_for_project(project_root: &Path) -> Result<CoordinationSettings, String> {
+    let overrides = load_project_coordination_override(&project_coordination_path(project_root))
+        .await
+        .map_err(|_| "project coordination settings unavailable")?;
+    resolve_coordination(&current().coordination, &overrides)
+        .map_err(|_| "project coordination settings invalid".to_string())
+}
+
+pub async fn load_project_coordination_override(
+    path: &Path,
+) -> Result<CoordinationOverride, String> {
+    let raw = match tokio::fs::read_to_string(path).await {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CoordinationOverride::new())
+        }
+        Err(error) => {
+            return Err(format!(
+                "cannot read coordination overrides {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    if raw.trim().is_empty() {
+        return Ok(CoordinationOverride::new());
+    }
+    let parsed: CoordinationOverride = serde_yaml::from_str(&raw).map_err(|error| {
+        format!(
+            "invalid coordination overrides in {}: {error}",
+            path.display()
+        )
+    })?;
+    normalize_coordination_override(parsed)
+}
+
+/// Accept only published coordination leaves, each already inside its range, so
+/// a project file can never widen a bound the global surface enforces.
+pub fn normalize_coordination_override(
+    raw: CoordinationOverride,
+) -> Result<CoordinationOverride, String> {
+    let mut normalized = CoordinationOverride::new();
+    for (name, value) in raw {
+        let bound = coordination_field_bounds()
+            .iter()
+            .find(|bound| bound.name == name)
+            .ok_or_else(|| format!("unknown coordination setting '{name}'"))?;
+        if bound.value_type == "integer_map" {
+            validate_coordination_integer_map(bound, &value)?;
+            normalized.insert(name, value);
+            continue;
+        }
+        match (bound.minimum, bound.maximum) {
+            (Some(minimum), Some(maximum)) => {
+                let number = value.as_u64().ok_or_else(|| {
+                    format!(
+                        "{} must be a whole number",
+                        coordination_field_path(bound.name)
+                    )
+                })?;
+                validate_u64(
+                    &coordination_field_path(bound.name),
+                    number,
+                    minimum,
+                    maximum,
+                )?;
+            }
+            _ => {
+                if !value.is_boolean() {
+                    return Err(format!(
+                        "{} must be true or false",
+                        coordination_field_path(bound.name)
+                    ));
+                }
+            }
+        }
+        normalized.insert(name, value);
+    }
+    Ok(normalized)
+}
+
+/// Merge a sparse project override onto the global coordination settings.
+pub fn resolve_coordination(
+    global: &CoordinationSettings,
+    overrides: &CoordinationOverride,
+) -> Result<CoordinationSettings, String> {
+    let overrides = normalize_coordination_override(overrides.clone())?;
+    let mut rendered = serde_json::to_value(global)
+        .map_err(|error| format!("cannot inspect coordination settings: {error}"))?;
+    let object = rendered
+        .as_object_mut()
+        .ok_or_else(|| "coordination settings must serialize as an object".to_string())?;
+    for (name, value) in overrides {
+        object.insert(name, value);
+    }
+    let resolved: CoordinationSettings = serde_json::from_value(rendered)
+        .map_err(|error| format!("invalid coordination overrides: {error}"))?;
+    validate_coordination(&resolved)?;
+    Ok(resolved)
+}
+
+/// The resolved view the Settings surface renders: every leaf, its effective
+/// value, the inherited global value, and whether the project pinned it.
+pub fn coordination_effective_view(
+    global: &CoordinationSettings,
+    overrides: &CoordinationOverride,
+) -> Result<Vec<CoordinationEffectiveField>, String> {
+    let resolved = resolve_coordination(global, overrides)?;
+    let resolved_json = serde_json::to_value(&resolved)
+        .map_err(|error| format!("cannot inspect coordination settings: {error}"))?;
+    let global_json = serde_json::to_value(global)
+        .map_err(|error| format!("cannot inspect coordination settings: {error}"))?;
+    Ok(coordination_field_bounds()
+        .iter()
+        .map(|bound| {
+            let overridden = overrides.contains_key(bound.name);
+            CoordinationEffectiveField {
+                name: bound.name.to_string(),
+                value: resolved_json
+                    .get(bound.name)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                global_value: global_json
+                    .get(bound.name)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                source: if overridden {
+                    CoordinationValueSource::Project
+                } else {
+                    CoordinationValueSource::Global
+                },
+                inherited: !overridden,
+            }
+        })
+        .collect())
 }
 
 fn validate_usize(name: &str, value: usize, minimum: usize, maximum: usize) -> Result<(), String> {
@@ -560,6 +928,12 @@ mod tests {
             codegraph_dead_code_max_results: 654,
             codegraph_exec_flow_max_nodes: 987,
             vecdb_trajectory_split_bytes: 4_096,
+            coordination: CoordinationSettings {
+                max_active_engine: 21,
+                max_pending: 512,
+                lock_timeout_secs: 17,
+                ..CoordinationSettings::default()
+            },
             ..TrajectoryRuntimeSettings::default()
         }
     }
@@ -668,6 +1042,288 @@ trajectory_writer_enabled: false
         assert_eq!(loaded.review_diff_char_cap, defaults.review_diff_char_cap);
         assert_eq!(loaded.cat_max_input_paths, defaults.cat_max_input_paths);
         assert!(validate(&loaded).is_ok());
+    }
+
+    #[test]
+    fn coordination_defaults_are_generous_and_survive_a_yaml_round_trip() {
+        let defaults = TrajectoryRuntimeSettings::default().coordination;
+        assert!(defaults.enabled);
+        assert!(defaults.auto_inject_enabled);
+        assert_eq!(defaults.max_active_engine, 32);
+        assert_eq!(defaults.max_active_project, 16);
+        assert_eq!(defaults.max_active_root, 16);
+        assert_eq!(defaults.max_pending, 1_024);
+        assert_eq!(defaults.max_outstanding, 4_096);
+        assert_eq!(defaults.max_subchat_depth, 5);
+        assert_eq!(defaults.max_read_stamps, 16_384);
+        assert_eq!(defaults.max_write_records, 65_536);
+        assert_eq!(defaults.overview_default_rows, 50);
+        assert_eq!(defaults.overview_max_rows, 500);
+        assert_eq!(defaults.capsule_token_budget, 1_600);
+        assert_eq!(defaults.capsule_max_rows, 24);
+        assert_eq!(defaults.min_interval_secs, 60);
+        assert_eq!(defaults.debounce_secs, 5);
+        assert_eq!(defaults.recent_window_secs, 3_600);
+        assert_eq!(defaults.lock_timeout_secs, 30);
+        assert_eq!(defaults.lock_poll_interval_ms, 25);
+
+        let yaml = serde_yaml::to_string(&tweaked()).unwrap();
+        let reloaded: TrajectoryRuntimeSettings = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(reloaded.coordination, tweaked().coordination);
+    }
+
+    #[test]
+    fn yaml_without_a_coordination_block_keeps_every_coordination_default() {
+        let legacy = "max_queue_size: 7\n";
+        let loaded: TrajectoryRuntimeSettings = serde_yaml::from_str(legacy).unwrap();
+        assert_eq!(loaded.max_queue_size, 7);
+        assert_eq!(
+            loaded.coordination,
+            TrajectoryRuntimeSettings::default().coordination
+        );
+        assert!(validate(&loaded).is_ok());
+    }
+
+    #[test]
+    fn a_partial_coordination_block_fills_the_rest_from_defaults() {
+        let partial = "coordination:\n  max_active_engine: 48\n  debounce_secs: 3\n";
+        let loaded: TrajectoryRuntimeSettings = serde_yaml::from_str(partial).unwrap();
+        let defaults = TrajectoryRuntimeSettings::default().coordination;
+        assert_eq!(loaded.coordination.max_active_engine, 48);
+        assert_eq!(loaded.coordination.debounce_secs, 3);
+        assert_eq!(loaded.coordination.max_pending, defaults.max_pending);
+        assert_eq!(
+            loaded.coordination.lock_poll_interval_ms,
+            defaults.lock_poll_interval_ms
+        );
+        assert!(validate(&loaded).is_ok());
+    }
+
+    #[test]
+    fn the_bounds_table_covers_exactly_the_serialized_coordination_leaves() {
+        let rendered = serde_json::to_value(CoordinationSettings::default()).unwrap();
+        let serialized: std::collections::BTreeSet<String> =
+            rendered.as_object().unwrap().keys().cloned().collect();
+        let bounded: std::collections::BTreeSet<String> = coordination_field_bounds()
+            .iter()
+            .map(|bound| bound.name.to_string())
+            .collect();
+        assert_eq!(bounded, serialized);
+        for bound in coordination_field_bounds() {
+            match (bound.minimum, bound.maximum) {
+                (Some(minimum), Some(maximum)) => {
+                    assert!(matches!(bound.value_type, "integer" | "integer_map"));
+                    assert!(minimum <= maximum, "{} has an empty range", bound.name);
+                }
+                _ => assert_eq!(bound.value_type, "boolean"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_default_sits_inside_its_published_range() {
+        let rendered = serde_json::to_value(CoordinationSettings::default()).unwrap();
+        for bound in coordination_field_bounds() {
+            if bound.value_type == "integer_map" {
+                validate_coordination_integer_map(bound, &rendered[bound.name]).unwrap();
+                continue;
+            }
+            let (minimum, maximum) = match (bound.minimum, bound.maximum) {
+                (Some(minimum), Some(maximum)) => (minimum, maximum),
+                _ => continue,
+            };
+            let value = rendered[bound.name].as_u64().unwrap();
+            assert!(
+                (minimum..=maximum).contains(&value),
+                "{} default {value} is outside {minimum}..={maximum}",
+                bound.name
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_range_and_invariant_violating_coordination_values_are_rejected() {
+        let mut settings = TrajectoryRuntimeSettings::default();
+        settings.coordination.max_subchat_depth = 0;
+        let error = validate(&settings).unwrap_err();
+        assert!(
+            error.contains("coordination.max_subchat_depth"),
+            "unexpected error: {error}"
+        );
+
+        let mut relational = TrajectoryRuntimeSettings::default();
+        relational.coordination.max_active_project = 64;
+        relational.coordination.max_active_engine = 32;
+        let error = validate(&relational).unwrap_err();
+        assert!(
+            error.contains("max_active_project"),
+            "unexpected error: {error}"
+        );
+
+        let mut too_big = TrajectoryRuntimeSettings::default();
+        too_big.coordination.capsule_max_rows = 100_000;
+        assert!(validate(&too_big).is_err());
+    }
+
+    #[test]
+    fn a_sparse_project_override_resolves_over_the_global_settings() {
+        let global = CoordinationSettings {
+            max_active_engine: 32,
+            capsule_max_rows: 24,
+            ..CoordinationSettings::default()
+        };
+        let mut overrides = CoordinationOverride::new();
+        overrides.insert("capsule_max_rows".to_string(), serde_json::json!(8));
+        overrides.insert("auto_inject_enabled".to_string(), serde_json::json!(false));
+
+        let resolved = resolve_coordination(&global, &overrides).unwrap();
+        assert_eq!(resolved.capsule_max_rows, 8);
+        assert!(!resolved.auto_inject_enabled);
+        assert_eq!(resolved.max_active_engine, global.max_active_engine);
+        assert_eq!(resolved.max_pending, global.max_pending);
+
+        let view = coordination_effective_view(&global, &overrides).unwrap();
+        let capsule = view
+            .iter()
+            .find(|field| field.name == "capsule_max_rows")
+            .unwrap();
+        assert_eq!(capsule.value, serde_json::json!(8));
+        assert_eq!(capsule.global_value, serde_json::json!(24));
+        assert_eq!(capsule.source, CoordinationValueSource::Project);
+        assert!(!capsule.inherited);
+
+        let engine = view
+            .iter()
+            .find(|field| field.name == "max_active_engine")
+            .unwrap();
+        assert_eq!(engine.source, CoordinationValueSource::Global);
+        assert!(engine.inherited);
+        assert_eq!(view.len(), coordination_field_bounds().len());
+    }
+
+    #[test]
+    fn an_empty_project_override_inherits_every_global_value() {
+        let global = CoordinationSettings {
+            max_pending: 77,
+            ..CoordinationSettings::default()
+        };
+        let overrides = CoordinationOverride::new();
+        assert_eq!(resolve_coordination(&global, &overrides).unwrap(), global);
+        assert!(coordination_effective_view(&global, &overrides)
+            .unwrap()
+            .iter()
+            .all(|field| field.inherited));
+    }
+
+    #[test]
+    fn project_overrides_cannot_introduce_unknown_or_out_of_range_values() {
+        let mut unknown = CoordinationOverride::new();
+        unknown.insert("not_a_setting".to_string(), serde_json::json!(1));
+        let error = normalize_coordination_override(unknown).unwrap_err();
+        assert!(error.contains("not_a_setting"), "unexpected error: {error}");
+
+        let mut widened = CoordinationOverride::new();
+        widened.insert(
+            "max_active_engine".to_string(),
+            serde_json::json!(1_000_000),
+        );
+        let error = normalize_coordination_override(widened).unwrap_err();
+        assert!(
+            error.contains("coordination.max_active_engine"),
+            "unexpected error: {error}"
+        );
+
+        let mut wrong_type = CoordinationOverride::new();
+        wrong_type.insert("enabled".to_string(), serde_json::json!(3));
+        assert!(normalize_coordination_override(wrong_type).is_err());
+
+        let mut breaks_invariant = CoordinationOverride::new();
+        breaks_invariant.insert("overview_default_rows".to_string(), serde_json::json!(900));
+        let error =
+            resolve_coordination(&CoordinationSettings::default(), &breaks_invariant).unwrap_err();
+        assert!(
+            error.contains("overview_default_rows"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn root_weights_are_validated_in_global_and_sparse_project_settings() {
+        let mut settings = CoordinationSettings::default();
+        settings.root_weights.insert("root".into(), 2);
+        validate_coordination(&settings).unwrap();
+        let overrides =
+            CoordinationOverride::from([("root_weights".into(), serde_json::json!({"other": 3}))]);
+        let resolved = resolve_coordination(&settings, &overrides).unwrap();
+        assert_eq!(resolved.root_quantum("other"), 3);
+        assert_eq!(resolved.root_quantum("root"), 1);
+        for value in [
+            serde_json::json!({"root": 0}),
+            serde_json::json!({"root": 1025}),
+            serde_json::json!([]),
+            serde_json::json!({"root": "2"}),
+        ] {
+            assert!(
+                normalize_coordination_override(CoordinationOverride::from([(
+                    "root_weights".into(),
+                    value
+                )]))
+                .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_empty_project_override_file_reads_as_no_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = project_coordination_path(dir.path());
+        assert!(load_project_coordination_override(&path)
+            .await
+            .unwrap()
+            .is_empty());
+
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&path, "").await.unwrap();
+        assert!(load_project_coordination_override(&path)
+            .await
+            .unwrap()
+            .is_empty());
+
+        tokio::fs::write(&path, "capsule_max_rows: 8\n")
+            .await
+            .unwrap();
+        let loaded = load_project_coordination_override(&path).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded["capsule_max_rows"], serde_json::json!(8));
+
+        tokio::fs::write(&path, "capsule_max_rows: 100000\n")
+            .await
+            .unwrap();
+        assert!(load_project_coordination_override(&path).await.is_err());
+    }
+
+    #[test]
+    #[serial(runtime_settings)]
+    fn coordination_settings_reach_the_crate_snapshot_live() {
+        reset_for_test();
+        assert_eq!(
+            refact_work_core::coordination_settings(),
+            CoordinationSettings::default()
+        );
+        let settings = tweaked();
+        install_live(&settings);
+        assert_eq!(
+            refact_work_core::coordination_settings(),
+            settings.coordination
+        );
+        assert_eq!(current().coordination, settings.coordination);
+        reset_for_test();
+        assert_eq!(
+            refact_work_core::coordination_settings(),
+            CoordinationSettings::default()
+        );
     }
 
     #[test]

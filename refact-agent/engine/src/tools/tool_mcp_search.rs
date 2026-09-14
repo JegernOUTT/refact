@@ -86,6 +86,21 @@ impl Tool for ToolMcpSearch {
             )
         };
         let mut integration_groups = get_integration_tools(gcx.clone()).await;
+        for group in &mut integration_groups {
+            let mut allowed = Vec::new();
+            for tool in group.tools.drain(..) {
+                if crate::agents::tool_authority::ensure_context_tool(
+                    &ccx,
+                    &tool.tool_description().name,
+                )
+                .await
+                .is_ok()
+                {
+                    allowed.push(tool);
+                }
+            }
+            group.tools = allowed;
+        }
         let policy = crate::tools::tools_list::tool_access_policy(gcx).await;
         if !bypass && !policy.tool_access.providers.is_empty() {
             let provider = crate::tools::tools_list::provider_of_model(&model_id);

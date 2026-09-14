@@ -1,8 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use git2::Repository;
-use tokio::sync::Mutex as AMutex;
 use tokio::fs;
 use tracing::warn;
 use uuid::Uuid;
@@ -12,10 +11,13 @@ use refact_buddy_core::user_action::UserAction;
 use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
 use crate::files_correction::get_project_dirs;
+use super::board_lock::{self, BoardLockGuard, BOARD_LOCK_FILE};
 use super::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus, TrajectoryInfo};
 use super::events::{emit_task_event, emit_task_updated, TaskEvent};
+use crate::coordination::board_rows::{self, BoardProvenance};
 
 const TASKS_DIR: &str = "tasks";
+const PLANNER_ID_COUNTER_FILE: &str = "planner_next_id";
 
 async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
     #[cfg(windows)]
@@ -27,21 +29,6 @@ async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), Stri
     fs::rename(tmp_path, dest_path)
         .await
         .map_err(|e| format!("Failed to rename: {}", e))
-}
-
-static BOARD_LOCKS: std::sync::OnceLock<AMutex<HashMap<String, Arc<AMutex<()>>>>> =
-    std::sync::OnceLock::new();
-
-fn get_board_locks() -> &'static AMutex<HashMap<String, Arc<AMutex<()>>>> {
-    BOARD_LOCKS.get_or_init(|| AMutex::new(HashMap::new()))
-}
-
-async fn get_board_lock(task_id: &str) -> Arc<AMutex<()>> {
-    let mut locks = get_board_locks().lock().await;
-    locks
-        .entry(task_id.to_string())
-        .or_insert_with(|| Arc::new(AMutex::new(())))
-        .clone()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +43,40 @@ impl BoardConflict {
             "Board rev mismatch: expected {}, actual {}",
             self.expected, self.actual
         )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardSaveError {
+    Conflict(BoardConflict),
+    Failed(String),
+}
+
+impl BoardSaveError {
+    pub fn message(&self) -> String {
+        match self {
+            BoardSaveError::Conflict(conflict) => conflict.message(),
+            BoardSaveError::Failed(error) => error.clone(),
+        }
+    }
+
+    pub fn conflict(&self) -> Option<BoardConflict> {
+        match self {
+            BoardSaveError::Conflict(conflict) => Some(*conflict),
+            BoardSaveError::Failed(_) => None,
+        }
+    }
+}
+
+impl From<String> for BoardSaveError {
+    fn from(value: String) -> Self {
+        BoardSaveError::Failed(value)
+    }
+}
+
+impl std::fmt::Display for BoardSaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
     }
 }
 
@@ -180,29 +201,160 @@ pub async fn save_task_meta(
 
 pub async fn load_board(gcx: Arc<GlobalContext>, task_id: &str) -> Result<TaskBoard, String> {
     let task_dir = find_task_dir(gcx, task_id).await?;
+    read_board_from_dir(&task_dir).await
+}
+
+async fn read_board_from_dir(task_dir: &Path) -> Result<TaskBoard, String> {
+    read_board_with_provenance(task_dir)
+        .await
+        .map(|(board, _)| board)
+}
+
+async fn read_board_with_provenance(
+    task_dir: &Path,
+) -> Result<(TaskBoard, BoardProvenance), String> {
     let board_path = task_dir.join("board.yaml");
     if !board_path.exists() {
-        return Ok(TaskBoard::default());
+        return Ok((TaskBoard::default(), BoardProvenance::default()));
     }
     let content = fs::read_to_string(&board_path)
         .await
         .map_err(|e| e.to_string())?;
-    serde_yaml::from_str(&content).map_err(|e| e.to_string())
+    let value: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|e| e.to_string())?;
+    let board = serde_yaml::from_value(value.clone()).map_err(|e| e.to_string())?;
+    let provenance = value
+        .get("work_provenance")
+        .and_then(|value| serde_yaml::from_value(value.clone()).ok())
+        .unwrap_or_default();
+    Ok((board, provenance))
 }
 
+async fn write_board_locked(
+    gcx: &GlobalContext,
+    guard: &BoardLockGuard,
+    task_dir: &Path,
+    board: &TaskBoard,
+    provenance: &BoardProvenance,
+) -> Result<(), String> {
+    if !guard.guards(BOARD_LOCK_FILE) {
+        return Err("Board write attempted without the board lock".to_string());
+    }
+    if guard.dir() != task_dir {
+        return Err(format!(
+            "Board write attempted under a lock for a different task dir: {} vs {}",
+            guard.dir().display(),
+            task_dir.display()
+        ));
+    }
+    let board_path = task_dir.join("board.yaml");
+    let tmp_path = task_dir.join("board.yaml.tmp");
+    let mut value = serde_yaml::to_value(board).map_err(|e| e.to_string())?;
+    value
+        .as_mapping_mut()
+        .ok_or("board must be a mapping")?
+        .insert(
+            serde_yaml::Value::String("work_provenance".into()),
+            serde_yaml::to_value(provenance).map_err(|e| e.to_string())?,
+        );
+    let content = serde_yaml::to_string(&value).map_err(|e| e.to_string())?;
+    fs::write(&tmp_path, &content)
+        .await
+        .map_err(|e| e.to_string())?;
+    atomic_write_file(&tmp_path, &board_path).await?;
+    gcx.work_boards.publish(task_dir, Some((board, provenance)));
+    Ok(())
+}
+
+async fn locked_task_dir(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+) -> Result<(PathBuf, BoardLockGuard), String> {
+    let task_dir = find_task_dir(gcx, task_id).await?;
+    let guard = board_lock::acquire_board(&task_dir).await?;
+    let canonical = guard.dir().to_path_buf();
+    Ok((canonical, guard))
+}
+
+async fn board_max_reviewers(gcx: Arc<GlobalContext>, task_id: &str) -> Result<usize, String> {
+    let task_dir = find_task_dir(gcx, task_id).await?;
+    let project_root = task_dir
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| format!("Task directory {} has no project root", task_dir.display()))?;
+    Ok(crate::runtime_settings::coordination_for_project(project_root)
+        .await?
+        .board_max_reviewers)
+}
+
+/// Create `board.yaml` for a task that must not have one yet.
+///
+/// This is the only writer allowed to run without a revision check, and it
+/// still refuses to clobber an existing board.
+pub async fn create_board(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    board: &TaskBoard,
+) -> Result<(), BoardSaveError> {
+    let max_reviewers = board_max_reviewers(gcx.clone(), task_id)
+        .await
+        .map_err(BoardSaveError::from)?;
+    board
+        .validate_for_write(max_reviewers)
+        .map_err(BoardSaveError::from)?;
+    let source = board_rows::actor_provenance(&gcx).await?;
+    let (task_dir, guard) = locked_task_dir(gcx.clone(), task_id).await?;
+    let existing = read_board_from_dir(&task_dir).await?;
+    if task_dir.join("board.yaml").exists() {
+        return Err(BoardSaveError::Conflict(BoardConflict {
+            expected: 0,
+            actual: existing.rev,
+        }));
+    }
+    let provenance = board_rows::write_provenance(board, None, source);
+    write_board_locked(&gcx, &guard, &task_dir, board, &provenance).await?;
+    Ok(())
+}
+
+#[cfg(test)]
 pub async fn save_board(
     gcx: Arc<GlobalContext>,
     task_id: &str,
     board: &TaskBoard,
 ) -> Result<(), String> {
-    let task_dir = find_task_dir(gcx, task_id).await?;
-    let board_path = task_dir.join("board.yaml");
-    let tmp_path = task_dir.join("board.yaml.tmp");
-    let content = serde_yaml::to_string(board).map_err(|e| e.to_string())?;
-    fs::write(&tmp_path, &content)
+    board.validate_for_write(board_max_reviewers(gcx.clone(), task_id).await?)?;
+    let (task_dir, guard) = locked_task_dir(gcx.clone(), task_id)
         .await
         .map_err(|e| e.to_string())?;
-    atomic_write_file(&tmp_path, &board_path).await
+    write_board_locked(&gcx, &guard, &task_dir, board, &BoardProvenance::default()).await
+}
+
+/// Replace `board.yaml` only when the on-disk revision still matches
+/// `expected_rev`, under the cross-process board lock.
+pub async fn save_board_checked(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    expected_rev: u64,
+    board: &TaskBoard,
+) -> Result<(), BoardSaveError> {
+    let max_reviewers = board_max_reviewers(gcx.clone(), task_id)
+        .await
+        .map_err(BoardSaveError::from)?;
+    board
+        .validate_for_write(max_reviewers)
+        .map_err(BoardSaveError::Storage)?;
+    let source = board_rows::actor_provenance(&gcx).await?;
+    let (task_dir, guard) = locked_task_dir(gcx.clone(), task_id).await?;
+    let (existing, previous) = read_board_with_provenance(&task_dir).await?;
+    if existing.rev != expected_rev {
+        return Err(BoardSaveError::Conflict(BoardConflict {
+            expected: expected_rev,
+            actual: existing.rev,
+        }));
+    }
+    let provenance = board_rows::write_provenance(board, Some((&existing, &previous)), source);
+    write_board_locked(&gcx, &guard, &task_dir, board, &provenance).await?;
+    Ok(())
 }
 
 pub async fn update_board_atomic<F, T>(
@@ -214,17 +366,82 @@ where
     F: FnOnce(&mut TaskBoard) -> Result<T, String>,
     T: Default,
 {
-    let lock = get_board_lock(task_id).await;
-    let _guard = lock.lock().await;
+    let planner_actor = match crate::file_activity::current_actor() {
+        Some(actor)
+            if crate::chat::trajectories::chat_id_is_planner_for_task(
+                gcx.clone(),
+                &actor,
+                task_id,
+            )
+            .await =>
+        {
+            Some(actor)
+        }
+        _ => None,
+    };
+    update_board_atomic_with_reviewer(gcx, task_id, planner_actor, None, updater).await
+}
 
-    let mut board = load_board(gcx.clone(), task_id).await?;
+pub async fn update_board_atomic_as_reviewer<F, T>(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    reviewer_chat_id: &str,
+    updater: F,
+) -> Result<(TaskBoard, T), String>
+where
+    F: FnOnce(&mut TaskBoard) -> Result<T, String>,
+    T: Default,
+{
+    if !crate::chat::trajectories::chat_id_is_planner_for_task(
+        gcx.clone(),
+        reviewer_chat_id,
+        task_id,
+    )
+    .await
+    {
+        return Err("task review requires an authenticated planner chat".to_string());
+    }
+    update_board_atomic_with_reviewer(
+        gcx,
+        task_id,
+        None,
+        Some(reviewer_chat_id.to_string()),
+        updater,
+    )
+    .await
+}
+
+async fn update_board_atomic_with_reviewer<F, T>(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    planner_actor: Option<String>,
+    reviewer_actor: Option<String>,
+    updater: F,
+) -> Result<(TaskBoard, T), String>
+where
+    F: FnOnce(&mut TaskBoard) -> Result<T, String>,
+    T: Default,
+{
+    let max_reviewers = board_max_reviewers(gcx.clone(), task_id).await?;
+    let source = board_rows::actor_provenance(&gcx).await?;
+    let (task_dir, guard) = locked_task_dir(gcx.clone(), task_id).await?;
+
+    let (existing, previous) = read_board_with_provenance(&task_dir).await?;
+    let mut board = existing.clone();
     let failed_before: HashSet<String> = board
         .cards
         .iter()
         .filter(|card| card.column == "failed" || card.column == "regressed")
         .map(|card| card.id.clone())
         .collect();
+    if let Some(actor) = planner_actor.as_deref() {
+        board.authorize_owner(actor)?;
+    }
+    if let Some(reviewer) = reviewer_actor.as_deref() {
+        board.authorize_reviewer(reviewer)?;
+    }
     let result = updater(&mut board)?;
+    board.validate_for_write(max_reviewers)?;
     let new_failed = board
         .cards
         .iter()
@@ -254,7 +471,9 @@ where
         })
         .collect::<Vec<_>>();
     board.rev += 1;
-    save_board(gcx.clone(), task_id, &board).await?;
+    let provenance = board_rows::write_provenance(&board, Some((&existing, &previous)), source);
+    write_board_locked(&gcx, &guard, &task_dir, &board, &provenance).await?;
+    drop(guard);
     if !new_failed.is_empty() {
         let user_activity = gcx.user_activity.clone();
         if let Ok(mut ring) = user_activity.try_lock() {
@@ -366,7 +585,9 @@ pub async fn create_task(gcx: Arc<GlobalContext>, name: &str) -> Result<TaskMeta
     };
 
     save_task_meta(gcx.clone(), &task_id, &meta).await?;
-    save_board(gcx.clone(), &task_id, &TaskBoard::default()).await?;
+    create_board(gcx.clone(), &task_id, &TaskBoard::default())
+        .await
+        .map_err(|e| e.message())?;
     save_planner_instructions(gcx.clone(), &task_id, "").await?;
 
     emit_task_event(
@@ -398,10 +619,13 @@ pub async fn create_task(gcx: Arc<GlobalContext>, name: &str) -> Result<TaskMeta
 
 pub async fn delete_task(gcx: Arc<GlobalContext>, task_id: &str) -> Result<(), String> {
     let task_dir = find_task_dir(gcx.clone(), task_id).await?;
+    let guard = board_lock::acquire_board(&task_dir).await?;
     let tasks_dir = task_dir.parent().map(Path::to_path_buf);
     fs::remove_dir_all(&task_dir)
         .await
         .map_err(|e| e.to_string())?;
+    gcx.work_boards.publish(guard.dir(), None);
+    drop(guard);
     if let Some(tasks_dir) = tasks_dir {
         if let Err(e) = super::index::remove_task_index_entry(&tasks_dir, task_id).await {
             warn!(
@@ -489,14 +713,35 @@ fn should_list_task_trajectory(role: &str, data: &serde_json::Value) -> bool {
     }
 }
 
-/// Compute the next planner chat id in the standard `planner-{task_id}-{n}` format.
+async fn read_planner_id_counter(task_dir: &Path) -> u32 {
+    let path = task_dir.join(PLANNER_ID_COUNTER_FILE);
+    match fs::read_to_string(&path).await {
+        Ok(content) => content.trim().parse::<u32>().unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+async fn write_planner_id_counter(task_dir: &Path, value: u32) -> Result<(), String> {
+    let path = task_dir.join(PLANNER_ID_COUNTER_FILE);
+    let tmp_path = task_dir.join(format!("{}.tmp", PLANNER_ID_COUNTER_FILE));
+    fs::write(&tmp_path, value.to_string())
+        .await
+        .map_err(|e| e.to_string())?;
+    atomic_write_file(&tmp_path, &path).await
+}
+
+/// Reserve the next planner chat id in the standard `planner-{task_id}-{n}` format.
 ///
-/// NOTE: this is not strictly atomic — concurrent callers can pick the same
-/// number. Callers that care about uniqueness must serialize themselves.
+/// The returned number is durably reserved before the lock is released, so two
+/// callers never receive the same id even when neither has created its chat yet.
 pub async fn next_planner_chat_id(
     gcx: Arc<GlobalContext>,
     task_id: &str,
 ) -> Result<String, String> {
+    let task_dir = find_task_dir(gcx.clone(), task_id).await?;
+    let guard = board_lock::acquire_planner_ids(&task_dir).await?;
+    let task_dir = guard.dir().to_path_buf();
+
     let existing = list_task_trajectories_for(
         gcx,
         task_id,
@@ -506,7 +751,7 @@ pub async fn next_planner_chat_id(
     )
     .await?;
     let prefix = format!("planner-{}-", task_id);
-    let max_num = existing
+    let max_listed = existing
         .iter()
         .filter_map(|t| {
             t.id.strip_prefix(&prefix)
@@ -514,7 +759,11 @@ pub async fn next_planner_chat_id(
         })
         .max()
         .unwrap_or(0);
-    Ok(format!("planner-{}-{}", task_id, max_num + 1))
+    let reserved = max_listed.max(read_planner_id_counter(&task_dir).await) + 1;
+    write_planner_id_counter(&task_dir, reserved).await?;
+    drop(guard);
+
+    Ok(format!("planner-{}-{}", task_id, reserved))
 }
 
 pub async fn list_task_trajectories(
@@ -617,6 +866,197 @@ pub fn infer_task_id_from_chat_id(chat_id: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subprocess_board_claim() {
+        let Ok(root) = std::env::var("REFACT_TEST_BOARD_RACE_ROOT") else {
+            return;
+        };
+        let id = std::env::var("REFACT_TEST_BOARD_RACE_ID").unwrap();
+        let root = PathBuf::from(root);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let gcx = crate::global_context::tests::make_test_gcx().await;
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
+            std::fs::write(root.join(format!("ready-{id}")), "ready").unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !root.join("go").exists() {
+                assert!(std::time::Instant::now() < deadline);
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            let result = update_board_atomic(gcx, "task-race", |board| {
+                let card = board.cards.first_mut().ok_or("card missing")?;
+                if card.agent_chat_id.is_some() {
+                    return Err("already claimed".into());
+                }
+                card.agent_chat_id = Some(id.clone());
+                card.column = "doing".into();
+                Ok(())
+            })
+            .await;
+            std::fs::write(
+                root.join(format!("result-{id}")),
+                if result.is_ok() { "won" } else { "claimed" },
+            )
+            .unwrap();
+        });
+    }
+
+    fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn board_persistence_has_no_writer_outside_the_guarded_transaction() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_sources(&src, &mut files);
+        files.sort();
+        let this_file = src.join("tasks").join("storage.rs");
+        let bootstrap = src.join("coordination").join("board_bootstrap.rs");
+        let mut violations = Vec::new();
+        let mut guarded_callers = std::collections::BTreeSet::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).unwrap();
+            let relative = file.strip_prefix(&src).unwrap().display().to_string();
+            let test_only_module = file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with("tests.rs"));
+            let first_test_marker = if test_only_module {
+                0
+            } else if *file == this_file {
+                text.find("\nmod tests {").unwrap_or(text.len())
+            } else {
+                text.find("#[cfg(test)]").unwrap_or(text.len())
+            };
+            let mut offset = 0usize;
+            let mut current_fn = String::new();
+            for line in text.split_inclusive('\n') {
+                let start = offset;
+                offset += line.len();
+                let trimmed = line.trim_start();
+                if let Some(rest) = trimmed
+                    .strip_prefix("pub async fn ")
+                    .or_else(|| trimmed.strip_prefix("pub(crate) async fn "))
+                    .or_else(|| trimmed.strip_prefix("async fn "))
+                    .or_else(|| trimmed.strip_prefix("pub fn "))
+                    .or_else(|| trimmed.strip_prefix("pub(crate) fn "))
+                    .or_else(|| trimmed.strip_prefix("fn "))
+                {
+                    current_fn = rest
+                        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .next()
+                        .unwrap_or_default()
+                        .to_string();
+                }
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                let mentions_board = line.contains("board.yaml");
+                let calls_writer = line.contains("write_board_locked(");
+                if !(mentions_board || calls_writer) {
+                    continue;
+                }
+                if start >= first_test_marker {
+                    continue;
+                }
+                if *file == this_file {
+                    if calls_writer && !trimmed.starts_with("async fn write_board_locked(") {
+                        guarded_callers.insert(current_fn.clone());
+                    }
+                    continue;
+                }
+                let read_only = *file == bootstrap
+                    && !calls_writer
+                    && !["write", "create", "rename", "remove", "open"]
+                        .iter()
+                        .any(|verb| line.contains(verb));
+                if !read_only {
+                    violations.push(format!("{relative}: {}", line.trim()));
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "board writers outside storage.rs: {violations:#?}"
+        );
+        assert_eq!(
+            guarded_callers,
+            [
+                "create_board",
+                "save_board",
+                "save_board_checked",
+                "update_board_atomic"
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+        );
+    }
+
+    #[test]
+    fn cooperating_processes_cannot_both_claim_one_board_card() {
+        let root = tempfile::tempdir().unwrap();
+        let task = root.path().join(".refact/tasks/task-race");
+        std::fs::create_dir_all(&task).unwrap();
+        let board: TaskBoard = serde_json::from_value(serde_json::json!({"cards":[{
+            "id":"card","title":"Claim","column":"planned","created_at":"2026-01-01T00:00:00Z"
+        }]}))
+        .unwrap();
+        std::fs::write(
+            task.join("board.yaml"),
+            serde_yaml::to_string(&board).unwrap(),
+        )
+        .unwrap();
+        let spawn = |id: &str| {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tasks::storage::tests::subprocess_board_claim",
+                    "--nocapture",
+                ])
+                .env("REFACT_TEST_BOARD_RACE_ROOT", root.path())
+                .env("REFACT_TEST_BOARD_RACE_ID", id)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        let mut a = spawn("a");
+        let mut b = spawn("b");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !root.path().join("ready-a").exists() || !root.path().join("ready-b").exists() {
+            if std::time::Instant::now() >= deadline {
+                let _ = a.kill();
+                let _ = b.kill();
+                let _ = a.wait();
+                let _ = b.wait();
+                panic!("board subprocesses did not reach barrier");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::fs::write(root.path().join("go"), "go").unwrap();
+        assert!(a.wait().unwrap().success());
+        assert!(b.wait().unwrap().success());
+        let a = std::fs::read_to_string(root.path().join("result-a")).unwrap();
+        let b = std::fs::read_to_string(root.path().join("result-b")).unwrap();
+        assert_ne!(a, b);
+        let board: TaskBoard =
+            serde_yaml::from_str(&std::fs::read_to_string(task.join("board.yaml")).unwrap())
+                .unwrap();
+        assert_eq!(board.rev, 1);
+        assert!(board.cards[0].agent_chat_id.is_some());
+    }
     use super::*;
     use refact_buddy_core::user_action::UserAction;
     use crate::tasks::types::{
@@ -657,7 +1097,7 @@ mod tests {
             planner_session_state: None,
         };
         save_task_meta(gcx.clone(), task_id, &meta).await.unwrap();
-        save_board(
+        create_board(
             gcx.clone(),
             task_id,
             &TaskBoard {
@@ -888,6 +1328,198 @@ mod tests {
         singleton.agent_chat_id = Some("chat-single".to_string());
 
         assert_eq!(active_agent_count(&[ab, singleton]), 2);
+    }
+
+    async fn task_with_board(root: &std::path::Path, task_id: &str) -> Arc<GlobalContext> {
+        let gcx = setup_workspace(root).await;
+        let task_dir = root.join(".refact/tasks").join(task_id);
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+        save_task_meta(
+            gcx.clone(),
+            task_id,
+            &test_meta(task_id, "Task", "2026-01-01T00:00:00Z"),
+        )
+        .await
+        .unwrap();
+        create_board(gcx.clone(), task_id, &TaskBoard::default())
+            .await
+            .unwrap();
+        gcx
+    }
+
+    #[tokio::test]
+    async fn create_board_refuses_to_clobber_existing_board() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = task_with_board(temp.path(), "task-create-once").await;
+
+        let again = create_board(gcx.clone(), "task-create-once", &TaskBoard::default()).await;
+
+        assert!(matches!(again, Err(BoardSaveError::Conflict(_))));
+    }
+
+    #[tokio::test]
+    async fn save_board_checked_rejects_stale_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = task_with_board(temp.path(), "task-checked").await;
+
+        let (board, _) = update_board_atomic(gcx.clone(), "task-checked", |board| {
+            board.cards.clear();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(board.rev, 1);
+
+        let stale = save_board_checked(gcx.clone(), "task-checked", 0, &board).await;
+        assert_eq!(
+            stale.unwrap_err().conflict(),
+            Some(BoardConflict {
+                expected: 0,
+                actual: 1
+            })
+        );
+
+        let mut fresh = board.clone();
+        fresh.rev = 2;
+        save_board_checked(gcx.clone(), "task-checked", 1, &fresh)
+            .await
+            .unwrap();
+        assert_eq!(load_board(gcx, "task-checked").await.unwrap().rev, 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_updates_do_not_lose_cards() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = task_with_board(temp.path(), "task-concurrent-cards").await;
+
+        let mut handles = vec![];
+        for i in 0..8 {
+            let gcx = gcx.clone();
+            handles.push(tokio::spawn(async move {
+                update_board_atomic(gcx, "task-concurrent-cards", move |board| {
+                    board.cards.push(BoardCard {
+                        id: format!("card-{i}"),
+                        title: format!("card-{i}"),
+                        column: "todo".to_string(),
+                        priority: "P1".to_string(),
+                        depends_on: vec![],
+                        instructions: String::new(),
+                        assignee: None,
+                        agent_chat_id: None,
+                        status_updates: vec![],
+                        comments: vec![],
+                        final_report: None,
+                        final_report_structured: None,
+                        verifier_report: None,
+                        created_at: "2026-01-01T00:00:00Z".to_string(),
+                        started_at: None,
+                        last_heartbeat_at: None,
+                        completed_at: None,
+                        agent_branch: None,
+                        agent_worktree: None,
+                        agent_worktree_name: None,
+                        base_branch: None,
+                        base_commit: None,
+                        ab_variants: None,
+                        team_members: vec![],
+                        target_files: vec![],
+                        scope_guard_mode: Default::default(),
+                    });
+                    Ok(())
+                })
+                .await
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
+
+        let board = load_board(gcx, "task-concurrent-cards").await.unwrap();
+        assert_eq!(board.cards.len(), 8);
+        assert_eq!(board.rev, 8);
+    }
+
+    #[tokio::test]
+    async fn board_write_rejects_lock_for_another_task_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = task_with_board(temp.path(), "task-guard-a").await;
+        let other_dir = temp.path().join(".refact/tasks").join("task-guard-b");
+        tokio::fs::create_dir_all(&other_dir).await.unwrap();
+
+        let task_dir = find_task_dir(gcx.clone(), "task-guard-a").await.unwrap();
+        let foreign_guard = board_lock::acquire_board(&other_dir).await.unwrap();
+
+        let error = write_board_locked(
+            &gcx,
+            &foreign_guard,
+            &task_dir,
+            &TaskBoard::default(),
+            &BoardProvenance::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("different task dir"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn board_write_rejects_planner_id_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = task_with_board(temp.path(), "task-guard-kind").await;
+        let task_dir = find_task_dir(gcx.clone(), "task-guard-kind").await.unwrap();
+        let planner_guard = board_lock::acquire_planner_ids(&task_dir).await.unwrap();
+
+        let error = write_board_locked(
+            &gcx,
+            &planner_guard,
+            planner_guard.dir(),
+            &TaskBoard::default(),
+            &BoardProvenance::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("without the board lock"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn planner_chat_ids_are_reserved_durably_without_created_chats() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = task_with_board(temp.path(), "task-planner-ids").await;
+
+        let first = next_planner_chat_id(gcx.clone(), "task-planner-ids")
+            .await
+            .unwrap();
+        let second = next_planner_chat_id(gcx.clone(), "task-planner-ids")
+            .await
+            .unwrap();
+
+        assert_eq!(first, "planner-task-planner-ids-1");
+        assert_eq!(second, "planner-task-planner-ids-2");
+    }
+
+    #[tokio::test]
+    async fn concurrent_planner_chat_id_reservations_are_unique() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = task_with_board(temp.path(), "task-planner-race").await;
+
+        let mut handles = vec![];
+        for _ in 0..8 {
+            let gcx = gcx.clone();
+            handles.push(tokio::spawn(async move {
+                next_planner_chat_id(gcx, "task-planner-race").await
+            }));
+        }
+        let mut ids = vec![];
+        for handle in handles {
+            ids.push(handle.await.unwrap().unwrap());
+        }
+
+        let unique: HashSet<String> = ids.iter().cloned().collect();
+        assert_eq!(unique.len(), 8, "duplicate planner ids: {ids:?}");
+        assert!(ids
+            .iter()
+            .all(|id| id.starts_with("planner-task-planner-race-")));
     }
 
     #[tokio::test]

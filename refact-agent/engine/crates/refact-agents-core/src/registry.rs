@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, TimeDelta, Utc};
 use tokio::sync::{Mutex, Notify, RwLock};
 use uuid::Uuid;
-use refact_chat_api::{DeliveryOutcome, PendingDelivery, PushMode};
+use refact_chat_api::{
+    DeliveryOutcome, DeliveryStatus, DeliveryStatusRecord, PendingDelivery, PushMode,
+};
 
 use crate::storage;
 use crate::types::{
@@ -16,8 +18,6 @@ use crate::types::{
 };
 #[cfg(test)]
 use crate::types::BgAgentKind;
-
-const MAX_INBOX_MESSAGES: usize = 100;
 
 #[derive(Debug, Clone)]
 pub struct InboxMessage {
@@ -73,6 +73,7 @@ impl BackgroundAgentRegistry {
             .await
             .map_err(|e| format!("Failed to create background agent registry directory: {e}"))?;
         let mut records = storage::load_all(&storage_root).await?;
+        normalize_delivery_state(&mut records);
         reconcile_interrupted(&storage_root, &mut records).await?;
         Ok(Arc::new(Self {
             records: RwLock::new(records),
@@ -91,6 +92,7 @@ impl BackgroundAgentRegistry {
         let agent_id = format!("bgagent-{}", Uuid::new_v4());
         let record = BackgroundAgent {
             schema_version: 1,
+            run_generation: 1,
             agent_id: agent_id.clone(),
             parent_chat_id: req.parent_chat_id,
             parent_root_chat_id: req.parent_root_chat_id,
@@ -116,6 +118,7 @@ impl BackgroundAgentRegistry {
             completion_push: PushMode::Append,
             pending_deliveries: Vec::new(),
             delivery_ids: Vec::new(),
+            dropped_deliveries: Vec::new(),
             deferred_at: None,
             model: req.model,
             model_type: req.model_type,
@@ -128,6 +131,8 @@ impl BackgroundAgentRegistry {
             questions: Vec::new(),
             tokens_used: 0,
             cost_usd: None,
+            deliverable: None,
+            deliverable_status: None,
             created_at: now,
             started_at: None,
             finished_at: None,
@@ -160,20 +165,77 @@ impl BackgroundAgentRegistry {
         Ok((record, abort_flag, notify))
     }
 
+    pub async fn save_accepted_launch(
+        &self,
+        agent_id: &str,
+        payload: &storage::AcceptedLaunchPayload,
+    ) -> Result<(), String> {
+        let record = self.get_any(agent_id).await?;
+        if record.status != BgAgentStatus::Queued || record.run_generation != 1 {
+            return Err(
+                "accepted launch can only be installed on the initial queued attempt".into(),
+            );
+        }
+        storage::save_accepted_launch(&self.storage_root, agent_id, payload).await
+    }
+
+    pub async fn accepted_launch(
+        &self,
+        parent_chat_id: &str,
+        agent_id: &str,
+        max_bytes: usize,
+    ) -> Result<storage::AcceptedLaunchPayload, String> {
+        let record = self.get_any(agent_id).await?;
+        if record.parent_chat_id != parent_chat_id {
+            return Err("accepted launch is not visible".into());
+        }
+        storage::load_accepted_launch(&self.storage_root, agent_id, max_bytes).await
+    }
+
     pub async fn mark_running(
         self: &Arc<Self>,
         agent_id: &str,
         child_chat_id: String,
     ) -> Result<BackgroundAgent, String> {
         self.update_record_if_not_terminal(agent_id, false, |record, now| {
+            let starting = record.status == BgAgentStatus::Queued;
             record.status = BgAgentStatus::Running;
             record.child_chat_id = Some(child_chat_id);
-            record.started_at = Some(now);
+            if starting || record.started_at.is_none() {
+                record.started_at = Some(now);
+            }
             record.finished_at = None;
             record.error = None;
             Ok(())
         })
         .await
+    }
+
+    pub async fn save_run_config(
+        &self,
+        agent_id: &str,
+        generation: u64,
+        payload: &storage::AcceptedLaunchPayload,
+    ) -> Result<(), String> {
+        let record = self.get_any(agent_id).await?;
+        if record.status != BgAgentStatus::Queued || record.run_generation != generation {
+            return Err("run configuration requires the matching queued generation".into());
+        }
+        storage::save_run_config(&self.storage_root, agent_id, generation, payload).await
+    }
+
+    pub async fn run_config(
+        &self,
+        parent_chat_id: &str,
+        agent_id: &str,
+        generation: u64,
+        max_bytes: usize,
+    ) -> Result<storage::AcceptedLaunchPayload, String> {
+        let record = self.get_any(agent_id).await?;
+        if record.parent_chat_id != parent_chat_id || record.run_generation != generation {
+            return Err("run configuration is not visible at this generation".into());
+        }
+        storage::load_run_config(&self.storage_root, agent_id, generation, max_bytes).await
     }
 
     pub async fn update_progress(
@@ -230,12 +292,158 @@ impl BackgroundAgentRegistry {
         .await
     }
 
+    pub async fn set_worktree_metadata(
+        self: &Arc<Self>,
+        agent_id: &str,
+        worktree_id: Option<String>,
+        worktree_branch: Option<String>,
+    ) -> Result<BackgroundAgent, String> {
+        self.update_record_if_not_terminal(agent_id, false, |record, _| {
+            record.worktree_id = worktree_id;
+            record.worktree_branch = worktree_branch;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn reopen_capped(
+        self: &Arc<Self>,
+        agent_id: &str,
+        parent_chat_id: &str,
+        expected_change_seq: u64,
+    ) -> Result<(BackgroundAgent, Arc<AtomicBool>, Arc<Notify>), String> {
+        self.reopen(agent_id, parent_chat_id, expected_change_seq, true)
+            .await
+    }
+
+    pub async fn reopen(
+        self: &Arc<Self>,
+        agent_id: &str,
+        parent_chat_id: &str,
+        expected_change_seq: u64,
+        require_cap: bool,
+    ) -> Result<(BackgroundAgent, Arc<AtomicBool>, Arc<Notify>), String> {
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(Notify::new());
+        let (previous, updated) = {
+            // Keep the records -> runtime order used by terminal retirement. Publish
+            // the claim and its cancellation handle together, before awaiting disk IO.
+            let mut records = self.records.write().await;
+            let previous = records
+                .get(agent_id)
+                .cloned()
+                .ok_or_else(|| "agent not found".to_string())?;
+            if previous.parent_chat_id != parent_chat_id {
+                return Err("agent is not owned by this parent".into());
+            }
+            if previous.change_seq != expected_change_seq {
+                return Err("agent changed; inspect its current state before resuming".into());
+            }
+            let recoverable = previous
+                .error
+                .as_deref()
+                .and_then(super::types::CapStop::from_error)
+                .is_some_and(|stop| stop.parent_can_raise_steps());
+            if require_cap && (previous.status != BgAgentStatus::Failed || !recoverable) {
+                return Err("agent is not stopped by a recoverable cap".into());
+            }
+            if !previous.status.is_terminal() {
+                return Err("agent has not stopped".into());
+            }
+            let mut runtime = self.runtime.write().await;
+            if runtime.contains_key(agent_id) {
+                return Err("agent's previous runner is still finishing".into());
+            }
+            let mut updated = previous.clone();
+            updated.run_generation = previous
+                .run_generation
+                .checked_add(1)
+                .ok_or("agent run generation overflow")?;
+            updated.status = BgAgentStatus::Queued;
+            updated.error = None;
+            updated.finished_at = None;
+            updated.completion_message_id = None;
+            updated.completion_pushed_at = None;
+            updated.deferred_at = None;
+            updated.result_summary = None;
+            updated.result_payload_path = None;
+            updated.current_tool = None;
+            touch_record(&mut updated, Utc::now());
+            records.insert(agent_id.to_string(), updated.clone());
+            runtime.insert(
+                agent_id.to_string(),
+                AgentRuntime {
+                    abort_flag: abort_flag.clone(),
+                    notify: notify.clone(),
+                    interrupt_notify: Arc::new(Notify::new()),
+                    inbox: Arc::new(Mutex::new(VecDeque::new())),
+                    delivery_state: Arc::new(Mutex::new(RunnerDeliveryState::default())),
+                },
+            );
+            (previous, updated)
+        };
+        if let Err(error) = self.flush_records(Vec::new()).await {
+            let mut records = self.records.write().await;
+            let mut runtime = self.runtime.write().await;
+            abort_flag.store(true, Ordering::SeqCst);
+            if runtime
+                .get(agent_id)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.abort_flag, &abort_flag))
+            {
+                runtime.remove(agent_id);
+            }
+            // A cancellation or a newer claim wins over this failed disk write.
+            if records
+                .get(agent_id)
+                .is_some_and(|record| record.change_seq == updated.change_seq)
+            {
+                let mut restored = previous;
+                restored.change_seq = updated.change_seq;
+                touch_record(&mut restored, Utc::now());
+                records.insert(agent_id.to_string(), restored);
+            }
+            notify.notify_waiters();
+            return Err(error);
+        }
+        // Cancellation may have won while the flush was awaiting its IO lock.
+        let records = self.records.read().await;
+        if abort_flag.load(Ordering::SeqCst)
+            || records
+                .get(agent_id)
+                .is_none_or(|record| record.status != BgAgentStatus::Queued)
+        {
+            return Err("agent changed while reopening".into());
+        }
+        Ok((updated, abort_flag, notify))
+    }
+
     pub async fn set_merge_status(
         &self,
         agent_id: &str,
         status: &str,
     ) -> Result<BackgroundAgent, String> {
         self.set_merge_outcome(agent_id, status, None, None).await
+    }
+
+    pub async fn install_deliverable(
+        &self,
+        agent_id: &str,
+        contract: refact_chat_api::DeliverableContract,
+    ) -> Result<BackgroundAgent, String> {
+        self.update_record(agent_id, |record, _| {
+            if record.status != BgAgentStatus::Queued || record.run_generation != 1 {
+                return Err(
+                    "deliverable contract can only be installed on the initial queued attempt"
+                        .into(),
+                );
+            }
+            if record.deliverable.is_some() {
+                return Err("deliverable contract already installed".into());
+            }
+            record.deliverable = Some(contract);
+            Ok(())
+        })
+        .await
     }
 
     pub async fn set_merge_outcome(
@@ -281,8 +489,15 @@ impl BackgroundAgentRegistry {
                 }
                 record.questions.push(AgentQuestion {
                     id: question_id.clone(),
+                    kind: refact_chat_api::QuestionKind::AgentParent,
+                    asker: agent_id.to_string(),
+                    answerer: record.parent_chat_id.clone(),
+                    correlation_id: question_id.clone(),
                     text,
+                    options: None,
+                    state: refact_chat_api::QuestionState::Pending,
                     asked_at: now,
+                    expires_at: None,
                     answer: None,
                     answered_at: None,
                 });
@@ -309,6 +524,7 @@ impl BackgroundAgentRegistry {
                 return Err("question already answered".to_string());
             }
             question.answer = Some(answer);
+            question.state = refact_chat_api::QuestionState::Answered;
             question.answered_at = Some(now);
             Ok(())
         })
@@ -335,6 +551,7 @@ impl BackgroundAgentRegistry {
                 diff_summary,
                 conflict_summary,
                 child_chat_id,
+                deliverable_status,
             } = completion;
             let payload = serde_json::json!({
                 "agent_id": agent_id,
@@ -343,6 +560,7 @@ impl BackgroundAgentRegistry {
                 "diff_summary": diff_summary.clone(),
                 "conflict_summary": conflict_summary.clone(),
                 "child_chat_id": child_chat_id.clone(),
+                "deliverable_status": deliverable_status.clone(),
             });
             let result_payload_path =
                 storage::save_result_payload(&self.storage_root, agent_id, &payload).await?;
@@ -354,6 +572,7 @@ impl BackgroundAgentRegistry {
             updated.edited_files = edited_files;
             updated.diff_summary = diff_summary;
             updated.conflict_summary = conflict_summary;
+            updated.deliverable_status = deliverable_status;
             updated.current_tool = None;
             if child_chat_id.is_some() {
                 updated.child_chat_id = child_chat_id;
@@ -394,6 +613,16 @@ impl BackgroundAgentRegistry {
             let mut updated = current;
             let now = Utc::now();
             updated.status = BgAgentStatus::Failed;
+            if let Some(stop) = super::types::CapStop::from_error(&error) {
+                if matches!(
+                    stop.key,
+                    super::types::CapKind::Steps | super::types::CapKind::GoalTurns
+                ) {
+                    updated.step_count = updated
+                        .step_count
+                        .max(u32::try_from(stop.used).unwrap_or(u32::MAX));
+                }
+            }
             updated.error = Some(error);
             updated.current_tool = None;
             updated.result_payload_path = Some(result_payload_path);
@@ -503,12 +732,29 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         message_id: String,
     ) -> Result<(), String> {
+        self.set_completion_message_id_for_run(agent_id, None, message_id)
+            .await
+    }
+
+    pub async fn set_completion_message_id_for_run(
+        &self,
+        agent_id: &str,
+        run_generation: Option<u64>,
+        message_id: String,
+    ) -> Result<(), String> {
         {
             let mut records = self.records.write().await;
             let current = records
                 .get(agent_id)
                 .cloned()
                 .ok_or_else(|| "agent not found".to_string())?;
+            // An old terminal delivery may finish after capped recovery. It must
+            // not attach the previous attempt's correlation to the live attempt.
+            if !current.status.is_terminal()
+                || run_generation.is_some_and(|generation| generation != current.run_generation)
+            {
+                return Ok(());
+            }
             if let Some(current_id) = current.completion_message_id.as_deref() {
                 if current_id != "pending" && current_id != "deferred" {
                     return Ok(());
@@ -873,7 +1119,7 @@ impl BackgroundAgentRegistry {
     pub async fn enqueue_delivery(
         &self,
         agent_id: &str,
-        delivery: PendingDelivery,
+        mut delivery: PendingDelivery,
     ) -> Result<DeliveryOutcome, String> {
         let runtime = self
             .runtime
@@ -888,8 +1134,21 @@ impl BackgroundAgentRegistry {
         }
         let mut outcome = DeliveryOutcome::Queued;
         let preempt = delivery.push == PushMode::Preempt;
-        self.update_record(agent_id, |record, _| {
+        let claimed = state.claimed.clone();
+        let settings = refact_work_core::coordination_settings();
+        if delivery.expires_at_ms.is_none() {
+            delivery.expires_at_ms = Some(
+                delivery
+                    .enqueued_at_ms
+                    .saturating_add(settings.delivery_default_ttl_secs.saturating_mul(1000)),
+            );
+        }
+        self.update_record(agent_id, |record, now| {
             if record.delivery_ids.contains(&delivery.id)
+                || record
+                    .dropped_deliveries
+                    .iter()
+                    .any(|dropped| dropped.id == delivery.id)
                 || record
                     .pending_deliveries
                     .iter()
@@ -901,7 +1160,32 @@ impl BackgroundAgentRegistry {
             if record.status.is_terminal() {
                 return Err("agent already finished".to_string());
             }
-            if record.pending_deliveries.len() >= MAX_INBOX_MESSAGES {
+            if delivery
+                .expires_at_ms
+                .is_some_and(|deadline| deadline <= now.timestamp_millis().max(0) as u64)
+            {
+                record_dropped_delivery(record, delivery.id.clone(), DeliveryStatus::Expired);
+                outcome = DeliveryOutcome::Expired;
+                return Ok(());
+            }
+            if let Some(key) = delivery.supersede_key.as_deref() {
+                let superseded: Vec<String> = record
+                    .pending_deliveries
+                    .iter()
+                    .filter(|pending| {
+                        pending.supersede_key.as_deref() == Some(key)
+                            && !claimed.contains(&pending.id)
+                    })
+                    .map(|pending| pending.id.clone())
+                    .collect();
+                record
+                    .pending_deliveries
+                    .retain(|pending| !superseded.contains(&pending.id));
+                for id in superseded {
+                    record_dropped_delivery(record, id, DeliveryStatus::Superseded);
+                }
+            }
+            if record.pending_deliveries.len() >= settings.delivery_max_pending {
                 return Err("agent delivery queue is full".to_string());
             }
             record.pending_deliveries.push(delivery);
@@ -940,7 +1224,7 @@ impl BackgroundAgentRegistry {
                 .ok_or_else(|| "pending delivery not found".to_string())?;
             if cancel {
                 let cancelled = record.pending_deliveries.remove(index);
-                record.delivery_ids.push(cancelled.id);
+                record_dropped_delivery(record, cancelled.id, DeliveryStatus::Failed);
             } else if let Some(push) = push {
                 record.pending_deliveries[index].push = push;
             }
@@ -963,10 +1247,132 @@ impl BackgroundAgentRegistry {
             if !record.delivery_ids.iter().any(|delivered| delivered == id) {
                 record.delivery_ids.push(id.to_string());
             }
+            let retention = refact_work_core::coordination_settings().delivery_status_retention;
+            if record.delivery_ids.len() > retention {
+                record
+                    .delivery_ids
+                    .drain(..record.delivery_ids.len() - retention);
+            }
             Ok(())
         })
         .await
         .map(|_| ())
+    }
+
+    pub async fn consume_delivery(&self, agent_id: &str, id: &str) -> Result<(), String> {
+        self.update_record(agent_id, |record, _| {
+            let was_pending = record
+                .pending_deliveries
+                .iter()
+                .any(|delivery| delivery.id == id);
+            let was_delivered = record.delivery_ids.iter().any(|delivered| delivered == id);
+            if !was_pending && !was_delivered {
+                return Err("delivery was not accepted by this agent".to_string());
+            }
+            record
+                .pending_deliveries
+                .retain(|delivery| delivery.id != id);
+            record.delivery_ids.retain(|delivered| delivered != id);
+            record_dropped_delivery(record, id.to_string(), DeliveryStatus::Consumed);
+            Ok(())
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Lifecycle of one delivery id for this runner: pending, consumed,
+    /// dropped before consumption, or never seen.
+    pub async fn delivery_status(&self, agent_id: &str, id: &str) -> DeliveryStatus {
+        let records = self.records.read().await;
+        let Some(record) = records.get(agent_id) else {
+            return DeliveryStatus::Unknown;
+        };
+        if record
+            .pending_deliveries
+            .iter()
+            .any(|pending| pending.id == id)
+        {
+            return DeliveryStatus::Pending;
+        }
+        if let Some(status) = record
+            .dropped_deliveries
+            .iter()
+            .rev()
+            .find(|dropped| dropped.id == id)
+            .map(|dropped| dropped.status)
+        {
+            return status;
+        }
+        record
+            .delivery_ids
+            .iter()
+            .any(|known| known == id)
+            .then_some(DeliveryStatus::Delivered)
+            .unwrap_or(DeliveryStatus::Unknown)
+    }
+
+    pub async fn record_delivery_status(
+        &self,
+        agent_id: &str,
+        id: &str,
+        status: DeliveryStatus,
+    ) -> Result<(), String> {
+        if !matches!(
+            status,
+            DeliveryStatus::Consumed
+                | DeliveryStatus::Expired
+                | DeliveryStatus::Superseded
+                | DeliveryStatus::Failed
+        ) {
+            return Err("delivery status is not terminal".to_string());
+        }
+        self.update_record(agent_id, |record, _| {
+            record
+                .pending_deliveries
+                .retain(|delivery| delivery.id != id);
+            record.delivery_ids.retain(|delivered| delivered != id);
+            record_dropped_delivery(record, id.to_string(), status);
+            Ok(())
+        })
+        .await
+        .map(|_| ())
+    }
+
+    async fn expire_deliveries(&self, agent_id: &str, claimed: &HashSet<String>) {
+        let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+        let expired: Vec<String> = self
+            .records
+            .read()
+            .await
+            .get(agent_id)
+            .map(|record| {
+                record
+                    .pending_deliveries
+                    .iter()
+                    .filter(|pending| {
+                        !claimed.contains(&pending.id)
+                            && pending
+                                .expires_at_ms
+                                .is_some_and(|deadline| deadline <= now_ms)
+                    })
+                    .map(|pending| pending.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if expired.is_empty() {
+            return;
+        }
+        let _ = self
+            .update_record(agent_id, |record, _| {
+                record
+                    .pending_deliveries
+                    .retain(|pending| !expired.contains(&pending.id));
+                for id in &expired {
+                    record_dropped_delivery(record, id.clone(), DeliveryStatus::Expired);
+                }
+                Ok(())
+            })
+            .await;
     }
 
     pub async fn drain_deliveries(
@@ -982,6 +1388,8 @@ impl BackgroundAgentRegistry {
             .cloned()
             .ok_or_else(|| "agent is not running in this process".to_string())?;
         let mut state = runtime.delivery_state.lock().await;
+        let claimed = state.claimed.clone();
+        self.expire_deliveries(agent_id, &claimed).await;
         let records = self.records.read().await;
         let record = records
             .get(agent_id)
@@ -1015,6 +1423,8 @@ impl BackgroundAgentRegistry {
             .cloned()
             .ok_or_else(|| "agent is not running in this process".to_string())?;
         let mut state = runtime.delivery_state.lock().await;
+        let claimed = state.claimed.clone();
+        self.expire_deliveries(agent_id, &claimed).await;
         let records = self.records.read().await;
         let record = records
             .get(agent_id)
@@ -1056,7 +1466,7 @@ impl BackgroundAgentRegistry {
             .await
             .ok_or_else(|| "agent is not running in this process".to_string())?;
         let mut inbox = inbox.lock().await;
-        if inbox.len() >= MAX_INBOX_MESSAGES {
+        if inbox.len() >= refact_work_core::coordination_settings().delivery_max_pending {
             return Err("agent inbox is full".to_string());
         }
         inbox.push_back(msg);
@@ -1244,6 +1654,69 @@ impl BackgroundAgentRegistry {
     }
 }
 
+fn normalize_delivery_state(records: &mut HashMap<String, BackgroundAgent>) {
+    let settings = refact_work_core::coordination_settings();
+    let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+    for record in records.values_mut() {
+        let mut superseded = Vec::new();
+        let mut expired = Vec::new();
+        let mut newest_by_key: HashMap<String, String> = HashMap::new();
+        for delivery in &mut record.pending_deliveries {
+            if delivery.expires_at_ms.is_none() {
+                delivery.expires_at_ms = Some(
+                    now_ms.saturating_add(settings.delivery_default_ttl_secs.saturating_mul(1000)),
+                );
+            }
+            if delivery
+                .expires_at_ms
+                .is_some_and(|deadline| deadline <= now_ms)
+            {
+                expired.push(delivery.id.clone());
+            }
+            if let Some(key) = &delivery.supersede_key {
+                if let Some(previous) = newest_by_key.insert(key.clone(), delivery.id.clone()) {
+                    superseded.push(previous);
+                }
+            }
+        }
+        record.pending_deliveries.retain(|delivery| {
+            !expired.contains(&delivery.id) && !superseded.contains(&delivery.id)
+        });
+        for id in expired {
+            record_dropped_delivery(record, id, DeliveryStatus::Expired);
+        }
+        for id in superseded {
+            record_dropped_delivery(record, id, DeliveryStatus::Superseded);
+        }
+        if record.pending_deliveries.len() > settings.delivery_max_pending {
+            let overflow = record.pending_deliveries.len() - settings.delivery_max_pending;
+            let dropped: Vec<_> = record.pending_deliveries.drain(..overflow).collect();
+            for delivery in dropped {
+                record_dropped_delivery(record, delivery.id, DeliveryStatus::Failed);
+            }
+        }
+        if record.delivery_ids.len() > settings.delivery_status_retention {
+            let overflow = record.delivery_ids.len() - settings.delivery_status_retention;
+            record.delivery_ids.drain(..overflow);
+        }
+        if record.dropped_deliveries.len() > settings.delivery_status_retention {
+            let overflow = record.dropped_deliveries.len() - settings.delivery_status_retention;
+            record.dropped_deliveries.drain(..overflow);
+        }
+    }
+}
+
+fn record_dropped_delivery(record: &mut BackgroundAgent, id: String, status: DeliveryStatus) {
+    record.dropped_deliveries.retain(|dropped| dropped.id != id);
+    record
+        .dropped_deliveries
+        .push(DeliveryStatusRecord { id, status });
+    let retention = refact_work_core::coordination_settings().delivery_status_retention;
+    while record.dropped_deliveries.len() > retention {
+        record.dropped_deliveries.remove(0);
+    }
+}
+
 pub fn normalize_path_for_overlap(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     let mut collapsed = String::with_capacity(normalized.len());
@@ -1336,7 +1809,7 @@ async fn reconcile_interrupted(
             record.last_update_at = now;
             record.change_seq = record.change_seq.saturating_add(1);
             record.error = Some(
-                "Engine restarted before agent finished. True resume is not supported.".to_string(),
+                "Engine restarted before agent finished. Inspect the saved child before explicit recovery; no work was replayed.".to_string(),
             );
             interrupted.push(record.clone());
         }
@@ -1350,6 +1823,7 @@ async fn reconcile_interrupted(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
 
     async fn registry() -> (tempfile::TempDir, Arc<BackgroundAgentRegistry>) {
         let temp = tempfile::tempdir().unwrap();
@@ -1378,6 +1852,146 @@ mod tests {
         }
     }
 
+    async fn capped(registry: &Arc<BackgroundAgentRegistry>) -> BackgroundAgent {
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+        registry
+            .update_progress(&record.agent_id, "capped".into(), 4)
+            .await
+            .unwrap();
+        registry
+            .add_usage(&record.agent_id, 123, Some(0.5))
+            .await
+            .unwrap();
+        let error = super::super::types::CapStop {
+            key: refact_work_core::CapKind::Steps,
+            scope: refact_work_core::CapScope::Child,
+            limit: 4,
+            used: 4,
+            resumable: true,
+            run_generation: 0,
+        }
+        .as_error()
+        .unwrap();
+        registry.mark_failed(&record.agent_id, error).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn capped_reopen_rejects_forged_caps_owner_and_stale_revision() {
+        let (_temp, registry) = registry().await;
+        let record = capped(&registry).await;
+        assert!(registry
+            .reopen_capped(&record.agent_id, "other", record.change_seq)
+            .await
+            .is_err());
+        assert!(registry
+            .reopen_capped(&record.agent_id, "parent", record.change_seq - 1)
+            .await
+            .is_err());
+        for error in [
+            "CAP_STOP:forged",
+            "CAP_STOP:{\"key\":\"max_steps\",\"limit\":4,\"used\":4,\"resumable\":false}",
+            "CAP_STOP:{\"key\":\"goal.max_turns\",\"limit\":4,\"used\":4,\"resumable\":true}",
+        ] {
+            let forged = registry
+                .update_record(&record.agent_id, |r, _| {
+                    r.error = Some(error.into());
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            assert!(registry
+                .reopen_capped(&record.agent_id, "parent", forged.change_seq)
+                .await
+                .is_err());
+            assert!(!registry.has_runtime(&record.agent_id).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn capped_reopen_has_one_winner_and_preserves_accounting() {
+        let (_temp, registry) = registry().await;
+        let record = capped(&registry).await;
+        registry
+            .set_completion_message_id(&record.agent_id, "old".into())
+            .await
+            .unwrap();
+        let record = registry.get_any(&record.agent_id).await.unwrap();
+        let (one, two) = tokio::join!(
+            registry.reopen_capped(&record.agent_id, "parent", record.change_seq),
+            registry.reopen_capped(&record.agent_id, "parent", record.change_seq),
+        );
+        assert_ne!(one.is_ok(), two.is_ok());
+        let (reopened, _, _) = one.or(two).unwrap();
+        assert_eq!(reopened.step_count, 4);
+        assert_eq!(reopened.tokens_used, 123);
+        assert_eq!(reopened.cost_usd, Some(0.5));
+        assert!(reopened.result_payload_path.is_none());
+        registry
+            .set_completion_message_id(&record.agent_id, "late-old".into())
+            .await
+            .unwrap();
+        assert!(registry
+            .get_any(&record.agent_id)
+            .await
+            .unwrap()
+            .completion_message_id
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_reopen_flush_cannot_resurrect_runtime() {
+        let (_temp, registry) = registry().await;
+        let record = capped(&registry).await;
+        let disk = registry.storage_write.lock().await;
+        let reopen = registry.reopen_capped(&record.agent_id, "parent", record.change_seq);
+        tokio::pin!(reopen);
+        // Poll exactly through publication and stop on the held disk lock.
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(reopen.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        let flag = registry.abort_flag(&record.agent_id).await.unwrap();
+        let cancel = registry.cancel("parent", &record.agent_id, None);
+        tokio::pin!(cancel);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(cancel.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(flag.load(Ordering::SeqCst));
+        drop(disk);
+        let (resumed, cancelled) = tokio::join!(reopen, cancel);
+        assert!(resumed.is_err());
+        assert_eq!(cancelled.unwrap().status, BgAgentStatus::Cancelled);
+        assert!(!registry.has_runtime(&record.agent_id).await);
+    }
+
+    #[tokio::test]
+    async fn failed_reopen_flush_releases_claim_without_reusing_revision() {
+        let (_temp, registry) = registry().await;
+        let record = capped(&registry).await;
+        tokio::fs::remove_dir_all(&registry.storage_root)
+            .await
+            .unwrap();
+        tokio::fs::write(&registry.storage_root, b"not a directory")
+            .await
+            .unwrap();
+        assert!(registry
+            .reopen_capped(&record.agent_id, "parent", record.change_seq)
+            .await
+            .is_err());
+        let restored = registry.get_any(&record.agent_id).await.unwrap();
+        assert_eq!(restored.status, BgAgentStatus::Failed);
+        assert_eq!(restored.error, record.error);
+        assert!(restored.change_seq > record.change_seq);
+        assert!(!registry.has_runtime(&record.agent_id).await);
+        assert!(registry
+            .reopen_capped(&record.agent_id, "parent", record.change_seq)
+            .await
+            .is_err());
+    }
+
     fn inbox_message(text: impl Into<String>) -> InboxMessage {
         InboxMessage {
             from: "sibling".to_string(),
@@ -1393,6 +2007,7 @@ mod tests {
             diff_summary: None,
             conflict_summary: None,
             child_chat_id: None,
+            deliverable_status: None,
         }
     }
 
@@ -1524,7 +2139,8 @@ mod tests {
     async fn inbox_drops_oldest_message_after_capacity() {
         let (_temp, registry) = registry().await;
         let (record, _, _) = registry.create(request("parent")).await.unwrap();
-        for index in 0..MAX_INBOX_MESSAGES {
+        let capacity = refact_work_core::coordination_settings().delivery_max_pending;
+        for index in 0..capacity {
             registry
                 .push_inbox(&record.agent_id, inbox_message(index.to_string()))
                 .await
@@ -1535,12 +2151,128 @@ mod tests {
             .await
             .is_err());
         let inbox = registry.drain_inbox(&record.agent_id).await;
-        assert_eq!(inbox.len(), MAX_INBOX_MESSAGES);
+        assert_eq!(inbox.len(), capacity);
         assert_eq!(inbox[0].text, "0");
     }
 
     fn delivery(push: PushMode) -> PendingDelivery {
         PendingDelivery::new(Vec::new(), push, "registry-test".to_string(), true)
+    }
+
+    #[tokio::test]
+    async fn runner_deliveries_expire_and_supersede_without_reaching_the_agent() {
+        let (_temp, registry) = registry().await;
+        let (record, _cancel, _) = registry.create(request("parent")).await.unwrap();
+        let now_ms = Utc::now().timestamp_millis() as u64;
+        let mut stale = delivery(PushMode::Append);
+        stale.expires_at_ms = Some(now_ms.saturating_sub(1));
+        assert_eq!(
+            registry
+                .enqueue_delivery(&record.agent_id, stale.clone())
+                .await
+                .unwrap(),
+            DeliveryOutcome::Expired
+        );
+        assert_eq!(
+            registry.delivery_status(&record.agent_id, &stale.id).await,
+            DeliveryStatus::Expired
+        );
+        let mut first = delivery(PushMode::Append);
+        first.supersede_key = Some("steer:card".into());
+        let mut second = delivery(PushMode::Append);
+        second.supersede_key = Some("steer:card".into());
+        let mut soon = delivery(PushMode::Append);
+        soon.expires_at_ms = Some(now_ms + 40);
+        for pending in [first.clone(), second.clone(), soon.clone()] {
+            assert_eq!(
+                registry
+                    .enqueue_delivery(&record.agent_id, pending)
+                    .await
+                    .unwrap(),
+                DeliveryOutcome::Queued
+            );
+        }
+        assert_eq!(
+            registry.delivery_status(&record.agent_id, &first.id).await,
+            DeliveryStatus::Superseded
+        );
+        assert_eq!(
+            registry.delivery_status(&record.agent_id, &second.id).await,
+            DeliveryStatus::Pending
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let drained = registry
+            .drain_deliveries(&record.agent_id, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            drained.iter().map(|d| d.id.clone()).collect::<Vec<_>>(),
+            vec![second.id.clone()]
+        );
+        assert_eq!(
+            registry.delivery_status(&record.agent_id, &soon.id).await,
+            DeliveryStatus::Expired
+        );
+        registry
+            .acknowledge_delivery(&record.agent_id, &second.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            registry.delivery_status(&record.agent_id, &second.id).await,
+            DeliveryStatus::Delivered
+        );
+        registry
+            .consume_delivery(&record.agent_id, &second.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            registry.delivery_status(&record.agent_id, &second.id).await,
+            DeliveryStatus::Consumed
+        );
+        assert_eq!(
+            registry.delivery_status(&record.agent_id, "never").await,
+            DeliveryStatus::Unknown
+        );
+        let persisted = registry.get_any(&record.agent_id).await.unwrap();
+        assert_eq!(persisted.dropped_deliveries.len(), 4);
+        assert!(persisted.pending_deliveries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delivery_terminal_statuses_survive_registry_restore_and_reject_id_reuse() {
+        let (temp, registry) = registry().await;
+        let (record, _cancel, _) = registry.create(request("parent")).await.unwrap();
+        let mut message = delivery(PushMode::Append);
+        message.supersede_key = Some("steer:one".to_string());
+        registry
+            .enqueue_delivery(&record.agent_id, message.clone())
+            .await
+            .unwrap();
+        registry
+            .consume_delivery(&record.agent_id, &message.id)
+            .await
+            .unwrap();
+        let restored = BackgroundAgentRegistry::new(temp.path().join("agents"))
+            .await
+            .unwrap();
+        assert_eq!(
+            restored
+                .delivery_status(&record.agent_id, &message.id)
+                .await,
+            DeliveryStatus::Consumed
+        );
+        let reopened = restored.get_any(&record.agent_id).await.unwrap();
+        let (_runtime_record, _, _) = restored
+            .reopen(&record.agent_id, "parent", reopened.change_seq, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            restored
+                .enqueue_delivery(&record.agent_id, message)
+                .await
+                .unwrap(),
+            DeliveryOutcome::Duplicate
+        );
     }
 
     #[tokio::test]

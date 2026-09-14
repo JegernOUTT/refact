@@ -76,6 +76,48 @@ struct ParsedShellArgs {
     push: PushMode,
 }
 
+pub(crate) async fn approval_request(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    args: &HashMap<String, Value>,
+) -> Result<crate::exec::ExecSpawnRequest, String> {
+    let (gcx, scope, chat_id) = {
+        let context = ccx.lock().await;
+        (
+            context.app.gcx.clone(),
+            context.execution_scope.clone(),
+            context.chat_id.clone(),
+        )
+    };
+    let policy = shell_gate::load_policy(gcx.clone()).await;
+    let mut filter = OutputFilter::default();
+    filter.limit_lines = policy.execution.output_limit_lines;
+    let parsed = parse_args_with_filter(gcx.clone(), args, &filter, scope.as_ref()).await?;
+    let cwd = parsed
+        .workdir
+        .or(get_active_project_path(gcx.clone()).await);
+    let mut errors = Vec::new();
+    let env = crate::integrations::setting_up_integrations::get_vars_for_replacements(
+        gcx.clone(),
+        &mut errors,
+    )
+    .await;
+    let chat_mode = chat_mode_for_exec(gcx.clone(), &chat_id).await;
+    build_exec_request(
+        gcx,
+        CommandPolicyInput {
+            source: ExecSource::ShellTool,
+            command: CommandKind::Shell(&parsed.command),
+            cwd,
+            env,
+            chat_mode,
+            escalation: parsed.escalation,
+        },
+    )
+    .await
+    .map(|policy| policy.request)
+    .map_err(|error| error.message)
+}
+
 #[async_trait]
 impl Tool for ToolShell {
     async fn tool_execute(
@@ -213,6 +255,21 @@ impl Tool for ToolShell {
         }
 
         let started = tokio::time::Instant::now();
+        if let Err(error) = crate::agents::command_approval::enforce(
+            &ccx,
+            tool_call_id,
+            "shell",
+            args,
+            &mut request,
+        )
+        .await
+        {
+            drop(request);
+            if let Some(progress_task) = progress_task {
+                let _ = progress_task.await;
+            }
+            return Err(error);
+        }
         let result = match exec_registry.spawn(request).await {
             Ok(result) => result,
             Err(error) => {

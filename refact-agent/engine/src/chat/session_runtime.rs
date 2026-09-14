@@ -174,6 +174,8 @@ pub async fn get_or_create_session_with_trajectory(
         .await;
         let transition_identity_repaired = loaded.transition_identity_repaired;
         let transition_repair_patch = transition_identity_repaired.then(|| loaded.repair_patch());
+        let work_project_root =
+            crate::coordination::scope::restored_source_root(&app, &loaded.source_path).await;
         let mut session = ChatSession::new_with_trajectory(
             chat_id.to_string(),
             loaded.messages,
@@ -183,6 +185,8 @@ pub async fn get_or_create_session_with_trajectory(
             loaded.waiting_for_card_ids,
             loaded.goal,
         );
+        session.work_project_root = work_project_root;
+        let dropped_deliveries = loaded.dropped_deliveries.clone();
         if let Some(agent_id) = app.agents.find_agent_id_by_child_chat_id(chat_id).await {
             if app.agents.has_runtime(&agent_id).await {
                 session.restore_pending_deliveries(Vec::new());
@@ -193,6 +197,7 @@ pub async fn get_or_create_session_with_trajectory(
         } else {
             session.restore_pending_deliveries(loaded.pending_deliveries);
         }
+        session.merge_dropped_deliveries(dropped_deliveries);
         session.goal_ledger = loaded.goal_ledger;
         session.goal_verification_blocked_until_ms = loaded.goal_verification_blocked_until_ms;
         session.compression_retry_after_ms = loaded.compression_retry_after_ms;
@@ -202,6 +207,10 @@ pub async fn get_or_create_session_with_trajectory(
         (session, false, transition_repair_patch)
     } else {
         let mut s = ChatSession::new(chat_id.to_string());
+        s.work_project_root =
+            crate::coordination::roots::resolve_source_workspace_root(gcx.clone(), None)
+                .await
+                .ok();
         s.increment_version();
         s.trajectory_dirty = false;
         (s, true, None)

@@ -243,6 +243,7 @@ mod tests {
                     diff_summary: Some("diff".to_string()),
                     conflict_summary: None,
                     child_chat_id: Some("completed-child".to_string()),
+                    deliverable_status: None,
                 },
             )
             .await

@@ -263,6 +263,57 @@ describe("BackgroundAgentCard", () => {
     ).toBeVisible();
   });
 
+  it("renders the structural deliverable verdict with its reasons", () => {
+    render(
+      <BackgroundAgentCard
+        agent={makeAgent({
+          status: "completed",
+          deliverable: {
+            required_sections: ["Findings"],
+            evidence_required: true,
+          },
+          deliverable_status: {
+            check: "structural",
+            met: false,
+            missing_sections: ["Findings"],
+            schema_error: null,
+            evidence_missing: true,
+          },
+        })}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand background agent details" }),
+    );
+    const badge = screen.getByTestId("background-agent-deliverable");
+    expect(badge).toHaveTextContent("Deliverable unmet");
+    expect(badge).toHaveAttribute(
+      "title",
+      "structural check · missing sections: Findings · evidence section missing; claims are unverified",
+    );
+  });
+
+  it("distinguishes a declared but unevaluated deliverable contract", () => {
+    render(
+      <BackgroundAgentCard
+        agent={makeAgent({
+          status: "failed",
+          error: "provider unavailable",
+          deliverable: {
+            required_sections: ["Findings"],
+            evidence_required: false,
+          },
+        })}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand background agent details" }),
+    );
+    expect(
+      screen.getByTestId("background-agent-deliverable"),
+    ).toHaveTextContent("Deliverable not evaluated");
+  });
+
   it("hides live tool state and zero cost for terminal agents", () => {
     render(
       <BackgroundAgentCard

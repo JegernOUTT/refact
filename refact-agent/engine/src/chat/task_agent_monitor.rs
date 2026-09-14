@@ -1803,6 +1803,21 @@ async fn check_for_stuck_agents(app: AppState) -> Result<(), String> {
                 }
             };
 
+            if crate::tasks::admission::is_queued(agent_chat_id).await
+                || app
+                    .agent_executions
+                    .get(agent_chat_id)
+                    .is_some_and(|execution| {
+                        matches!(
+                            execution.state(),
+                            crate::agents::execution::ExecutionState::Parked
+                                | crate::agents::execution::ExecutionState::Acquiring
+                                | crate::agents::execution::ExecutionState::Suspending
+                        )
+                    })
+            {
+                continue;
+            }
             let session_arc = {
                 let sessions_read = sessions.read().await;
                 sessions_read.get(agent_chat_id).cloned()

@@ -277,6 +277,7 @@ pub struct ExecSandboxSpec {
 pub enum ExecEnvPolicy {
     Inherit,
     Scrubbed { passthrough: Vec<String> },
+    Exact,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

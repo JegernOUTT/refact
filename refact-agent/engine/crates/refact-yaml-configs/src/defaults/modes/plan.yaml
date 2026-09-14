@@ -220,6 +220,7 @@ tools:
   - subagent
   - agents_overview
   - agent_message
+  - agent_peer_grant
   - agent_list
   - agent_status
   - agent_wait
@@ -256,5 +257,7 @@ tool_confirm:
       action: auto
     - match: "agent_message"
       action: auto
+    - match: "agent_peer_grant"
+      action: ask
     - match: "*"
       action: auto

@@ -62,6 +62,14 @@ pub async fn tool_undo_text_doc_exec(
 ) -> Result<(String, String, Vec<DiffChunk>, String), String> {
     let a = parse_args(gcx.clone(), args, execution_scope).await?;
 
+    let actor = crate::file_activity::current_actor();
+    let write_guard = crate::file_activity::begin_write(
+        actor.as_deref(),
+        &a.path,
+        crate::file_activity::WriteIntent::Contextual,
+        "undo_textdoc",
+    )
+    .await?;
     let history = get_undo_history();
     let entries: Vec<UndoEntry> = {
         let h = history.lock().unwrap();
@@ -85,12 +93,31 @@ pub async fn tool_undo_text_doc_exec(
 
     let target_idx = entries.len() - a.steps;
     let target_content = &entries[target_idx].content;
+    if entries[target_idx..]
+        .iter()
+        .any(|entry| entry.actor != actor)
+    {
+        return Err("undo history belongs to a different writer".into());
+    }
 
     let current_content = tokio::fs::read_to_string(&a.path)
         .await
         .map_err(|e| format!("⚠️ Failed to read {:?}: {}", a.path, e))?;
 
-    if target_content.is_empty() {
+    if entries.last().and_then(|entry| entry.after_digest.as_ref())
+        != Some(&crate::file_activity::digest_of(&current_content))
+    {
+        return Err(
+            "undo target changed since the recorded edit; reread and edit explicitly".into(),
+        );
+    }
+    if crate::files_in_workspace::get_file_text_from_memory_or_disk(gcx.clone(), &a.path).await?
+        != current_content
+    {
+        return Err("undo buffer differs from disk; save or reload before retrying".into());
+    }
+    let delete = !entries[target_idx].existed;
+    if delete {
         tokio::fs::remove_file(&a.path)
             .await
             .map_err(|e| format!("⚠️ Failed to delete {:?}: {}", a.path, e))?;
@@ -103,13 +130,21 @@ pub async fn tool_undo_text_doc_exec(
     {
         let mut h = history.lock().unwrap();
         if let Some(list) = h.get_mut(&a.path) {
-            list.truncate(target_idx + 1);
+            list.truncate(target_idx);
         }
     }
 
     remove_memory_document_for_path(gcx.clone(), &a.path).await;
+    write_guard.commit(
+        if delete {
+            crate::file_activity::WriteKind::Deleted
+        } else {
+            crate::file_activity::WriteKind::Modified
+        },
+        (!delete).then_some(target_content.as_str()),
+    );
 
-    let summary = if target_content.is_empty() {
+    let summary = if delete {
         fast_enqueue_for_edit(gcx.clone(), &[a.path.clone()]).await?;
         format!(
             "✅ Undid {} step(s), deleted {:?}",
@@ -142,6 +177,8 @@ impl Tool for ToolUndoTextDoc {
             let cgcx = ccx.lock().await;
             (cgcx.app.gcx.clone(), cgcx.execution_scope.clone())
         };
+        let resolved = parse_args(gcx.clone(), args, execution_scope.as_ref()).await?;
+        crate::tools::file_edit::auxiliary::check_scope_guard(&ccx, &resolved.path).await?;
         let (_, _, chunks, summary) =
             tool_undo_text_doc_exec(gcx.clone(), args, execution_scope.as_ref()).await?;
 
@@ -260,5 +297,56 @@ impl Tool for ToolUndoTextDoc {
             output_schema: None,
             annotations: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::file_edit::auxiliary::write_file;
+
+    #[tokio::test]
+    async fn undo_empty_file_is_not_delete_and_successive_undo_consumes_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        std::fs::write(&path, "").unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
+        write_file(gcx.clone(), &path, &"one".into(), false, Some(""))
+            .await
+            .unwrap();
+        write_file(gcx.clone(), &path, &"two".into(), false, Some("one"))
+            .await
+            .unwrap();
+        let args = HashMap::from([("path".into(), json!(path))]);
+        tool_undo_text_doc_exec(gcx.clone(), &args, None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one");
+        tool_undo_text_doc_exec(gcx.clone(), &args, None)
+            .await
+            .unwrap();
+        assert!(path.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        assert!(tool_undo_text_doc_exec(gcx, &args, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn external_edit_cannot_be_overwritten_by_undo_even_without_read_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, "before").unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
+        write_file(gcx.clone(), &path, &"after".into(), false, Some("before"))
+            .await
+            .unwrap();
+        std::fs::write(&path, "external").unwrap();
+        let args = HashMap::from([("path".into(), json!(path))]);
+        assert!(tool_undo_text_doc_exec(gcx, &args, None)
+            .await
+            .unwrap_err()
+            .contains("changed since"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external");
     }
 }

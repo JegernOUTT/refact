@@ -24,6 +24,10 @@ pub struct ToolAgentMessage {
     pub config_path: String,
 }
 
+pub struct ToolAgentPeerGrant {
+    pub config_path: String,
+}
+
 pub struct ToolProgressReport {
     pub config_path: String,
 }
@@ -179,7 +183,154 @@ async fn can_message_agent(
             return Ok(target);
         }
     }
-    Err("You may only message your direct children or descendants.".to_string())
+    let target_root = target
+        .parent_root_chat_id
+        .as_deref()
+        .unwrap_or(target.parent_chat_id.as_str());
+    if target_root == root_chat_id {
+        return Err("You may only message your direct children or descendants.".to_string());
+    }
+    let source_root = app
+        .agent_executions
+        .saved_scope(target_agent_id)
+        .ok_or_else(|| "Peer agent project scope is unavailable.".to_string())?;
+    let project = crate::coordination::roots::project_identity(&source_root);
+    if app.peer_grants.allows(
+        &project,
+        root_chat_id,
+        target_root,
+        crate::coordination::peer_authority::PeerAuthority::Mail,
+        delivery_now_ms(),
+    ) {
+        return Ok(target);
+    }
+    Err("Peer messaging requires an explicit same-project mail grant; discovery grants no messaging or control authority.".to_string())
+}
+
+fn delivery_now_ms() -> u64 {
+    Utc::now().timestamp_millis().max(0) as u64
+}
+
+#[async_trait]
+impl Tool for ToolAgentPeerGrant {
+    fn tool_description(&self) -> ToolDesc {
+        let settings = refact_work_core::coordination_settings();
+        let mut desc = tool_desc(
+            self.config_path.clone(),
+            "agent_peer_grant",
+            "Agent Peer Grant",
+            "Grant or revoke time-bounded, directional same-project peer metadata, mail, or control authority. Discovery alone grants none. Control includes mail and metadata; mail includes metadata. User confirmation is required.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "recipient_root": {"type": "string", "minLength": 1},
+                    "authority": {"type": "string", "enum": ["metadata", "mail", "control"]},
+                    "ttl_secs": {"type": "integer", "minimum": 1, "maximum": settings.peer_grant_max_ttl_secs},
+                    "revoke": {"type": "boolean", "default": false}
+                },
+                "required": ["recipient_root"]
+            }),
+        );
+        desc.allow_parallel = false;
+        desc
+    }
+
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let recipient_root = required_string(args, "recipient_root")?;
+        let revoke = optional_bool(args, "revoke")?;
+        let (app, chat_id, sender_root, caller_agent_id) = context(&ccx).await;
+        if caller_agent_id.is_some() {
+            return Err("Only a top-level root can change peer authority.".to_string());
+        }
+        if recipient_root == sender_root {
+            return Err("recipient_root must identify a different root".to_string());
+        }
+        let current_model = ccx.lock().await.current_model.clone();
+        let caller = crate::coordination::scope::model_caller(&app, &chat_id, &current_model)
+            .await
+            .map_err(|error| error.to_string())?;
+        let project = crate::coordination::roots::project_identity(&caller.source_root);
+        let exists = crate::coordination::catalog::build_catalog(&app, caller.source_root.to_str())
+            .await?
+            .all_rows()
+            .iter()
+            .any(|row| row.root_chat_id.as_deref() == Some(recipient_root.as_str()));
+        if !exists {
+            return Err("recipient root is not visible in this project".to_string());
+        }
+        if revoke {
+            let removed = app
+                .peer_grants
+                .revoke(&project, &sender_root, &recipient_root);
+            return Ok(output(
+                tool_call_id,
+                format!(
+                    "Peer grant {}.",
+                    if removed {
+                        "revoked"
+                    } else {
+                        "was not present"
+                    }
+                ),
+            ));
+        }
+        let authority = match args.get("authority").and_then(Value::as_str) {
+            Some("metadata") => crate::coordination::peer_authority::PeerAuthority::Metadata,
+            Some("mail") => crate::coordination::peer_authority::PeerAuthority::Mail,
+            Some("control") => crate::coordination::peer_authority::PeerAuthority::Control,
+            _ => return Err("authority must be metadata, mail or control".to_string()),
+        };
+        let settings = refact_work_core::coordination_settings();
+        let ttl_secs = match args.get("ttl_secs") {
+            None | Some(Value::Null) => settings.peer_grant_default_ttl_secs,
+            Some(value) => value
+                .as_u64()
+                .ok_or_else(|| "ttl_secs must be an integer".to_string())?,
+        };
+        if !(1..=settings.peer_grant_max_ttl_secs).contains(&ttl_secs) {
+            return Err(format!(
+                "ttl_secs must be between 1 and {}",
+                settings.peer_grant_max_ttl_secs
+            ));
+        }
+        app.peer_grants.grant(
+            crate::coordination::peer_authority::PeerGrant {
+                project,
+                sender_root,
+                recipient_root,
+                authority,
+                granted_by: format!("chat:{chat_id}"),
+                expires_at_ms: delivery_now_ms().saturating_add(ttl_secs.saturating_mul(1000)),
+            },
+            delivery_now_ms(),
+        )?;
+        Ok(output(
+            tool_call_id,
+            format!("Directional peer {authority:?} authority granted for {ttl_secs}s."),
+        ))
+    }
+
+    async fn match_against_confirm_deny(
+        &self,
+        _ccx: Arc<AMutex<AtCommandsContext>>,
+        _args: &HashMap<String, Value>,
+    ) -> Result<crate::tools::tools_description::MatchConfirmDeny, String> {
+        Ok(crate::tools::tools_description::MatchConfirmDeny {
+            result: crate::tools::tools_description::MatchConfirmDenyResult::CONFIRMATION,
+            command: "change peer authority".to_string(),
+            rule: "explicit_user_consent".to_string(),
+        })
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec![]
+    }
 }
 
 fn short_id(agent_id: &str) -> &str {
@@ -302,10 +453,11 @@ impl Tool for ToolAgentMessage {
                 "type": "object",
                 "properties": {
                     "to": {"type": "string", "description": "A child/descendant agent id, or parent."},
-                    "text": {"type": "string", "description": "Message text."},
+                    "text": {"type": "string", "minLength": 1, "maxLength": refact_work_core::coordination_settings().agent_message_max_chars, "description": "Message text."},
                     "expects_reply": {"type": "boolean", "description": "When messaging parent, create a tracked question."},
                     "push": PushMode::schema(),
-                    "reply_to": {"type": "string", "description": "Question id being answered when messaging a child."}
+                    "reply_to": {"type": "string", "description": "Question id being answered when messaging a child."},
+                    "ttl_secs": {"type": "integer", "minimum": 1, "maximum": refact_work_core::coordination_settings().delivery_max_ttl_secs, "description": "Drop the message as expired if the recipient reaches no boundary within this many seconds; omitted uses the configured default, and expired messages never land late."}
                 },
                 "required": ["to", "text"]
             }),
@@ -324,6 +476,25 @@ impl Tool for ToolAgentMessage {
         let push = PushMode::from_args(args)?;
         let reply_to = optional_string(args, "reply_to");
         let (app, chat_id, root_chat_id, caller_agent_id) = context(&ccx).await;
+        let settings = refact_work_core::coordination_settings();
+        if text.chars().count() > settings.agent_message_max_chars {
+            return Err(format!(
+                "argument `text` supports at most {} characters",
+                settings.agent_message_max_chars
+            ));
+        }
+        let ttl_secs = match args.get("ttl_secs") {
+            None | Some(Value::Null) => settings.delivery_default_ttl_secs,
+            Some(value) => value
+                .as_u64()
+                .filter(|secs| (1..=settings.delivery_max_ttl_secs).contains(secs))
+                .ok_or_else(|| {
+                    format!(
+                        "argument `ttl_secs` must be an integer between 1 and {}",
+                        settings.delivery_max_ttl_secs
+                    )
+                })?,
+        };
 
         if to == "parent" {
             let Some(agent_id) = caller_agent_id else {
@@ -388,23 +559,43 @@ impl Tool for ToolAgentMessage {
             .as_deref()
             .map(|question_id| format!("Answer to {question_id}: {text}"))
             .unwrap_or(text);
-        crate::agents::delivery::deliver_to_agent(
-            app,
-            &to,
-            PendingDelivery::new(
-                vec![crate::chat::internal_roles::event(
-                    crate::chat::internal_roles::EventSubkind::SystemNotice,
-                    "agents.message",
-                    json!({"from": "parent"}),
-                    format!("[message from parent]\n{message_text}"),
-                )],
-                push,
-                "agents.message".to_string(),
-                true,
-            ),
-        )
-        .await?;
-        Ok(output(tool_call_id, format!("Message queued for {to}.")))
+        let mut delivery = PendingDelivery::new(
+            vec![crate::chat::internal_roles::event(
+                crate::chat::internal_roles::EventSubkind::SystemNotice,
+                "agents.message",
+                json!({"from": "parent"}),
+                format!("[message from parent]\n{message_text}"),
+            )],
+            push,
+            "agents.message".to_string(),
+            true,
+        );
+        delivery.expires_at_ms = Some(
+            delivery
+                .enqueued_at_ms
+                .saturating_add(ttl_secs.saturating_mul(1000)),
+        );
+        let delivery_id = delivery.id.clone();
+        let outcome = crate::agents::delivery::deliver_to_agent(app, &to, delivery).await?;
+        let text = match outcome {
+            refact_chat_api::DeliveryOutcome::Expired => {
+                format!("Message to {to} expired before it could be queued.")
+            }
+            _ => format!("Message queued for {to}."),
+        };
+        let mut result = output(tool_call_id, text);
+        if let Some(ContextEnum::ChatMessage(message)) = result.1.first_mut() {
+            message.extra.insert(
+                "delivery_receipt".into(),
+                json!({
+                    "kind": "agent_message",
+                    "delivery_id": delivery_id,
+                    "outcome": outcome,
+                    "ttl_secs": ttl_secs,
+                }),
+            );
+        }
+        Ok(result)
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -670,7 +861,71 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.contains("direct children or descendants"));
+        assert!(error.contains("Peer agent project scope is unavailable"));
+    }
+
+    #[tokio::test]
+    async fn unrelated_root_requires_directional_same_project_mail_grant() {
+        let (app, ccx) = test_context("root-a", "root-a", None).await;
+        let peer = create(&app, "root-b", "peer").await;
+        app.agent_executions
+            .remember_scope(&peer.agent_id, std::env::temp_dir());
+        let project = crate::coordination::roots::project_identity(&std::env::temp_dir());
+        let mut tool = ToolAgentMessage {
+            config_path: String::new(),
+        };
+        let request = args(&[
+            ("to", json!(peer.agent_id.clone())),
+            ("text", json!("hello")),
+        ]);
+        assert!(tool
+            .tool_execute(ccx.clone(), &"denied".to_string(), &request)
+            .await
+            .unwrap_err()
+            .contains("explicit same-project mail grant"));
+        app.peer_grants
+            .grant(
+                crate::coordination::peer_authority::PeerGrant {
+                    project: project.clone(),
+                    sender_root: "root-a".to_string(),
+                    recipient_root: "root-b".to_string(),
+                    authority: crate::coordination::peer_authority::PeerAuthority::Metadata,
+                    granted_by: "user".to_string(),
+                    expires_at_ms: delivery_now_ms() + 10_000,
+                },
+                delivery_now_ms(),
+            )
+            .unwrap();
+        assert!(tool
+            .tool_execute(ccx.clone(), &"metadata".to_string(), &request)
+            .await
+            .unwrap_err()
+            .contains("explicit same-project mail grant"));
+        app.peer_grants
+            .grant(
+                crate::coordination::peer_authority::PeerGrant {
+                    project: project.clone(),
+                    sender_root: "root-a".to_string(),
+                    recipient_root: "root-b".to_string(),
+                    authority: crate::coordination::peer_authority::PeerAuthority::Mail,
+                    granted_by: "user".to_string(),
+                    expires_at_ms: delivery_now_ms() + 10_000,
+                },
+                delivery_now_ms(),
+            )
+            .unwrap();
+        let response = tool
+            .tool_execute(ccx, &"allowed".to_string(), &request)
+            .await
+            .unwrap();
+        assert!(text(response).contains("Message queued"));
+        assert!(!app.peer_grants.allows(
+            &project,
+            "root-b",
+            "root-a",
+            crate::coordination::peer_authority::PeerAuthority::Mail,
+            delivery_now_ms(),
+        ));
     }
 
     #[tokio::test]
@@ -883,6 +1138,7 @@ mod tests {
             .await
             .unwrap();
         let config = crate::subchat::SubchatConfig {
+            history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: true,
             autonomous_no_confirm: false,

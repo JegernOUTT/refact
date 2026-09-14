@@ -1,19 +1,18 @@
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum, DiffChunk};
 use crate::files_correction::{check_if_its_inside_a_workspace_or_config, get_unscoped_project_dirs};
-use crate::files_in_workspace::{get_file_text_from_memory_or_disk, remove_memory_document_for_path};
+use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::global_context::GlobalContext;
 use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel};
 use crate::tools::file_edit::auxiliary::{
-    check_scope_guard, convert_edit_to_diffchunks, fast_enqueue_for_edit, normalize_line_endings,
-    resolve_path_with_scope, restore_line_endings, write_file, ResolvedToolPath,
+    check_scope_guard, convert_edit_to_diffchunks, normalize_line_endings, resolve_path_with_scope,
+    restore_line_endings, ResolvedToolPath,
 };
 use crate::worktrees::scope::ExecutionScope;
 use crate::tools::file_edit::openai_apply_patch::{
     apply_update_chunks, parse_patch, validate_relative_path, FileOperation, ParsedPatch,
 };
-use crate::tools::file_edit::undo_history;
 use crate::tools::tools_description::{
     MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
     json_schema_from_params,
@@ -188,6 +187,19 @@ pub async fn tool_apply_patch_exec(
     execution_scope: Option<&ExecutionScope>,
     scope_guard_context: Option<&Arc<AMutex<AtCommandsContext>>>,
 ) -> Result<ApplyPatchResult, String> {
+    let plan = plan_patch(gcx.clone(), args, execution_scope, scope_guard_context).await?;
+    if !dry {
+        super::patch_transaction::apply(gcx, &plan).await?;
+    }
+    Ok(plan)
+}
+
+async fn plan_patch(
+    gcx: Arc<GlobalContext>,
+    args: &HashMap<String, Value>,
+    execution_scope: Option<&ExecutionScope>,
+    scope_guard_context: Option<&Arc<AMutex<AtCommandsContext>>>,
+) -> Result<ApplyPatchResult, String> {
     let parsed = parse_patch_arg(args)?;
 
     let mut file_results = Vec::new();
@@ -215,12 +227,7 @@ pub async fn tool_apply_patch_exec(
                     return Err(format!("File already exists: {:?}", full_path));
                 }
 
-                if dry {
-                    overlay.insert(full_path.clone(), OverlayState::Present(contents.clone()));
-                } else {
-                    write_file(gcx.clone(), &full_path, &contents, false, None).await?;
-                    fast_enqueue_for_edit(gcx.clone(), &[full_path.clone()]).await?;
-                }
+                overlay.insert(full_path.clone(), OverlayState::Present(contents.clone()));
 
                 let chunks =
                     convert_edit_to_diffchunks(full_path.clone(), &String::new(), &contents)?;
@@ -236,7 +243,7 @@ pub async fn tool_apply_patch_exec(
 
             FileOperation::Delete { path } => {
                 let resolved_path =
-                    resolve_patch_path(gcx.clone(), &path, true, execution_scope).await?;
+                    resolve_patch_path(gcx.clone(), &path, false, execution_scope).await?;
                 warnings.extend(resolved_path.warnings);
                 let full_path = resolved_path.path;
                 if let Some(ccx) = scope_guard_context {
@@ -256,16 +263,7 @@ pub async fn tool_apply_patch_exec(
                     }
                 };
 
-                if dry {
-                    overlay.insert(full_path.clone(), OverlayState::Deleted);
-                } else {
-                    undo_history::record_before_edit(&full_path, &file_content);
-                    tokio::fs::remove_file(&full_path)
-                        .await
-                        .map_err(|e| format!("Failed to delete: {}", e))?;
-                    remove_memory_document_for_path(gcx.clone(), &full_path).await;
-                    fast_enqueue_for_edit(gcx.clone(), &[full_path.clone()]).await?;
-                }
+                overlay.insert(full_path.clone(), OverlayState::Deleted);
 
                 let chunk = DiffChunk {
                     file_name: full_path.to_string_lossy().to_string(),
@@ -297,7 +295,7 @@ pub async fn tool_apply_patch_exec(
                 chunks,
             } => {
                 let resolved_path =
-                    resolve_patch_path(gcx.clone(), &path, true, execution_scope).await?;
+                    resolve_patch_path(gcx.clone(), &path, false, execution_scope).await?;
                 warnings.extend(resolved_path.warnings);
                 let full_path = resolved_path.path;
                 if let Some(ccx) = scope_guard_context {
@@ -340,22 +338,11 @@ pub async fn tool_apply_patch_exec(
                         return Err(format!("Move destination exists: {:?}", dest_path));
                     }
 
-                    if dry {
-                        overlay.insert(full_path.clone(), OverlayState::Deleted);
-                        overlay.insert(
-                            dest_path.clone(),
-                            OverlayState::Present(new_file_content.clone()),
-                        );
-                    } else {
-                        write_file(gcx.clone(), &dest_path, &new_file_content, false, None).await?;
-                        undo_history::record_before_edit(&full_path, &file_content);
-                        tokio::fs::remove_file(&full_path)
-                            .await
-                            .map_err(|e| format!("Failed to remove: {}", e))?;
-                        remove_memory_document_for_path(gcx.clone(), &full_path).await;
-                        fast_enqueue_for_edit(gcx.clone(), &[full_path.clone(), dest_path.clone()])
-                            .await?;
-                    }
+                    overlay.insert(full_path.clone(), OverlayState::Deleted);
+                    overlay.insert(
+                        dest_path.clone(),
+                        OverlayState::Present(new_file_content.clone()),
+                    );
 
                     let chunk = DiffChunk {
                         file_name: full_path.to_string_lossy().to_string(),
@@ -379,15 +366,10 @@ pub async fn tool_apply_patch_exec(
                         chunks: vec![chunk],
                     });
                 } else {
-                    if dry {
-                        overlay.insert(
-                            full_path.clone(),
-                            OverlayState::Present(new_file_content.clone()),
-                        );
-                    } else {
-                        write_file(gcx.clone(), &full_path, &new_file_content, false, None).await?;
-                        fast_enqueue_for_edit(gcx.clone(), &[full_path.clone()]).await?;
-                    }
+                    overlay.insert(
+                        full_path.clone(),
+                        OverlayState::Present(new_file_content.clone()),
+                    );
 
                     let diff_chunks = convert_edit_to_diffchunks(
                         full_path.clone(),
@@ -589,7 +571,7 @@ const APPLY_PATCH_PARAM_DESCRIPTION: &str = r#"The patch content in envelope for
 
 #[cfg(test)]
 mod tests {
-    use super::absolute_path_inside_workspace;
+    use super::*;
     use std::path::PathBuf;
 
     #[test]
@@ -621,5 +603,57 @@ mod tests {
             absolute_path_inside_workspace("/tmp/subchat.rs", &project_dirs),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_later_operation_leaves_all_earlier_files_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
+        let path = dir.path().join("existing.txt");
+        std::fs::write(&path, "before\n").unwrap();
+        let args = HashMap::from([("patch".into(), json!("*** Begin Patch\n*** Update File: existing.txt\n@@\n-before\n+after\n*** Delete File: missing.txt\n*** End Patch"))]);
+        assert!(tool_apply_patch_exec(gcx, &args, false, None, None)
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "before\n");
+    }
+
+    #[tokio::test]
+    async fn patch_plan_rechecks_every_preimage_under_the_complete_lock_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
+        for file in ["a", "b"] {
+            std::fs::write(dir.path().join(file), "before\n").unwrap();
+        }
+        let args = HashMap::from([("patch".into(), json!("*** Begin Patch\n*** Update File: a\n@@\n-before\n+after\n*** Update File: b\n@@\n-before\n+after\n*** End Patch"))]);
+        let plan = plan_patch(gcx.clone(), &args, None, None).await.unwrap();
+        std::fs::write(dir.path().join("b"), "external\n").unwrap();
+        assert!(super::super::patch_transaction::apply(gcx, &plan)
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a")).unwrap(),
+            "before\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("b")).unwrap(),
+            "external\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_overlay_supports_create_update_move_and_delete_in_one_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
+        let args = HashMap::from([("patch".into(), json!("*** Begin Patch\n*** Add File: a\n+one\n*** Update File: a\n*** Move to: b\n@@\n-one\n+two\n*** Delete File: b\n*** End Patch"))]);
+        let result = tool_apply_patch_exec(gcx, &args, false, None, None)
+            .await
+            .unwrap();
+        assert_eq!(result.file_results.len(), 3);
+        assert!(!dir.path().join("a").exists());
+        assert!(!dir.path().join("b").exists());
     }
 }

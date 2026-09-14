@@ -33,8 +33,7 @@ use super::goal_monitor::handle_goal_turn_end;
 use super::types::*;
 use super::trajectories::{
     check_external_reload_pending, ensure_frozen_prefix, first_system_prompt,
-    frozen_prefix_is_complete,
-    maybe_save_trajectory_background_with_intent,
+    frozen_prefix_is_complete, maybe_save_trajectory_background_with_intent,
 };
 use super::tools::{process_tool_calls_once, ToolStepOutcome};
 use super::prepare::{
@@ -564,7 +563,8 @@ pub fn prepare_session_preamble_and_knowledge(
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> futures::future::BoxFuture<'static, ()> {
     Box::pin(async move {
-        prepare_session_preamble_and_knowledge_inner(app, session_arc).await;
+        prepare_session_preamble_and_knowledge_inner(app.clone(), session_arc.clone()).await;
+        prepare_project_work_context(&app, &session_arc).await;
     })
 }
 
@@ -894,6 +894,50 @@ async fn prepare_session_preamble_and_knowledge_inner(
                 }
             }
         }
+    }
+}
+
+pub async fn prepare_project_work_context(app: &AppState, session_arc: &Arc<AMutex<ChatSession>>) {
+    let (thread, chat_id, version, source_root, mut state) = {
+        let mut session = session_arc.lock().await;
+        if session.closed || !is_agentic_mode_id(&session.thread.mode) {
+            return;
+        }
+        let mut recovered = session.work_capsule_state.clone();
+        recovered.reconcile(&session.messages);
+        session.work_capsule_state = recovered;
+        (
+            session.thread.clone(),
+            session.chat_id.clone(),
+            session.trajectory_version,
+            crate::coordination::scope::session_source_root(&session),
+            session.work_capsule_state.clone(),
+        )
+    };
+    let original_state = state.clone();
+    let message = crate::coordination::capsule::prepare_work_context(
+        app,
+        &mut state,
+        &chat_id,
+        &thread.model,
+    )
+    .await;
+    let mut session = session_arc.lock().await;
+    if session.closed
+        || session.trajectory_version != version
+        || session.thread.model != thread.model
+        || session.thread.worktree != thread.worktree
+        || crate::coordination::scope::session_source_root(&session) != source_root
+        || session.work_capsule_state != original_state
+        || message
+            .as_ref()
+            .is_some_and(|message| !crate::coordination::capsule::still_cleared(app, message))
+    {
+        return;
+    }
+    session.work_capsule_state = state;
+    if let Some(message) = message {
+        session.add_message(message);
     }
 }
 
@@ -2189,6 +2233,9 @@ impl TurnDepthGuard {
         session.turn_depth = session.turn_depth.saturating_sub(1);
         session.queue_notify.notify_one();
         self.released = true;
+        let chat_id = session.chat_id.clone();
+        drop(session);
+        crate::tasks::admission::synchronize(&self.app, &chat_id).await;
     }
 }
 
@@ -2229,6 +2276,27 @@ pub async fn run_llm_generation(
 ) -> Result<GenerationResult, LlmStreamError> {
     let gcx = app.gcx.clone();
     check_aborted_before_stream(&abort_flag)?;
+    let execution = app.agent_executions.get(&chat_id);
+    let _operation = if let Some(execution) = &execution {
+        let acquisition = execution.begin_operation();
+        tokio::pin!(acquisition);
+        loop {
+            if abort_flag.load(Ordering::SeqCst)
+                || app.runtime.shutdown_flag.load(Ordering::Relaxed)
+            {
+                execution.cancel();
+                return Err("Aborted while waiting for execution capacity"
+                    .to_string()
+                    .into());
+            }
+            tokio::select! {
+                result = &mut acquisition => break Some(result.map_err(|e| e.to_string())?),
+                _ = tokio::time::sleep(refact_work_core::coordination_settings().lock_poll_interval()) => {}
+            }
+        }
+    } else {
+        None
+    };
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
         .await
         .map_err(|e| e.message)?;

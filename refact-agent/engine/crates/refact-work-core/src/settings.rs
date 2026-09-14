@@ -1,0 +1,545 @@
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fmt;
+use std::sync::{OnceLock, RwLock};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CoordinationSettings {
+    pub enabled: bool,
+    pub auto_inject_enabled: bool,
+    pub max_active_engine: usize,
+    pub max_active_project: usize,
+    pub max_active_root: usize,
+    /// Base admission opportunities per eligible root, multiplied by its weight.
+    pub root_fairness_quantum: usize,
+    /// Operator-assigned weights by stable root chat ID; unlisted roots weigh 1.
+    pub root_weights: BTreeMap<String, usize>,
+    pub max_root_weight_entries: usize,
+    /// Maximum consecutive aged resumes before an eligible fresh run gets a turn.
+    pub max_resume_burst: usize,
+    pub max_pending: usize,
+    pub max_outstanding: usize,
+    #[serde(alias = "max_depth")]
+    pub max_subchat_depth: usize,
+    pub max_read_stamps: usize,
+    pub max_write_records: usize,
+    pub max_undo_entries_per_file: usize,
+    pub max_undo_bytes: usize,
+    pub overview_default_rows: usize,
+    pub overview_max_rows: usize,
+    pub max_work_views: usize,
+    pub max_work_cursors: usize,
+    pub max_work_history_rows: usize,
+    pub max_work_history_bytes: usize,
+    pub max_work_provenance_records: usize,
+    pub max_work_provenance_bytes: usize,
+    pub work_cursor_ttl_secs: u64,
+    pub work_subscription_interval_ms: u64,
+    pub work_stream_max_bytes: usize,
+    pub work_stream_timeout_ms: u64,
+    pub work_reconnect_max_ms: u64,
+    pub inspect_max_paths: usize,
+    pub capsule_token_budget: usize,
+    pub capsule_max_rows: usize,
+    pub min_interval_secs: u64,
+    pub debounce_secs: u64,
+    pub recent_window_secs: u64,
+    pub lock_timeout_secs: u64,
+    pub lock_poll_interval_ms: u64,
+    pub approval_timeout_secs: u64,
+    pub max_pending_approvals: usize,
+    pub delivery_default_ttl_secs: u64,
+    pub delivery_max_ttl_secs: u64,
+    pub delivery_max_pending: usize,
+    pub delivery_status_retention: usize,
+    pub agent_message_max_chars: usize,
+    pub peer_grant_default_ttl_secs: u64,
+    pub peer_grant_max_ttl_secs: u64,
+    pub board_max_reviewers: usize,
+    pub agent_wait_default_ms: u64,
+    pub agent_wait_max_ms: u64,
+    pub agent_wait_max_agents: usize,
+    pub subagent_default_steps: usize,
+    pub subagent_max_steps: usize,
+    pub launch_context_tokens: usize,
+    pub launch_context_messages: usize,
+    pub launch_context_entries: usize,
+    pub launch_context_bytes: usize,
+    pub launch_source_bytes: usize,
+}
+
+impl Default for CoordinationSettings {
+    fn default() -> Self {
+        CoordinationSettings {
+            enabled: true,
+            auto_inject_enabled: true,
+            max_active_engine: 32,
+            max_active_project: 16,
+            max_active_root: 16,
+            root_fairness_quantum: 1,
+            root_weights: BTreeMap::new(),
+            max_root_weight_entries: 4096,
+            max_resume_burst: 4,
+            max_pending: 1024,
+            max_outstanding: 4096,
+            max_subchat_depth: 5,
+            max_read_stamps: 16384,
+            max_write_records: 65536,
+            max_undo_entries_per_file: 128,
+            max_undo_bytes: 128 * 1024 * 1024,
+            overview_default_rows: 50,
+            overview_max_rows: 500,
+            max_work_views: 4096,
+            max_work_cursors: 16384,
+            max_work_history_rows: 16384,
+            max_work_history_bytes: 64 * 1024 * 1024,
+            max_work_provenance_records: 16384,
+            max_work_provenance_bytes: 4 * 1024 * 1024,
+            work_cursor_ttl_secs: 300,
+            work_subscription_interval_ms: 1000,
+            work_stream_max_bytes: 16 * 1024 * 1024,
+            work_stream_timeout_ms: 60_000,
+            work_reconnect_max_ms: 10_000,
+            inspect_max_paths: 200,
+            capsule_token_budget: 1600,
+            capsule_max_rows: 24,
+            min_interval_secs: 60,
+            debounce_secs: 5,
+            recent_window_secs: 3600,
+            lock_timeout_secs: 30,
+            lock_poll_interval_ms: 25,
+            approval_timeout_secs: 1800,
+            max_pending_approvals: 256,
+            delivery_default_ttl_secs: 86_400,
+            delivery_max_ttl_secs: 604_800,
+            delivery_max_pending: 4096,
+            delivery_status_retention: 16_384,
+            agent_message_max_chars: 65_536,
+            peer_grant_default_ttl_secs: 3600,
+            peer_grant_max_ttl_secs: 604_800,
+            board_max_reviewers: 256,
+            agent_wait_default_ms: 60_000,
+            agent_wait_max_ms: 30 * 60 * 1000,
+            agent_wait_max_agents: 128,
+            subagent_default_steps: 256,
+            subagent_max_steps: 4096,
+            launch_context_tokens: 24_000,
+            launch_context_messages: 1024,
+            launch_context_entries: 256,
+            launch_context_bytes: 16 * 1024 * 1024,
+            launch_source_bytes: 4 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsViolation {
+    pub field: String,
+    pub message: String,
+}
+
+impl fmt::Display for SettingsViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.field, self.message)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsError {
+    pub violations: Vec<SettingsViolation>,
+}
+
+impl fmt::Display for SettingsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let joined = self
+            .violations
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        write!(f, "invalid coordination settings: {joined}")
+    }
+}
+
+impl std::error::Error for SettingsError {}
+
+fn at_least(out: &mut Vec<SettingsViolation>, field: &str, value: u64, minimum: u64) {
+    if value < minimum {
+        out.push(SettingsViolation {
+            field: field.to_string(),
+            message: format!("must be at least {minimum}, got {value}"),
+        });
+    }
+}
+
+fn not_greater(
+    out: &mut Vec<SettingsViolation>,
+    field: &str,
+    value: u64,
+    other_field: &str,
+    other: u64,
+) {
+    if value > other {
+        out.push(SettingsViolation {
+            field: field.to_string(),
+            message: format!("must not exceed {other_field} ({other}), got {value}"),
+        });
+    }
+}
+
+impl CoordinationSettings {
+    pub fn validate(&self) -> Result<(), SettingsError> {
+        let mut v = Vec::new();
+        at_least(
+            &mut v,
+            "max_undo_entries_per_file",
+            self.max_undo_entries_per_file as u64,
+            1,
+        );
+        at_least(&mut v, "max_undo_bytes", self.max_undo_bytes as u64, 1);
+
+        at_least(
+            &mut v,
+            "work_stream_max_bytes",
+            self.work_stream_max_bytes as u64,
+            1,
+        );
+        at_least(
+            &mut v,
+            "work_stream_timeout_ms",
+            self.work_stream_timeout_ms,
+            1,
+        );
+        at_least(
+            &mut v,
+            "work_reconnect_max_ms",
+            self.work_reconnect_max_ms,
+            1,
+        );
+        for (field, value) in [
+            ("launch_context_tokens", self.launch_context_tokens as u64),
+            (
+                "launch_context_messages",
+                self.launch_context_messages as u64,
+            ),
+            ("launch_context_entries", self.launch_context_entries as u64),
+            ("launch_context_bytes", self.launch_context_bytes as u64),
+            ("launch_source_bytes", self.launch_source_bytes as u64),
+            ("max_work_views", self.max_work_views as u64),
+            ("max_work_cursors", self.max_work_cursors as u64),
+            ("max_work_history_rows", self.max_work_history_rows as u64),
+            ("max_work_history_bytes", self.max_work_history_bytes as u64),
+            (
+                "max_work_provenance_records",
+                self.max_work_provenance_records as u64,
+            ),
+            (
+                "max_work_provenance_bytes",
+                self.max_work_provenance_bytes as u64,
+            ),
+            ("work_cursor_ttl_secs", self.work_cursor_ttl_secs),
+            (
+                "work_subscription_interval_ms",
+                self.work_subscription_interval_ms,
+            ),
+            ("inspect_max_paths", self.inspect_max_paths as u64),
+        ] {
+            at_least(&mut v, field, value, 1);
+        }
+        at_least(
+            &mut v,
+            "max_active_engine",
+            self.max_active_engine as u64,
+            1,
+        );
+        at_least(
+            &mut v,
+            "max_active_project",
+            self.max_active_project as u64,
+            1,
+        );
+        at_least(&mut v, "max_active_root", self.max_active_root as u64, 1);
+        at_least(
+            &mut v,
+            "root_fairness_quantum",
+            self.root_fairness_quantum as u64,
+            1,
+        );
+        at_least(&mut v, "max_resume_burst", self.max_resume_burst as u64, 1);
+        at_least(
+            &mut v,
+            "max_root_weight_entries",
+            self.max_root_weight_entries as u64,
+            1,
+        );
+        not_greater(
+            &mut v,
+            "root_weights",
+            self.root_weights.len() as u64,
+            "max_root_weight_entries",
+            self.max_root_weight_entries as u64,
+        );
+        for (root, weight) in &self.root_weights {
+            if root.trim().is_empty() || root.trim() != root || root.chars().any(char::is_control) {
+                v.push(SettingsViolation {
+                    field: "root_weights".into(),
+                    message: "root IDs must be nonempty, trimmed and contain no control characters"
+                        .into(),
+                });
+            }
+            at_least(&mut v, "root_weights", *weight as u64, 1);
+        }
+        at_least(&mut v, "max_pending", self.max_pending as u64, 1);
+        at_least(&mut v, "max_outstanding", self.max_outstanding as u64, 1);
+        at_least(
+            &mut v,
+            "max_subchat_depth",
+            self.max_subchat_depth as u64,
+            1,
+        );
+        at_least(&mut v, "max_read_stamps", self.max_read_stamps as u64, 1);
+        at_least(
+            &mut v,
+            "max_write_records",
+            self.max_write_records as u64,
+            1,
+        );
+        at_least(
+            &mut v,
+            "overview_default_rows",
+            self.overview_default_rows as u64,
+            1,
+        );
+        at_least(
+            &mut v,
+            "overview_max_rows",
+            self.overview_max_rows as u64,
+            1,
+        );
+        at_least(
+            &mut v,
+            "capsule_token_budget",
+            self.capsule_token_budget as u64,
+            1600,
+        );
+        at_least(&mut v, "capsule_max_rows", self.capsule_max_rows as u64, 1);
+        at_least(&mut v, "recent_window_secs", self.recent_window_secs, 1);
+        at_least(&mut v, "lock_timeout_secs", self.lock_timeout_secs, 1);
+        at_least(
+            &mut v,
+            "approval_timeout_secs",
+            self.approval_timeout_secs,
+            1,
+        );
+        for (field, value) in [
+            ("delivery_default_ttl_secs", self.delivery_default_ttl_secs),
+            ("delivery_max_ttl_secs", self.delivery_max_ttl_secs),
+            ("agent_wait_default_ms", self.agent_wait_default_ms),
+            ("agent_wait_max_ms", self.agent_wait_max_ms),
+            (
+                "peer_grant_default_ttl_secs",
+                self.peer_grant_default_ttl_secs,
+            ),
+            ("peer_grant_max_ttl_secs", self.peer_grant_max_ttl_secs),
+        ] {
+            at_least(&mut v, field, value, 1);
+        }
+        for (field, value) in [
+            ("delivery_max_pending", self.delivery_max_pending),
+            ("delivery_status_retention", self.delivery_status_retention),
+            ("agent_message_max_chars", self.agent_message_max_chars),
+            ("board_max_reviewers", self.board_max_reviewers),
+            ("agent_wait_max_agents", self.agent_wait_max_agents),
+        ] {
+            at_least(&mut v, field, value as u64, 1);
+        }
+        at_least(
+            &mut v,
+            "subagent_max_steps",
+            self.subagent_max_steps as u64,
+            1,
+        );
+        at_least(
+            &mut v,
+            "subagent_default_steps",
+            self.subagent_default_steps as u64,
+            1,
+        );
+        not_greater(
+            &mut v,
+            "subagent_default_steps",
+            self.subagent_default_steps as u64,
+            "subagent_max_steps",
+            self.subagent_max_steps as u64,
+        );
+        at_least(
+            &mut v,
+            "max_pending_approvals",
+            self.max_pending_approvals as u64,
+            1,
+        );
+        at_least(
+            &mut v,
+            "lock_poll_interval_ms",
+            self.lock_poll_interval_ms,
+            1,
+        );
+
+        not_greater(
+            &mut v,
+            "max_active_project",
+            self.max_active_project as u64,
+            "max_active_engine",
+            self.max_active_engine as u64,
+        );
+        not_greater(
+            &mut v,
+            "max_active_root",
+            self.max_active_root as u64,
+            "max_active_engine",
+            self.max_active_engine as u64,
+        );
+        not_greater(
+            &mut v,
+            "max_pending",
+            self.max_pending as u64,
+            "max_outstanding",
+            self.max_outstanding as u64,
+        );
+        not_greater(
+            &mut v,
+            "overview_default_rows",
+            self.overview_default_rows as u64,
+            "overview_max_rows",
+            self.overview_max_rows as u64,
+        );
+        not_greater(
+            &mut v,
+            "debounce_secs",
+            self.debounce_secs,
+            "min_interval_secs",
+            self.min_interval_secs,
+        );
+        not_greater(
+            &mut v,
+            "lock_poll_interval_ms",
+            self.lock_poll_interval_ms,
+            "lock_timeout_secs_in_millis",
+            self.lock_timeout_secs.saturating_mul(1000),
+        );
+        not_greater(
+            &mut v,
+            "delivery_default_ttl_secs",
+            self.delivery_default_ttl_secs,
+            "delivery_max_ttl_secs",
+            self.delivery_max_ttl_secs,
+        );
+        not_greater(
+            &mut v,
+            "agent_wait_default_ms",
+            self.agent_wait_default_ms,
+            "agent_wait_max_ms",
+            self.agent_wait_max_ms,
+        );
+        not_greater(
+            &mut v,
+            "peer_grant_default_ttl_secs",
+            self.peer_grant_default_ttl_secs,
+            "peer_grant_max_ttl_secs",
+            self.peer_grant_max_ttl_secs,
+        );
+
+        if v.is_empty() {
+            Ok(())
+        } else {
+            Err(SettingsError { violations: v })
+        }
+    }
+
+    pub fn validated(self) -> Result<Self, SettingsError> {
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn overview_rows(&self, requested: Option<usize>) -> usize {
+        let rows = requested.unwrap_or(self.overview_default_rows);
+        rows.clamp(1, self.overview_max_rows.max(1))
+    }
+
+    pub fn root_quantum(&self, root_id: &str) -> usize {
+        self.root_fairness_quantum
+            .saturating_mul(self.root_weights.get(root_id).copied().unwrap_or(1))
+    }
+
+    pub fn lock_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.lock_timeout_secs)
+    }
+
+    pub fn lock_poll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.lock_poll_interval_ms)
+    }
+
+    pub fn recent_window(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.recent_window_secs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delivery_and_wait_defaults_are_generous_and_consistent() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(settings.delivery_default_ttl_secs <= settings.delivery_max_ttl_secs);
+        assert!(settings.delivery_max_pending >= 1024);
+        assert!(settings.delivery_status_retention >= settings.delivery_max_pending);
+        assert!(settings.agent_wait_default_ms <= settings.agent_wait_max_ms);
+        assert!(settings.agent_wait_max_agents >= 32);
+    }
+
+    #[test]
+    fn delivery_and_wait_bounds_reject_zero_and_inverted_values() {
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.delivery_max_pending = 0,
+            |settings: &mut CoordinationSettings| settings.delivery_status_retention = 0,
+            |settings: &mut CoordinationSettings| settings.agent_message_max_chars = 0,
+            |settings: &mut CoordinationSettings| settings.agent_wait_max_agents = 0,
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
+        let mut settings = CoordinationSettings::default();
+        settings.delivery_default_ttl_secs = settings.delivery_max_ttl_secs + 1;
+        assert!(settings.validate().is_err());
+        let mut settings = CoordinationSettings::default();
+        settings.agent_wait_default_ms = settings.agent_wait_max_ms + 1;
+        assert!(settings.validate().is_err());
+    }
+}
+
+fn global_slot() -> &'static RwLock<CoordinationSettings> {
+    static SLOT: OnceLock<RwLock<CoordinationSettings>> = OnceLock::new();
+    SLOT.get_or_init(|| RwLock::new(CoordinationSettings::default()))
+}
+
+pub fn install_coordination_settings(
+    settings: CoordinationSettings,
+) -> Result<CoordinationSettings, SettingsError> {
+    settings.validate()?;
+    let mut guard = global_slot()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = settings;
+    Ok(guard.clone())
+}
+
+pub fn coordination_settings() -> CoordinationSettings {
+    global_slot()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}

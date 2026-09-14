@@ -724,6 +724,7 @@ pub struct LoadedTrajectory {
     pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
     pub waiting_for_card_ids: Vec<String>,
     pub pending_deliveries: Vec<refact_core::chat_types::PendingDelivery>,
+    pub dropped_deliveries: Vec<refact_core::chat_types::DeliveryStatusRecord>,
     pub auto_approve_editing_tools_present: bool,
     pub auto_approve_dangerous_commands_present: bool,
     pub transition_identity_repaired: bool,
@@ -781,6 +782,7 @@ pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> Traject
     snapshot.goal_verification_blocked_until_ms = session.goal_verification_blocked_until_ms;
     snapshot.compression_retry_after_ms = session.compression_retry_after_ms.clone();
     snapshot.pending_deliveries = session.pending_deliveries_for_snapshot();
+    snapshot.dropped_deliveries = session.dropped_deliveries_for_snapshot();
     span.finish(
         PerfOutcome::Success,
         None,
@@ -2288,6 +2290,7 @@ fn is_known_trajectory_top_level_key(key: &str) -> bool {
             | "wake_up_at"
             | "waiting_for_card_ids"
             | "pending_deliveries"
+            | "dropped_deliveries"
             | "worktree"
             | "parent_id"
             | "link_type"
@@ -2844,6 +2847,11 @@ async fn load_trajectory_candidate(
         .and_then(|object| object.remove("pending_deliveries"))
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default();
+    let dropped_deliveries = t
+        .as_object_mut()
+        .and_then(|object| object.remove("dropped_deliveries"))
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
     let compression_retry_after_ms = t
         .as_object_mut()
         .and_then(|object| object.remove("compression_retry_after_ms"))
@@ -3148,6 +3156,7 @@ async fn load_trajectory_candidate(
 
     Some(LoadedTrajectory {
         pending_deliveries,
+        dropped_deliveries,
         goal_ledger,
         goal_verification_blocked_until_ms,
         compression_retry_after_ms,
@@ -3432,6 +3441,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         goal: None,
         goal_ledger: Vec::new(),
         pending_deliveries: Vec::new(),
+        dropped_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
         compression_retry_after_ms: Default::default(),
         chat_id: chat_id.to_string(),
@@ -3513,6 +3523,7 @@ pub async fn save_trajectory_as_with_intent_checked(
         goal: None,
         goal_ledger: Vec::new(),
         pending_deliveries: Vec::new(),
+        dropped_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
         compression_retry_after_ms: Default::default(),
         chat_id: thread.id.clone(),
@@ -4297,6 +4308,9 @@ async fn save_trajectory_snapshot_inner(
     }
     if !snapshot.pending_deliveries.is_empty() {
         trajectory["pending_deliveries"] = json!(snapshot.pending_deliveries);
+    }
+    if !snapshot.dropped_deliveries.is_empty() {
+        trajectory["dropped_deliveries"] = json!(snapshot.dropped_deliveries);
     }
     if let Some(ref goal) = snapshot.goal {
         trajectory["goal"] = serde_json::to_value(goal).unwrap_or_default();
@@ -5192,6 +5206,7 @@ fn apply_loaded_external_update_to_session(
     session.release_turn_only_state();
     session.messages = loaded.messages;
     session.restore_pending_deliveries(loaded.pending_deliveries);
+    session.merge_dropped_deliveries(loaded.dropped_deliveries);
     session.thread = loaded.thread;
     session.compression_retry_after_ms = loaded.compression_retry_after_ms;
     session.reset_compaction_runtime_state();
@@ -10914,6 +10929,7 @@ mod tests {
             goal: None,
             goal_ledger: Vec::new(),
             pending_deliveries: Vec::new(),
+            dropped_deliveries: Vec::new(),
             goal_verification_blocked_until_ms: None,
             compression_retry_after_ms: Default::default(),
             chat_id: chat_id.to_string(),
@@ -18220,6 +18236,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let session = ChatSession {
             chat_id: "test-123".to_string(),
+            work_provenance: Default::default(),
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread: ThreadParams {
                 id: "test-123".to_string(),
@@ -18278,6 +18295,7 @@ mod tests {
             pending_deliveries: VecDeque::new(),
             runner_pending_deliveries: Vec::new(),
             delivered_delivery_ids: Default::default(),
+            dropped_deliveries: VecDeque::new(),
             turn_depth: 0,
             delivery_wake_sources: Default::default(),
             event_seq: 0,
@@ -18293,10 +18311,13 @@ mod tests {
                 crate::chat::types::QueueProcessorCounters::default(),
             ),
             last_activity: Instant::now(),
+            work_project_root: None,
+            work_capsule_state: Default::default(),
             last_stream_delta_at: None,
             command_enqueued_at: std::collections::HashMap::new(),
             stream_started_at: None,
             confirmation_paused_at: None,
+            approval_wrapper_calls: Default::default(),
             last_tool_started_at: None,
             last_tool_progress_at: None,
             trajectory_dirty: false,
@@ -18373,6 +18394,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let mut session = ChatSession {
             chat_id: "skill-test".to_string(),
+            work_provenance: Default::default(),
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread: ThreadParams {
                 id: "skill-test".to_string(),
@@ -18400,6 +18422,7 @@ mod tests {
             pending_deliveries: VecDeque::new(),
             runner_pending_deliveries: Vec::new(),
             delivered_delivery_ids: Default::default(),
+            dropped_deliveries: VecDeque::new(),
             turn_depth: 0,
             delivery_wake_sources: Default::default(),
             event_seq: 0,
@@ -18415,10 +18438,13 @@ mod tests {
                 crate::chat::types::QueueProcessorCounters::default(),
             ),
             last_activity: Instant::now(),
+            work_project_root: None,
+            work_capsule_state: Default::default(),
             last_stream_delta_at: None,
             command_enqueued_at: std::collections::HashMap::new(),
             stream_started_at: None,
             confirmation_paused_at: None,
+            approval_wrapper_calls: Default::default(),
             last_tool_started_at: None,
             last_tool_progress_at: None,
             trajectory_dirty: false,
@@ -19247,6 +19273,7 @@ mod tests {
             goal: None,
             goal_ledger: Vec::new(),
             pending_deliveries: Vec::new(),
+            dropped_deliveries: Vec::new(),
             goal_verification_blocked_until_ms: None,
             compression_retry_after_ms: Default::default(),
             chat_id: chat_id.clone(),
@@ -21564,10 +21591,11 @@ mod tests {
         assert_eq!(loaded.pending_deliveries, vec![delivery.clone()]);
         let mut restored = ChatSession::new("pending-roundtrip".into());
         restored.restore_pending_deliveries(loaded.pending_deliveries);
-        assert_eq!(
-            restored.pending_deliveries_for_snapshot(),
-            vec![delivery.clone()]
-        );
+        let restored_delivery = restored.pending_deliveries_for_snapshot();
+        assert_eq!(restored_delivery.len(), 1);
+        assert_eq!(restored_delivery[0].id, delivery.id);
+        assert_eq!(restored_delivery[0].enqueued_at_ms, delivery.enqueued_at_ms);
+        assert!(restored_delivery[0].expires_at_ms.is_some());
         restored.pending_deliveries.clear();
         restored.messages = delivery.stamp_messages();
         restored.restore_pending_deliveries(vec![delivery]);

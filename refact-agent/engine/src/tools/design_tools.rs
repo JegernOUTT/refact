@@ -1911,9 +1911,30 @@ impl Tool for ToolVisualDiff {
                     .await
                     .map_err(|error| format!("failed to create baseline directory: {error}"))?;
             }
+            let existed = baseline.exists();
+            let actor = crate::file_activity::current_actor();
+            let guard = crate::file_activity::begin_write(
+                actor.as_deref(),
+                &baseline,
+                if existed {
+                    crate::file_activity::WriteIntent::Overwrite { authorized: true }
+                } else {
+                    crate::file_activity::WriteIntent::Create
+                },
+                "visual_diff",
+            )
+            .await?;
             tokio::fs::write(&baseline, &current_bytes)
                 .await
                 .map_err(|error| format!("failed to write baseline: {error}"))?;
+            guard.commit_bytes(
+                if existed {
+                    crate::file_activity::WriteKind::Modified
+                } else {
+                    crate::file_activity::WriteKind::Created
+                },
+                Some(&current_bytes),
+            );
             let spilled = spill_artifact(&current, &runtime.artifacts_dir, "visual-diff-baseline")?;
             runtime.touch();
             return tool_image_message(

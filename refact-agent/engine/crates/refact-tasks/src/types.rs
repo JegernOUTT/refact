@@ -65,6 +65,29 @@ pub struct TaskBoard {
     pub columns: Vec<BoardColumn>,
     #[serde(default)]
     pub cards: Vec<BoardCard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewer_chat_ids: Vec<String>,
+    #[serde(default)]
+    pub review_policy: BoardReviewPolicy,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub review_attestations: std::collections::BTreeMap<String, BoardReviewAttestation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardReviewPolicy {
+    #[default]
+    OwnerAllowed,
+    IndependentRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardReviewAttestation {
+    pub reviewer_chat_id: String,
+    pub reviewed_at: String,
+    pub report: VerifierReport,
 }
 
 fn default_columns() -> Vec<BoardColumn> {
@@ -99,6 +122,10 @@ impl Default for TaskBoard {
             rev: 0,
             columns: default_columns(),
             cards: vec![],
+            owner_chat_id: None,
+            reviewer_chat_ids: Vec::new(),
+            review_policy: BoardReviewPolicy::default(),
+            review_attestations: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -496,6 +523,254 @@ pub struct TrajectoryInfo {
 }
 
 impl TaskBoard {
+    pub fn validate_dependencies(&self) -> Result<(), String> {
+        let mut by_id = std::collections::HashMap::new();
+        for (index, card) in self.cards.iter().enumerate() {
+            if by_id.insert(card.id.as_str(), index).is_some() {
+                return Err(format!("Duplicate card ID {}", card.id));
+            }
+        }
+        let mut indegree = vec![0usize; self.cards.len()];
+        let mut dependents = vec![Vec::new(); self.cards.len()];
+        for card in &self.cards {
+            if card.depends_on.iter().any(|dependency| dependency == &card.id) {
+                return Err(format!("Card {} cannot depend on itself", card.id));
+            }
+            let mut unique = std::collections::HashSet::new();
+            if let Some(duplicate) = card
+                .depends_on
+                .iter()
+                .find(|dependency| !unique.insert(dependency.as_str()))
+            {
+                return Err(format!(
+                    "Card {} lists dependency {} more than once",
+                    card.id, duplicate
+                ));
+            }
+            if let Some(missing) = card
+                .depends_on
+                .iter()
+                .find(|dependency| !by_id.contains_key(dependency.as_str()))
+            {
+                return Err(format!("Card {} dependency {} does not exist", card.id, missing));
+            }
+        }
+        for (card_index, card) in self.cards.iter().enumerate() {
+            indegree[card_index] = card.depends_on.len();
+            for dependency in &card.depends_on {
+                dependents[by_id[dependency.as_str()]].push(card_index);
+            }
+        }
+        let mut ready = indegree
+            .iter()
+            .enumerate()
+            .filter_map(|(index, degree)| (*degree == 0).then_some(index))
+            .collect::<std::collections::VecDeque<_>>();
+        let mut visited = 0usize;
+        while let Some(index) = ready.pop_front() {
+            visited += 1;
+            for dependent in &dependents[index] {
+                indegree[*dependent] -= 1;
+                if indegree[*dependent] == 0 {
+                    ready.push_back(*dependent);
+                }
+            }
+        }
+        if visited != self.cards.len() {
+            let cycle = indegree
+                .iter()
+                .enumerate()
+                .find_map(|(index, degree)| (*degree > 0).then_some(self.cards[index].id.as_str()))
+                .unwrap_or("unknown");
+            return Err(format!("Dependency cycle includes {cycle}"));
+        }
+        Ok(())
+    }
+
+    pub fn validate_authority(&self, max_reviewers: usize) -> Result<(), String> {
+        if self.reviewer_chat_ids.len() > max_reviewers {
+            return Err(format!(
+                "Task board has {} reviewers, exceeding the configured maximum of {}",
+                self.reviewer_chat_ids.len(),
+                max_reviewers
+            ));
+        }
+        let mut unique = std::collections::HashSet::new();
+        for reviewer in &self.reviewer_chat_ids {
+            if reviewer.trim().is_empty() {
+                return Err("Task board reviewer IDs cannot be empty".to_string());
+            }
+            if !unique.insert(reviewer.as_str()) {
+                return Err(format!("Task board reviewer {} is duplicated", reviewer));
+            }
+            if self.owner_chat_id.as_deref() == Some(reviewer.as_str()) {
+                return Err("Task board owner cannot also be an assigned reviewer".to_string());
+            }
+        }
+        if self.owner_chat_id.as_deref().is_some_and(str::is_empty) {
+            return Err("Task board owner ID cannot be empty".to_string());
+        }
+        for (card_id, attestation) in &self.review_attestations {
+            let card = self
+                .get_card(card_id)
+                .ok_or_else(|| format!("Review attestation references missing card {card_id}"))?;
+            if card.verifier_report.as_ref() != Some(&attestation.report) {
+                return Err(format!(
+                    "Review attestation for card {card_id} does not match its verifier report"
+                ));
+            }
+            if !self
+                .reviewer_chat_ids
+                .iter()
+                .any(|reviewer| reviewer == &attestation.reviewer_chat_id)
+            {
+                return Err(format!(
+                    "Review attestation for card {card_id} names unassigned reviewer {}",
+                    attestation.reviewer_chat_id
+                ));
+            }
+            if self.owner_chat_id.as_deref() == Some(attestation.reviewer_chat_id.as_str()) {
+                return Err(format!(
+                    "Review attestation for card {card_id} was produced by the board owner"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_write(&self, max_reviewers: usize) -> Result<(), String> {
+        self.validate_dependencies()?;
+        self.validate_authority(max_reviewers)
+    }
+
+    pub fn dependencies_satisfied(&self, card_id: &str) -> Result<(), String> {
+        self.validate_dependencies()?;
+        let card = self
+            .get_card(card_id)
+            .ok_or_else(|| format!("Card {card_id} not found"))?;
+        for dependency in &card.depends_on {
+            let dependency_card = self
+                .get_card(dependency)
+                .ok_or_else(|| format!("Card {card_id} dependency {dependency} does not exist"))?;
+            if dependency_card.column != "done" {
+                return Err(format!(
+                    "Card {card_id} is blocked by dependency {dependency} in '{}'",
+                    dependency_card.column
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn authorize_owner(&mut self, chat_id: &str) -> Result<(), String> {
+        match self.owner_chat_id.as_deref() {
+            None => {
+                self.owner_chat_id = Some(chat_id.to_string());
+                Ok(())
+            }
+            Some(owner) if owner == chat_id => Ok(()),
+            Some(_) => Err("task board mutation requires the owning planner chat".to_string()),
+        }
+    }
+
+    pub fn require_owner(&self, chat_id: &str) -> Result<(), String> {
+        match self.owner_chat_id.as_deref() {
+            Some(owner) if owner == chat_id => Ok(()),
+            Some(_) => Err("task board mutation requires the owning planner chat".to_string()),
+            None => Err("task board has no owner; claim ownership first".to_string()),
+        }
+    }
+
+    pub fn authorize_reviewer(&self, chat_id: &str) -> Result<(), String> {
+        let owner = self.owner_chat_id.as_deref() == Some(chat_id);
+        let assigned = self.reviewer_chat_ids.iter().any(|reviewer| reviewer == chat_id);
+        if assigned || (owner && self.review_policy == BoardReviewPolicy::OwnerAllowed) {
+            Ok(())
+        } else if owner {
+            Err("task review policy requires an independent assigned reviewer".to_string())
+        } else {
+            Err("task review requires the owner or an assigned reviewer".to_string())
+        }
+    }
+
+    pub fn review_policy_allows_report(
+        &self,
+        card_id: &str,
+        report: &VerifierReport,
+    ) -> Result<(), String> {
+        if self.review_policy == BoardReviewPolicy::OwnerAllowed {
+            return Ok(());
+        }
+        let attestation = self.review_attestations.get(card_id).ok_or_else(|| {
+            "task review policy requires an independent reviewer report".to_string()
+        })?;
+        if &attestation.report != report {
+            return Err("task review attestation no longer matches the stored report".to_string());
+        }
+        if self.owner_chat_id.as_deref() == Some(attestation.reviewer_chat_id.as_str()) {
+            return Err("task review policy forbids owner self-review".to_string());
+        }
+        if !self
+            .reviewer_chat_ids
+            .iter()
+            .any(|assigned| assigned == &attestation.reviewer_chat_id)
+        {
+            return Err(format!(
+                "task reviewer {} is no longer assigned to this board",
+                attestation.reviewer_chat_id
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn clear_verifier_reports(&mut self) {
+        self.review_attestations.clear();
+        for card in &mut self.cards {
+            card.verifier_report = None;
+        }
+    }
+
+    pub fn remove_reviewer(&mut self, reviewer_chat_id: &str) {
+        self.reviewer_chat_ids
+            .retain(|reviewer| reviewer != reviewer_chat_id);
+        let stale = self
+            .review_attestations
+            .iter()
+            .filter_map(|(card_id, attestation)| {
+                (attestation.reviewer_chat_id == reviewer_chat_id).then(|| card_id.clone())
+            })
+            .collect::<Vec<_>>();
+        for card_id in stale {
+            self.invalidate_card_review(&card_id);
+        }
+    }
+
+    pub fn invalidate_card_review(&mut self, card_id: &str) {
+        self.review_attestations.remove(card_id);
+        if let Some(card) = self.get_card_mut(card_id) {
+            card.verifier_report = None;
+        }
+    }
+
+    pub fn attest_review(
+        &mut self,
+        card_id: &str,
+        reviewer_chat_id: &str,
+        report: &VerifierReport,
+        reviewed_at: String,
+    ) -> Result<(), String> {
+        self.authorize_reviewer(reviewer_chat_id)?;
+        self.review_attestations.insert(
+            card_id.to_string(),
+            BoardReviewAttestation {
+                reviewer_chat_id: reviewer_chat_id.to_string(),
+                reviewed_at,
+                report: report.clone(),
+            },
+        );
+        Ok(())
+    }
+
     pub fn get_ready_cards(&self) -> ReadyCardsResult {
         let mut ready = vec![];
         let mut blocked = vec![];

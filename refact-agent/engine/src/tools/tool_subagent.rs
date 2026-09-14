@@ -6,17 +6,18 @@ use refact_core::chat_types::PushMode;
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex as AMutex;
 
+use crate::agents::launch_spec::{self, LaunchSpec, ResolvedLaunchContext};
 use crate::agents::spawn::{
     NotifyParent, SpawnGoal, SpawnRequest, SpawnWorktreeMode, spawn_background_agent,
 };
 use crate::agents::types::BgAgentKind;
-use crate::at_commands::at_commands::{AtCommandsContext, MAX_SUBCHAT_DEPTH};
+use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::types::{GoalBudget, GoalCriterion};
 use crate::global_context::try_load_caps_quickly_if_not_present;
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
-use crate::tools::tools_list::{get_available_tools, get_tools_for_mode};
+use crate::tools::tools_list::get_available_tools;
 use crate::yaml_configs::customization_registry::get_subagent_config;
 
 pub const SUBAGENT_FORCE_TOOLS: &[&str] = &[
@@ -53,11 +54,25 @@ struct SubagentArgs {
     plan: Option<String>,
     worktree_mode: SpawnWorktreeMode,
     completion_push: PushMode,
+    launch_spec: Option<LaunchSpec>,
+    preview_only: bool,
 }
 
 #[async_trait]
 impl Tool for ToolSubagent {
     fn tool_description(&self) -> ToolDesc {
+        let context_entry_schema = json!({
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["raw_text", "message_range", "file_range", "task_doc", "memory_ref"]},
+                "label": {"type": "string"}, "text": {"type": "string"},
+                "start_message_id": {"type": "string"}, "end_message_id": {"type": "string"},
+                "path": {"type": "string"}, "line1": {"type": "integer"}, "line2": {"type": "integer"},
+                "task_id": {"type": "string"}, "slug": {"type": "string", "description": "Exact task document slug, required for task_doc."},
+                "query": {"type": "string"}
+            },
+            "required": ["type"]
+        });
         ToolDesc {
             name: "subagent".to_string(),
             display_name: "Subagent".to_string(),
@@ -81,7 +96,34 @@ impl Tool for ToolSubagent {
                     "plan": {"type": "string", "description": "Optional installed plan; it is ground truth for the child."},
                     "worktree": {"type": "string", "enum": ["inherit", "isolated"], "default": "inherit", "description": "Use the parent worktree or create an isolated worktree."},
                     "push": PushMode::schema(),
-                    "auto_merge": {"type": "boolean", "default": true, "description": "Only for worktree=isolated. Squash-merge completion automatically."}
+                    "auto_merge": {"type": "boolean", "default": true, "description": "Only for worktree=isolated. Squash-merge completion automatically."},
+                    "action": {"type": "string", "enum": ["run", "preview"], "default": "run", "description": "Use `preview` to resolve prompts/context and effective settings without spawning a child."},
+                    "launch_spec": {
+                        "type": "object",
+                        "description": "Optional parent-controlled child launch specification: custom instructions/profile augmentation and explicit initial context.",
+                        "properties": {
+                            "custom_instructions": {"type": "string", "description": "Extra instructions appended to the child's task."},
+                            "profile_augmentation": {"type": "string", "description": "Extra profile/persona augmentation appended to the child's task."},
+                            "history_mode": {"type": "string", "enum": ["fresh", "fork_completed_prefix"], "description": "fresh uses only explicit context; fork_completed_prefix also copies parent history up to its last complete tool boundary. Parent system policy is excluded; copied goals/plans are historical context, not child control state."},
+                            "token_budget": {"type": "integer", "minimum": 1, "description": "Cap on estimated tokens for resolved context entries."},
+                            "include_parent_goal": {"type": "boolean", "default": false, "description": "Copy the parent's current goal as historical reference context; it never becomes the child's goal."},
+                            "include_parent_plan": {"type": "boolean", "default": false, "description": "Copy the parent's current plan as historical reference context; it is not installed as the child's plan."},
+                            "deliverable": {
+                                "type": "object",
+                                "description": "Deliverable contract checked structurally on the child's final message: required Markdown sections, one ```json block validated against a JSON-schema subset, and an Evidence section. An unmet contract is reported to the parent; it is never proof of success.",
+                                "properties": {
+                                    "required_sections": {"type": "array", "items": {"type": "string"}},
+                                    "output_schema": {"type": "object"},
+                                    "evidence_required": {"type": "boolean", "default": false}
+                                }
+                            },
+                            "context": {
+                                "type": "array",
+                                "description": "Explicit discriminated context entries; unmatched or over-budget entries are skipped with a reason, never silently dropped.",
+                                "items": context_entry_schema
+                            }
+                        }
+                    }
                 },
                 "required": ["task", "expected_result"]
             }),
@@ -96,7 +138,6 @@ impl Tool for ToolSubagent {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let args = parse_subagent_args(args)?;
         let (
             gcx,
             app,
@@ -107,6 +148,7 @@ impl Tool for ToolSubagent {
             parent_task_meta,
             parent_worktree,
             current_model,
+            parent_messages,
         ) = {
             let ccx_lock = ccx.lock().await;
             (
@@ -119,24 +161,29 @@ impl Tool for ToolSubagent {
                 ccx_lock.task_meta.clone(),
                 ccx_lock.execution_scope_worktree(),
                 ccx_lock.current_model.clone(),
+                ccx_lock.messages.clone(),
             )
         };
 
-        if subchat_depth >= MAX_SUBCHAT_DEPTH.saturating_sub(1) {
-            return Err(format!(
-                "subchat depth limit ({MAX_SUBCHAT_DEPTH}) exceeded"
-            ));
-        }
-
-        let config = get_subagent_config(gcx.clone(), "subagent", None)
-            .await
-            .ok_or_else(|| "subagent config 'subagent' not found".to_string())?;
-        let max_steps = config.subchat.max_steps.unwrap_or(60).max(1);
-        let available_tools = available_tools(gcx.clone()).await;
-        let spawn_tools = match args.tools.as_ref() {
-            Some(requested) => Some(normalize_explicit_tools(requested, &available_tools)?),
-            None => inherit_parent_tools(&app, gcx.clone(), &parent_chat_id, &current_model).await,
+        let caller = if args
+            .get("launch_spec")
+            .is_some_and(|value| !value.is_null())
+        {
+            Some(
+                crate::coordination::scope::model_caller(&app, &parent_chat_id, &current_model)
+                    .await
+                    .map_err(|_| "launch caller scope or model unavailable")?,
+            )
+        } else {
+            None
         };
+        let limits = match &caller {
+            Some(caller) => {
+                crate::runtime_settings::coordination_for_project(&caller.source_root).await?
+            }
+            None => crate::file_activity::settings(),
+        };
+        let args = parse_subagent_args_with_limits(args, &limits)?;
         let (model, model_type) = resolve_model(
             gcx.clone(),
             args.model_name.as_deref(),
@@ -144,30 +191,109 @@ impl Tool for ToolSubagent {
             &current_model,
         )
         .await?;
+        let ceiling =
+            crate::agents::tool_authority::current_ceiling(&app, &parent_chat_id, &model, "agent")
+                .await?;
+        let requested = match args.tools.as_ref() {
+            Some(requested) => crate::subchat::ToolsPolicy::from_option(Some(
+                normalize_explicit_tools(requested, &available_tools(gcx.clone()).await)?,
+            )),
+            None => crate::subchat::ToolsPolicy::All,
+        };
+        let frozen = crate::agents::tool_authority::freeze(
+            &app,
+            &parent_chat_id,
+            &model,
+            "agent",
+            &requested,
+        )
+        .await?;
+        let mut spawn_tools = match frozen {
+            crate::subchat::ToolsPolicy::Only(names) => names,
+            crate::subchat::ToolsPolicy::None => Vec::new(),
+            crate::subchat::ToolsPolicy::All => {
+                return Err("concrete child authority unavailable".into())
+            }
+        };
+        for name in SUBAGENT_FORCE_TOOLS {
+            if ceiling.allows_tool(name) && !spawn_tools.iter().any(|tool| tool == name) {
+                spawn_tools.push(name.to_string());
+            }
+        }
+        spawn_tools.sort();
+        let launch_scope = if let Some(caller) = caller {
+            let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+                .await
+                .map_err(|_| "launch model unavailable")?;
+            let child_model = crate::caps::resolve_chat_model(caps, &model)?.base.clone();
+            Some(launch_spec::LaunchScope {
+                caller,
+                child_model,
+                limits,
+            })
+        } else {
+            None
+        };
+        let resolved_launch = match args.launch_spec.as_ref() {
+            Some(spec) => {
+                let scope = launch_scope.as_ref().ok_or("launch scope unavailable")?;
+                Some(
+                    launch_spec::resolve_scoped_launch_spec(
+                        gcx.clone(),
+                        spec,
+                        &parent_messages,
+                        scope,
+                    )
+                    .await,
+                )
+            }
+            None => None,
+        };
+        let max_steps = crate::runtime_settings::current()
+            .coordination
+            .subagent_default_steps;
         let peer_snapshot = peer_snapshot(&app, &parent_root_chat_id, &args.target_files).await;
+        let deliverable = args
+            .launch_spec
+            .as_ref()
+            .and_then(|spec| spec.deliverable.clone());
         let prompt = build_subagent_prompt(
             &args.task,
             &args.expected_result,
             &args.target_files,
             &peer_snapshot,
             args.goal.is_some(),
+            deliverable.as_ref(),
         );
         let req = SpawnRequest {
             kind: BgAgentKind::Subagent,
             parent_chat_id: parent_chat_id.clone(),
-            parent_root_chat_id: Some(parent_root_chat_id),
+            parent_root_chat_id: Some(parent_root_chat_id.clone()),
             parent_tool_call_id: Some(tool_call_id.clone()),
             config_name: "subagent".to_string(),
             title: short_title("Subagent", &args.task),
             prompt,
-            tools: spawn_tools,
+            initial_context_messages: resolved_launch
+                .as_ref()
+                .map(|resolved| resolved.prepended_messages.clone())
+                .unwrap_or_default(),
+            history_source_model: args
+                .launch_spec
+                .as_ref()
+                .filter(|spec| {
+                    spec.history_mode == Some(launch_spec::HistoryForkMode::ForkCompletedPrefix)
+                })
+                .map(|_| current_model.clone()),
+            custom_instructions: None,
+            tools: Some(spawn_tools.clone()),
             target_files: args.target_files.clone(),
             max_steps,
             model: model.clone(),
             model_type: model_type.clone(),
-            goal: args.goal,
-            plan: args.plan,
-            worktree_mode: args.worktree_mode,
+            goal: args.goal.clone(),
+            plan: args.plan.clone(),
+            deliverable,
+            worktree_mode: args.worktree_mode.clone(),
             parent_subchat_tx: Some(parent_subchat_tx),
             parent_worktree,
             parent_task_meta,
@@ -175,6 +301,86 @@ impl Tool for ToolSubagent {
             notify_parent: NotifyParent::Auto,
             completion_push: args.completion_push,
         };
+        if args.preview_only {
+            let effective = crate::agents::spawn::preview_launch(&app, &req).await;
+            let mut preview =
+                build_launch_preview_tool_result(&args, resolved_launch.as_ref(), tool_call_id);
+            if let ContextEnum::ChatMessage(message) = &mut preview {
+                message
+                    .extra
+                    .insert("effective_tools".into(), json!(spawn_tools));
+                message.extra.insert("effective_model".into(), json!(model));
+                if let Some(contract) = args
+                    .launch_spec
+                    .as_ref()
+                    .and_then(|spec| spec.deliverable.as_ref())
+                {
+                    message.extra.insert("deliverable".into(), json!(contract));
+                }
+                match effective {
+                    Ok(effective) => {
+                        message
+                            .extra
+                            .insert("effective_launch".into(), json!(effective));
+                    }
+                    Err(error) => {
+                        message.extra.insert("launch_blocked".into(), json!(error));
+                        if let ChatContent::SimpleText(text) = &mut message.content {
+                            text.push_str(&format!("\n\n## Launch Blocked\n- {error}"));
+                        }
+                    }
+                }
+            }
+            if let (Some(scope), Some(resolved), ContextEnum::ChatMessage(message)) =
+                (&launch_scope, &resolved_launch, &mut preview)
+            {
+                crate::privacy::records::carry_records_into(message, &resolved.prepended_messages)
+                    .map_err(|_| "launch preview provenance unavailable")?;
+                crate::privacy::records::carry_records_into(message, &parent_messages)
+                    .map_err(|_| "launch parent provenance unavailable")?;
+                scope.clear(&gcx, std::slice::from_ref(message))?;
+                message.extra.insert("effective_model".into(), json!(model));
+                message.extra.insert(
+                    "launch_limits".into(),
+                    json!({
+                        "tokens": scope.limits.launch_context_tokens,
+                        "messages": scope.limits.launch_context_messages,
+                        "entries": scope.limits.launch_context_entries,
+                        "bytes": scope.limits.launch_context_bytes,
+                        "source_bytes": scope.limits.launch_source_bytes,
+                    }),
+                );
+            }
+            return Ok((false, vec![preview]));
+        }
+
+        let max_depth = crate::runtime_settings::current()
+            .coordination
+            .max_subchat_depth;
+        if subchat_depth >= max_depth.saturating_sub(1) {
+            return Err(format!("subchat depth limit ({max_depth}) exceeded"));
+        }
+
+        let _config = get_subagent_config(gcx.clone(), "subagent", None)
+            .await
+            .ok_or_else(|| "subagent config 'subagent' not found".to_string())?;
+        if let (Some(scope), Some(resolved)) = (&launch_scope, &resolved_launch) {
+            if !resolved.skipped.is_empty() {
+                return Err("launch context could not be fully resolved; inspect the preview and revise the request before launching".into());
+            }
+            scope.clear(&gcx, &resolved.prepended_messages)?;
+            let current =
+                crate::coordination::scope::model_caller(&app, &parent_chat_id, &current_model)
+                    .await
+                    .map_err(|_| "launch caller changed during preparation")?;
+            if current.source_root != scope.caller.source_root
+                || current.checkout_root != scope.caller.checkout_root
+            {
+                return Err(
+                    "launch scope changed during preparation; request a new preview".into(),
+                );
+            }
+        }
         let handle = spawn_background_agent(app, req).await?;
         Ok((
             false,
@@ -195,7 +401,15 @@ impl Tool for ToolSubagent {
     }
 }
 
+#[cfg(test)]
 fn parse_subagent_args(args: &HashMap<String, Value>) -> Result<SubagentArgs, String> {
+    parse_subagent_args_with_limits(args, &crate::file_activity::settings())
+}
+
+fn parse_subagent_args_with_limits(
+    args: &HashMap<String, Value>,
+    limits: &refact_work_core::CoordinationSettings,
+) -> Result<SubagentArgs, String> {
     let task = parse_required_string(args, "task")?;
     let expected_result = parse_required_string(args, "expected_result")?;
     let target_files = parse_target_files(args)?;
@@ -230,6 +444,17 @@ fn parse_subagent_args(args: &HashMap<String, Value>) -> Result<SubagentArgs, St
         },
         _ => return Err("argument `worktree` must be `inherit` or `isolated`".to_string()),
     };
+    let action = parse_optional_string(args, "action")?.unwrap_or_else(|| "run".to_string());
+    let preview_only = match action.as_str() {
+        "run" => false,
+        "preview" => true,
+        other => {
+            return Err(format!(
+                "argument `action` must be `run` or `preview`, got `{other}`"
+            ))
+        }
+    };
+    let launch_spec = launch_spec::parse_launch_spec_with_limits(args, limits)?;
     Ok(SubagentArgs {
         task,
         expected_result,
@@ -241,6 +466,8 @@ fn parse_subagent_args(args: &HashMap<String, Value>) -> Result<SubagentArgs, St
         plan,
         worktree_mode,
         completion_push: PushMode::from_args(args)?,
+        launch_spec,
+        preview_only,
     })
 }
 
@@ -369,30 +596,6 @@ async fn available_tools(gcx: Arc<crate::global_context::GlobalContext>) -> Hash
     names
 }
 
-async fn inherit_parent_tools(
-    app: &crate::app_state::AppState,
-    gcx: Arc<crate::global_context::GlobalContext>,
-    parent_chat_id: &str,
-    model: &str,
-) -> Option<Vec<String>> {
-    let session = {
-        let sessions = app.chat.sessions.read().await;
-        sessions.get(parent_chat_id)?.clone()
-    };
-    let parent_mode = session.lock().await.thread.mode.clone();
-    let mut tools = get_tools_for_mode(gcx, &parent_mode, Some(model))
-        .await
-        .into_iter()
-        .map(|tool| tool.tool_description().name)
-        .collect::<Vec<_>>();
-    for tool in SUBAGENT_FORCE_TOOLS {
-        if !tools.iter().any(|candidate| candidate == tool) {
-            tools.push((*tool).to_string());
-        }
-    }
-    Some(tools)
-}
-
 fn canonical_tool_name(tool: &str) -> String {
     let normalized = tool.trim().to_ascii_lowercase();
     let normalized =
@@ -429,11 +632,6 @@ fn normalize_explicit_tools(
         }
         if seen.insert(canonical.clone()) {
             result.push(canonical);
-        }
-    }
-    for tool in SUBAGENT_FORCE_TOOLS {
-        if seen.insert((*tool).to_string()) {
-            result.push((*tool).to_string());
         }
     }
     Ok(result)
@@ -555,6 +753,7 @@ fn build_subagent_prompt(
     target_files: &[String],
     peers: &str,
     goal_installed: bool,
+    deliverable: Option<&refact_chat_api::DeliverableContract>,
 ) -> String {
     let mut prompt = format!("# Your Task\n{task}\n\n# Expected Result\n{expected_result}\n\n");
     if !target_files.is_empty() {
@@ -565,6 +764,10 @@ fn build_subagent_prompt(
         prompt.push('\n');
     }
     prompt.push_str(&format!("# Active peers\n{peers}\n\n"));
+    if let Some(contract) = deliverable {
+        prompt.push_str(&contract.render_instructions());
+        prompt.push_str("\n\n");
+    }
     prompt.push_str("# Constraints\n- Work independently in this background trajectory.\n- You MAY run tests, compilation, lint, or other verification when your tools allow it.\n- Publish progress with `tasks_set` and `progress_report`.\n- Sibling digest notices arrive in your context automatically; coordinate with `agents_overview` and `agent_message`.\n");
     if goal_installed {
         prompt.push_str("- An installed goal is ground truth. You MUST call `validate_goal` before finishing and report any unmet criteria.\n");
@@ -584,11 +787,11 @@ fn build_background_start_tool_result(
 ) -> ContextEnum {
     let mut lines = vec![
         format!(
-            "✓ Started background subagent: {}",
+            "✓ Accepted background subagent: {}",
             truncate_chars(task, 60)
         ),
         format!("- agent_id: {}", handle.agent_id),
-        "- status: running".to_string(),
+        "- status: queued".to_string(),
         format!("- child_chat_id: {}", handle.child_chat_id),
         format!("- model: {model}"),
     ];
@@ -624,8 +827,10 @@ fn build_background_start_tool_result(
         Map::from_iter([
             ("background_agent_id".to_string(), json!(handle.agent_id)),
             ("background_agent_kind".to_string(), json!("subagent")),
-            ("background_agent_status".to_string(), json!("running")),
+            ("background_agent_status".to_string(), json!("queued")),
             ("child_chat_id".to_string(), json!(handle.child_chat_id)),
+            ("launch_revision".to_string(), json!(handle.launch_revision)),
+            ("launch_digest".to_string(), json!(handle.launch_digest)),
             ("model".to_string(), json!(model)),
             ("model_type".to_string(), json!(model_type)),
             ("worktree_branch".to_string(), json!(handle.worktree_branch)),
@@ -636,6 +841,100 @@ fn build_background_start_tool_result(
             ),
         ]),
     )
+}
+
+fn build_launch_preview_tool_result(
+    args: &SubagentArgs,
+    resolved: Option<&ResolvedLaunchContext>,
+    tool_call_id: &str,
+) -> ContextEnum {
+    let mut lines = vec![
+        "# Launch Preview (no child spawned)".to_string(),
+        String::new(),
+        format!("- task: {}", truncate_chars(&args.task, 200)),
+        format!(
+            "- worktree_mode: {}",
+            match &args.worktree_mode {
+                SpawnWorktreeMode::Inherit => "inherit".to_string(),
+                SpawnWorktreeMode::Isolated { auto_merge } =>
+                    format!("isolated (auto_merge={auto_merge})"),
+            }
+        ),
+        format!(
+            "- tools: {}",
+            args.tools
+                .as_ref()
+                .map(|t| t.join(", "))
+                .unwrap_or_else(|| "(inherit all)".to_string())
+        ),
+    ];
+    match resolved {
+        None => lines.push("- launch_spec: (not provided; legacy defaults apply)".to_string()),
+        Some(resolved) => {
+            lines.push(String::new());
+            lines.push("## Resolved Context".to_string());
+            if resolved.prepended_messages.is_empty() {
+                lines.push("(no context messages resolved)".to_string());
+            } else {
+                for message in &resolved.prepended_messages {
+                    lines.push(format!(
+                        "- [{}] {}",
+                        message.role,
+                        truncate_chars(&message.content.content_text_only(), 120)
+                    ));
+                }
+            }
+            if !resolved.skipped.is_empty() {
+                lines.push(String::new());
+                lines.push("## Skipped/Withheld Entries".to_string());
+                for skipped in &resolved.skipped {
+                    lines.push(format!("- {}: {}", skipped.description, skipped.reason));
+                }
+            }
+            if !resolved.excluded.is_empty() {
+                lines.push("## Fork Exclusions".into());
+                for excluded in &resolved.excluded {
+                    lines.push(format!("- {}: {}", excluded.description, excluded.reason));
+                }
+            }
+            lines.push(String::new());
+            lines.push(format!("- estimated_tokens: {}", resolved.estimated_tokens));
+        }
+    }
+    let extra = Map::from_iter([
+        ("preview".to_string(), json!(true)),
+        (
+            "skipped_count".to_string(),
+            json!(resolved.map(|r| r.skipped.len()).unwrap_or(0)),
+        ),
+        (
+            "estimated_tokens".to_string(),
+            json!(resolved.map(|r| r.estimated_tokens).unwrap_or(0)),
+        ),
+        (
+            "serialized_bytes".to_string(),
+            json!(resolved.map(|r| r.serialized_bytes).unwrap_or(0)),
+        ),
+        (
+            "context_sources".into(),
+            json!(resolved
+                .map(|resolved| resolved
+                    .prepended_messages
+                    .iter()
+                    .filter_map(|message| message.extra.get("launch_context_source"))
+                    .collect::<Vec<_>>())
+                .unwrap_or_default()),
+        ),
+        (
+            "skipped".into(),
+            json!(resolved.map(|r| r.skipped.clone()).unwrap_or_default()),
+        ),
+        (
+            "exclusions".into(),
+            json!(resolved.map(|r| r.excluded.clone()).unwrap_or_default()),
+        ),
+    ]);
+    tool_message(lines.join("\n"), tool_call_id, extra)
 }
 
 fn tool_message(content: String, tool_call_id: &str, extra: Map<String, Value>) -> ContextEnum {
@@ -730,11 +1029,16 @@ mod tests {
             .as_secs();
     }
 
-    async fn test_context(parent_chat_id: &str) -> Arc<AMutex<AtCommandsContext>> {
+    async fn test_context(
+        parent_chat_id: &str,
+    ) -> (Arc<AMutex<AtCommandsContext>>, tempfile::TempDir) {
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let workspace = tempfile::tempdir().expect("subagent test workspace");
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().canonicalize().unwrap()];
         install_test_caps(gcx.clone()).await;
         let app = AppState::from_gcx(gcx).await;
-        Arc::new(AMutex::new(
+        let context = Arc::new(AMutex::new(
             AtCommandsContext::new_from_app(
                 app,
                 4096,
@@ -748,7 +1052,8 @@ mod tests {
                 None,
             )
             .await,
-        ))
+        ));
+        (context, workspace)
     }
 
     fn message(contexts: Vec<ContextEnum>) -> ChatMessage {
@@ -756,6 +1061,154 @@ mod tests {
             ContextEnum::ChatMessage(message) => message,
             _ => panic!("expected chat message"),
         }
+    }
+
+    #[tokio::test]
+    async fn public_launch_preview_enforces_scope_destination_and_preserves_source_records() {
+        let (ccx, workspace) = test_context("launch-parent").await;
+        let app = ccx.lock().await.app.clone();
+        let mut parent = crate::chat::types::ChatSession::new("launch-parent".into());
+        parent.thread.model = "test/default".into();
+        parent.work_project_root = Some(workspace.path().into());
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("launch-parent".into(), Arc::new(AMutex::new(parent)));
+        let (root, _) = crate::caps::project_model_defaults_state(app.gcx.clone()).await;
+        app.gcx.caps_state.write().await.loaded_project_root = Some(root);
+        let file = workspace.path().join("private.rs");
+        std::fs::write(&file, "launch-source-body").unwrap();
+        let mut request = args();
+        request.insert("action".into(), json!("preview"));
+        request.insert(
+            "launch_spec".into(),
+            json!({"context":[{"type":"file_range","path":"private.rs"}]}),
+        );
+        let execute = |request: HashMap<String, Value>| {
+            let app = app.clone();
+            let ccx = ccx.clone();
+            async move {
+                app.tool_registry
+                    .execute_tool(
+                        &ccx,
+                        "agent",
+                        Some("test/default"),
+                        "preview",
+                        "subagent",
+                        request.into_iter().collect(),
+                    )
+                    .await
+            }
+        };
+        let preview = execute(request.clone())
+            .await
+            .unwrap()
+            .expect("subagent must be publicly reachable");
+        let message = preview.messages.first().unwrap();
+        assert!(message
+            .content
+            .content_text_only()
+            .contains("launch-source-body"));
+        assert!(crate::privacy::records::records_to_carry(&preview.messages)
+            .unwrap()
+            .iter()
+            .any(|record| record.path == file.to_string_lossy()));
+        assert!(app.agents.list_all().await.is_empty());
+        let effective = &message.extra["effective_launch"];
+        assert!(message.extra.get("launch_blocked").is_none());
+        assert_eq!(effective["schema_version"], 1);
+        assert_eq!(effective["revision"], 1);
+        assert_eq!(effective["model"], message.extra["effective_model"]);
+        assert_eq!(effective["mode"], "agent");
+        match &effective["tools"] {
+            Value::String(policy) => {
+                assert_eq!(policy, "None");
+                assert_eq!(message.extra["effective_tools"], json!([]));
+            }
+            policy => assert_eq!(policy["Only"], message.extra["effective_tools"]),
+        }
+        assert_eq!(effective["worktree_mode"], "inherit");
+        assert_eq!(effective["stateful"], true);
+        assert_eq!(effective["autonomous_no_confirm"], false);
+        assert_eq!(effective["auto_approve_editing_tools"], false);
+        assert_eq!(effective["auto_approve_dangerous_commands"], false);
+        assert_eq!(
+            effective["max_steps"],
+            crate::runtime_settings::current()
+                .coordination
+                .subagent_default_steps
+        );
+        assert_eq!(effective["subchat_depth"], 1);
+        assert!(effective["messages"].as_u64().unwrap() >= 1);
+        assert!(effective["accepted_bytes"].as_u64().unwrap() > 0);
+        assert!(
+            effective["accepted_bytes"].as_u64().unwrap()
+                <= effective["accepted_byte_limit"].as_u64().unwrap()
+        );
+        assert_eq!(message.extra["skipped"], json!([]));
+        assert_eq!(message.extra["exclusions"], json!([]));
+        assert!(app.agents.list_all().await.is_empty());
+        let saved_depth = ccx.lock().await.subchat_depth;
+        ccx.lock().await.subchat_depth = crate::runtime_settings::current()
+            .coordination
+            .max_subchat_depth;
+        let blocked = execute(request.clone()).await.unwrap().unwrap();
+        assert!(blocked.messages[0].extra["launch_blocked"]
+            .as_str()
+            .unwrap()
+            .contains("depth"));
+        assert!(blocked.messages[0].extra.get("effective_launch").is_none());
+        assert!(blocked.messages[0]
+            .content
+            .content_text_only()
+            .contains("## Launch Blocked"));
+        ccx.lock().await.subchat_depth = saved_depth;
+        assert!(app.agents.list_all().await.is_empty());
+        let settings_path = crate::runtime_settings::project_coordination_path(workspace.path());
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        std::fs::write(&settings_path, "launch_source_bytes: 1\n").unwrap();
+        let bounded = execute(request.clone()).await.unwrap().unwrap();
+        assert_eq!(bounded.messages[0].extra["skipped_count"], 1);
+        assert_eq!(
+            bounded.messages[0].extra["launch_limits"]["source_bytes"],
+            1
+        );
+        assert!(!bounded.messages[0]
+            .content
+            .content_text_only()
+            .contains("launch-source-body"));
+        std::fs::write(&settings_path, "launch_source_bytes: 4096\n").unwrap();
+        let restored = execute(request.clone()).await.unwrap().unwrap();
+        assert_eq!(restored.messages[0].extra["skipped_count"], 0);
+        assert!(restored.messages[0]
+            .content
+            .content_text_only()
+            .contains("launch-source-body"));
+        std::fs::write(&settings_path, "launch_source_bytes: 0\n").unwrap();
+        assert!(execute(request.clone()).await.is_err());
+        std::fs::write(&settings_path, "{}\n").unwrap();
+        app.gcx.privacy_policy_load.write().unwrap().policy =
+            Arc::new(refact_privacy::PrivacyPolicy {
+                zones: vec![refact_privacy::Zone {
+                    name: "private".into(),
+                    patterns: vec![file.to_string_lossy().into_owned()],
+                    send_to: vec!["other".into()],
+                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
+                }],
+                ..Default::default()
+            });
+        let denied = execute(request.clone()).await.unwrap().unwrap();
+        assert!(!denied.messages.iter().any(|message| message
+            .content
+            .content_text_only()
+            .contains("launch-source-body")));
+        request.insert("action".into(), json!("run"));
+        assert!(execute(request.clone()).await.is_err());
+        assert!(app.agents.list_all().await.is_empty());
+        request.insert("action".into(), json!("preview"));
+        request.insert("model_name".into(), json!("missing/model"));
+        assert!(execute(request).await.is_err());
     }
 
     #[test]
@@ -792,6 +1245,462 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    #[serial(test_runner)]
+    async fn public_fork_launch_uses_completed_snapshot_and_reports_queued_without_side_effects() {
+        let (ccx, workspace) = test_context("fork-parent").await;
+        let app = ccx.lock().await.app.clone();
+        let mut parent = crate::chat::types::ChatSession::new("fork-parent".into());
+        parent.thread.model = "test/default".into();
+        parent.work_project_root = Some(workspace.path().into());
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("fork-parent".into(), Arc::new(AMutex::new(parent)));
+        let (root, _) = crate::caps::project_model_defaults_state(app.gcx.clone()).await;
+        app.gcx.caps_state.write().await.loaded_project_root = Some(root);
+        let completed = ChatMessage {
+            message_id: "completed-answer".into(),
+            role: "assistant".into(),
+            content: ChatContent::SimpleText("completed parent answer".into()),
+            thinking_blocks: Some(vec![
+                json!({"type":"thinking","thinking":"exact thinking","signature":"opaque-signature"}),
+            ]),
+            ..Default::default()
+        };
+        let pending: ChatMessage = serde_json::from_value(json!({
+            "message_id":"unfinished", "role":"assistant", "content":"pending",
+            "tool_calls":[{"id":"pending-call","type":"function","function":{"name":"shell","arguments":"{}"}}]
+        })).unwrap();
+        ccx.lock().await.messages = vec![
+            ChatMessage::new("system".into(), "parent policy is not child policy".into()),
+            completed.clone(),
+            pending,
+        ];
+        app.work_scheduler
+            .configure(refact_work_core::CoordinationSettings {
+                max_active_engine: 1,
+                max_active_project: 1,
+                max_active_root: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        let blocker = app
+            .work_scheduler
+            .reserve(refact_work_core::AdmissionRequest::new(
+                refact_work_core::WorkKey::background_agent("blocker").run(1),
+                refact_work_core::WorkScope::new(
+                    refact_work_core::ProjectKey::new("blocker"),
+                    refact_work_core::CheckoutKey::new("blocker"),
+                ),
+            ))
+            .unwrap()
+            .acquire()
+            .await
+            .unwrap();
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let output = captured.clone();
+        let _runner =
+            crate::agents::spawn::install_test_runner(Arc::new(move |_gcx, messages, config| {
+                *output.lock().unwrap() = Some((
+                    crate::subchat::prepare_child_history(&messages, &config),
+                    config,
+                ));
+                Box::pin(async move {
+                    Ok(SubchatResult {
+                        messages,
+                        metering: Map::new(),
+                        chat_id: None,
+                        aborted: false,
+                    })
+                })
+            }));
+        let mut request = args();
+        request.insert(
+            "launch_spec".into(),
+            json!({"history_mode":"fork_completed_prefix"}),
+        );
+        let result = app
+            .tool_registry
+            .execute_tool(
+                &ccx,
+                "agent",
+                Some("test/default"),
+                "fork-call",
+                "subagent",
+                request.into_iter().collect(),
+            )
+            .await
+            .unwrap()
+            .expect("public fork launch");
+        let receipt = &result.messages[0];
+        assert_eq!(receipt.extra["background_agent_status"], "queued");
+        assert!(receipt.extra["worktree_branch"].is_null());
+        let agent = receipt.extra["background_agent_id"].as_str().unwrap();
+        let child = receipt.extra["child_chat_id"].as_str().unwrap();
+        assert!(captured.lock().unwrap().is_none());
+        assert!(!app.chat.sessions.read().await.contains_key(child));
+        let launch_limit = crate::runtime_settings::coordination_for_project(workspace.path())
+            .await
+            .unwrap()
+            .launch_context_bytes;
+        let accepted_bytes = app
+            .agents
+            .accepted_launch("fork-parent", agent, launch_limit)
+            .await
+            .unwrap();
+        let accepted = accepted_bytes.decode::<Value>().unwrap();
+        assert_eq!(accepted["revision"], 1);
+        assert_eq!(receipt.extra["launch_revision"], accepted["revision"]);
+        assert_eq!(receipt.extra["launch_digest"], {
+            use sha2::Digest;
+            hex::encode(sha2::Sha256::digest(accepted_bytes.as_bytes()))
+        });
+        assert_eq!(accepted["config"]["chat_id"], child);
+        assert_eq!(accepted["config"]["model"], "test/default");
+        assert_eq!(accepted["config"]["autonomous_no_confirm"], false);
+        assert!(accepted["config"].get("parent_subchat_tx").is_none());
+        assert!(app
+            .agents
+            .accepted_launch("foreign-parent", agent, launch_limit)
+            .await
+            .is_err());
+        assert!(app
+            .agents
+            .save_accepted_launch(agent, &accepted_bytes)
+            .await
+            .is_err());
+        let parent = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get("fork-parent")
+            .unwrap()
+            .clone();
+        parent.lock().await.thread.autonomous_no_confirm = true;
+        ccx.lock().await.messages.clear();
+        drop(blocker);
+        app.agents
+            .wait("fork-parent", agent, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let (messages, config) = captured.lock().unwrap().clone().expect("child ran");
+        assert!(!config.autonomous_no_confirm);
+        assert!(!config.auto_approve_editing_tools);
+        assert!(!config.auto_approve_dangerous_commands);
+        assert_eq!(
+            app.agents
+                .accepted_launch("fork-parent", agent, launch_limit)
+                .await
+                .unwrap()
+                .decode::<Value>()
+                .unwrap(),
+            accepted
+        );
+        assert_eq!(config.history_source_model.as_deref(), Some("test/default"));
+        let source = messages
+            .iter()
+            .find(|message| message.message_id == "completed-answer")
+            .unwrap();
+        assert_eq!(source.thinking_blocks, completed.thinking_blocks);
+        assert_eq!(
+            source.extra["launch_context_source"]["type"],
+            "completed_prefix"
+        );
+        assert!(!messages
+            .iter()
+            .any(|message| message.message_id == "unfinished"));
+        assert!(!messages.iter().any(|message| message
+            .content
+            .content_text_only()
+            .contains("parent policy is not child policy")));
+    }
+
+    #[tokio::test]
+    #[serial(test_runner)]
+    async fn public_launch_binds_deliverable_contract_and_reports_structural_outcome() {
+        for met in [false, true] {
+            let (ccx, workspace) = test_context("contract-parent").await;
+            let app = ccx.lock().await.app.clone();
+            let mut parent = crate::chat::types::ChatSession::new("contract-parent".into());
+            parent.thread.model = "test/default".into();
+            parent.work_project_root = Some(workspace.path().into());
+            crate::chat::goal_role::install_goal(
+                &mut parent,
+                "agent",
+                "Parent goal body",
+                true,
+                refact_chat_api::GoalBudget::default(),
+            );
+            crate::chat::plan_role::install_plan(&mut parent, "agent", "Parent plan body");
+            parent
+                .queue_processor_running
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let parent_messages = parent.messages.clone();
+            app.chat
+                .sessions
+                .write()
+                .await
+                .insert("contract-parent".into(), Arc::new(AMutex::new(parent)));
+            ccx.lock().await.messages = parent_messages;
+            let (root, _) = crate::caps::project_model_defaults_state(app.gcx.clone()).await;
+            app.gcx.caps_state.write().await.loaded_project_root = Some(root);
+            let captured = Arc::new(std::sync::Mutex::new(None));
+            let output = captured.clone();
+            let _runner = crate::agents::spawn::install_test_runner(Arc::new(
+                move |_gcx, mut messages, config| {
+                    *output.lock().unwrap() = Some((messages.clone(), config.tools.clone()));
+                    let final_text = if met {
+                        "# Findings\nfound it\n# Evidence\ncargo test exit 0\n```json\n{\"status\":\"done\"}\n```\n"
+                    } else {
+                        "Status: DONE\nNo sections at all."
+                    };
+                    messages.push(ChatMessage::new("assistant".into(), final_text.into()));
+                    Box::pin(async move {
+                        Ok(SubchatResult {
+                            messages,
+                            metering: Map::new(),
+                            chat_id: config.chat_id,
+                            aborted: false,
+                        })
+                    })
+                },
+            ));
+            let contract = json!({
+                "required_sections": ["Findings"],
+                "output_schema": {"type":"object","required":["status"],"properties":{"status":{"type":"string"}}},
+                "evidence_required": true
+            });
+            let mut request = args();
+            request.insert(
+                "launch_spec".into(),
+                json!({"include_parent_goal": true, "include_parent_plan": true, "deliverable": contract}),
+            );
+            let mut preview = request.clone();
+            preview.insert("action".into(), json!("preview"));
+            let previewed = app
+                .tool_registry
+                .execute_tool(
+                    &ccx,
+                    "agent",
+                    Some("test/default"),
+                    "preview",
+                    "subagent",
+                    preview.into_iter().collect(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(previewed.messages[0].extra["deliverable"], contract);
+            let sources = previewed.messages[0].extra["context_sources"]
+                .as_array()
+                .unwrap();
+            assert!(sources.iter().any(|source| source["type"] == "parent_goal"
+                && source["trusted_as_instructions"] == false));
+            assert!(sources
+                .iter()
+                .any(|source| source["type"] == "parent_plan" && source["historical"] == true));
+            assert!(app.agents.list_all().await.is_empty());
+            let result = app
+                .tool_registry
+                .execute_tool(
+                    &ccx,
+                    "agent",
+                    Some("test/default"),
+                    "launch",
+                    "subagent",
+                    request.into_iter().collect(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let agent = result.messages[0].extra["background_agent_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let record = app
+                .agents
+                .wait("contract-parent", &agent, Duration::from_secs(5))
+                .await
+                .unwrap();
+            assert_eq!(
+                record.status,
+                crate::agents::types::BgAgentStatus::Completed
+            );
+            assert_eq!(
+                serde_json::to_value(record.deliverable.as_ref().unwrap()).unwrap(),
+                contract
+            );
+            let status = record.deliverable_status.clone().expect("evaluated");
+            assert_eq!(status.check, refact_chat_api::DELIVERABLE_CHECK_STRUCTURAL);
+            assert_eq!(status.met, met);
+            if !met {
+                assert_eq!(status.missing_sections, vec!["Findings"]);
+                assert!(status.evidence_missing);
+                assert!(status.schema_error.is_some());
+            }
+            let (messages, tools) = captured.lock().unwrap().clone().unwrap();
+            assert!(matches!(tools, ToolsPolicy::Only(_)));
+            let prompt = messages
+                .iter()
+                .map(|message| message.content.content_text_only())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(prompt.contains("# Deliverable contract"));
+            assert!(prompt.contains("`# Findings`"));
+            assert!(prompt.contains("Parent goal body"));
+            assert!(prompt.contains("Parent plan body"));
+            assert!(prompt.contains("It is not the child's goal"));
+            let child_goal = crate::chat::goal_snapshot_from_messages(&messages, None);
+            assert!(child_goal.is_none());
+            let parent_session = app
+                .chat
+                .sessions
+                .read()
+                .await
+                .get("contract-parent")
+                .cloned()
+                .unwrap();
+            let notice = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let found = {
+                        let session = parent_session.lock().await;
+                        session
+                            .messages
+                            .iter()
+                            .chain(
+                                session
+                                    .pending_deliveries
+                                    .iter()
+                                    .flat_map(|delivery| delivery.messages.iter()),
+                            )
+                            .map(|message| message.content.content_text_only())
+                            .find(|text| text.contains("[background subagent finished]"))
+                    };
+                    if let Some(found) = found {
+                        break found;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("completion notice");
+            assert!(notice.contains(if met {
+                "deliverable_contract: met"
+            } else {
+                "deliverable_contract: UNMET"
+            }));
+            if !met {
+                assert!(notice.contains("missing sections: Findings"));
+                assert!(notice.contains("claims are unverified"));
+            }
+            let summary = crate::agents::types::BackgroundAgentSummary::from(&record);
+            assert_eq!(
+                summary.deliverable_status.as_ref().map(|status| status.met),
+                Some(met)
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial(test_runner)]
+    async fn queued_public_launch_rechecks_scope_and_privacy_before_runner() {
+        for change_scope in [false, true] {
+            let (ccx, workspace) = test_context("queued-parent").await;
+            let app = ccx.lock().await.app.clone();
+            let mut parent = crate::chat::types::ChatSession::new("queued-parent".into());
+            parent.thread.model = "test/default".into();
+            parent.work_project_root = Some(workspace.path().into());
+            let parent = Arc::new(AMutex::new(parent));
+            app.chat
+                .sessions
+                .write()
+                .await
+                .insert("queued-parent".into(), parent.clone());
+            let (root, _) = crate::caps::project_model_defaults_state(app.gcx.clone()).await;
+            app.gcx.caps_state.write().await.loaded_project_root = Some(root);
+            std::fs::write(workspace.path().join("context.txt"), "accepted source body").unwrap();
+            app.work_scheduler
+                .configure(refact_work_core::CoordinationSettings {
+                    max_active_engine: 1,
+                    max_active_project: 1,
+                    max_active_root: 1,
+                    ..Default::default()
+                })
+                .unwrap();
+            let blocker = app
+                .work_scheduler
+                .reserve(refact_work_core::AdmissionRequest::new(
+                    refact_work_core::WorkKey::background_agent("blocker").run(1),
+                    refact_work_core::WorkScope::new(
+                        refact_work_core::ProjectKey::new("blocker"),
+                        refact_work_core::CheckoutKey::new("blocker"),
+                    ),
+                ))
+                .unwrap()
+                .acquire()
+                .await
+                .unwrap();
+            let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = ran.clone();
+            let _runner =
+                crate::agents::spawn::install_test_runner(Arc::new(move |_, messages, _| {
+                    observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Box::pin(async move {
+                        Ok(SubchatResult {
+                            messages,
+                            metering: Map::new(),
+                            chat_id: None,
+                            aborted: false,
+                        })
+                    })
+                }));
+            let mut request = args();
+            request.insert(
+                "launch_spec".into(),
+                json!({"context":[{"type":"file_range","path":"context.txt"}]}),
+            );
+            let result = app
+                .tool_registry
+                .execute_tool(
+                    &ccx,
+                    "agent",
+                    Some("test/default"),
+                    "queued-call",
+                    "subagent",
+                    request.into_iter().collect(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let receipt = &result.messages[0];
+            let agent = receipt.extra["background_agent_id"].as_str().unwrap();
+            let child = receipt.extra["child_chat_id"].as_str().unwrap();
+            let foreign = tempfile::tempdir().unwrap();
+            if change_scope {
+                parent.lock().await.work_project_root = Some(foreign.path().into());
+            } else {
+                app.gcx.privacy_policy_load.write().unwrap().policy =
+                    Arc::new(refact_privacy::PrivacyPolicy {
+                        blocked: vec!["context.txt".into()],
+                        ..Default::default()
+                    });
+            }
+            drop(blocker);
+            let stopped = app
+                .agents
+                .wait("queued-parent", agent, Duration::from_secs(5))
+                .await
+                .unwrap();
+            assert_eq!(stopped.status, crate::agents::types::BgAgentStatus::Failed);
+            assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(!app.chat.sessions.read().await.contains_key(child));
+            assert!(stopped.worktree_id.is_none());
+        }
+    }
+
     #[test]
     fn completion_push_defaults_to_append_and_validates_modes() {
         assert_eq!(
@@ -809,7 +1718,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_tools_accept_editing_aliases_and_force_tools() {
+    fn explicit_tools_accept_editing_aliases_without_adding_authority() {
         let available = HashSet::from([
             "apply_patch".to_string(),
             "search_pattern".to_string(),
@@ -821,10 +1730,7 @@ mod tests {
             &available,
         )
         .unwrap();
-        assert_eq!(&tools[..2], ["apply_patch", "search_pattern"]);
-        for required in SUBAGENT_FORCE_TOOLS {
-            assert!(tools.contains(&required.to_string()));
-        }
+        assert_eq!(tools, ["apply_patch", "search_pattern"]);
     }
 
     #[tokio::test]
@@ -927,7 +1833,7 @@ mod tests {
     #[serial(test_runner)]
     #[tokio::test]
     async fn omitted_tools_spawn_with_all_tools_and_peer_prompt() {
-        let ccx = test_context("parent").await;
+        let (ccx, _workspace) = test_context("parent").await;
         let app = ccx.lock().await.app.clone();
         let (peer, _, _) = app
             .agents
@@ -1002,7 +1908,9 @@ mod tests {
             .unwrap();
         assert_eq!(result.completion_push, PushMode::Preempt);
         let (tools, prompt) = captured.lock().unwrap().clone().unwrap();
-        assert!(matches!(tools, ToolsPolicy::All));
+        assert!(
+            matches!(tools, ToolsPolicy::Only(ref tools) if tools.iter().any(|name| name == "cat"))
+        );
         assert!(prompt.contains("# Active peers"));
         assert!(prompt.contains("Peer frog task"));
         assert!(prompt.contains("Overlap warning"));
@@ -1016,8 +1924,8 @@ mod tests {
 
     #[serial(test_runner)]
     #[tokio::test]
-    async fn omitted_tools_inherit_parent_mode_tools_and_force_tools() {
-        let ccx = test_context("restricted-parent").await;
+    async fn omitted_tools_cannot_add_force_tools_outside_parent_mode() {
+        let (ccx, _workspace) = test_context("restricted-parent").await;
         let app = ccx.lock().await.app.clone();
         let parent_session = Arc::new(AMutex::new(crate::chat::types::ChatSession::new(
             "restricted-parent".to_string(),
@@ -1028,10 +1936,20 @@ mod tests {
             .write()
             .await
             .insert("restricted-parent".to_string(), parent_session);
-        let expected =
-            inherit_parent_tools(&app, app.gcx.clone(), "restricted-parent", "test/default")
-                .await
-                .expect("parent mode tools");
+        let mut expected = crate::tools::tools_list::get_tools_for_mode(
+            app.gcx.clone(),
+            "NO_TOOLS",
+            Some("test/default"),
+        )
+        .await
+        .into_iter()
+        .map(|tool| tool.tool_description().name)
+        .collect::<Vec<_>>();
+        expected.sort();
+        assert!(!expected.is_empty());
+        assert!(SUBAGENT_FORCE_TOOLS
+            .iter()
+            .any(|tool| !expected.iter().any(|name| name == tool)));
         let captured = Arc::new(std::sync::Mutex::new(None));
         let captured_runner = captured.clone();
         let _runner =

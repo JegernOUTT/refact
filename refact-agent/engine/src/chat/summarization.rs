@@ -1724,6 +1724,7 @@ async fn summarize_segment_text(
         .map_err(|error| SegmentSummaryFailure::Transient(error.to_string()))?;
 
     let config = SubchatConfig {
+        history_source_model: None,
         tool_name: "segment_summarize".to_string(),
         stateful: false,
         autonomous_no_confirm: false,

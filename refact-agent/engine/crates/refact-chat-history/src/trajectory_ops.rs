@@ -83,6 +83,9 @@ fn preserve_hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serd
     if let Some(privacy) = msg.extra.get("privacy") {
         extra.insert("privacy".to_string(), privacy.clone());
     }
+    if let Some(source) = msg.extra.get("launch_context_source") {
+        extra.insert("launch_context_source".to_string(), source.clone());
+    }
     extra
 }
 
@@ -2095,6 +2098,28 @@ mod tests {
 
         assert_eq!(sanitized.extra.len(), 1);
         assert_eq!(sanitized.extra["privacy"], message.extra["privacy"]);
+    }
+
+    #[test]
+    fn launch_source_provenance_survives_new_thread_and_model_switch() {
+        let mut message = ChatMessage::new("context_file".into(), "selected source".into());
+        message.extra.insert(
+            "launch_context_source".into(),
+            serde_json::json!({
+                "type":"file_range", "path":"src/lib.rs", "digest":"accepted-revision",
+                "line1":2, "line2":4, "observed_at_ms":123,
+            }),
+        );
+        let mut selected = sanitize_messages_for_new_thread(&[message.clone()]);
+        assert_eq!(
+            selected[0].extra["launch_context_source"],
+            message.extra["launch_context_source"]
+        );
+        sanitize_messages_for_model_switch(&mut selected);
+        assert_eq!(
+            selected[0].extra["launch_context_source"],
+            message.extra["launch_context_source"]
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@ use refact_chat_api::{
     BuddyThreadMeta, ClaudeCodeIdentity, FrozenRequestPrefix, GoalLedgerEntry, GoalSnapshot,
     TaskMeta, ThreadParams, WorktreeMeta,
 };
-use refact_core::chat_types::{ChatMessage, PendingDelivery};
+use refact_core::chat_types::{ChatMessage, DeliveryStatusRecord, PendingDelivery};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -50,6 +50,8 @@ pub struct TrajectorySnapshot {
     pub waiting_for_card_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_deliveries: Vec<PendingDelivery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_deliveries: Vec<DeliveryStatusRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalSnapshot>,
     #[serde(
@@ -123,6 +125,7 @@ impl TrajectorySnapshot {
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
             pending_deliveries: Vec::new(),
+            dropped_deliveries: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
@@ -194,6 +197,21 @@ mod tests {
             .unwrap()
             .get("pending_deliveries")
             .is_none());
+    }
+
+    #[test]
+    fn delivery_status_records_roundtrip_and_legacy_absence() {
+        let mut snapshot = snapshot();
+        snapshot.dropped_deliveries.push(DeliveryStatusRecord {
+            id: "expired-1".to_string(),
+            status: refact_core::chat_types::DeliveryStatus::Expired,
+        });
+        let mut value = serde_json::to_value(&snapshot).unwrap();
+        let decoded: TrajectorySnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(decoded.dropped_deliveries, snapshot.dropped_deliveries);
+        value.as_object_mut().unwrap().remove("dropped_deliveries");
+        let legacy: TrajectorySnapshot = serde_json::from_value(value).unwrap();
+        assert!(legacy.dropped_deliveries.is_empty());
     }
 
     #[test]

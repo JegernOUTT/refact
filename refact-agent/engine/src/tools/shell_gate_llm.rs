@@ -116,6 +116,7 @@ async fn validate_command_inner(
         .ok()?
     } else {
         let config = SubchatConfig {
+            history_source_model: None,
             tool_name: "shell_command_validator".to_string(),
             stateful: false,
             autonomous_no_confirm: true,

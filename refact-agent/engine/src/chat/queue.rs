@@ -32,9 +32,7 @@ use super::tools::{
     acquire_session_turn_tool_pool, execute_tools_with_session,
     resolve_tool_call_aliases_with_catalog,
 };
-use super::trajectories::{
-    maybe_save_trajectory_background_with_intent,
-};
+use super::trajectories::{maybe_save_trajectory_background_with_intent};
 use crate::ext::slash_expand::expand_slash_command;
 use crate::ext::skills_context::{expand_skill_includes, SKILLS_CONTEXT_MARKER};
 use crate::worktrees::service::WorktreeService;
@@ -2520,7 +2518,7 @@ fn is_allowed_for_branch(msg: &ChatMessage) -> bool {
         || is_goal_hidden_event(msg)
 }
 
-async fn handle_tool_decisions(
+pub(crate) async fn handle_tool_decisions(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
     decisions: &[ToolDecisionItem],
@@ -2688,6 +2686,33 @@ async fn handle_tool_decisions(
         let outcome = session.process_tool_decisions(decisions);
         let any_rejected = !outcome.denied_ids.is_empty();
 
+        for id in &outcome.denied_ids {
+            if let Some(call) = session.approval_wrapper_calls.remove(id) {
+                if let Ok(args) =
+                    serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+                {
+                    if args.get("action").and_then(serde_json::Value::as_str) == Some("approve") {
+                        if let Some(request_id) =
+                            args.get("request_id").and_then(serde_json::Value::as_str)
+                        {
+                            let now = crate::agents::approval::now_ms();
+                            if let Ok(request) =
+                                app.agent_approvals.get(&session.thread.id, request_id, now)
+                            {
+                                let _ = app.agent_approvals.decide(
+                                    &session.thread.id,
+                                    request.run_generation,
+                                    request_id,
+                                    false,
+                                    now,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         for id in &outcome.accepted_ids {
             if !session.runtime.accepted_tool_ids.contains(id) {
                 session.runtime.accepted_tool_ids.push(id.clone());
@@ -2704,7 +2729,7 @@ async fn handle_tool_decisions(
             }
         }
 
-        let tool_calls: Vec<crate::call_validation::ChatToolCall> =
+        let mut tool_calls: Vec<crate::call_validation::ChatToolCall> =
             if let Some(msg_idx) = paused_msg_idx {
                 session
                     .messages
@@ -2727,6 +2752,108 @@ async fn handle_tool_decisions(
                     .cloned()
                     .collect()
             };
+
+        let invalid_wrappers: Vec<_> = session
+            .approval_wrapper_calls
+            .iter()
+            .filter(|(id, _)| ids_to_execute.contains(*id))
+            .filter(|(_, original)| {
+                !tool_calls.iter().any(|call| {
+                    call.id == original.id
+                        && call.function.name == original.function.name
+                        && call.function.arguments == original.function.arguments
+                })
+            })
+            .map(|(id, call)| (id.clone(), call.clone()))
+            .collect();
+        for (id, original) in invalid_wrappers {
+            if let Ok(args) =
+                serde_json::from_str::<serde_json::Value>(&original.function.arguments)
+            {
+                if let Some(request_id) = args.get("request_id").and_then(serde_json::Value::as_str)
+                {
+                    let now = crate::agents::approval::now_ms();
+                    if let Ok(request) =
+                        app.agent_approvals.get(&session.thread.id, request_id, now)
+                    {
+                        let _ = app.agent_approvals.cancel(
+                            &session.thread.id,
+                            request.run_generation,
+                            request_id,
+                            now,
+                        );
+                    }
+                }
+            }
+            tool_calls.retain(|call| call.id != id);
+            session
+                .runtime
+                .accepted_tool_ids
+                .retain(|accepted| accepted != &id);
+            session.approval_wrapper_calls.remove(&id);
+            if session
+                .messages
+                .iter()
+                .filter_map(|message| message.tool_calls.as_ref())
+                .flatten()
+                .any(|call| call.id == id)
+                && !session
+                    .messages
+                    .iter()
+                    .any(|message| message.role == "tool" && message.tool_call_id == id)
+            {
+                session.add_message(ChatMessage {
+                    role: "tool".into(), tool_call_id: id, tool_failed: Some(true),
+                    content: ChatContent::SimpleText("Child approval wrapper changed while awaiting the user decision; no authority granted.".into()),
+                    ..Default::default()
+                });
+            }
+        }
+        tool_calls.retain(|call| {
+            if call.function.name != "agent_approval" && !session.approval_wrapper_calls.contains_key(&call.id) {
+                return true;
+            }
+            let matches = session.approval_wrapper_calls.get(&call.id).is_some_and(|original| {
+                original.function.name == call.function.name && original.function.arguments == call.function.arguments
+            });
+            if !matches {
+                session.add_message(ChatMessage {
+                    role: "tool".into(), tool_call_id: call.id.clone(), tool_failed: Some(true),
+                    content: ChatContent::SimpleText("Child approval wrapper changed while awaiting the user decision; no authority granted.".into()),
+                    ..Default::default()
+                });
+            }
+            matches
+        });
+        for call in &tool_calls {
+            if remaining
+                || !session.runtime.accepted_tool_ids.contains(&call.id)
+                || call.function.name != "agent_approval"
+            {
+                continue;
+            }
+            let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+            else {
+                continue;
+            };
+            if args.get("action").and_then(serde_json::Value::as_str) != Some("approve") {
+                continue;
+            }
+            let Some(request_id) = args.get("request_id").and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let now = crate::agents::approval::now_ms();
+            if let Ok(request) = app.agent_approvals.get(&session.thread.id, request_id, now) {
+                let _ = app.agent_approvals.grant_user_once(
+                    &session.thread.id,
+                    request_id,
+                    request.run_generation,
+                    &call.id,
+                    now,
+                );
+            }
+        }
 
         (
             auto_approved,

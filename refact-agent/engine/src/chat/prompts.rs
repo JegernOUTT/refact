@@ -2476,6 +2476,7 @@ async fn run_task_briefing_subchat(
                     task_briefing_prompt(&role, &source),
                 )];
                 let config = crate::subchat::SubchatConfig {
+                    history_source_model: None,
                     tool_name: TASK_BRIEFING_CONTEXT_MARKER.to_string(),
                     stateful: false,
                     autonomous_no_confirm: false,

@@ -45,12 +45,30 @@ pub async fn push_completion_to_parent(
     {
         Ok(DeliveryOutcome::Queued | DeliveryOutcome::Delivered | DeliveryOutcome::Duplicate) => {
             app.agents
-                .set_completion_message_id(&record.agent_id, id)
+                .set_completion_message_id_for_run(
+                    &record.agent_id,
+                    Some(record.run_generation),
+                    id,
+                )
                 .await?;
+        }
+        Ok(DeliveryOutcome::Expired | DeliveryOutcome::Superseded) => {
+            app.agents
+                .set_completion_message_id_for_run(
+                    &record.agent_id,
+                    Some(record.run_generation),
+                    "deferred".to_string(),
+                )
+                .await?;
+            return Err("completion delivery was dropped before reaching the parent".to_string());
         }
         Err(error) => {
             app.agents
-                .set_completion_message_id(&record.agent_id, "deferred".to_string())
+                .set_completion_message_id_for_run(
+                    &record.agent_id,
+                    Some(record.run_generation),
+                    "deferred".to_string(),
+                )
                 .await?;
             return Err(error);
         }
@@ -60,7 +78,14 @@ pub async fn push_completion_to_parent(
 
 fn build_completion_delivery(record: &BackgroundAgent) -> PendingDelivery {
     PendingDelivery::with_id(
-        format!("background-agent-finished-{}", record.agent_id),
+        format!(
+            "background-agent-finished-{}-{}",
+            record.agent_id,
+            record
+                .finished_at
+                .unwrap_or(record.created_at)
+                .timestamp_micros()
+        ),
         vec![build_completion_event(record)],
         record.completion_push,
         "agents.completion",
@@ -152,6 +177,7 @@ fn build_completion_event(record: &BackgroundAgent) -> refact_core::chat_types::
         "agents.spawn",
         serde_json::json!({
             "agent_id": record.agent_id,
+            "run_generation": record.run_generation,
             "parent_chat_id": record.parent_chat_id,
             "parent_root_chat_id": record.parent_root_chat_id,
             "parent_tool_call_id": record.parent_tool_call_id,
@@ -171,6 +197,7 @@ fn build_completion_event(record: &BackgroundAgent) -> refact_core::chat_types::
             "merge_status": record.merge_status,
             "tokens_used": record.tokens_used,
             "cost_usd": record.cost_usd,
+            "deliverable_status": record.deliverable_status,
             "created_at": record.created_at,
             "last_update_at": record.last_update_at,
         }),
@@ -196,6 +223,29 @@ fn build_push_message(record: &BackgroundAgent) -> String {
     if !record.target_files.is_empty() {
         lines.push("Target files:".to_string());
         lines.extend(record.target_files.iter().map(|file| format!("- {}", file)));
+        lines.push(String::new());
+    }
+    if let Some(status) = &record.deliverable_status {
+        lines.push(format!(
+            "deliverable_contract: {} ({} check)",
+            if status.met { "met" } else { "UNMET" },
+            status.check
+        ));
+        if !status.missing_sections.is_empty() {
+            lines.push(format!(
+                "- missing sections: {}",
+                status.missing_sections.join(", ")
+            ));
+        }
+        if let Some(error) = &status.schema_error {
+            lines.push(format!("- output schema: {error}"));
+        }
+        if status.evidence_missing {
+            lines.push("- evidence section missing or empty; claims are unverified".into());
+        }
+        lines.push(String::new());
+    } else if record.deliverable.is_some() {
+        lines.push("deliverable_contract: not evaluated (no completed final message)".into());
         lines.push(String::new());
     }
     if !record.edited_files.is_empty() {
@@ -238,6 +288,14 @@ fn build_push_message(record: &BackgroundAgent) -> String {
         BgAgentStatus::Failed => {
             lines.push("Error:".to_string());
             lines.push(record.error.as_deref().unwrap_or("").to_string());
+            if record
+                .error
+                .as_deref()
+                .and_then(crate::agents::types::CapStop::from_error)
+                .is_some_and(|stop| stop.parent_can_raise_steps())
+            {
+                lines.push("Use agent_resume with action inspect to check this child's limits, then raise_and_resume with the returned change_seq. This preserves the same child task and trajectory.".into());
+            }
         }
         BgAgentStatus::Cancelled => {
             lines.push("Reason:".to_string());
@@ -316,6 +374,7 @@ mod tests {
                     diff_summary: None,
                     conflict_summary: None,
                     child_chat_id: Some("child".to_string()),
+                    deliverable_status: None,
                 },
             )
             .await
@@ -334,6 +393,10 @@ mod tests {
         assert_eq!(retry.push, PushMode::WhenIdle);
         record.completion_push = PushMode::Preempt;
         assert_eq!(build_completion_delivery(&record).push, PushMode::Preempt);
+        record.finished_at = record
+            .finished_at
+            .map(|time| time + TimeDelta::milliseconds(1));
+        assert_ne!(build_completion_delivery(&record).id, first.id);
     }
 
     #[tokio::test]
@@ -391,6 +454,7 @@ mod tests {
                     diff_summary: None,
                     conflict_summary: None,
                     child_chat_id: Some("child".to_string()),
+                    deliverable_status: None,
                 },
             )
             .await

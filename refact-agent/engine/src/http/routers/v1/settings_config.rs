@@ -418,7 +418,7 @@ pub struct TrajectorySettingsResponse {
 
 #[derive(Debug, Serialize)]
 struct TrajectorySettingField {
-    name: &'static str,
+    name: String,
     value_type: &'static str,
     minimum: Option<u64>,
     maximum: Option<u64>,
@@ -426,35 +426,35 @@ struct TrajectorySettingField {
 }
 
 fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
-    let live_usize = |name, minimum, maximum| TrajectorySettingField {
-        name,
+    let live_usize = |name: &str, minimum, maximum| TrajectorySettingField {
+        name: name.to_string(),
         value_type: "integer",
         minimum: Some(minimum),
         maximum: Some(maximum),
         apply_mode: "live",
     };
-    let restart_usize = |name, minimum, maximum| TrajectorySettingField {
-        name,
+    let restart_usize = |name: &str, minimum, maximum| TrajectorySettingField {
+        name: name.to_string(),
         value_type: "integer",
         minimum: Some(minimum),
         maximum: Some(maximum),
         apply_mode: "restart_required",
     };
-    let restart_bool = |name| TrajectorySettingField {
-        name,
+    let restart_bool = |name: &str| TrajectorySettingField {
+        name: name.to_string(),
         value_type: "boolean",
         minimum: None,
         maximum: None,
         apply_mode: "restart_required",
     };
-    let live_bool = |name| TrajectorySettingField {
-        name,
+    let live_bool = |name: &str| TrajectorySettingField {
+        name: name.to_string(),
         value_type: "boolean",
         minimum: None,
         maximum: None,
         apply_mode: "live",
     };
-    vec![
+    let mut fields = vec![
         live_usize("internal_traces_keep_per_folder", 10, 10_000),
         live_usize("internal_trace_prune_interval_secs", 60, 86_400),
         live_usize("buddy_conversations_keep", 10, 100_000),
@@ -502,7 +502,26 @@ fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         live_usize("process_subscribe_preview_bytes", 50, 100_000),
         live_usize("review_diff_char_cap", 4_096, 8_388_608),
         live_usize("review_max_diff_patch_bytes", 4_096, 268_435_456),
-    ]
+    ];
+    fields.extend(coordination_settings_fields(true));
+    fields
+}
+
+fn coordination_settings_fields(dotted: bool) -> Vec<TrajectorySettingField> {
+    crate::runtime_settings::coordination_field_bounds()
+        .iter()
+        .map(|field| TrajectorySettingField {
+            name: if dotted {
+                crate::runtime_settings::coordination_field_path(field.name)
+            } else {
+                field.name.to_string()
+            },
+            value_type: field.value_type,
+            minimum: field.minimum,
+            maximum: field.maximum,
+            apply_mode: "live",
+        })
+        .collect()
 }
 
 fn trajectory_settings_response(
@@ -525,7 +544,7 @@ pub async fn handle_v1_trajectory_settings_get(
     let path = crate::runtime_settings::settings_path(&app.paths.config_dir);
     let config = crate::runtime_settings::load_from_path(&path)
         .await
-        .map_err(server_error)?;
+        .map_err(|error| server_error(error.to_string()))?;
     Ok(trajectory_settings_response(path, config))
 }
 
@@ -548,6 +567,125 @@ pub async fn handle_v1_trajectory_settings_post(
     atomic_write(&path, &yaml).await?;
     crate::runtime_settings::install_live(&settings);
     Ok(trajectory_settings_response(path, settings))
+}
+
+#[derive(Debug, Serialize)]
+pub struct CoordinationSettingsResponse {
+    scope: String,
+    path: String,
+    config: serde_json::Value,
+    global: refact_work_core::CoordinationSettings,
+    effective: refact_work_core::CoordinationSettings,
+    defaults: refact_work_core::CoordinationSettings,
+    fields: Vec<TrajectorySettingField>,
+    project_available: bool,
+    inherited: Vec<String>,
+}
+
+async fn coordination_response(
+    app: &AppState,
+    scope: &str,
+) -> Result<Json<CoordinationSettingsResponse>, ScratchError> {
+    let global_path = crate::runtime_settings::settings_path(&app.paths.config_dir);
+    let global = crate::runtime_settings::load_from_path(&global_path)
+        .await
+        .map_err(|error| server_error(error.to_string()))?
+        .coordination;
+    let project_root = crate::files_correction::get_project_dirs(app.gcx.clone())
+        .await
+        .into_iter()
+        .next();
+    let project_path = project_root
+        .as_ref()
+        .map(|root| crate::runtime_settings::project_coordination_path(root));
+    let overrides = match project_path.as_ref() {
+        Some(path) => crate::runtime_settings::load_project_coordination_override(path)
+            .await
+            .map_err(|error| server_error(error.to_string()))?,
+        None => Default::default(),
+    };
+    let effective =
+        crate::runtime_settings::resolve_coordination(&global, &overrides).map_err(bad_request)?;
+    let (path, config) = if scope == "project" {
+        (
+            project_path.ok_or_else(|| bad_request("no project root is available"))?,
+            serde_json::to_value(&overrides).map_err(|error| server_error(error.to_string()))?,
+        )
+    } else {
+        (
+            global_path,
+            serde_json::to_value(&global).map_err(|error| server_error(error.to_string()))?,
+        )
+    };
+    let inherited = crate::runtime_settings::coordination_field_bounds()
+        .iter()
+        .filter(|field| !overrides.contains_key(field.name))
+        .map(|field| field.name.to_string())
+        .collect();
+    Ok(Json(CoordinationSettingsResponse {
+        scope: scope.to_string(),
+        path: path.to_string_lossy().into_owned(),
+        config,
+        global,
+        effective,
+        defaults: Default::default(),
+        fields: coordination_settings_fields(false),
+        project_available: project_root.is_some(),
+        inherited,
+    }))
+}
+
+pub async fn handle_v1_coordination_settings_get(
+    State(app): State<AppState>,
+    Query(query): Query<SettingsScopeQuery>,
+) -> Result<Json<CoordinationSettingsResponse>, ScratchError> {
+    coordination_response(&app, requested_scope(&query)?).await
+}
+
+pub async fn handle_v1_coordination_settings_post(
+    State(app): State<AppState>,
+    Query(query): Query<SettingsScopeQuery>,
+    body: hyper::body::Bytes,
+) -> Result<Json<CoordinationSettingsResponse>, ScratchError> {
+    let scope = requested_scope(&query)?;
+    let body: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|error| bad_request(format!("invalid coordination settings: {error}")))?;
+    let config = body.get("config").unwrap_or(&body).clone();
+    let global_path = crate::runtime_settings::settings_path(&app.paths.config_dir);
+    let mut global_settings = crate::runtime_settings::load_from_path(&global_path)
+        .await
+        .map_err(|error| server_error(error.to_string()))?;
+    if scope == "project" {
+        let overrides = serde_json::from_value(config)
+            .map_err(|error| bad_request(format!("invalid coordination overrides: {error}")))?;
+        let overrides = crate::runtime_settings::normalize_coordination_override(overrides)
+            .map_err(bad_request)?;
+        crate::runtime_settings::resolve_coordination(&global_settings.coordination, &overrides)
+            .map_err(bad_request)?;
+        let root = first_project_root(&app).await?;
+        let path = crate::runtime_settings::project_coordination_path(&root);
+        let yaml =
+            serde_yaml::to_string(&overrides).map_err(|error| server_error(error.to_string()))?;
+        atomic_write(&path, &yaml).await?;
+    } else {
+        let coordination = serde_json::from_value(config)
+            .map_err(|error| bad_request(format!("invalid coordination settings: {error}")))?;
+        crate::runtime_settings::validate_coordination(&coordination).map_err(bad_request)?;
+        if let Ok(root) = first_project_root(&app).await {
+            let path = crate::runtime_settings::project_coordination_path(&root);
+            let overrides = crate::runtime_settings::load_project_coordination_override(&path)
+                .await
+                .map_err(|error| server_error(error.to_string()))?;
+            crate::runtime_settings::resolve_coordination(&coordination, &overrides)
+                .map_err(bad_request)?;
+        }
+        global_settings.coordination = coordination;
+        let yaml = serde_yaml::to_string(&global_settings)
+            .map_err(|error| server_error(error.to_string()))?;
+        atomic_write(&global_path, &yaml).await?;
+        crate::runtime_settings::install_live(&global_settings);
+    }
+    coordination_response(&app, scope).await
 }
 
 #[cfg(test)]
@@ -573,7 +711,18 @@ mod tests {
             .as_object()
             .expect("settings serialize as a JSON object")
             .keys()
-            .cloned()
+            .flat_map(|name| {
+                if name == "coordination" {
+                    defaults_json[name]
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(|leaf| format!("coordination.{leaf}"))
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![name.clone()]
+                }
+            })
             .collect();
 
         let fields = trajectory_settings_fields();
@@ -602,12 +751,21 @@ mod tests {
                     continue;
                 }
             };
-            assert_eq!(field.value_type, "integer");
+            assert!(matches!(field.value_type, "integer" | "integer_map"));
             assert!(minimum < maximum, "{} has an empty range", field.name);
 
             let with_value = |value: u64| {
                 let mut json = defaults_json.clone();
-                json[field.name] = serde_json::json!(value);
+                let value_json = if field.value_type == "integer_map" {
+                    serde_json::json!({"root": value})
+                } else {
+                    serde_json::json!(value)
+                };
+                if let Some((group, leaf)) = field.name.split_once('.') {
+                    json[group][leaf] = value_json;
+                } else {
+                    json[&field.name] = value_json;
+                }
                 let settings: crate::runtime_settings::TrajectoryRuntimeSettings =
                     serde_json::from_value(json).unwrap_or_else(|e| {
                         panic!("{} is not settable to {value}: {e}", field.name)
@@ -628,7 +786,11 @@ mod tests {
                 }
             }
             // Just outside the boundaries is rejected with exactly these bounds.
-            for rejected in [minimum - 1, maximum + 1] {
+            for rejected in minimum
+                .checked_sub(1)
+                .into_iter()
+                .chain(maximum.checked_add(1))
+            {
                 let error = with_value(rejected).unwrap_err();
                 assert_eq!(
                     error,
@@ -653,7 +815,10 @@ mod tests {
             initial.config,
             crate::runtime_settings::TrajectoryRuntimeSettings::default()
         );
-        assert_eq!(initial.fields.len(), 47);
+        assert_eq!(
+            initial.fields.len(),
+            47 + crate::runtime_settings::coordination_field_bounds().len()
+        );
         assert!(initial
             .fields
             .iter()
@@ -940,6 +1105,189 @@ mod tests {
 
         assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
         assert!(error.message.contains("cannot use ~/"));
+    }
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn coordination_global_save_preserves_unrelated_settings() {
+        crate::runtime_settings::reset_for_test();
+        let temp = tempfile::tempdir().unwrap();
+        let mut gcx = crate::global_context::tests::make_test_gcx().await;
+        Arc::get_mut(&mut gcx).unwrap().config_dir = temp.path().join("config");
+        let app = AppState::from_gcx(gcx).await;
+        let mut original = crate::runtime_settings::TrajectoryRuntimeSettings::default();
+        original.max_queue_size = 777;
+        original.review_diff_char_cap = 12_345;
+        original.coordination.max_pending = 321;
+        let path = crate::runtime_settings::settings_path(&app.paths.config_dir);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&path, serde_yaml::to_string(&original).unwrap())
+            .await
+            .unwrap();
+        let mut coordination = original.coordination.clone();
+        coordination.max_pending = 654;
+        coordination.launch_context_tokens = 48_000;
+        coordination.launch_context_entries = 512;
+        coordination.launch_context_messages = 2048;
+        coordination.launch_context_bytes = 32 * 1024 * 1024;
+        coordination.launch_source_bytes = 8 * 1024 * 1024;
+        let saved = handle_v1_coordination_settings_post(
+            State(app.clone()),
+            Query(SettingsScopeQuery {
+                scope: Some("global".into()),
+            }),
+            hyper::body::Bytes::from(serde_json::to_vec(&coordination).unwrap()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(saved.global, coordination);
+        let loaded = crate::runtime_settings::load_from_path(&path)
+            .await
+            .unwrap();
+        assert_eq!(loaded.max_queue_size, original.max_queue_size);
+        assert_eq!(loaded.review_diff_char_cap, original.review_diff_char_cap);
+        assert_eq!(loaded.coordination, coordination);
+        assert_eq!(
+            crate::runtime_settings::current().coordination,
+            coordination
+        );
+    }
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn coordination_project_sparse_override_inherits_and_empty_resets() {
+        crate::runtime_settings::reset_for_test();
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut gcx = crate::global_context::tests::make_test_gcx().await;
+        let mutable = Arc::get_mut(&mut gcx).unwrap();
+        mutable.config_dir = temp.path().join("config");
+        *mutable.documents_state.workspace_folders.lock().unwrap() = vec![project.clone()];
+        let app = AppState::from_gcx(gcx).await;
+        let mut global = crate::runtime_settings::TrajectoryRuntimeSettings::default();
+        global.coordination.max_pending = 321;
+        global.coordination.max_active_engine = 48;
+        let global_path = crate::runtime_settings::settings_path(&app.paths.config_dir);
+        tokio::fs::create_dir_all(global_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&global_path, serde_yaml::to_string(&global).unwrap())
+            .await
+            .unwrap();
+        let sparse = serde_json::json!({"max_pending": 654});
+        let saved = handle_v1_coordination_settings_post(
+            State(app.clone()),
+            Query(SettingsScopeQuery {
+                scope: Some("project".into()),
+            }),
+            hyper::body::Bytes::from(serde_json::to_vec(&sparse).unwrap()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(saved.config, sparse);
+        assert_eq!(saved.effective.max_pending, 654);
+        assert_eq!(saved.effective.max_active_engine, 48);
+        assert!(saved.inherited.contains(&"max_active_engine".to_string()));
+        let empty = handle_v1_coordination_settings_post(
+            State(app.clone()),
+            Query(SettingsScopeQuery {
+                scope: Some("project".into()),
+            }),
+            hyper::body::Bytes::from_static(b"{}"),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(empty.config, serde_json::json!({}));
+        assert_eq!(empty.effective, global.coordination);
+        assert_eq!(
+            empty.inherited.len(),
+            crate::runtime_settings::coordination_field_bounds().len()
+        );
+    }
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn invalid_coordination_config_does_not_persist() {
+        crate::runtime_settings::reset_for_test();
+        let app = trajectory_settings_app().await;
+        let original = crate::runtime_settings::load_from_path(
+            &crate::runtime_settings::settings_path(&app.paths.config_dir),
+        )
+        .await
+        .unwrap();
+        let invalid = serde_json::json!({
+            "max_active_engine": 0,
+            "max_active_project": original.coordination.max_active_project,
+            "max_active_root": original.coordination.max_active_root,
+            "max_pending": original.coordination.max_pending,
+            "max_outstanding": original.coordination.max_outstanding,
+            "max_subchat_depth": original.coordination.max_subchat_depth,
+            "max_read_stamps": original.coordination.max_read_stamps,
+            "max_write_records": original.coordination.max_write_records,
+            "overview_default_rows": original.coordination.overview_default_rows,
+            "overview_max_rows": original.coordination.overview_max_rows,
+            "capsule_token_budget": original.coordination.capsule_token_budget,
+            "capsule_max_rows": original.coordination.capsule_max_rows,
+            "min_interval_secs": original.coordination.min_interval_secs,
+            "debounce_secs": original.coordination.debounce_secs,
+            "recent_window_secs": original.coordination.recent_window_secs,
+            "lock_timeout_secs": original.coordination.lock_timeout_secs,
+            "lock_poll_interval_ms": original.coordination.lock_poll_interval_ms,
+            "approval_timeout_secs": original.coordination.approval_timeout_secs,
+            "max_pending_approvals": original.coordination.max_pending_approvals,
+            "enabled": original.coordination.enabled,
+            "auto_inject_enabled": original.coordination.auto_inject_enabled
+        });
+        let error = handle_v1_coordination_settings_post(
+            State(app.clone()),
+            Query(SettingsScopeQuery {
+                scope: Some("global".into()),
+            }),
+            hyper::body::Bytes::from(serde_json::to_vec(&invalid).unwrap()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
+        let loaded = crate::runtime_settings::load_from_path(
+            &crate::runtime_settings::settings_path(&app.paths.config_dir),
+        )
+        .await
+        .unwrap();
+        assert_eq!(loaded, original);
+    }
+
+    #[test]
+    fn coordination_descriptors_match_crate_fields_and_bounds() {
+        let fields = coordination_settings_fields(false);
+        let bounds = crate::runtime_settings::coordination_field_bounds();
+        assert_eq!(fields.len(), bounds.len());
+        for (field, bound) in fields.iter().zip(bounds) {
+            assert_eq!(field.name, bound.name);
+            assert_eq!(field.value_type, bound.value_type);
+            assert_eq!(field.minimum, bound.minimum);
+            assert_eq!(field.maximum, bound.maximum);
+        }
+    }
+
+    #[tokio::test]
+    async fn coordination_project_without_root_is_bad_request() {
+        let app = trajectory_settings_app().await;
+        let error = handle_v1_coordination_settings_get(
+            State(app),
+            Query(SettingsScopeQuery {
+                scope: Some("project".into()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("no project root"));
     }
 
     #[tokio::test]

@@ -246,3 +246,46 @@ pub async fn start_background_tasks(
     }
     bg
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn abort_cancels_every_owned_task_and_joins_before_returning() {
+        let unwound = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let mut holder = BackgroundTasksHolder::default();
+        let flag = DropFlag(unwound.clone());
+        holder.push_back(tokio::spawn(async move {
+            let _flag = flag;
+            std::future::pending::<()>().await;
+        }));
+        let done = finished.clone();
+        let completed = tokio::spawn(async move {
+            done.store(true, Ordering::SeqCst);
+        });
+        while !finished.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        holder.extend([completed]);
+        holder.push_back(tokio::spawn(std::future::pending::<()>()));
+        let started = std::time::Instant::now();
+        holder.abort().await;
+        assert!(started.elapsed() < ABORT_TIMEOUT);
+        assert!(holder.tasks.is_empty());
+        assert!(unwound.load(Ordering::SeqCst));
+        assert!(finished.load(Ordering::SeqCst));
+        holder.abort().await;
+        assert!(holder.tasks.is_empty());
+    }
+}

@@ -47,6 +47,7 @@ fn completion(child_chat_id: &str) -> AgentCompletion {
         diff_summary: Some("one frog changed".to_string()),
         conflict_summary: None,
         child_chat_id: Some(child_chat_id.to_string()),
+        deliverable_status: None,
     }
 }
 
@@ -70,7 +71,7 @@ async fn create_agent(
         .0
 }
 
-async fn app_with_parent_session(
+pub(super) async fn app_with_parent_session(
     parent_chat_id: &str,
 ) -> (
     std::sync::Arc<crate::global_context::GlobalContext>,
@@ -81,6 +82,29 @@ async fn app_with_parent_session(
     let gcx = crate::global_context::tests::make_test_gcx().await;
     let workspace = tempdir().expect("workspace");
     *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace.path().to_path_buf()];
+    let (root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
+    {
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            "model".into(),
+            Arc::new(crate::caps::ChatModelRecord {
+                base: crate::caps::BaseModelRecord {
+                    id: "model".into(),
+                    ..Default::default()
+                },
+                supports_agent: true,
+                supports_tools: true,
+                ..Default::default()
+            }),
+        );
+        let mut state = gcx.caps_state.write().await;
+        state.caps = Some(Arc::new(caps));
+        state.loaded_project_root = Some(root);
+        state.last_attempted_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+    }
     let app = AppState::from_gcx(gcx.clone()).await;
     let session = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
         parent_chat_id.to_string(),
@@ -487,6 +511,7 @@ fn summary_maps_introspection_and_question_state() {
     let now = Utc::now();
     let record = BackgroundAgent {
         schema_version: 1,
+        run_generation: 1,
         agent_id: "agent".to_string(),
         parent_chat_id: "parent".to_string(),
         parent_root_chat_id: None,
@@ -512,6 +537,7 @@ fn summary_maps_introspection_and_question_state() {
         completion_push: Default::default(),
         pending_deliveries: Vec::new(),
         delivery_ids: Vec::new(),
+        dropped_deliveries: Vec::new(),
         deferred_at: None,
         model: "model".to_string(),
         model_type: Some("thinking".to_string()),
@@ -524,21 +550,37 @@ fn summary_maps_introspection_and_question_state() {
         questions: vec![
             crate::agents::types::AgentQuestion {
                 id: "11111111".to_string(),
+                kind: refact_chat_api::QuestionKind::AgentParent,
+                asker: "agent".to_string(),
+                answerer: "parent".to_string(),
+                correlation_id: "11111111".to_string(),
                 text: "Question one".to_string(),
+                options: None,
+                state: refact_chat_api::QuestionState::Pending,
                 asked_at: now,
+                expires_at: None,
                 answer: None,
                 answered_at: None,
             },
             crate::agents::types::AgentQuestion {
                 id: "22222222".to_string(),
+                kind: refact_chat_api::QuestionKind::AgentParent,
+                asker: "agent".to_string(),
+                answerer: "parent".to_string(),
+                correlation_id: "22222222".to_string(),
                 text: "Question two".to_string(),
+                options: None,
+                state: refact_chat_api::QuestionState::Answered,
                 asked_at: now,
+                expires_at: None,
                 answer: Some("Answer".to_string()),
                 answered_at: Some(now),
             },
         ],
         tokens_used: 123,
         cost_usd: Some(0.42),
+        deliverable: None,
+        deliverable_status: None,
         created_at: now,
         started_at: Some(now),
         finished_at: None,
@@ -1105,7 +1147,7 @@ async fn restart_recovery_interrupts_active_records() {
         assert_eq!(record.status, BgAgentStatus::Interrupted);
         assert_eq!(
             record.error.as_deref(),
-            Some("Engine restarted before agent finished. True resume is not supported.")
+            Some("Engine restarted before agent finished. Inspect the saved child before explicit recovery; no work was replayed.")
         );
         assert!(record.finished_at.is_some());
     }
@@ -1191,6 +1233,10 @@ async fn overlap_warning_normalizes_equivalent_paths() {
 async fn set_completion_message_id_is_idempotent() {
     let (temp, registry) = registry().await;
     let record = create_agent(&registry, "parent", BgAgentKind::Delegate).await;
+    let record = registry
+        .mark_failed(&record.agent_id, "finished".into())
+        .await
+        .unwrap();
 
     registry
         .set_completion_message_id(&record.agent_id, "message-one".to_string())
@@ -1222,6 +1268,14 @@ async fn set_completion_message_id_allows_pending_and_deferred_retry_markers_to_
     let (_temp, registry) = registry().await;
     let first = create_agent(&registry, "parent", BgAgentKind::Delegate).await;
     let second = create_agent(&registry, "parent", BgAgentKind::Delegate).await;
+    registry
+        .mark_failed(&first.agent_id, "finished".into())
+        .await
+        .unwrap();
+    registry
+        .mark_failed(&second.agent_id, "finished".into())
+        .await
+        .unwrap();
 
     registry
         .set_completion_message_id(&first.agent_id, "pending".to_string())
@@ -1583,7 +1637,12 @@ async fn spawn_and_wait_returns_terminal_record_within_timeout() {
             .await
             .expect("spawn completed");
 
-    assert_eq!(completed.status, BgAgentStatus::Completed);
+    assert_eq!(
+        completed.status,
+        BgAgentStatus::Completed,
+        "{:?}",
+        completed.error
+    );
     assert_eq!(completed.parent_chat_id, "parent-wait-terminal");
     assert!(completed
         .child_chat_id
@@ -1620,19 +1679,16 @@ async fn spawn_and_wait_times_out_when_runner_hangs() {
         app_with_parent_session("parent-wait-timeout").await;
     let mut req = subagent_spawn_request("parent-wait-timeout", "src/frog.rs");
     req.notify_parent = crate::agents::spawn::NotifyParent::Silent;
-    let wait_task = tokio::spawn(crate::agents::spawn::spawn_and_wait(
-        app.clone(),
-        req,
-        Some(Duration::from_secs(5)),
-    ));
+    let wait = crate::agents::spawn::spawn_and_wait(app.clone(), req, Some(Duration::from_secs(5)));
+    tokio::pin!(wait);
 
-    runner_started.notified().await;
-    tokio::task::yield_now().await;
+    tokio::select! {
+        result = &mut wait => panic!("spawn finished before the runner started: {result:?}"),
+        _ = runner_started.notified() => {}
+    }
+    assert!(futures::poll!(&mut wait).is_pending());
     tokio::time::advance(Duration::from_secs(5)).await;
-    let err = wait_task
-        .await
-        .expect("spawn task joined")
-        .expect_err("spawn should time out");
+    let err = wait.await.expect_err("spawn should time out");
 
     assert_eq!(err, "background agent timed out");
     let records = app
@@ -1644,7 +1700,7 @@ async fn spawn_and_wait_times_out_when_runner_hangs() {
 }
 
 #[tokio::test]
-async fn spawn_and_wait_timeout_returns_error() {
+async fn spawn_rejects_missing_configuration_before_admission() {
     let (_gcx, app, _session_arc, _workspace) = app_with_parent_session("parent-timeout").await;
     let req = crate::agents::spawn::SpawnRequest {
         kind: BgAgentKind::Subagent,
@@ -1654,6 +1710,9 @@ async fn spawn_and_wait_timeout_returns_error() {
         config_name: "missing-subagent-config".to_string(),
         title: "Missing".to_string(),
         prompt: "prompt".to_string(),
+        initial_context_messages: Vec::new(),
+        history_source_model: None,
+        custom_instructions: None,
         tools: None,
         target_files: vec![],
         max_steps: 1,
@@ -1661,6 +1720,7 @@ async fn spawn_and_wait_timeout_returns_error() {
         model_type: None,
         goal: None,
         plan: None,
+        deliverable: None,
         worktree_mode: crate::agents::spawn::SpawnWorktreeMode::Inherit,
         parent_subchat_tx: None,
         parent_worktree: None,
@@ -1670,10 +1730,13 @@ async fn spawn_and_wait_timeout_returns_error() {
         completion_push: Default::default(),
     };
 
-    let err = crate::agents::spawn::spawn_and_wait(app, req, Some(Duration::from_millis(1)))
-        .await
-        .expect_err("missing config should error before waiting");
-    assert!(err.contains("not found") || err.contains("missing"));
+    let err =
+        crate::agents::spawn::spawn_and_wait(app.clone(), req, Some(Duration::from_millis(1)))
+            .await
+            .expect_err("missing config should error before waiting");
+    assert_eq!(err, "subagent config 'missing-subagent-config' not found");
+    assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+    assert!(app.agents.list_all().await.is_empty());
 }
 
 #[serial(test_runner)]
@@ -1707,7 +1770,7 @@ async fn spawn_with_empty_assistant_response_uses_no_text_summary() {
     );
 }
 
-fn subagent_spawn_request(
+pub(super) fn subagent_spawn_request(
     parent_chat_id: &str,
     target_file: &str,
 ) -> crate::agents::spawn::SpawnRequest {
@@ -1719,6 +1782,9 @@ fn subagent_spawn_request(
         config_name: "test_spawn".to_string(),
         title: format!("Edit {target_file}"),
         prompt: format!("Edit {target_file}"),
+        initial_context_messages: Vec::new(),
+        history_source_model: None,
+        custom_instructions: None,
         tools: None,
         target_files: vec![target_file.to_string()],
         max_steps: 1,
@@ -1726,6 +1792,7 @@ fn subagent_spawn_request(
         model_type: None,
         goal: None,
         plan: None,
+        deliverable: None,
         worktree_mode: crate::agents::spawn::SpawnWorktreeMode::Inherit,
         parent_subchat_tx: None,
         parent_worktree: None,
@@ -1828,8 +1895,16 @@ fn agents_spawn_system_notice_count(session: &ChatSession) -> usize {
 }
 
 fn install_spawn_runner(abort_seen: Arc<AtomicBool>) -> crate::agents::spawn::TestRunnerGuard {
+    install_spawn_runner_with_start(abort_seen, Arc::new(AtomicBool::new(false)))
+}
+
+fn install_spawn_runner_with_start(
+    abort_seen: Arc<AtomicBool>,
+    started: Arc<AtomicBool>,
+) -> crate::agents::spawn::TestRunnerGuard {
     crate::agents::spawn::install_test_runner(Arc::new(move |_gcx, messages, config| {
         let abort_seen = abort_seen.clone();
+        started.store(true, Ordering::SeqCst);
         Box::pin(async move { stub_spawn_runner(abort_seen, messages, config).await })
     }))
 }
@@ -1877,7 +1952,8 @@ async fn stub_spawn_runner(
 #[tokio::test]
 async fn background_agent_final_integration_spawn_push_list_cancel_and_restart() {
     let abort_seen = Arc::new(AtomicBool::new(false));
-    let _runner = install_spawn_runner(abort_seen.clone());
+    let runner_started = Arc::new(AtomicBool::new(false));
+    let _runner = install_spawn_runner_with_start(abort_seen.clone(), runner_started.clone());
     let (_gcx, app, session_arc, _workspace) = app_with_parent_session("parent-final").await;
     session_arc
         .lock()
@@ -1928,10 +2004,20 @@ async fn background_agent_final_integration_spawn_push_list_cancel_and_restart()
     cancel_req.title = "Cancel me".to_string();
     cancel_req.prompt = "wait until cancelled".to_string();
     cancel_req.notify_parent = crate::agents::spawn::NotifyParent::Silent;
+    runner_started.store(false, Ordering::SeqCst);
     let cancel_handle = crate::agents::spawn::spawn_background_agent(app.clone(), cancel_req)
         .await
         .expect("cancel spawn");
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if runner_started.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("cancel target started running");
     let cancelled = app
         .agents
         .cancel(

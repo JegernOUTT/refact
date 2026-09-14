@@ -10,6 +10,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::http::routers::v1::sidebar::{NotificationEvent, NotificationQuestion};
+use refact_chat_api::{QuestionContract, QuestionKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct QuestionItem {
@@ -138,6 +139,23 @@ impl Tool for ToolAskQuestions {
             let ccx_lock = ccx.lock().await;
             ccx_lock.chat_id.clone()
         };
+        let asked_at = chrono::Utc::now();
+        let contracts = questions
+            .iter()
+            .map(|question| {
+                QuestionContract::pending(
+                    question.id.clone(),
+                    QuestionKind::UserInput,
+                    format!("chat:{chat_id}"),
+                    "user",
+                    format!("{chat_id}:{tool_call_id}:{}", question.id),
+                    question.text.clone(),
+                    question.options.clone(),
+                    asked_at,
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         {
             let ccx_lock = ccx.lock().await;
@@ -164,6 +182,7 @@ impl Tool for ToolAskQuestions {
             "type": "ask_questions",
             "tool_call_id": tool_call_id,
             "questions": questions,
+            "contracts": contracts,
         });
 
         Ok((

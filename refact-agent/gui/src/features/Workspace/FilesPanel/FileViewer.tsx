@@ -125,6 +125,10 @@ export function FileViewer({ path }: { path: string }) {
   const activeStep = useAppSelector(selectActiveEditPlayerStep);
   const playbackStep = activeStep?.path === path ? activeStep : undefined;
   const [draft, setDraft] = useState<string | null>(null);
+  const [editBase, setEditBase] = useState<{
+    mtimeMs: number;
+    digest?: string;
+  } | null>(null);
   const [pendingCaret, setPendingCaret] = useState<number | null>(null);
   const [showSource, setShowSource] = useState(false);
   const [discardIntent, setDiscardIntent] = useState<DiscardIntent>(null);
@@ -183,6 +187,7 @@ export function FileViewer({ path }: { path: string }) {
 
   useEffect(() => {
     setDraft(null);
+    setEditBase(null);
     setPendingCaret(null);
     setShowSource(false);
     setDiscardIntent(null);
@@ -208,14 +213,16 @@ export function FileViewer({ path }: { path: string }) {
     (offset: number | null) => {
       if (!editable || isPlaying) return;
       setDraft(data.content);
+      setEditBase({ mtimeMs: data.mtime_ms, digest: data.digest });
       setPendingCaret(offset);
       setDiscardIntent(null);
     },
-    [data?.content, editable, isPlaying],
+    [data, editable, isPlaying],
   );
 
   const cancelEdit = useCallback(() => {
     setDraft(null);
+    setEditBase(null);
     setPendingCaret(null);
     setDiscardIntent(null);
   }, []);
@@ -250,15 +257,17 @@ export function FileViewer({ path }: { path: string }) {
   }, [cancelEdit, discardIntent, reloadFromDisk]);
 
   const saveDraft = useCallback(async () => {
-    if (draft === null || !data) return;
+    if (draft === null || !data || !editBase) return;
     if (!editable || isPlaying || writeState.isLoading) return;
     const result = await writeFile({
       path,
       content: draft,
-      expectedMtimeMs: data.mtime_ms,
+      expectedMtimeMs: editBase.mtimeMs,
+      expectedDigest: editBase.digest,
     });
     if ("data" in result) {
       setDraft(null);
+      setEditBase(null);
       setPendingCaret(null);
       setDiscardIntent(null);
       void refetch();
@@ -266,6 +275,7 @@ export function FileViewer({ path }: { path: string }) {
   }, [
     data,
     draft,
+    editBase,
     editable,
     isPlaying,
     path,

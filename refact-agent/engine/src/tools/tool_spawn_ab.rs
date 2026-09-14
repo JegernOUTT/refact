@@ -28,10 +28,10 @@ use refact_chat_api::ChatCommand;
 use refact_runtime_api::CreateSessionRequest;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct AbVariantSpec {
-    model: Option<String>,
-    extra_instructions: Option<String>,
-    suggested_steps: usize,
+pub(crate) struct AbVariantSpec {
+    pub(crate) model: Option<String>,
+    pub(crate) extra_instructions: Option<String>,
+    pub(crate) suggested_steps: usize,
 }
 
 #[derive(Debug)]
@@ -42,10 +42,45 @@ struct PreparedAbVariant {
     prepared: PreparedWorktree,
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 struct PreparedAbVariants {
     a: PreparedAbVariant,
     b: PreparedAbVariant,
+}
+
+#[derive(Clone)]
+pub(crate) struct QueuedAbVariant {
+    agent_id: String,
+    pub(crate) chat_id: String,
+    model: String,
+    spec: AbVariantSpec,
+}
+
+impl QueuedAbVariant {
+    pub(crate) fn new(card_id: &str, key: &str, model: String, spec: AbVariantSpec) -> Self {
+        let agent_id = Uuid::new_v4().to_string();
+        Self {
+            chat_id: format!("agent-{card_id}-{}-{key}", &agent_id[..8]),
+            agent_id,
+            model,
+            spec,
+        }
+    }
+
+    fn info(&self) -> AbVariantInfo {
+        AbVariantInfo {
+            agent_id: self.agent_id.clone(),
+            chat_id: self.chat_id.clone(),
+            // Legacy shape uses a string. Empty means not created, never a
+            // guessed path that callers could mistake for an active checkout.
+            worktree: String::new(),
+            worktree_name: None,
+            branch: None,
+            model: Some(self.model.clone()),
+            finish: None,
+        }
+    }
 }
 
 pub struct ToolSpawnAb;
@@ -192,6 +227,7 @@ fn variant_info(variant: &PreparedAbVariant) -> AbVariantInfo {
     }
 }
 
+#[cfg(test)]
 async fn prepare_ab_worktrees(
     gcx: Arc<GlobalContext>,
     task_meta: &crate::tasks::types::TaskMeta,
@@ -251,7 +287,7 @@ async fn prepare_ab_worktrees(
 }
 
 async fn create_variant_session(
-    gcx: Arc<GlobalContext>,
+    app: crate::app_state::AppState,
     task_id: &str,
     planner_chat_id: &str,
     card_id: &str,
@@ -262,7 +298,6 @@ async fn create_variant_session(
     variant: &PreparedAbVariant,
     worktree: WorktreeMeta,
 ) -> Result<(), String> {
-    let app = crate::app_state::AppState::from_gcx(gcx).await;
     let thread = build_agent_thread_params(
         &variant.chat_id,
         card_title,
@@ -310,37 +345,322 @@ async fn create_variant_session(
     app.chat.facade.maybe_save_session(&variant.chat_id).await
 }
 
-async fn start_variant_session(gcx: Arc<GlobalContext>, chat_id: &str) -> Result<(), String> {
-    let app = crate::app_state::AppState::from_gcx(gcx).await;
+async fn start_variant_session(
+    app: crate::app_state::AppState,
+    chat_id: &str,
+) -> Result<(), String> {
     app.chat
         .facade
         .push_priority_command(chat_id, ChatCommand::Regenerate {})
         .await
 }
 
-async fn restore_card_after_spawn_ab_failure(
+fn queued_variant_is_current(card: &BoardCard, key: &str, chat_id: &str) -> bool {
+    card.column == "doing"
+        && card.ab_variants.as_ref().is_some_and(|variants| {
+            variants.winner.is_none()
+                && variants
+                    .variant(key)
+                    .is_some_and(|variant| variant.chat_id == chat_id && variant.finish.is_none())
+        })
+}
+
+async fn run_queued_ab_variant(
+    app: crate::app_state::AppState,
+    task_meta: crate::tasks::types::TaskMeta,
+    planner_chat_id: String,
+    card: BoardCard,
+    dependency_context: String,
+    key: &'static str,
+    queued: QueuedAbVariant,
+) -> Result<(), String> {
+    use crate::tasks::admission;
+    admission::wait_for_permit(&queued.chat_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let execution = app
+        .agent_executions
+        .get(&queued.chat_id)
+        .ok_or("A/B admission lost")?;
+    let _operation = execution
+        .begin_operation()
+        .await
+        .map_err(|e| e.to_string())?;
+    let board = storage::load_board(app.gcx.clone(), &task_meta.id).await?;
+    if !board
+        .get_card(&card.id)
+        .is_some_and(|current| queued_variant_is_current(current, key, &queued.chat_id))
+    {
+        return Err("queued A/B claim was cancelled or replaced".into());
+    }
+    let prepared = prepare_agent_worktree_with_suffix(
+        app.gcx.clone(),
+        &task_meta,
+        &task_meta.id,
+        &queued.agent_id,
+        &card.id,
+        &queued.chat_id,
+        Some(if key == "a" { "-a" } else { "-b" }),
+    )
+    .await?;
+    let variant = PreparedAbVariant {
+        agent_id: queued.agent_id,
+        chat_id: queued.chat_id.clone(),
+        model: queued.model,
+        prepared,
+    };
+    let info = variant_info(&variant);
+    let id = card.id.clone();
+    let chat_id = queued.chat_id.clone();
+    let link_execution = execution.clone();
+    let linked = storage::update_board_atomic(app.gcx.clone(), &task_meta.id, move |board| {
+        let current = board.get_card_mut(&id).ok_or("A/B card removed")?;
+        if link_execution.is_cancelled() || !queued_variant_is_current(current, key, &chat_id) {
+            return Err("queued A/B claim was cancelled or replaced".into());
+        }
+        *current
+            .ab_variants
+            .as_mut()
+            .unwrap()
+            .variant_mut(key)
+            .unwrap() = info;
+        current
+            .started_at
+            .get_or_insert_with(|| Utc::now().to_rfc3339());
+        current.status_updates.push(StatusUpdate {
+            timestamp: Utc::now().to_rfc3339(),
+            message: format!("A/B variant {key} admitted; preparing session"),
+        });
+        Ok(())
+    })
+    .await;
+    if let Err(error) = linked {
+        variant.prepared.cleanup_unlinked(app.gcx.clone()).await;
+        return Err(error);
+    }
+    // Once linked, failures retain the checkout for inspection. Never delete a
+    // checkout after a session may have started executing in it.
+    if execution.is_cancelled() {
+        return Err("A/B setup cancelled".into());
+    }
+    create_variant_session(
+        app.clone(),
+        &task_meta.id,
+        &planner_chat_id,
+        &card.id,
+        &card.title,
+        &card.instructions,
+        &dependency_context,
+        &queued.spec,
+        &variant,
+        variant.prepared.worktree_meta(),
+    )
+    .await?;
+    if execution.is_cancelled() {
+        return Err("A/B setup cancelled".into());
+    }
+    start_variant_session(app, &queued.chat_id).await
+}
+
+async fn mark_ab_setup_failed(
     gcx: Arc<GlobalContext>,
     task_id: &str,
-    original_card: BoardCard,
-    chat_id_a: String,
-    chat_id_b: String,
+    card_id: String,
+    key: &'static str,
+    chat_id: String,
+    error: String,
 ) {
     let stats_gcx = gcx.clone();
     let _ = storage::update_board_atomic(gcx, task_id, move |board| {
-        if let Some(card) = board.get_card_mut(&original_card.id) {
-            let matches_ab = card
-                .ab_variants
-                .as_ref()
-                .map(|ab| ab.a.chat_id == chat_id_a && ab.b.chat_id == chat_id_b)
-                .unwrap_or(false);
-            if matches_ab {
-                *card = original_card.clone();
+        if let Some(card) = board.get_card_mut(&card_id) {
+            if queued_variant_is_current(card, key, &chat_id) {
+                let now = Utc::now().to_rfc3339();
+                card.ab_variants
+                    .as_mut()
+                    .unwrap()
+                    .variant_mut(key)
+                    .unwrap()
+                    .finish = Some(crate::tasks::types::AbVariantFinish {
+                    success: false,
+                    final_report: format!("A/B variant setup failed: {error}"),
+                    completed_at: now.clone(),
+                    ..Default::default()
+                });
+                card.status_updates.push(StatusUpdate {
+                    timestamp: now,
+                    message: format!("A/B variant {key} setup failed: {error}"),
+                });
             }
         }
         Ok(())
     })
     .await;
     let _ = storage::update_task_stats(stats_gcx, task_id).await;
+}
+
+pub(crate) async fn dispatch_ab_variants(
+    app: crate::app_state::AppState,
+    task_meta: crate::tasks::types::TaskMeta,
+    planner_chat_id: String,
+    root_chat_id: &str,
+    project: &str,
+    card: BoardCard,
+    dependency_context: String,
+    a: QueuedAbVariant,
+    b: QueuedAbVariant,
+    depth: usize,
+) -> Result<AbVariants, String> {
+    use crate::tasks::admission;
+    admission::reserve(&app, &a.chat_id, project, root_chat_id, depth)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Err(error) = admission::reserve(&app, &b.chat_id, project, root_chat_id, depth).await {
+        admission::end(&a.chat_id).await;
+        return Err(error.to_string());
+    }
+    let variants = AbVariants {
+        a: a.info(),
+        b: b.info(),
+        winner: None,
+    };
+    let claim = variants.clone();
+    let tracked = a.chat_id.clone();
+    let cleanup_b = b.chat_id.clone();
+    let (accepted, acceptance) = tokio::sync::oneshot::channel();
+    let registered = admission::spawn_tracked(&tracked, async move {
+        use futures::FutureExt;
+        let mut accepted = Some(accepted);
+        let mut b_dispatched = false;
+        let setup = async {
+            if accepted.as_ref().is_none_or(|tx| tx.is_closed()) {
+                return Err("A/B caller cancelled before claim".to_string());
+            }
+            let card_id = card.id.clone();
+            storage::update_board_atomic(app.gcx.clone(), &task_meta.id, move |board| {
+                let card = board
+                    .get_card_mut(&card_id)
+                    .ok_or("A/B card removed before claim")?;
+                if card.column != "planned"
+                    || card.ab_variants.is_some()
+                    || card.agent_chat_id.is_some()
+                {
+                    return Err("A/B card already claimed or no longer planned".into());
+                }
+                card.column = "doing".into();
+                card.assignee = Some("ab".into());
+                card.agent_branch = None;
+                card.agent_worktree = None;
+                card.agent_worktree_name = None;
+                card.started_at = None;
+                card.ab_variants = Some(claim);
+                card.status_updates.push(StatusUpdate {
+                    timestamp: Utc::now().to_rfc3339(),
+                    message: "A/B variants queued for execution capacity".into(),
+                });
+                Ok(())
+            })
+            .await?;
+            if accepted
+                .take()
+                .ok_or("A/B acceptance lost")?
+                .send(Ok(()))
+                .is_err()
+            {
+                return Err("A/B caller cancelled during claim".into());
+            }
+            // Registration contains no suspension. Both launchers are owned
+            // before this task waits for either permit (including at cap=1).
+            let child_app = app.clone();
+            let meta = task_meta.clone();
+            let planner = planner_chat_id.clone();
+            let child_card = card.clone();
+            let context = dependency_context.clone();
+            let child = b.clone();
+            admission::spawn_tracked(&b.chat_id, async move {
+                let result = std::panic::AssertUnwindSafe(run_queued_ab_variant(
+                    child_app.clone(),
+                    meta.clone(),
+                    planner,
+                    child_card.clone(),
+                    context,
+                    "b",
+                    child.clone(),
+                ))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| Err("A/B setup panicked".into()));
+                if let Err(error) = result {
+                    mark_ab_setup_failed(
+                        child_app.gcx.clone(),
+                        &meta.id,
+                        child_card.id,
+                        "b",
+                        child.chat_id.clone(),
+                        error,
+                    )
+                    .await;
+                    admission::end(&child.chat_id).await;
+                }
+                let _ = storage::update_task_stats(child_app.gcx, &meta.id).await;
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            b_dispatched = true;
+            run_queued_ab_variant(
+                app.clone(),
+                task_meta.clone(),
+                planner_chat_id,
+                card.clone(),
+                dependency_context,
+                "a",
+                a.clone(),
+            )
+            .await
+        };
+        let result = std::panic::AssertUnwindSafe(setup)
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| Err("A/B setup panicked".into()));
+        if let Err(error) = result {
+            if let Some(accepted) = accepted.take() {
+                let _ = accepted.send(Err(error.clone()));
+            }
+            mark_ab_setup_failed(
+                app.gcx.clone(),
+                &task_meta.id,
+                card.id.clone(),
+                "a",
+                a.chat_id.clone(),
+                error.clone(),
+            )
+            .await;
+            admission::end(&a.chat_id).await;
+            // B is independent once registered; a failure in A must not stop it.
+            if !b_dispatched {
+                mark_ab_setup_failed(
+                    app.gcx.clone(),
+                    &task_meta.id,
+                    card.id,
+                    "b",
+                    b.chat_id.clone(),
+                    error,
+                )
+                .await;
+                admission::end(&b.chat_id).await;
+            }
+        }
+        let _ = storage::update_task_stats(app.gcx, &task_meta.id).await;
+    })
+    .await;
+    if let Err(error) = registered {
+        admission::end(&tracked).await;
+        admission::end(&cleanup_b).await;
+        return Err(error.to_string());
+    }
+    acceptance
+        .await
+        .map_err(|_| "A/B setup ended before acceptance".to_string())??;
+    Ok(variants)
 }
 
 fn winner_parts<'a>(
@@ -354,7 +674,7 @@ fn winner_parts<'a>(
     }
 }
 
-async fn cleanup_ab_variant(
+pub(crate) async fn cleanup_ab_variant(
     gcx: Arc<GlobalContext>,
     variant: &AbVariantInfo,
 ) -> Result<(), String> {
@@ -374,6 +694,10 @@ async fn cleanup_ab_variant_with_timeout(
                 variant.chat_id, e
             )
         })?;
+
+    if variant.worktree.is_empty() && variant.worktree_name.is_none() {
+        return Ok(());
+    }
 
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
@@ -740,7 +1064,6 @@ impl Tool for ToolSpawnAb {
         }
         let original_card = card.clone();
         let card_title = card.title.clone();
-        let card_instructions = card.instructions.clone();
         let dependency_context = board
             .get_dependency_reports(card_id)
             .into_iter()
@@ -748,109 +1071,48 @@ impl Tool for ToolSpawnAb {
             .collect::<Vec<_>>()
             .join("\n\n");
 
-        let prepared =
-            prepare_ab_worktrees(gcx.clone(), &task_meta, &task_id, card_id, model_a, model_b)
-                .await?;
-        let variants = AbVariants {
-            a: variant_info(&prepared.a),
-            b: variant_info(&prepared.b),
-            winner: None,
+        crate::tools::task_tool_helpers::preflight_agent_model(gcx.clone(), &model_a).await?;
+        crate::tools::task_tool_helpers::preflight_agent_model(gcx.clone(), &model_b).await?;
+        let (app, root_chat_id, depth, source_root) = {
+            let context = ccx.lock().await;
+            (
+                context.app.clone(),
+                context.root_chat_id.clone(),
+                context.subchat_depth,
+                context
+                    .execution_scope_worktree()
+                    .map(|worktree| worktree.source_workspace_root),
+            )
         };
-
-        let card_id_owned = card_id.to_string();
-        let variants_for_board = variants.clone();
-        let board_update = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
-            let card = board
-                .get_card_mut(&card_id_owned)
-                .ok_or(format!("Card {} not found", card_id_owned))?;
-            if card.column != "planned" {
-                return Err(format!(
-                    "Card {} is in column '{}', expected 'planned'",
-                    card_id_owned, card.column
-                ));
-            }
-            if card.ab_variants.is_some() {
-                return Err(format!("Card {} already has A/B variants", card_id_owned));
-            }
-            card.column = "doing".to_string();
-            card.assignee = Some("ab".to_string());
-            card.agent_chat_id = None;
-            card.agent_branch = None;
-            card.agent_worktree = None;
-            card.agent_worktree_name = None;
-            card.started_at = Some(Utc::now().to_rfc3339());
-            card.ab_variants = Some(variants_for_board.clone());
-            card.status_updates.push(StatusUpdate {
-                timestamp: Utc::now().to_rfc3339(),
-                message: format!(
-                    "A/B spawned: A={}, B={}",
-                    variants_for_board.a.chat_id, variants_for_board.b.chat_id
-                ),
-            });
-            Ok(())
-        })
-        .await;
-        if let Err(error) = board_update {
-            prepared.a.prepared.cleanup_unlinked(gcx.clone()).await;
-            prepared.b.prepared.cleanup_unlinked(gcx.clone()).await;
-            return Err(error);
-        }
-        storage::update_task_stats(gcx.clone(), &task_id).await?;
-
-        let session_result = async {
-            create_variant_session(
-                gcx.clone(),
-                &task_id,
-                &planner_chat_id,
-                card_id,
-                &card_title,
-                &card_instructions,
-                &dependency_context,
-                &variant_a,
-                &prepared.a,
-                prepared.a.prepared.worktree_meta(),
-            )
-            .await?;
-            create_variant_session(
-                gcx.clone(),
-                &task_id,
-                &planner_chat_id,
-                card_id,
-                &card_title,
-                &card_instructions,
-                &dependency_context,
-                &variant_b,
-                &prepared.b,
-                prepared.b.prepared.worktree_meta(),
-            )
-            .await?;
-            start_variant_session(gcx.clone(), &prepared.a.chat_id).await?;
-            start_variant_session(gcx.clone(), &prepared.b.chat_id).await
-        }
-        .await;
-        if let Err(error) = session_result {
-            restore_card_after_spawn_ab_failure(
-                gcx.clone(),
-                &task_id,
-                original_card,
-                prepared.a.chat_id.clone(),
-                prepared.b.chat_id.clone(),
-            )
-            .await;
-            prepared.a.prepared.cleanup_unlinked(gcx.clone()).await;
-            prepared.b.prepared.cleanup_unlinked(gcx.clone()).await;
-            return Err(error);
-        }
-
-        let result_message = format!(
-            "# A/B Agents Spawned\n\n**Card:** {}\n**A:** {} ({})\n**B:** {} ({})\n\nUse `pick_ab_winner(card_id=\"{}\", winner=\"a\"|\"b\")` after comparing the variants.",
-            card_id,
-            variants.a.chat_id,
-            prepared.a.model,
-            variants.b.chat_id,
-            prepared.b.model,
-            card_id
-        );
+        let source_root = source_root
+            .or(crate::files_correction::get_active_project_path(gcx.clone()).await)
+            .ok_or("No active project for A/B agents")?;
+        let project = crate::coordination::roots::project_identity(&source_root);
+        let root_chat_id = if root_chat_id.is_empty() {
+            &planner_chat_id
+        } else {
+            &root_chat_id
+        };
+        let variants = dispatch_ab_variants(
+            app,
+            task_meta,
+            planner_chat_id.clone(),
+            root_chat_id,
+            &project,
+            original_card,
+            dependency_context,
+            QueuedAbVariant::new(card_id, "a", model_a, variant_a),
+            QueuedAbVariant::new(card_id, "b", model_b, variant_b),
+            depth,
+        )
+        .await?;
+        let result_message = json!({
+            "summary": format!("A/B agents queued: {card_title}"),
+            "card_id": card_id,
+            "execution_state": "queued",
+            "variant_a": { "agent_id": variants.a.agent_id, "agent_chat_id": variants.a.chat_id, "model": variants.a.model, "worktree": null },
+            "variant_b": { "agent_id": variants.b.agent_id, "agent_chat_id": variants.b.chat_id, "model": variants.b.model, "worktree": null },
+        }).to_string();
         Ok((
             false,
             vec![ContextEnum::ChatMessage(ChatMessage {
@@ -933,7 +1195,7 @@ impl Tool for ToolPickAbWinner {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::tasks::types::{AbVariantFinish, TaskBoard, TaskMeta, TaskStatus};
     use std::path::Path;
@@ -969,7 +1231,7 @@ mod tests {
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root];
     }
 
-    fn task_meta(task_id: &str) -> TaskMeta {
+    pub(crate) fn task_meta(task_id: &str) -> TaskMeta {
         let now = Utc::now().to_rfc3339();
         TaskMeta {
             schema_version: 1,
@@ -991,7 +1253,7 @@ mod tests {
         }
     }
 
-    fn test_card() -> BoardCard {
+    pub(crate) fn test_card() -> BoardCard {
         BoardCard {
             id: "T-1".to_string(),
             title: "Card T-1".to_string(),
@@ -1022,7 +1284,8 @@ mod tests {
         }
     }
 
-    async fn setup_repo_task() -> (Arc<GlobalContext>, tempfile::TempDir, std::path::PathBuf) {
+    pub(crate) async fn setup_repo_task(
+    ) -> (Arc<GlobalContext>, tempfile::TempDir, std::path::PathBuf) {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -1046,6 +1309,312 @@ mod tests {
         .await
         .unwrap();
         (gcx, temp, source)
+    }
+
+    #[derive(Default)]
+    pub(crate) struct RecordingFacade {
+        pub(crate) created: std::sync::Mutex<Vec<String>>,
+        pub(crate) started: std::sync::Mutex<Vec<String>>,
+        notify: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl refact_runtime_api::ChatSessionFacade for RecordingFacade {
+        async fn session_snapshot(
+            &self,
+            _: &str,
+        ) -> Result<refact_runtime_api::ChatSessionSnapshot, String> {
+            Err("unused".into())
+        }
+        async fn update_session(
+            &self,
+            _: &str,
+            _: refact_runtime_api::ChatSessionUpdate,
+        ) -> Result<(), String> {
+            Err("unused".into())
+        }
+        async fn create_session(&self, request: CreateSessionRequest) -> Result<(), String> {
+            assert!(request.thread.worktree.as_ref().unwrap().root.is_dir());
+            self.created.lock().unwrap().push(request.chat_id);
+            Ok(())
+        }
+        async fn push_command(&self, id: &str, _: ChatCommand) -> Result<(), String> {
+            self.started.lock().unwrap().push(id.into());
+            self.notify.notify_one();
+            Ok(())
+        }
+        async fn session_state(
+            &self,
+            _: &str,
+        ) -> Result<Option<refact_runtime_api::SessionState>, String> {
+            Ok(None)
+        }
+        async fn maybe_save_session(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn save_trajectory_snapshot(
+            &self,
+            _: refact_runtime_api::RuntimeTrajectorySnapshot,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn queued_variant(key: &str) -> QueuedAbVariant {
+        QueuedAbVariant::new(
+            "T-1",
+            key,
+            format!("model-{key}"),
+            AbVariantSpec {
+                model: None,
+                extra_instructions: None,
+                suggested_steps: 30,
+            },
+        )
+    }
+
+    pub(crate) async fn await_started(facade: &RecordingFacade, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let notified = facade.notify.notified();
+                if facade.started.lock().unwrap().len() >= count {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("A/B setup starts after admission");
+    }
+
+    #[tokio::test]
+    async fn dropped_ab_claim_caller_cannot_strand_reservations_or_launch_workers() {
+        use std::future::Future;
+        let (gcx, _temp, source) = setup_repo_task().await;
+        let mut app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let facade = Arc::new(RecordingFacade::default());
+        app.chat.facade = facade.clone();
+        let project = crate::coordination::roots::project_identity(&source);
+        let lock = crate::tasks::board_lock::acquire_board(&source.join(".refact/tasks/task-1"))
+            .await
+            .unwrap();
+        let mut caller = Box::pin(dispatch_ab_variants(
+            app.clone(),
+            task_meta("task-1"),
+            "planner".into(),
+            "planner",
+            &project,
+            test_card(),
+            String::new(),
+            queued_variant("a"),
+            queued_variant("b"),
+            0,
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(caller.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(app.work_scheduler.snapshot().reserved, 2);
+        drop(caller);
+        drop(lock);
+        crate::tasks::admission::shutdown(&app).await;
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+        assert!(facade.created.lock().unwrap().is_empty());
+        assert!(!gcx.cache_dir.join("worktrees").exists());
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        assert_ne!(board.get_card("T-1").unwrap().column, "doing");
+    }
+
+    #[tokio::test]
+    async fn ab_full_capacity_returns_queued_and_variants_start_independently() {
+        let (gcx, _temp, source) = setup_repo_task().await;
+        let mut app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        app.work_scheduler = Arc::new(refact_work_core::AdmissionScheduler::new(
+            refact_work_core::CoordinationSettings {
+                max_active_engine: 1,
+                max_active_project: 1,
+                max_active_root: 1,
+                ..Default::default()
+            },
+        ));
+        let facade = Arc::new(RecordingFacade::default());
+        app.chat.facade = facade.clone();
+        let project = crate::coordination::roots::project_identity(&source);
+        let holder = app
+            .work_scheduler
+            .reserve(refact_work_core::AdmissionRequest::new(
+                refact_work_core::WorkKey::background_agent("blocking-parent").run(1),
+                crate::tasks::admission::board_scope(&project, "planner"),
+            ))
+            .unwrap()
+            .acquire()
+            .await
+            .unwrap();
+        let meta = task_meta("task-1");
+        let variants = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            dispatch_ab_variants(
+                app.clone(),
+                meta,
+                "planner".into(),
+                "planner",
+                &project,
+                test_card(),
+                String::new(),
+                queued_variant("a"),
+                queued_variant("b"),
+                0,
+            ),
+        )
+        .await
+        .expect("spawn never waits for execution capacity")
+        .unwrap();
+        assert!(variants.a.worktree.is_empty() && variants.b.worktree.is_empty());
+        assert!(facade.created.lock().unwrap().is_empty());
+        assert!(!gcx.cache_dir.join("worktrees").exists());
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        assert!(board.get_card("T-1").unwrap().started_at.is_none());
+        holder.release();
+        await_started(&facade, 1).await;
+        let first = facade.started.lock().unwrap()[0].clone();
+        let other = if first == variants.a.chat_id {
+            &variants.b.chat_id
+        } else {
+            &variants.a.chat_id
+        };
+        assert!(crate::tasks::admission::is_queued(other).await);
+        assert_eq!(app.work_scheduler.snapshot().active, 1);
+        crate::tasks::admission::end(&first).await;
+        await_started(&facade, 2).await;
+        assert_eq!(app.work_scheduler.snapshot().active, 1);
+        crate::tasks::admission::end(other).await;
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        let stored = board.get_card("T-1").unwrap().ab_variants.as_ref().unwrap();
+        assert!(!stored.a.worktree.is_empty() && !stored.b.worktree.is_empty());
+        cleanup_ab_variant(gcx.clone(), &stored.a).await.unwrap();
+        cleanup_ab_variant(gcx, &stored.b).await.unwrap();
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+    }
+
+    #[tokio::test]
+    async fn ab_second_reservation_failure_does_not_claim_card_or_create_worktrees() {
+        let (gcx, _temp, source) = setup_repo_task().await;
+        let mut app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        app.work_scheduler = Arc::new(refact_work_core::AdmissionScheduler::new(
+            refact_work_core::CoordinationSettings {
+                max_pending: 1,
+                ..Default::default()
+            },
+        ));
+        let project = crate::coordination::roots::project_identity(&source);
+        let error = dispatch_ab_variants(
+            app.clone(),
+            task_meta("task-1"),
+            "planner".into(),
+            "planner",
+            &project,
+            test_card(),
+            String::new(),
+            queued_variant("a"),
+            queued_variant("b"),
+            0,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("queue is full"));
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        assert_eq!(board.get_card("T-1").unwrap().column, "planned");
+        assert!(board.get_card("T-1").unwrap().ab_variants.is_none());
+        assert!(!gcx.cache_dir.join("worktrees").exists());
+    }
+
+    #[tokio::test]
+    async fn ab_cancel_queued_setup_creates_no_worktree_and_records_failed_outcome() {
+        let (gcx, _temp, source) = setup_repo_task().await;
+        let mut app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        app.work_scheduler = Arc::new(refact_work_core::AdmissionScheduler::new(
+            refact_work_core::CoordinationSettings {
+                max_active_engine: 1,
+                max_active_project: 1,
+                max_active_root: 1,
+                ..Default::default()
+            },
+        ));
+        let project = crate::coordination::roots::project_identity(&source);
+        let holder = app
+            .work_scheduler
+            .reserve(refact_work_core::AdmissionRequest::new(
+                refact_work_core::WorkKey::background_agent("holder").run(1),
+                crate::tasks::admission::board_scope(&project, "planner"),
+            ))
+            .unwrap()
+            .acquire()
+            .await
+            .unwrap();
+        let variants = dispatch_ab_variants(
+            app.clone(),
+            task_meta("task-1"),
+            "planner".into(),
+            "planner",
+            &project,
+            test_card(),
+            String::new(),
+            queued_variant("a"),
+            queued_variant("b"),
+            0,
+        )
+        .await
+        .unwrap();
+        let ccx = Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                app.clone(),
+                4096,
+                20,
+                false,
+                vec![],
+                "planner".into(),
+                Some("planner".into()),
+                "model-a".into(),
+                Some(refact_chat_api::TaskMeta {
+                    task_id: "task-1".into(),
+                    role: "planner".into(),
+                    agent_id: None,
+                    card_id: None,
+                    planner_chat_id: Some("planner".into()),
+                }),
+                None,
+            )
+            .await,
+        ));
+        let (_, output) = crate::tools::tool_agent_lifecycle::ToolCancelAgent::new()
+            .tool_execute(
+                ccx,
+                &"cancel-ab".into(),
+                &HashMap::from([
+                    ("card_id".into(), json!("T-1")),
+                    ("reason".into(), json!("stop both")),
+                ]),
+            )
+            .await
+            .unwrap();
+        let ContextEnum::ChatMessage(message) = &output[0] else {
+            panic!("tool result");
+        };
+        let result: Value = serde_json::from_str(&message.content.content_text_only()).unwrap();
+        assert_eq!(result["stopped"], true);
+        assert!(!crate::tasks::admission::is_tracked(&variants.a.chat_id).await);
+        assert!(!crate::tasks::admission::is_tracked(&variants.b.chat_id).await);
+        holder.release();
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+        assert!(!gcx.cache_dir.join("worktrees").exists());
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        assert_eq!(board.get_card("T-1").unwrap().column, "failed");
+        let variants = board.get_card("T-1").unwrap().ab_variants.as_ref().unwrap();
+        assert!(variants.all_finished());
+        assert!(!variants.a.finish.as_ref().unwrap().success);
+        assert!(!variants.b.finish.as_ref().unwrap().success);
     }
 
     #[test]

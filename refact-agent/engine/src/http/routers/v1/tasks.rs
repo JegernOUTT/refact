@@ -168,40 +168,39 @@ pub async fn handle_create_task(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if !req.target_files.is_empty() {
         let now = Utc::now().to_rfc3339();
-        let mut board = storage::load_board(gcx.clone(), &meta.id)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        board.cards.push(BoardCard {
-            id: "targets".to_string(),
-            title: "Target files".to_string(),
-            column: "planned".into(),
-            priority: "P1".into(),
-            depends_on: vec![],
-            instructions: String::new(),
-            assignee: None,
-            agent_chat_id: None,
-            status_updates: vec![],
-            comments: vec![],
-            final_report: None,
-            final_report_structured: None,
-            verifier_report: None,
-            created_at: now,
-            started_at: None,
-            last_heartbeat_at: None,
-            completed_at: None,
-            agent_branch: None,
-            agent_worktree: None,
-            agent_worktree_name: None,
-            base_branch: None,
-            base_commit: None,
-            ab_variants: None,
-            target_files: req.target_files,
-            scope_guard_mode: Default::default(),
-            team_members: vec![],
-        });
-        storage::save_board(gcx.clone(), &meta.id, &board)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        storage::update_board_atomic(gcx.clone(), &meta.id, |board| {
+            board.cards.push(BoardCard {
+                id: "targets".to_string(),
+                title: "Target files".to_string(),
+                column: "planned".into(),
+                priority: "P1".into(),
+                depends_on: vec![],
+                instructions: String::new(),
+                assignee: None,
+                agent_chat_id: None,
+                status_updates: vec![],
+                comments: vec![],
+                final_report: None,
+                final_report_structured: None,
+                verifier_report: None,
+                created_at: now,
+                started_at: None,
+                last_heartbeat_at: None,
+                completed_at: None,
+                agent_branch: None,
+                agent_worktree: None,
+                agent_worktree_name: None,
+                base_branch: None,
+                base_commit: None,
+                ab_variants: None,
+                target_files: req.target_files,
+                scope_guard_mode: Default::default(),
+                team_members: vec![],
+            });
+            Ok(())
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         meta = storage::update_task_stats(gcx.clone(), &meta.id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -1580,6 +1579,7 @@ mod tests {
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
             pending_deliveries: Vec::new(),
+            dropped_deliveries: Vec::new(),
         }
     }
 

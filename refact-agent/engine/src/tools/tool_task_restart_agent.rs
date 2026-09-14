@@ -89,7 +89,12 @@ async fn restore_card_after_restart_failure(
 ) {
     let stats_gcx = gcx.clone();
     let _ = storage::update_board_atomic(gcx, task_id, move |board| {
-        restore_original_card_if_current_agent(board, &original_card, &guard_chat_id);
+        if board
+            .get_card(&original_card.id)
+            .is_some_and(|card| card.column == "doing")
+        {
+            restore_original_card_if_current_agent(board, &original_card, &guard_chat_id);
+        }
         Ok(())
     })
     .await;
@@ -167,6 +172,39 @@ fn ensure_restart_source_current(card: &BoardCard, original: &BoardCard) -> Resu
         card.assignee.as_deref().unwrap_or("none"),
         card.agent_chat_id.as_deref().unwrap_or("none")
     ))
+}
+
+async fn claim_restart(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    original: &BoardCard,
+    agent_id: &str,
+    agent_chat_id: &str,
+    mode: &str,
+) -> Result<BoardCard, String> {
+    let original = original.clone();
+    let agent_id = agent_id.to_string();
+    let agent_chat_id = agent_chat_id.to_string();
+    let mode = mode.to_string();
+    let (_, queued) = storage::update_board_atomic(gcx, task_id, move |board| {
+        let card = board
+            .get_card_mut(&original.id)
+            .ok_or("restart card removed")?;
+        ensure_restart_source_current(card, &original)?;
+        card.column = "doing".into();
+        card.assignee = Some(agent_id);
+        card.agent_chat_id = Some(agent_chat_id);
+        card.started_at = None;
+        // Preserve the old checkout until the admitted replacement succeeds.
+        // A queued restart or cancellation must not discard interrupted edits.
+        card.status_updates.push(StatusUpdate {
+            timestamp: Utc::now().to_rfc3339(),
+            message: format!("Agent restart queued (mode={mode}); previous checkout retained"),
+        });
+        Ok(Some(card.clone()))
+    })
+    .await?;
+    queued.ok_or_else(|| "restart claim returned no card".into())
 }
 
 async fn get_worktree_meta_for_resume(
@@ -288,6 +326,12 @@ impl Tool for ToolTaskRestartAgent {
             .and_then(|m| m.planner_chat_id.clone())
             .unwrap_or_else(|| ccx_lock.chat_id.clone());
         let current_chat_id = ccx_lock.chat_id.clone();
+        let root_chat_id = ccx_lock.root_chat_id.clone();
+        let depth = ccx_lock.subchat_depth;
+        let source_root = ccx_lock
+            .execution_scope_worktree()
+            .map(|w| w.source_workspace_root);
+        let app = ccx_lock.app.clone();
         let current_model = ccx_lock.current_model.clone();
         let gcx = ccx_lock.app.gcx.clone();
         drop(ccx_lock);
@@ -334,6 +378,13 @@ impl Tool for ToolTaskRestartAgent {
         let card = board
             .get_card(card_id)
             .ok_or_else(|| format!("Card {} not found", card_id))?;
+        if card
+            .ab_variants
+            .as_ref()
+            .is_some_and(|variants| variants.winner.is_none())
+        {
+            return Err("Pick or cancel the A/B variants before restarting this card".into());
+        }
 
         match card.column.as_str() {
             "done" => {
@@ -375,39 +426,158 @@ impl Tool for ToolTaskRestartAgent {
             .collect::<Vec<_>>()
             .join("\n\n");
 
-        let result_message = if mode == "resume" {
-            self.execute_resume(
-                gcx.clone(),
-                &task_id,
-                &planner_chat_id,
-                &current_chat_id,
-                card_id,
-                &card_title,
-                &card_instructions,
-                &dependency_context,
-                &model,
-                suggested_steps,
-                files_to_open,
-                card,
-            )
-            .await?
+        let source_root = source_root
+            .or(crate::files_correction::get_active_project_path(gcx.clone()).await)
+            .ok_or("No active project for restarted agent")?;
+        let project = crate::coordination::roots::project_identity(&source_root);
+        let root = if root_chat_id.is_empty() {
+            &planner_chat_id
         } else {
-            self.execute_fresh(
-                gcx.clone(),
-                &task_id,
-                &planner_chat_id,
-                &task_meta,
-                card_id,
-                &card_title,
-                &card_instructions,
-                &dependency_context,
-                &model,
-                suggested_steps,
-                files_to_open,
-                card,
-            )
-            .await?
+            &root_chat_id
         };
+        let original = card.clone();
+        let agent_id = Uuid::new_v4().to_string();
+        let agent_chat_id = format!("agent-{card_id}-{}", &agent_id[..8]);
+        crate::tasks::admission::reserve(&app, &agent_chat_id, &project, root, depth)
+            .await
+            .map_err(|e| e.to_string())?;
+        let result_message = json!({
+            "summary": format!("Agent restart queued: {card_title}"),
+            "card_id": card_id, "agent_id": agent_id, "agent_chat_id": agent_chat_id,
+            "mode": mode, "execution_state": "queued", "model": model,
+            "worktree": null,
+        })
+        .to_string();
+        let card_id = card_id.to_string();
+        let mode = mode.to_string();
+        let tracked_chat_id = agent_chat_id.clone();
+        let (accepted, acceptance) = tokio::sync::oneshot::channel();
+        let registered = crate::tasks::admission::spawn_tracked(&tracked_chat_id, async move {
+            use futures::FutureExt;
+            let mut accepted = Some(accepted);
+            let setup = async {
+                if accepted.as_ref().is_none_or(|tx| tx.is_closed()) {
+                    return Err("restart caller cancelled before claim".to_string());
+                }
+                let queued = claim_restart(
+                    gcx.clone(),
+                    &task_id,
+                    &original,
+                    &agent_id,
+                    &agent_chat_id,
+                    &mode,
+                )
+                .await?;
+                if accepted
+                    .take()
+                    .ok_or("restart acceptance lost")?
+                    .send(Ok(()))
+                    .is_err()
+                {
+                    restore_card_after_restart_failure(
+                        gcx.clone(),
+                        &task_id,
+                        original.clone(),
+                        agent_chat_id.clone(),
+                    )
+                    .await;
+                    return Err("restart caller cancelled during claim".into());
+                }
+                // Stop the old attempt before waiting for capacity: it may be
+                // the holder of the only permit. No worktree changes occur yet.
+                if let Some(old_chat) = original.agent_chat_id.as_deref() {
+                    wait_for_agent_abort(gcx.clone(), old_chat, AGENT_ABORT_TIMEOUT).await?;
+                }
+                crate::tasks::admission::wait_for_permit(&agent_chat_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let execution = app
+                    .agent_executions
+                    .get(&agent_chat_id)
+                    .ok_or("restart admission lost")?;
+                let _operation = execution
+                    .begin_operation()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let board = storage::load_board(gcx.clone(), &task_id).await?;
+                ensure_restart_source_current(
+                    board.get_card(&card_id).ok_or("restart card removed")?,
+                    &queued,
+                )?;
+                let tool = ToolTaskRestartAgent::new();
+                if mode == "resume" {
+                    tool.execute_resume(
+                        app.clone(),
+                        &task_id,
+                        &planner_chat_id,
+                        &current_chat_id,
+                        &card_id,
+                        &card_title,
+                        &card_instructions,
+                        &dependency_context,
+                        &model,
+                        suggested_steps,
+                        files_to_open,
+                        &original,
+                        &queued,
+                        &agent_id,
+                        &agent_chat_id,
+                    )
+                    .await
+                } else {
+                    tool.execute_fresh(
+                        app.clone(),
+                        &task_id,
+                        &planner_chat_id,
+                        &task_meta,
+                        &card_id,
+                        &card_title,
+                        &card_instructions,
+                        &dependency_context,
+                        &model,
+                        suggested_steps,
+                        files_to_open,
+                        &original,
+                        &queued,
+                        &agent_id,
+                        &agent_chat_id,
+                    )
+                    .await
+                }
+            };
+            let result = std::panic::AssertUnwindSafe(setup)
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| Err("agent restart setup panicked".into()));
+            if let Err(error) = result {
+                if let Some(accepted) = accepted.take() {
+                    let _ = accepted.send(Err(error.clone()));
+                }
+                let id = card_id.clone();
+                let chat = agent_chat_id.clone();
+                let _ = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+                    if let Some(card) = board.get_card_mut(&id) {
+                        if card.column == "doing" && card.agent_chat_id.as_deref() == Some(&chat) {
+                            card.column = "failed".into();
+                            card.final_report = Some(format!("Restart setup failed: {error}"));
+                            card.completed_at = Some(Utc::now().to_rfc3339());
+                        }
+                    }
+                    Ok(())
+                })
+                .await;
+                crate::tasks::admission::end(&agent_chat_id).await;
+            }
+            let _ = storage::update_task_stats(gcx, &task_id).await;
+        })
+        .await;
+        if let Err(error) = registered {
+            crate::tasks::admission::end(&tracked_chat_id).await;
+            return Err(error.to_string());
+        }
+        acceptance
+            .await
+            .map_err(|_| "restart setup ended before acceptance".to_string())??;
 
         Ok((
             false,
@@ -429,7 +599,7 @@ impl Tool for ToolTaskRestartAgent {
 impl ToolTaskRestartAgent {
     async fn execute_fresh(
         &self,
-        gcx: Arc<GlobalContext>,
+        app: crate::app_state::AppState,
         task_id: &str,
         planner_chat_id: &str,
         task_meta: &crate::tasks::types::TaskMeta,
@@ -441,23 +611,12 @@ impl ToolTaskRestartAgent {
         suggested_steps: usize,
         files_to_open: Vec<String>,
         card: &BoardCard,
+        queued_card: &BoardCard,
+        agent_id: &str,
+        agent_chat_id: &str,
     ) -> Result<String, String> {
+        let gcx = app.gcx.clone();
         let original_card = card.clone();
-
-        if let Some(old_chat_id) = original_card.agent_chat_id.as_deref() {
-            if let Err(e) =
-                wait_for_agent_abort(gcx.clone(), old_chat_id, AGENT_ABORT_TIMEOUT).await
-            {
-                return Err(format!(
-                    "Cannot restart card {}: previous agent session '{}' did not stop in time: {}. \
-                     Wait for it to settle and retry, or use cancel_agent first.",
-                    card_id, old_chat_id, e
-                ));
-            }
-        }
-
-        let agent_id = Uuid::new_v4().to_string();
-        let agent_chat_id = format!("agent-{}-{}", card_id, &agent_id[..8]);
 
         let mut restart_task_meta = task_meta.clone();
         if original_card.base_branch.is_some() || original_card.base_commit.is_some() {
@@ -486,12 +645,19 @@ impl ToolTaskRestartAgent {
         let prepared_base_branch = worktree_meta.base_branch.clone();
         let prepared_base_commit = worktree_meta.base_commit.clone();
         let card_id_owned = card_id.to_string();
-        let agent_id_clone = agent_id.clone();
-        let agent_chat_id_clone = agent_chat_id.clone();
-        let source_card = original_card.clone();
+        let agent_id_clone = agent_id.to_string();
+        let agent_chat_id_clone = agent_chat_id.to_string();
+        let source_card = queued_card.clone();
 
+        let link_execution = app
+            .agent_executions
+            .get(agent_chat_id)
+            .ok_or("restart execution lost")?;
         let board_update_result =
             storage::update_board_atomic(gcx.clone(), task_id, move |board| {
+                if link_execution.is_cancelled() {
+                    return Err("restart setup cancelled".into());
+                }
                 let card = board
                     .get_card_mut(&card_id_owned)
                     .ok_or(format!("Card {} not found", card_id_owned))?;
@@ -519,7 +685,7 @@ impl ToolTaskRestartAgent {
 
         if let Err(e) = self
             .create_and_dispatch_session(
-                gcx.clone(),
+                app,
                 task_id,
                 planner_chat_id,
                 card_id,
@@ -540,7 +706,7 @@ impl ToolTaskRestartAgent {
                 gcx.clone(),
                 task_id,
                 original_card,
-                agent_chat_id.clone(),
+                agent_chat_id.to_string(),
             )
             .await;
             return Err(e);
@@ -562,7 +728,7 @@ impl ToolTaskRestartAgent {
 
     async fn execute_resume(
         &self,
-        gcx: Arc<GlobalContext>,
+        app: crate::app_state::AppState,
         task_id: &str,
         planner_chat_id: &str,
         resume_chat_id: &str,
@@ -574,32 +740,28 @@ impl ToolTaskRestartAgent {
         suggested_steps: usize,
         files_to_open: Vec<String>,
         card: &BoardCard,
+        queued_card: &BoardCard,
+        agent_id: &str,
+        agent_chat_id: &str,
     ) -> Result<String, String> {
+        let gcx = app.gcx.clone();
         let original_card = card.clone();
 
-        if let Some(old_chat_id) = original_card.agent_chat_id.as_deref() {
-            if let Err(e) =
-                wait_for_agent_abort(gcx.clone(), old_chat_id, AGENT_ABORT_TIMEOUT).await
-            {
-                return Err(format!(
-                    "Cannot resume card {}: previous agent session '{}' did not stop in time: {}. \
-                     Wait for it to settle and retry, or use cancel_agent first.",
-                    card_id, old_chat_id, e
-                ));
-            }
-        }
-
         let worktree_meta = get_worktree_meta_for_resume(gcx.clone(), card).await?;
-
-        let agent_id = Uuid::new_v4().to_string();
-        let agent_chat_id = format!("agent-{}-{}", card_id, &agent_id[..8]);
         let card_id_owned = card_id.to_string();
-        let agent_id_clone = agent_id.clone();
-        let agent_chat_id_clone = agent_chat_id.clone();
+        let agent_id_clone = agent_id.to_string();
+        let agent_chat_id_clone = agent_chat_id.to_string();
         let _ = resume_chat_id;
-        let source_card = original_card.clone();
+        let source_card = queued_card.clone();
 
+        let link_execution = app
+            .agent_executions
+            .get(agent_chat_id)
+            .ok_or("restart execution lost")?;
         storage::update_board_atomic(gcx.clone(), task_id, move |board| {
+            if link_execution.is_cancelled() {
+                return Err("restart setup cancelled".into());
+            }
             let card = board
                 .get_card_mut(&card_id_owned)
                 .ok_or(format!("Card {} not found", card_id_owned))?;
@@ -613,7 +775,7 @@ impl ToolTaskRestartAgent {
 
         if let Err(e) = self
             .create_and_dispatch_session(
-                gcx.clone(),
+                app,
                 task_id,
                 planner_chat_id,
                 card_id,
@@ -633,7 +795,7 @@ impl ToolTaskRestartAgent {
                 gcx.clone(),
                 task_id,
                 original_card,
-                agent_chat_id.clone(),
+                agent_chat_id.to_string(),
             )
             .await;
             return Err(e);
@@ -648,7 +810,7 @@ impl ToolTaskRestartAgent {
     #[allow(clippy::too_many_arguments)]
     async fn create_and_dispatch_session(
         &self,
-        gcx: Arc<GlobalContext>,
+        app: crate::app_state::AppState,
         task_id: &str,
         planner_chat_id: &str,
         card_id: &str,
@@ -662,7 +824,14 @@ impl ToolTaskRestartAgent {
         suggested_steps: usize,
         files_to_open: Vec<String>,
     ) -> Result<(), String> {
-        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let gcx = app.gcx.clone();
+        let execution = app
+            .agent_executions
+            .get(agent_chat_id)
+            .ok_or("restart execution lost")?;
+        if execution.is_cancelled() {
+            return Err("restart setup cancelled".into());
+        }
 
         let thread = build_agent_thread_params(
             agent_chat_id,
@@ -779,6 +948,9 @@ impl ToolTaskRestartAgent {
             })
             .await?;
         app.chat.facade.maybe_save_session(agent_chat_id).await?;
+        if execution.is_cancelled() {
+            return Err("restart setup cancelled".into());
+        }
         app.chat
             .facade
             .push_priority_command(agent_chat_id, ChatCommand::Regenerate {})
@@ -792,6 +964,262 @@ impl ToolTaskRestartAgent {
 mod tests {
     use super::*;
     use crate::tasks::types::{BoardCard, TaskBoard};
+
+    #[tokio::test]
+    async fn restart_tool_queues_at_capacity_then_admits_without_losing_retained_edits() {
+        use crate::tools::tool_spawn_ab::tests::{setup_repo_task, RecordingFacade, await_started};
+        use crate::app_state::AppState;
+        let (gcx, _temp, source) = setup_repo_task().await;
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            "test/model".into(),
+            Arc::new(crate::caps::ChatModelRecord::default()),
+        );
+        gcx.caps_state.write().await.caps = Some(Arc::new(caps));
+        gcx.caps_state.write().await.last_attempted_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let meta = storage::load_task_meta(gcx.clone(), "task-1")
+            .await
+            .unwrap();
+        let old =
+            prepare_agent_worktree(gcx.clone(), &meta, "task-1", "old-agent", "T-1", "old-chat")
+                .await
+                .unwrap();
+        let old_root = old.worktree_path();
+        std::fs::write(old_root.join("retained.txt"), "preserve me").unwrap();
+        let mut failed = failed_card(
+            "T-1",
+            Some(old_root.to_string_lossy().into_owned()),
+            old.branch_name(),
+        );
+        failed.agent_worktree_name = Some(old.worktree_name());
+        failed.agent_chat_id = Some("old-chat".into());
+        storage::update_board_atomic(gcx.clone(), "task-1", move |board| {
+            *board.get_card_mut("T-1").unwrap() = failed;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let mut app = AppState::from_gcx(gcx.clone()).await;
+        app.work_scheduler = Arc::new(refact_work_core::AdmissionScheduler::new(
+            refact_work_core::CoordinationSettings {
+                max_active_engine: 1,
+                max_active_project: 1,
+                max_active_root: 1,
+                ..Default::default()
+            },
+        ));
+        let facade = Arc::new(RecordingFacade::default());
+        app.chat.facade = facade.clone();
+        let project = crate::coordination::roots::project_identity(&source);
+        let holder = app
+            .work_scheduler
+            .reserve(refact_work_core::AdmissionRequest::new(
+                refact_work_core::WorkKey::background_agent("holder").run(1),
+                crate::tasks::admission::board_scope(&project, "planner"),
+            ))
+            .unwrap()
+            .acquire()
+            .await
+            .unwrap();
+        let ccx = Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                app.clone(),
+                4096,
+                20,
+                false,
+                vec![],
+                "planner".into(),
+                Some("planner".into()),
+                "test/model".into(),
+                Some(refact_chat_api::TaskMeta {
+                    task_id: "task-1".into(),
+                    role: "planner".into(),
+                    planner_chat_id: Some("planner".into()),
+                    agent_id: None,
+                    card_id: None,
+                }),
+                None,
+            )
+            .await,
+        ));
+        let (_, result) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ToolTaskRestartAgent::new().tool_execute(
+                ccx,
+                &"restart-call".into(),
+                &HashMap::from([
+                    ("card_id".into(), json!("T-1")),
+                    ("mode".into(), json!("resume")),
+                ]),
+            ),
+        )
+        .await
+        .expect("restart returns without waiting for capacity")
+        .unwrap();
+        let ContextEnum::ChatMessage(message) = &result[0] else {
+            panic!("tool result");
+        };
+        let response: Value = serde_json::from_str(&message.content.content_text_only()).unwrap();
+        assert_eq!(response["execution_state"], "queued");
+        assert!(response["worktree"].is_null());
+        assert!(facade.created.lock().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(old_root.join("retained.txt")).unwrap(),
+            "preserve me"
+        );
+        let queued = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        assert!(queued.get_card("T-1").unwrap().started_at.is_none());
+        holder.release();
+        await_started(&facade, 1).await;
+        let chat = response["agent_chat_id"].as_str().unwrap();
+        assert_eq!(
+            facade.started.lock().unwrap().as_slice(),
+            &[chat.to_string()]
+        );
+        assert_eq!(app.work_scheduler.snapshot().active, 1);
+        assert_eq!(
+            std::fs::read_to_string(old_root.join("retained.txt")).unwrap(),
+            "preserve me"
+        );
+        crate::tasks::admission::cancel_setup_and_wait(chat, std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        crate::tasks::admission::end(chat).await;
+        old.cleanup_unlinked(gcx).await;
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+    }
+
+    #[tokio::test]
+    async fn dropped_restart_caller_during_claim_keeps_previous_worktree_and_binding() {
+        use std::future::Future;
+        use crate::tools::tool_spawn_ab::tests::setup_repo_task;
+        let (gcx, _temp, source) = setup_repo_task().await;
+        let original = failed_card("T-1", Some("/retained".into()), None);
+        storage::update_board_atomic(gcx.clone(), "task-1", {
+            let original = original.clone();
+            move |board| {
+                *board.get_card_mut("T-1").unwrap() = original;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let id = format!("restart-test-{}", Uuid::new_v4());
+        crate::tasks::admission::reserve(&app, &id, "proj", "root", 0)
+            .await
+            .unwrap();
+        let lock = crate::tasks::board_lock::acquire_board(&source.join(".refact/tasks/task-1"))
+            .await
+            .unwrap();
+        let (accepted, acceptance) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let task_id = id.clone();
+        let task_gcx = gcx.clone();
+        let old = original.clone();
+        crate::tasks::admission::spawn_tracked(&id, async move {
+            let mut claim = Box::pin(claim_restart(
+                task_gcx.clone(),
+                "task-1",
+                &old,
+                "new-agent",
+                &task_id,
+                "resume",
+            ));
+            std::future::poll_fn(|cx| {
+                assert!(claim.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            entered.send(()).unwrap();
+            match claim.await {
+                Ok(_) => {
+                    if accepted.send(Ok(())).is_err() {
+                        restore_card_after_restart_failure(
+                            task_gcx,
+                            "task-1",
+                            old,
+                            task_id.clone(),
+                        )
+                        .await;
+                    }
+                }
+                Err(error) => {
+                    let _ = accepted.send(Err(error));
+                }
+            }
+            crate::tasks::admission::end(&task_id).await;
+        })
+        .await
+        .unwrap();
+        entry.await.unwrap();
+        drop(acceptance);
+        drop(lock);
+        crate::tasks::admission::shutdown(&app).await;
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert_eq!(card.agent_chat_id, original.agent_chat_id);
+        assert_eq!(card.agent_worktree, original.agent_worktree);
+        assert_eq!(card.column, "failed");
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+    }
+
+    #[tokio::test]
+    async fn restart_claim_is_conditional_and_preserves_old_checkout_while_queued() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![temp.path().canonicalize().unwrap()];
+        let task_dir = temp.path().join(".refact/tasks/restart-claim");
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+        let mut original = failed_card(
+            "T-1",
+            Some("/retained/worktree".into()),
+            Some("retained-branch".into()),
+        );
+        original.agent_worktree_name = Some("retained-id".into());
+        let board = TaskBoard {
+            cards: vec![original.clone()],
+            ..Default::default()
+        };
+        storage::save_board(gcx.clone(), "restart-claim", &board)
+            .await
+            .unwrap();
+        let queued = claim_restart(
+            gcx.clone(),
+            "restart-claim",
+            &original,
+            "new-agent",
+            "new-chat",
+            "fresh",
+        )
+        .await
+        .unwrap();
+        assert_eq!(queued.column, "doing");
+        assert_eq!(queued.agent_chat_id.as_deref(), Some("new-chat"));
+        assert!(queued.started_at.is_none());
+        assert_eq!(queued.agent_worktree, original.agent_worktree);
+        assert_eq!(queued.final_report, original.final_report);
+        let error = claim_restart(
+            gcx.clone(),
+            "restart-claim",
+            &original,
+            "duplicate",
+            "duplicate-chat",
+            "fresh",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("changed while restart"));
+        let current = storage::load_board(gcx, "restart-claim").await.unwrap();
+        assert_eq!(
+            current.get_card("T-1").unwrap().agent_chat_id,
+            queued.agent_chat_id
+        );
+    }
 
     #[tokio::test]
     async fn restart_agent_context_file_message_has_declared_record() {

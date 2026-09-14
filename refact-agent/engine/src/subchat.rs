@@ -103,9 +103,12 @@ fn runner_tool_window_closed(messages: &[ChatMessage]) -> bool {
     };
     messages[index].tool_calls.as_ref().map_or(true, |calls| {
         calls.iter().all(|call| {
-            messages[index + 1..]
-                .iter()
-                .any(|message| message.role == "tool" && message.tool_call_id == call.id)
+            messages[index + 1..].iter().any(|message| {
+                matches!(
+                    message.role.as_str(),
+                    "tool" | "diff" | "context_file" | "plain_text"
+                ) && message.tool_call_id == call.id
+            })
         })
     })
 }
@@ -399,7 +402,7 @@ fn get_context_files_from_messages(messages: &[ChatMessage]) -> Vec<String> {
     paths
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ToolsPolicy {
     All,
     None,
@@ -423,7 +426,7 @@ impl ToolsPolicy {
         }
     }
 
-    fn allows_tool(&self, tool_name: &str) -> bool {
+    pub(crate) fn allows_tool(&self, tool_name: &str) -> bool {
         match self {
             ToolsPolicy::All => true,
             ToolsPolicy::None => false,
@@ -432,14 +435,14 @@ impl ToolsPolicy {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct WrapUpConfig {
     pub depth: usize,
     pub tokens_cnt: usize,
     pub prompt: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TraceParent {
     pub chat_id: Option<String>,
     pub root_chat_id: Option<String>,
@@ -476,9 +479,10 @@ impl TraceParent {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SubchatConfig {
     pub tool_name: String,
+    pub history_source_model: Option<String>,
     pub stateful: bool,
     pub autonomous_no_confirm: bool,
     pub auto_approve_editing_tools: bool,
@@ -502,13 +506,16 @@ pub struct SubchatConfig {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub cache_control: CacheControl,
     pub parent_tool_call_id: Option<String>,
+    #[serde(skip)]
     pub parent_subchat_tx: Option<Arc<AMutex<mpsc::UnboundedSender<Value>>>>,
+    #[serde(skip)]
     pub abort_flag: Option<Arc<AtomicBool>>,
     pub soft_abort: bool,
     pub background_agent_id: Option<String>,
     pub subchat_depth: usize,
     pub final_step_force_answer: bool,
     pub buddy_meta: Option<crate::buddy::types::BuddyThreadMeta>,
+    #[serde(skip)]
     pub step_progress: Option<Arc<dyn Fn(SubchatProgress) + Send + Sync>>,
     pub trace_parent: TraceParent,
 }
@@ -1228,15 +1235,14 @@ pub async fn resolve_subchat_config_with_parent(
     abort_flag: Option<Arc<AtomicBool>>,
     subchat_depth: usize,
 ) -> Result<SubchatConfig, String> {
-    use crate::at_commands::at_commands::MAX_SUBCHAT_DEPTH;
+    let max_depth = crate::runtime_settings::current()
+        .coordination
+        .max_subchat_depth;
     if max_steps == 0 {
         return Err("max_steps must be > 0".to_string());
     }
-    if subchat_depth >= MAX_SUBCHAT_DEPTH {
-        return Err(format!(
-            "subchat depth limit ({}) exceeded",
-            MAX_SUBCHAT_DEPTH
-        ));
+    if subchat_depth >= max_depth {
+        return Err(format!("subchat depth limit ({max_depth}) exceeded"));
     }
 
     let params = resolve_subchat_params(gcx.clone(), tool_name).await?;
@@ -1280,6 +1286,7 @@ pub async fn resolve_subchat_config_with_parent(
     let trace_parent = TraceParent::from_parts(parent_id.as_deref(), root_chat_id.as_deref());
 
     Ok(SubchatConfig {
+        history_source_model: None,
         tool_name: tool_name.to_string(),
         stateful,
         autonomous_no_confirm,
@@ -1344,15 +1351,14 @@ pub async fn resolve_subchat_config_with_explicit_params(
     abort_flag: Option<Arc<AtomicBool>>,
     subchat_depth: usize,
 ) -> Result<SubchatConfig, String> {
-    use crate::at_commands::at_commands::MAX_SUBCHAT_DEPTH;
+    let max_depth = crate::runtime_settings::current()
+        .coordination
+        .max_subchat_depth;
     if max_steps == 0 {
         return Err("max_steps must be > 0".to_string());
     }
-    if subchat_depth >= MAX_SUBCHAT_DEPTH {
-        return Err(format!(
-            "subchat depth limit ({}) exceeded",
-            MAX_SUBCHAT_DEPTH
-        ));
+    if subchat_depth >= max_depth {
+        return Err(format!("subchat depth limit ({max_depth}) exceeded"));
     }
     if spec.model.trim().is_empty() {
         return Err(format!(
@@ -1409,6 +1415,7 @@ pub async fn resolve_subchat_config_with_explicit_params(
     let trace_parent = TraceParent::from_parts(parent_id.as_deref(), root_chat_id.as_deref());
 
     Ok(SubchatConfig {
+        history_source_model: None,
         tool_name: attribution_id.to_string(),
         stateful,
         autonomous_no_confirm: spec.autonomous_no_confirm,
@@ -1647,8 +1654,8 @@ async fn persist_subchat_progress(
         Ok(()) => {
             if let Some(agent_id) = config.background_agent_id.as_deref() {
                 for id in acknowledgements {
-                    if let Err(error) = app.agents.acknowledge_delivery(agent_id, &id).await {
-                        warn!(%agent_id, %id, %error, "Failed to acknowledge durable runner delivery");
+                    if let Err(error) = app.agents.consume_delivery(agent_id, &id).await {
+                        warn!(%agent_id, %id, %error, "Failed to mark durable runner delivery consumed");
                     }
                 }
                 crate::agents::delivery::publish_runner_queue(&app, agent_id).await;
@@ -1768,6 +1775,69 @@ pub(crate) fn stable_subchat_chat_id(
     fresh_id()
 }
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{SubchatConfig, ToolsPolicy, TraceParent};
+
+    pub(crate) fn minimal_config(chat_id: &str, parent: &str) -> SubchatConfig {
+        SubchatConfig {
+            history_source_model: None,
+            tool_name: "subagent".into(),
+            stateful: true,
+            autonomous_no_confirm: false,
+            auto_approve_editing_tools: false,
+            auto_approve_dangerous_commands: false,
+            chat_id: Some(chat_id.into()),
+            title: Some("child".into()),
+            parent_id: Some(parent.into()),
+            link_type: Some("subagent".into()),
+            root_chat_id: Some(parent.into()),
+            tools: ToolsPolicy::None,
+            max_steps: 1,
+            prepend_system_prompt: false,
+            wrap_up: None,
+            task_meta: None,
+            worktree: None,
+            model: "test/model".into(),
+            mode: "agent".into(),
+            n_ctx: 4096,
+            max_new_tokens: 512,
+            temperature: None,
+            reasoning_effort: None,
+            cache_control: crate::llm::params::CacheControl::Ephemeral,
+            parent_tool_call_id: None,
+            parent_subchat_tx: None,
+            abort_flag: None,
+            soft_abort: false,
+            background_agent_id: None,
+            subchat_depth: 1,
+            final_step_force_answer: false,
+            buddy_meta: None,
+            step_progress: None,
+            trace_parent: TraceParent::rooted(parent, parent),
+        }
+    }
+}
+
+pub(crate) fn prepare_child_history(
+    messages: &[ChatMessage],
+    config: &SubchatConfig,
+) -> Vec<ChatMessage> {
+    let mut selected = sanitize_messages_for_new_thread(messages);
+    if config.history_source_model.as_deref() == Some(config.model.as_str()) {
+        for (target, source) in
+            selected.iter_mut().zip(messages.iter().filter(|message| {
+                !refact_chat_history::trajectory_ops::is_ui_only_message(message)
+            }))
+        {
+            target.thinking_blocks = source.thinking_blocks.clone();
+            target.reasoning_content = source.reasoning_content.clone();
+            target.server_content_blocks = source.server_content_blocks.clone();
+        }
+    }
+    selected
+}
+
 pub async fn run_subchat(
     gcx: Arc<GlobalContext>,
     messages: Vec<ChatMessage>,
@@ -1780,9 +1850,16 @@ pub async fn run_subchat(
 
     let chat_id = stable_subchat_chat_id(&config, || format!("subchat-{}", Uuid::new_v4()));
 
-    let messages = sanitize_messages_for_new_thread(&messages);
+    let resuming = config.stateful
+        && (agent_resume_boundary(&messages, config.background_agent_id.as_deref()).is_some()
+            || previous_agent_cap(&messages, config.background_agent_id.as_deref()).is_some());
+    let messages = if resuming {
+        messages
+    } else {
+        prepare_child_history(&messages, &config)
+    };
     let messages = prepare_subchat_messages(&gcx, messages, &config.model)?;
-    if should_persist_subchat_trajectory(&config) {
+    if should_persist_subchat_trajectory(&config) && !resuming {
         let thread = trace_thread_from_config(&chat_id, &config);
         save_trajectory_as_with_intent(
             gcx.clone(),
@@ -1815,6 +1892,7 @@ pub async fn run_subchat(
 
     ccx.lock().await.subchat_depth = config.subchat_depth;
     ccx.lock().await.background_agent_id = config.background_agent_id.clone();
+    ccx.lock().await.child_tool_ceiling = Some(config.tools.clone());
 
     if let Some(ref parent_tx) = config.parent_subchat_tx {
         ccx.lock().await.subchat_tx = parent_tx.clone();
@@ -2233,6 +2311,17 @@ async fn runner_model_turn(
         )
     };
     loop {
+        let execution = app.agent_executions.get(&chat_id);
+        let _operation = if let Some(execution) = &execution {
+            Some(
+                execution
+                    .begin_operation()
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
         let result = {
             let generation = subchat_single_internal(
                 ccx.clone(),
@@ -2285,6 +2374,80 @@ async fn runner_model_turn(
     }
 }
 
+fn agent_resume_boundary(messages: &[ChatMessage], agent_id: Option<&str>) -> Option<(usize, u64)> {
+    let agent_id = agent_id?;
+    messages.iter().rev().find_map(|message| {
+        if message.role != "event" {
+            return None;
+        }
+        let event = message.extra.get("event")?;
+        if event.get("source")?.as_str()? != "agents.resume" {
+            return None;
+        }
+        let payload = event.get("payload")?;
+        if payload.get("agent_id")?.as_str()? != agent_id {
+            return None;
+        }
+        Some((
+            usize::try_from(payload.get("steps_before")?.as_u64()?).ok()?,
+            payload.get("run_generation")?.as_u64()?,
+        ))
+    })
+}
+
+fn previous_agent_cap(
+    messages: &[ChatMessage],
+    agent_id: Option<&str>,
+) -> Option<crate::agents::types::CapStop> {
+    let agent_id = agent_id?;
+    messages.iter().rev().find_map(|message| {
+        if message.role != "event" {
+            return None;
+        }
+        let event = message.extra.get("event")?;
+        if event.get("source").and_then(Value::as_str) != Some("agents.cap_stop") {
+            return None;
+        }
+        let payload = event.get("payload")?;
+        if payload.get("agent_id").and_then(Value::as_str) != Some(agent_id) {
+            return None;
+        }
+        serde_json::from_value(payload.get("cap_stop")?.clone()).ok()
+    })
+}
+
+#[cfg(test)]
+mod cap_history_tests {
+    use super::*;
+
+    #[test]
+    fn cap_accounting_selects_only_this_agents_bound_event() {
+        let stop = crate::agents::types::CapStop {
+            key: refact_work_core::CapKind::Steps,
+            scope: refact_work_core::CapScope::Child,
+            limit: 12,
+            used: 12,
+            resumable: true,
+            run_generation: 1,
+        };
+        let message = crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "agents.cap_stop",
+            serde_json::json!({"agent_id": "child", "cap_stop": stop}),
+            "cap reached",
+        );
+        assert_eq!(
+            previous_agent_cap(&[message.clone()], Some("child")),
+            Some(stop)
+        );
+        assert!(previous_agent_cap(&[message.clone()], Some("parent")).is_none());
+        assert!(previous_agent_cap(&[message.clone()], None).is_none());
+        let mut historical_text = message;
+        historical_text.role = "user".into();
+        assert!(previous_agent_cap(&[historical_text], Some("child")).is_none());
+    }
+}
+
 async fn run_subchat_loop(
     ccx: Arc<AMutex<AtCommandsContext>>,
     config: &SubchatConfig,
@@ -2295,6 +2458,12 @@ async fn run_subchat_loop(
 ) -> Result<(Vec<ChatMessage>, bool), String> {
     let mut context_limit_compact_count = 0usize;
     let mut empty_choice_retry_count = 0usize;
+    let previous_cap = previous_agent_cap(&messages, config.background_agent_id.as_deref());
+    let resume_boundary = agent_resume_boundary(&messages, config.background_agent_id.as_deref());
+    let steps_before = resume_boundary.map_or_else(
+        || previous_cap.as_ref().map_or(0, |stop| stop.used),
+        |(steps, _)| steps,
+    );
     for step in 0..config.max_steps {
         if is_aborted(&config.abort_flag) {
             if config.soft_abort {
@@ -2396,6 +2565,48 @@ async fn run_subchat_loop(
             }
             return Err("Aborted".to_string());
         }
+    }
+
+    if config.background_agent_id.is_some()
+        && !has_final_answer(&messages)
+        && !is_aborted(&config.abort_flag)
+    {
+        let total_steps = steps_before.saturating_add(config.max_steps);
+        let goal_limit = crate::chat::goal_snapshot_from_messages(&messages, None)
+            .and_then(|goal| goal.budget.max_turns)
+            .filter(|limit| *limit > 0);
+        let is_goal_cap = goal_limit.is_some_and(|limit| total_steps as u64 >= u64::from(limit));
+        let stop = crate::agents::types::CapStop {
+            key: if is_goal_cap {
+                refact_work_core::CapKind::GoalTurns
+            } else {
+                refact_work_core::CapKind::Steps
+            },
+            scope: refact_work_core::CapScope::Child,
+            limit: total_steps,
+            used: total_steps,
+            resumable: !is_goal_cap,
+            run_generation: resume_boundary.map_or_else(
+                || {
+                    previous_cap
+                        .as_ref()
+                        .map_or(1, |stop| stop.run_generation.saturating_add(1))
+                },
+                |(_, generation)| generation,
+            ),
+        };
+        let error = stop.as_error().map_err(|error| error.to_string())?;
+        messages.push(crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "agents.cap_stop", serde_json::json!({"agent_id": config.background_agent_id, "cap_stop": stop}),
+            if is_goal_cap {
+                "Explicit goal turn budget reached; a step-cap override cannot widen the goal budget."
+            } else {
+                "Step limit reached. Parent may inspect agent_resume and raise this child's step limit to resume the same task."
+            },
+        ));
+        persist_subchat_progress(&ccx, config, progress, &messages).await;
+        return Err(error);
     }
 
     if needs_forced_final_answer(
@@ -2828,7 +3039,7 @@ async fn execute_pending_tool_calls(
     let mut denied_msgs: Vec<ChatMessage> = vec![];
 
     for tc in tool_calls.iter() {
-        if !tools_policy.allows_tool(&tc.function.name) {
+        if !crate::agents::tool_authority::allows_dispatch(tools_policy, &tc.function.name) {
             denied_msgs.push(ChatMessage {
                 message_id: Uuid::new_v4().to_string(),
                 role: "tool".to_string(),
@@ -2859,6 +3070,53 @@ async fn execute_pending_tool_calls(
         ..Default::default()
     };
 
+    let (confirmations, denials) = crate::chat::tools::check_tools_confirmation(
+        app.clone(),
+        &allowed,
+        &messages,
+        &thread,
+        None,
+        mode_id,
+        Some(model_id),
+        &[],
+        "subagent",
+    )
+    .await;
+    for denial in denials {
+        allowed.retain(|call| call.id != denial.tool_call_id);
+        denied_msgs.push(ChatMessage {
+            role: "tool".into(),
+            tool_call_id: denial.tool_call_id,
+            tool_failed: Some(true),
+            content: ChatContent::SimpleText(format!("Denied by policy: {}", denial.rule)),
+            ..Default::default()
+        });
+    }
+    for confirmation in confirmations {
+        if let Some(call) = allowed
+            .iter()
+            .find(|call| call.id == confirmation.tool_call_id)
+            .cloned()
+        {
+            let result =
+                crate::agents::approval::request(&app, &ccx, &call, &confirmation.rule).await;
+            if !matches!(result, Ok(true)) {
+                allowed.retain(|candidate| candidate.id != call.id);
+                denied_msgs.push(ChatMessage {
+                    role: "tool".into(),
+                    tool_call_id: call.id,
+                    tool_failed: Some(true),
+                    content: ChatContent::SimpleText(
+                        result
+                            .err()
+                            .unwrap_or_else(|| "Command approval rejected or expired".into()),
+                    ),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
     if let Some(tx_toolid) = &tx_toolid_mb {
         let subchat_tx = ccx.lock().await.subchat_tx.clone();
         let context_files = get_context_files_from_messages(&messages);
@@ -2887,7 +3145,10 @@ async fn execute_pending_tool_calls(
         &thread,
         &thread.mode,
         Some(&thread.model),
-        ExecuteToolsOptions::default(),
+        ExecuteToolsOptions {
+            execution_context: Some(ccx.clone()),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -3849,6 +4110,7 @@ mod subchat_tests {
 
     fn test_subchat_config() -> SubchatConfig {
         SubchatConfig {
+            history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: false,
             autonomous_no_confirm: false,
@@ -3883,6 +4145,29 @@ mod subchat_tests {
             step_progress: None,
             trace_parent: TraceParent::unattributed(),
         }
+    }
+
+    #[test]
+    fn completed_child_history_preserves_signatures_only_for_the_same_model() {
+        let mut message = ChatMessage::new("assistant".into(), "completed answer".into());
+        message.thinking_blocks = Some(vec![
+            serde_json::json!({"type":"thinking", "thinking":"reasoning", "signature":"opaque-unaltered"}),
+        ]);
+        message.extra.insert(
+            "launch_context_source".into(),
+            serde_json::json!({"type":"completed_prefix","digest":"original"}),
+        );
+        let mut config = test_subchat_config();
+        config.history_source_model = Some(config.model.clone());
+        let same = super::prepare_child_history(&[message.clone()], &config);
+        assert_eq!(same[0].thinking_blocks, message.thinking_blocks);
+        config.model = "different/model".into();
+        let changed = super::prepare_child_history(&[message.clone()], &config);
+        assert!(changed[0].thinking_blocks.is_none());
+        assert_eq!(
+            changed[0].extra["launch_context_source"],
+            message.extra["launch_context_source"]
+        );
     }
 
     async fn abort_test_ccx(
@@ -4705,6 +4990,7 @@ mod subchat_tests {
             planner_chat_id: Some("planner-task-1-1".to_string()),
         };
         let config = SubchatConfig {
+            history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: true,
             autonomous_no_confirm: false,
@@ -4772,6 +5058,7 @@ mod subchat_tests {
             planner_chat_id: Some("planner-task-1-1".to_string()),
         };
         let config = SubchatConfig {
+            history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: true,
             autonomous_no_confirm: false,
@@ -4833,6 +5120,7 @@ mod subchat_tests {
             planner_chat_id: Some("planner-task-1-1".to_string()),
         };
         let config = SubchatConfig {
+            history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: false,
             autonomous_no_confirm: false,
@@ -5078,6 +5366,7 @@ mod subchat_tests {
             .await
             .unwrap();
         let config = SubchatConfig {
+            history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: true,
             autonomous_no_confirm: false,

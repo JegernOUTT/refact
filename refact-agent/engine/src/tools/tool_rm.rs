@@ -280,9 +280,18 @@ impl Tool for ToolRm {
                 }));
                 return Ok((corrections, messages));
             }
+            let actor = ccx.lock().await.chat_id.clone();
+            let guard = crate::file_activity::begin_write(
+                Some(&actor),
+                &true_path,
+                crate::file_activity::WriteIntent::Tree,
+                "rm",
+            )
+            .await?;
             fs::remove_dir_all(&true_path)
                 .await
                 .map_err(|e| format!("Failed to remove directory '{}': {}", corrected_path, e))?;
+            guard.commit(crate::file_activity::WriteKind::Deleted, None);
             remove_memory_documents_under_path(gcx.clone(), &true_path).await;
             messages.push(ContextEnum::ChatMessage(ChatMessage {
                 role: "tool".to_string(),
@@ -305,10 +314,24 @@ impl Tool for ToolRm {
                 }));
                 return Ok((corrections, messages));
             }
+            let actor = ccx.lock().await.chat_id.clone();
+            let guard = crate::file_activity::begin_write(
+                Some(&actor),
+                &true_path,
+                crate::file_activity::WriteIntent::Delete,
+                "rm",
+            )
+            .await?;
+            if let Ok(disk) = fs::read_to_string(&true_path).await {
+                if disk != file_content {
+                    return Err("delete preimage changed or buffer differs from disk; reread before retrying".into());
+                }
+            }
             fs::remove_file(&true_path)
                 .await
                 .map_err(|e| format!("Failed to remove file '{}': {}", corrected_path, e))?;
             remove_memory_document_for_path(gcx.clone(), &true_path).await;
+            guard.commit(crate::file_activity::WriteKind::Deleted, None);
             if !file_content.is_empty() {
                 let diff_chunk = DiffChunk {
                     file_name: corrected_path.clone(),

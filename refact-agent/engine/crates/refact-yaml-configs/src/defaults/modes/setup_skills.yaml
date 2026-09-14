@@ -219,6 +219,7 @@ tools:
   - subagent
   - agents_overview
   - agent_message
+  - agent_peer_grant
   - tasks_set
   - task_done
   - ask_questions
@@ -266,6 +267,8 @@ tool_confirm:
       action: auto
     - match: "agent_message"
       action: auto
+    - match: "agent_peer_grant"
+      action: ask
     - match: "tasks_set"
       action: auto
     - match: "task_done"

@@ -45,6 +45,8 @@ pub struct AtCommandsContext {
     pub subchat_depth: usize,
     pub tool_access_bypass: bool,
     pub background_agent_id: Option<String>,
+    pub(crate) child_tool_ceiling: Option<crate::subchat::ToolsPolicy>,
+    pub approved_executions: HashMap<String, crate::agents::command_approval::ApprovedExecution>,
 
     pub at_commands: HashMap<String, Arc<dyn AtCommand + Send>>,
     pub subchat_tool_parameters: IndexMap<String, SubchatParameters>,
@@ -166,11 +168,13 @@ impl AtCommandsContext {
             }
             None => crate::privacy::records::new_derived_privacy_zones(),
         };
-        let background_agent_id = if !chat_id.starts_with("subchat-") {
-            None
-        } else {
-            app.agents.find_agent_id_by_child_chat_id(&chat_id).await
-        };
+        let background_agent_id = app.agents.find_agent_id_by_child_chat_id(&chat_id).await;
+        let child_tool_ceiling = background_agent_id.as_ref().map(|id| {
+            app.agent_executions
+                .saved_config(id)
+                .map(|config| config.tools)
+                .unwrap_or(crate::subchat::ToolsPolicy::None)
+        });
         AtCommandsContext {
             global_context,
             app: app.clone(),
@@ -190,6 +194,8 @@ impl AtCommandsContext {
             subchat_depth: 0,
             tool_access_bypass: false,
             background_agent_id,
+            child_tool_ceiling,
+            approved_executions: HashMap::new(),
             at_commands: at_commands_dict(app).await,
             subchat_tool_parameters: IndexMap::new(),
             postprocess_parameters: PostprocessSettings::new(),

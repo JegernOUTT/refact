@@ -375,6 +375,20 @@ impl Tool for ToolAgentAskPlanner {
         let urgency = QuestionUrgency::parse(args.get("urgency"))?;
         let push = planner_delivery::parse_push_mode(args)?;
         let question_id = make_question_id();
+        let question_contract = refact_chat_api::QuestionContract::pending(
+            question_id.clone(),
+            refact_chat_api::QuestionKind::BoardPlanner,
+            format!("task:{task_id}:card:{card_id}"),
+            planner_chat_id
+                .as_ref()
+                .map(|planner| format!("chat:{planner}"))
+                .unwrap_or_else(|| format!("task:{task_id}:planner")),
+            format!("{task_id}:{card_id}:{question_id}"),
+            question.clone(),
+            None,
+            Utc::now(),
+            None,
+        )?;
         let message = format!(
             "[ASK:{}] {} (urgency={})",
             question_id,
@@ -427,6 +441,8 @@ impl Tool for ToolAgentAskPlanner {
                         Ok(DeliveryOutcome::Delivered) => "\n\nBlocking question delivered to planner; wake requested.",
                         Ok(DeliveryOutcome::Queued) => "\n\nBlocking question queued for planner; wake requested without overriding push mode.",
                         Ok(DeliveryOutcome::Duplicate) => "\n\nBlocking question already accepted; duplicate not delivered.",
+                        Ok(DeliveryOutcome::Expired) => "\n\nPlanner wake expired before delivery; the question is durably recorded and will surface on the planner's next task_list call.",
+                        Ok(DeliveryOutcome::Superseded) => "\n\nPlanner wake was superseded before delivery; the question is durably recorded and will surface on the planner's next task_list call.",
                         Err(error) => {
                             tracing::warn!(
                                 "agent_ask_planner: failed to wake planner for blocking question {} on card {}: {}",
@@ -455,6 +471,10 @@ impl Tool for ToolAgentAskPlanner {
             question_id,
             wake_note
         );
+        output.push_str(&format!(
+            "\n\nTyped question contract:\n{}",
+            serde_json::to_string(&question_contract).unwrap_or_default()
+        ));
         if let Some(notice) = question_notice {
             output = format!("{}\n\n{}", notice, output);
         }

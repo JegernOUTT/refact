@@ -119,6 +119,14 @@ async fn proxy_to_worker(
         .request(method, url)
         .headers(headers)
         .body(body.to_vec());
+    let request = if worker_path == "/v1/work" || worker_path.starts_with("/v1/work/") {
+        match crate::daemon::hooks::worker_forward_token(&state) {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        }
+    } else {
+        request
+    };
     let response = send_worker_request(request, use_stream_client).await;
 
     match response {

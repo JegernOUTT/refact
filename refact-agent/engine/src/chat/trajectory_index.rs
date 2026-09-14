@@ -293,6 +293,8 @@ pub struct TrajectoryIndexSkippedFile {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TrajectoryIndexEntry {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<crate::coordination::history::WorkIndexMetadata>,
     pub file_name: String,
     #[serde(default)]
     pub source: TrajectoryIndexSource,
@@ -746,6 +748,22 @@ impl TrajectoryIndexCoordinator {
         snapshot
     }
 
+    pub async fn work_snapshot(&self, dir: &Path) -> Result<TrajectoryIndex, String> {
+        let settings = crate::file_activity::settings();
+        let state = self.ensure_loaded(dir, None).await?;
+        let guard = state.lock().await;
+        let index = guard
+            .index
+            .as_ref()
+            .ok_or_else(|| "Work index unavailable".to_string())?;
+        if index.entries.len() > settings.max_work_history_rows {
+            return Err("Work history exceeds configured projection limits".into());
+        }
+        crate::coordination::bounds::serialized_size(index, settings.max_work_history_bytes)
+            .ok_or_else(|| "Work history exceeds configured projection limits".to_string())?;
+        Ok(index.clone())
+    }
+
     pub async fn upsert(&self, dir: &Path, entry: TrajectoryIndexEntry) -> Result<(), String> {
         validate_trajectory_index_entry(&entry)?;
         let state = self.directory_state(dir).await?;
@@ -1032,6 +1050,7 @@ struct FileGeneration {
 struct DirectoryContentsGeneration {
     metadata: FileGeneration,
     entry_count: usize,
+    names: Vec<std::ffi::OsString>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1087,14 +1106,17 @@ fn directory_contents_generation(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("Failed to read directory {:?}: {error}", path)),
     };
-    let mut entry_count = 0;
+    let mut names = Vec::new();
     for entry in entries {
-        entry.map_err(|error| format!("Failed to read directory entry in {:?}: {error}", path))?;
-        entry_count += 1;
+        let entry = entry
+            .map_err(|error| format!("Failed to read directory entry in {:?}: {error}", path))?;
+        names.push(entry.file_name());
     }
+    names.sort();
     Ok(Some(DirectoryContentsGeneration {
         metadata,
-        entry_count,
+        entry_count: names.len(),
+        names,
     }))
 }
 
@@ -1229,12 +1251,31 @@ fn refresh_generation_for_entry(
         state.generation_verified_at = None;
         return;
     };
-    if let Some((child, _)) = file_name.split_once('/') {
+    let expected_names = |previous: Option<&DirectoryContentsGeneration>, added: &str| {
+        let mut names = previous.map_or_else(Vec::new, |previous| previous.names.clone());
+        names.push(std::ffi::OsString::from(added));
+        names.sort();
+        names.dedup();
+        names
+    };
+    let root_name = file_name.split('/').next().unwrap_or(file_name);
+    if root.names != expected_names(generation.root.as_ref(), root_name) {
+        state.generation = None;
+        state.generation_verified_at = None;
+        return;
+    }
+    if let Some((child, leaf)) = file_name.split_once('/') {
         let Ok(Some(child_generation)) = directory_contents_generation(&dir.join(child)) else {
             state.generation = None;
             state.generation_verified_at = None;
             return;
         };
+        let previous = generation.children.iter().find(|(name, _)| name == child);
+        if child_generation.names != expected_names(previous.map(|(_, value)| value), leaf) {
+            state.generation = None;
+            state.generation_verified_at = None;
+            return;
+        }
         match generation
             .children
             .iter_mut()
@@ -1830,6 +1871,15 @@ pub fn entry_from_trajectory_value(
     };
 
     Ok(TrajectoryIndexEntry {
+        work: Some(
+            crate::coordination::history::WorkIndexMetadata::from_values(
+                &data.messages,
+                data.extra
+                    .get("version")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0),
+            ),
+        ),
         id: data.id,
         file_name,
         source: TrajectoryIndexSource::from(&source),

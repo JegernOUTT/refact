@@ -4,12 +4,14 @@ use uuid::Uuid;
 
 pub mod chat_local_types;
 pub mod code_lens;
+pub mod deliverable;
 pub mod diagnostics;
 pub mod goal_ledger;
 pub mod goal_role;
 pub mod internal_roles;
 pub mod notification_event;
 pub mod plan_role;
+pub mod question;
 pub mod tool_enrichment;
 
 pub use goal_ledger::{
@@ -23,6 +25,8 @@ pub use chat_local_types::{
     PendingBrowserMessage, PendingSkillDeactivation, RuntimeChatTimeouts, TrajectorySourceIdentity,
 };
 pub use notification_event::{NotificationEvent, NotificationQuestion};
+pub use question::{QuestionContract, QuestionKind, QuestionState};
+pub use deliverable::{DeliverableContract, DeliverableStatus, DELIVERABLE_CHECK_STRUCTURAL};
 pub use tool_enrichment::{
     attach_tool_enrichment, attach_tool_enrichment_to_extra, redact_tool_enrichment,
     sanitize_http_url, tool_enrichment_from_extra, ToolEnrichment, ToolEnrichmentKind,
@@ -31,8 +35,8 @@ pub use tool_enrichment::{
 };
 pub use refact_core::buddy_meta::BuddyThreadMeta;
 pub use refact_core::chat_types::{
-    delivery_id_of_message, ChatMessage, ContextFile, DeliveryOutcome, PendingDelivery, PushMode,
-    DELIVERY_EXTRA_KEY,
+    delivery_id_of_message, ChatMessage, ContextFile, DeliveryOutcome, DeliveryStatus,
+    DeliveryStatusRecord, PendingDelivery, PushMode, DELIVERY_EXTRA_KEY,
 };
 pub use refact_core::worktree_meta::WorktreeMeta;
 
@@ -542,6 +546,8 @@ impl QueuedItem {
                 "wake": delivery.wake,
                 "message_count": delivery.messages.len(),
                 "enqueued_at_ms": delivery.enqueued_at_ms,
+                "expires_at_ms": delivery.expires_at_ms,
+                "supersede_key": delivery.supersede_key,
             })),
             enqueued_at_ms: Some(delivery.enqueued_at_ms),
         }
@@ -622,6 +628,12 @@ pub struct PauseReason {
 pub struct AgentQuestionSummary {
     pub id: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<QuestionKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<QuestionState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
     pub answer: Option<String>,
     pub asked_at: DateTime<Utc>,
     pub answered_at: Option<DateTime<Utc>>,
@@ -670,6 +682,10 @@ pub struct BackgroundAgentSummary {
     pub cost_usd: Option<f64>,
     #[serde(default)]
     pub questions: Vec<AgentQuestionSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliverable: Option<DeliverableContract>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliverable_status: Option<DeliverableStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1245,6 +1261,8 @@ mod tests {
             tokens_used: 123,
             cost_usd: Some(0.42),
             questions: Vec::new(),
+            deliverable: None,
+            deliverable_status: None,
         }
     }
 

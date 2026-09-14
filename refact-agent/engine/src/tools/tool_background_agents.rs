@@ -15,10 +15,6 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType
 
 const DEFAULT_LIMIT: usize = 20;
 const DEFAULT_TERMINAL_HOURS: i64 = 24;
-const DEFAULT_WAIT_MS: u64 = 60_000;
-const MIN_WAIT_MS: u64 = 1_000;
-const MAX_WAIT_MS: u64 = 30 * 60 * 1_000;
-
 pub struct ToolAgentList {
     pub config_path: String,
 }
@@ -37,6 +33,142 @@ pub struct ToolAgentResult {
 
 pub struct ToolAgentCancel {
     pub config_path: String,
+}
+
+pub struct ToolAgentResume {
+    pub config_path: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AgentResumeAction {
+    Inspect,
+    Resume {
+        expected_change_seq: u64,
+        instruction: Option<String>,
+        reconcile_incomplete: bool,
+    },
+    RaiseAndResume {
+        max_steps: usize,
+        expected_change_seq: u64,
+    },
+}
+
+fn agent_resume_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "agent_id": {"type": "string", "minLength": 1},
+            "action": {"type": "string", "enum": ["inspect", "raise_and_resume", "resume"]},
+            "instruction": {"type": "string", "minLength": 1, "description": "Optional exact parent follow-up for resume; appended after preserved child history."},
+            "reconcile_incomplete": {"type": "boolean", "default": false, "description": "For resume only: explicitly acknowledge missing tool outcomes as unknown without replaying calls. Inspect side effects before enabling."},
+            "max_steps": {
+                "type": "integer", "minimum": 1,
+                "description": "New per-child total step cap, required for raise_and_resume. Must increase the stopped cap without exceeding the Settings ceiling."
+            },
+            "expected_change_seq": {
+                "type": "integer", "minimum": 1,
+                "description": "Exact change_seq returned by inspect, required for any resume."
+            }
+        },
+        "required": ["agent_id", "action"],
+        "oneOf": [
+            {"properties": {"action": {"const": "inspect"}}, "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["expected_change_seq"]}, {"required": ["instruction"]}, {"required": ["reconcile_incomplete"]}]}},
+            {"properties": {"action": {"const": "raise_and_resume"}}, "required": ["max_steps", "expected_change_seq"], "not": {"anyOf": [{"required": ["instruction"]}, {"required": ["reconcile_incomplete"]}]}},
+            {"properties": {"action": {"const": "resume"}}, "required": ["expected_change_seq"], "not": {"required": ["max_steps"]}}
+        ]
+    })
+}
+
+fn parse_agent_resume_args(
+    args: &HashMap<String, Value>,
+) -> Result<(String, AgentResumeAction), String> {
+    for key in args.keys() {
+        if !matches!(
+            key.as_str(),
+            "agent_id"
+                | "action"
+                | "max_steps"
+                | "expected_change_seq"
+                | "instruction"
+                | "reconcile_incomplete"
+        ) {
+            return Err(format!("Unknown argument '{key}'"));
+        }
+    }
+    let agent_id = parse_required_string(args, "agent_id")?;
+    let action = match args.get("action").and_then(Value::as_str) {
+        Some("inspect") => {
+            if [
+                "max_steps",
+                "expected_change_seq",
+                "instruction",
+                "reconcile_incomplete",
+            ]
+            .iter()
+            .any(|key| args.contains_key(*key))
+            {
+                return Err("inspect does not accept mutation fields".to_string());
+            }
+            AgentResumeAction::Inspect
+        }
+        Some("raise_and_resume") => {
+            if args.contains_key("instruction") || args.contains_key("reconcile_incomplete") {
+                return Err(
+                    "raise_and_resume does not accept instruction or reconcile_incomplete".into(),
+                );
+            }
+            let positive_integer = |key: &str| {
+                args.get(key)
+                    .and_then(Value::as_u64)
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| format!("{key} must be a positive integer"))
+            };
+            AgentResumeAction::RaiseAndResume {
+                max_steps: usize::try_from(positive_integer("max_steps")?)
+                    .map_err(|_| "max_steps is too large".to_string())?,
+                expected_change_seq: positive_integer("expected_change_seq")?,
+            }
+        }
+        Some("resume") => {
+            if args.contains_key("max_steps") {
+                return Err(
+                    "resume does not change limits; use raise_and_resume for a stopped cap".into(),
+                );
+            }
+            let expected_change_seq = args
+                .get("expected_change_seq")
+                .and_then(Value::as_u64)
+                .filter(|value| *value > 0)
+                .ok_or("expected_change_seq must be a positive integer")?;
+            let instruction = args
+                .get("instruction")
+                .map(|value| {
+                    value
+                        .as_str()
+                        .filter(|text| !text.trim().is_empty())
+                        .map(str::to_string)
+                        .ok_or_else(|| "instruction must be a non-empty string".to_string())
+                })
+                .transpose()?;
+            let reconcile_incomplete = args
+                .get("reconcile_incomplete")
+                .map(|value| {
+                    value
+                        .as_bool()
+                        .ok_or("reconcile_incomplete must be a boolean")
+                })
+                .transpose()?
+                .unwrap_or(false);
+            AgentResumeAction::Resume {
+                expected_change_seq,
+                instruction,
+                reconcile_incomplete,
+            }
+        }
+        _ => return Err("action must be inspect, resume or raise_and_resume".to_string()),
+    };
+    Ok((agent_id, action))
 }
 
 fn background_agent_tool_desc(
@@ -113,15 +245,65 @@ fn agent_status_schema() -> Value {
 }
 
 fn agent_wait_schema() -> Value {
-    agent_id_schema(serde_json::Map::from_iter([(
-        "timeout_ms".to_string(),
-        json!({
-            "type": "integer",
-            "minimum": MIN_WAIT_MS,
-            "maximum": MAX_WAIT_MS,
-            "description": "How long to wait for completion. Default: 60000"
-        }),
-    )]))
+    let settings = refact_work_core::coordination_settings();
+    json!({
+        "type": "object",
+        "properties": {
+            "agent_id": {
+                "type": "string",
+                "description": "Background agent ID, for example bgagent-... Use agent_ids to wait for the first of several."
+            },
+            "agent_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": settings.agent_wait_max_agents,
+                "description": "Wait for whichever of these agents (spawned by this chat) reaches a terminal state first."
+            },
+            "timeout_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": settings.agent_wait_max_ms,
+                "description": format!("How long to wait for completion. Default: {}", settings.agent_wait_default_ms)
+            }
+        }
+    })
+}
+
+fn parse_wait_targets(
+    args: &HashMap<String, Value>,
+    max_agents: usize,
+) -> Result<Vec<String>, String> {
+    let mut ids: Vec<String> = match args.get("agent_ids") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .filter(|id| !id.trim().is_empty())
+                    .map(|id| id.trim().to_string())
+                    .ok_or_else(|| "argument `agent_ids` must contain agent id strings".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => return Err("argument `agent_ids` must be an array of agent ids".to_string()),
+    };
+    if let Some(single) = args.get("agent_id").and_then(Value::as_str) {
+        if !single.trim().is_empty() {
+            ids.push(single.trim().to_string());
+        }
+    }
+    ids.dedup();
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(id.clone()));
+    if ids.is_empty() {
+        return Err("provide `agent_id` or a nonempty `agent_ids` list".to_string());
+    }
+    if ids.len() > max_agents {
+        return Err(format!(
+            "`agent_ids` supports at most {max_agents} agents per wait"
+        ));
+    }
+    Ok(ids)
 }
 
 fn agent_result_schema() -> Value {
@@ -224,13 +406,17 @@ fn parse_optional_usize(
     usize::try_from(value).map_err(|_| format!("{key} is too large"))
 }
 
-fn parse_wait_timeout_ms(args: &HashMap<String, Value>) -> Result<u64, String> {
-    let timeout_ms = parse_optional_u64(args, "timeout_ms", DEFAULT_WAIT_MS)?;
-    if timeout_ms < MIN_WAIT_MS {
-        return Err(format!("timeout_ms must be at least {MIN_WAIT_MS}ms"));
+fn parse_wait_timeout_ms(
+    args: &HashMap<String, Value>,
+    default_ms: u64,
+    max_ms: u64,
+) -> Result<u64, String> {
+    let timeout_ms = parse_optional_u64(args, "timeout_ms", default_ms)?;
+    if timeout_ms < 1 {
+        return Err("timeout_ms must be at least 1ms".to_string());
     }
-    if timeout_ms > MAX_WAIT_MS {
-        return Err(format!("timeout_ms must be at most {MAX_WAIT_MS}ms"));
+    if timeout_ms > max_ms {
+        return Err(format!("timeout_ms must be at most {max_ms}ms"));
     }
     Ok(timeout_ms)
 }
@@ -293,6 +479,53 @@ async fn background_agent_context(
 ) -> (crate::app_state::AppState, String) {
     let ccx_lock = ccx.lock().await;
     (ccx_lock.app.clone(), get_parent_chat_id(&ccx_lock))
+}
+
+async fn authorize_agent_control(
+    app: &crate::app_state::AppState,
+    caller_chat_id: &str,
+    caller_root_id: &str,
+    caller_agent_id: Option<&str>,
+    agent_id: &str,
+) -> Result<BackgroundAgent, String> {
+    if let Ok(record) = app.agents.get(caller_chat_id, agent_id).await {
+        return Ok(record);
+    }
+    if let Some(caller_agent_id) = caller_agent_id {
+        if let Some(record) = app
+            .agents
+            .list_descendants(caller_agent_id)
+            .await
+            .into_iter()
+            .find(|record| record.agent_id == agent_id)
+        {
+            return Ok(record);
+        }
+    }
+    let record = app
+        .agents
+        .get_any(agent_id)
+        .await
+        .map_err(|error| map_registry_error(agent_id, error))?;
+    let target_root = record
+        .parent_root_chat_id
+        .as_deref()
+        .unwrap_or(record.parent_chat_id.as_str());
+    let source_root = app
+        .agent_executions
+        .saved_scope(agent_id)
+        .ok_or_else(|| not_found_error(agent_id))?;
+    let project = crate::coordination::roots::project_identity(&source_root);
+    if app.peer_grants.allows(
+        &project,
+        caller_root_id,
+        target_root,
+        crate::coordination::peer_authority::PeerAuthority::Control,
+        chrono::Utc::now().timestamp_millis().max(0) as u64,
+    ) {
+        return Ok(record);
+    }
+    Err(not_found_error(agent_id))
 }
 
 fn not_found_error(agent_id: &str) -> String {
@@ -729,6 +962,146 @@ fn payload_string_list(payload: &Value, key: &str) -> Option<Vec<String>> {
 }
 
 #[async_trait]
+impl Tool for ToolAgentResume {
+    fn tool_description(&self) -> ToolDesc {
+        let mut description = background_agent_tool_desc(
+            self.config_path.clone(),
+            "agent_resume",
+            "Agent Resume",
+            "Inspect or explicitly resume a stopped direct child on its saved history, plan and goal. Resume may append a parent instruction; incomplete tool outcomes require explicit reconciliation and are never replayed. raise_and_resume increases a stopped per-child step cap. Mutations require expected_change_seq from inspect. Cannot change global Settings, goal budgets, policy or provider quotas. Saved runtime configuration must still be available.",
+            agent_resume_schema(),
+        );
+        description.allow_parallel = false;
+        description
+    }
+
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let (agent_id, action) = parse_agent_resume_args(args)?;
+        let (app, chat_id) = background_agent_context(&ccx).await;
+        let mut record = app
+            .agents
+            .get_any(&agent_id)
+            .await
+            .map_err(|error| map_registry_error(&agent_id, error))?;
+        if record.parent_chat_id != chat_id {
+            return Err(not_found_error(&agent_id));
+        }
+        let resumed = match action {
+            AgentResumeAction::Inspect => false,
+            AgentResumeAction::Resume {
+                expected_change_seq,
+                instruction,
+                reconcile_incomplete,
+            } => {
+                record = crate::agents::spawn::resume_agent(
+                    app.clone(),
+                    &chat_id,
+                    &agent_id,
+                    None,
+                    expected_change_seq,
+                    instruction,
+                    reconcile_incomplete,
+                )
+                .await?;
+                true
+            }
+            AgentResumeAction::RaiseAndResume {
+                max_steps,
+                expected_change_seq,
+            } => {
+                record = crate::agents::spawn::resume_capped_agent(
+                    app.clone(),
+                    &chat_id,
+                    &agent_id,
+                    max_steps,
+                    expected_change_seq,
+                )
+                .await?;
+                true
+            }
+        };
+        let recovered = crate::agents::spawn::recover_run_config(&app, &chat_id, &agent_id)
+            .await
+            .ok();
+        let max_steps = recovered.as_ref().map(|run| run.config.max_steps);
+        let tool_authority = recovered.as_ref().map(|run| {
+            json!({
+                "tools": run.config.tools,
+                "migrated_from_legacy_all": run.authority_migrated,
+            })
+        });
+        let cap_stop = if record.status == BgAgentStatus::Failed {
+            record
+                .error
+                .as_deref()
+                .and_then(crate::agents::types::CapStop::from_error)
+        } else {
+            None
+        };
+        let scope_available = recovered.is_some();
+        let settings_ceiling = if let Some(run) = &recovered {
+            crate::runtime_settings::coordination_for_project(&run.root)
+                .await
+                .ok()
+                .map(|limits| limits.subagent_max_steps)
+        } else {
+            None
+        };
+        let summary = if resumed {
+            "The same child trajectory is queued to resume."
+        } else {
+            "Child recovery inspected; no limits or execution state changed."
+        };
+        Ok(tool_message(tool_call_id, json!({
+            "summary": summary,
+            "action": args.get("action"),
+            "agent_id": record.agent_id,
+            "child_chat_id": record.child_chat_id,
+            "status": record.status.as_str(),
+            "change_seq": record.change_seq,
+            "run_generation": record.run_generation,
+            "step_count": record.step_count,
+            "cap_stop": cap_stop,
+            "can_resume": scope_available && record.status.is_terminal() && max_steps.is_some_and(|limit| limit > record.step_count as usize) && cap_stop.is_none(),
+            "can_raise_and_resume": scope_available && cap_stop.as_ref().is_some_and(|stop| stop.parent_can_raise_steps()),
+            "max_steps": max_steps,
+            "settings_subagent_max_steps_ceiling": settings_ceiling,
+            "resume_configuration_available": max_steps.is_some(),
+            "tool_authority": tool_authority,
+            "original_scope_available": scope_available,
+        }).to_string()))
+    }
+
+    async fn match_against_confirm_deny(
+        &self,
+        _ccx: Arc<AMutex<AtCommandsContext>>,
+        args: &HashMap<String, Value>,
+    ) -> Result<crate::tools::tools_description::MatchConfirmDeny, String> {
+        use crate::tools::tools_description::{MatchConfirmDeny, MatchConfirmDenyResult};
+        let (agent_id, action) = parse_agent_resume_args(args)?;
+        Ok(MatchConfirmDeny {
+            result: match action {
+                AgentResumeAction::Inspect => MatchConfirmDenyResult::PASS,
+                AgentResumeAction::RaiseAndResume { .. } | AgentResumeAction::Resume { .. } => {
+                    MatchConfirmDenyResult::CONFIRMATION
+                }
+            },
+            command: format!("agent_resume {agent_id} {action:?}"),
+            rule: "default".to_string(),
+        })
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec![]
+    }
+}
+
+#[async_trait]
 impl Tool for ToolAgentList {
     fn tool_description(&self) -> ToolDesc {
         background_agent_tool_desc(
@@ -800,7 +1173,7 @@ impl Tool for ToolAgentWait {
             self.config_path.clone(),
             "agent_wait",
             "Agent Wait",
-            "Wait for one background agent spawned by this chat to reach a terminal state, or return its current status after a timeout.",
+            "Wait for one background agent spawned by this chat (agent_id), or for the first of several (agent_ids), to reach a terminal state; on timeout return current statuses instead. Waiting parks this runner's execution slot.",
             agent_wait_schema(),
         )
     }
@@ -811,27 +1184,101 @@ impl Tool for ToolAgentWait {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let agent_id = parse_required_string(args, "agent_id")?;
-        let timeout_ms = parse_wait_timeout_ms(args)?;
+        let settings = refact_work_core::coordination_settings();
+        let targets = parse_wait_targets(args, settings.agent_wait_max_agents)?;
+        let timeout_ms = parse_wait_timeout_ms(
+            args,
+            settings.agent_wait_default_ms,
+            settings.agent_wait_max_ms,
+        )?;
         let (app, parent_chat_id) = background_agent_context(&ccx).await;
-        let record = app
-            .agents
-            .wait(
-                &parent_chat_id,
-                &agent_id,
-                Duration::from_millis(timeout_ms),
-            )
-            .await
-            .map_err(|error| map_registry_error(&agent_id, error))?;
-        let content = if record.status.is_terminal() {
-            format_agent_result(&record, false).await?
-        } else {
-            format!(
-                "⏰ Timed out after {timeout_ms}ms — agent still running.\n\n{}",
-                format_agent_status_block(&record)
-            )
-        };
-        Ok(tool_message(tool_call_id, content))
+        if targets.len() == 1 {
+            let agent_id = &targets[0];
+            let record = app
+                .agents
+                .wait(&parent_chat_id, agent_id, Duration::from_millis(timeout_ms))
+                .await
+                .map_err(|error| map_registry_error(agent_id, error))?;
+            let content = if record.status.is_terminal() {
+                format_agent_result(&record, false).await?
+            } else {
+                format!(
+                    "⏰ Timed out after {timeout_ms}ms — agent still running.\n\n{}",
+                    format_agent_status_block(&record)
+                )
+            };
+            return Ok(tool_message(tool_call_id, content));
+        }
+        // Every id is authorized before any wait starts, so a guessed id can
+        // neither leak a peer's status nor keep the caller waiting.
+        for agent_id in &targets {
+            app.agents
+                .get(&parent_chat_id, agent_id)
+                .await
+                .map_err(|error| map_registry_error(agent_id, error))?;
+        }
+        let waits = targets.iter().map(|agent_id| {
+            let app = app.clone();
+            let parent_chat_id = parent_chat_id.clone();
+            let agent_id = agent_id.clone();
+            Box::pin(async move {
+                let record = app
+                    .agents
+                    .wait(
+                        &parent_chat_id,
+                        &agent_id,
+                        Duration::from_millis(timeout_ms),
+                    )
+                    .await
+                    .map_err(|error| map_registry_error(&agent_id, error));
+                (agent_id, record)
+            })
+        });
+        let mut pending: Vec<_> = waits.collect();
+        let mut first_terminal = None;
+        while !pending.is_empty() {
+            let ((agent_id, result), _, rest) = futures::future::select_all(pending).await;
+            pending = rest;
+            match result {
+                Ok(record) if record.status.is_terminal() => {
+                    first_terminal = Some((agent_id, record));
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let mut lines = Vec::new();
+        match &first_terminal {
+            Some((agent_id, record)) => {
+                lines.push(format!("First terminal agent: {agent_id}"));
+                lines.push(String::new());
+                lines.push(format_agent_result(record, false).await?);
+            }
+            None => {
+                lines.push(format!(
+                    "⏰ Timed out after {timeout_ms}ms — none of {} agents finished.",
+                    targets.len()
+                ));
+            }
+        }
+        lines.push(String::new());
+        lines.push("## Other waited agents".to_string());
+        for agent_id in &targets {
+            if first_terminal
+                .as_ref()
+                .is_some_and(|(done, _)| done == agent_id)
+            {
+                continue;
+            }
+            let record = app
+                .agents
+                .get(&parent_chat_id, agent_id)
+                .await
+                .map_err(|error| map_registry_error(agent_id, error))?;
+            lines.push(format!("- {agent_id}: {}", record.status.as_str()));
+        }
+        Ok(tool_message(tool_call_id, lines.join("\n")))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -895,12 +1342,23 @@ impl Tool for ToolAgentCancel {
         let agent_id = parse_required_string(args, "agent_id")?;
         let reason = parse_optional_string(args, "reason");
         let subtree = parse_optional_bool(args, "subtree", true)?;
-        let (app, parent_chat_id) = background_agent_context(&ccx).await;
-        let current = app
-            .agents
-            .get(&parent_chat_id, &agent_id)
-            .await
-            .map_err(|error| map_registry_error(&agent_id, error))?;
+        let (app, parent_chat_id, root_chat_id, caller_agent_id) = {
+            let context = ccx.lock().await;
+            (
+                context.app.clone(),
+                context.chat_id.clone(),
+                context.root_chat_id.clone(),
+                context.background_agent_id.clone(),
+            )
+        };
+        let current = authorize_agent_control(
+            &app,
+            &parent_chat_id,
+            &root_chat_id,
+            caller_agent_id.as_deref(),
+            &agent_id,
+        )
+        .await?;
         let subtree_has_running_descendant = subtree
             && app
                 .agents
@@ -919,7 +1377,7 @@ impl Tool for ToolAgentCancel {
         }
         let updated = app
             .agents
-            .cancel_subtree(&parent_chat_id, &agent_id, subtree, reason)
+            .cancel_subtree(&current.parent_chat_id, &agent_id, subtree, reason)
             .await
             .map_err(|error| map_registry_error(&agent_id, error))?;
         for record in &updated {
@@ -989,6 +1447,7 @@ mod tests {
             diff_summary: Some("one frog changed".to_string()),
             conflict_summary: Some("no conflicts".to_string()),
             child_chat_id: Some("subchat-frog".to_string()),
+            deliverable_status: None,
         }
     }
 
@@ -1176,6 +1635,69 @@ mod tests {
         );
 
         assert!(output.contains("✓ Cancel requested for: bgagent-"));
+    }
+
+    #[tokio::test]
+    async fn peer_cancel_requires_directional_control_not_metadata_or_mail() {
+        let (_temp, app, ccx) = test_context("root-a").await;
+        ccx.lock().await.root_chat_id = "root-a".to_string();
+        let mut peer_request = create_request("root-b", BgAgentKind::Subagent, "Peer");
+        peer_request.parent_root_chat_id = Some("root-b".to_string());
+        let (peer, abort, _) = app.agents.create(peer_request).await.unwrap();
+        app.agents
+            .mark_running(&peer.agent_id, "peer-chat".to_string())
+            .await
+            .unwrap();
+        app.agent_executions
+            .remember_scope(&peer.agent_id, std::env::temp_dir());
+        let project = crate::coordination::roots::project_identity(&std::env::temp_dir());
+        let request = args(&[("agent_id", json!(peer.agent_id.clone()))]);
+        for authority in [
+            crate::coordination::peer_authority::PeerAuthority::Metadata,
+            crate::coordination::peer_authority::PeerAuthority::Mail,
+        ] {
+            app.peer_grants
+                .grant(
+                    crate::coordination::peer_authority::PeerGrant {
+                        project: project.clone(),
+                        sender_root: "root-a".to_string(),
+                        recipient_root: "root-b".to_string(),
+                        authority,
+                        granted_by: "user".to_string(),
+                        expires_at_ms: chrono::Utc::now().timestamp_millis().max(0) as u64 + 10_000,
+                    },
+                    chrono::Utc::now().timestamp_millis().max(0) as u64,
+                )
+                .unwrap();
+            let error = ToolAgentCancel {
+                config_path: String::new(),
+            }
+            .tool_execute(ccx.clone(), &"denied".to_string(), &request)
+            .await
+            .unwrap_err();
+            assert_eq!(error, not_found_error(&peer.agent_id));
+            assert!(!abort.load(std::sync::atomic::Ordering::SeqCst));
+        }
+        app.peer_grants
+            .grant(
+                crate::coordination::peer_authority::PeerGrant {
+                    project,
+                    sender_root: "root-a".to_string(),
+                    recipient_root: "root-b".to_string(),
+                    authority: crate::coordination::peer_authority::PeerAuthority::Control,
+                    granted_by: "user".to_string(),
+                    expires_at_ms: chrono::Utc::now().timestamp_millis().max(0) as u64 + 10_000,
+                },
+                chrono::Utc::now().timestamp_millis().max(0) as u64,
+            )
+            .unwrap();
+        ToolAgentCancel {
+            config_path: String::new(),
+        }
+        .tool_execute(ccx, &"allowed".to_string(), &request)
+        .await
+        .unwrap();
+        assert!(abort.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -1391,6 +1913,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_wait_any_returns_the_first_terminal_agent_and_reports_the_rest() {
+        let (_temp, app, ccx) = test_context(PARENT).await;
+        let slow = create_agent(&app, PARENT, BgAgentKind::Subagent, "Slow one").await;
+        let fast = create_agent(&app, PARENT, BgAgentKind::Subagent, "Fast one").await;
+        for record in [&slow, &fast] {
+            app.agents
+                .mark_running(&record.agent_id, format!("subchat-{}", record.agent_id))
+                .await
+                .unwrap();
+        }
+        let foreign = create_agent(&app, "other-parent", BgAgentKind::Subagent, "Foreign").await;
+        let denied = ToolAgentWait {
+            config_path: String::new(),
+        }
+        .tool_execute(
+            ccx.clone(),
+            &"denied".to_string(),
+            &args(&[
+                (
+                    "agent_ids",
+                    json!([slow.agent_id.clone(), foreign.agent_id.clone()]),
+                ),
+                ("timeout_ms", json!(1000)),
+            ]),
+        )
+        .await;
+        assert!(
+            denied.is_err(),
+            "a foreign id must fail before any wait starts"
+        );
+        let fast_id = fast.agent_id.clone();
+        let registry = app.agents.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            registry
+                .mark_completed(&fast_id, completion("fast finished"))
+                .await
+                .unwrap();
+        });
+        let output = output_text(
+            ToolAgentWait {
+                config_path: String::new(),
+            }
+            .tool_execute(
+                ccx.clone(),
+                &"any".to_string(),
+                &args(&[
+                    (
+                        "agent_ids",
+                        json!([slow.agent_id.clone(), fast.agent_id.clone()]),
+                    ),
+                    ("timeout_ms", json!(2000)),
+                ]),
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(output.contains(&format!("First terminal agent: {}", fast.agent_id)));
+        assert!(output.contains("fast finished"));
+        assert!(output.contains(&format!("- {}: running", slow.agent_id)));
+        let timed_out = output_text(
+            ToolAgentWait {
+                config_path: String::new(),
+            }
+            .tool_execute(
+                ccx,
+                &"timeout".to_string(),
+                &args(&[
+                    ("agent_ids", json!([slow.agent_id.clone()])),
+                    ("agent_id", json!(slow.agent_id.clone())),
+                    ("timeout_ms", json!(1)),
+                ]),
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(timed_out.contains("Timed out"));
+        assert!(timed_out.contains("still running"));
+    }
+
+    #[tokio::test]
     async fn agent_result_reports_not_finished_for_running_agent() {
         let (_temp, app, ccx) = test_context(PARENT).await;
         let record = create_agent(&app, PARENT, BgAgentKind::Subagent, "Still running").await;
@@ -1591,6 +2194,207 @@ mod tests {
         );
         assert!(output.contains(&parent.agent_id));
         assert!(output.contains(&child.agent_id));
+    }
+
+    #[test]
+    fn agent_resume_parser_requires_exact_actions_and_positive_integers() {
+        let inspect = args(&[
+            ("agent_id", json!("bgagent-test")),
+            ("action", json!("inspect")),
+        ]);
+        assert_eq!(
+            parse_agent_resume_args(&inspect).unwrap().1,
+            AgentResumeAction::Inspect
+        );
+        let valid = args(&[
+            ("agent_id", json!("bgagent-test")),
+            ("action", json!("raise_and_resume")),
+            ("max_steps", json!(80)),
+            ("expected_change_seq", json!(5)),
+        ]);
+        assert_eq!(
+            parse_agent_resume_args(&valid).unwrap().1,
+            AgentResumeAction::RaiseAndResume {
+                max_steps: 80,
+                expected_change_seq: 5
+            }
+        );
+        for key in ["max_steps", "expected_change_seq"] {
+            for value in [
+                json!(0),
+                json!(-1),
+                json!(1.5),
+                json!(80.0),
+                json!("80"),
+                Value::Null,
+                json!(true),
+            ] {
+                let mut invalid = valid.clone();
+                invalid.insert(key.to_string(), value);
+                assert!(
+                    parse_agent_resume_args(&invalid).is_err(),
+                    "accepted {key}: {invalid:?}"
+                );
+            }
+            let mut missing = valid.clone();
+            missing.remove(key);
+            assert!(parse_agent_resume_args(&missing).is_err());
+            let mut mutation_on_inspect = inspect.clone();
+            mutation_on_inspect.insert(key.to_string(), json!(1));
+            assert!(parse_agent_resume_args(&mutation_on_inspect).is_err());
+        }
+        for key in ["action", "agent_id"] {
+            let mut missing = valid.clone();
+            missing.remove(key);
+            assert!(parse_agent_resume_args(&missing).is_err());
+            for value in [json!(""), Value::Null, json!(42)] {
+                let mut invalid = valid.clone();
+                invalid.insert(key.to_string(), value);
+                assert!(parse_agent_resume_args(&invalid).is_err());
+            }
+        }
+        let mut unknown = valid;
+        unknown.insert("scope".to_string(), json!("all"));
+        assert!(parse_agent_resume_args(&unknown).is_err());
+    }
+
+    #[test]
+    fn agent_resume_schema_is_scoped_and_requires_mutation_revision() {
+        let description = ToolAgentResume {
+            config_path: String::new(),
+        }
+        .tool_description();
+        assert_eq!(description.name, "agent_resume");
+        assert!(!description.allow_parallel);
+        let schema = description.input_schema;
+        assert_eq!(schema["required"], json!(["agent_id", "action"]));
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["action"]["enum"],
+            json!(["inspect", "raise_and_resume", "resume"])
+        );
+        assert_eq!(
+            schema["oneOf"][1]["required"],
+            json!(["max_steps", "expected_change_seq"])
+        );
+        for field in ["max_steps", "expected_change_seq"] {
+            assert_eq!(schema["properties"][field]["type"], "integer");
+            assert_eq!(schema["properties"][field]["minimum"], 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_resume_inspection_is_read_only_and_direct_parent_scoped() {
+        let (_temp, app, ccx) = test_context(PARENT).await;
+        let own = create_agent(&app, PARENT, BgAgentKind::Subagent, "Capped").await;
+        let cap = crate::agents::types::CapStop {
+            key: refact_work_core::CapKind::Steps,
+            scope: refact_work_core::CapScope::Child,
+            limit: 10,
+            used: 10,
+            resumable: true,
+            run_generation: 0,
+        };
+        let failed = app
+            .agents
+            .mark_failed(&own.agent_id, cap.as_error().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::agents::types::CapStop::from_error(failed.error.as_deref().unwrap()),
+            Some(cap.clone())
+        );
+        let mut tool = ToolAgentResume {
+            config_path: String::new(),
+        };
+        let output = output_text(
+            tool.tool_execute(
+                ccx.clone(),
+                &"inspect".to_string(),
+                &args(&[
+                    ("agent_id", json!(own.agent_id)),
+                    ("action", json!("inspect")),
+                ]),
+            )
+            .await
+            .unwrap(),
+        );
+        let payload: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(payload["cap_stop"], serde_json::to_value(&cap).unwrap());
+        assert_eq!(
+            serde_json::from_value::<crate::agents::types::CapStop>(payload["cap_stop"].clone())
+                .unwrap(),
+            cap
+        );
+        assert_eq!(payload["action"], "inspect");
+        assert_eq!(payload["agent_id"], own.agent_id);
+        assert_eq!(payload["step_count"], failed.step_count);
+        assert_eq!(payload["change_seq"], failed.change_seq);
+        assert_eq!(payload["status"], "failed");
+        assert_eq!(payload["can_resume"], false);
+        assert_eq!(payload["resume_configuration_available"], false);
+        assert!(payload["settings_subagent_max_steps_ceiling"].is_null());
+        assert_eq!(
+            app.agents.get_any(&own.agent_id).await.unwrap().change_seq,
+            failed.change_seq
+        );
+        assert_eq!(
+            app.agents
+                .get_any(&own.agent_id)
+                .await
+                .unwrap()
+                .error
+                .as_deref(),
+            failed.error.as_deref()
+        );
+        let foreign = create_agent(&app, OTHER_PARENT, BgAgentKind::Subagent, "Hidden").await;
+        for action in ["inspect", "raise_and_resume"] {
+            let mut request = args(&[
+                ("agent_id", json!(foreign.agent_id)),
+                ("action", json!(action)),
+            ]);
+            if action == "raise_and_resume" {
+                request.insert("max_steps".to_string(), json!(80));
+                request.insert("expected_change_seq".to_string(), json!(1));
+            }
+            let error = tool
+                .tool_execute(ccx.clone(), &"foreign".to_string(), &request)
+                .await
+                .unwrap_err();
+            assert_eq!(error, not_found_error(&foreign.agent_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_resume_raise_requires_confirmation_by_default() {
+        use crate::tools::tools_description::MatchConfirmDenyResult;
+        let (_temp, _app, ccx) = test_context(PARENT).await;
+        let tool = ToolAgentResume {
+            config_path: String::new(),
+        };
+        let inspect = args(&[
+            ("agent_id", json!("bgagent-test")),
+            ("action", json!("inspect")),
+        ]);
+        let result = tool
+            .match_against_confirm_deny(ccx.clone(), &inspect)
+            .await
+            .unwrap();
+        assert!(matches!(result.result, MatchConfirmDenyResult::PASS));
+        let mutation = args(&[
+            ("agent_id", json!("bgagent-test")),
+            ("action", json!("raise_and_resume")),
+            ("max_steps", json!(80)),
+            ("expected_change_seq", json!(5)),
+        ]);
+        let result = tool
+            .match_against_confirm_deny(ccx, &mutation)
+            .await
+            .unwrap();
+        assert!(matches!(
+            result.result,
+            MatchConfirmDenyResult::CONFIRMATION
+        ));
     }
 
     #[test]

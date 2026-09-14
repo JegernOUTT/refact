@@ -593,6 +593,7 @@ pub async fn handle_handoff_apply(
 
     let mut snapshot = TrajectorySnapshot {
         pending_deliveries: Vec::new(),
+        dropped_deliveries: Vec::new(),
         goal: None,
         goal_ledger: Vec::new(),
         goal_verification_blocked_until_ms: None,
@@ -788,6 +789,7 @@ pub async fn handle_mode_transition_apply(
 
     let mut snapshot = TrajectorySnapshot {
         pending_deliveries: Vec::new(),
+        dropped_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
         compression_retry_after_ms: Default::default(),
         goal: transferred_goal.target_goal.clone(),
@@ -967,6 +969,7 @@ pub async fn handle_planner_from_transition(
 
     let mut snapshot = TrajectorySnapshot {
         pending_deliveries: Vec::new(),
+        dropped_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
         compression_retry_after_ms: Default::default(),
         goal: transferred_goal.target_goal.clone(),
@@ -1110,6 +1113,7 @@ mod tests {
     fn transition_identity_snapshot(link_type: &str) -> TrajectorySnapshot {
         let mut snapshot = TrajectorySnapshot {
             pending_deliveries: Vec::new(),
+            dropped_deliveries: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
@@ -1511,6 +1515,7 @@ mod tests {
         }
         let snapshot = TrajectorySnapshot {
             pending_deliveries: Vec::new(),
+            dropped_deliveries: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,

@@ -138,6 +138,19 @@ impl Tool for ToolMcpCall {
 
         match found_tool {
             Some(tool) => {
+                if crate::agents::tool_authority::ensure_context_tool(
+                    &ccx,
+                    &tool.tool_description().name,
+                )
+                .await
+                .is_err()
+                {
+                    return Ok(MatchConfirmDeny {
+                        result: MatchConfirmDenyResult::DENY,
+                        command: tool_name.clone(),
+                        rule: "outside accepted child tool authority".into(),
+                    });
+                }
                 let (model_id, bypass) = {
                     let locked = ccx.lock().await;
                     (locked.current_model.clone(), locked.tool_access_bypass)
@@ -206,6 +219,8 @@ impl Tool for ToolMcpCall {
             )
         })?;
 
+        crate::agents::tool_authority::ensure_context_tool(&ccx, &tool.tool_description().name)
+            .await?;
         let (model_id, bypass) = {
             let locked = ccx.lock().await;
             (locked.current_model.clone(), locked.tool_access_bypass)

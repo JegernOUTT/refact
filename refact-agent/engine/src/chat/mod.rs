@@ -9,6 +9,8 @@ mod content;
 pub mod delivery;
 pub mod diagnostics;
 mod generation;
+#[cfg(test)]
+pub(crate) use generation::prepare_project_work_context;
 pub mod goal_monitor;
 pub mod goal_role;
 pub mod goal_verifier;
@@ -31,6 +33,7 @@ pub mod prompts;
 mod queue;
 pub(crate) mod retry_policy;
 mod session;
+pub(crate) use session::goal_snapshot_from_messages;
 pub mod session_runtime;
 pub mod stream_core;
 pub mod summarization;
@@ -55,6 +58,8 @@ pub use session::{
     try_restore_session_if_trajectory_exists, snapshot_with_agents,
 };
 pub use queue::process_command_queue;
+#[cfg(test)]
+pub(crate) use queue::handle_tool_decisions;
 pub use delivery::{deliver_to_chat, drain_deliveries_at_boundary, update_pending_delivery_in_chat};
 pub use trajectories::{
     start_trajectory_watcher, TrajectoryEvent, TrajectoryMeta, handle_v1_trajectories_list,

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use refact_chat_api::{GoalProgress, GoalStatus};
+use refact_chat_api::GoalSnapshot;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
@@ -22,7 +22,11 @@ impl ToolGetGoal {
     }
 }
 
-fn goal_value(session: &ChatSession, message: &ChatMessage) -> Result<Value, String> {
+fn goal_value(
+    session: &ChatSession,
+    message: &ChatMessage,
+    live: Option<&GoalSnapshot>,
+) -> Result<Value, String> {
     let meta = message
         .extra
         .get("goal")
@@ -31,20 +35,27 @@ fn goal_value(session: &ChatSession, message: &ChatMessage) -> Result<Value, Str
         .get("version")
         .and_then(Value::as_u64)
         .ok_or_else(|| "current goal is missing version".to_string())?;
-    let progress = GoalProgress::default();
+    let goal = crate::chat::goal_snapshot_from_messages(&session.messages, live)
+        .ok_or("current goal projection unavailable")?;
+    let latest = goal.attempts.last();
     let content = goal_role::synthesize_current_goal(session)
         .ok_or_else(|| "current goal could not be synthesized".to_string())?;
     let delta_count = goal_role::goal_delta_events(session).len();
 
     Ok(json!({
         "content": content,
-        "status": GoalStatus::Active,
+        "status": goal.status,
+        "active": goal.active,
         "version": version,
         "delta_count": delta_count,
-        "turns_used": progress.turns_used,
-        "tokens_used": progress.tokens_used,
-        "latest_verdict": null,
-        "gaps": [],
+        "turns_used": goal.progress.turns_used,
+        "tokens_used": goal.progress.tokens_used,
+        "no_progress_turns": goal.progress.no_progress_turns,
+        "cost_used_cents": goal.progress.cost_used_cents,
+        "budget": goal.budget,
+        "snoozed_until_ms": goal.snoozed_until_ms,
+        "latest_verdict": latest.map(|attempt| &attempt.verdict),
+        "gaps": latest.map(|attempt| attempt.gaps.as_slice()).unwrap_or_default(),
     }))
 }
 
@@ -100,9 +111,10 @@ impl Tool for ToolGetGoal {
             .get(&chat_id)
             .cloned()
             .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
-        let session = session_arc.lock().await.accepted_control_projection();
+        let live = session_arc.lock().await;
+        let session = live.accepted_control_projection();
         let goal = match goal_role::current_base_goal(&session) {
-            Some(message) => goal_value(&session, message)?,
+            Some(message) => goal_value(&session, message, live.goal.as_ref())?,
             None => Value::Null,
         };
         Ok((
@@ -121,6 +133,81 @@ mod tests {
     use crate::tools::tool_update_goal::ToolUpdateGoal;
     use crate::tools::tools_list::get_tools_for_mode;
 
+    #[tokio::test]
+    async fn public_goal_read_preserves_live_status_usage_verdict_and_unlimited_budget() {
+        for status in [
+            refact_chat_api::GoalStatus::Paused,
+            refact_chat_api::GoalStatus::Stopped,
+            refact_chat_api::GoalStatus::Verifying,
+            refact_chat_api::GoalStatus::Completed,
+        ] {
+            let gcx = crate::global_context::tests::make_test_gcx().await;
+            let app = AppState::from_gcx(gcx).await;
+            let chat_id = "get-goal-live";
+            let mut session = ChatSession::new(chat_id.into());
+            session.install_goal(
+                "agent",
+                "base",
+                true,
+                refact_chat_api::GoalBudget::default(),
+            );
+            session.goal_record_progress_with_cost(987, true, 12);
+            session.goal_push_attempt(refact_chat_api::GoalAttempt {
+                verdict: "unmet".into(),
+                gaps: vec!["missing executed evidence".into()],
+                ..Default::default()
+            });
+            session.goal_set_status(status);
+            session.turn_depth = 1;
+            session
+                .enqueue_delivery(refact_core::chat_types::PendingDelivery::new(
+                    vec![internal_roles::goal_delta(
+                        "test",
+                        json!({"seq":1}),
+                        "pending change",
+                    )],
+                    refact_core::chat_types::PushMode::WhenIdle,
+                    "test",
+                    false,
+                ))
+                .unwrap();
+            let before = session.goal.clone();
+            insert_session(&app, session).await;
+            let output = result_json(
+                ToolGetGoal::new(String::new())
+                    .tool_execute(
+                        ccx(app.clone(), chat_id).await,
+                        &"read-live".into(),
+                        &HashMap::new(),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(output["goal"]["status"], json!(status));
+            assert_eq!(output["goal"]["turns_used"], 1);
+            assert_eq!(output["goal"]["tokens_used"], 987);
+            assert_eq!(output["goal"]["cost_used_cents"], 12);
+            assert_eq!(output["goal"]["latest_verdict"], "unmet");
+            assert_eq!(output["goal"]["gaps"], json!(["missing executed evidence"]));
+            assert!(output["goal"]["budget"]["max_turns"].is_null());
+            assert!(output["goal"]["content"]
+                .as_str()
+                .unwrap()
+                .ends_with("pending change"));
+            let session = app
+                .chat
+                .sessions
+                .read()
+                .await
+                .get(chat_id)
+                .cloned()
+                .unwrap();
+            let session = session.lock().await;
+            assert_eq!(session.goal, before);
+            assert_eq!(session.pending_deliveries.len(), 1);
+        }
+    }
+
     async fn ccx(app: AppState, chat_id: &str) -> Arc<AMutex<AtCommandsContext>> {
         Arc::new(AMutex::new(
             AtCommandsContext::new_from_app(
@@ -137,6 +224,147 @@ mod tests {
             )
             .await,
         ))
+    }
+
+    #[tokio::test]
+    async fn public_goal_read_preserves_restored_ledger_state_without_rearming() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            temp.path().join("cache"),
+            temp.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().into()];
+        let app = AppState::from_gcx(gcx.clone()).await;
+        for (index, status) in [
+            refact_chat_api::GoalStatus::Paused,
+            refact_chat_api::GoalStatus::Completed,
+            refact_chat_api::GoalStatus::BudgetExhausted,
+            refact_chat_api::GoalStatus::Transferred,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("restored-goal-{index}");
+            let mut session = ChatSession::new(id.clone());
+            session.install_goal(
+                "agent",
+                "preserve persisted state",
+                true,
+                refact_chat_api::GoalBudget {
+                    max_turns: Some(3),
+                    max_tokens: Some(0),
+                    explicit: true,
+                    ..Default::default()
+                },
+            );
+            session.goal_record_progress_with_cost(456, true, 9);
+            session.goal_push_attempt(refact_chat_api::GoalAttempt {
+                verdict: "blocked".into(),
+                gaps: vec!["required evidence unavailable".into()],
+                ..Default::default()
+            });
+            session.goal_set_status(status);
+            let before = session.goal.clone().unwrap();
+            let ledger = session.goal_ledger.clone();
+            let session = Arc::new(AMutex::new(session));
+            app.chat
+                .sessions
+                .write()
+                .await
+                .insert(id.clone(), session.clone());
+            crate::chat::trajectories::flush_trajectory_for_session(app.clone(), session)
+                .await
+                .unwrap();
+            let saved = crate::chat::trajectories::load_trajectory_for_chat(gcx.clone(), &id)
+                .await
+                .unwrap();
+            assert_eq!(saved.goal_ledger, ledger);
+            let mut restored = ChatSession::new_with_trajectory(
+                id.clone(),
+                saved.messages,
+                saved.thread,
+                saved.created_at,
+                saved.wake_up_at,
+                saved.waiting_for_card_ids,
+                saved.goal,
+            );
+            restored.goal_ledger = saved.goal_ledger;
+            insert_session(&app, restored).await;
+            let output = result_json(
+                ToolGetGoal::new(String::new())
+                    .tool_execute(
+                        ccx(app.clone(), &id).await,
+                        &"restored-read".into(),
+                        &HashMap::new(),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(output["goal"]["status"], json!(status));
+            assert_eq!(output["goal"]["active"], before.active);
+            assert_eq!(output["goal"]["tokens_used"], 456);
+            assert_eq!(output["goal"]["cost_used_cents"], 9);
+            assert_eq!(output["goal"]["budget"]["max_turns"], 3);
+            assert_eq!(output["goal"]["budget"]["max_tokens"], 0);
+            assert_eq!(output["goal"]["latest_verdict"], "blocked");
+            assert_eq!(
+                output["goal"]["gaps"],
+                json!(["required evidence unavailable"])
+            );
+            let session = app.chat.sessions.read().await.get(&id).cloned().unwrap();
+            let session = session.lock().await;
+            assert_eq!(session.goal.as_ref().unwrap(), &before);
+            assert_eq!(session.goal_ledger, ledger);
+            assert!(session.command_queue.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn public_goal_read_does_not_attach_old_verdict_to_new_goal_version() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let id = "new-goal-version";
+        let mut session = ChatSession::new(id.into());
+        session.install_goal("agent", "old", true, refact_chat_api::GoalBudget::default());
+        session.goal_record_progress_with_cost(50, true, 2);
+        session.goal_push_attempt(refact_chat_api::GoalAttempt {
+            verdict: "met".into(),
+            ..Default::default()
+        });
+        session.turn_depth = 1;
+        session
+            .enqueue_delivery(refact_core::chat_types::PendingDelivery::new(
+                vec![internal_roles::goal(
+                    "agent",
+                    2,
+                    "new",
+                    None,
+                    false,
+                    refact_chat_api::GoalBudget::default(),
+                )],
+                refact_core::chat_types::PushMode::WhenIdle,
+                "test",
+                false,
+            ))
+            .unwrap();
+        insert_session(&app, session).await;
+        let output = result_json(
+            ToolGetGoal::new(String::new())
+                .tool_execute(
+                    ccx(app.clone(), id).await,
+                    &"new-version-read".into(),
+                    &HashMap::new(),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(output["goal"]["content"], "new");
+        assert_eq!(output["goal"]["version"], 2);
+        assert_eq!(output["goal"]["status"], "paused");
+        assert_eq!(output["goal"]["tokens_used"], 0);
+        assert!(output["goal"]["latest_verdict"].is_null());
+        let session = app.chat.sessions.read().await.get(id).cloned().unwrap();
+        assert_eq!(session.lock().await.goal.as_ref().unwrap().version, 1);
     }
 
     async fn insert_session(app: &AppState, session: ChatSession) {

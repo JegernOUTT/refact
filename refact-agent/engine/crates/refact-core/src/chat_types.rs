@@ -1336,6 +1336,30 @@ pub enum DeliveryOutcome {
     Delivered,
     /// A delivery with the same id was already accepted or delivered.
     Duplicate,
+    /// Its TTL elapsed before any boundary opened; nothing was appended.
+    Expired,
+    /// A later delivery with the same supersede key replaced it while it was
+    /// still pending; nothing from it was appended.
+    Superseded,
+}
+
+/// Lifecycle of one delivery id as far as the recipient session knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryStatus {
+    Pending,
+    Delivered,
+    Consumed,
+    Expired,
+    Superseded,
+    Failed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryStatusRecord {
+    pub id: String,
+    pub status: DeliveryStatus,
 }
 
 /// A batch of messages waiting to be appended to a chat at a boundary chosen by
@@ -1359,6 +1383,15 @@ pub struct PendingDelivery {
     pub wake: bool,
     #[serde(default)]
     pub enqueued_at_ms: u64,
+    /// Absolute deadline; a pending delivery whose deadline passes before its
+    /// boundary opens is dropped and reported `Expired`, never appended late.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+    /// Newer deliveries with the same key replace older still-pending ones
+    /// (for example repeated steering of one agent); replaced deliveries are
+    /// reported `Superseded` instead of landing out of date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersede_key: Option<String>,
 }
 
 /// Narrow equality: compares metadata directly and messages by their JSON
@@ -1367,6 +1400,8 @@ impl PartialEq for PendingDelivery {
     fn eq(&self, other: &Self) -> bool {
         self.after_tool_call_id == other.after_tool_call_id
             && self.thread_patch == other.thread_patch
+            && self.expires_at_ms == other.expires_at_ms
+            && self.supersede_key == other.supersede_key
             && self.id == other.id
             && self.push == other.push
             && self.source == other.source
@@ -1419,6 +1454,8 @@ impl PendingDelivery {
             source: source.into(),
             wake,
             enqueued_at_ms: delivery_epoch_ms_now(),
+            expires_at_ms: None,
+            supersede_key: None,
             thread_patch: None,
             after_tool_call_id: None,
         }
@@ -1479,6 +1516,28 @@ mod delivery_tests {
             serde_json::from_value::<PushMode>(serde_json::json!("preempt")).unwrap(),
             PushMode::Preempt
         );
+    }
+
+    #[test]
+    fn delivery_status_serializes_every_distinct_lifecycle_state() {
+        for (status, wire) in [
+            (DeliveryStatus::Pending, "pending"),
+            (DeliveryStatus::Delivered, "delivered"),
+            (DeliveryStatus::Consumed, "consumed"),
+            (DeliveryStatus::Expired, "expired"),
+            (DeliveryStatus::Superseded, "superseded"),
+            (DeliveryStatus::Failed, "failed"),
+            (DeliveryStatus::Unknown, "unknown"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(wire)
+            );
+            assert_eq!(
+                serde_json::from_value::<DeliveryStatus>(serde_json::json!(wire)).unwrap(),
+                status
+            );
+        }
     }
 
     #[test]

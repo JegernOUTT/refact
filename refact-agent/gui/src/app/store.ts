@@ -14,6 +14,7 @@ import {
 } from "redux-persist";
 import { statsApi } from "../services/refact/stats";
 import { codeIntelApi } from "../services/refact/codeIntel";
+import { workApi } from "../services/refact/work";
 import {
   capsApi,
   promptsApi,
@@ -156,6 +157,7 @@ const rootReducer = combineSlices(
     chat: chatReducer,
     [statsApi.reducerPath]: statsApi.reducer,
     [codeIntelApi.reducerPath]: codeIntelApi.reducer,
+    [workApi.reducerPath]: workApi.reducer,
     [capsApi.reducerPath]: capsApi.reducer,
     [promptsApi.reducerPath]: promptsApi.reducer,
     [toolsApi.reducerPath]: toolsApi.reducer,
@@ -302,6 +304,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           pingApi.middleware,
           statsApi.middleware,
           codeIntelApi.middleware,
+          workApi.middleware,
           capsApi.middleware,
           promptsApi.middleware,
           toolsApi.middleware,

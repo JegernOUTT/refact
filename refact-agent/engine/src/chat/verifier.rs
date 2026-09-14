@@ -696,6 +696,7 @@ async fn run_verifier_review(
 ) -> Result<Vec<String>, String> {
     let model = resolve_verifier_model(gcx.clone()).await?;
     let config = crate::subchat::SubchatConfig {
+        history_source_model: None,
         tool_name: "verifier".to_string(),
         stateful: false,
         autonomous_no_confirm: true,

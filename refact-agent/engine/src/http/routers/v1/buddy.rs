@@ -823,6 +823,7 @@ pub async fn handle_v1_buddy_conversations_create(
     let model = crate::buddy::actor::resolve_buddy_chat_model(app.clone()).await;
     let snapshot = TrajectorySnapshot {
         pending_deliveries: Vec::new(),
+        dropped_deliveries: Vec::new(),
         goal: None,
         goal_ledger: Vec::new(),
         goal_verification_blocked_until_ms: None,
@@ -985,6 +986,7 @@ pub async fn handle_v1_buddy_conversations_create_setup(
     };
     let snapshot = TrajectorySnapshot {
         pending_deliveries: Vec::new(),
+        dropped_deliveries: Vec::new(),
         goal: None,
         goal_ledger: Vec::new(),
         goal_verification_blocked_until_ms: None,

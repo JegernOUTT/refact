@@ -72,6 +72,8 @@ pub mod yaml_configs;
 
 pub mod at_commands;
 pub mod completion_cache;
+pub mod coordination;
+pub mod file_activity;
 pub mod file_filter;
 pub mod file_index;
 pub mod files_blocklist;

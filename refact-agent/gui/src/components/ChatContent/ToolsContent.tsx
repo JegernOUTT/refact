@@ -90,6 +90,9 @@ import { AgentDiffView } from "./AgentDiffView";
 import { TaskDocumentsView } from "./TaskDocumentsView";
 import { FinalReportView } from "./FinalReportView";
 import { BackgroundAgentCard } from "../BackgroundAgentCard";
+import { AgenticTool, isAgenticToolName } from "../Tools/AgenticTool";
+import { LaunchPreviewTool } from "../Tools/AgenticTool/LaunchPreviewTool";
+import { parseAgenticArgs } from "../Tools/AgenticTool/agenticToolModel";
 import styles from "./ToolsContent.module.css";
 import { PrivacyToolResult } from "../../features/Privacy/PrivacyToolResult";
 import {
@@ -941,19 +944,33 @@ function processToolCalls(
   }
 
   if (headName === "subagent" || headName === "delegate") {
-    const elem = (
+    const isPreview =
+      headName === "subagent" &&
+      parseAgenticArgs(normalizedHead.function.arguments).args.action ===
+        "preview";
+    const elem = isPreview ? (
+      <LaunchPreviewTool
+        key={`launch-preview-${head.id ?? processed.length}`}
+        toolCall={normalizedHead}
+        extra={result?.extra}
+        hasResult={Boolean(result)}
+        failed={result?.tool_failed === true}
+      />
+    ) : (
       <NewSubagentTool
         key={`background-agent-tool-${headName}-${processed.length}`}
         toolCall={normalizedHead}
       />
     );
-    const decoratedElem = decorateBackgroundAgentTool(
-      elem,
-      headName,
-      result,
-      threadId,
-      onOpenTrajectory,
-    );
+    const decoratedElem = isPreview
+      ? elem
+      : decorateBackgroundAgentTool(
+          elem,
+          headName,
+          result,
+          threadId,
+          onOpenTrajectory,
+        );
     return processToolCalls(
       tail,
       toolResults,
@@ -1376,6 +1393,27 @@ function processToolCalls(
       <AskQuestionsTool
         key={`ask-questions-tool-${processed.length}`}
         toolCall={normalizedHead}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+      activeToolCallId,
+      onOpenTrajectory,
+      threadId,
+    );
+  }
+
+  if (isAgenticToolName(headName)) {
+    const elem = (
+      <AgenticTool
+        key={`agentic-tool-${headName}-${head.id ?? processed.length}`}
+        toolCall={normalizedHead}
+        threadId={threadId}
       />
     );
     return processToolCalls(

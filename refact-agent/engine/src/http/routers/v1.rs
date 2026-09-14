@@ -198,6 +198,7 @@ pub mod v1_browser;
 mod v1_integrations;
 pub mod vecdb;
 pub mod voice;
+mod work;
 mod workspace;
 mod worktrees;
 
@@ -275,6 +276,9 @@ use crate::http::routers::v1::v1_browser::{
 
 pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
     let builder = Router::new()
+        .route("/work", get(work::list))
+        .route("/work/subscribe", get(work::subscribe))
+        .route("/work/:id", get(work::inspect))
         .route("/ping", get(handle_v1_ping))
         .route(
             "/graceful-shutdown",
@@ -338,6 +342,11 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/trajectory-settings",
             get(settings_config::handle_v1_trajectory_settings_get)
                 .post(settings_config::handle_v1_trajectory_settings_post),
+        )
+        .route(
+            "/coordination-settings",
+            get(settings_config::handle_v1_coordination_settings_get)
+                .post(settings_config::handle_v1_coordination_settings_post),
         )
         .route(
             "/indexing-settings",

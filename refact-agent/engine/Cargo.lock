@@ -4084,7 +4084,9 @@ name = "refact-agents-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "libc",
  "refact-chat-api",
+ "refact-work-core",
  "serde",
  "serde_json",
  "tempfile",
@@ -4533,6 +4535,7 @@ dependencies = [
  "refact-tui",
  "refact-vecdb",
  "refact-voice",
+ "refact-work-core",
  "refact-worktrees",
  "refact-yaml-configs",
  "regex",
@@ -4840,6 +4843,15 @@ dependencies = [
  "tokio",
  "tracing",
  "whisper-rs",
+]
+
+[[package]]
+name = "refact-work-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

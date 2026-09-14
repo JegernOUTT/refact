@@ -83,6 +83,8 @@ pub struct WriteRequest {
     content: String,
     #[serde(default)]
     expected_mtime_ms: Option<u64>,
+    #[serde(default)]
+    expected_digest: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,6 +104,7 @@ pub struct ReadResponse {
     line_start: Option<usize>,
     line_end: Option<usize>,
     mtime_ms: u64,
+    digest: String,
     #[serde(skip_serializing_if = "is_false")]
     binary: bool,
 }
@@ -480,6 +483,7 @@ async fn read_file_core(
             line_start,
             line_end,
             mtime_ms: mtime_ms(&metadata),
+            digest: crate::file_activity::digest_bytes(&bytes),
             binary: false,
         });
     }
@@ -492,6 +496,7 @@ async fn read_file_core(
         line_start,
         line_end,
         mtime_ms: mtime_ms(&metadata),
+        digest: crate::file_activity::digest_bytes(&bytes),
         binary: true,
     })
 }
@@ -559,6 +564,14 @@ pub async fn handle_v1_files_write(
     privacy_checked_path(app.gcx.clone(), &requested).await?;
     privacy_checked_path(app.gcx.clone(), &path).await?;
 
+    let guard = crate::file_activity::begin_write(
+        None,
+        &path,
+        crate::file_activity::WriteIntent::Contextual,
+        "files.write",
+    )
+    .await
+    .map_err(|error| ScratchError::new(StatusCode::CONFLICT, error))?;
     let metadata = tokio::fs::metadata(&path)
         .await
         .map_err(|error| io_error(StatusCode::NOT_FOUND, "inspect file", &path, error))?;
@@ -581,15 +594,49 @@ pub async fn handle_v1_files_write(
         }
     }
 
-    crate::tools::file_edit::auxiliary::write_file(
-        app.gcx.clone(),
+    let before = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|error| io_error(StatusCode::INTERNAL_SERVER_ERROR, "read file", &path, error))?;
+    if request
+        .expected_digest
+        .as_ref()
+        .is_some_and(|digest| *digest != crate::file_activity::digest_of(&before))
+    {
+        return Err(ScratchError::new(
+            StatusCode::CONFLICT,
+            "File content changed since it was loaded".into(),
+        ));
+    }
+    let buffer =
+        crate::files_in_workspace::get_file_text_from_memory_or_disk(app.gcx.clone(), &path)
+            .await
+            .map_err(|error| ScratchError::new(StatusCode::CONFLICT, error))?;
+    if buffer != before {
+        return Err(ScratchError::new(
+            StatusCode::CONFLICT,
+            "Editor buffer differs from disk".into(),
+        ));
+    }
+    tokio::fs::write(&path, &request.content)
+        .await
+        .map_err(|error| {
+            io_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "write file",
+                &path,
+                error,
+            )
+        })?;
+    crate::tools::file_edit::undo_history::record_edit(
         &path,
-        &request.content,
-        false,
-        None,
-    )
-    .await
-    .map_err(|error| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        Some(&before),
+        Some(&request.content),
+    );
+    crate::files_in_workspace::remove_memory_document_for_path(app.gcx.clone(), &path).await;
+    guard.commit(
+        crate::file_activity::WriteKind::Modified,
+        Some(&request.content),
+    );
 
     let metadata = tokio::fs::metadata(&path).await.map_err(|error| {
         io_error(
@@ -976,6 +1023,34 @@ mod tests {
             tokio::fs::read_to_string(&path).await.unwrap(),
             "original\n"
         );
+    }
+
+    #[tokio::test]
+    async fn write_rechecks_preconditions_after_waiting_for_cooperative_writer() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("main.rs");
+        tokio::fs::write(&path, "original\n").await.unwrap();
+        let (_gcx, router) = test_router(&[workspace.path()]).await;
+        let guard = crate::file_activity::begin_write(
+            None,
+            &path,
+            crate::file_activity::WriteIntent::Contextual,
+            "other",
+        )
+        .await
+        .unwrap();
+        let mut pending = Box::pin(post_json(
+            router,
+            "/v1/files/write",
+            serde_json::json!({
+                "path":path,"content":"mine\n","expected_digest":crate::file_activity::digest_of("original\n")
+            }),
+        ));
+        assert!(futures::poll!(pending.as_mut()).is_pending());
+        tokio::fs::write(&path, "other\n").await.unwrap();
+        guard.commit(crate::file_activity::WriteKind::Modified, Some("other\n"));
+        assert_eq!(pending.await.0, StatusCode::CONFLICT);
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "other\n");
     }
 
     #[tokio::test]

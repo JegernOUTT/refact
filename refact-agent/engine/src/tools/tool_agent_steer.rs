@@ -309,18 +309,20 @@ impl Tool for ToolAgentSteer {
             ));
         }
 
+        let mut steer_delivery = planner_delivery::single_message_delivery(
+            steer_message.clone(),
+            push,
+            "tools.agent_steer",
+            true,
+        );
+        steer_delivery.supersede_key = Some(format!("agent_steer:{card_id}"));
         let report = planner_delivery::deliver_to_card(
             gcx.clone(),
             chat_facade.clone(),
             &task_id,
             &target,
             CardGuard::doing(),
-            planner_delivery::single_message_delivery(
-                steer_message.clone(),
-                push,
-                "tools.agent_steer",
-                true,
-            ),
+            steer_delivery,
         )
         .await;
 
@@ -334,6 +336,16 @@ impl Tool for ToolAgentSteer {
             .await?;
         }
 
+        let mut receipt = report.receipt();
+        receipt["kind"] = serde_json::json!("agent_steer");
+        receipt["card_id"] = serde_json::json!(card_id);
+        receipt["push"] = serde_json::json!(planner_delivery::push_mode_label(push));
+        receipt["compacted_before_steer"] = serde_json::json!(compacted);
+        if receipt["prior_state"].is_null() {
+            receipt["prior_state"] = serde_json::json!(session_state.to_string());
+        }
+        let mut extra = serde_json::Map::new();
+        extra.insert("delivery_receipt".into(), receipt);
         Ok((
             false,
             vec![ContextEnum::ChatMessage(ChatMessage {
@@ -348,6 +360,7 @@ impl Tool for ToolAgentSteer {
                 )),
                 tool_calls: None,
                 tool_call_id: tool_call_id.clone(),
+                extra,
                 ..Default::default()
             })],
         ))
@@ -381,6 +394,7 @@ mod tests {
         messages: StdMutex<Vec<ChatMessage>>,
         thread: StdMutex<refact_chat_api::ThreadParams>,
         updates: StdMutex<Vec<ChatSessionUpdate>>,
+        delivery_failure: StdMutex<Option<String>>,
     }
 
     fn test_agent_thread() -> refact_chat_api::ThreadParams {
@@ -412,7 +426,14 @@ mod tests {
                     ..test_agent_thread()
                 }),
                 updates: StdMutex::new(vec![]),
+                delivery_failure: StdMutex::new(None),
             }
+        }
+
+        fn failing(state: SessionState, error: &str) -> Self {
+            let mock = Self::new(state);
+            *mock.delivery_failure.lock().unwrap() = Some(error.to_string());
+            mock
         }
 
         fn pushed_commands(&self) -> Vec<(String, ChatCommand)> {
@@ -467,6 +488,9 @@ mod tests {
             chat_id: &str,
             delivery: PendingDelivery,
         ) -> Result<DeliveryOutcome, String> {
+            if let Some(error) = self.delivery_failure.lock().unwrap().clone() {
+                return Err(error);
+            }
             self.delivered
                 .lock()
                 .unwrap()
@@ -713,8 +737,8 @@ mod tests {
         let ccx = planner_ccx(gcx.clone(), mock.clone(), "planner").await;
         let mut tool = ToolAgentSteer::new();
 
-        let output = tool_output_text(
-            tool.tool_execute(
+        let result = tool
+            .tool_execute(
                 ccx,
                 &"call".to_string(),
                 &args(&[
@@ -723,8 +747,20 @@ mod tests {
                 ]),
             )
             .await
-            .unwrap(),
-        );
+            .unwrap();
+        let receipt = match &result.1[0] {
+            ContextEnum::ChatMessage(message) => message.extra["delivery_receipt"].clone(),
+            _ => panic!("expected chat message"),
+        };
+        assert_eq!(receipt["kind"], "agent_steer");
+        assert_eq!(receipt["card_id"], "T-29");
+        assert_eq!(receipt["outcome"], "queued");
+        assert_eq!(receipt["reached"], true);
+        assert_eq!(receipt["push"], "append");
+        assert_eq!(receipt["compacted_before_steer"], false);
+        assert!(receipt["reason"].is_null());
+        assert_eq!(receipt["prior_state"], "executing_tools");
+        let output = tool_output_text(result);
 
         let deliveries = mock.deliveries();
         assert_eq!(deliveries.len(), 1);
@@ -754,6 +790,37 @@ mod tests {
         );
         assert!(output.contains("✅ Steered T-29"));
         assert!(output.contains("⚙️ Executing tools"));
+    }
+
+    #[tokio::test]
+    async fn tool_agent_steer_receipt_reports_failed_delivery_honestly() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(
+            temp.path(),
+            test_card("doing", Some("agent-chat-1".to_string())),
+        )
+        .await;
+        let mock = Arc::new(MockChatFacade::failing(SessionState::Idle, "queue is full"));
+        let ccx = planner_ccx(gcx, mock.clone(), "planner").await;
+        let result = ToolAgentSteer::new()
+            .tool_execute(
+                ccx,
+                &"call".to_string(),
+                &args(&[("card_id", json!("T-29")), ("message", json!("retry"))]),
+            )
+            .await
+            .unwrap();
+        let receipt = match &result.1[0] {
+            ContextEnum::ChatMessage(message) => message.extra["delivery_receipt"].clone(),
+            _ => panic!("expected chat message"),
+        };
+        assert_eq!(receipt["outcome"], "failed");
+        assert_eq!(receipt["reached"], false);
+        assert!(receipt["reason"]
+            .as_str()
+            .unwrap()
+            .contains("queue is full"));
+        assert!(tool_output_text(result).contains("⚠️ Did not steer T-29"));
     }
 
     #[tokio::test]

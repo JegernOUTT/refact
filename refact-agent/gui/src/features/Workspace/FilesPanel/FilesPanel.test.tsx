@@ -115,6 +115,7 @@ const readResponse = (overrides: Record<string, unknown> = {}) => ({
   line_start: null,
   line_end: null,
   mtime_ms: 1,
+  digest: "loaded-content-digest",
   ...overrides,
 });
 
@@ -649,9 +650,66 @@ describe("FilesPanel", () => {
 
     await waitFor(() => {
       expect(writes).toEqual([
-        { path: filePath, content: "edited\n", expected_mtime_ms: 1 },
+        {
+          path: filePath,
+          content: "edited\n",
+          expected_mtime_ms: 1,
+          expected_digest: "loaded-content-digest",
+        },
       ]);
     });
+  });
+
+  it("keeps the original draft precondition when a live refetch changes the file", async () => {
+    const writes: unknown[] = [];
+    let changed = false;
+    let reads = 0;
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/read", () => {
+        reads += 1;
+        return HttpResponse.json(
+          readResponse(
+            changed
+              ? {
+                  content: "external\n",
+                  mtime_ms: 2,
+                  digest: "external-digest",
+                }
+              : {},
+          ),
+        );
+      }),
+      http.post("*/v1/files/write", async ({ request }) => {
+        writes.push(await request.json());
+        return HttpResponse.json({ detail: "changed" }, { status: 409 });
+      }),
+    );
+    const view = render(<FileViewer path={filePath} />);
+    view.store.dispatch(openFileInFilesPanel({ path: filePath }));
+    await view.user.click(
+      await screen.findByRole("button", { name: "Edit this file" }),
+    );
+    setEditorContent(
+      await screen.findByRole("textbox", { name: /Edit main\.ts/ }),
+      "draft\n",
+    );
+    changed = true;
+    view.store.dispatch(
+      filesApi.util.invalidateTags([{ type: "File", id: filePath }]),
+    );
+    await waitFor(() => expect(reads).toBeGreaterThan(1));
+    await view.user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(writes).toEqual([
+        {
+          path: filePath,
+          content: "draft\n",
+          expected_mtime_ms: 1,
+          expected_digest: "loaded-content-digest",
+        },
+      ]),
+    );
   });
 
   it("surfaces a save conflict instead of clobbering the file", async () => {

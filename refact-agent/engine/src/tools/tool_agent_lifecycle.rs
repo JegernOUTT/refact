@@ -33,6 +33,7 @@ struct LifecycleCardSnapshot {
     agent_worktree: Option<String>,
     agent_branch: Option<String>,
     agent_worktree_name: Option<String>,
+    ab_variants: Option<crate::tasks::types::AbVariants>,
 }
 
 impl LifecycleCardSnapshot {
@@ -43,6 +44,7 @@ impl LifecycleCardSnapshot {
             agent_worktree: card.agent_worktree.clone(),
             agent_branch: card.agent_branch.clone(),
             agent_worktree_name: card.agent_worktree_name.clone(),
+            ab_variants: card.ab_variants.clone(),
         }
     }
 }
@@ -255,7 +257,18 @@ async fn load_doing_card_snapshot(
     let card = board
         .get_card(card_id)
         .ok_or_else(|| format!("Card {} not found", card_id))?;
-    validate_doing_card(card, action)?;
+    if action == "cancel"
+        && card
+            .ab_variants
+            .as_ref()
+            .is_some_and(|variants| variants.winner.is_none())
+    {
+        if card.column != "doing" {
+            return Err(card_state_error(action, &card.id, &card.column));
+        }
+    } else {
+        validate_doing_card(card, action)?;
+    }
     Ok(LifecycleCardSnapshot::from_card(card))
 }
 
@@ -693,6 +706,75 @@ impl Tool for ToolCancelAgent {
         let snapshot =
             load_doing_card_snapshot(planner.gcx.clone(), &planner.task_id, &card_id, "cancel")
                 .await?;
+        if let Some(variants) = snapshot
+            .ab_variants
+            .as_ref()
+            .filter(|variants| variants.winner.is_none())
+        {
+            if !retain_worktree {
+                return Err("Cancel A/B variants with retain_worktree=true; inspect and clean up their checkouts separately".into());
+            }
+            let expected = variants.clone();
+            let id = card_id.clone();
+            let why = reason.clone();
+            storage::update_board_atomic(planner.gcx.clone(), &planner.task_id, move |board| {
+                let card = board.get_card_mut(&id).ok_or("A/B card removed")?;
+                if card.column != "doing" {
+                    return Err(card_state_error("cancel", &card.id, &card.column));
+                }
+                let current = card.ab_variants.as_mut().ok_or("A/B claim changed")?;
+                if current.winner.is_some()
+                    || current.a.chat_id != expected.a.chat_id
+                    || current.b.chat_id != expected.b.chat_id
+                {
+                    return Err("A/B claim changed before cancellation".into());
+                }
+                let now = Utc::now().to_rfc3339();
+                for variant in [&mut current.a, &mut current.b] {
+                    variant
+                        .finish
+                        .get_or_insert_with(|| crate::tasks::types::AbVariantFinish {
+                            success: false,
+                            final_report: format!("Cancelled by planner: {why}"),
+                            completed_at: now.clone(),
+                            ..Default::default()
+                        });
+                }
+                card.column = "failed".into();
+                card.completed_at = Some(now.clone());
+                card.final_report = Some(format!("A/B run cancelled: {why}"));
+                card.status_updates.push(StatusUpdate {
+                    timestamp: now,
+                    message: format!("A/B variants cancelled: {why}; checkouts retained"),
+                });
+                Ok(())
+            })
+            .await?;
+            let mut errors = Vec::new();
+            for variant in [&variants.a, &variants.b] {
+                if let Err(error) = crate::tools::task_tool_helpers::wait_for_agent_abort(
+                    planner.gcx.clone(),
+                    &variant.chat_id,
+                    crate::tools::task_tool_helpers::AGENT_ABORT_TIMEOUT,
+                )
+                .await
+                {
+                    errors.push(error);
+                }
+            }
+            storage::update_task_stats(planner.gcx.clone(), &planner.task_id).await?;
+            let result = json!({"summary": "A/B cancellation requested; checkouts retained", "card_id": card_id,
+                "stopped": errors.is_empty(), "pending_stop_errors": errors});
+            return Ok((
+                false,
+                vec![ContextEnum::ChatMessage(ChatMessage {
+                    role: "tool".into(),
+                    content: ChatContent::SimpleText(result.to_string()),
+                    tool_call_id: tool_call_id.clone(),
+                    ..Default::default()
+                })],
+            ));
+        }
         let agent_chat_id = snapshot.agent_chat_id.clone().ok_or_else(|| {
             format!(
                 "Cannot cancel card {}: it has no active agent chat id.",
@@ -728,6 +810,12 @@ impl Tool for ToolCancelAgent {
         })
         .await?;
 
+        // Also invalidate queued setup; it has no chat session to receive Abort.
+        crate::tasks::admission::cancel_setup_and_wait(
+            &agent_chat_id,
+            crate::tools::task_tool_helpers::AGENT_ABORT_TIMEOUT,
+        )
+        .await?;
         let push_report = push_if_card_current_and_live(
             planner.gcx.clone(),
             &planner.task_id,

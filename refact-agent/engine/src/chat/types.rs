@@ -15,11 +15,11 @@ pub use refact_chat_api::chat_local_types::{
 pub use refact_chat_api::{
     delivery_id_of_message, ActiveCommandContext, BackgroundAgentSummary, BrowserMeta,
     BrowserSnapshot, BrowserTabInfo, BuddyThreadMeta, ChatCommand, ChatEvent, CommandRequest,
-    CompressionPhase, CompressionReason, CriterionVerdict, DeliveryOutcome, DeltaOp, DiffBox,
-    EventEnvelope, GoalAttempt, GoalBudget, GoalCriterion, GoalEvent, GoalLedgerEntry,
-    GoalLedgerOp, GoalProgress, GoalSnapshot, GoalStatus, PauseReason, PendingDelivery, PushMode,
-    QueuedItem, RuntimeState, SessionState, TaskMeta, ThreadParams, TimelineEntry,
-    ToolDecisionItem, WindowBounds, WorktreeMeta, CLIENT_MESSAGE_ID_EXTRA_KEY,
+    CompressionPhase, CompressionReason, CriterionVerdict, DeliveryOutcome, DeliveryStatus,
+    DeliveryStatusRecord, DeltaOp, DiffBox, EventEnvelope, GoalAttempt, GoalBudget, GoalCriterion,
+    GoalEvent, GoalLedgerEntry, GoalLedgerOp, GoalProgress, GoalSnapshot, GoalStatus, PauseReason,
+    PendingDelivery, PushMode, QueuedItem, RuntimeState, SessionState, TaskMeta, ThreadParams,
+    TimelineEntry, ToolDecisionItem, WindowBounds, WorktreeMeta, CLIENT_MESSAGE_ID_EXTRA_KEY,
     DELIVERY_COMMAND_TYPE, DELIVERY_EXTRA_KEY,
 };
 
@@ -316,10 +316,15 @@ pub struct ChatSession {
     pub queue_notify: Arc<Notify>,
     pub queue_processor_counters: Arc<QueueProcessorCounters>,
     pub last_activity: Instant,
+    /// Trusted creation/restoration project; not request-editable thread metadata.
+    pub(crate) work_project_root: Option<std::path::PathBuf>,
+    pub(crate) work_provenance: crate::coordination::provenance::WorkProvenance,
+    pub work_capsule_state: crate::coordination::capsule::CapsuleState,
     pub last_stream_delta_at: Option<Instant>,
     pub command_enqueued_at: HashMap<String, Instant>,
     pub stream_started_at: Option<Instant>,
     pub confirmation_paused_at: Option<(Instant, HashSet<String>)>,
+    pub(crate) approval_wrapper_calls: HashMap<String, crate::call_validation::ChatToolCall>,
     pub last_tool_started_at: Option<Instant>,
     pub last_tool_progress_at: Option<Instant>,
     pub trajectory_dirty: bool,
@@ -359,6 +364,9 @@ pub struct ChatSession {
     pub runner_pending_deliveries: Vec<PendingDelivery>,
     /// Delivery ids already appended to this chat, for restart-safe dedupe.
     pub delivered_delivery_ids: HashSet<String>,
+    /// Terminal delivery audit records not represented by stamped messages,
+    /// bounded so receipts stay truthful across restore.
+    pub dropped_deliveries: VecDeque<DeliveryStatusRecord>,
     /// Nesting depth of the generation turn loop. Zero means the whole turn
     /// (assistant + multi-step tool loop) has ended, which is the `when_idle`
     /// boundary; the `Idle` runtime state alone can be transient between steps.

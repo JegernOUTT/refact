@@ -298,7 +298,7 @@ async fn forward_to_worker(
     })
 }
 
-fn worker_forward_token(state: &DaemonState) -> Option<&str> {
+pub(crate) fn worker_forward_token(state: &DaemonState) -> Option<&str> {
     state.auth_token.as_deref().or_else(|| {
         if state.config.hooks.enabled {
             state

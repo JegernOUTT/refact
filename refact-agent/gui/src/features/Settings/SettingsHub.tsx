@@ -21,6 +21,7 @@ import { GeneralSettingsSection } from "./GeneralSettingsSection";
 import { IndexingSettingsSection } from "./IndexingSettingsSection";
 import { BrowserSettingsSection } from "./BrowserSettingsSection";
 import { TrajectorySettingsPanel } from "../Performance/TrajectorySettingsPanel";
+import { CoordinationSettingsPanel } from "../Performance/CoordinationSettingsPanel";
 
 import styles from "./SettingsHub.module.css";
 
@@ -58,7 +59,12 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
       case "browser":
         return <BrowserSettingsSection />;
       case "limits":
-        return <TrajectorySettingsPanel />;
+        return (
+          <>
+            <CoordinationSettingsPanel />
+            <TrajectorySettingsPanel />
+          </>
+        );
       case "providers":
         return (
           <Providers

@@ -434,6 +434,266 @@ fn validate_files_to_open(args: &HashMap<String, Value>) -> Result<Vec<String>, 
     Ok(deduped)
 }
 
+async fn run_queued_board_agent(
+    gcx: Arc<GlobalContext>,
+    app: crate::app_state::AppState,
+    task_id: String,
+    card_id: String,
+    agent_id: String,
+    agent_chat_id: String,
+    planner_chat_id: String,
+    task_meta: StoredTaskMeta,
+    planner_worktree: Option<WorktreeMeta>,
+    workspace_root: PathBuf,
+    explicit_base_branch: Option<String>,
+    explicit_base_commit: Option<String>,
+    files_to_open: Vec<String>,
+    suggested_steps: usize,
+    model: String,
+    starting_new_run: bool,
+) -> Result<(), String> {
+    crate::tasks::admission::wait_for_permit(&agent_chat_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let execution = app
+        .agent_executions
+        .get(&agent_chat_id)
+        .ok_or("board setup admission lost")?;
+    let _operation = execution
+        .begin_operation()
+        .await
+        .map_err(|e| e.to_string())?;
+    let board = storage::load_board(gcx.clone(), &task_id).await?;
+    if !board.get_card(&card_id).is_some_and(|card| {
+        card.column == "doing" && card.agent_chat_id.as_deref() == Some(&agent_chat_id)
+    }) {
+        return Err("queued board claim was cancelled or replaced".into());
+    }
+    let (base_branch, base_commit) = resolve_spawn_base(
+        explicit_base_branch,
+        explicit_base_commit,
+        planner_worktree.as_ref(),
+        &workspace_root,
+        &task_meta,
+    );
+    let prepared_worktree = match prepare_agent_worktree_with_base_and_suffix(
+        gcx.clone(),
+        &task_meta,
+        &task_id,
+        &agent_id,
+        &card_id,
+        &agent_chat_id,
+        base_branch,
+        base_commit,
+        None,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(e) => {
+            crate::tasks::admission::end(&agent_chat_id).await;
+            return Err(e);
+        }
+    };
+
+    let dirty_tree_warning = prepared_worktree.spawned_with_dirty_tree;
+    let base_branch_mismatch_warning = prepared_worktree.base_branch_mismatch_warning.clone();
+
+    let initial_context_files = if files_to_open.is_empty() {
+        Vec::new()
+    } else {
+        let worktree_path = prepared_worktree.worktree_path();
+        let source_workspace_root = prepared_worktree.source_workspace_root();
+        match context_files_from_files_to_open(
+            gcx.clone(),
+            &worktree_path,
+            &source_workspace_root,
+            &files_to_open,
+        )
+        .await
+        {
+            Ok(context_files) => context_files,
+            Err(e) => {
+                crate::tasks::admission::end(&agent_chat_id).await;
+                prepared_worktree.cleanup_unlinked(gcx.clone()).await;
+                return Err(e);
+            }
+        }
+    };
+    let initial_context_message = if initial_context_files.is_empty() {
+        None
+    } else {
+        match context_file_message(&gcx, initial_context_files) {
+            Ok(message) => Some(message),
+            Err(e) => {
+                crate::tasks::admission::end(&agent_chat_id).await;
+                prepared_worktree.cleanup_unlinked(gcx.clone()).await;
+                return Err(e);
+            }
+        }
+    };
+
+    let card_id_owned = card_id.to_string();
+    let agent_id_clone = agent_id.clone();
+    let agent_chat_id_clone = agent_chat_id.clone();
+    let worktree_branch = prepared_worktree.branch_name();
+    let worktree_path_str = Some(
+        prepared_worktree
+            .worktree_path()
+            .to_string_lossy()
+            .to_string(),
+    );
+    let worktree_name = Some(prepared_worktree.worktree_name());
+    let base_branch_from_prep = prepared_worktree.meta.base_branch.clone();
+    let base_commit_from_prep = prepared_worktree.meta.base_commit.clone();
+
+    let link_execution = execution.clone();
+    let board_result = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+            let card = board.get_card_mut(&card_id_owned).ok_or("queued card removed")?;
+            if link_execution.is_cancelled() || card.agent_chat_id.as_deref() != Some(&agent_chat_id_clone) || card.column != "doing" {
+                return Err("queued claim was cancelled or replaced".into());
+            }
+            mark_card_agent_started(card, &agent_id_clone, &agent_chat_id_clone,
+                worktree_branch, worktree_path_str, worktree_name);
+            card.base_branch = base_branch_from_prep;
+            card.base_commit = base_commit_from_prep;
+            if dirty_tree_warning {
+                card.status_updates.push(StatusUpdate { timestamp: Utc::now().to_rfc3339(), message: "Agent starts from the committed base; local uncommitted changes are not included.".into() });
+            }
+            if let Some(warning) = base_branch_mismatch_warning {
+                card.status_updates.push(StatusUpdate { timestamp: Utc::now().to_rfc3339(), message: warning });
+            }
+            Ok(())
+        }).await;
+    let (board, _) = match board_result {
+        Ok(result) => result,
+        Err(error) => {
+            prepared_worktree.cleanup_unlinked(gcx.clone()).await;
+            return Err(error);
+        }
+    };
+    if let Err(e) = storage::update_task_stats(gcx.clone(), &task_id).await {
+        rollback_retain(gcx.clone(), &task_id, &card_id, &agent_chat_id, &e).await;
+        crate::tasks::admission::end(&agent_chat_id).await;
+        prepared_worktree.retain(gcx.clone()).await;
+        return Err(e);
+    }
+
+    let mut meta = match storage::load_task_meta(gcx.clone(), &task_id).await {
+        Ok(m) => m,
+        Err(e) => {
+            rollback_retain(gcx.clone(), &task_id, &card_id, &agent_chat_id, &e).await;
+            crate::tasks::admission::end(&agent_chat_id).await;
+            prepared_worktree.retain(gcx.clone()).await;
+            return Err(e);
+        }
+    };
+    if starting_new_run {
+        meta.last_agents_summary_at = Some(Utc::now().to_rfc3339());
+    } else if meta.last_agents_summary_at.is_none() {
+        let earliest = board
+            .cards
+            .iter()
+            .filter(|c| c.column == "doing" && c.assignee.is_some())
+            .filter_map(|c| c.started_at.as_deref())
+            .filter_map(parse_rfc3339_to_utc)
+            .min();
+        meta.last_agents_summary_at = Some(earliest.unwrap_or_else(Utc::now).to_rfc3339());
+    }
+    if let Err(e) = storage::save_task_meta(gcx.clone(), &task_id, &meta).await {
+        rollback_retain(gcx.clone(), &task_id, &card_id, &agent_chat_id, &e).await;
+        prepared_worktree.retain(gcx.clone()).await;
+        return Err(e);
+    }
+
+    let card_title = board
+        .get_card(&card_id)
+        .map(|c| c.title.clone())
+        .unwrap_or_default();
+    let card_instructions = board
+        .get_card(&card_id)
+        .map(|c| c.instructions.clone())
+        .unwrap_or_default();
+    let dependency_context = board
+        .get_dependency_reports(&card_id)
+        .into_iter()
+        .map(|(title, report)| format!("### {}\n{}", title, report))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    let thread = build_agent_thread_params(
+        &agent_chat_id,
+        &card_title,
+        &model,
+        &task_id,
+        &agent_id,
+        &card_id,
+        &planner_chat_id,
+        prepared_worktree.meta.clone(),
+    );
+    let user_prompt = build_agent_prompt(
+        &card_title,
+        &card_instructions,
+        &dependency_context,
+        suggested_steps,
+    );
+    let user_msg = event(
+        EventSubkind::SystemNotice,
+        "tool.task_spawn_agent",
+        json!({
+            "task_id": &task_id,
+            "planner_chat_id": &planner_chat_id,
+            "card_id": &card_id,
+            "card_title": &card_title,
+            "agent_id": &agent_id,
+            "agent_chat_id": &agent_chat_id,
+            "model": &model,
+            "suggested_steps": suggested_steps,
+            "files_to_open": &files_to_open,
+            "worktree": prepared_worktree.worktree_path().to_string_lossy().to_string(),
+            "worktree_name": prepared_worktree.worktree_name(),
+            "branch": prepared_worktree.branch_name(),
+        }),
+        user_prompt,
+    );
+    let mut messages = vec![user_msg];
+
+    if let Some(context_message) = initial_context_message {
+        messages.push(context_message);
+    }
+
+    let session_result = async {
+        if execution.is_cancelled() {
+            return Err("board setup cancelled".to_string());
+        }
+        app.chat
+            .facade
+            .create_session(CreateSessionRequest {
+                chat_id: agent_chat_id.clone(),
+                thread,
+                messages,
+            })
+            .await?;
+        app.chat.facade.maybe_save_session(&agent_chat_id).await?;
+        if execution.is_cancelled() {
+            return Err("board setup cancelled".to_string());
+        }
+        app.chat
+            .facade
+            .push_priority_command(&agent_chat_id, ChatCommand::Regenerate {})
+            .await
+    }
+    .await;
+    if let Err(e) = session_result {
+        rollback_retain(gcx.clone(), &task_id, &card_id, &agent_chat_id, &e).await;
+        crate::tasks::admission::end(&agent_chat_id).await;
+        prepared_worktree.retain(gcx.clone()).await;
+        return Err(e);
+    }
+
+    Ok(())
+}
+
 pub struct ToolTaskSpawnAgent;
 
 impl ToolTaskSpawnAgent {
@@ -908,278 +1168,144 @@ impl Tool for ToolTaskSpawnAgent {
         let workspace_root = project_dirs.first().ok_or_else(|| {
             "No workspace folder found; task agents require an isolated git worktree".to_string()
         })?;
-        let (base_branch, base_commit) = resolve_spawn_base(
-            explicit_base_branch,
-            explicit_base_commit,
-            planner_worktree.as_ref(),
-            workspace_root,
-            &task_meta,
-        );
-        let prepared_worktree = prepare_agent_worktree_with_base_and_suffix(
-            gcx.clone(),
-            &task_meta,
-            &task_id,
-            &agent_id,
-            card_id,
-            &agent_chat_id,
-            base_branch,
-            base_commit,
-            None,
-        )
-        .await?;
 
-        let dirty_tree_warning = prepared_worktree.spawned_with_dirty_tree;
-        let base_branch_mismatch_warning = prepared_worktree.base_branch_mismatch_warning.clone();
-
-        let initial_context_files = if files_to_open.is_empty() {
-            Vec::new()
-        } else {
-            let worktree_path = prepared_worktree.worktree_path();
-            let source_workspace_root = prepared_worktree.source_workspace_root();
-            match context_files_from_files_to_open(
-                gcx.clone(),
-                &worktree_path,
-                &source_workspace_root,
-                &files_to_open,
-            )
-            .await
-            {
-                Ok(context_files) => context_files,
-                Err(e) => {
-                    prepared_worktree.cleanup_unlinked(gcx.clone()).await;
-                    return Err(e);
-                }
-            }
-        };
-        let initial_context_message = if initial_context_files.is_empty() {
-            None
-        } else {
-            match context_file_message(&gcx, initial_context_files) {
-                Ok(message) => Some(message),
-                Err(e) => {
-                    prepared_worktree.cleanup_unlinked(gcx.clone()).await;
-                    return Err(e);
-                }
-            }
-        };
-
-        let card_id_owned = card_id.to_string();
-        let agent_id_clone = agent_id.clone();
-        let agent_chat_id_clone = agent_chat_id.clone();
-        let worktree_branch = prepared_worktree.branch_name();
-        let worktree_path_str = Some(
-            prepared_worktree
-                .worktree_path()
-                .to_string_lossy()
-                .to_string(),
-        );
-        let worktree_name = Some(prepared_worktree.worktree_name());
-        let base_branch_from_prep = prepared_worktree.meta.base_branch.clone();
-        let base_commit_from_prep = prepared_worktree.meta.base_commit.clone();
-
-        let board_update_result = storage::update_board_atomic(
-            gcx.clone(),
-            &task_id,
-            move |board| {
-                let agents_active_before = board
-                    .cards
-                    .iter()
-                    .filter(|c| c.column == "doing" && c.assignee.is_some())
-                    .count();
-
-                let card = board
-                    .get_card_mut(&card_id_owned)
-                    .ok_or(format!("Card {} not found", card_id_owned))?;
-
-                if card.column == "done" {
-                    return Err(format!("Card {} is already done", card_id_owned));
-                }
-                if card.column == "failed" {
-                    return Err(format!("Card {} has failed. Reset it first if you want to retry.", card_id_owned));
-                }
-                if card.column != "planned" && card.column != "doing" {
-                    return Err(format!("Card {} is in column '{}', expected 'planned' or 'doing'", card_id_owned, card.column));
-                }
-                if card.column == "doing" && card.agent_chat_id.is_some() {
-                    let existing_chat_id = card.agent_chat_id.as_ref().unwrap();
-                    return Err(format!(
-                        "Card {} already has an active agent ({}). Use check_agents to monitor it, or move the card back to 'planned' to respawn.",
-                        card_id_owned, existing_chat_id
-                    ));
-                }
-
-                mark_card_agent_started(
-                    card,
-                    &agent_id_clone,
-                    &agent_chat_id_clone,
-                    worktree_branch.clone(),
-                    worktree_path_str.clone(),
-                    worktree_name.clone(),
-                );
-                card.base_branch = base_branch_from_prep.clone();
-                card.base_commit = base_commit_from_prep.clone();
-
-                Ok(Some(agents_active_before == 0))
-            },
-        )
-        .await;
-        let (board, commit_info) = match board_update_result {
-            Ok(result) => result,
-            Err(e) => {
-                prepared_worktree.cleanup_unlinked(gcx.clone()).await;
-                return Err(e);
-            }
-        };
-
-        let starting_new_run = commit_info.unwrap();
-
-        if let Err(e) = storage::update_task_stats(gcx.clone(), &task_id).await {
-            rollback_retain(gcx.clone(), &task_id, card_id, &agent_chat_id, &e).await;
-            prepared_worktree.retain(gcx.clone()).await;
-            return Err(e);
-        }
-
-        let mut meta = match storage::load_task_meta(gcx.clone(), &task_id).await {
-            Ok(m) => m,
-            Err(e) => {
-                rollback_retain(gcx.clone(), &task_id, card_id, &agent_chat_id, &e).await;
-                prepared_worktree.retain(gcx.clone()).await;
-                return Err(e);
-            }
-        };
-        if starting_new_run {
-            meta.last_agents_summary_at = Some(Utc::now().to_rfc3339());
-        } else if meta.last_agents_summary_at.is_none() {
-            let earliest = board
-                .cards
-                .iter()
-                .filter(|c| c.column == "doing" && c.assignee.is_some())
-                .filter_map(|c| c.started_at.as_deref())
-                .filter_map(parse_rfc3339_to_utc)
-                .min();
-            meta.last_agents_summary_at = Some(earliest.unwrap_or_else(Utc::now).to_rfc3339());
-        }
-        if let Err(e) = storage::save_task_meta(gcx.clone(), &task_id, &meta).await {
-            rollback_retain(gcx.clone(), &task_id, card_id, &agent_chat_id, &e).await;
-            prepared_worktree.retain(gcx.clone()).await;
-            return Err(e);
-        }
-
-        let card_title = board
-            .get_card(card_id)
-            .map(|c| c.title.clone())
-            .unwrap_or_default();
-        let card_instructions = board
-            .get_card(card_id)
-            .map(|c| c.instructions.clone())
-            .unwrap_or_default();
-        let dependency_context = board
-            .get_dependency_reports(card_id)
-            .into_iter()
-            .map(|(title, report)| format!("### {}\n{}", title, report))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-        let thread = build_agent_thread_params(
-            &agent_chat_id,
-            &card_title,
-            &model,
-            &task_id,
-            &agent_id,
-            card_id,
-            &planner_chat_id,
-            prepared_worktree.meta.clone(),
-        );
-        let user_prompt = build_agent_prompt(
-            &card_title,
-            &card_instructions,
-            &dependency_context,
-            suggested_steps,
-        );
-        let user_msg = event(
-            EventSubkind::SystemNotice,
-            "tool.task_spawn_agent",
-            json!({
-                "task_id": &task_id,
-                "planner_chat_id": &planner_chat_id,
-                "card_id": card_id,
-                "card_title": &card_title,
-                "agent_id": &agent_id,
-                "agent_chat_id": &agent_chat_id,
-                "model": &model,
-                "suggested_steps": suggested_steps,
-                "files_to_open": &files_to_open,
-                "worktree": prepared_worktree.worktree_path().to_string_lossy().to_string(),
-                "worktree_name": prepared_worktree.worktree_name(),
-                "branch": prepared_worktree.branch_name(),
-            }),
-            user_prompt,
-        );
-        let mut messages = vec![user_msg];
-
-        if let Some(context_message) = initial_context_message {
-            messages.push(context_message);
-        }
-
-        let session_result = async {
-            app.chat
-                .facade
-                .create_session(CreateSessionRequest {
-                    chat_id: agent_chat_id.clone(),
-                    thread,
-                    messages,
-                })
-                .await?;
-            app.chat.facade.maybe_save_session(&agent_chat_id).await?;
-            app.chat
-                .facade
-                .push_priority_command(&agent_chat_id, ChatCommand::Regenerate {})
-                .await
-        }
-        .await;
-        if let Err(e) = session_result {
-            rollback_retain(gcx.clone(), &task_id, card_id, &agent_chat_id, &e).await;
-            prepared_worktree.retain(gcx.clone()).await;
-            return Err(e);
-        }
-
-        tracing::info!(
-            "Spawned agent {} for card {}: {} (model: {})",
-            agent_id,
-            card_id,
-            card_title,
-            model
-        );
-
-        let dirty_note = if dirty_tree_warning {
-            "\n\n⚠️ Note: agent works from the committed base. Your uncommitted local changes are not included in the agent's worktree."
-        } else {
-            ""
-        };
-        let branch_note = base_branch_mismatch_warning
+        let workspace_root = planner_worktree
             .as_ref()
-            .map(|warning| format!("\n\n⚠️ Note: {}", warning))
-            .unwrap_or_default();
-
-        let result_message = format!(
-            r#"# Agent Spawned: {}
-
-**Card:** {}
-**Agent ID:** {}
-**Model:** {}
-**Status:** Running in background
-
-The agent will call `agent_finish()` when done. Use `check_agents` to monitor progress.{}{}"#,
-            card_title, card_id, agent_id, model, dirty_note, branch_note
-        );
-
+            .map(|w| w.source_workspace_root.clone())
+            .unwrap_or_else(|| workspace_root.clone());
+        let (app, depth) = {
+            let ccx = ccx.lock().await;
+            (ccx.app.clone(), ccx.subchat_depth)
+        };
+        let project_identity = crate::coordination::roots::project_identity(&workspace_root);
+        let root = if root_chat_id.is_empty() {
+            planner_chat_id.as_str()
+        } else {
+            root_chat_id.as_str()
+        };
+        crate::tasks::admission::reserve(&app, &agent_chat_id, &project_identity, root, depth)
+            .await
+            .map_err(|error| error.to_string())?;
+        let original = card.clone();
+        let title = card.title.clone();
+        let card_id = card_id.to_string();
+        let claim_card = card_id.clone();
+        let claim_agent = agent_id.clone();
+        let claim_chat = agent_chat_id.clone();
+        let response = json!({
+            "summary": format!("Agent queued: {title}"), "card_id": card_id,
+            "agent_id": agent_id, "agent_chat_id": agent_chat_id, "model": model,
+            "execution_state": "queued", "worktree": null,
+        });
+        let tracked_chat = agent_chat_id.clone();
+        let (accepted, acceptance) = tokio::sync::oneshot::channel();
+        let registered = crate::tasks::admission::spawn_tracked(&tracked_chat, async move {
+            use futures::FutureExt;
+            let mut accepted = Some(accepted);
+            let setup = async {
+                if accepted.as_ref().is_none_or(|tx| tx.is_closed()) {
+                    return Err("spawn caller cancelled before claim".to_string());
+                }
+                let (_, starting_new_run) =
+                    storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+                        let starting = storage::active_agent_count(&board.cards) == 0;
+                        let card = board
+                            .get_card_mut(&claim_card)
+                            .ok_or("card removed before claim")?;
+                        if !matches!(card.column.as_str(), "planned" | "doing")
+                            || card.agent_chat_id.is_some()
+                        {
+                            return Err("card already claimed or no longer spawnable".into());
+                        }
+                        card.assignee = Some(claim_agent);
+                        card.agent_chat_id = Some(claim_chat);
+                        card.column = "doing".into();
+                        card.started_at = None;
+                        card.agent_worktree = None;
+                        card.agent_worktree_name = None;
+                        card.agent_branch = None;
+                        card.status_updates.push(StatusUpdate {
+                            timestamp: Utc::now().to_rfc3339(),
+                            message: "Agent queued for execution capacity".into(),
+                        });
+                        Ok(starting)
+                    })
+                    .await?;
+                if accepted
+                    .take()
+                    .ok_or("spawn acceptance lost")?
+                    .send(Ok(()))
+                    .is_err()
+                {
+                    return Err("spawn caller cancelled during claim".into());
+                }
+                run_queued_board_agent(
+                    gcx.clone(),
+                    app.clone(),
+                    task_id.clone(),
+                    card_id.clone(),
+                    agent_id,
+                    agent_chat_id.clone(),
+                    planner_chat_id,
+                    task_meta,
+                    planner_worktree,
+                    workspace_root,
+                    explicit_base_branch,
+                    explicit_base_commit,
+                    files_to_open,
+                    suggested_steps,
+                    model,
+                    starting_new_run,
+                )
+                .await
+            };
+            let result = std::panic::AssertUnwindSafe(setup)
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| Err("board agent setup panicked".into()));
+            if let Err(error) = result {
+                if let Some(accepted) = accepted.take() {
+                    let _ = accepted.send(Err(error.clone()));
+                }
+                let guard_chat = agent_chat_id.clone();
+                let reason = error.clone();
+                let _ = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+                    if let Some(card) = board.get_card_mut(&original.id) {
+                        if card.column == "doing"
+                            && card.agent_chat_id.as_deref() == Some(&guard_chat)
+                        {
+                            if card.agent_worktree.is_none() {
+                                *card = original;
+                            } else {
+                                card.column = "failed".into();
+                            }
+                            card.status_updates.push(StatusUpdate {
+                                timestamp: Utc::now().to_rfc3339(),
+                                message: format!("Agent setup failed: {reason}"),
+                            });
+                        }
+                    }
+                    Ok(())
+                })
+                .await;
+                crate::tasks::admission::end(&agent_chat_id).await;
+                tracing::warn!("Board agent setup failed: {error}");
+            }
+            let _ = storage::update_task_stats(gcx, &task_id).await;
+        })
+        .await;
+        if let Err(error) = registered {
+            crate::tasks::admission::end(&tracked_chat).await;
+            return Err(error.to_string());
+        }
+        acceptance
+            .await
+            .map_err(|_| "board setup ended before acceptance".to_string())??;
         Ok((
             false,
             vec![ContextEnum::ChatMessage(ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText(result_message),
-                tool_calls: None,
+                role: "tool".into(),
+                content: ChatContent::SimpleText(response.to_string()),
                 tool_call_id: tool_call_id.clone(),
                 ..Default::default()
             })],

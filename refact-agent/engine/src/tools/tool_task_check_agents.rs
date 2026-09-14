@@ -71,6 +71,8 @@ pub(crate) enum AgentReportFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum AgentStateKind {
     Running,
+    Queued,
+    Parked,
     Stuck,
     Failed,
     Done,
@@ -116,6 +118,8 @@ impl AgentStatusQuery {
         } else {
             Some(HashSet::from([
                 AgentStateKind::Running,
+                AgentStateKind::Queued,
+                AgentStateKind::Parked,
                 AgentStateKind::Stuck,
                 AgentStateKind::Failed,
             ]))
@@ -150,7 +154,7 @@ pub(crate) fn agent_status_input_schema() -> Value {
             },
             "status_filter": {
                 "type": "array",
-                "items": {"type": "string", "enum": ["running", "stuck", "failed", "done", "paused", "all"]},
+                "items": {"type": "string", "enum": ["running", "queued", "parked", "stuck", "failed", "done", "paused", "all"]},
                 "description": "Statuses to include. Default: running, stuck, failed"
             },
             "card_ids": {
@@ -305,6 +309,12 @@ fn parse_status_filter(values: &[String]) -> Result<Option<HashSet<AgentStateKin
             "all" => return Ok(None),
             "running" => {
                 result.insert(AgentStateKind::Running);
+            }
+            "queued" => {
+                result.insert(AgentStateKind::Queued);
+            }
+            "parked" => {
+                result.insert(AgentStateKind::Parked);
             }
             "stuck" => {
                 result.insert(AgentStateKind::Stuck);
@@ -568,6 +578,18 @@ fn latest_timestamp(
 }
 
 fn classify_agent_status(status: &AgentStatus, _now: DateTime<Utc>) -> AgentStateKind {
+    if status.column == "doing" {
+        match crate::tasks::admission::execution_state(&status.agent_chat_id) {
+            Some(crate::agents::execution::ExecutionState::Acquiring) => {
+                return AgentStateKind::Queued
+            }
+            Some(
+                crate::agents::execution::ExecutionState::Parked
+                | crate::agents::execution::ExecutionState::Suspending,
+            ) => return AgentStateKind::Parked,
+            _ => {}
+        }
+    }
     match status.column.as_str() {
         "done" => AgentStateKind::Done,
         "failed" => AgentStateKind::Failed,
@@ -617,12 +639,14 @@ pub(crate) fn has_active_agent_statuses(statuses: &[AgentStatus]) -> bool {
 }
 
 fn waitable_agent_status_at(status: &AgentStatus, now: DateTime<Utc>) -> bool {
-    status.column == "doing"
-        && status.session_state.is_some()
-        && matches!(
-            classify_agent_status(status, now),
-            AgentStateKind::Running | AgentStateKind::Paused
-        )
+    if status.column != "doing" {
+        return false;
+    }
+    match classify_agent_status(status, now) {
+        AgentStateKind::Queued | AgentStateKind::Parked => true,
+        AgentStateKind::Running | AgentStateKind::Paused => status.session_state.is_some(),
+        _ => false,
+    }
 }
 
 pub(crate) fn waitable_agent_statuses<'a>(
@@ -651,6 +675,8 @@ fn format_agent_status_detail_at(status: &AgentStatus, now: DateTime<Utc>) -> St
         AgentStateKind::Failed => ("❌", "Failed"),
         AgentStateKind::Stuck => ("🔴", "Stuck / needs attention"),
         AgentStateKind::Paused => ("⏸️", "Paused / awaiting approval"),
+        AgentStateKind::Queued => ("⏳", "Queued for execution capacity"),
+        AgentStateKind::Parked => ("⏸️", "Parked / waiting without execution capacity"),
         AgentStateKind::Running => match &status.session_state {
             Some(SessionState::Generating) => ("🔄", "Generating response"),
             Some(SessionState::ExecutingTools) => ("⚙️", "Executing tools"),
@@ -868,6 +894,8 @@ fn status_rank(kind: AgentStateKind) -> u8 {
         AgentStateKind::Paused => 2,
         AgentStateKind::Running => 3,
         AgentStateKind::Done => 4,
+        AgentStateKind::Queued => 5,
+        AgentStateKind::Parked => 6,
     }
 }
 
@@ -915,6 +943,8 @@ fn format_summary(statuses: &[&AgentStatus], now: DateTime<Utc>) -> String {
     let mut failed = 0;
     let mut done = 0;
     let mut paused = 0;
+    let mut queued = 0;
+    let mut parked = 0;
     let mut priorities: HashMap<String, usize> = HashMap::new();
 
     for status in statuses {
@@ -924,6 +954,8 @@ fn format_summary(statuses: &[&AgentStatus], now: DateTime<Utc>) -> String {
             AgentStateKind::Failed => failed += 1,
             AgentStateKind::Done => done += 1,
             AgentStateKind::Paused => paused += 1,
+            AgentStateKind::Queued => queued += 1,
+            AgentStateKind::Parked => parked += 1,
         }
         *priorities
             .entry(status.priority.to_ascii_uppercase())
@@ -939,8 +971,8 @@ fn format_summary(statuses: &[&AgentStatus], now: DateTime<Utc>) -> String {
         .join(", ");
 
     format!(
-        "Total: {} | Running: {} | Stuck: {} | Failed: {} | Done: {} | Paused: {}\nBy priority: {}\n",
-        statuses.len(), running, stuck, failed, done, paused, priority_text
+        "Total: {} | Running: {} | Stuck: {} | Failed: {} | Done: {} | Paused: {} | Queued: {} | Parked: {}\nBy priority: {}\n",
+        statuses.len(), running, stuck, failed, done, paused, queued, parked, priority_text
     )
 }
 
@@ -1009,6 +1041,18 @@ fn format_compact_line(status: &AgentStatus, now: DateTime<Utc>) -> String {
     let last_tool = status.last_tool_name.as_deref().unwrap_or("?");
 
     match kind {
+        AgentStateKind::Queued => format!(
+            "{:<2} ⏳  {:<5} {:<22} | queued | waiting for capacity",
+            priority,
+            status.status_id(),
+            title
+        ),
+        AgentStateKind::Parked => format!(
+            "{:<2} ⏸️  {:<5} {:<22} | parked | capacity released",
+            priority,
+            status.status_id(),
+            title
+        ),
         AgentStateKind::Stuck => format!(
             "{:<2} 🔴  {:<5} {:<22} | STUCK {:<5} | needs attention",
             priority,
@@ -1190,6 +1234,42 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-05-22T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    #[tokio::test]
+    async fn queued_and_parked_admissions_are_waitable_without_false_stuck_alerts() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let status = status(&id, "P1", "doing", None, 1000);
+        crate::tasks::admission::reserve(&app, &status.agent_chat_id, "proj", "root", 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            classify_agent_status(&status, now()),
+            AgentStateKind::Queued
+        );
+        assert!(waitable_agent_status_at(&status, now()));
+        assert!(format_compact_line(&status, now()).contains("queued"));
+        assert_eq!(
+            AgentAlerts::from_statuses(&[status.clone()], now()).stuck,
+            0
+        );
+        crate::tasks::admission::wait_for_permit(&status.agent_chat_id)
+            .await
+            .unwrap();
+        let execution = app.agent_executions.get(&status.agent_chat_id).unwrap();
+        execution.park().await.unwrap();
+        assert_eq!(
+            classify_agent_status(&status, now()),
+            AgentStateKind::Parked
+        );
+        assert!(waitable_agent_status_at(&status, now()));
+        assert!(format_compact_line(&status, now()).contains("parked"));
+        drop(execution);
+        crate::tasks::admission::end(&status.agent_chat_id).await;
+        assert_eq!(classify_agent_status(&status, now()), AgentStateKind::Stuck);
+        assert!(!waitable_agent_status_at(&status, now()));
     }
 
     fn status(

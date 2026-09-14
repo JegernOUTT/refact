@@ -116,7 +116,15 @@ pub fn build_child_env(
     policy: &ExecEnvPolicy,
     request_env: &HashMap<String, String>,
 ) -> Vec<(String, String)> {
+    if matches!(policy, ExecEnvPolicy::Exact) {
+        let ordered: BTreeMap<_, _> = request_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        return ordered.into_iter().collect();
+    }
     let mut child_env = match policy {
+        ExecEnvPolicy::Exact => unreachable!(),
         ExecEnvPolicy::Inherit => {
             let mut child_env = BTreeMap::new();
             for (name, value) in utf8_parent_env() {
@@ -177,7 +185,7 @@ pub(crate) fn apply_tokio_child_env(
                 command.env(name, value);
             }
         }
-        ExecEnvPolicy::Scrubbed { .. } => {
+        ExecEnvPolicy::Scrubbed { .. } | ExecEnvPolicy::Exact => {
             command.env_clear();
             for (name, value) in build_child_env(policy, request_env) {
                 command.env(name, value);
@@ -200,7 +208,7 @@ pub(crate) fn apply_pty_child_env(
                 command.env(name, value);
             }
         }
-        ExecEnvPolicy::Scrubbed { .. } => {
+        ExecEnvPolicy::Scrubbed { .. } | ExecEnvPolicy::Exact => {
             command.env_clear();
             for (name, value) in build_child_env(policy, request_env) {
                 command.env(name, value);

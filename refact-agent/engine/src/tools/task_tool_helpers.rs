@@ -148,11 +148,18 @@ pub(crate) async fn wait_for_agent_abort(
     timeout: std::time::Duration,
 ) -> Result<(), String> {
     use std::sync::atomic::Ordering;
+    let attempt = crate::tasks::admission::current_attempt(chat_id);
+    // A queued board run may have no session yet. Stop/join its setup first,
+    // otherwise a late admission could create a worktree after cancellation.
+    crate::tasks::admission::cancel_setup_and_wait(chat_id, timeout).await?;
     let session_arc = {
         let sessions = gcx.chat_sessions.read().await;
         sessions.get(chat_id).cloned()
     };
     let Some(session_arc) = session_arc else {
+        if let Some(attempt) = &attempt {
+            attempt.end();
+        }
         return Ok(());
     };
     let processor_running = {
@@ -178,6 +185,9 @@ pub(crate) async fn wait_for_agent_abort(
                 | refact_runtime_api::SessionState::WaitingUserInput
         );
         if state_stopped && !processor_running.load(Ordering::SeqCst) {
+            if let Some(attempt) = &attempt {
+                attempt.end();
+            }
             return Ok(());
         }
 

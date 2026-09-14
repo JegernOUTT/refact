@@ -81,14 +81,30 @@ pub async fn recover_runner_deliveries(app: &AppState, chat_id: &str) -> Result<
     for mut delivery in app.agents.pending_deliveries(&agent_id).await {
         let id = delivery.id.clone();
         delivery.wake = false;
-        Box::pin(crate::chat::delivery::deliver_to_chat(
+        let outcome = Box::pin(crate::chat::delivery::deliver_to_chat(
             app.clone(),
             chat_id,
             delivery,
         ))
         .await?;
-        app.agents.acknowledge_delivery(&agent_id, &id).await?;
-        recovered += 1;
+        match outcome {
+            DeliveryOutcome::Queued | DeliveryOutcome::Delivered | DeliveryOutcome::Duplicate => {
+                app.agents.consume_delivery(&agent_id, &id).await?;
+                recovered += 1;
+            }
+            DeliveryOutcome::Expired => {
+                app.agents
+                    .record_delivery_status(
+                        &agent_id,
+                        &id,
+                        refact_chat_api::DeliveryStatus::Expired,
+                    )
+                    .await?;
+            }
+            DeliveryOutcome::Superseded => {
+                return Err("recovered delivery was superseded inconsistently".to_string());
+            }
+        }
     }
     publish_runner_queue(app, &agent_id).await;
     Ok(recovered)

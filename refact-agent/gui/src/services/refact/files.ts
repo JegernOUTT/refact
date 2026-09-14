@@ -39,12 +39,14 @@ export type ReadFileResponse = {
   line_end: number | null;
   mtime_ms: number;
   binary?: boolean;
+  digest?: string;
 };
 
 export type WriteFileRequest = {
   path: string;
   content: string;
   expectedMtimeMs?: number;
+  expectedDigest?: string;
 };
 
 export type WriteFileResponse = {
@@ -131,6 +133,7 @@ export const filesApi = createApi({
             path: request.path,
             content: request.content,
             expected_mtime_ms: request.expectedMtimeMs,
+            expected_digest: request.expectedDigest,
           },
           credentials: "same-origin",
           redirect: "follow",

@@ -38,6 +38,7 @@ members = [
     "crates/refact-exec",
     "crates/refact-sandbox",
     "crates/refact-agents-core",
+    "crates/refact-work-core",
     "crates/refact-self-update",
     "crates/refact-tui",
     "crates/refact-privacy",
@@ -262,6 +263,7 @@ refact-runtime-api = { path = "crates/refact-runtime-api" }
 refact-exec = { path = "crates/refact-exec" }
 refact-sandbox = { path = "crates/refact-sandbox" }
 refact-agents-core = { path = "crates/refact-agents-core" }
+refact-work-core = { path = "crates/refact-work-core" }
 refact-self-update = { path = "crates/refact-self-update" }
 refact-tui = { path = "crates/refact-tui" }
 

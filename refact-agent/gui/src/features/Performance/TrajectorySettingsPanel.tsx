@@ -19,6 +19,7 @@ import {
   useSaveTrajectorySettingsMutation,
 } from "../../services/refact/performance";
 import { formatComponentName } from "./performanceFormatters";
+import { settingValue, setSettingValue, settingsEqual } from "./settingPaths";
 import styles from "./PerformancePage.module.css";
 
 type SettingsGroup = {
@@ -129,8 +130,6 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
     names: ["review_diff_char_cap", "review_max_diff_patch_bytes"],
   },
   {
-    // Kept last on purpose: this is the only group of on/off toggles, and it is
-    // looked up by title (never by index) below.
     title: OPTIMIZATIONS_GROUP_TITLE,
     description:
       "These optimizations are enabled by default. Disabling one reduces performance; restart-required changes take effect after the next engine restart.",
@@ -202,8 +201,7 @@ function draftEquals(
   draft: TrajectorySettingsConfig,
   loaded: TrajectorySettingsConfig,
 ): boolean {
-  const keys = new Set([...Object.keys(draft), ...Object.keys(loaded)]);
-  return [...keys].every((key) => draft[key] === loaded[key]);
+  return settingsEqual(draft, loaded);
 }
 
 function parseInteger(value: string): number | null {
@@ -249,9 +247,9 @@ export function TrajectorySettingsPanel() {
       fields.flatMap((field) => {
         const validationError = fieldError(
           field,
-          draft[field.name],
-          data?.config[field.name] === null ||
-            data?.defaults[field.name] === null,
+          settingValue(draft, field.name) ?? null,
+          settingValue(data?.config, field.name) === null ||
+            settingValue(data?.defaults, field.name) === null,
         );
         return validationError ? [[field.name, validationError]] : [];
       }),
@@ -267,7 +265,9 @@ export function TrajectorySettingsPanel() {
     hasChanges && validationErrors.size === 0 && !saveState.isLoading;
 
   const updateValue = (name: string, value: TrajectorySettingValue) => {
-    setDraft((current) => (current ? { ...current, [name]: value } : current));
+    setDraft((current) =>
+      current ? setSettingValue(current, name, value) : current,
+    );
     setSaveError(null);
     setSaved(false);
   };
@@ -301,16 +301,22 @@ export function TrajectorySettingsPanel() {
   };
 
   const renderField = (field: TrajectorySettingField) => {
-    if (!draft || !(field.name in draft)) return null;
-    const value = draft[field.name];
+    if (!draft) return null;
+    const value = settingValue(draft, field.name);
+    if (value === undefined || (value !== null && typeof value === "object"))
+      return null;
     const localError = validationErrors.get(field.name);
     const backendError = backendErrorForField(field.name, saveError);
     const restartRequired = field.apply_mode === "restart_required";
     const optimization = OPTIMIZATION_NAMES.has(field.name);
     const description = [
       rangeHint(field),
-      `Default: ${valueToInput(data?.defaults[field.name] ?? null) || "—"}.`,
-      `Runtime: ${valueToInput(data?.current[field.name] ?? null) || "—"}.`,
+      `Default: ${
+        valueToInput(settingValue(data?.defaults, field.name) ?? null) || "—"
+      }.`,
+      `Runtime: ${
+        valueToInput(settingValue(data?.current, field.name) ?? null) || "—"
+      }.`,
       optimization && value === false
         ? "Disabled optimization reduces performance."
         : undefined,

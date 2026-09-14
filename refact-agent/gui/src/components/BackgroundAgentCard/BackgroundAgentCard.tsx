@@ -11,6 +11,7 @@ import type {
   AgentQuestion,
   BackgroundAgentMergeStatus,
   BackgroundAgentSummary,
+  DeliverableStatus,
 } from "../../services/refact/types";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import { selectBackgroundAgent } from "../../features/Chat/Thread/selectors";
@@ -116,6 +117,20 @@ function parseDiffCounts(
 function pendingQuestions(agent: BackgroundAgentSummary): number {
   if (agent.pending_questions !== undefined) return agent.pending_questions;
   return (agent.questions ?? []).filter((question) => !question.answer).length;
+}
+
+function deliverableTitle(status: DeliverableStatus): string {
+  const parts = [`${status.check} check`];
+  if (status.missing_sections.length > 0) {
+    parts.push(`missing sections: ${status.missing_sections.join(", ")}`);
+  }
+  if (status.schema_error) {
+    parts.push(`output schema: ${status.schema_error}`);
+  }
+  if (status.evidence_missing) {
+    parts.push("evidence section missing; claims are unverified");
+  }
+  return parts.join(" · ");
 }
 
 function formatUsage(agent: BackgroundAgentSummary): string | null {
@@ -395,6 +410,31 @@ const ExpandedDetail: React.FC<{
             >
               Conflicts
             </Badge>
+          )}
+          {agent.deliverable_status ? (
+            <Badge
+              tone={agent.deliverable_status.met ? "accent" : "warning"}
+              size="xs"
+              variant="soft"
+              data-testid="background-agent-deliverable"
+              title={deliverableTitle(agent.deliverable_status)}
+            >
+              {agent.deliverable_status.met
+                ? "Deliverable met"
+                : "Deliverable unmet"}
+            </Badge>
+          ) : (
+            agent.deliverable && (
+              <Badge
+                tone="muted"
+                size="xs"
+                variant="soft"
+                data-testid="background-agent-deliverable"
+                title="A deliverable contract was declared but no completed final message was evaluated"
+              >
+                Deliverable not evaluated
+              </Badge>
+            )
           )}
           {agent.error && (
             <Badge tone="danger" size="xs" variant="soft" title={agent.error}>

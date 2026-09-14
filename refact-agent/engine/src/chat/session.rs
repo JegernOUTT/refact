@@ -13,6 +13,13 @@ use crate::chat::internal_roles::{event, EventSubkind, GOAL_ROLE};
 use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 
 use super::types::*;
+
+fn delivery_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
 use super::types::session_idle_timeout;
 use super::config::limits;
 use super::trajectories::{task_context_from_task_meta, trajectory_meta_title, TrajectoryEvent};
@@ -435,10 +442,14 @@ impl ChatSession {
             queue_notify: Arc::new(Notify::new()),
             queue_processor_counters: Arc::new(QueueProcessorCounters::default()),
             last_activity: Instant::now(),
+            work_project_root: None,
+            work_provenance: Default::default(),
+            work_capsule_state: Default::default(),
             last_stream_delta_at: None,
             command_enqueued_at: HashMap::new(),
             stream_started_at: None,
             confirmation_paused_at: None,
+            approval_wrapper_calls: HashMap::new(),
             last_tool_started_at: None,
             last_tool_progress_at: None,
             trajectory_dirty: false,
@@ -473,6 +484,7 @@ impl ChatSession {
             pending_deliveries: VecDeque::new(),
             runner_pending_deliveries: Vec::new(),
             delivered_delivery_ids: HashSet::new(),
+            dropped_deliveries: VecDeque::new(),
             turn_depth: 0,
             delivery_wake_sources: Default::default(),
             active_command: ActiveCommandContext::default(),
@@ -527,6 +539,10 @@ impl ChatSession {
                     .map(str::to_string)
             })
             .collect();
+        let work_provenance = crate::coordination::provenance::WorkProvenance::from_messages(
+            &messages,
+            &crate::file_activity::settings(),
+        );
         Self {
             chat_id,
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
@@ -561,10 +577,14 @@ impl ChatSession {
             queue_notify: Arc::new(Notify::new()),
             queue_processor_counters: Arc::new(QueueProcessorCounters::default()),
             last_activity: Instant::now(),
+            work_project_root: None,
+            work_provenance,
+            work_capsule_state: Default::default(),
             last_stream_delta_at: None,
             command_enqueued_at: HashMap::new(),
             stream_started_at: None,
             confirmation_paused_at: None,
+            approval_wrapper_calls: HashMap::new(),
             last_tool_started_at: None,
             last_tool_progress_at: None,
             external_reload_pending: None,
@@ -599,6 +619,7 @@ impl ChatSession {
             pending_deliveries: VecDeque::new(),
             runner_pending_deliveries: Vec::new(),
             delivered_delivery_ids: HashSet::new(),
+            dropped_deliveries: VecDeque::new(),
             turn_depth: 0,
             delivery_wake_sources: Default::default(),
             active_command: ActiveCommandContext::default(),
@@ -1108,6 +1129,7 @@ impl ChatSession {
 
     pub fn replace_messages(&mut self, messages: Vec<ChatMessage>) {
         self.messages = messages;
+        self.refresh_work_provenance();
         self.compression_retry_after_ms.clear();
         self.rebuild_goal_projection_from_messages();
         self.reset_compaction_runtime_state();
@@ -1265,11 +1287,37 @@ impl ChatSession {
         self.last_prompt_messages = Vec::new();
         self.tool_catalog = None;
         self.turn_tool_pool = None;
+        self.approval_wrapper_calls.clear();
         self.post_turn_task_handles
             .retain(|task| !task.is_finished());
     }
 
+    pub(crate) fn refresh_work_provenance(&mut self) {
+        self.work_provenance = crate::coordination::provenance::WorkProvenance::from_messages(
+            &self.messages,
+            &crate::file_activity::settings(),
+        );
+    }
+
     pub fn emit(&mut self, event: ChatEvent) {
+        match &event {
+            ChatEvent::MessageAdded { message, .. } | ChatEvent::MessageUpdated { message, .. } => {
+                self.work_provenance.observe(
+                    message,
+                    self.messages.len(),
+                    &crate::file_activity::settings(),
+                );
+            }
+            ChatEvent::Snapshot { .. } => self.refresh_work_provenance(),
+            ChatEvent::MessageRemoved { .. } | ChatEvent::MessagesTruncated { .. }
+                if !self
+                    .work_provenance
+                    .matches_message_count(self.messages.len()) =>
+            {
+                self.refresh_work_provenance();
+            }
+            _ => {}
+        }
         if self.event_tx.receiver_count() == 0 {
             if perf_diagnostics::is_enabled() {
                 perf_diagnostics::record(
@@ -1803,6 +1851,7 @@ impl ChatSession {
 
     fn knows_delivery_id(&self, id: &str) -> bool {
         self.delivered_delivery_ids.contains(id)
+            || self.dropped_deliveries.iter().any(|known| known.id == id)
             || self
                 .pending_deliveries
                 .iter()
@@ -1893,7 +1942,7 @@ impl ChatSession {
     /// `pending_deliveries` until `drain_pending_deliveries` sees its boundary.
     pub fn enqueue_delivery(
         &mut self,
-        delivery: PendingDelivery,
+        mut delivery: PendingDelivery,
     ) -> Result<DeliveryOutcome, String> {
         if self.closed {
             return Err("chat session is closed".to_string());
@@ -1917,8 +1966,26 @@ impl ChatSession {
         if self.knows_delivery_id(&delivery.id) {
             return Ok(DeliveryOutcome::Duplicate);
         }
+        let settings = crate::file_activity::settings();
+        if delivery.expires_at_ms.is_none() {
+            delivery.expires_at_ms = Some(
+                delivery
+                    .enqueued_at_ms
+                    .saturating_add(settings.delivery_default_ttl_secs.saturating_mul(1000)),
+            );
+        }
+        if delivery
+            .expires_at_ms
+            .is_some_and(|deadline| deadline <= delivery_now_ms())
+        {
+            self.record_dropped_delivery(delivery.id.clone(), DeliveryStatus::Expired);
+            return Ok(DeliveryOutcome::Expired);
+        }
+        self.supersede_pending(&delivery);
         // Reject before any side effect rather than dropping an accepted delivery.
-        if self.pending_deliveries.len() >= max_queue_size() && delivery.push != PushMode::Preempt {
+        if self.pending_deliveries.len() >= settings.delivery_max_pending
+            && delivery.push != PushMode::Preempt
+        {
             return Err("chat delivery queue is full".to_string());
         }
 
@@ -1954,6 +2021,7 @@ impl ChatSession {
         }
         let mut delivered_ids = Vec::new();
         let mut wake = false;
+        let expired = self.expire_pending_deliveries();
         loop {
             let Some(index) = self
                 .pending_deliveries
@@ -1975,11 +2043,90 @@ impl ChatSession {
             delivered_ids.push(delivery.id);
             wake |= delivery.wake;
         }
-        if !delivered_ids.is_empty() {
+        if !delivered_ids.is_empty() || expired {
             self.emit_queue_update();
             self.mark_persisted_runtime_changed();
         }
         (delivered_ids, wake)
+    }
+
+    /// Drop pending deliveries whose deadline passed. Returns whether anything
+    /// was dropped. A late boundary never lands stale instructions.
+    fn expire_pending_deliveries(&mut self) -> bool {
+        let now = delivery_now_ms();
+        let expired: Vec<String> = self
+            .pending_deliveries
+            .iter()
+            .filter(|pending| {
+                pending
+                    .expires_at_ms
+                    .is_some_and(|deadline| deadline <= now)
+            })
+            .map(|pending| pending.id.clone())
+            .collect();
+        if expired.is_empty() {
+            return false;
+        }
+        self.pending_deliveries
+            .retain(|pending| !expired.contains(&pending.id));
+        for id in expired {
+            self.record_dropped_delivery(id, DeliveryStatus::Expired);
+        }
+        true
+    }
+
+    /// A newer delivery with the same supersede key replaces older pending
+    /// ones; the older ids are reported superseded rather than landing late.
+    fn supersede_pending(&mut self, incoming: &PendingDelivery) {
+        let Some(key) = incoming.supersede_key.as_deref() else {
+            return;
+        };
+        let superseded: Vec<String> = self
+            .pending_deliveries
+            .iter()
+            .filter(|pending| {
+                pending.id != incoming.id && pending.supersede_key.as_deref() == Some(key)
+            })
+            .map(|pending| pending.id.clone())
+            .collect();
+        if superseded.is_empty() {
+            return;
+        }
+        self.pending_deliveries
+            .retain(|pending| !superseded.contains(&pending.id));
+        for id in superseded {
+            self.record_dropped_delivery(id, DeliveryStatus::Superseded);
+        }
+    }
+
+    fn record_dropped_delivery(&mut self, id: String, status: DeliveryStatus) {
+        self.dropped_deliveries.retain(|known| known.id != id);
+        self.dropped_deliveries
+            .push_back(DeliveryStatusRecord { id, status });
+        let retention = crate::file_activity::settings().delivery_status_retention;
+        while self.dropped_deliveries.len() > retention {
+            self.dropped_deliveries.pop_front();
+        }
+    }
+
+    /// Truthful lifecycle of a delivery id from this session's point of view.
+    pub fn delivery_status(&self, delivery_id: &str) -> DeliveryStatus {
+        if self.delivered_delivery_ids.contains(delivery_id) {
+            return DeliveryStatus::Delivered;
+        }
+        if self
+            .pending_deliveries
+            .iter()
+            .any(|pending| pending.id == delivery_id)
+        {
+            return DeliveryStatus::Pending;
+        }
+        self.dropped_deliveries
+            .iter()
+            .rev()
+            .find(|known| known.id == delivery_id)
+            .map(|known| known.status)
+            .unwrap_or(DeliveryStatus::Unknown)
     }
 
     /// Reprioritize or cancel a still-pending delivery. Works while a
@@ -2003,6 +2150,7 @@ impl ChatSession {
         };
 
         if cancel {
+            let delivery_id = self.pending_deliveries[index].id.clone();
             let kinds: HashSet<_> = self.pending_deliveries[index]
                 .messages
                 .iter()
@@ -2021,6 +2169,7 @@ impl ChatSession {
                 );
             }
             self.pending_deliveries.remove(index);
+            self.record_dropped_delivery(delivery_id, DeliveryStatus::Failed);
             self.emit_queue_update();
             self.mark_persisted_runtime_changed();
             return Ok(false);
@@ -2072,21 +2221,46 @@ impl ChatSession {
                 .filter_map(delivery_id_of_message)
                 .map(str::to_string),
         );
+        let settings = crate::file_activity::settings();
+        let now = delivery_now_ms();
         let mut seen: HashSet<String> = self
             .pending_deliveries
             .iter()
             .chain(self.runner_pending_deliveries.iter())
             .map(|delivery| delivery.id.clone())
             .collect();
-        for delivery in deliveries {
+        for mut delivery in deliveries {
             if delivery.messages.is_empty()
                 || self.delivered_delivery_ids.contains(&delivery.id)
                 || !seen.insert(delivery.id.clone())
             {
                 continue;
             }
+            if delivery.expires_at_ms.is_none() {
+                delivery.expires_at_ms = Some(
+                    now.saturating_add(settings.delivery_default_ttl_secs.saturating_mul(1000)),
+                );
+            }
+            if delivery
+                .expires_at_ms
+                .is_some_and(|deadline| deadline <= now)
+            {
+                self.record_dropped_delivery(delivery.id, DeliveryStatus::Expired);
+                continue;
+            }
+            self.supersede_pending(&delivery);
             self.pending_deliveries.push_back(delivery);
         }
+    }
+
+    pub fn merge_dropped_deliveries(&mut self, deliveries: Vec<DeliveryStatusRecord>) {
+        for delivery in deliveries {
+            self.record_dropped_delivery(delivery.id, delivery.status);
+        }
+    }
+
+    pub fn dropped_deliveries_for_snapshot(&self) -> Vec<DeliveryStatusRecord> {
+        self.dropped_deliveries.iter().cloned().collect()
     }
 
     pub fn record_ide_tool_result(
@@ -2808,6 +2982,24 @@ impl ChatSession {
                 ));
             }
         }
+        let mut previous_wrappers = std::mem::take(&mut self.approval_wrapper_calls);
+        self.approval_wrapper_calls = message_index
+            .and_then(|index| self.messages.get(index))
+            .and_then(|message| message.tool_calls.as_ref())
+            .into_iter()
+            .flatten()
+            .filter(|call| {
+                call.function.name == "agent_approval"
+                    && (reasons.iter().any(|reason| reason.tool_call_id == call.id)
+                        || auto_approved_ids.contains(&call.id))
+            })
+            .map(|call| {
+                let original = previous_wrappers
+                    .remove(&call.id)
+                    .unwrap_or_else(|| call.clone());
+                (call.id.clone(), original)
+            })
+            .collect();
         self.runtime.pause_reasons = reasons.clone();
         self.runtime.auto_approved_tool_ids = auto_approved_ids;
         self.runtime.accepted_tool_ids.clear();
@@ -3247,8 +3439,12 @@ impl ChatSession {
     ) -> ToolDecisionOutcome {
         let mut accepted_ids = Vec::new();
         let mut denied_ids = Vec::new();
+        let mut seen_ids = HashSet::new();
 
         for decision in decisions {
+            if !seen_ids.insert(&decision.tool_call_id) {
+                continue;
+            }
             if !self.validate_tool_decision(&decision.tool_call_id) {
                 warn!(
                     "Tool decision for unknown tool_call_id: {}",
@@ -3256,7 +3452,11 @@ impl ChatSession {
                 );
                 continue;
             }
-            if decision.accepted {
+            if decision.accepted
+                && !decisions
+                    .iter()
+                    .any(|other| other.tool_call_id == decision.tool_call_id && !other.accepted)
+            {
                 accepted_ids.push(decision.tool_call_id.clone());
             } else {
                 denied_ids.push(decision.tool_call_id.clone());
@@ -3502,6 +3702,93 @@ mod tests {
     }
 
     #[test]
+    fn delivery_ttl_expires_pending_work_instead_of_landing_it_late() {
+        let mut session = make_session();
+        session.turn_depth = 1;
+        let mut stale = delivery_fixture("stale", PushMode::WhenIdle);
+        stale.expires_at_ms = Some(delivery_now_ms().saturating_sub(1));
+        assert_eq!(
+            session.enqueue_delivery(stale).unwrap(),
+            DeliveryOutcome::Expired
+        );
+        assert_eq!(session.delivery_status("stale"), DeliveryStatus::Expired);
+        assert!(session.pending_deliveries.is_empty());
+        let mut soon = delivery_fixture("soon", PushMode::WhenIdle);
+        soon.expires_at_ms = Some(delivery_now_ms() + 50);
+        assert_eq!(
+            session.enqueue_delivery(soon).unwrap(),
+            DeliveryOutcome::Queued
+        );
+        assert_eq!(session.delivery_status("soon"), DeliveryStatus::Pending);
+        let durable = delivery_fixture("durable", PushMode::WhenIdle);
+        assert_eq!(
+            session.enqueue_delivery(durable).unwrap(),
+            DeliveryOutcome::Queued
+        );
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        session.turn_depth = 0;
+        assert_eq!(
+            session.drain_pending_deliveries(),
+            (vec!["durable".into()], true)
+        );
+        assert_eq!(session.delivery_status("soon"), DeliveryStatus::Expired);
+        assert_eq!(
+            session.delivery_status("durable"),
+            DeliveryStatus::Delivered
+        );
+        assert_eq!(session.delivery_status("never"), DeliveryStatus::Unknown);
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session
+                .enqueue_delivery(delivery_fixture("soon", PushMode::Append))
+                .unwrap(),
+            DeliveryOutcome::Duplicate,
+            "a terminal delivery id cannot be reused after expiry"
+        );
+    }
+
+    #[test]
+    fn newer_delivery_supersedes_pending_deliveries_with_the_same_key() {
+        let mut session = make_session();
+        session.turn_depth = 1;
+        for id in ["steer-1", "steer-2"] {
+            let mut delivery = delivery_fixture(id, PushMode::WhenIdle);
+            delivery.supersede_key = Some("steer:card-1".into());
+            assert_eq!(
+                session.enqueue_delivery(delivery).unwrap(),
+                DeliveryOutcome::Queued
+            );
+        }
+        let mut other = delivery_fixture("steer-other", PushMode::WhenIdle);
+        other.supersede_key = Some("steer:card-2".into());
+        session.enqueue_delivery(other).unwrap();
+        assert_eq!(
+            session.delivery_status("steer-1"),
+            DeliveryStatus::Superseded
+        );
+        assert_eq!(session.delivery_status("steer-2"), DeliveryStatus::Pending);
+        assert_eq!(session.pending_deliveries.len(), 2);
+        session.turn_depth = 0;
+        let (delivered, _) = session.drain_pending_deliveries();
+        assert_eq!(
+            delivered,
+            vec!["steer-2".to_string(), "steer-other".to_string()]
+        );
+        assert_eq!(session.messages.len(), 2);
+        let mut late = delivery_fixture("steer-3", PushMode::Append);
+        late.supersede_key = Some("steer:card-1".into());
+        assert_eq!(
+            session.enqueue_delivery(late).unwrap(),
+            DeliveryOutcome::Delivered,
+            "a delivered predecessor is history, not something to retract"
+        );
+        assert_eq!(
+            session.delivery_status("steer-2"),
+            DeliveryStatus::Delivered
+        );
+    }
+
+    #[test]
     fn delivery_manual_abort_suppresses_existing_wakes_but_accepts_future_wake() {
         let mut session = make_session();
         let mut landed = delivery_fixture("landed", PushMode::Append);
@@ -3732,7 +4019,8 @@ mod tests {
     fn delivery_full_and_invalid_rejections_have_no_side_effects() {
         let mut session = make_session();
         session.start_stream().unwrap();
-        for n in 0..max_queue_size() {
+        let capacity = crate::file_activity::settings().delivery_max_pending;
+        for n in 0..capacity {
             session
                 .enqueue_delivery(delivery_fixture(&format!("{n}"), PushMode::Append))
                 .unwrap();
@@ -3743,7 +4031,7 @@ mod tests {
             .is_err());
         assert_eq!(session.event_seq, seq);
         assert!(!session.abort_flag.load(Ordering::SeqCst));
-        assert_eq!(session.pending_deliveries.len(), max_queue_size());
+        assert_eq!(session.pending_deliveries.len(), capacity);
         let mut empty = delivery_fixture("empty", PushMode::Preempt);
         empty.messages.clear();
         assert!(session.enqueue_delivery(empty).is_err());

@@ -55,6 +55,24 @@ struct BroadcastResult {
     status: BroadcastStatus,
 }
 
+impl BroadcastResult {
+    fn receipt(&self) -> Value {
+        let (outcome, reached, reason) = match &self.status {
+            BroadcastStatus::Notified => ("delivered", true, None),
+            BroadcastStatus::SkippedExcluded => ("excluded", false, None),
+            BroadcastStatus::Skipped(reason) => ("skipped", false, Some(reason.clone())),
+            BroadcastStatus::Failed(reason) => ("failed", false, Some(reason.clone())),
+        };
+        json!({
+            "card_id": self.card_id,
+            "title": self.title,
+            "outcome": outcome,
+            "reached": reached,
+            "reason": reason,
+        })
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum BroadcastStatus {
     Notified,
@@ -348,13 +366,21 @@ impl Tool for ToolTaskBroadcast {
             results.push(result);
         }
 
-        Ok((
-            false,
-            vec![tool_message(
-                tool_call_id,
-                format_output(&results, notified_count, &message),
-            )],
-        ))
+        let receipts = json!({
+            "kind": "task_broadcast",
+            "notified": notified_count,
+            "total": results.len(),
+            "push": planner_delivery::push_mode_label(push),
+            "cards": results.iter().map(BroadcastResult::receipt).collect::<Vec<_>>(),
+        });
+        let mut output = tool_message(
+            tool_call_id,
+            format_output(&results, notified_count, &message),
+        );
+        if let ContextEnum::ChatMessage(message) = &mut output {
+            message.extra.insert("delivery_receipts".into(), receipts);
+        }
+        Ok((false, vec![output]))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -651,23 +677,39 @@ mod tests {
         let mock = Arc::new(MockChatFacade::new(&[]));
         let ccx = planner_ccx(gcx.clone(), mock.clone(), "planner").await;
 
-        let output = output_text(
-            ToolTaskBroadcast::new()
-                .tool_execute(
-                    ccx,
-                    &"call".to_string(),
-                    &args(&[
-                        (
-                            "message",
-                            json!("API X is now deprecated, use Y in all new code"),
-                        ),
-                        ("priority", json!("info")),
-                        ("exclude_cards", json!(["T-23"])),
-                    ]),
-                )
-                .await
-                .unwrap(),
-        );
+        let result = ToolTaskBroadcast::new()
+            .tool_execute(
+                ccx,
+                &"call".to_string(),
+                &args(&[
+                    (
+                        "message",
+                        json!("API X is now deprecated, use Y in all new code"),
+                    ),
+                    ("priority", json!("info")),
+                    ("exclude_cards", json!(["T-23"])),
+                ]),
+            )
+            .await
+            .unwrap();
+        let receipts = match &result.1[0] {
+            ContextEnum::ChatMessage(message) => message.extra["delivery_receipts"].clone(),
+            _ => panic!("expected chat message"),
+        };
+        assert_eq!(receipts["kind"], "task_broadcast");
+        assert_eq!(receipts["notified"], 2);
+        assert_eq!(receipts["total"], 3);
+        assert_eq!(receipts["push"], "append");
+        let cards = receipts["cards"].as_array().unwrap();
+        assert_eq!(cards.len(), 3);
+        assert_eq!(cards[0]["card_id"], "T-22");
+        assert_eq!(cards[0]["outcome"], "delivered");
+        assert_eq!(cards[0]["reached"], true);
+        assert_eq!(cards[1]["card_id"], "T-23");
+        assert_eq!(cards[1]["outcome"], "excluded");
+        assert_eq!(cards[1]["reached"], false);
+        assert_eq!(cards[2]["title"], "check_agents");
+        let output = output_text(result);
 
         let deliveries = mock.deliveries();
         assert_eq!(deliveries.len(), 2);

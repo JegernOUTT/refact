@@ -696,6 +696,7 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_task_board::ToolTaskBoardMoveCard::new()),
         Box::new(crate::tools::tool_task_board::ToolTaskBoardDeleteCard::new()),
         Box::new(crate::tools::tool_task_board::ToolTaskReadyCards::new()),
+        Box::new(crate::tools::tool_task_board_authority::ToolTaskBoardAuthority::new()),
         Box::new(crate::tools::tool_task_batch::ToolBoardCreateBatch::new()),
         Box::new(crate::tools::tool_task_agent::ToolTaskAgentUpdate::new()),
         Box::new(crate::tools::tool_task_agent::ToolTaskAgentComplete::new()),
@@ -749,10 +750,22 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
     ];
 
     let background_agent_tools: Vec<Box<dyn Tool + Send>> = vec![
+        Box::new(crate::tools::tool_agent_approval::ToolAgentApproval {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_work_overview::ToolWorkOverview {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_work_inspect::ToolWorkInspect {
+            config_path: config_path.clone(),
+        }),
         Box::new(crate::tools::tool_agent_interact::ToolAgentsOverview {
             config_path: config_path.clone(),
         }),
         Box::new(crate::tools::tool_agent_interact::ToolAgentMessage {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_agent_interact::ToolAgentPeerGrant {
             config_path: config_path.clone(),
         }),
         Box::new(crate::tools::tool_agent_interact::ToolProgressReport {
@@ -768,6 +781,9 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
             config_path: config_path.clone(),
         }),
         Box::new(crate::tools::tool_background_agents::ToolAgentResult {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_background_agents::ToolAgentResume {
             config_path: config_path.clone(),
         }),
         Box::new(crate::tools::tool_background_agents::ToolAgentCancel {
@@ -997,6 +1013,205 @@ mod tests {
     }
 
     struct TestTool(ToolDesc);
+
+    struct AuthorityTestTool {
+        desc: ToolDesc,
+        executions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for AuthorityTestTool {
+        async fn tool_execute(
+            &mut self,
+            _ccx: Arc<tokio::sync::Mutex<crate::at_commands::at_commands::AtCommandsContext>>,
+            tool_call_id: &String,
+            _args: &HashMap<String, serde_json::Value>,
+        ) -> Result<(bool, Vec<crate::call_validation::ContextEnum>), String> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            Ok((
+                false,
+                vec![crate::call_validation::ContextEnum::ChatMessage(
+                    crate::call_validation::ChatMessage {
+                        role: "tool".into(),
+                        tool_call_id: tool_call_id.clone(),
+                        content: crate::call_validation::ChatContent::SimpleText(
+                            "fixture result".into(),
+                        ),
+                        ..Default::default()
+                    },
+                )],
+            ))
+        }
+
+        fn tool_description(&self) -> ToolDesc {
+            self.desc.clone()
+        }
+    }
+
+    struct AuthorityTestIntegration(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl IntegrationTrait for AuthorityTestIntegration {
+        fn integr_schema(&self) -> &str {
+            "type: object"
+        }
+
+        async fn integr_settings_apply(
+            &mut self,
+            _gcx: Arc<GlobalContext>,
+            _config_path: String,
+            _value: &serde_json::Value,
+        ) -> Result<(), serde_json::Error> {
+            Ok(())
+        }
+
+        fn integr_settings_as_json(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+
+        fn integr_common(&self) -> crate::integrations::integr_abstract::IntegrationCommon {
+            Default::default()
+        }
+
+        async fn integr_tools(&self, _integr_name: &str) -> Vec<Box<dyn Tool + Send>> {
+            ["mcp_fixture_read", "mcp_fixture_write"]
+                .into_iter()
+                .map(|name| {
+                    Box::new(AuthorityTestTool {
+                        desc: mcp_desc("mcp_fixture.yaml", name),
+                        executions: self.0.clone(),
+                    }) as Box<dyn Tool + Send>
+                })
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_public_search_and_proxy_enforce_concrete_child_targets() {
+        use crate::subchat::ToolsPolicy;
+        use crate::tools::tools_description::MatchConfirmDenyResult;
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let executions = Arc::new(AtomicUsize::new(0));
+        let counter = executions.clone();
+        let factory: TestIntegrationFactory = Arc::new(move |_| {
+            let mut integrations: LoadedIntegrations = indexmap::IndexMap::new();
+            integrations.insert(
+                "mcp_fixture".into(),
+                Box::new(AuthorityTestIntegration(counter.clone())),
+            );
+            (integrations, vec![])
+        });
+        test_integration_factory()
+            .lock()
+            .await
+            .insert(gcx.config_dir.clone(), factory);
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let context = Arc::new(tokio::sync::Mutex::new(
+            crate::at_commands::at_commands::AtCommandsContext::new_from_app(
+                app,
+                4096,
+                1,
+                false,
+                vec![],
+                "mcp-child".into(),
+                None,
+                "model".into(),
+                None,
+                None,
+            )
+            .await,
+        ));
+        context.lock().await.child_tool_ceiling =
+            Some(ToolsPolicy::Only(vec!["mcp_fixture_read".into()]));
+        let mut search = crate::tools::tool_mcp_search::ToolMcpSearch {};
+        let result = search
+            .tool_execute(
+                context.clone(),
+                &"search".into(),
+                &HashMap::from([("query".into(), serde_json::json!("."))]),
+            )
+            .await
+            .unwrap();
+        let serialized = result
+            .1
+            .iter()
+            .map(|item| match item {
+                crate::call_validation::ContextEnum::ChatMessage(message) => {
+                    message.content.content_text_only()
+                }
+                _ => panic!("expected tool message"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(serialized.contains("mcp_fixture_read"));
+        assert!(!serialized.contains("mcp_fixture_write"));
+        let mut proxy = crate::tools::tool_mcp_call::ToolMcpCall {};
+        for name in ["mcp_fixture_write", "fixture_write"] {
+            let args = HashMap::from([
+                ("tool_name".into(), serde_json::json!(name)),
+                ("args".into(), serde_json::json!({})),
+            ]);
+            assert_eq!(
+                proxy
+                    .match_against_confirm_deny(context.clone(), &args)
+                    .await
+                    .unwrap()
+                    .result,
+                MatchConfirmDenyResult::DENY
+            );
+            assert!(proxy
+                .tool_execute(context.clone(), &"denied".into(), &args)
+                .await
+                .is_err());
+        }
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        let allowed = HashMap::from([
+            ("tool_name".into(), serde_json::json!("fixture_read")),
+            ("args".into(), serde_json::json!({})),
+        ]);
+        proxy
+            .tool_execute(context.clone(), &"allowed".into(), &allowed)
+            .await
+            .unwrap();
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        for ceiling in [
+            ToolsPolicy::None,
+            ToolsPolicy::Only(vec!["mcp_call".into(), "mcp_tool_search".into()]),
+        ] {
+            context.lock().await.child_tool_ceiling = Some(ceiling);
+            assert!(proxy
+                .tool_execute(context.clone(), &"denied".into(), &allowed)
+                .await
+                .is_err());
+            let result = search
+                .tool_execute(
+                    context.clone(),
+                    &"search".into(),
+                    &HashMap::from([("query".into(), serde_json::json!("."))]),
+                )
+                .await
+                .unwrap();
+            let serialized = result
+                .1
+                .iter()
+                .map(|item| match item {
+                    crate::call_validation::ContextEnum::ChatMessage(message) => {
+                        message.content.content_text_only()
+                    }
+                    _ => panic!("expected tool message"),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!serialized.contains("mcp_fixture_read"));
+            assert!(!serialized.contains("mcp_fixture_write"));
+            assert!(serialized.contains("all 0 available"));
+        }
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        test_integration_factory()
+            .lock()
+            .await
+            .remove(&gcx.config_dir);
+    }
 
     #[derive(Clone)]
     struct IntegrationTestState {
@@ -1337,6 +1552,57 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(subagents, vec![true]);
+    }
+
+    #[tokio::test]
+    async fn agent_and_work_tool_names_stay_registered_as_builtins() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all(
+            &gcx.config_dir,
+        )
+        .await
+        .unwrap();
+        let tools = get_available_tools(gcx).await;
+        let builtin = |name: &str| {
+            tools
+                .iter()
+                .filter(|tool| tool.tool_description().name == name)
+                .map(|tool| {
+                    let desc = tool.tool_description();
+                    (
+                        matches!(desc.source.source_type, ToolSourceType::Builtin),
+                        desc.allow_parallel,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for name in [
+            "subagent",
+            "agents_overview",
+            "agent_list",
+            "agent_status",
+            "agent_wait",
+            "agent_result",
+            "agent_cancel",
+            "agent_resume",
+            "agent_message",
+            "agent_peer_grant",
+            "progress_report",
+        ] {
+            assert_eq!(
+                builtin(name).len(),
+                1,
+                "{name} must stay registered exactly once"
+            );
+            assert!(builtin(name)[0].0, "{name} must remain a builtin");
+        }
+        for name in ["work_overview", "work_inspect"] {
+            assert_eq!(
+                builtin(name),
+                vec![(true, true)],
+                "{name} is read-only and parallel"
+            );
+        }
     }
 
     #[tokio::test]

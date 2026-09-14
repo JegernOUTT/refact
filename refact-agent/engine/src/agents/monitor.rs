@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use chrono::{TimeDelta, Utc};
 
+use crate::agents::execution::ExecutionState;
 use crate::agents::types::BgAgentStatus;
 use crate::app_state::AppState;
 
@@ -24,12 +25,27 @@ pub async fn run_background_agent_monitor(app: AppState, shutdown: Arc<AtomicBoo
             _ = wait_for_shutdown(shutdown.clone()) => break,
         }
     }
+    app.agent_executions.begin_shutdown();
+    crate::tasks::admission::shutdown(&app).await;
+    app.agent_executions.shutdown().await;
 }
 
 pub(crate) async fn monitor_once(app: AppState) -> Result<(), String> {
+    crate::tasks::admission::synchronize_all(&app).await;
     let now = Utc::now();
     for record in app.agents.list_all().await {
+        let waiting_intentionally = record
+            .child_chat_id
+            .as_deref()
+            .and_then(|child| app.agent_executions.get(child))
+            .is_some_and(|execution| {
+                matches!(
+                    execution.state(),
+                    ExecutionState::Parked | ExecutionState::Acquiring | ExecutionState::Suspending
+                )
+            });
         if record.status == BgAgentStatus::Running
+            && !waiting_intentionally
             && now.signed_duration_since(record.last_update_at) > STUCK_AFTER
         {
             let updated = app
@@ -142,6 +158,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn monitor_never_flags_parked_or_queued_waiting_as_stalled() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let create = |title: &str| CreateAgentRequest {
+            parent_chat_id: "parent-waiting".to_string(),
+            parent_root_chat_id: None,
+            parent_tool_call_id: None,
+            kind: BgAgentKind::Subagent,
+            config_name: "subagent".to_string(),
+            title: title.to_string(),
+            prompt: "prompt".to_string(),
+            target_files: vec![],
+            model: "model".to_string(),
+            model_type: None,
+            goal_summary: None,
+            plan_present: false,
+            worktree_id: None,
+            worktree_branch: None,
+        };
+        let (parked, _, _) = app.agents.create(create("parked")).await.unwrap();
+        let (queued, _, _) = app.agents.create(create("queued")).await.unwrap();
+        app.agents
+            .mark_running(&parked.agent_id, "parked-child".to_string())
+            .await
+            .unwrap();
+        let permit = app
+            .work_scheduler
+            .reserve(refact_work_core::AdmissionRequest::new(
+                refact_work_core::WorkKey::background_agent(parked.agent_id.clone()).run(1),
+                refact_work_core::WorkScope::new(
+                    refact_work_core::ProjectKey::new("project"),
+                    refact_work_core::CheckoutKey::new("parent-waiting"),
+                ),
+            ))
+            .unwrap()
+            .acquire()
+            .await
+            .unwrap();
+        let execution = app
+            .agent_executions
+            .install("parked-child", permit)
+            .unwrap();
+        execution.park().await.unwrap();
+        assert_eq!(execution.state(), ExecutionState::Parked);
+        for agent_id in [&parked.agent_id, &queued.agent_id] {
+            app.agents
+                .set_last_update_at_for_test(agent_id, Utc::now() - TimeDelta::minutes(25))
+                .await
+                .unwrap();
+        }
+        monitor_once(app.clone()).await.unwrap();
+        for agent_id in [&parked.agent_id, &queued.agent_id] {
+            let record = app.agents.get("parent-waiting", agent_id).await.unwrap();
+            assert!(!record
+                .progress
+                .as_deref()
+                .unwrap_or("")
+                .contains("20+ minutes"));
+            assert!(!record.status.is_terminal(), "{:?}", record.status);
+        }
+        assert_eq!(
+            app.agents
+                .get("parent-waiting", &queued.agent_id)
+                .await
+                .unwrap()
+                .status,
+            BgAgentStatus::Queued
+        );
+        execution.resume().await.unwrap();
+        assert_eq!(execution.state(), ExecutionState::Running);
+        app.agents
+            .set_last_update_at_for_test(&parked.agent_id, Utc::now() - TimeDelta::minutes(25))
+            .await
+            .unwrap();
+        monitor_once(app.clone()).await.unwrap();
+        let record = app
+            .agents
+            .get("parent-waiting", &parked.agent_id)
+            .await
+            .unwrap();
+        assert!(record
+            .progress
+            .as_deref()
+            .unwrap_or("")
+            .contains("20+ minutes"));
+        app.agent_executions.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn monitor_retries_cooled_deferred_completion() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let workspace = tempfile::tempdir().unwrap();
@@ -191,6 +296,7 @@ mod tests {
                     diff_summary: None,
                     conflict_summary: None,
                     child_chat_id: Some("child-monitor-deferred".to_string()),
+                    deliverable_status: None,
                 },
             )
             .await
