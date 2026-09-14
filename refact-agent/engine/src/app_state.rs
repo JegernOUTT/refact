@@ -1494,6 +1494,11 @@ impl AppState {
     pub async fn from_gcx(gcx: SharedGlobalContext) -> Self {
         gcx.app_state(gcx.clone())
     }
+
+    /// The one tracked question service behind every question family.
+    pub fn questions(&self) -> &refact_chat_api::QuestionRegistry {
+        self.agents.questions()
+    }
 }
 
 impl FromRef<AppState> for SharedGlobalContext {

@@ -284,8 +284,16 @@ fn linked_agent_session_matches(session: &ChatSession, task_id: &str, card: &Boa
     true
 }
 
-fn agent_session_idle_stall_ready(session: &ChatSession, task_id: &str, card: &BoardCard) -> bool {
+fn agent_session_idle_stall_ready(
+    session: &ChatSession,
+    task_id: &str,
+    card: &BoardCard,
+    has_open_question: bool,
+) -> bool {
     if card.column != "doing" || card.agent_chat_id.is_none() {
+        return false;
+    }
+    if has_open_question {
         return false;
     }
     if !linked_agent_session_matches(session, task_id, card) {
@@ -1901,8 +1909,13 @@ async fn check_for_stuck_agents(app: AppState) -> Result<(), String> {
                 .and_then(|meta| meta.planner_chat_id.clone());
 
             let now = Utc::now();
+            let card_asker = crate::questions::board_card_asker(task_id, &card.id);
+            let waiting_on_question = crate::questions::has_open_question(
+                &app,
+                &[session.chat_id.as_str(), card_asker.as_str()],
+            );
             let stall_info: Option<(StallKind, Duration)> =
-                if agent_session_idle_stall_ready(&session, task_id, card) {
+                if agent_session_idle_stall_ready(&session, task_id, card, waiting_on_question) {
                     let kind = match session.runtime.state {
                         SessionState::Completed => StallKind::Completed,
                         _ => StallKind::IdleNoFinish,
@@ -2108,6 +2121,25 @@ mod tests {
             .queue_processor_running
             .store(true, Ordering::SeqCst);
         session
+    }
+
+    #[test]
+    fn an_agent_waiting_on_a_question_is_never_flagged_as_stalled() {
+        let card = create_test_card("T-1", "doing", Some("agent-1".to_string()));
+        let session = make_test_agent_session(
+            "task-1",
+            "T-1",
+            "agent-1",
+            card.agent_chat_id.as_deref().unwrap(),
+            SessionState::Idle,
+            STALL_PLANNER_NOTIFY_GRACE + Duration::from_secs(60),
+        );
+        assert!(agent_session_idle_stall_ready(
+            &session, "task-1", &card, false
+        ));
+        assert!(!agent_session_idle_stall_ready(
+            &session, "task-1", &card, true
+        ));
     }
 
     async fn setup_monitor_case(

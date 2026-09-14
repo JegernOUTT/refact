@@ -20,6 +20,64 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType
 const ASK_PREFIX: &str = "[ASK:";
 const REPLY_PREFIX: &str = "[REPLY:";
 
+use crate::questions::{
+    board_card_asker as board_question_asker, board_planner_answerer as board_question_answerer,
+};
+
+fn board_question_correlation(task_id: &str, card_id: &str, question_id: &str) -> String {
+    format!("{task_id}:{card_id}:{question_id}")
+}
+
+/// Re-seed the tracked question from the durable board record when the service
+/// has no entry for it, so a reply after a restart settles the same question.
+fn reseed_board_question(
+    gcx: &Arc<GlobalContext>,
+    task_id: &str,
+    card: &BoardCard,
+    question_id: &str,
+) {
+    let questions = gcx.agents.questions();
+    if questions.get(question_id).is_some() {
+        return;
+    }
+    let Some(update) = card.status_updates.iter().find(|update| {
+        parse_ask(&update.message)
+            .map(|(id, _)| id == question_id)
+            .unwrap_or(false)
+    }) else {
+        return;
+    };
+    let (text, _) = parse_ask(&update.message)
+        .map(|(_, text)| split_question_and_urgency(text))
+        .unwrap_or_default();
+    let now = Utc::now();
+    let asked_at = chrono::DateTime::parse_from_rfc3339(&update.timestamp)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .unwrap_or(now);
+    let expires_at = now
+        + chrono::Duration::seconds(
+            questions.limits().default_expiry_secs.min(i64::MAX as u64) as i64
+        );
+    let Ok(contract) = refact_chat_api::QuestionContract::pending(
+        question_id,
+        refact_chat_api::QuestionKind::BoardPlanner,
+        board_question_asker(task_id, &card.id),
+        board_question_answerer(task_id),
+        board_question_correlation(task_id, &card.id, question_id),
+        if text.is_empty() {
+            "(question text unavailable)".to_string()
+        } else {
+            text
+        },
+        None,
+        asked_at.min(expires_at - chrono::Duration::seconds(1)),
+        Some(expires_at),
+    ) else {
+        return;
+    };
+    let _ = questions.register(contract, now);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuestionUrgency {
     Info,
@@ -375,20 +433,21 @@ impl Tool for ToolAgentAskPlanner {
         let urgency = QuestionUrgency::parse(args.get("urgency"))?;
         let push = planner_delivery::parse_push_mode(args)?;
         let question_id = make_question_id();
-        let question_contract = refact_chat_api::QuestionContract::pending(
-            question_id.clone(),
-            refact_chat_api::QuestionKind::BoardPlanner,
-            format!("task:{task_id}:card:{card_id}"),
-            planner_chat_id
-                .as_ref()
-                .map(|planner| format!("chat:{planner}"))
-                .unwrap_or_else(|| format!("task:{task_id}:planner")),
-            format!("{task_id}:{card_id}:{question_id}"),
-            question.clone(),
-            None,
-            Utc::now(),
-            None,
-        )?;
+        let question_contract = gcx
+            .agents
+            .questions()
+            .ask(
+                refact_chat_api::AskQuestion::new(
+                    refact_chat_api::QuestionKind::BoardPlanner,
+                    board_question_asker(&task_id, &card_id),
+                    board_question_answerer(&task_id),
+                    board_question_correlation(&task_id, &card_id, &question_id),
+                    question.clone(),
+                )
+                .with_id(&question_id),
+                Utc::now(),
+            )
+            .map_err(|error| error.to_string())?;
         let message = format!(
             "[ASK:{}] {} (urgency={})",
             question_id,
@@ -405,7 +464,7 @@ impl Tool for ToolAgentAskPlanner {
         };
         let card_id_for_update = card_id.clone();
         let timestamp = Utc::now().to_rfc3339();
-        storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+        if let Err(error) = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
             let card = board
                 .get_card_mut(&card_id_for_update)
                 .ok_or_else(|| format!("Card {} not found", card_id_for_update))?;
@@ -421,7 +480,14 @@ impl Tool for ToolAgentAskPlanner {
             }
             Ok(())
         })
-        .await?;
+        .await
+        {
+            let _ =
+                gcx.agents
+                    .questions()
+                    .cancel(&question_id, &question_contract.asker, Utc::now());
+            return Err(error);
+        }
 
         let wake_note = if urgency == QuestionUrgency::Block {
             match planner_chat_id {
@@ -544,6 +610,14 @@ impl Tool for ToolPlannerReply {
         let facade = ccx.lock().await.app.chat.facade.clone();
         let push = planner_delivery::parse_push_mode(args)?;
 
+        if let Some(card) = storage::load_board(gcx.clone(), &task_id)
+            .await
+            .ok()
+            .and_then(|board| board.get_card(&card_id).cloned())
+        {
+            reseed_board_question(&gcx, &task_id, &card, &question_id);
+        }
+
         let card_id_for_update = card_id.clone();
         let question_id_for_update = question_id.clone();
         let answer_for_update = answer.clone();
@@ -577,6 +651,22 @@ impl Tool for ToolPlannerReply {
             })
             .await?;
 
+        let question_state = if recorded {
+            match gcx.agents.questions().answer(
+                &question_id,
+                &board_question_answerer(&task_id),
+                answer.clone(),
+                Utc::now(),
+            ) {
+                Ok(settled) => format!("{:?}", settled.state).to_lowercase(),
+                Err(error) => error.code().to_string(),
+            }
+        } else {
+            refact_chat_api::QuestionError::AlreadyAnswered
+                .code()
+                .to_string()
+        };
+
         let delivery_note = if !recorded {
             "Reply already recorded; duplicate answer not delivered.".to_string()
         } else if let Some(target) = target {
@@ -603,7 +693,7 @@ impl Tool for ToolPlannerReply {
             "Reply not delivered (card has no agent chat).".to_string()
         };
         let mut output = format!(
-            "Reply {} on card `{}` for question `{}`.\n\n{}{}",
+            "Reply {} on card `{}` for question `{}`.\n\n- question state: `{}`\n\n{}{}",
             if recorded {
                 "recorded"
             } else {
@@ -611,6 +701,7 @@ impl Tool for ToolPlannerReply {
             },
             card_id,
             question_id,
+            question_state,
             delivery_note,
             if recorded {
                 format!("\n\nAnswer: {}", answer)
@@ -875,6 +966,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reply_after_a_restart_settles_the_same_tracked_question() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(
+            temp.path(),
+            vec![test_card(
+                "T-1",
+                "QnA",
+                vec![StatusUpdate {
+                    timestamp: Utc::now().to_rfc3339(),
+                    message: "[ASK:1234abcd] Which implementation? (urgency=info)".into(),
+                }],
+            )],
+        )
+        .await;
+        let ccx = task_ccx(gcx.clone(), "planner", None).await;
+        // A restarted process holds only the durable board record.
+        assert!(gcx.agents.questions().get("1234abcd").is_none());
+
+        let arguments = args(&[
+            ("card_id", json!("T-1")),
+            ("question_id", json!("1234abcd")),
+            ("answer", json!("Proceed")),
+        ]);
+        let output = output_text(
+            ToolPlannerReply::new()
+                .tool_execute(ccx.clone(), &"call".into(), &arguments)
+                .await
+                .unwrap(),
+        );
+
+        assert!(
+            output.contains("question state: `answered`"),
+            "expected the tracked question to be answered, got: {}",
+            output
+        );
+        let question = gcx.agents.questions().get("1234abcd").unwrap();
+        assert_eq!(question.correlation_id, "task-1:T-1:1234abcd");
+        assert_eq!(question.asker, "task:task-1:card:T-1");
+        assert_eq!(question.answerer, "task:task-1:planner");
+        assert_eq!(question.answer.as_deref(), Some("Proceed"));
+        assert_eq!(question.kind, refact_chat_api::QuestionKind::BoardPlanner);
+
+        let duplicate = output_text(
+            ToolPlannerReply::new()
+                .tool_execute(ccx, &"retry".into(), &arguments)
+                .await
+                .unwrap(),
+        );
+        assert!(
+            duplicate.contains("question state: `already_answered`"),
+            "a second answer must be reported as already_answered, got: {}",
+            duplicate
+        );
+        assert_eq!(
+            gcx.agents
+                .questions()
+                .get("1234abcd")
+                .unwrap()
+                .answer
+                .as_deref(),
+            Some("Proceed")
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_ask_planner_tracks_the_question_in_the_shared_service() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(temp.path(), vec![test_card("T-40", "QnA", vec![])]).await;
+        let ccx = task_ccx(gcx.clone(), "agents", Some("T-40")).await;
+
+        ToolAgentAskPlanner::new()
+            .tool_execute(
+                ccx,
+                &"call".to_string(),
+                &args(&[
+                    ("question", json!("Which one?")),
+                    ("urgency", json!("info")),
+                ]),
+            )
+            .await
+            .unwrap();
+
+        let tracked = gcx
+            .agents
+            .questions()
+            .pending_for_asker("task:task-1:card:T-40", Utc::now());
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].kind, refact_chat_api::QuestionKind::BoardPlanner);
+        assert_eq!(tracked[0].text, "Which one?");
+        assert!(tracked[0].expires_at.is_some());
+    }
+
+    #[tokio::test]
     async fn planner_reply_rejects_unknown_question_id() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = write_task(temp.path(), vec![test_card("T-40", "QnA", vec![])]).await;
@@ -944,6 +1128,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(runtime_settings)]
     async fn agent_ask_planner_records_question_and_block_marker() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = write_task(temp.path(), vec![test_card("T-40", "QnA", vec![])]).await;

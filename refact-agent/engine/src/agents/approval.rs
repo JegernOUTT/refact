@@ -8,6 +8,8 @@ use refact_work_core::{ApprovalDecision, PendingApproval};
 
 struct PendingApprovalGuard {
     registry: refact_work_core::ApprovalRegistry,
+    questions: refact_chat_api::QuestionRegistry,
+    asker: String,
     parent: String,
     generation: u64,
     request_id: String,
@@ -20,6 +22,9 @@ impl Drop for PendingApprovalGuard {
         let _ = self
             .registry
             .cancel(&self.parent, self.generation, &self.request_id, now_ms());
+        let _ = self
+            .questions
+            .cancel(&self.request_id, &self.asker, chrono::Utc::now());
         if let Some(execution) = &self.execution {
             execution.cancel();
         }
@@ -27,6 +32,29 @@ impl Drop for PendingApprovalGuard {
             abort.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
+}
+
+/// Mirror an approval decision onto its tracked `PermissionEscalation`
+/// question. The decision itself still belongs to the approval registry; this
+/// only settles the question that tracks it, exactly once.
+fn settle_escalation_question(
+    app: &AppState,
+    request_id: &str,
+    asker: &str,
+    answerer: &str,
+    decision: ApprovalDecision,
+) {
+    let now = chrono::Utc::now();
+    let questions = app.questions();
+    let _ = match decision {
+        ApprovalDecision::Approved => questions.answer(request_id, answerer, "approve".into(), now),
+        ApprovalDecision::Rejected => questions.reject(request_id, answerer, now),
+        ApprovalDecision::Cancelled => questions.cancel(request_id, asker, now),
+        ApprovalDecision::Expired => {
+            questions.expire(now);
+            return;
+        }
+    };
 }
 
 struct ApprovalNoticeAudit<'a>(&'a ChatMessage);
@@ -132,9 +160,28 @@ pub async fn request(
     app.agent_approvals
         .register(pending.clone(), created)
         .map_err(|e| format!("approval registration: {e:?}"))?;
+    app.questions()
+        .ask(
+            refact_chat_api::AskQuestion::new(
+                refact_chat_api::QuestionKind::PermissionEscalation,
+                &agent_id,
+                &target.parent_id,
+                format!("{}:{}", agent_id, call.id),
+                format!("{} {}", pending.tool_name, pending.args),
+            )
+            .with_id(&request_id)
+            .with_options(Some(vec!["approve".into(), "reject".into()]))
+            .with_expiry_secs(Some(
+                refact_work_core::coordination_settings().approval_timeout_secs,
+            )),
+            chrono::Utc::now(),
+        )
+        .map_err(|error| format!("approval question registration: {error}"))?;
     let execution = app.agent_executions.get(&child_chat_id);
     let mut pending_guard = PendingApprovalGuard {
         registry: app.agent_approvals.clone(),
+        questions: app.questions().clone(),
+        asker: agent_id.clone(),
         parent: target.parent_id.clone(),
         generation: pending.run_generation,
         request_id: request_id.clone(),
@@ -165,31 +212,28 @@ pub async fn request(
         );
         return Err(error);
     }
-    let decision = app.agent_approvals.wait(&request_id, now_ms());
-    tokio::pin!(decision);
-    let result = loop {
-        if abort.load(std::sync::atomic::Ordering::Relaxed)
-            || execution
-                .as_ref()
-                .is_some_and(|execution| execution.is_cancelled())
-            || app
-                .runtime
-                .shutdown_flag
-                .load(std::sync::atomic::Ordering::Relaxed)
-        {
+    let result = match crate::questions::park_and_wait(
+        app,
+        &child_chat_id,
+        &abort,
+        app.agent_approvals.wait(&request_id, now_ms()),
+    )
+    .await
+    {
+        Ok(decision) => decision.map_err(|e| format!("approval wait: {e:?}")),
+        Err(_) => {
             let _ = app.agent_approvals.cancel(
                 &target.parent_id,
                 pending.run_generation,
                 &request_id,
                 now_ms(),
             );
-            break Err("approval cancelled".to_string());
-        }
-        tokio::select! {
-            result = &mut decision => break result.map_err(|e| format!("approval wait: {e:?}")),
-            _ = tokio::time::sleep(refact_work_core::coordination_settings().lock_poll_interval()) => {}
+            Err("approval cancelled".to_string())
         }
     };
+    if let Ok(decision) = &result {
+        settle_escalation_question(app, &request_id, &agent_id, &target.parent_id, *decision);
+    }
     if abort.load(std::sync::atomic::Ordering::Relaxed)
         || app
             .runtime
@@ -400,6 +444,8 @@ mod tests {
             }
             drop(PendingApprovalGuard {
                 registry: registry.clone(),
+                questions: refact_chat_api::QuestionRegistry::new(Default::default()).unwrap(),
+                asker: "child".into(),
                 parent: "parent".into(),
                 generation: 1,
                 request_id: "request".into(),

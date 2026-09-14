@@ -858,9 +858,12 @@ pub async fn create_global_context(
     let agents_root = user_activity_project_root
         .join(".refact")
         .join("background_agents");
-    let agents = BackgroundAgentRegistry::new(agents_root)
-        .await
-        .unwrap_or_else(|error| panic!("failed to initialize background agent registry: {error}"));
+    let agents = BackgroundAgentRegistry::with_question_limits(
+        agents_root,
+        crate::questions::limits_from_settings(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("failed to initialize background agent registry: {error}"));
     let cx = GlobalContext {
         shutdown_flag: Arc::new(AtomicBool::new(false)),
         lsp_tcp_client_count: Arc::new(AtomicUsize::new(0)),

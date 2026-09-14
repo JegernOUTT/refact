@@ -49,6 +49,9 @@ pub struct CoordinationSettings {
     pub lock_poll_interval_ms: u64,
     pub approval_timeout_secs: u64,
     pub max_pending_approvals: usize,
+    pub max_pending_questions: usize,
+    pub question_default_expiry_secs: u64,
+    pub question_max_expiry_secs: u64,
     pub delivery_default_ttl_secs: u64,
     pub delivery_max_ttl_secs: u64,
     pub delivery_max_pending: usize,
@@ -118,6 +121,9 @@ impl Default for CoordinationSettings {
             lock_poll_interval_ms: 25,
             approval_timeout_secs: 1800,
             max_pending_approvals: 256,
+            max_pending_questions: 256,
+            question_default_expiry_secs: 1800,
+            question_max_expiry_secs: 604_800,
             delivery_default_ttl_secs: 86_400,
             delivery_max_ttl_secs: 604_800,
             delivery_max_pending: 4096,
@@ -404,6 +410,38 @@ impl CoordinationSettings {
         );
         at_least(
             &mut v,
+            "max_pending_questions",
+            self.max_pending_questions as u64,
+            1,
+        );
+        at_least(
+            &mut v,
+            "question_default_expiry_secs",
+            self.question_default_expiry_secs,
+            1,
+        );
+        at_least(
+            &mut v,
+            "question_max_expiry_secs",
+            self.question_max_expiry_secs,
+            1,
+        );
+        not_greater(
+            &mut v,
+            "question_default_expiry_secs",
+            self.question_default_expiry_secs,
+            "question_max_expiry_secs",
+            self.question_max_expiry_secs,
+        );
+        not_greater(
+            &mut v,
+            "question_max_expiry_secs",
+            self.question_max_expiry_secs,
+            "question_absolute_max_expiry_secs",
+            31_536_000,
+        );
+        at_least(
+            &mut v,
             "lock_poll_interval_ms",
             self.lock_poll_interval_ms,
             1,
@@ -552,6 +590,27 @@ mod tests {
         let mut settings = CoordinationSettings::default();
         settings.max_path_scope_entries = 0;
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn question_bounds_default_usable_and_reject_invalid_values() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(settings.max_pending_questions >= 1);
+        assert!(settings.question_default_expiry_secs <= settings.question_max_expiry_secs);
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.max_pending_questions = 0,
+            |settings: &mut CoordinationSettings| settings.question_default_expiry_secs = 0,
+            |settings: &mut CoordinationSettings| settings.question_max_expiry_secs = 0,
+            |settings: &mut CoordinationSettings| {
+                settings.question_default_expiry_secs = settings.question_max_expiry_secs + 1
+            },
+            |settings: &mut CoordinationSettings| settings.question_max_expiry_secs = 31_536_001,
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
     }
 
     #[test]

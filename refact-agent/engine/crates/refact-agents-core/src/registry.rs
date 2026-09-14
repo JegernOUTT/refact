@@ -8,13 +8,13 @@ use chrono::{DateTime, TimeDelta, Utc};
 use tokio::sync::{Mutex, Notify, RwLock};
 use uuid::Uuid;
 use refact_chat_api::{
-    DeliveryOutcome, DeliveryStatus, DeliveryStatusRecord, PendingDelivery, PushMode,
+    AskQuestion, DeliveryOutcome, DeliveryStatus, DeliveryStatusRecord, PendingDelivery, PushMode,
+    QuestionKind, QuestionLimits, QuestionRegistry,
 };
 
 use crate::storage;
 use crate::types::{
-    AgentCompletion, AgentListFilter, AgentQuestion, BackgroundAgent, BgAgentStatus,
-    CreateAgentRequest,
+    AgentCompletion, AgentListFilter, BackgroundAgent, BgAgentStatus, CreateAgentRequest,
 };
 #[cfg(test)]
 use crate::types::BgAgentKind;
@@ -47,6 +47,7 @@ pub struct BackgroundAgentRegistry {
     storage_root: PathBuf,
     write_state: Mutex<RegistryWriteState>,
     storage_write: Mutex<()>,
+    questions: QuestionRegistry,
 }
 
 struct RegistryWriteState {
@@ -69,19 +70,41 @@ const WRITE_DEBOUNCE: Duration = Duration::from_secs(10);
 
 impl BackgroundAgentRegistry {
     pub async fn new(storage_root: PathBuf) -> Result<Arc<Self>, String> {
+        Self::with_question_limits(storage_root, QuestionLimits::default()).await
+    }
+
+    pub async fn with_question_limits(
+        storage_root: PathBuf,
+        question_limits: QuestionLimits,
+    ) -> Result<Arc<Self>, String> {
         tokio::fs::create_dir_all(&storage_root)
             .await
             .map_err(|e| format!("Failed to create background agent registry directory: {e}"))?;
         let mut records = storage::load_all(&storage_root).await?;
         normalize_delivery_state(&mut records);
         reconcile_interrupted(&storage_root, &mut records).await?;
+        let questions = QuestionRegistry::new(question_limits)?;
+        let now = Utc::now();
+        questions.restore(
+            records
+                .values()
+                .flat_map(|record| record.questions.iter().cloned()),
+            now,
+        );
         Ok(Arc::new(Self {
             records: RwLock::new(records),
             runtime: RwLock::new(HashMap::new()),
             storage_root,
             write_state: Mutex::new(RegistryWriteState::default()),
             storage_write: Mutex::new(()),
+            questions,
         }))
+    }
+
+    /// The single tracked question service. Every question family shares this
+    /// instance, and agent records are its durable projection.
+    pub fn questions(&self) -> &QuestionRegistry {
+        &self.questions
     }
 
     pub async fn create(
@@ -482,29 +505,46 @@ impl BackgroundAgentRegistry {
         text: String,
     ) -> Result<(BackgroundAgent, String), String> {
         let question_id = Uuid::new_v4().simple().to_string()[..8].to_string();
+        let answerer = {
+            let records = self.records.read().await;
+            let record = records
+                .get(agent_id)
+                .ok_or_else(|| "agent not found".to_string())?;
+            if record.status.is_terminal() {
+                return Err("agent already finished".to_string());
+            }
+            record.parent_chat_id.clone()
+        };
+        let question = self
+            .questions
+            .ask(
+                AskQuestion::new(
+                    QuestionKind::AgentParent,
+                    agent_id,
+                    answerer,
+                    format!("{agent_id}:{question_id}"),
+                    text,
+                )
+                .with_id(&question_id),
+                Utc::now(),
+            )
+            .map_err(|error| error.to_string())?;
         let updated = self
-            .update_record(agent_id, |record, now| {
+            .update_record(agent_id, |record, _| {
                 if record.status.is_terminal() {
                     return Err("agent already finished".to_string());
                 }
-                record.questions.push(AgentQuestion {
-                    id: question_id.clone(),
-                    kind: refact_chat_api::QuestionKind::AgentParent,
-                    asker: agent_id.to_string(),
-                    answerer: record.parent_chat_id.clone(),
-                    correlation_id: question_id.clone(),
-                    text,
-                    options: None,
-                    state: refact_chat_api::QuestionState::Pending,
-                    asked_at: now,
-                    expires_at: None,
-                    answer: None,
-                    answered_at: None,
-                });
+                record.questions.push(question);
                 Ok(())
             })
-            .await?;
-        Ok((updated, question_id))
+            .await;
+        match updated {
+            Ok(updated) => Ok((updated, question_id)),
+            Err(error) => {
+                let _ = self.questions.cancel(&question_id, agent_id, Utc::now());
+                Err(error)
+            }
+        }
     }
 
     pub async fn answer_question(
@@ -513,19 +553,34 @@ impl BackgroundAgentRegistry {
         question_id: &str,
         answer: String,
     ) -> Result<BackgroundAgent, String> {
-        let question_id = question_id.to_string();
-        self.update_record(agent_id, |record, now| {
+        let answerer = {
+            let records = self.records.read().await;
+            records
+                .get(agent_id)
+                .ok_or_else(|| "agent not found".to_string())?
+                .parent_chat_id
+                .clone()
+        };
+        let settled = match self
+            .questions
+            .answer(question_id, &answerer, answer, Utc::now())
+        {
+            Ok(settled) => settled,
+            Err(refact_chat_api::QuestionError::AlreadyAnswered) => {
+                return Err("question already answered".to_string())
+            }
+            Err(refact_chat_api::QuestionError::NotFound) => {
+                return Err("question not found".to_string())
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        self.update_record(agent_id, |record, _| {
             let question = record
                 .questions
                 .iter_mut()
-                .find(|question| question.id == question_id)
+                .find(|question| question.id == settled.id)
                 .ok_or_else(|| "question not found".to_string())?;
-            if question.answer.is_some() {
-                return Err("question already answered".to_string());
-            }
-            question.answer = Some(answer);
-            question.state = refact_chat_api::QuestionState::Answered;
-            question.answered_at = Some(now);
+            *question = settled;
             Ok(())
         })
         .await

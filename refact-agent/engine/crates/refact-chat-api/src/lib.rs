@@ -25,7 +25,10 @@ pub use chat_local_types::{
     PendingBrowserMessage, PendingSkillDeactivation, RuntimeChatTimeouts, TrajectorySourceIdentity,
 };
 pub use notification_event::{NotificationEvent, NotificationQuestion};
-pub use question::{QuestionContract, QuestionKind, QuestionState};
+pub use question::{
+    AskQuestion, QuestionContract, QuestionError, QuestionKind, QuestionLimits, QuestionRegistry,
+    QuestionSettlement, QuestionState, QUESTION_MAX_EXPIRY_SECS,
+};
 pub use deliverable::{DeliverableContract, DeliverableStatus, DELIVERABLE_CHECK_STRUCTURAL};
 pub use tool_enrichment::{
     attach_tool_enrichment, attach_tool_enrichment_to_extra, redact_tool_enrichment,

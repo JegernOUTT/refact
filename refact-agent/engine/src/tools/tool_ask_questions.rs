@@ -10,7 +10,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::http::routers::v1::sidebar::{NotificationEvent, NotificationQuestion};
-use refact_chat_api::{QuestionContract, QuestionKind};
+use refact_chat_api::{AskQuestion, QuestionContract, QuestionKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct QuestionItem {
@@ -135,27 +135,31 @@ impl Tool for ToolAskQuestions {
             ccx_lock.abort_flag.store(true, Ordering::SeqCst);
         }
 
-        let chat_id = {
+        let (chat_id, app) = {
             let ccx_lock = ccx.lock().await;
-            ccx_lock.chat_id.clone()
+            (ccx_lock.chat_id.clone(), ccx_lock.app.clone())
         };
         let asked_at = chrono::Utc::now();
+        let service = app.questions();
         let contracts = questions
             .iter()
             .map(|question| {
-                QuestionContract::pending(
-                    question.id.clone(),
-                    QuestionKind::UserInput,
-                    format!("chat:{chat_id}"),
-                    "user",
-                    format!("{chat_id}:{tool_call_id}:{}", question.id),
-                    question.text.clone(),
-                    question.options.clone(),
-                    asked_at,
-                    None,
-                )
+                service
+                    .ask(
+                        AskQuestion::new(
+                            QuestionKind::UserInput,
+                            format!("chat:{chat_id}"),
+                            "user",
+                            format!("{chat_id}:{tool_call_id}:{}", question.id),
+                            question.text.clone(),
+                        )
+                        .with_id(format!("{tool_call_id}:{}", question.id))
+                        .with_options(question.options.clone()),
+                        asked_at,
+                    )
+                    .map_err(|error| error.to_string())
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<QuestionContract>, String>>()?;
 
         {
             let ccx_lock = ccx.lock().await;
