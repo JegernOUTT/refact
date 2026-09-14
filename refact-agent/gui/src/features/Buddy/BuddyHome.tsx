@@ -1164,6 +1164,26 @@ const BuddyHomeContent: React.FC = () => {
           </Surface>
         )}
 
+        {operatorEnabled && (
+          <BuddyDesk
+            key={JSON.stringify([
+              operator.currentData?.worker,
+              mappedDraft.currentData?.data.value.id,
+            ])}
+            workId={
+              currentPage?.name === "buddy"
+                ? currentPage.workId ?? mappedDraft.currentData?.data.value.id
+                : undefined
+            }
+            projectId={
+              currentPage?.name === "buddy"
+                ? currentPage.workProjectId ??
+                  mappedDraft.currentData?.project.project_id
+                : undefined
+            }
+          />
+        )}
+
         <Tabs
           value={activeTab}
           onValueChange={(value) => setActiveTab(value as BuddyHomeTab)}
@@ -1306,26 +1326,6 @@ const BuddyHomeContent: React.FC = () => {
             </div>
           </Tabs.Content>
         </Tabs>
-
-        {operatorEnabled && (
-          <BuddyDesk
-            key={JSON.stringify([
-              operator.currentData?.worker,
-              mappedDraft.currentData?.data.value.id,
-            ])}
-            workId={
-              currentPage?.name === "buddy"
-                ? currentPage.workId ?? mappedDraft.currentData?.data.value.id
-                : undefined
-            }
-            projectId={
-              currentPage?.name === "buddy"
-                ? currentPage.workProjectId ??
-                  mappedDraft.currentData?.project.project_id
-                : undefined
-            }
-          />
-        )}
 
         <BuddySummaryStrip
           name={name}

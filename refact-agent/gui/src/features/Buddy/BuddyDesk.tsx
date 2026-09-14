@@ -1,6 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ArrowLeft, RefreshCw } from "lucide-react";
-import { Button, Text } from "../../components/ui";
+import {
+  ArrowLeft,
+  ClipboardList,
+  FileSearch,
+  Inbox,
+  RefreshCw,
+} from "lucide-react";
+import { Button, Icon, Surface, Text } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
   useGetBuddyOperatorArtifactQuery,
@@ -28,6 +34,8 @@ const viewQuery = {
   Watching: "watching",
 } as const;
 
+const DEFAULT_VIEW: WorkView = "Needs you";
+
 const viewForState: Record<WorkItemState, WorkView> = {
   needs_attention: "Needs you",
   blocked: "Needs you",
@@ -36,6 +44,32 @@ const viewForState: Record<WorkItemState, WorkView> = {
   cancelled: "Delivered",
   watching: "Watching",
 };
+
+const emptyView: Record<WorkView, string> = {
+  "Needs you": "Nothing needs you right now.",
+  "Working on": "Nothing is in progress right now.",
+  Delivered: "Nothing has been delivered yet.",
+  Watching: "Nothing is being watched right now.",
+};
+
+const opaqueIdentifier = /[0-9a-f]{24,}/i;
+
+function readableSubject(item: WorkItem): string | null {
+  const subject = item.subject.resource_id.trim();
+  if (subject === "" || opaqueIdentifier.test(subject)) return null;
+  return subject;
+}
+
+function changedAt(value: string): string | null {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  const minutes = Math.round((Date.now() - parsed) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
 
 function WorkDetail({
   item,
@@ -61,6 +95,7 @@ function WorkDetail({
     artifact?.project.project_id === item.project.project_id &&
     artifact.project.canonical_root === item.project.canonical_root;
   const backButton = useRef<HTMLButtonElement>(null);
+  const subject = readableSubject(item);
   useEffect(() => {
     backButton.current?.focus();
   }, []);
@@ -68,6 +103,7 @@ function WorkDetail({
     <article className={styles.detail} aria-label="Work detail">
       <Button
         ref={backButton}
+        className={styles.back}
         variant="ghost"
         size="sm"
         leftIcon={ArrowLeft}
@@ -75,77 +111,127 @@ function WorkDetail({
       >
         Back to work list
       </Button>
-      <h3>{item.title}</h3>
-      <Text size="1">
-        {humanizeIdentifier(item.state)} · {item.subject.resource_id}
-      </Text>
+      <div className={styles.headlineMeta}>
+        <Text size="1" color="gray" className={styles.subject}>
+          {subject
+            ? `${humanizeIdentifier(item.state)} · ${subject}`
+            : humanizeIdentifier(item.state)}
+        </Text>
+      </div>
       {!item.current_artifact_id && (
-        <p>No report has been saved for this work yet.</p>
+        <Surface variant="surface-1" className={styles.note} role="status">
+          <Text size="2" color="gray">
+            {item.title} has not produced a result yet.
+          </Text>
+        </Surface>
       )}
-      {isFetching && <p role="status">Loading report…</p>}
+      {isFetching && (
+        <Surface variant="surface-1" className={styles.note} role="status">
+          <Text size="2" color="gray">
+            Loading the result…
+          </Text>
+        </Surface>
+      )}
       {error && (
-        <div role="alert">
-          <p>The saved report could not be loaded.</p>
+        <Surface variant="surface-1" className={styles.note} role="alert">
+          <Text size="2" color="red">
+            The result could not be loaded.
+          </Text>
           <Button size="sm" onClick={() => void refetch()}>
             Retry report
           </Button>
-        </div>
+        </Surface>
       )}
       {artifact && !artifactMatches && (
-        <p role="alert">The saved report belongs to another project.</p>
+        <Surface variant="surface-1" className={styles.note} role="alert">
+          <Text size="2" color="red">
+            This result belongs to another project.
+          </Text>
+        </Surface>
       )}
       {artifact && artifactMatches && !error && (
         <>
-          <h4>{artifact.title}</h4>
-          <p className={styles.conclusion}>{artifact.conclusion}</p>
-          {artifact.delta && (
-            <section aria-label="What changed">
-              <h4>What changed</h4>
-              <p>{artifact.delta}</p>
-            </section>
-          )}
-          <BuddyArtifactBody body={artifact.body} />
-          {artifact.uncertainty && (
-            <section aria-label="Limitations">
-              <h4>Limitations</h4>
-              <p>{artifact.uncertainty}</p>
-            </section>
-          )}
-          <BuddyReportReadState
-            key={`read:${artifact.artifact_id}:${artifact.revision}`}
-            item={item}
-            artifact={artifact}
-            endpointIdentity={endpointIdentity}
-          />
-          <BuddyDeskActions
-            item={item}
-            artifact={artifact}
-            endpointIdentity={endpointIdentity}
-          />
-          <BuddyWorkSnooze
-            key={`snooze:${artifact.artifact_id}:${artifact.revision}`}
-            item={item}
-            artifact={artifact}
-            identity={endpointIdentity}
-          />
-          <details>
-            <summary>Evidence · revision {artifact.revision}</summary>
-            {artifact.evidence.length === 0 ? (
-              <p>No evidence references were recorded.</p>
-            ) : (
-              <ul>
-                {artifact.evidence.map((evidence) => (
-                  <li key={evidence.evidence_id}>
-                    <strong>
-                      {humanizeIdentifier(evidence.source.source_kind)}
-                    </strong>{" "}
-                    · {evidence.source.source_id}
-                    <div>{evidence.locator}</div>
-                    <Text size="1">Observed {evidence.observed_at}</Text>
-                  </li>
-                ))}
-              </ul>
+          <Surface
+            variant="surface-1"
+            radius="card"
+            className={styles.headline}
+          >
+            <Text as="p" size="3" weight="bold" className={styles.title}>
+              {artifact.title}
+            </Text>
+            <Text as="p" size="3" className={styles.conclusion}>
+              {artifact.conclusion}
+            </Text>
+            {artifact.delta && (
+              <Text as="p" size="2" color="gray" className={styles.delta}>
+                {artifact.delta}
+              </Text>
             )}
+          </Surface>
+          <div className={styles.decide}>
+            <BuddyDeskActions
+              item={item}
+              artifact={artifact}
+              endpointIdentity={endpointIdentity}
+            />
+            <div className={styles.embedded}>
+              <BuddyReportReadState
+                key={`read:${artifact.artifact_id}:${artifact.revision}`}
+                item={item}
+                artifact={artifact}
+                endpointIdentity={endpointIdentity}
+              />
+              <BuddyWorkSnooze
+                key={`snooze:${artifact.artifact_id}:${artifact.revision}`}
+                item={item}
+                artifact={artifact}
+                identity={endpointIdentity}
+              />
+            </div>
+          </div>
+          <details className={styles.disclosure} open>
+            <summary className={styles.summary}>The full write-up</summary>
+            <div className={styles.disclosureBody}>
+              <BuddyArtifactBody body={artifact.body} />
+              {artifact.uncertainty && (
+                <section aria-label="Limitations" className={styles.limits}>
+                  <Text as="p" size="1" color="orange" weight="medium">
+                    What this did not cover
+                  </Text>
+                  <Text as="p" size="2" color="gray">
+                    {artifact.uncertainty}
+                  </Text>
+                </section>
+              )}
+            </div>
+          </details>
+          <details className={styles.disclosure}>
+            <summary className={styles.summary}>
+              Evidence · revision {artifact.revision}
+            </summary>
+            <div className={styles.disclosureBody}>
+              {artifact.evidence.length === 0 ? (
+                <Text as="p" size="2" color="gray">
+                  No evidence references were recorded.
+                </Text>
+              ) : (
+                <ul className={styles.evidence}>
+                  {artifact.evidence.map((evidence) => (
+                    <li key={evidence.evidence_id}>
+                      <Text size="2" weight="medium">
+                        {humanizeIdentifier(evidence.source.source_kind)}
+                      </Text>
+                      <Text size="1" color="gray">
+                        {evidence.locator}
+                      </Text>
+                      <Text size="1" color="gray">
+                        Observed {evidence.observed_at}
+                      </Text>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </details>
           <BuddyReportHistory
             item={item}
@@ -170,8 +256,9 @@ function DeskContent({
   const config = useConfig();
   const [cursor, setCursor] = useState<number>();
   const [previous, setPrevious] = useState<OperatorRecord<WorkItem>[]>([]);
-  const [view, setView] = useState<WorkView>("Needs you");
+  const [view, setView] = useState<WorkView>(DEFAULT_VIEW);
   const [selectedId, setSelectedId] = useState<string | null>(workId ?? null);
+  const [expanded, setExpanded] = useState(false);
   const linkedWork = useGetBuddyOperatorWorkItemQuery(
     {
       id: workId ?? "",
@@ -185,6 +272,7 @@ function DeskContent({
     "all" | "unread" | "snoozed" | "unsnoozed"
   >("all");
   const trigger = useRef<HTMLButtonElement | null>(null);
+  const expandButton = useRef<HTMLButtonElement>(null);
   const { currentData, isFetching, error, refetch } =
     useGetBuddyOperatorWorkQuery(
       {
@@ -221,6 +309,15 @@ function DeskContent({
   const filtered = records.filter(
     ({ value }) => viewForState[value.state] === view,
   );
+  const filtersApplied = query !== "" || attention !== "all";
+  const collapsed =
+    !expanded &&
+    !workId &&
+    !error &&
+    !filtersApplied &&
+    view === DEFAULT_VIEW &&
+    Boolean(currentData) &&
+    records.length === 0;
 
   useEffect(() => {
     if (
@@ -266,19 +363,42 @@ function DeskContent({
     window.history.replaceState(window.history.state, "", url);
   };
 
+  if (collapsed) {
+    return (
+      <section
+        className={styles.collapsed}
+        aria-label="Buddy Desk"
+        data-detail-open={false}
+      >
+        <Text size="2" color="gray" className={styles.collapsedText}>
+          Nothing needs you right now.
+        </Text>
+        <Button
+          ref={expandButton}
+          size="sm"
+          variant="ghost"
+          leftIcon={Inbox}
+          onClick={() => setExpanded(true)}
+        >
+          Browse saved work
+        </Button>
+      </section>
+    );
+  }
+
   return (
-    <section
+    <Surface
+      as="section"
+      variant="glass"
+      radius="card"
       className={styles.desk}
       aria-label="Buddy Desk"
       data-detail-open={Boolean(selected)}
     >
       <header className={styles.header}>
-        <div>
-          <h2>Buddy Desk</h2>
-          <Text size="1">
-            Results and decisions, without opening a worker chat.
-          </Text>
-        </div>
+        <Icon icon={ClipboardList} size="sm" tone="muted" />
+        <h2 className={styles.heading}>Buddy Desk</h2>
+        <span className={styles.headerSpacer} aria-hidden />
         <Button
           size="sm"
           variant="ghost"
@@ -290,21 +410,27 @@ function DeskContent({
         </Button>
       </header>
       {selectedId === workId && linkedWork.isFetching && (
-        <p role="status">Loading linked work…</p>
+        <Surface variant="surface-1" className={styles.note} role="status">
+          <Text size="2" color="gray">
+            Opening that item…
+          </Text>
+        </Surface>
       )}
       {selectedId === workId && linkedWork.error && (
-        <div role="alert">
-          <p>
+        <Surface variant="surface-1" className={styles.note} role="alert">
+          <Text size="2" color="red">
             The linked work is unavailable in this project. No other report was
             substituted.
-          </p>
-          <Button size="sm" onClick={() => void linkedWork.refetch()}>
-            Retry linked work
-          </Button>
-          <Button size="sm" variant="ghost" onClick={back}>
-            Back to work list
-          </Button>
-        </div>
+          </Text>
+          <div className={styles.noteActions}>
+            <Button size="sm" onClick={() => void linkedWork.refetch()}>
+              Retry linked work
+            </Button>
+            <Button size="sm" variant="ghost" onClick={back}>
+              Back to work list
+            </Button>
+          </div>
+        </Surface>
       )}
       <div className={styles.layout}>
         <div className={styles.list}>
@@ -326,84 +452,120 @@ function DeskContent({
               </Button>
             ))}
           </nav>
-          <label className={styles.search}>
-            Search saved work
-            <input
-              type="search"
-              value={search}
-              maxLength={256}
-              onChange={(event) => {
-                setSearch(event.target.value);
-                setCursor(undefined);
-                setPrevious([]);
-                setSelectedId(null);
-              }}
-            />
-          </label>
-          <label className={styles.search}>
-            Report attention
-            <select
-              value={attention}
-              onChange={(event) => {
-                const value = event.target.value;
-                if (
-                  value !== "all" &&
-                  value !== "unread" &&
-                  value !== "snoozed" &&
-                  value !== "unsnoozed"
-                )
-                  return;
-                setAttention(value);
-                setCursor(undefined);
-                setPrevious([]);
-                setSelectedId(null);
-              }}
+          {(records.length > 0 || filtersApplied) && !error && (
+            <div className={styles.filters}>
+              <label className={styles.search}>
+                <Text size="1" color="gray">
+                  Search saved work
+                </Text>
+                <input
+                  type="search"
+                  value={search}
+                  maxLength={256}
+                  onChange={(event) => {
+                    setSearch(event.target.value);
+                    setCursor(undefined);
+                    setPrevious([]);
+                    setSelectedId(null);
+                  }}
+                />
+              </label>
+              <label className={styles.search}>
+                <Text size="1" color="gray">
+                  Report attention
+                </Text>
+                <select
+                  value={attention}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (
+                      value !== "all" &&
+                      value !== "unread" &&
+                      value !== "snoozed" &&
+                      value !== "unsnoozed"
+                    )
+                      return;
+                    setAttention(value);
+                    setCursor(undefined);
+                    setPrevious([]);
+                    setSelectedId(null);
+                  }}
+                >
+                  <option value="all">All saved work</option>
+                  <option value="unread">Unread reports</option>
+                  <option value="snoozed">Snoozed reports</option>
+                  <option value="unsnoozed">Not snoozed</option>
+                </select>
+              </label>
+            </div>
+          )}
+          {isFetching && (
+            <Text
+              as="p"
+              size="1"
+              color="gray"
+              role="status"
+              className={styles.inlineStatus}
             >
-              <option value="all">All saved work</option>
-              <option value="unread">Unread reports</option>
-              <option value="snoozed">Snoozed reports</option>
-              <option value="unsnoozed">Not snoozed</option>
-            </select>
-          </label>
-          {isFetching && <p role="status">Loading work…</p>}
+              Loading work…
+            </Text>
+          )}
           {error ? (
-            <div role="alert">
-              <p>
-                Buddy’s saved work is unavailable. Existing chat controls and
-                settings remain available below.
-              </p>
+            <Surface variant="surface-1" className={styles.note} role="alert">
+              <Text size="2" color="red">
+                Buddy could not reach your saved work.
+              </Text>
               <Button size="sm" onClick={refresh}>
                 Retry work
               </Button>
-            </div>
+            </Surface>
           ) : (
             <>
               {currentData && filtered.length === 0 && (
-                <p>
-                  No {view.toLocaleLowerCase()} items
-                  {query ? " match this search" : " match these filters"}.
-                </p>
+                <Text
+                  as="p"
+                  size="2"
+                  color="gray"
+                  className={styles.inlineStatus}
+                >
+                  {filtersApplied
+                    ? "Nothing here matches those filters."
+                    : emptyView[view]}
+                </Text>
               )}
               <ul className={styles.items}>
-                {filtered.map(({ value }) => (
-                  <li key={value.id}>
-                    <button
-                      className={styles.item}
-                      aria-current={
-                        selectedId === value.id ? "true" : undefined
-                      }
-                      onClick={(event) => {
-                        trigger.current = event.currentTarget;
-                        setSelectedId(value.id);
-                        updateLink(value);
-                      }}
-                    >
-                      <strong>{value.title}</strong>
-                      <span>{humanizeIdentifier(value.state)}</span>
-                      <span>{value.subject.resource_id}</span>
-                    </button>
-                  </li>
-                ))}
+                {filtered.map(({ value }) => {
+                  const changed = changedAt(value.last_material_change_at);
+                  return (
+                    <li key={value.id}>
+                      <button
+                        className={styles.item}
+                        aria-current={
+                          selectedId === value.id ? "true" : undefined
+                        }
+                        onClick={(event) => {
+                          trigger.current = event.currentTarget;
+                          setSelectedId(value.id);
+                          updateLink(value);
+                        }}
+                      >
+                        <Text size="2" weight="medium" className={styles.name}>
+                          {value.title}
+                        </Text>
+                        <span className={styles.itemMeta}>
+                          <Text size="1" color="gray">
+                            {humanizeIdentifier(value.state)}
+                          </Text>
+                          {changed && (
+                            <Text size="1" color="gray">
+                              {changed}
+                            </Text>
+                          )}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
               {currentData?.next_cursor != null && (
                 <Button
@@ -428,12 +590,17 @@ function DeskContent({
             onBack={back}
           />
         ) : (
-          <p className={styles.placeholder}>
-            Choose a work item to read its result and evidence.
-          </p>
+          filtered.length > 0 && (
+            <div className={styles.placeholder}>
+              <Icon icon={FileSearch} size="md" tone="muted" />
+              <Text size="2" color="gray">
+                Pick something on the left to read what Buddy found.
+              </Text>
+            </div>
+          )
         )}
       </div>
-    </section>
+    </Surface>
   );
 }
 

@@ -351,6 +351,119 @@ describe("BuddyDesk", () => {
     await waitFor(() => expect(document.activeElement).toBe(row));
   });
 
+  it("collapses to one honest line instead of empty desk chrome", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () => HttpResponse.json(envelope([]))),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    expect(
+      await screen.findByText("Nothing needs you right now."),
+    ).toBeTruthy();
+    const desk = screen.getByRole("region", { name: "Buddy Desk" });
+    expect(
+      within(desk).queryByRole("heading", { name: "Buddy Desk" }),
+    ).toBeNull();
+    expect(within(desk).queryByRole("searchbox")).toBeNull();
+    expect(
+      within(desk).queryByRole("combobox", { name: "Report attention" }),
+    ).toBeNull();
+    expect(
+      within(desk).queryByRole("button", { name: "Needs you" }),
+    ).toBeNull();
+    expect(within(desk).queryByText(/Pick something on the left/)).toBeNull();
+    fireEvent.click(
+      within(desk).getByRole("button", { name: "Browse saved work" }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Needs you" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Buddy Desk" })).toBeTruthy();
+    expect(screen.queryByRole("searchbox")).toBeNull();
+  });
+
+  it("keeps the desk expanded for a deep link even when the list is empty", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () => HttpResponse.json(envelope([]))),
+      http.get("*/v1/buddy/work/work-1", () =>
+        HttpResponse.json(envelope(record(item))),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+    );
+    render(<BuddyDesk workId={item.id} projectId={project.project_id} />, {
+      preloadedState: config,
+    });
+    expect(await screen.findByText("The token has expired.")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Buddy Desk" })).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Browse saved work" }),
+    ).toBeNull();
+  });
+
+  it("reports a failed request rather than collapsing as if there were no work", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json({ detail: "unavailable" }, { status: 503 }),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Buddy could not reach your saved work.",
+    );
+    expect(screen.queryByText("Nothing needs you right now.")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Buddy Desk" })).toBeTruthy();
+    expect(screen.queryByRole("searchbox")).toBeNull();
+  });
+
+  it("keeps internal resource identifiers out of the work rows", async () => {
+    const digest = `producer:${"a1b2c3d4".repeat(8)}`;
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(
+          envelope([
+            record({
+              ...item,
+              subject: { ...item.subject, resource_id: digest },
+            }),
+          ]),
+        ),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    const row = await screen.findByRole("button", {
+      name: /Provider setup diagnosis/,
+    });
+    expect(row).not.toHaveTextContent(digest);
+    expect(row).toHaveTextContent("Needs attention");
+    fireEvent.click(row);
+    const detail = within(screen.getByRole("article", { name: "Work detail" }));
+    expect(detail.getByText("Needs attention")).toBeTruthy();
+    expect(screen.queryByText(new RegExp(digest))).toBeNull();
+  });
+
+  it("does not offer a report placeholder when the current view has nothing to pick", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record({ ...item, state: "delivered" })])),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(await screen.findByRole("button", { name: "Delivered" }));
+    expect(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    ).toBeTruthy();
+    expect(screen.getByText(/Pick something on the left/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Watching" }));
+    expect(
+      await screen.findByText("Nothing is being watched right now."),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Pick something on the left/)).toBeNull();
+  });
+
   it("shows unavailable rather than an empty successful result", async () => {
     server.use(
       http.get("*/v1/buddy/work", () =>

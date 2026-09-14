@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
-import { Button } from "../../components/ui";
+import { Zap } from "lucide-react";
+import { Button, Surface, Text } from "../../components/ui";
 import {
   useGetBuddyDeskActionsQuery,
   useExecuteBuddyDeskActionMutation,
@@ -13,8 +14,10 @@ import type {
   WorkItem,
 } from "./operatorTypes";
 import { humanizeIdentifier } from "../../utils/displayNames";
+import { BuddySectionHeader } from "./BuddySectionHeader";
 import { BuddyResourceAction } from "./BuddyResourceAction";
 import { buddyRegisteredActionHandler } from "./executeBuddyAction";
+import styles from "./BuddyDeskActions.module.css";
 
 function ActionControl({
   action,
@@ -96,29 +99,50 @@ function ActionControl({
     }
   };
   return (
-    <section aria-label={action.label}>
-      <p>{action.description}</p>
+    <section className={styles.action} aria-label={action.label}>
+      <Text as="p" size="2" className={styles.description}>
+        {action.description}
+      </Text>
       <Button
         size="sm"
+        variant="primary"
         disabled={disabled || pending || !available}
         onClick={() => void run()}
       >
         {pending ? "Checking saved evidence…" : action.label}
       </Button>
-      {!supported && <p>This action type is not supported by this client.</p>}
-      {error && <p role="alert">{error}</p>}
+      {!supported && (
+        <Text as="p" size="1" color="gray" className={styles.description}>
+          This action type is not supported by this client.
+        </Text>
+      )}
+      {error && (
+        <Text as="p" size="1" color="red" role="alert">
+          {error}
+        </Text>
+      )}
       {latest && (
-        <div role="status">
-          <p>Saved check: {humanizeIdentifier(latest.status)}</p>
-          <ul>
+        <div role="status" className={styles.receipt}>
+          <Text as="p" size="1" weight="medium" className={styles.description}>
+            Saved check: {humanizeIdentifier(latest.status)}
+          </Text>
+          <ul className={styles.evidence}>
             {latest.verification_evidence.map((evidence, index) => (
-              <li key={index}>{evidence}</li>
+              <li key={index}>
+                <Text size="1" color="gray">
+                  {evidence}
+                </Text>
+              </li>
             ))}
           </ul>
-          <details>
-            <summary>Execution receipt</summary>
-            <p>{latest.execution_id}</p>
-            <p>{latest.ended_at ?? "No terminal observation recorded yet."}</p>
+          <details className={styles.disclosure}>
+            <summary className={styles.summary}>Execution receipt</summary>
+            <Text as="p" size="1" color="gray" className={styles.description}>
+              {latest.execution_id}
+            </Text>
+            <Text as="p" size="1" color="gray" className={styles.description}>
+              {latest.ended_at ?? "No terminal observation recorded yet."}
+            </Text>
           </details>
         </div>
       )}
@@ -154,15 +178,41 @@ export function BuddyDeskActions({
       action.artifact_revision === artifact.revision &&
       action.spec.project.canonical_root === item.project.canonical_root,
   );
+  const returned = currentData?.data.length ?? 0;
+  const stale = !isFetching && !error && returned > 0 && actions?.length === 0;
+  const proposals = artifact.proposed_action_ids.length > 0;
+  if (!error && !isFetching && !stale && (actions?.length ?? 0) === 0) {
+    return proposals ? (
+      <Text as="p" size="1" color="gray" className={styles.footnote}>
+        Buddy only describes what it found; no proposed fix is applied
+        automatically.
+      </Text>
+    ) : null;
+  }
   return (
-    <section aria-label="Registered actions">
-      <h4>Registered actions</h4>
-      {isFetching && <p role="status">Loading current actions…</p>}
+    <Surface
+      as="section"
+      variant="surface-1"
+      radius="card"
+      className={styles.panel}
+      aria-label="Registered actions"
+    >
+      <BuddySectionHeader icon={Zap} label="What you can do" />
+      {isFetching && (
+        <Text as="p" size="1" color="gray" role="status">
+          Loading current actions…
+        </Text>
+      )}
       {error && (
-        <p role="alert">
-          Registered actions could not be loaded. Saved execution status is
-          unavailable.
-        </p>
+        <div role="alert" className={styles.alert}>
+          <Text as="p" size="2" color="red">
+            Registered actions could not be loaded. Saved execution status is
+            unavailable.
+          </Text>
+          <Button size="sm" onClick={() => void refetch()}>
+            Retry actions
+          </Button>
+        </div>
       )}
       {!error &&
         actions?.map((action) =>
@@ -186,23 +236,27 @@ export function BuddyDeskActions({
             />
           ),
         )}
-      {!isFetching && !error && actions?.length === 0 && (
-        <p>No registered actions are available for this report revision.</p>
+      {stale && (
+        <Text as="p" size="2" color="gray" className={styles.description}>
+          No registered actions are available for this report revision.
+        </Text>
       )}
-      <Button
-        size="sm"
-        variant="ghost"
-        disabled={isFetching}
-        onClick={() => void refetch()}
-      >
-        Reload action status
-      </Button>
-      {artifact.proposed_action_ids.length > 0 && (
-        <p>
-          Report proposals are not executable instructions. Only registered
-          controls above can run; no proposed fix is applied automatically.
-        </p>
+      {!error && (
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={isFetching}
+          onClick={() => void refetch()}
+        >
+          Reload action status
+        </Button>
       )}
-    </section>
+      {proposals && (
+        <Text as="p" size="1" color="gray" className={styles.footnote}>
+          Buddy only describes what it found; no proposed fix is applied
+          automatically.
+        </Text>
+      )}
+    </Surface>
   );
 }

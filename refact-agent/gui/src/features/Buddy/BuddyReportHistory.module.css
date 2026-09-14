@@ -1,0 +1,80 @@
+.history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.disclosure {
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-control);
+  min-width: 0;
+}
+
+.summary {
+  padding: var(--rf-space-2) var(--rf-space-3);
+  cursor: pointer;
+  font-size: var(--rf-font-size-1);
+  color: var(--rf-color-muted);
+  border-radius: var(--rf-radius-control);
+  overflow-wrap: anywhere;
+}
+
+.summary:focus-visible {
+  outline: var(--rf-hairline) solid var(--rf-color-accent);
+  outline-offset: var(--rf-space-1);
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--rf-space-2);
+  padding: 0 var(--rf-space-3) var(--rf-space-3);
+  min-width: 0;
+}
+
+.body p {
+  margin: 0;
+}
+
+.runRow {
+  max-width: 100%;
+  min-width: 0;
+  justify-content: flex-start;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+
+.run {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-control);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.run p {
+  margin: 0;
+}
+
+.heading {
+  margin: var(--rf-space-1) 0 0;
+  font-size: var(--rf-font-size-1);
+  font-weight: var(--rf-weight-semibold);
+  color: var(--rf-color-fg);
+}
+
+.effects {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+}

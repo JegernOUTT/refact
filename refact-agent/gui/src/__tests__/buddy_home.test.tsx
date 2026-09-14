@@ -320,7 +320,7 @@ describe("BuddyHome single work authority", () => {
       store.dispatch(push({ name: "buddy", draftId: "expired" }));
       const { user } = render(<BuddyHome />, { store });
       if (mode === "enabled")
-        await screen.findByRole("heading", { name: "Buddy Desk" });
+        await screen.findByRole("region", { name: "Buddy Desk" });
       else await screen.findByRole("button", { name: "Retry work authority" });
       for (const name of [
         "Opportunities",
@@ -1594,8 +1594,14 @@ describe("BuddyHome_layout_contract", () => {
 
       if (mode === "enabled") {
         expect(
-          await screen.findByRole("heading", { name: "Buddy Desk" }),
+          await screen.findByText("Nothing needs you right now."),
         ).toBeInTheDocument();
+        const desk = screen.getByRole("region", { name: "Buddy Desk" });
+        expect(desk).toBeInTheDocument();
+        expect(
+          within(desk).queryByRole("heading", { name: "Buddy Desk" }),
+        ).toBeNull();
+        expect(within(desk).queryByRole("searchbox")).toBeNull();
       }
       const retry = screen.queryByRole("button", {
         name: "Retry work authority",
