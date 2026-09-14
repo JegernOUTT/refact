@@ -8,10 +8,9 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::ContextEnum;
 use crate::tools::tools_description::{
-    MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolConfig, ToolDesc, ToolGroupCategory,
-    ToolSource, ToolSourceType,
+    MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolConfig, ToolDesc, ToolSource,
+    ToolSourceType,
 };
-use crate::tools::tools_list::get_integration_tools;
 
 pub struct ToolMcpCall {}
 
@@ -48,7 +47,7 @@ fn extract_proxy_args(args: &HashMap<String, Value>) -> Result<HashMap<String, V
 /// Some provider adapters strip the literal "mcp_" prefix from every piece of text the
 /// model sees (the Claude Code adapter does this for billing-detection reasons), so the
 /// model can only echo back the stripped form in `tool_name`. Accept both spellings.
-fn mcp_tool_name_matches(registered: &str, requested: &str) -> bool {
+pub(crate) fn mcp_tool_name_matches(registered: &str, requested: &str) -> bool {
     registered == requested
         || registered.strip_prefix("mcp_") == Some(requested)
         || requested.strip_prefix("mcp_") == Some(registered)
@@ -118,23 +117,9 @@ impl Tool for ToolMcpCall {
         let tool_args = extract_proxy_args(args).unwrap_or_default();
 
         let gcx = ccx.lock().await.app.gcx.clone();
-        let mut integration_groups = get_integration_tools(gcx.clone()).await;
-
-        // Move the tool out of the groups so it can be awaited safely.
-        let mut found_tool: Option<Box<dyn Tool + Send>> = None;
-        'outer: for group in &mut integration_groups {
-            if !matches!(group.category, ToolGroupCategory::MCP) {
-                continue;
-            }
-            if let Some(pos) = group
-                .tools
-                .iter()
-                .position(|t| mcp_tool_name_matches(&t.tool_description().name, &tool_name))
-            {
-                found_tool = Some(group.tools.remove(pos));
-                break 'outer;
-            }
-        }
+        let found_tool =
+            crate::tools::tools_list::get_integration_mcp_tool_by_name(gcx.clone(), &tool_name)
+                .await;
 
         match found_tool {
             Some(tool) => {
@@ -181,23 +166,9 @@ impl Tool for ToolMcpCall {
         let tool_args = extract_proxy_args(args)?;
 
         let gcx = ccx.lock().await.app.gcx.clone();
-        let mut integration_groups = get_integration_tools(gcx.clone()).await;
-
-        // Find the named MCP tool and extract it (needs &mut self for tool_execute).
-        let mut found_tool: Option<Box<dyn Tool + Send>> = None;
-        'outer: for group in &mut integration_groups {
-            if !matches!(group.category, ToolGroupCategory::MCP) {
-                continue;
-            }
-            if let Some(pos) = group
-                .tools
-                .iter()
-                .position(|t| mcp_tool_name_matches(&t.tool_description().name, &tool_name))
-            {
-                found_tool = Some(group.tools.remove(pos));
-                break 'outer;
-            }
-        }
+        let found_tool =
+            crate::tools::tools_list::get_integration_mcp_tool_by_name(gcx.clone(), &tool_name)
+                .await;
 
         let mut tool = found_tool.ok_or_else(|| {
             format!(

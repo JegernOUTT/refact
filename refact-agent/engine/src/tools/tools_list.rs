@@ -932,6 +932,76 @@ async fn get_config_subagent_tools(gcx: Arc<GlobalContext>) -> ToolGroup {
     }
 }
 
+enum McpToolQuery<'a> {
+    ByName(&'a str),
+    All,
+}
+
+async fn collect_mcp_integration_tools(
+    gcx: Arc<GlobalContext>,
+    query: McpToolQuery<'_>,
+) -> Vec<Box<dyn Tool + Send>> {
+    let span = perf_diagnostics::span(PerfComponent::ToolIntegrationToolsBuild, None, None);
+    let integrations_map = load_integrations_cached(gcx.clone()).await;
+    let is_available = tool_available_from_gcx(gcx.clone()).await;
+
+    let mut integr_names: Vec<&String> = integrations_map.keys().collect();
+    integr_names.sort();
+
+    let mut collected: Vec<(String, Box<dyn Tool + Send>)> = vec![];
+    'outer: for integr_name in integr_names {
+        let integr = match integrations_map.get(integr_name) {
+            Some(integr) => integr,
+            None => continue,
+        };
+        for tool in integr.integr_tools(integr_name).await {
+            let tool_desc = tool.tool_description();
+            if !tool_desc.name.starts_with("mcp") || !is_available(&tool) {
+                continue;
+            }
+            let server = std::path::Path::new(&tool_desc.source.config_path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            match query {
+                McpToolQuery::ByName(requested) => {
+                    if crate::tools::tool_mcp_call::mcp_tool_name_matches(
+                        &tool_desc.name,
+                        requested,
+                    ) {
+                        collected.push((server, tool));
+                        break 'outer;
+                    }
+                }
+                McpToolQuery::All => collected.push((server, tool)),
+            }
+        }
+    }
+
+    collected.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let tools: Vec<Box<dyn Tool + Send>> = collected.into_iter().map(|(_, tool)| tool).collect();
+    span.finish_tool(PerfOutcome::Success, 1, tools.len() as u64, None);
+    tools
+}
+
+/// Resolve a single MCP tool by the name the model used, stopping at the first integration
+/// that provides it instead of materialising every MCP tool box.
+pub async fn get_integration_mcp_tool_by_name(
+    gcx: Arc<GlobalContext>,
+    tool_name: &str,
+) -> Option<Box<dyn Tool + Send>> {
+    collect_mcp_integration_tools(gcx, McpToolQuery::ByName(tool_name))
+        .await
+        .pop()
+}
+
+/// Every available MCP tool as a flat list, ordered by server the same way
+/// `get_integration_tools` groups them.
+pub async fn get_integration_mcp_tools(gcx: Arc<GlobalContext>) -> Vec<Box<dyn Tool + Send>> {
+    collect_mcp_integration_tools(gcx, McpToolQuery::All).await
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1027,6 +1097,7 @@ mod tests {
     struct TestIntegration {
         state: IntegrationTestState,
         config_path: String,
+        tool_names: Vec<String>,
     }
 
     #[async_trait::async_trait]
@@ -1053,24 +1124,29 @@ mod tests {
             Default::default()
         }
 
-        async fn integr_tools(&self, integr_name: &str) -> Vec<Box<dyn Tool + Send>> {
+        async fn integr_tools(&self, _integr_name: &str) -> Vec<Box<dyn Tool + Send>> {
             let build_number = self.state.tool_builds.fetch_add(1, Ordering::SeqCst);
-            vec![Box::new(IntegrationTestTool {
-                desc: ToolDesc {
-                    name: format!("{integr_name}_tool"),
-                    experimental: false,
-                    allow_parallel: true,
-                    description: format!("build {build_number}"),
-                    input_schema: serde_json::json!({"type":"object"}),
-                    output_schema: None,
-                    annotations: None,
-                    display_name: format!("{integr_name}_tool"),
-                    source: ToolSource {
-                        source_type: ToolSourceType::Integration,
-                        config_path: self.config_path.clone(),
-                    },
-                },
-            })]
+            self.tool_names
+                .iter()
+                .map(|tool_name| {
+                    Box::new(IntegrationTestTool {
+                        desc: ToolDesc {
+                            name: tool_name.clone(),
+                            experimental: false,
+                            allow_parallel: true,
+                            description: format!("build {build_number}"),
+                            input_schema: serde_json::json!({"type":"object"}),
+                            output_schema: None,
+                            annotations: None,
+                            display_name: tool_name.clone(),
+                            source: ToolSource {
+                                source_type: ToolSourceType::Integration,
+                                config_path: self.config_path.clone(),
+                            },
+                        },
+                    }) as Box<dyn Tool + Send>
+                })
+                .collect()
         }
     }
 
@@ -1091,21 +1167,25 @@ mod tests {
         gcx
     }
 
-    async fn with_test_integration_factory<T>(
+    async fn with_test_integrations<T>(
         config_dir: PathBuf,
         state: IntegrationTestState,
+        specs: Vec<(String, Vec<String>)>,
         f: impl std::future::Future<Output = T>,
     ) -> T {
         let factory: TestIntegrationFactory = Arc::new(move |_gcx: Arc<GlobalContext>| {
             state.loads.fetch_add(1, Ordering::SeqCst);
             let mut integrations: LoadedIntegrations = indexmap::IndexMap::new();
-            integrations.insert(
-                "cmdline".to_string(),
-                Box::new(TestIntegration {
-                    state: state.clone(),
-                    config_path: "cmdline.yaml".to_string(),
-                }),
-            );
+            for (integr_name, tool_names) in &specs {
+                integrations.insert(
+                    integr_name.clone(),
+                    Box::new(TestIntegration {
+                        state: state.clone(),
+                        config_path: format!("{integr_name}.yaml"),
+                        tool_names: tool_names.clone(),
+                    }),
+                );
+            }
             (integrations, Vec::new())
         });
         test_integration_factory()
@@ -1115,6 +1195,20 @@ mod tests {
         let result = f.await;
         test_integration_factory().lock().await.remove(&config_dir);
         result
+    }
+
+    async fn with_test_integration_factory<T>(
+        config_dir: PathBuf,
+        state: IntegrationTestState,
+        f: impl std::future::Future<Output = T>,
+    ) -> T {
+        with_test_integrations(
+            config_dir,
+            state,
+            vec![("cmdline".to_string(), vec!["cmdline_tool".to_string()])],
+            f,
+        )
+        .await
     }
 
     #[async_trait::async_trait]
@@ -1238,6 +1332,144 @@ mod tests {
 
         assert_eq!(state.loads.load(Ordering::SeqCst), 2);
         assert_eq!(state.tool_builds.load(Ordering::SeqCst), 3);
+    }
+
+    fn counting_state() -> IntegrationTestState {
+        IntegrationTestState {
+            loads: Arc::new(AtomicUsize::new(0)),
+            tool_builds: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn mcp_integration_specs() -> Vec<(String, Vec<String>)> {
+        vec![
+            (
+                "alpha".to_string(),
+                vec!["mcp_alpha_one".to_string(), "mcp_alpha_two".to_string()],
+            ),
+            ("beta".to_string(), vec!["mcp_beta_one".to_string()]),
+            ("plain".to_string(), vec!["plain_shell".to_string()]),
+            ("zeta".to_string(), vec!["mcp_zeta_one".to_string()]),
+        ]
+    }
+
+    #[tokio::test]
+    async fn call_builds_integration_tools_once_per_invocation() {
+        let state = counting_state();
+        let gcx = integration_test_gcx().await;
+
+        with_test_integrations(
+            gcx.config_dir.clone(),
+            state.clone(),
+            mcp_integration_specs(),
+            async {
+                let confirmation =
+                    get_integration_mcp_tool_by_name(gcx.clone(), "mcp_alpha_one").await;
+                let execution =
+                    get_integration_mcp_tool_by_name(gcx.clone(), "mcp_alpha_one").await;
+                assert!(confirmation.is_some());
+                assert!(execution.is_some());
+            },
+        )
+        .await;
+
+        assert_eq!(state.tool_builds.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn call_confirmation_and_execution_see_same_tool() {
+        let state = counting_state();
+        let gcx = integration_test_gcx().await;
+
+        with_test_integrations(
+            gcx.config_dir.clone(),
+            state.clone(),
+            mcp_integration_specs(),
+            async {
+                let confirmation = get_integration_mcp_tool_by_name(gcx.clone(), "mcp_beta_one")
+                    .await
+                    .expect("confirmation resolves the tool");
+                let execution = get_integration_mcp_tool_by_name(gcx.clone(), "mcp_beta_one")
+                    .await
+                    .expect("execution resolves the tool");
+                let stripped = get_integration_mcp_tool_by_name(gcx.clone(), "beta_one")
+                    .await
+                    .expect("prefix-stripped spelling resolves the tool");
+
+                let confirmation = confirmation.tool_description();
+                let execution = execution.tool_description();
+                let stripped = stripped.tool_description();
+
+                assert_eq!(confirmation.name, "mcp_beta_one");
+                assert_eq!(execution.name, confirmation.name);
+                assert_eq!(
+                    execution.source.config_path,
+                    confirmation.source.config_path
+                );
+                assert_eq!(execution.input_schema, confirmation.input_schema);
+                assert_eq!(stripped.name, confirmation.name);
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn call_handles_missing_tool_and_disconnected_session() {
+        let state = counting_state();
+        let gcx = integration_test_gcx().await;
+        let specs = vec![
+            ("alpha".to_string(), vec![]),
+            ("zeta".to_string(), vec!["mcp_zeta_one".to_string()]),
+        ];
+
+        with_test_integrations(gcx.config_dir.clone(), state.clone(), specs, async {
+            assert!(
+                get_integration_mcp_tool_by_name(gcx.clone(), "mcp_alpha_one")
+                    .await
+                    .is_none()
+            );
+            assert!(get_integration_mcp_tool_by_name(gcx.clone(), "mcp_nope")
+                .await
+                .is_none());
+
+            let survivor = get_integration_mcp_tool_by_name(gcx.clone(), "mcp_zeta_one").await;
+            assert_eq!(
+                survivor.map(|tool| tool.tool_description().name),
+                Some("mcp_zeta_one".to_string())
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn search_resolves_without_full_rebuild() {
+        let state = counting_state();
+        let gcx = integration_test_gcx().await;
+
+        with_test_integrations(
+            gcx.config_dir.clone(),
+            state.clone(),
+            mcp_integration_specs(),
+            async {
+                let names: Vec<String> = get_integration_mcp_tools(gcx.clone())
+                    .await
+                    .iter()
+                    .map(|tool| tool.tool_description().name)
+                    .collect();
+                assert_eq!(
+                    names,
+                    vec![
+                        "mcp_alpha_one",
+                        "mcp_alpha_two",
+                        "mcp_beta_one",
+                        "mcp_zeta_one"
+                    ]
+                );
+            },
+        )
+        .await;
+
+        assert_eq!(state.tool_builds.load(Ordering::SeqCst), 4);
     }
 
     #[test]
