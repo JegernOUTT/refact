@@ -1691,11 +1691,23 @@ describe("BuddyHome_layout_contract", () => {
     expect(readCssBlock(css, ".tabs .tabsList")).toContain(
       "grid-auto-columns: minmax(max-content, 1fr)",
     );
+    const heroScene = readCssBlock(
+      css,
+      '.heroCard.heroCard [data-testid="buddy-world"]',
+    );
+    expect(heroScene).toContain("height: clamp(180px, 22vh, 240px)");
+    expect(heroScene).toContain("padding: 0");
     expect(
-      readCssBlock(css, '.heroCard [data-testid="buddy-world"]'),
-    ).toContain("height: clamp(180px, 24vh, 260px)");
+      readCssBlock(
+        css,
+        '.heroCard.heroCard [data-testid="buddy-world-canvas"]',
+      ),
+    ).toContain("height: 100%");
     expect(
-      readCssBlock(css, '.heroCardExpanded [data-testid="buddy-world"]'),
+      readCssBlock(
+        css,
+        '.heroCardExpanded.heroCardExpanded [data-testid="buddy-world"]',
+      ),
     ).toContain("height: clamp(280px, 38vh, 430px)");
   });
 });
