@@ -24,6 +24,7 @@ import { BuddyRecentChats } from "./BuddyRecentChats";
 import { BuddyPulseCard } from "./BuddyPulseCard";
 import { BuddyOpportunitiesFeed } from "./BuddyOpportunitiesFeed";
 import { BuddySettingsPanel } from "./BuddySettingsPanel";
+import { BuddyAppliedChangesCard } from "./BuddyAppliedChangesCard";
 import { BuddyWorld } from "./BuddyWorld";
 import { BuddyErrorBoundary } from "./BuddyErrorBoundary";
 import { BuddySummaryStrip } from "./BuddySummaryStrip";
@@ -1323,6 +1324,7 @@ const BuddyHomeContent: React.FC = () => {
                 onToggleProactive={handleSettings}
                 onPromptChange={(prompt) => void handlePromptChange(prompt)}
               />
+              <BuddyAppliedChangesCard />
               <BuddySettingsPanel />
             </div>
           </Tabs.Content>

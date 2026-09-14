@@ -1516,6 +1516,73 @@ describe("BuddyHome_renders_all_sections", () => {
     expect(settingsSection).toBeInTheDocument();
     expect(settingsSection).not.toHaveAttribute("style");
   });
+
+  it("reaches the undo surface for applied changes through the settings tab", async () => {
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+    server.use(
+      http.get("*/v1/buddy/opportunities", () =>
+        HttpResponse.json({
+          opportunities: [
+            {
+              id: "opp-dup-guard",
+              kind: "memory_ops_batch",
+              priority: "normal",
+              summary: "Merge 12 near-duplicate memories",
+              detail: "",
+              confidence: 0.9,
+              actions: [],
+              created_at: "2026-07-03T06:00:00Z",
+            },
+          ],
+        }),
+      ),
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
+      http.get("*/v1/stats/llm/summary", () =>
+        HttpResponse.json({
+          totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
+        }),
+      ),
+      http.get("*/v1/setup/status", () =>
+        HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+      ),
+      http.get("*/v1/buddy/receipts", () =>
+        HttpResponse.json({
+          receipts: [
+            {
+              id: "receipt-1",
+              action_kind: "apply_config_patch",
+              target_path: ".refact/knowledge/handbook/testing.md",
+              pre_image: null,
+              created_at: "2026-07-03T06:00:00Z",
+              undone: false,
+            },
+          ],
+        }),
+      ),
+    );
+
+    const { user } = render(<BuddyHome />, { store });
+
+    await screen.findByTestId("buddy-home-content");
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
+
+    const settingsSection = await screen.findByTestId(
+      "buddy-home-settings-section",
+    );
+    const appliedChanges = await screen.findByTestId(
+      "buddy-applied-changes-card",
+    );
+    expect(settingsSection).toContainElement(appliedChanges);
+    expect(
+      screen.getByRole("button", {
+        name: "Undo .refact/knowledge/handbook/testing.md",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Merge 12 near-duplicate memories"),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("BuddyHome_layout_contract", () => {

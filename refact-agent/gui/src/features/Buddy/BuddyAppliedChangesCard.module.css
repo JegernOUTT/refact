@@ -11,12 +11,6 @@
   min-width: 0;
 }
 
-.section {
-  display: grid;
-  gap: var(--rf-space-1);
-  min-width: 0;
-}
-
 .row {
   display: flex;
   align-items: center;
@@ -25,15 +19,14 @@
 }
 
 .rowText {
+  display: grid;
   flex: 1;
+  gap: var(--rf-space-1);
   min-width: 0;
+}
+
+.path {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.statsRow {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--rf-space-3);
 }
