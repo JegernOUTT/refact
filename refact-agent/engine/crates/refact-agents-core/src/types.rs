@@ -35,13 +35,16 @@ pub enum BgAgentStatus {
     Failed,
     Cancelled,
     Interrupted,
+    /// Deliberately closed by its parent: terminal, but the saved child can be
+    /// resumed at the next generation.
+    Closed,
 }
 
 impl BgAgentStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted | Self::Closed
         )
     }
 
@@ -54,8 +57,24 @@ impl BgAgentStatus {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::Interrupted => "interrupted",
+            Self::Closed => "closed",
         }
     }
+}
+
+/// The outcome of one finished generation, preserved when the same child is
+/// closed, resumed or asked for a continued turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentRunOutcome {
+    pub run_generation: u64,
+    pub status: BgAgentStatus,
+    pub step_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
 }
 
 pub type AgentQuestion = refact_chat_api::QuestionContract;
@@ -144,6 +163,13 @@ pub struct BackgroundAgent {
     pub dropped_deliveries: Vec<DeliveryStatusRecord>,
     #[serde(default)]
     pub deferred_at: Option<DateTime<Utc>>,
+    /// Why the parent closed this child; set only while the record is closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_reason: Option<String>,
+    /// Outcomes of earlier generations, oldest first; bounded by
+    /// `agent_closed_retained_max`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_runs: Vec<AgentRunOutcome>,
     pub model: String,
     #[serde(default)]
     pub model_type: Option<String>,

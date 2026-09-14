@@ -69,7 +69,8 @@ fn record_terminal_timestamp(record: &BackgroundAgent) -> Option<DateTime<Utc>> 
         BgAgentStatus::Completed
         | BgAgentStatus::Failed
         | BgAgentStatus::Cancelled
-        | BgAgentStatus::Interrupted => record.finished_at.or(Some(record.last_update_at)),
+        | BgAgentStatus::Interrupted
+        | BgAgentStatus::Closed => record.finished_at.or(Some(record.last_update_at)),
         _ => None,
     };
     finished
@@ -661,6 +662,8 @@ mod tests {
             completion_message_id: None,
             completion_pushed_at: None,
             deferred_at: None,
+            close_reason: None,
+            previous_runs: Vec::new(),
             completion_push: Default::default(),
             pending_deliveries: Vec::new(),
             delivery_ids: Vec::new(),

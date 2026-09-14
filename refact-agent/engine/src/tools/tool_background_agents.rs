@@ -42,7 +42,16 @@ pub struct ToolAgentResume {
 #[derive(Debug, PartialEq, Eq)]
 enum AgentResumeAction {
     Inspect,
+    Close {
+        expected_run_generation: Option<u64>,
+        reason: Option<String>,
+    },
     Resume {
+        expected_change_seq: u64,
+        instruction: Option<String>,
+        reconcile_incomplete: bool,
+    },
+    ContinueTurn {
         expected_change_seq: u64,
         instruction: Option<String>,
         reconcile_incomplete: bool,
@@ -53,29 +62,83 @@ enum AgentResumeAction {
     },
 }
 
+/// What a lifecycle call actually did. Kept separate from the record's status
+/// so a request to continue can never be reported as a completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifecycleOutcome {
+    Inspected,
+    Closed,
+    AlreadyClosed,
+    Queued,
+}
+
+impl LifecycleOutcome {
+    /// True only when the call changed the child's lifecycle right now.
+    fn accepted(self) -> bool {
+        matches!(self, LifecycleOutcome::Closed | LifecycleOutcome::Queued)
+    }
+
+    /// The state to report. An accepted continuation is queued: the agent is
+    /// running again only once its new generation starts, and the previous
+    /// completion is never presented as this call's result.
+    fn state(self, status: BgAgentStatus) -> &'static str {
+        match self {
+            LifecycleOutcome::Queued => BgAgentStatus::Queued.as_str(),
+            LifecycleOutcome::Closed | LifecycleOutcome::AlreadyClosed => {
+                BgAgentStatus::Closed.as_str()
+            }
+            LifecycleOutcome::Inspected => status.as_str(),
+        }
+    }
+
+    fn summary(self) -> &'static str {
+        match self {
+            LifecycleOutcome::Inspected => {
+                "Child inspected; no limits, lifecycle or execution state changed."
+            }
+            LifecycleOutcome::Closed => {
+                "Child closed. It holds no execution slot; its history, goal and plan stay resumable."
+            }
+            LifecycleOutcome::AlreadyClosed => {
+                "Child was already closed. Nothing changed."
+            }
+            LifecycleOutcome::Queued => {
+                "Continuation accepted and queued on the same child. This is NOT a completion: the child has not run yet, and any earlier result stands unchanged until the new generation reports."
+            }
+        }
+    }
+}
+
 fn agent_resume_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
             "agent_id": {"type": "string", "minLength": 1},
-            "action": {"type": "string", "enum": ["inspect", "raise_and_resume", "resume"]},
-            "instruction": {"type": "string", "minLength": 1, "description": "Optional exact parent follow-up for resume; appended after preserved child history."},
-            "reconcile_incomplete": {"type": "boolean", "default": false, "description": "For resume only: explicitly acknowledge missing tool outcomes as unknown without replaying calls. Inspect side effects before enabling."},
+            "action": {"type": "string", "enum": ["inspect", "close", "raise_and_resume", "resume", "continue"]},
+            "instruction": {"type": "string", "minLength": 1, "description": "Optional exact parent follow-up for resume or continue; appended after preserved child history."},
+            "reconcile_incomplete": {"type": "boolean", "default": false, "description": "For resume or continue only: explicitly acknowledge missing tool outcomes as unknown without replaying calls. Inspect side effects before enabling."},
+            "reason": {"type": "string", "minLength": 1, "description": "For close only: why this child is being closed."},
+            "expected_run_generation": {
+                "type": "integer", "minimum": 1,
+                "description": "For close only: refuse if the child already moved to another generation."
+            },
             "max_steps": {
                 "type": "integer", "minimum": 1,
                 "description": "New per-child total step cap, required for raise_and_resume. Must increase the stopped cap without exceeding the Settings ceiling."
             },
             "expected_change_seq": {
                 "type": "integer", "minimum": 1,
-                "description": "Exact change_seq returned by inspect, required for any resume."
+                "description": "Exact change_seq returned by inspect, required for any resume or continue."
             }
         },
         "required": ["agent_id", "action"],
         "oneOf": [
-            {"properties": {"action": {"const": "inspect"}}, "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["expected_change_seq"]}, {"required": ["instruction"]}, {"required": ["reconcile_incomplete"]}]}},
-            {"properties": {"action": {"const": "raise_and_resume"}}, "required": ["max_steps", "expected_change_seq"], "not": {"anyOf": [{"required": ["instruction"]}, {"required": ["reconcile_incomplete"]}]}},
-            {"properties": {"action": {"const": "resume"}}, "required": ["expected_change_seq"], "not": {"required": ["max_steps"]}}
+            {"properties": {"action": {"const": "inspect"}}, "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["expected_change_seq"]}, {"required": ["instruction"]}, {"required": ["reconcile_incomplete"]}, {"required": ["reason"]}, {"required": ["expected_run_generation"]}]}},
+            {"properties": {"action": {"const": "close"}}, "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["expected_change_seq"]}, {"required": ["instruction"]}, {"required": ["reconcile_incomplete"]}]}},
+            {"properties": {"action": {"const": "raise_and_resume"}}, "required": ["max_steps", "expected_change_seq"], "not": {"anyOf": [{"required": ["instruction"]}, {"required": ["reconcile_incomplete"]}, {"required": ["reason"]}, {"required": ["expected_run_generation"]}]}},
+            {"properties": {"action": {"const": "resume"}}, "required": ["expected_change_seq"], "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["reason"]}, {"required": ["expected_run_generation"]}]}},
+            {"properties": {"action": {"const": "continue"}}, "required": ["expected_change_seq"], "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["reason"]}, {"required": ["expected_run_generation"]}]}}
         ]
     })
 }
@@ -92,13 +155,59 @@ fn parse_agent_resume_args(
                 | "expected_change_seq"
                 | "instruction"
                 | "reconcile_incomplete"
+                | "reason"
+                | "expected_run_generation"
         ) {
             return Err(format!("Unknown argument '{key}'"));
         }
     }
     let agent_id = parse_required_string(args, "agent_id")?;
+    let optional_instruction = |args: &HashMap<String, Value>| -> Result<Option<String>, String> {
+        args.get("instruction")
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|text| !text.trim().is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| "instruction must be a non-empty string".to_string())
+            })
+            .transpose()
+    };
+    let optional_reconcile = |args: &HashMap<String, Value>| -> Result<bool, String> {
+        Ok(args
+            .get("reconcile_incomplete")
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or("reconcile_incomplete must be a boolean")
+            })
+            .transpose()?
+            .unwrap_or(false))
+    };
+    let required_change_seq = |args: &HashMap<String, Value>| -> Result<u64, String> {
+        args.get("expected_change_seq")
+            .and_then(Value::as_u64)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| "expected_change_seq must be a positive integer".to_string())
+    };
     let action = match args.get("action").and_then(Value::as_str) {
         Some("inspect") => {
+            if [
+                "max_steps",
+                "expected_change_seq",
+                "instruction",
+                "reconcile_incomplete",
+                "reason",
+                "expected_run_generation",
+            ]
+            .iter()
+            .any(|key| args.contains_key(*key))
+            {
+                return Err("inspect does not accept mutation fields".to_string());
+            }
+            AgentResumeAction::Inspect
+        }
+        Some("close") => {
             if [
                 "max_steps",
                 "expected_change_seq",
@@ -108,9 +217,41 @@ fn parse_agent_resume_args(
             .iter()
             .any(|key| args.contains_key(*key))
             {
-                return Err("inspect does not accept mutation fields".to_string());
+                return Err("close only accepts reason and expected_run_generation".to_string());
             }
-            AgentResumeAction::Inspect
+            AgentResumeAction::Close {
+                expected_run_generation: args
+                    .get("expected_run_generation")
+                    .map(|value| {
+                        value.as_u64().filter(|value| *value > 0).ok_or_else(|| {
+                            "expected_run_generation must be a positive integer".to_string()
+                        })
+                    })
+                    .transpose()?,
+                reason: args
+                    .get("reason")
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .filter(|text| !text.trim().is_empty())
+                            .map(str::to_string)
+                            .ok_or_else(|| "reason must be a non-empty string".to_string())
+                    })
+                    .transpose()?,
+            }
+        }
+        Some("continue") => {
+            if args.contains_key("max_steps") {
+                return Err(
+                    "continue does not change limits; use raise_and_resume for a stopped cap"
+                        .into(),
+                );
+            }
+            AgentResumeAction::ContinueTurn {
+                expected_change_seq: required_change_seq(args)?,
+                instruction: optional_instruction(args)?,
+                reconcile_incomplete: optional_reconcile(args)?,
+            }
         }
         Some("raise_and_resume") => {
             if args.contains_key("instruction") || args.contains_key("reconcile_incomplete") {
@@ -136,37 +277,17 @@ fn parse_agent_resume_args(
                     "resume does not change limits; use raise_and_resume for a stopped cap".into(),
                 );
             }
-            let expected_change_seq = args
-                .get("expected_change_seq")
-                .and_then(Value::as_u64)
-                .filter(|value| *value > 0)
-                .ok_or("expected_change_seq must be a positive integer")?;
-            let instruction = args
-                .get("instruction")
-                .map(|value| {
-                    value
-                        .as_str()
-                        .filter(|text| !text.trim().is_empty())
-                        .map(str::to_string)
-                        .ok_or_else(|| "instruction must be a non-empty string".to_string())
-                })
-                .transpose()?;
-            let reconcile_incomplete = args
-                .get("reconcile_incomplete")
-                .map(|value| {
-                    value
-                        .as_bool()
-                        .ok_or("reconcile_incomplete must be a boolean")
-                })
-                .transpose()?
-                .unwrap_or(false);
             AgentResumeAction::Resume {
-                expected_change_seq,
-                instruction,
-                reconcile_incomplete,
+                expected_change_seq: required_change_seq(args)?,
+                instruction: optional_instruction(args)?,
+                reconcile_incomplete: optional_reconcile(args)?,
             }
         }
-        _ => return Err("action must be inspect, resume or raise_and_resume".to_string()),
+        _ => {
+            return Err(
+                "action must be inspect, close, resume, continue or raise_and_resume".to_string(),
+            )
+        }
     };
     Ok((agent_id, action))
 }
@@ -200,7 +321,7 @@ fn agent_list_schema() -> Value {
         "properties": {
             "status": {
                 "type": "string",
-                "enum": ["queued", "running", "waiting_for_approval", "completed", "failed", "cancelled", "interrupted", "all"],
+                "enum": ["queued", "running", "waiting_for_approval", "completed", "failed", "cancelled", "interrupted", "closed", "all"],
                 "description": "Only include agents with this status. Default: all"
             },
             "kind": {
@@ -453,6 +574,7 @@ fn parse_status(value: &str) -> Result<Option<Vec<BgAgentStatus>>, String> {
         "failed" => Ok(Some(vec![BgAgentStatus::Failed])),
         "cancelled" => Ok(Some(vec![BgAgentStatus::Cancelled])),
         "interrupted" => Ok(Some(vec![BgAgentStatus::Interrupted])),
+        "closed" => Ok(Some(vec![BgAgentStatus::Closed])),
         other => Err(format!("Invalid status: {other}")),
     }
 }
@@ -595,6 +717,7 @@ fn format_status_chip(status: BgAgentStatus) -> &'static str {
         BgAgentStatus::Failed => "❌ failed",
         BgAgentStatus::Cancelled => "⏹ cancelled",
         BgAgentStatus::Interrupted => "⚠ interrupted",
+        BgAgentStatus::Closed => "🔒 closed",
     }
 }
 
@@ -627,6 +750,13 @@ fn format_agent_last_activity(record: &BackgroundAgent) -> String {
         if let Some(error) = &record.error {
             return format!("error: {}", truncate_chars(error, 80));
         }
+    }
+    if record.status == BgAgentStatus::Closed {
+        return record
+            .close_reason
+            .as_deref()
+            .map(|reason| format!("closed: {}", truncate_chars(reason, 80)))
+            .unwrap_or_else(|| "(closed, resumable)".to_string());
     }
     if record.status.is_terminal() {
         return "(finished)".to_string();
@@ -675,6 +805,7 @@ fn format_agent_counts(rows: &[BackgroundAgent]) -> String {
         BgAgentStatus::Failed,
         BgAgentStatus::Cancelled,
         BgAgentStatus::Interrupted,
+        BgAgentStatus::Closed,
     ];
     let counts = statuses
         .into_iter()
@@ -766,6 +897,12 @@ fn format_agent_status_block(record: &BackgroundAgent) -> String {
             record.conflict_summary.as_deref(),
         );
         format_optional_line(&mut result, "Error", record.error.as_deref());
+        format_optional_line(&mut result, "Close reason", record.close_reason.as_deref());
+        if record.status == BgAgentStatus::Closed {
+            result.push_str(
+                "\n(Closed, not finished. agent_resume with action inspect, then resume, continues this same child.)\n",
+            );
+        }
     } else {
         result.push_str("\n(Pull final result with agent_result after completion.)\n");
     }
@@ -822,7 +959,13 @@ async fn format_agent_result(
                 .filter(|error| !error.trim().is_empty())
                 .map(str::to_string)
         })
-        .unwrap_or_else(|| format!("Agent finished with status {}.", record.status.as_str()));
+        .unwrap_or_else(|| {
+            if record.status == BgAgentStatus::Closed {
+                "This child was closed by its parent, not finished. Nothing was produced by this generation; its saved history, goal and plan remain resumable.".to_string()
+            } else {
+                format!("Agent finished with status {}.", record.status.as_str())
+            }
+        });
     let mut result = format!("# Agent Result: {}\n", record.title);
     result.push_str(&format!(
         "- Status: {}\n",
@@ -968,7 +1111,7 @@ impl Tool for ToolAgentResume {
             self.config_path.clone(),
             "agent_resume",
             "Agent Resume",
-            "Inspect or explicitly resume a stopped direct child on its saved history, plan and goal. Resume may append a parent instruction; incomplete tool outcomes require explicit reconciliation and are never replayed. raise_and_resume increases a stopped per-child step cap. Mutations require expected_change_seq from inspect. Cannot change global Settings, goal budgets, policy or provider quotas. Saved runtime configuration must still be available.",
+            "Inspect, close, resume or continue a direct child on its saved history, plan and goal. close stops a live child and releases its execution slot while keeping it resumable. resume restarts a stopped or closed child; continue asks an already-completed child for another turn without rewriting its earlier completion. Both may append a parent instruction; incomplete tool outcomes require explicit reconciliation and are never replayed. raise_and_resume increases a stopped per-child step cap. Resuming and continuing require expected_change_seq from inspect, and are reported as queued, never as completed. Cannot change global Settings, goal budgets, policy or provider quotas. Saved runtime configuration must still be available.",
             agent_resume_schema(),
         );
         description.allow_parallel = false;
@@ -991,13 +1134,36 @@ impl Tool for ToolAgentResume {
         if record.parent_chat_id != chat_id {
             return Err(not_found_error(&agent_id));
         }
-        let resumed = match action {
-            AgentResumeAction::Inspect => false,
+        let outcome = match action {
+            AgentResumeAction::Inspect => LifecycleOutcome::Inspected,
+            AgentResumeAction::Close {
+                expected_run_generation,
+                reason,
+            } => {
+                let (closed, already_closed) = crate::agents::lifecycle::close_agent(
+                    app.clone(),
+                    &chat_id,
+                    &agent_id,
+                    expected_run_generation,
+                    reason,
+                )
+                .await
+                .map_err(|error| map_registry_error(&agent_id, error))?;
+                record = closed;
+                if already_closed {
+                    LifecycleOutcome::AlreadyClosed
+                } else {
+                    LifecycleOutcome::Closed
+                }
+            }
             AgentResumeAction::Resume {
                 expected_change_seq,
                 instruction,
                 reconcile_incomplete,
             } => {
+                if record.status == BgAgentStatus::Completed {
+                    return Err("this child already completed; use action continue to ask it for another turn".to_string());
+                }
                 record = crate::agents::spawn::resume_agent(
                     app.clone(),
                     &chat_id,
@@ -1008,7 +1174,30 @@ impl Tool for ToolAgentResume {
                     reconcile_incomplete,
                 )
                 .await?;
-                true
+                LifecycleOutcome::Queued
+            }
+            AgentResumeAction::ContinueTurn {
+                expected_change_seq,
+                instruction,
+                reconcile_incomplete,
+            } => {
+                if record.status != BgAgentStatus::Completed {
+                    return Err(format!(
+                        "continue applies to a completed child; this one is {}. Use action resume instead.",
+                        record.status.as_str()
+                    ));
+                }
+                record = crate::agents::spawn::resume_agent(
+                    app.clone(),
+                    &chat_id,
+                    &agent_id,
+                    None,
+                    expected_change_seq,
+                    instruction,
+                    reconcile_incomplete,
+                )
+                .await?;
+                LifecycleOutcome::Queued
             }
             AgentResumeAction::RaiseAndResume {
                 max_steps,
@@ -1022,7 +1211,7 @@ impl Tool for ToolAgentResume {
                     expected_change_seq,
                 )
                 .await?;
-                true
+                LifecycleOutcome::Queued
             }
         };
         let recovered = crate::agents::spawn::recover_run_config(&app, &chat_id, &agent_id)
@@ -1052,22 +1241,25 @@ impl Tool for ToolAgentResume {
         } else {
             None
         };
-        let summary = if resumed {
-            "The same child trajectory is queued to resume."
-        } else {
-            "Child recovery inspected; no limits or execution state changed."
-        };
+        let steps_left = scope_available
+            && max_steps.is_some_and(|limit| limit > record.step_count as usize)
+            && cap_stop.is_none();
         Ok(tool_message(tool_call_id, json!({
-            "summary": summary,
+            "summary": outcome.summary(),
             "action": args.get("action"),
+            "accepted": outcome.accepted(),
             "agent_id": record.agent_id,
             "child_chat_id": record.child_chat_id,
-            "status": record.status.as_str(),
+            "status": outcome.state(record.status),
             "change_seq": record.change_seq,
             "run_generation": record.run_generation,
             "step_count": record.step_count,
             "cap_stop": cap_stop,
-            "can_resume": scope_available && record.status.is_terminal() && max_steps.is_some_and(|limit| limit > record.step_count as usize) && cap_stop.is_none(),
+            "close_reason": record.close_reason,
+            "previous_runs": record.previous_runs,
+            "can_close": !record.status.is_terminal(),
+            "can_resume": steps_left && record.status.is_terminal() && record.status != BgAgentStatus::Completed,
+            "can_continue": steps_left && record.status == BgAgentStatus::Completed,
             "can_raise_and_resume": scope_available && cap_stop.as_ref().is_some_and(|stop| stop.parent_can_raise_steps()),
             "max_steps": max_steps,
             "settings_subagent_max_steps_ceiling": settings_ceiling,
@@ -1087,9 +1279,10 @@ impl Tool for ToolAgentResume {
         Ok(MatchConfirmDeny {
             result: match action {
                 AgentResumeAction::Inspect => MatchConfirmDenyResult::PASS,
-                AgentResumeAction::RaiseAndResume { .. } | AgentResumeAction::Resume { .. } => {
-                    MatchConfirmDenyResult::CONFIRMATION
-                }
+                AgentResumeAction::Close { .. }
+                | AgentResumeAction::RaiseAndResume { .. }
+                | AgentResumeAction::Resume { .. }
+                | AgentResumeAction::ContinueTurn { .. } => MatchConfirmDenyResult::CONFIRMATION,
             },
             command: format!("agent_resume {agent_id} {action:?}"),
             rule: "default".to_string(),
@@ -2505,12 +2698,18 @@ mod tests {
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(
             schema["properties"]["action"]["enum"],
-            json!(["inspect", "raise_and_resume", "resume"])
+            json!(["inspect", "close", "raise_and_resume", "resume", "continue"])
         );
         assert_eq!(
-            schema["oneOf"][1]["required"],
+            schema["oneOf"][2]["required"],
             json!(["max_steps", "expected_change_seq"])
         );
+        for branch in [3, 4] {
+            assert_eq!(
+                schema["oneOf"][branch]["required"],
+                json!(["expected_change_seq"])
+            );
+        }
         for field in ["max_steps", "expected_change_seq"] {
             assert_eq!(schema["properties"][field]["type"], "integer");
             assert_eq!(schema["properties"][field]["minimum"], 1);
@@ -2629,6 +2828,271 @@ mod tests {
             result.result,
             MatchConfirmDenyResult::CONFIRMATION
         ));
+    }
+
+    #[test]
+    fn a_queued_continuation_is_never_reported_as_a_completion() {
+        assert_eq!(
+            LifecycleOutcome::Queued.state(BgAgentStatus::Completed),
+            "queued",
+            "asking a completed child for another turn returns queued, not completed"
+        );
+        assert!(LifecycleOutcome::Queued.accepted());
+        let summary = LifecycleOutcome::Queued.summary();
+        assert!(summary.contains("NOT a completion"), "{summary}");
+        assert!(!summary.contains("completed"), "{summary}");
+
+        for status in [
+            BgAgentStatus::Completed,
+            BgAgentStatus::Failed,
+            BgAgentStatus::Cancelled,
+            BgAgentStatus::Interrupted,
+            BgAgentStatus::Closed,
+            BgAgentStatus::Running,
+        ] {
+            assert_eq!(LifecycleOutcome::Queued.state(status), "queued");
+            assert_eq!(LifecycleOutcome::Closed.state(status), "closed");
+            assert_eq!(LifecycleOutcome::AlreadyClosed.state(status), "closed");
+            assert_eq!(LifecycleOutcome::Inspected.state(status), status.as_str());
+        }
+
+        assert!(LifecycleOutcome::Closed.accepted());
+        assert!(!LifecycleOutcome::AlreadyClosed.accepted());
+        assert!(!LifecycleOutcome::Inspected.accepted());
+        assert!(LifecycleOutcome::AlreadyClosed
+            .summary()
+            .contains("Nothing changed"));
+    }
+
+    #[test]
+    fn agent_resume_parser_scopes_close_and_continue_fields() {
+        let base = |action: &str| {
+            args(&[
+                ("agent_id", json!("bgagent-test")),
+                ("action", json!(action)),
+            ])
+        };
+        assert_eq!(
+            parse_agent_resume_args(&base("close")).unwrap().1,
+            AgentResumeAction::Close {
+                expected_run_generation: None,
+                reason: None
+            }
+        );
+        let mut close = base("close");
+        close.insert("reason".into(), json!("parked"));
+        close.insert("expected_run_generation".into(), json!(3));
+        assert_eq!(
+            parse_agent_resume_args(&close).unwrap().1,
+            AgentResumeAction::Close {
+                expected_run_generation: Some(3),
+                reason: Some("parked".into())
+            }
+        );
+        for (key, value) in [
+            ("expected_run_generation", json!(0)),
+            ("expected_run_generation", json!(-1)),
+            ("expected_run_generation", json!("3")),
+            ("reason", json!("")),
+            ("reason", json!(7)),
+            ("expected_change_seq", json!(2)),
+            ("max_steps", json!(2)),
+            ("instruction", json!("go")),
+        ] {
+            let mut invalid = base("close");
+            invalid.insert(key.to_string(), value.clone());
+            assert!(
+                parse_agent_resume_args(&invalid).is_err(),
+                "close accepted {key}={value}"
+            );
+        }
+
+        let mut continued = base("continue");
+        continued.insert("expected_change_seq".into(), json!(9));
+        continued.insert("instruction".into(), json!("keep going"));
+        continued.insert("reconcile_incomplete".into(), json!(true));
+        assert_eq!(
+            parse_agent_resume_args(&continued).unwrap().1,
+            AgentResumeAction::ContinueTurn {
+                expected_change_seq: 9,
+                instruction: Some("keep going".into()),
+                reconcile_incomplete: true,
+            }
+        );
+        let mut without_revision = base("continue");
+        without_revision.insert("instruction".into(), json!("keep going"));
+        assert!(parse_agent_resume_args(&without_revision).is_err());
+        let mut with_steps = continued.clone();
+        with_steps.insert("max_steps".into(), json!(40));
+        assert!(parse_agent_resume_args(&with_steps).is_err());
+        let mut reason_on_inspect = base("inspect");
+        reason_on_inspect.insert("reason".into(), json!("nope"));
+        assert!(parse_agent_resume_args(&reason_on_inspect).is_err());
+
+        let schema = ToolAgentResume {
+            config_path: String::new(),
+        }
+        .tool_description()
+        .input_schema;
+        assert_eq!(
+            schema["properties"]["action"]["enum"],
+            json!(["inspect", "close", "raise_and_resume", "resume", "continue"])
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_resume_closes_a_live_child_and_settles_repeat_closes_once() {
+        let (_temp, app, ccx) = test_context(PARENT).await;
+        let record = create_agent(&app, PARENT, BgAgentKind::Subagent, "Closable").await;
+        app.agents
+            .mark_running(&record.agent_id, "subchat-closable".to_string())
+            .await
+            .unwrap();
+        let mut tool = ToolAgentResume {
+            config_path: String::new(),
+        };
+        let close = args(&[
+            ("agent_id", json!(record.agent_id)),
+            ("action", json!("close")),
+            ("reason", json!("parent stepped away")),
+        ]);
+
+        let first: Value = serde_json::from_str(&output_text(
+            tool.tool_execute(ccx.clone(), &"close".to_string(), &close)
+                .await
+                .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(first["status"], "closed");
+        assert_eq!(first["accepted"], true);
+        assert_eq!(first["close_reason"], "parent stepped away");
+        assert_eq!(first["can_close"], false);
+        assert_eq!(first["can_continue"], false);
+
+        let second: Value = serde_json::from_str(&output_text(
+            tool.tool_execute(ccx.clone(), &"close-again".to_string(), &close)
+                .await
+                .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(second["status"], "closed");
+        assert_eq!(second["accepted"], false);
+        assert_eq!(second["change_seq"], first["change_seq"]);
+
+        let stale = tool
+            .tool_execute(
+                ccx.clone(),
+                &"stale".to_string(),
+                &args(&[
+                    ("agent_id", json!(record.agent_id)),
+                    ("action", json!("close")),
+                    ("expected_run_generation", json!(9)),
+                ]),
+            )
+            .await
+            .unwrap_err();
+        assert!(stale.contains("another generation"), "{stale}");
+
+        let wrong_action = tool
+            .tool_execute(
+                ccx.clone(),
+                &"continue".to_string(),
+                &args(&[
+                    ("agent_id", json!(record.agent_id)),
+                    ("action", json!("continue")),
+                    ("expected_change_seq", json!(first["change_seq"].clone())),
+                ]),
+            )
+            .await
+            .unwrap_err();
+        assert!(wrong_action.contains("continue applies to a completed child"));
+
+        let inspected: Value = serde_json::from_str(&output_text(
+            tool.tool_execute(
+                ccx.clone(),
+                &"inspect".to_string(),
+                &args(&[
+                    ("agent_id", json!(record.agent_id)),
+                    ("action", json!("inspect")),
+                ]),
+            )
+            .await
+            .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(inspected["status"], "closed");
+        assert_eq!(inspected["accepted"], false);
+        assert_eq!(
+            inspected["resume_configuration_available"], false,
+            "a closed child without saved configuration stays deny-all"
+        );
+        assert!(inspected["tool_authority"].is_null());
+        assert_eq!(inspected["can_resume"], false);
+
+        let listed = output_text(
+            ToolAgentList {
+                config_path: String::new(),
+            }
+            .tool_execute(
+                ccx,
+                &"list".to_string(),
+                &args(&[("status", json!("closed"))]),
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(listed.contains("🔒 closed"));
+        assert!(listed.contains("closed: parent stepped away"));
+        assert!(listed.contains("Total: 1"));
+    }
+
+    #[tokio::test]
+    async fn agent_resume_refuses_plain_resume_on_a_completed_child() {
+        let (_temp, app, ccx) = test_context(PARENT).await;
+        let record = create_agent(&app, PARENT, BgAgentKind::Subagent, "Finished").await;
+        let completed = app
+            .agents
+            .mark_completed(&record.agent_id, completion("the first answer"))
+            .await
+            .unwrap();
+
+        let error = ToolAgentResume {
+            config_path: String::new(),
+        }
+        .tool_execute(
+            ccx.clone(),
+            &"resume".to_string(),
+            &args(&[
+                ("agent_id", json!(record.agent_id)),
+                ("action", json!("resume")),
+                ("expected_change_seq", json!(completed.change_seq)),
+            ]),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("use action continue"), "{error}");
+        assert_eq!(
+            app.agents.get_any(&record.agent_id).await.unwrap().status,
+            BgAgentStatus::Completed
+        );
+
+        let closing = ToolAgentResume {
+            config_path: String::new(),
+        }
+        .tool_execute(
+            ccx,
+            &"close".to_string(),
+            &args(&[
+                ("agent_id", json!(record.agent_id)),
+                ("action", json!("close")),
+            ]),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            closing.contains("already finished as completed"),
+            "{closing}"
+        );
     }
 
     #[test]

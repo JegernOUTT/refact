@@ -82,6 +82,8 @@ pub struct CoordinationSettings {
     /// Upgrades a declared-intent `reject` path scope to canonical enforcement.
     pub strict_path_scope_default: bool,
     pub max_path_scope_entries: usize,
+    /// Prior-run outcomes retained on a closed or continued child record.
+    pub agent_closed_retained_max: usize,
 }
 
 impl Default for CoordinationSettings {
@@ -158,6 +160,7 @@ impl Default for CoordinationSettings {
             agent_profile_max_bytes: 64 * 1024,
             strict_path_scope_default: false,
             max_path_scope_entries: 256,
+            agent_closed_retained_max: 64,
         }
     }
 }
@@ -398,6 +401,7 @@ impl CoordinationSettings {
             ("board_max_reviewers", self.board_max_reviewers),
             ("board_claim_key_max_len", self.board_claim_key_max_len),
             ("agent_wait_max_agents", self.agent_wait_max_agents),
+            ("agent_closed_retained_max", self.agent_closed_retained_max),
         ] {
             at_least(&mut v, field, value as u64, 1);
         }
@@ -593,6 +597,7 @@ mod tests {
             |settings: &mut CoordinationSettings| settings.delivery_status_retention = 0,
             |settings: &mut CoordinationSettings| settings.agent_message_max_chars = 0,
             |settings: &mut CoordinationSettings| settings.agent_wait_max_agents = 0,
+            |settings: &mut CoordinationSettings| settings.agent_closed_retained_max = 0,
         ] {
             let mut settings = CoordinationSettings::default();
             mutate(&mut settings);

@@ -72,6 +72,8 @@ pub enum WorkStateTag {
     Cancelled,
     /// Lost to a restart.
     Interrupted,
+    /// Deliberately closed; terminal, but the saved child can be resumed.
+    Closed,
     /// The live record could not be read without blocking; row is stale.
     Unknown,
 }
@@ -88,6 +90,7 @@ impl WorkStateTag {
             WorkStateTag::Failed => "failed",
             WorkStateTag::Cancelled => "cancelled",
             WorkStateTag::Interrupted => "interrupted",
+            WorkStateTag::Closed => "closed",
             WorkStateTag::Unknown => "unknown",
         }
     }
@@ -103,6 +106,7 @@ impl WorkStateTag {
             "failed" => WorkStateTag::Failed,
             "cancelled" => WorkStateTag::Cancelled,
             "interrupted" => WorkStateTag::Interrupted,
+            "closed" => WorkStateTag::Closed,
             "unknown" => WorkStateTag::Unknown,
             _ => return None,
         })
@@ -116,6 +120,7 @@ impl WorkStateTag {
                 | WorkStateTag::Failed
                 | WorkStateTag::Cancelled
                 | WorkStateTag::Interrupted
+                | WorkStateTag::Closed
         )
     }
 
@@ -139,12 +144,13 @@ impl WorkStateTag {
             WorkStateTag::Interrupted => 5,
             WorkStateTag::Idle => 6,
             WorkStateTag::Cancelled => 7,
-            WorkStateTag::Completed => 8,
-            WorkStateTag::Unknown => 9,
+            WorkStateTag::Closed => 8,
+            WorkStateTag::Completed => 9,
+            WorkStateTag::Unknown => 10,
         }
     }
 
-    pub const ALL: [WorkStateTag; 10] = [
+    pub const ALL: [WorkStateTag; 11] = [
         WorkStateTag::Queued,
         WorkStateTag::Running,
         WorkStateTag::Parked,
@@ -154,6 +160,7 @@ impl WorkStateTag {
         WorkStateTag::Failed,
         WorkStateTag::Cancelled,
         WorkStateTag::Interrupted,
+        WorkStateTag::Closed,
         WorkStateTag::Unknown,
     ];
 }

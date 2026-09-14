@@ -202,6 +202,23 @@ impl RunExecution {
         self.inner.wake();
     }
 
+    /// Give up the slot entirely: a running permit is released and a parked
+    /// ticket is cancelled, so a closed child holds neither capacity nor
+    /// residency. Unlike `cancel`, this never keeps the permit alive for
+    /// in-flight work.
+    pub fn release(&self) {
+        {
+            let mut state = self.inner.lock();
+            state.cancelled = true;
+            match std::mem::replace(&mut state.slot, Slot::Gone) {
+                Slot::Running(permit) => permit.release(),
+                Slot::Parked(ticket) => ticket.cancel(),
+                Slot::Acquiring | Slot::Gone => {}
+            }
+        }
+        self.inner.wake();
+    }
+
     pub async fn park(&self) -> Result<(), AdmissionError> {
         self.suspend_for_wait().await.map(|_| ())
     }
@@ -696,6 +713,23 @@ impl ExecutionRegistry {
             .cloned()
     }
 
+    /// Release the slot held by this child and forget it. Returns whether a
+    /// live execution was found, so a repeated close settles once.
+    pub fn release(&self, chat_id: &str) -> bool {
+        let execution = self
+            .runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(chat_id);
+        match execution {
+            Some(execution) => {
+                execution.release();
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn finish(&self, chat_id: &str) {
         self.runs
             .lock()
@@ -929,6 +963,54 @@ mod tests {
         drop(new);
         assert!(registry.get("child").is_none());
         assert_eq!(sched.snapshot().active, 0);
+    }
+
+    #[tokio::test]
+    async fn closing_releases_the_permit_at_cap_one_while_the_owner_is_still_alive() {
+        let sched = scheduler(1);
+        let registry = Arc::new(ExecutionRegistry::default());
+        let execution = registry
+            .install("child", permit_for(&sched, "closed").await)
+            .unwrap();
+        assert_eq!(sched.snapshot().active, 1);
+
+        assert!(registry.release("child"));
+        assert!(!execution.holds_permit());
+        assert_eq!(execution.state(), ExecutionState::Gone);
+        assert_eq!(sched.snapshot().active, 0);
+        assert_eq!(sched.snapshot().outstanding, 0);
+        assert!(registry.get("child").is_none());
+
+        // The runner Arc outliving a close must not keep the slot charged.
+        let mut successor = Box::pin(permit_for(&sched, "successor"));
+        let permit = completes_now(successor.as_mut()).await;
+        assert_eq!(sched.snapshot().active, 1);
+
+        assert!(!registry.release("child"));
+        assert!(matches!(
+            execution.resume().await,
+            Err(AdmissionError::Gone)
+        ));
+        assert!(execution.register_operation().is_none());
+        drop(execution);
+        permit.release();
+        assert_eq!(sched.snapshot().outstanding, 0);
+    }
+
+    #[tokio::test]
+    async fn closing_a_parked_execution_gives_up_its_residency() {
+        let sched = scheduler(1);
+        let registry = Arc::new(ExecutionRegistry::default());
+        let execution = registry
+            .install("child", permit_for(&sched, "parked").await)
+            .unwrap();
+        execution.park().await.unwrap();
+        assert_eq!(sched.snapshot().parked, 1);
+
+        assert!(registry.release("child"));
+        assert_eq!(execution.state(), ExecutionState::Gone);
+        assert_eq!(sched.snapshot().parked, 0);
+        assert_eq!(sched.snapshot().outstanding, 0);
     }
 
     #[tokio::test]

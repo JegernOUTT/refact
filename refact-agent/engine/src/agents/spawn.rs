@@ -1795,11 +1795,17 @@ pub(super) async fn resume_agent_inner(
         )
         .await?;
     app.agent_executions.remember_scope(agent_id, accepted_root);
+    let (notice_source, notice_text) = continuation_notice(old.status);
     messages.push(event(
         EventSubkind::SystemNotice,
-        "agents.resume",
-        serde_json::json!({"agent_id": agent_id, "run_generation": generation, "steps_before": used_steps}),
-        "The parent explicitly resumed this same child. Preserved tool results are historical; incomplete tool outcomes must be inspected, not replayed automatically.",
+        notice_source,
+        serde_json::json!({
+            "agent_id": agent_id,
+            "run_generation": generation,
+            "steps_before": used_steps,
+            "previous_status": old.status.as_str(),
+        }),
+        notice_text,
     ));
     if authority_migrated {
         messages.push(event(
@@ -2023,6 +2029,28 @@ pub(super) async fn resume_agent_inner(
         return Err(error);
     }
     Ok(record)
+}
+
+/// The notice a resumed child sees, derived from the state it actually stopped
+/// in so a caller cannot describe a continued turn as a plain recovery.
+pub(crate) fn continuation_notice(
+    previous: crate::agents::types::BgAgentStatus,
+) -> (&'static str, &'static str) {
+    use crate::agents::types::BgAgentStatus;
+    match previous {
+        BgAgentStatus::Completed => (
+            "agents.continued_turn",
+            "The parent asked this already-completed child for another turn. The earlier completion stands and is preserved in the record; nothing about it is rewritten. Preserved tool results are historical and must not be replayed.",
+        ),
+        BgAgentStatus::Closed => (
+            "agents.resume",
+            "The parent reopened this child after deliberately closing it. Its history, goal and plan are unchanged; preserved tool results are historical, and incomplete tool outcomes must be inspected, not replayed automatically.",
+        ),
+        _ => (
+            "agents.resume",
+            "The parent explicitly resumed this same child. Preserved tool results are historical; incomplete tool outcomes must be inspected, not replayed automatically.",
+        ),
+    }
 }
 
 fn recovery_digest(value: &impl serde::Serialize) -> Result<String, String> {
@@ -3043,6 +3071,8 @@ fn fallback_failed_record(agent_id: String, req: SpawnRequest, error: String) ->
         completion_message_id: None,
         completion_pushed_at: None,
         deferred_at: None,
+        close_reason: None,
+        previous_runs: Vec::new(),
         model: req.model,
         model_type: None,
         current_tool: None,

@@ -398,6 +398,7 @@ fn status_chip(status: BgAgentStatus) -> &'static str {
         BgAgentStatus::Failed => "❌ failed",
         BgAgentStatus::Cancelled => "⏹ cancelled",
         BgAgentStatus::Interrupted => "⚠ interrupted",
+        BgAgentStatus::Closed => "🔒 closed",
     }
 }
 

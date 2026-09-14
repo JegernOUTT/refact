@@ -539,6 +539,8 @@ fn summary_maps_introspection_and_question_state() {
         delivery_ids: Vec::new(),
         dropped_deliveries: Vec::new(),
         deferred_at: None,
+        close_reason: None,
+        previous_runs: Vec::new(),
         model: "model".to_string(),
         model_type: Some("thinking".to_string()),
         current_tool: Some("cargo test".to_string()),

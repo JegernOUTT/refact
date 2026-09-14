@@ -14,7 +14,8 @@ use refact_chat_api::{
 
 use crate::storage;
 use crate::types::{
-    AgentCompletion, AgentListFilter, BackgroundAgent, BgAgentStatus, CreateAgentRequest,
+    AgentCompletion, AgentListFilter, AgentQuestion, AgentRunOutcome, BackgroundAgent,
+    BgAgentStatus, CreateAgentRequest,
 };
 #[cfg(test)]
 use crate::types::BgAgentKind;
@@ -82,6 +83,7 @@ impl BackgroundAgentRegistry {
             .map_err(|e| format!("Failed to create background agent registry directory: {e}"))?;
         let mut records = storage::load_all(&storage_root).await?;
         normalize_delivery_state(&mut records);
+        normalize_run_history(&mut records);
         reconcile_interrupted(&storage_root, &mut records).await?;
         let questions = QuestionRegistry::new(question_limits)?;
         let now = Utc::now();
@@ -143,6 +145,8 @@ impl BackgroundAgentRegistry {
             delivery_ids: Vec::new(),
             dropped_deliveries: Vec::new(),
             deferred_at: None,
+            close_reason: None,
+            previous_runs: Vec::new(),
             model: req.model,
             model_type: req.model_type,
             current_tool: None,
@@ -382,7 +386,9 @@ impl BackgroundAgentRegistry {
                 .run_generation
                 .checked_add(1)
                 .ok_or("agent run generation overflow")?;
+            record_previous_run(&mut updated, &previous);
             updated.status = BgAgentStatus::Queued;
+            updated.close_reason = None;
             updated.error = None;
             updated.finished_at = None;
             updated.completion_message_id = None;
@@ -769,6 +775,78 @@ impl BackgroundAgentRegistry {
         }
         self.retire_runtime(agent_id).await;
         Ok(updated)
+    }
+
+    /// Close this child: terminal, but its durable record and saved
+    /// configuration stay resumable. Returns whether it was already closed.
+    pub async fn mark_closed(
+        &self,
+        agent_id: &str,
+        expected_run_generation: Option<u64>,
+        reason: Option<String>,
+    ) -> Result<(BackgroundAgent, bool), String> {
+        let updated = {
+            let mut records = self.records.write().await;
+            let current = records
+                .get(agent_id)
+                .cloned()
+                .ok_or_else(|| "agent not found".to_string())?;
+            if expected_run_generation
+                .is_some_and(|generation| generation != current.run_generation)
+            {
+                return Err(
+                    "agent moved to another generation; inspect its current state before closing"
+                        .to_string(),
+                );
+            }
+            if current.status == BgAgentStatus::Closed {
+                return Ok((current, true));
+            }
+            if current.status.is_terminal() {
+                return Err(format!(
+                    "agent already finished as {}; only a live agent can be closed",
+                    current.status.as_str()
+                ));
+            }
+            let mut updated = current;
+            let now = Utc::now();
+            updated.status = BgAgentStatus::Closed;
+            updated.close_reason = reason;
+            updated.current_tool = None;
+            updated.finished_at = Some(now);
+            touch_record(&mut updated, now);
+            records.insert(agent_id.to_string(), updated.clone());
+            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
+            drop(records);
+            self.flush_records(snapshot).await?;
+            updated
+        };
+        if let Some(notify) = self.notify_for(agent_id).await {
+            notify.notify_waiters();
+        }
+        self.retire_runtime(agent_id).await;
+        Ok((updated, false))
+    }
+
+    /// Parent-scoped close: stops the runner, then retires the record as closed.
+    pub async fn close(
+        &self,
+        parent_chat_id: &str,
+        agent_id: &str,
+        expected_run_generation: Option<u64>,
+        reason: Option<String>,
+    ) -> Result<(BackgroundAgent, bool), String> {
+        let record = self.get(parent_chat_id, agent_id).await?;
+        if record.status == BgAgentStatus::Closed
+            && expected_run_generation.is_none_or(|generation| generation == record.run_generation)
+        {
+            return Ok((record, true));
+        }
+        if let Some(abort_flag) = self.abort_flag(agent_id).await {
+            abort_flag.store(true, Ordering::SeqCst);
+        }
+        self.mark_closed(agent_id, expected_run_generation, reason)
+            .await
     }
 
     pub async fn mark_waiting_for_approval(
@@ -1741,6 +1819,37 @@ fn normalize_delivery_state(records: &mut HashMap<String, BackgroundAgent>) {
     }
 }
 
+fn record_previous_run(updated: &mut BackgroundAgent, previous: &BackgroundAgent) {
+    updated.previous_runs.push(AgentRunOutcome {
+        run_generation: previous.run_generation,
+        status: previous.status,
+        step_count: previous.step_count,
+        result_summary: previous.result_summary.clone(),
+        error: previous.error.clone(),
+        finished_at: previous.finished_at,
+    });
+    trim_previous_runs(updated);
+}
+
+fn trim_previous_runs(record: &mut BackgroundAgent) {
+    let retained = refact_work_core::coordination_settings()
+        .agent_closed_retained_max
+        .max(1);
+    if record.previous_runs.len() > retained {
+        let overflow = record.previous_runs.len() - retained;
+        record.previous_runs.drain(..overflow);
+    }
+}
+
+fn normalize_run_history(records: &mut HashMap<String, BackgroundAgent>) {
+    for record in records.values_mut() {
+        trim_previous_runs(record);
+        if record.status != BgAgentStatus::Closed {
+            record.close_reason = None;
+        }
+    }
+}
+
 fn now_ms() -> u64 {
     Utc::now().timestamp_millis().max(0) as u64
 }
@@ -2665,6 +2774,203 @@ mod tests {
                 assert!(drained.is_empty());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn closing_is_terminal_resumable_idempotent_and_refuses_a_stale_generation() {
+        let (_temp, registry) = registry().await;
+        let (record, abort, _) = registry.create(request("parent")).await.unwrap();
+        registry
+            .mark_running(&record.agent_id, "child-chat".into())
+            .await
+            .unwrap();
+
+        assert!(registry
+            .mark_closed(&record.agent_id, Some(7), None)
+            .await
+            .unwrap_err()
+            .contains("another generation"));
+        assert!(!abort.load(Ordering::SeqCst));
+
+        let (closed, already) = registry
+            .close(
+                "parent",
+                &record.agent_id,
+                Some(record.run_generation),
+                Some("held for later".into()),
+            )
+            .await
+            .unwrap();
+        assert!(!already);
+        assert_eq!(closed.status, BgAgentStatus::Closed);
+        assert!(closed.status.is_terminal());
+        assert_eq!(closed.status.as_str(), "closed");
+        assert_eq!(closed.close_reason.as_deref(), Some("held for later"));
+        assert!(closed.finished_at.is_some());
+        assert!(abort.load(Ordering::SeqCst));
+        assert!(!registry.has_runtime(&record.agent_id).await);
+
+        let (again, already) = registry
+            .close("parent", &record.agent_id, None, Some("second".into()))
+            .await
+            .unwrap();
+        assert!(already);
+        assert_eq!(again.change_seq, closed.change_seq);
+        assert_eq!(again.close_reason.as_deref(), Some("held for later"));
+
+        for late in [
+            registry
+                .mark_cancelled(&record.agent_id, Some("too late".into()))
+                .await
+                .unwrap(),
+            registry
+                .mark_failed(&record.agent_id, "too late".into())
+                .await
+                .unwrap(),
+            registry
+                .mark_completed(&record.agent_id, completion())
+                .await
+                .unwrap(),
+        ] {
+            assert_eq!(late.status, BgAgentStatus::Closed);
+            assert_eq!(late.change_seq, closed.change_seq);
+        }
+
+        assert!(registry
+            .close("other-parent", &record.agent_id, None, None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn closing_a_finished_child_is_refused_and_reopen_keeps_its_outcome() {
+        let (_temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+        registry
+            .mark_running(&record.agent_id, "child-chat".into())
+            .await
+            .unwrap();
+        registry
+            .update_progress(&record.agent_id, "worked".into(), 3)
+            .await
+            .unwrap();
+        registry
+            .add_usage(&record.agent_id, 42, Some(0.25))
+            .await
+            .unwrap();
+        let completed = registry
+            .mark_completed(&record.agent_id, completion())
+            .await
+            .unwrap();
+
+        assert!(registry
+            .close("parent", &record.agent_id, None, None)
+            .await
+            .unwrap_err()
+            .contains("already finished as completed"));
+        assert_eq!(
+            registry
+                .get_any(&record.agent_id)
+                .await
+                .unwrap()
+                .result_summary
+                .as_deref(),
+            Some("done")
+        );
+
+        let (continued, _, _) = registry
+            .reopen(&record.agent_id, "parent", completed.change_seq, false)
+            .await
+            .unwrap();
+        assert_eq!(continued.status, BgAgentStatus::Queued);
+        assert_eq!(continued.run_generation, 2);
+        assert!(continued.result_summary.is_none());
+        assert_eq!(continued.step_count, 3);
+        assert_eq!(continued.tokens_used, 42);
+        assert_eq!(continued.previous_runs.len(), 1);
+        assert_eq!(continued.previous_runs[0].run_generation, 1);
+        assert_eq!(continued.previous_runs[0].status, BgAgentStatus::Completed);
+        assert_eq!(
+            continued.previous_runs[0].result_summary.as_deref(),
+            Some("done")
+        );
+        assert_eq!(continued.previous_runs[0].step_count, 3);
+    }
+
+    #[test]
+    fn legacy_records_load_without_lifecycle_fields_and_history_stays_bounded() {
+        let now = Utc::now();
+        let legacy = serde_json::json!({
+            "schema_version": 1,
+            "agent_id": "bgagent-legacy",
+            "parent_chat_id": "parent",
+            "parent_root_chat_id": null,
+            "parent_tool_call_id": null,
+            "child_chat_id": "child",
+            "kind": "subagent",
+            "config_name": "test",
+            "title": "Legacy",
+            "prompt": "legacy prompt",
+            "target_files": [],
+            "status": "completed",
+            "progress": null,
+            "step_count": 2,
+            "last_activity": null,
+            "result_summary": "legacy answer",
+            "result_payload_path": null,
+            "error": null,
+            "edited_files": [],
+            "diff_summary": null,
+            "conflict_summary": null,
+            "completion_message_id": null,
+            "completion_pushed_at": null,
+            "model": "test-model",
+            "created_at": now,
+            "started_at": null,
+            "finished_at": now,
+            "last_update_at": now,
+            "change_seq": 4,
+        });
+        let legacy: BackgroundAgent = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.run_generation, 1);
+        assert!(legacy.close_reason.is_none());
+        assert!(legacy.previous_runs.is_empty());
+
+        let retained = refact_work_core::coordination_settings().agent_closed_retained_max;
+        let mut overfull = legacy.clone();
+        overfull.previous_runs = (0..retained as u64 + 6)
+            .map(|generation| AgentRunOutcome {
+                run_generation: generation,
+                status: BgAgentStatus::Closed,
+                step_count: 0,
+                result_summary: None,
+                error: None,
+                finished_at: None,
+            })
+            .collect();
+        overfull.close_reason = Some("stale reason on a completed record".into());
+        let mut records = HashMap::from([(overfull.agent_id.clone(), overfull)]);
+        normalize_run_history(&mut records);
+        let healed = &records["bgagent-legacy"];
+        assert_eq!(healed.previous_runs.len(), retained);
+        assert_eq!(
+            healed.previous_runs.last().unwrap().run_generation,
+            retained as u64 + 5,
+            "the newest generations survive the bound"
+        );
+        assert!(
+            healed.close_reason.is_none(),
+            "only a closed record carries a close reason"
+        );
+
+        assert_eq!(
+            serde_json::to_value(BgAgentStatus::Closed).unwrap(),
+            serde_json::json!("closed")
+        );
+        assert_eq!(
+            serde_json::from_value::<BgAgentStatus>(serde_json::json!("closed")).unwrap(),
+            BgAgentStatus::Closed
+        );
     }
 
     #[tokio::test]

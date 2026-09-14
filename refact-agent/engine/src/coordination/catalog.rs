@@ -73,6 +73,7 @@ fn agent_state(agent: &BackgroundAgent) -> WorkStateTag {
         BgAgentStatus::Failed => WorkStateTag::Failed,
         BgAgentStatus::Cancelled => WorkStateTag::Cancelled,
         BgAgentStatus::Interrupted => WorkStateTag::Interrupted,
+        BgAgentStatus::Closed => WorkStateTag::Closed,
     }
 }
 

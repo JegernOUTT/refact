@@ -2856,3 +2856,313 @@ async fn dirty_non_runner_owned_session_is_not_overwritten_by_the_mirror() {
         "mine".to_string()
     );
 }
+
+async fn wait_until_slot_released(app: &AppState, child_chat_id: &str) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while app.agent_executions.get(child_chat_id).is_some()
+            || app.agent_executions.task_active(child_chat_id)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("child released its execution slot");
+}
+
+fn notice_source(message: &ChatMessage) -> Option<&str> {
+    message.extra.get("event")?.get("source")?.as_str()
+}
+
+#[serial(test_runner)]
+#[tokio::test]
+async fn closed_child_releases_its_slot_and_resumes_the_same_trajectory_next_generation() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let fixture = repo_fixture().await;
+    let parent_id = "close-resume-parent";
+    let mut parent = crate::chat::types::ChatSession::new(parent_id.into());
+    parent.work_project_root = Some(fixture.source.clone());
+    parent.set_runtime_state(SessionState::Generating, None);
+    fixture
+        .app
+        .chat
+        .sessions
+        .write()
+        .await
+        .insert(parent_id.into(), Arc::new(Mutex::new(parent)));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let running = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let finished = Arc::new(Notify::new());
+    let _runner = {
+        let attempts = attempts.clone();
+        let running = running.clone();
+        let release = release.clone();
+        let finished = finished.clone();
+        crate::agents::spawn::install_test_runner(Arc::new(move |gcx, mut messages, config| {
+            let attempts = attempts.clone();
+            let running = running.clone();
+            let release = release.clone();
+            let finished = finished.clone();
+            Box::pin(async move {
+                let app = AppState::from_gcx(gcx.clone()).await;
+                let id = config.chat_id.as_ref().unwrap().clone();
+                let session = app.chat.sessions.read().await.get(&id).cloned().unwrap();
+                let thread = session.lock().await.thread.clone();
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    messages.push(ChatMessage::new(
+                        "assistant".into(),
+                        "first pass before the close".into(),
+                    ));
+                    save_trajectory_as(gcx, &thread, &messages).await;
+                    mirror_subchat_messages_into_session(&app, &id, &messages).await;
+                    finish_stateful_subchat_session(&app, &id, &config).await;
+                    running.notify_one();
+                    release.notified().await;
+                    return Err("Aborted after the parent closed this child".into());
+                }
+                assert!(messages
+                    .iter()
+                    .any(|message| message.content.content_text_only()
+                        == "first pass before the close"));
+                let notice = messages
+                    .iter()
+                    .rev()
+                    .find(|message| notice_source(message) == Some("agents.resume"))
+                    .expect("closed children carry an explicit resume notice");
+                assert_eq!(
+                    notice.extra["event"]["payload"]["previous_status"],
+                    "closed"
+                );
+                assert!(messages.iter().any(
+                    |message| message.content.content_text_only() == "Finish what you started."
+                ));
+                let mut messages = messages;
+                messages.push(ChatMessage::new(
+                    "assistant".into(),
+                    "closed work done".into(),
+                ));
+                save_trajectory_as(gcx, &thread, &messages).await;
+                mirror_subchat_messages_into_session(&app, &id, &messages).await;
+                finish_stateful_subchat_session(&app, &id, &config).await;
+                finished.notify_one();
+                Ok(SubchatResult {
+                    messages,
+                    metering: serde_json::Map::new(),
+                    chat_id: Some(id),
+                    aborted: false,
+                })
+            })
+        }))
+    };
+    let handle = crate::agents::spawn::spawn_background_agent(
+        fixture.app.clone(),
+        spawn_request(parent_id, BgAgentKind::Subagent),
+    )
+    .await
+    .unwrap();
+    let agent_id = handle.agent_id.clone();
+    let child_chat_id = handle.child_chat_id.clone();
+    tokio::time::timeout(Duration::from_secs(30), running.notified())
+        .await
+        .expect("first attempt started");
+    let live = fixture.app.agents.get_any(&agent_id).await.unwrap();
+    assert!(!live.status.is_terminal());
+
+    let (closed, already) = crate::agents::lifecycle::close_agent(
+        fixture.app.clone(),
+        parent_id,
+        &agent_id,
+        Some(live.run_generation),
+        Some("paused by the parent".into()),
+    )
+    .await
+    .unwrap();
+    assert!(!already);
+    assert_eq!(closed.status, BgAgentStatus::Closed);
+    assert!(closed.status.is_terminal());
+    assert!(fixture.app.agent_executions.get(&child_chat_id).is_none());
+
+    release.notify_one();
+    let late = await_completion(handle).await;
+    assert_eq!(
+        late.status,
+        BgAgentStatus::Closed,
+        "a late runner exit must not rewrite the close"
+    );
+    wait_until_slot_released(&fixture.app, &child_chat_id).await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+    let stopped = fixture.app.agents.get_any(&agent_id).await.unwrap();
+    assert_eq!(stopped.status, BgAgentStatus::Closed);
+    assert_eq!(
+        stopped.close_reason.as_deref(),
+        Some("paused by the parent")
+    );
+    let resumed = crate::agents::spawn::resume_agent(
+        fixture.app.clone(),
+        parent_id,
+        &agent_id,
+        None,
+        stopped.change_seq,
+        Some("Finish what you started.".into()),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(resumed.status, BgAgentStatus::Queued);
+    assert_eq!(
+        resumed.child_chat_id.as_deref(),
+        Some(child_chat_id.as_str())
+    );
+    assert_eq!(resumed.run_generation, stopped.run_generation + 1);
+    assert_eq!(resumed.created_at, stopped.created_at);
+    assert!(resumed.close_reason.is_none());
+    assert_eq!(resumed.previous_runs.len(), 1);
+    assert_eq!(resumed.previous_runs[0].status, BgAgentStatus::Closed);
+    assert_eq!(resumed.previous_runs[0].run_generation, 1);
+
+    tokio::time::timeout(Duration::from_secs(30), finished.notified())
+        .await
+        .expect("resumed attempt finished");
+    let done = wait_for_record(&fixture.app, parent_id, &agent_id, |record| {
+        record.status.is_terminal()
+    })
+    .await;
+    assert_eq!(done.status, BgAgentStatus::Completed);
+    assert_eq!(done.run_generation, 2);
+    assert_eq!(done.result_summary.as_deref(), Some("closed work done"));
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[serial(test_runner)]
+#[tokio::test]
+async fn completed_child_takes_a_continued_turn_without_rewriting_its_completion() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let fixture = repo_fixture().await;
+    let parent_id = "continued-turn-parent";
+    let mut parent = crate::chat::types::ChatSession::new(parent_id.into());
+    parent.work_project_root = Some(fixture.source.clone());
+    parent.set_runtime_state(SessionState::Generating, None);
+    fixture
+        .app
+        .chat
+        .sessions
+        .write()
+        .await
+        .insert(parent_id.into(), Arc::new(Mutex::new(parent)));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(Notify::new());
+    let _runner = {
+        let attempts = attempts.clone();
+        let finished = finished.clone();
+        crate::agents::spawn::install_test_runner(Arc::new(move |gcx, mut messages, config| {
+            let attempts = attempts.clone();
+            let finished = finished.clone();
+            Box::pin(async move {
+                let app = AppState::from_gcx(gcx.clone()).await;
+                let id = config.chat_id.as_ref().unwrap().clone();
+                let session = app.chat.sessions.read().await.get(&id).cloned().unwrap();
+                let thread = session.lock().await.thread.clone();
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                if attempt == 1 {
+                    assert!(messages
+                        .iter()
+                        .any(|message| message.content.content_text_only() == "first answer"));
+                    let notice = messages
+                        .iter()
+                        .rev()
+                        .find(|message| notice_source(message) == Some("agents.continued_turn"))
+                        .expect("a continued turn is announced as such, not as a recovery");
+                    assert_eq!(
+                        notice.extra["event"]["payload"]["previous_status"],
+                        "completed"
+                    );
+                    assert!(notice.content.content_text_only().contains("preserved"));
+                    assert!(messages
+                        .iter()
+                        .all(|message| { notice_source(message) != Some("agents.resume") }));
+                }
+                messages.push(ChatMessage::new(
+                    "assistant".into(),
+                    if attempt == 0 {
+                        "first answer"
+                    } else {
+                        "second answer"
+                    }
+                    .into(),
+                ));
+                save_trajectory_as(gcx, &thread, &messages).await;
+                mirror_subchat_messages_into_session(&app, &id, &messages).await;
+                finish_stateful_subchat_session(&app, &id, &config).await;
+                if attempt == 1 {
+                    finished.notify_one();
+                }
+                Ok(SubchatResult {
+                    messages,
+                    metering: serde_json::Map::new(),
+                    chat_id: Some(id),
+                    aborted: false,
+                })
+            })
+        }))
+    };
+    let handle = crate::agents::spawn::spawn_background_agent(
+        fixture.app.clone(),
+        spawn_request(parent_id, BgAgentKind::Subagent),
+    )
+    .await
+    .unwrap();
+    let agent_id = handle.agent_id.clone();
+    let child_chat_id = handle.child_chat_id.clone();
+    let completed = await_completion(handle).await;
+    assert_eq!(completed.status, BgAgentStatus::Completed);
+    assert_eq!(completed.result_summary.as_deref(), Some("first answer"));
+    wait_until_slot_released(&fixture.app, &child_chat_id).await;
+
+    let before = fixture.app.agents.get_any(&agent_id).await.unwrap();
+    let queued = crate::agents::spawn::resume_agent(
+        fixture.app.clone(),
+        parent_id,
+        &agent_id,
+        None,
+        before.change_seq,
+        Some("Now do the second half.".into()),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        queued.status,
+        BgAgentStatus::Queued,
+        "a continuation request is queued, never reported as the earlier completion"
+    );
+    assert_eq!(queued.run_generation, before.run_generation + 1);
+    assert_eq!(
+        queued.child_chat_id.as_deref(),
+        Some(child_chat_id.as_str())
+    );
+    assert_eq!(queued.previous_runs.len(), 1);
+    assert_eq!(queued.previous_runs[0].status, BgAgentStatus::Completed);
+    assert_eq!(
+        queued.previous_runs[0].result_summary.as_deref(),
+        Some("first answer"),
+        "the prior completion is preserved, not rewritten"
+    );
+    assert_eq!(queued.previous_runs[0].run_generation, 1);
+
+    tokio::time::timeout(Duration::from_secs(30), finished.notified())
+        .await
+        .expect("continued turn finished");
+    let done = wait_for_record(&fixture.app, parent_id, &agent_id, |record| {
+        record.status.is_terminal()
+    })
+    .await;
+    assert_eq!(done.status, BgAgentStatus::Completed);
+    assert_eq!(done.run_generation, 2);
+    assert_eq!(done.result_summary.as_deref(), Some("second answer"));
+    assert_eq!(
+        done.previous_runs[0].result_summary.as_deref(),
+        Some("first answer")
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}

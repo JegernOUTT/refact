@@ -159,6 +159,7 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("agent_profile_max_bytes", 1_024, 16_777_216),
     coordination_bool("strict_path_scope_default"),
     coordination_integer("max_path_scope_entries", 1, 100_000),
+    coordination_integer("agent_closed_retained_max", 1, 100_000),
 ];
 
 pub fn coordination_field_bounds() -> &'static [CoordinationFieldBound] {

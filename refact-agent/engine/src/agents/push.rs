@@ -307,6 +307,20 @@ fn build_push_message(record: &BackgroundAgent) -> String {
                     .to_string(),
             );
         }
+        BgAgentStatus::Closed => {
+            lines.push("Reason:".to_string());
+            lines.push(
+                record
+                    .close_reason
+                    .as_deref()
+                    .unwrap_or("closed by the parent")
+                    .to_string(),
+            );
+            lines.push(
+                "This child is closed, not finished. Its history, goal and plan are preserved; use agent_resume with action inspect, then resume with the returned change_seq to continue the same child."
+                    .to_string(),
+            );
+        }
         BgAgentStatus::Queued | BgAgentStatus::Running | BgAgentStatus::WaitingForApproval => {
             lines.push("Summary:".to_string());
             lines.push(record.progress.as_deref().unwrap_or("").to_string());

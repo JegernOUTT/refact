@@ -4,6 +4,7 @@ pub mod command_approval;
 pub mod delivery;
 pub mod execution;
 pub mod launch_spec;
+pub mod lifecycle;
 pub mod monitor;
 pub mod path_scope;
 pub mod profile;
