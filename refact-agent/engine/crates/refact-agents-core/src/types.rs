@@ -244,7 +244,7 @@ impl From<&BackgroundAgent> for BackgroundAgentSummary {
             pending_questions: record
                 .questions
                 .iter()
-                .filter(|question| question.answer.is_none())
+                .filter(|question| question.state == refact_chat_api::QuestionState::Pending)
                 .count() as u32,
             tokens_used: record.tokens_used,
             cost_usd: record.cost_usd,
@@ -260,7 +260,8 @@ impl From<&BackgroundAgent> for BackgroundAgentSummary {
                     kind: Some(question.kind),
                     state: Some(question.state),
                     correlation_id: Some(question.correlation_id.clone()),
-                    answer: question.answer.clone(),
+                    answer: question.answered().map(str::to_string),
+                    defaulted_answer: question.defaulted().map(str::to_string),
                     asked_at: question.asked_at,
                     answered_at: question.answered_at,
                 })

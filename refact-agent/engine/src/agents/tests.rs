@@ -562,8 +562,26 @@ fn summary_maps_introspection_and_question_state() {
                 state: refact_chat_api::QuestionState::Pending,
                 asked_at: now,
                 expires_at: None,
+                irreversible: false,
+                default_answer: None,
                 answer: None,
                 answered_at: None,
+            },
+            crate::agents::types::AgentQuestion {
+                id: "33333333".to_string(),
+                kind: refact_chat_api::QuestionKind::AgentParent,
+                asker: "agent".to_string(),
+                answerer: "parent".to_string(),
+                correlation_id: "33333333".to_string(),
+                text: "Question three".to_string(),
+                options: None,
+                state: refact_chat_api::QuestionState::Defaulted,
+                asked_at: now,
+                expires_at: None,
+                irreversible: false,
+                default_answer: Some("Default".to_string()),
+                answer: Some("Default".to_string()),
+                answered_at: Some(now),
             },
             crate::agents::types::AgentQuestion {
                 id: "22222222".to_string(),
@@ -576,6 +594,8 @@ fn summary_maps_introspection_and_question_state() {
                 state: refact_chat_api::QuestionState::Answered,
                 asked_at: now,
                 expires_at: None,
+                irreversible: false,
+                default_answer: None,
                 answer: Some("Answer".to_string()),
                 answered_at: Some(now),
             },
@@ -608,8 +628,15 @@ fn summary_maps_introspection_and_question_state() {
     assert_eq!(summary.pending_questions, 1);
     assert_eq!(summary.tokens_used, 123);
     assert_eq!(summary.cost_usd, Some(0.42));
-    assert_eq!(summary.questions.len(), 2);
-    assert_eq!(summary.questions[1].answer.as_deref(), Some("Answer"));
+    assert_eq!(summary.questions.len(), 3);
+    assert_eq!(summary.questions[2].answer.as_deref(), Some("Answer"));
+    let defaulted = &summary.questions[1];
+    assert_eq!(
+        defaulted.state,
+        Some(refact_chat_api::QuestionState::Defaulted)
+    );
+    assert_eq!(defaulted.defaulted_answer.as_deref(), Some("Default"));
+    assert_eq!(defaulted.answer, None);
 }
 
 #[tokio::test]

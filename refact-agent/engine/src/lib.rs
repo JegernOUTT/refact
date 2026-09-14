@@ -99,6 +99,7 @@ pub mod forward_to_openai_endpoint;
 pub mod llm;
 pub use refact_postprocessing;
 pub use refact_providers;
+pub mod attention;
 pub mod providers;
 pub mod questions;
 pub mod restream;

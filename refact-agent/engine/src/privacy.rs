@@ -279,7 +279,10 @@ fn legacy_policy(privacy_settings: &PrivacySettings) -> PrivacyPolicy {
     policy
 }
 
-fn get_file_privacy_level(privacy_settings: Arc<PrivacySettings>, path: &Path) -> FilePrivacyLevel {
+pub fn get_file_privacy_level(
+    privacy_settings: Arc<PrivacySettings>,
+    path: &Path,
+) -> FilePrivacyLevel {
     let policy = match legacy_policy(&privacy_settings).compile() {
         Ok(policy) => policy,
         Err(_) => return FilePrivacyLevel::Blocked,

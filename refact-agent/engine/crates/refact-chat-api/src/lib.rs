@@ -642,7 +642,12 @@ pub struct AgentQuestionSummary {
     pub state: Option<QuestionState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
+    /// Only what a human actually chose. A defaulted question leaves this
+    /// empty so no surface can render a timeout as consent.
     pub answer: Option<String>,
+    /// The documented default that was applied instead of an answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defaulted_answer: Option<String>,
     pub asked_at: DateTime<Utc>,
     pub answered_at: Option<DateTime<Utc>>,
 }

@@ -412,6 +412,7 @@ pub struct GlobalContext {
     pub buddy_events_tx: Option<tokio::sync::broadcast::Sender<crate::buddy::events::BuddyEvent>>,
     pub user_activity: Arc<AMutex<crate::buddy::user_activity::UserActivityRing>>,
     pub agents: Arc<BackgroundAgentRegistry>,
+    pub attention: Arc<crate::attention::AttentionBudget>,
     pub work_scheduler: Arc<refact_work_core::AdmissionScheduler>,
     pub work_views: Arc<crate::coordination::paging::WorkViews>,
     pub work_boards: Arc<crate::coordination::board_index::WorkBoardIndex>,
@@ -508,6 +509,7 @@ impl GlobalContext {
             buddy_event_sink,
             tool_registry,
             agents: self.agents.clone(),
+            attention: self.attention.clone(),
             work_scheduler: self.work_scheduler.clone(),
             agent_executions: self.agent_executions.clone(),
             work_views: self.work_views.clone(),
@@ -868,6 +870,10 @@ pub async fn create_global_context(
     )
     .await
     .unwrap_or_else(|error| panic!("failed to initialize background agent registry: {error}"));
+    let attention = Arc::new(
+        crate::attention::AttentionBudget::from_settings(agents.questions().clone())
+            .unwrap_or_else(|error| panic!("failed to initialize attention budget: {error}")),
+    );
     let cx = GlobalContext {
         shutdown_flag: Arc::new(AtomicBool::new(false)),
         lsp_tcp_client_count: Arc::new(AtomicUsize::new(0)),
@@ -943,6 +949,7 @@ pub async fn create_global_context(
         buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
         user_activity: Arc::new(AMutex::new(user_activity)),
         agents,
+        attention,
         work_scheduler: Arc::new(refact_work_core::AdmissionScheduler::new(
             refact_work_core::coordination_settings(),
         )),
@@ -1167,6 +1174,10 @@ pub mod tests {
                 .unwrap_or_else(|error| {
                     panic!("failed to initialize test background agent registry: {error}")
                 });
+        let attention = Arc::new(
+            crate::attention::AttentionBudget::from_settings(agents.questions().clone())
+                .unwrap_or_else(|error| panic!("failed to initialize attention budget: {error}")),
+        );
 
         let cmdline = CommandLine {
             ping_message: "pong".to_string(),
@@ -1279,6 +1290,7 @@ pub mod tests {
             buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
             user_activity: Arc::new(AMutex::new(user_activity)),
             agents,
+            attention,
             work_scheduler: Arc::new(refact_work_core::AdmissionScheduler::default()),
             agent_executions: Arc::new(Default::default()),
             work_views: Arc::new(Default::default()),

@@ -9,8 +9,9 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
+use crate::attention::{AttentionPriority, AttentionRequest};
 use crate::http::routers::v1::sidebar::{NotificationEvent, NotificationQuestion};
-use refact_chat_api::{AskQuestion, QuestionContract, QuestionKind};
+use refact_chat_api::{QuestionContract, QuestionKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct QuestionItem {
@@ -20,6 +21,10 @@ struct QuestionItem {
     text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     options: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    priority: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default: Option<String>,
 }
 
 pub struct ToolAskQuestions {
@@ -65,6 +70,15 @@ impl Tool for ToolAskQuestions {
                                     "type": "array",
                                     "description": "Options for single_select or multi_select questions.",
                                     "items": { "type": "string" }
+                                },
+                                "priority": {
+                                    "type": "string",
+                                    "description": "How much of the user's attention this claims. 'blocking' skips the batching window, 'low' is refused when the user is already saturated. Defaults to normal.",
+                                    "enum": ["low", "normal", "blocking"]
+                                },
+                                "default": {
+                                    "type": "string",
+                                    "description": "Safe answer applied if the user never responds. Only allowed with priority 'low'. The outcome is recorded as defaulted, never as answered."
                                 }
                             },
                             "required": ["id", "type", "text"]
@@ -140,32 +154,48 @@ impl Tool for ToolAskQuestions {
             (ccx_lock.chat_id.clone(), ccx_lock.app.clone())
         };
         let asked_at = chrono::Utc::now();
-        let service = app.questions();
-        let contracts = questions
-            .iter()
-            .map(|question| {
-                service
-                    .ask(
-                        AskQuestion::new(
-                            QuestionKind::UserInput,
-                            format!("chat:{chat_id}"),
-                            "user",
-                            format!("{chat_id}:{tool_call_id}:{}", question.id),
-                            question.text.clone(),
-                        )
-                        .with_id(format!("{tool_call_id}:{}", question.id))
-                        .with_options(question.options.clone()),
-                        asked_at,
+        let scope = crate::attention::scope_for_chat(&app, &chat_id).await;
+        let waiter = format!("{chat_id}:{tool_call_id}");
+        let budget = app.attention();
+        let mut contracts: Vec<QuestionContract> = Vec::with_capacity(questions.len());
+        let mut unasked: Vec<&QuestionItem> = Vec::with_capacity(questions.len());
+        for question in &questions {
+            let priority = match question.priority.as_deref() {
+                Some(priority) => crate::attention::parse_priority(priority)?,
+                None => AttentionPriority::Normal,
+            };
+            let admission = budget
+                .join(
+                    AttentionRequest::new(
+                        scope.clone(),
+                        QuestionKind::UserInput,
+                        format!("chat:{chat_id}"),
+                        "user",
+                        question.text.clone(),
                     )
-                    .map_err(|error| error.to_string())
-            })
-            .collect::<Result<Vec<QuestionContract>, String>>()?;
+                    .with_options(question.options.clone())
+                    .with_priority(priority)
+                    .with_default_answer(question.default.clone()),
+                    &waiter,
+                    asked_at,
+                )
+                .map_err(|error| error.to_string())?;
+            if !admission.shared {
+                unasked.push(question);
+            }
+            contracts.push(
+                budget
+                    .questions()
+                    .get(&admission.question_id)
+                    .ok_or("admitted question is missing from the question service")?,
+            );
+        }
 
         {
             let ccx_lock = ccx.lock().await;
             let gcx = ccx_lock.global_context.clone();
             if let Some(ref tx) = gcx.notification_events_tx {
-                let notification_questions: Vec<NotificationQuestion> = questions
+                let notification_questions: Vec<NotificationQuestion> = unasked
                     .iter()
                     .map(|q| NotificationQuestion {
                         id: q.id.clone(),
@@ -174,11 +204,13 @@ impl Tool for ToolAskQuestions {
                         options: q.options.clone(),
                     })
                     .collect();
-                let _ = tx.send(NotificationEvent::AskQuestions {
-                    chat_id: chat_id.clone(),
-                    tool_call_id: tool_call_id.clone(),
-                    questions: notification_questions,
-                });
+                if !notification_questions.is_empty() {
+                    let _ = tx.send(NotificationEvent::AskQuestions {
+                        chat_id: chat_id.clone(),
+                        tool_call_id: tool_call_id.clone(),
+                        questions: notification_questions,
+                    });
+                }
             }
         }
 

@@ -336,6 +336,7 @@ pub struct AppState {
     pub buddy_event_sink: Arc<dyn BuddyEventSink>,
     pub tool_registry: Arc<dyn ToolRegistry>,
     pub agents: Arc<BackgroundAgentRegistry>,
+    pub attention: Arc<crate::attention::AttentionBudget>,
     pub work_scheduler: Arc<refact_work_core::AdmissionScheduler>,
     pub work_views: Arc<crate::coordination::paging::WorkViews>,
     pub work_boards: Arc<crate::coordination::board_index::WorkBoardIndex>,
@@ -1502,6 +1503,12 @@ impl AppState {
     /// The one tracked question service behind every question family.
     pub fn questions(&self) -> &refact_chat_api::QuestionRegistry {
         self.agents.questions()
+    }
+
+    /// The governor in front of the human: dedupe, batching, ranking and
+    /// backpressure for everything that would interrupt them.
+    pub fn attention(&self) -> &crate::attention::AttentionBudget {
+        &self.attention
     }
 }
 

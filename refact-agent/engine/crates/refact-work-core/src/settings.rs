@@ -60,6 +60,15 @@ pub struct CoordinationSettings {
     /// Reporting is always on; breaking a detected cycle by cancelling the
     /// refused waiter stays opt-in.
     pub deadlock_auto_cancel: bool,
+    /// How long arriving questions are collected before the human is shown one
+    /// batch instead of a stream of interruptions. Zero presents immediately.
+    pub attention_batch_window_ms: u64,
+    /// Beyond this many outstanding human-facing questions, low-priority ones
+    /// are refused rather than queued.
+    pub attention_max_outstanding_questions: usize,
+    /// How long a low-stakes question waits before its documented default is
+    /// applied.
+    pub attention_default_timeout_secs: u64,
     pub delivery_default_ttl_secs: u64,
     pub delivery_max_ttl_secs: u64,
     pub delivery_max_pending: usize,
@@ -151,6 +160,9 @@ impl Default for CoordinationSettings {
             deadlock_max_edges: 16384,
             deadlock_detection_attempts: 3,
             deadlock_auto_cancel: false,
+            attention_batch_window_ms: 2_000,
+            attention_max_outstanding_questions: 32,
+            attention_default_timeout_secs: 900,
             delivery_default_ttl_secs: 86_400,
             delivery_max_ttl_secs: 604_800,
             delivery_max_pending: 4096,
@@ -499,6 +511,25 @@ impl CoordinationSettings {
         );
         at_least(
             &mut v,
+            "attention_max_outstanding_questions",
+            self.attention_max_outstanding_questions as u64,
+            1,
+        );
+        at_least(
+            &mut v,
+            "attention_default_timeout_secs",
+            self.attention_default_timeout_secs,
+            1,
+        );
+        not_greater(
+            &mut v,
+            "attention_default_timeout_secs",
+            self.attention_default_timeout_secs,
+            "question_max_expiry_secs",
+            self.question_max_expiry_secs,
+        );
+        at_least(
+            &mut v,
             "lock_poll_interval_ms",
             self.lock_poll_interval_ms,
             1,
@@ -624,6 +655,10 @@ impl CoordinationSettings {
     pub fn recent_window(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.recent_window_secs)
     }
+
+    pub fn attention_batch_window(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.attention_batch_window_ms)
+    }
 }
 
 #[cfg(test)]
@@ -709,6 +744,32 @@ mod tests {
             |settings: &mut CoordinationSettings| settings.deadlock_max_nodes = 0,
             |settings: &mut CoordinationSettings| settings.deadlock_max_edges = 0,
             |settings: &mut CoordinationSettings| settings.deadlock_detection_attempts = 0,
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn attention_bounds_default_generous_and_reject_invalid_values() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(settings.attention_max_outstanding_questions >= 1);
+        assert!(settings.attention_default_timeout_secs <= settings.question_max_expiry_secs);
+        assert_eq!(
+            settings.attention_batch_window(),
+            std::time::Duration::from_millis(settings.attention_batch_window_ms)
+        );
+        let mut immediate = CoordinationSettings::default();
+        immediate.attention_batch_window_ms = 0;
+        immediate.validate().unwrap();
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.attention_max_outstanding_questions = 0,
+            |settings: &mut CoordinationSettings| settings.attention_default_timeout_secs = 0,
+            |settings: &mut CoordinationSettings| {
+                settings.attention_default_timeout_secs = settings.question_max_expiry_secs + 1
+            },
         ] {
             let mut settings = CoordinationSettings::default();
             mutate(&mut settings);

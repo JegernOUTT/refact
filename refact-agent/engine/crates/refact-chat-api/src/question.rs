@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 use tokio::time::{sleep_until, Instant};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuestionKind {
     UserInput,
@@ -23,6 +23,9 @@ pub enum QuestionKind {
 pub enum QuestionState {
     Pending,
     Answered,
+    /// A low-stakes question whose documented default was applied because the
+    /// human never got to it. Never reported as `Answered`: nobody consented.
+    Defaulted,
     Rejected,
     Cancelled,
     Expired,
@@ -42,6 +45,15 @@ pub struct QuestionContract {
     pub asked_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+    /// Set by an asker that has an irreversible effect behind the answer. The
+    /// kind already forces this for approvals and permission escalations.
+    #[serde(default)]
+    pub irreversible: bool,
+    /// The explicit safe default a low-stakes asker supplied. Its presence is
+    /// the only thing that lets expiry settle as `Defaulted` instead of
+    /// `Expired`, and `validate` refuses it on anything irreversible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -71,11 +83,62 @@ impl QuestionContract {
             state: QuestionState::Pending,
             asked_at,
             expires_at,
+            irreversible: false,
+            default_answer: None,
             answer: None,
             answered_at: None,
         };
         question.validate()?;
         Ok(question)
+    }
+
+    /// Declare what is at stake behind the answer. Rejected when a default is
+    /// offered for something irreversible, so the combination cannot exist.
+    pub fn with_stakes(
+        mut self,
+        irreversible: bool,
+        default_answer: Option<String>,
+    ) -> Result<Self, String> {
+        self.irreversible = irreversible;
+        self.default_answer = default_answer;
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Approvals and permission escalations are irreversible by kind, whatever
+    /// the asker claims.
+    pub fn is_irreversible(&self) -> bool {
+        self.irreversible
+            || matches!(
+                self.kind,
+                QuestionKind::PlanApproval | QuestionKind::PermissionEscalation
+            )
+    }
+
+    /// The default expiry would apply, or `None` when this question must be
+    /// answered by a human.
+    pub fn defaultable(&self) -> Option<&str> {
+        if self.is_irreversible() {
+            return None;
+        }
+        self.default_answer.as_deref()
+    }
+
+    /// The text a human actually chose. Never returns the default: a defaulted
+    /// question carries no consent.
+    pub fn answered(&self) -> Option<&str> {
+        match self.state {
+            QuestionState::Answered => self.answer.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The default that was applied, when nobody answered in time.
+    pub fn defaulted(&self) -> Option<&str> {
+        match self.state {
+            QuestionState::Defaulted => self.answer.as_deref(),
+            _ => None,
+        }
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -103,6 +166,24 @@ impl QuestionContract {
             && (self.answer.as_deref().is_none_or(str::is_empty) || self.answered_at.is_none())
         {
             return Err("answered questions require answer text and timestamp".into());
+        }
+        if let Some(default) = &self.default_answer {
+            if default.trim().is_empty() {
+                return Err("a defaultable question needs nonempty default text".into());
+            }
+            if self.is_irreversible() {
+                return Err(
+                    "approvals, permission escalations and irreversible questions cannot carry a default"
+                        .into(),
+                );
+            }
+        }
+        if self.state == QuestionState::Defaulted
+            && (self.default_answer.is_none()
+                || self.answer.as_deref() != self.default_answer.as_deref()
+                || self.answered_at.is_none())
+        {
+            return Err("defaulted questions require the stored default and its timestamp".into());
         }
         Ok(())
     }
@@ -198,6 +279,7 @@ impl std::error::Error for QuestionError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuestionSettlement {
     Answered(String),
+    Defaulted(String),
     Rejected,
     Cancelled,
     Expired,
@@ -207,17 +289,31 @@ impl QuestionSettlement {
     pub fn state(&self) -> QuestionState {
         match self {
             Self::Answered(_) => QuestionState::Answered,
+            Self::Defaulted(_) => QuestionState::Defaulted,
             Self::Rejected => QuestionState::Rejected,
             Self::Cancelled => QuestionState::Cancelled,
             Self::Expired => QuestionState::Expired,
         }
     }
 
+    /// Only a real answer. A defaulted question returns `None` here so no
+    /// caller can mistake a timeout for consent.
     pub fn answer(&self) -> Option<&str> {
         match self {
             Self::Answered(answer) => Some(answer.as_str()),
             _ => None,
         }
+    }
+
+    pub fn default_used(&self) -> Option<&str> {
+        match self {
+            Self::Defaulted(default) => Some(default.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn is_answered(&self) -> bool {
+        matches!(self, Self::Answered(_))
     }
 }
 
@@ -231,6 +327,8 @@ pub struct AskQuestion {
     pub text: String,
     pub options: Option<Vec<String>>,
     pub expires_in_secs: Option<u64>,
+    pub irreversible: bool,
+    pub default_answer: Option<String>,
 }
 
 impl AskQuestion {
@@ -250,6 +348,8 @@ impl AskQuestion {
             text: text.into(),
             options: None,
             expires_in_secs: None,
+            irreversible: false,
+            default_answer: None,
         }
     }
 
@@ -265,6 +365,18 @@ impl AskQuestion {
 
     pub fn with_expiry_secs(mut self, seconds: Option<u64>) -> Self {
         self.expires_in_secs = seconds;
+        self
+    }
+
+    pub fn irreversible(mut self, irreversible: bool) -> Self {
+        self.irreversible = irreversible;
+        self
+    }
+
+    /// Offer an explicit safe default. Registration fails if the question is
+    /// irreversible, rather than quietly dropping the default.
+    pub fn with_default_answer(mut self, default_answer: Option<String>) -> Self {
+        self.default_answer = default_answer;
         self
     }
 }
@@ -327,6 +439,7 @@ impl QuestionRegistry {
             now,
             Some(now + ChronoDuration::seconds(seconds as i64)),
         )
+        .and_then(|contract| contract.with_stakes(request.irreversible, request.default_answer))
         .map_err(QuestionError::Invalid)?;
         self.register(contract.clone(), now)?;
         Ok(contract)
@@ -585,6 +698,9 @@ impl QuestionRegistry {
             QuestionState::Answered => Some(QuestionSettlement::Answered(
                 entry.answer.clone().unwrap_or_default(),
             )),
+            QuestionState::Defaulted => Some(QuestionSettlement::Defaulted(
+                entry.answer.clone().unwrap_or_default(),
+            )),
             QuestionState::Rejected => Some(QuestionSettlement::Rejected),
             QuestionState::Cancelled => Some(QuestionSettlement::Cancelled),
             QuestionState::Expired => Some(QuestionSettlement::Expired),
@@ -598,12 +714,23 @@ impl QuestionRegistry {
             .count()
     }
 
+    /// The single deadline path. A low-stakes question with an explicit safe
+    /// default settles as `Defaulted` and records the default it used;
+    /// everything else — every approval, every escalation — simply expires.
     fn expire_locked(entries: &mut HashMap<String, QuestionContract>, now: DateTime<Utc>) {
         for entry in entries.values_mut() {
-            if entry.state == QuestionState::Pending
-                && entry.expires_at.is_some_and(|expires_at| expires_at <= now)
+            if entry.state != QuestionState::Pending
+                || !entry.expires_at.is_some_and(|expires_at| expires_at <= now)
             {
-                entry.state = QuestionState::Expired;
+                continue;
+            }
+            match entry.defaultable().map(str::to_string) {
+                Some(default) => {
+                    entry.state = QuestionState::Defaulted;
+                    entry.answer = Some(default);
+                    entry.answered_at = Some(now);
+                }
+                None => entry.state = QuestionState::Expired,
             }
         }
     }
@@ -987,6 +1114,123 @@ mod tests {
             }
             assert_eq!(waiter.await.unwrap().unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn a_low_stakes_timeout_defaults_and_is_never_reported_as_answered() {
+        let registry = registry();
+        let now = Utc::now();
+        let question = registry
+            .ask(
+                ask(QuestionKind::UserInput, "c")
+                    .with_expiry_secs(Some(60))
+                    .with_default_answer(Some("keep going".into())),
+                now,
+            )
+            .unwrap();
+        assert_eq!(question.defaultable(), Some("keep going"));
+        registry.expire(now + ChronoDuration::seconds(61));
+        let settled = registry.get(&question.id).unwrap();
+        assert_eq!(settled.state, QuestionState::Defaulted);
+        assert_eq!(settled.defaulted(), Some("keep going"));
+        assert_eq!(settled.answered(), None);
+        let settlement = registry.settlement(&question.id, now).unwrap();
+        assert_eq!(
+            settlement,
+            QuestionSettlement::Defaulted("keep going".into())
+        );
+        assert_eq!(settlement.default_used(), Some("keep going"));
+        assert_eq!(settlement.answer(), None);
+        assert!(!settlement.is_answered());
+        assert_eq!(settlement.state(), QuestionState::Defaulted);
+        assert_eq!(
+            registry.answer(&question.id, "answerer", "late".into(), now),
+            Err(QuestionError::AlreadySettled(QuestionState::Defaulted))
+        );
+        settled.validate().unwrap();
+    }
+
+    #[test]
+    fn nothing_irreversible_can_carry_a_default_so_it_expires_instead() {
+        let registry = registry();
+        let now = Utc::now();
+        for (kind, irreversible) in [
+            (QuestionKind::PermissionEscalation, false),
+            (QuestionKind::PlanApproval, false),
+            (QuestionKind::UserInput, true),
+        ] {
+            let request = ask(kind, "c")
+                .with_expiry_secs(Some(60))
+                .irreversible(irreversible)
+                .with_default_answer(Some("approve".into()));
+            assert!(matches!(
+                registry.ask(request, now),
+                Err(QuestionError::Invalid(_))
+            ));
+            let question = registry
+                .ask(
+                    ask(kind, "c")
+                        .with_expiry_secs(Some(60))
+                        .irreversible(irreversible),
+                    now,
+                )
+                .unwrap();
+            assert!(question.is_irreversible());
+            assert_eq!(question.defaultable(), None);
+            registry.expire(now + ChronoDuration::seconds(1_000));
+            assert_eq!(
+                registry.get(&question.id).unwrap().state,
+                QuestionState::Expired
+            );
+            assert_eq!(
+                registry.settlement(&question.id, now),
+                Some(QuestionSettlement::Expired)
+            );
+        }
+    }
+
+    #[test]
+    fn a_defaulted_record_must_carry_the_default_it_used() {
+        let base = QuestionContract::pending(
+            "q",
+            QuestionKind::UserInput,
+            "asker",
+            "answerer",
+            "correlation",
+            "Continue?",
+            None,
+            Utc::now(),
+            None,
+        )
+        .unwrap();
+        assert!(base.clone().with_stakes(false, Some("  ".into())).is_err());
+        let mut defaulted = base.with_stakes(false, Some("yes".into())).unwrap();
+        defaulted.state = QuestionState::Defaulted;
+        assert!(defaulted.validate().is_err());
+        defaulted.answer = Some("yes".into());
+        defaulted.answered_at = Some(Utc::now());
+        defaulted.validate().unwrap();
+        let mut forged = defaulted.clone();
+        forged.answer = Some("something else".into());
+        assert!(forged.validate().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_waiter_on_a_low_stakes_question_is_told_it_defaulted() {
+        let registry = registry();
+        let now = Utc::now();
+        let question = registry
+            .ask(
+                ask(QuestionKind::UserInput, "c")
+                    .with_expiry_secs(Some(1))
+                    .with_default_answer(Some("skip".into())),
+                now,
+            )
+            .unwrap();
+        assert_eq!(
+            registry.wait(&question.id, now).await,
+            Ok(QuestionSettlement::Defaulted("skip".into()))
+        );
     }
 
     #[tokio::test]
