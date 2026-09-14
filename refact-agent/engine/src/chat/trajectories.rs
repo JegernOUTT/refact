@@ -85,39 +85,20 @@ async fn atomic_write_json_with_tmp_path(
     write_error_prefix: Option<&str>,
     self_write_source: Option<TrajectorySourceIdentity>,
 ) -> Result<(), String> {
-    let result = async {
+    let write_result = async {
         let json = json_result?;
-        let self_write = match self_write_source {
-            Some(source) if trajectory_watcher_self_write_rollout_enabled() => {
-                register_trajectory_self_write(
-                    path,
-                    source,
-                    json.len() as u64,
-                    md5::compute(&json).0,
-                )
-                .await
-            }
-            None => None,
-            Some(_) => None,
-        };
-        if let Err(error) = fs::write(tmp_path, &json).await {
-            discard_trajectory_self_write(self_write);
-            return Err(write_error_prefix
+        fs::write(tmp_path, &json).await.map_err(|error| {
+            write_error_prefix
                 .map(|prefix| format!("{}: {}", prefix, error))
-                .unwrap_or_else(|| error.to_string()));
-        }
-        if let Err(error) = atomic_write_file(tmp_path, path).await {
-            discard_trajectory_self_write(self_write);
-            return Err(error);
-        }
-        complete_trajectory_self_write(self_write).await;
-        Ok(())
+                .unwrap_or_else(|| error.to_string())
+        })?;
+        Ok(TrajectoryPrettyWrite {
+            byte_len: json.len() as u64,
+            content_hash: md5::compute(&json).0,
+        })
     }
     .await;
-    if result.is_err() {
-        let _ = fs::remove_file(tmp_path).await;
-    }
-    result
+    atomic_finish_trajectory_write(path, tmp_path, write_result, self_write_source).await
 }
 
 struct TrajectoryPrettyWrite {
@@ -4338,7 +4319,14 @@ async fn schedule_detached_trajectory_writer(
         state.pending = Some((target_version, snapshot));
         state.coalesce_deadline =
             coalesce.then(|| Instant::now() + TRAJECTORY_CHECKPOINT_COALESCE_WINDOW);
-        if !state.in_flight {
+        // Both worker exits clear `in_flight` while still holding this lock, so `in_flight`
+        // without a live handle means the task was aborted or panicked. Respawning is what keeps
+        // `in_flight` from wedging at true and stalling every later write for this trajectory.
+        let worker_alive = state
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished());
+        if !state.in_flight || !worker_alive {
             state.in_flight = true;
             let worker_writer = writer.clone();
             let worker_gcx = gcx.clone();
@@ -7586,6 +7574,24 @@ fn task_progress_from_tasks_set_arguments(arguments: &str) -> Option<(i32, i32, 
     Some((total, done, failed))
 }
 
+fn accumulate_line_changes(content: &str, total_added: &mut i64, total_removed: &mut i64) {
+    let Ok(chunks) = serde_json::from_str::<Vec<serde_json::Value>>(content) else {
+        return;
+    };
+    for chunk in chunks {
+        if let Some(lines_add) = chunk.get("lines_add").and_then(|v| v.as_str()) {
+            if !lines_add.is_empty() {
+                *total_added += lines_add.lines().count() as i64;
+            }
+        }
+        if let Some(lines_remove) = chunk.get("lines_remove").and_then(|v| v.as_str()) {
+            if !lines_remove.is_empty() {
+                *total_removed += lines_remove.lines().count() as i64;
+            }
+        }
+    }
+}
+
 /// Every per-save trajectory metric in one forward pass. Task progress keeps its "last successful
 /// `tasks_set` carrying a task list" semantics: candidates are collected in message order and
 /// resolved in reverse, the exact order the previous reverse scan visited them in.
@@ -7618,23 +7624,7 @@ where
         match msg.role.as_str() {
             "diff" => {
                 if let ChatContent::SimpleText(content) = &msg.content {
-                    if let Ok(chunks) = serde_json::from_str::<Vec<serde_json::Value>>(content) {
-                        for chunk in chunks {
-                            if let Some(lines_add) = chunk.get("lines_add").and_then(|v| v.as_str())
-                            {
-                                if !lines_add.is_empty() {
-                                    total_added += lines_add.lines().count() as i64;
-                                }
-                            }
-                            if let Some(lines_remove) =
-                                chunk.get("lines_remove").and_then(|v| v.as_str())
-                            {
-                                if !lines_remove.is_empty() {
-                                    total_removed += lines_remove.lines().count() as i64;
-                                }
-                            }
-                        }
-                    }
+                    accumulate_line_changes(content, &mut total_added, &mut total_removed);
                 }
             }
             "tool" => {
@@ -10069,6 +10059,70 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
         assert_eq!(saved["title"], "Title 1");
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn aborted_writer_does_not_wedge_pending_coalesced_write() {
+        let _lock = serial_test_guard();
+        let _rollout = TrajectoryWriterRolloutGuard::set(true);
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "detached-writer-worker-abort";
+        let writer = detached_trajectory_writer(&gcx, &coalesce_test_snapshot(chat_id, 0));
+
+        persist_trajectory_snapshot_with_intent(
+            gcx.clone(),
+            coalesce_test_snapshot(chat_id, 0),
+            TrajectoryCommitIntent::Checkpoint,
+        )
+        .await
+        .unwrap();
+        assert!(
+            writer.lock().await.coalesce_deadline.is_some(),
+            "a checkpoint intent must arm the coalescing window"
+        );
+        assert_eq!(trajectory_physical_writes_for_chat(chat_id), 0);
+
+        let worker = writer
+            .lock()
+            .await
+            .worker
+            .take()
+            .expect("checkpoint must have spawned a detached writer");
+        worker.abort();
+        let _ = worker.await;
+        assert!(
+            writer.lock().await.in_flight,
+            "aborting the worker leaves in_flight set, which is exactly the wedge under test"
+        );
+
+        persist_trajectory_snapshot_with_intent(
+            gcx.clone(),
+            coalesce_test_snapshot(chat_id, 1),
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap();
+
+        {
+            let state = writer.lock().await;
+            assert!(state.pending.is_none());
+            assert!(
+                !state.in_flight,
+                "in_flight must not stay stuck after the replacement worker drains the queue"
+            );
+            assert_eq!(state.committed_version, 2);
+        }
+        assert_eq!(
+            trajectory_physical_writes_for_chat(chat_id),
+            1,
+            "the pending snapshot must land exactly once after the worker was aborted"
+        );
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(loaded.thread.title, "Title 1");
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].content.content_text_only(), "message 1");
     }
 
     #[serial(trajectory_perf)]
