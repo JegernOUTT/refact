@@ -1029,6 +1029,9 @@ impl Tool for ToolTaskBoardMoveCard {
 
         let (board, old_column) =
             storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+                board
+                    .ensure_column_move_allowed(card_id, column)
+                    .map_err(storage::violation_error)?;
                 let card = board
                     .get_card_mut(card_id)
                     .ok_or(format!("Card {} not found", card_id))?;
@@ -1231,9 +1234,429 @@ impl Tool for ToolTaskReadyCards {
     }
 }
 
+pub struct ToolTaskBoardClaimCard;
+pub struct ToolTaskBoardDiscover;
+
+impl ToolTaskBoardClaimCard {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl ToolTaskBoardDiscover {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Tool for ToolTaskBoardClaimCard {
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let task_id = get_task_id(&ccx, args).await?;
+        let (gcx, claimant) = {
+            let ccx_lock = ccx.lock().await;
+            (ccx_lock.app.gcx.clone(), ccx_lock.chat_id.clone())
+        };
+        let card_id = args
+            .get("card_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or("Missing 'card_id'")?;
+        let release = args
+            .get("release")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let result = if release {
+            let board = storage::release_card_claim(gcx, &task_id, card_id, &claimant).await?;
+            json!({
+                "type": "task_board_claim",
+                "action": "release",
+                "task_id": task_id,
+                "card_id": card_id,
+                "claimant_chat_id": claimant,
+                "rev": board.rev,
+            })
+        } else {
+            let idempotency_key = args
+                .get("idempotency_key")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(claimant.as_str())
+                .to_string();
+            let (board, outcome) =
+                storage::claim_card(gcx, &task_id, card_id, &claimant, &idempotency_key).await?;
+            json!({
+                "type": "task_board_claim",
+                "action": "claim",
+                "task_id": task_id,
+                "card_id": card_id,
+                "claimant_chat_id": claimant,
+                "idempotency_key": idempotency_key,
+                "already_held": outcome == crate::tasks::types::ClaimOutcome::AlreadyHeld,
+                "rev": board.rev,
+            })
+        };
+
+        Ok((
+            false,
+            vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(result.to_string()),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                ..Default::default()
+            })],
+        ))
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec![]
+    }
+
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "board_claim".to_string(),
+            display_name: "Task Board Claim Card".to_string(),
+            source: make_source(),
+            experimental: false,
+            allow_parallel: false,
+            description: "Atomically claim a board card for this chat, or release a claim this chat holds. Claiming is a compare-and-set: a card already claimed by someone else fails with already_claimed, and repeating the same idempotency key is a no-op.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task UUID (optional if in task context)"},
+                    "card_id": {"type": "string", "description": "Card ID to claim or release"},
+                    "idempotency_key": {"type": "string", "description": "Retry key; repeating the same key for the same chat re-confirms the existing claim"},
+                    "release": {"type": "boolean", "description": "Release the claim this chat holds instead of acquiring one"}
+                },
+                "required": ["card_id"]
+            }),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for ToolTaskBoardDiscover {
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let gcx = ccx.lock().await.app.gcx.clone();
+        let task_id = args
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let result = match task_id {
+            Some(task_id) => {
+                serde_yaml::to_string(&storage::discover_board_authority(gcx, task_id).await?)
+                    .map_err(|e| e.to_string())?
+            }
+            None => {
+                let (cards, projection_unavailable) = storage::discover_project_cards(gcx).await?;
+                serde_yaml::to_string(&json!({
+                    "projection_unavailable": projection_unavailable,
+                    "cards": cards,
+                }))
+                .map_err(|e| e.to_string())?
+            }
+        };
+
+        Ok((
+            false,
+            vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(result),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                ..Default::default()
+            })],
+        ))
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec![]
+    }
+
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "board_discover".to_string(),
+            display_name: "Task Board Discover".to_string(),
+            source: make_source(),
+            experimental: false,
+            allow_parallel: true,
+            description: "Read-only discovery of the tasks and cards in this project and their claim state. Without task_id it reads the published board projection; with task_id it reports that board's owner, reviewers, review policy, claims and dependency overrides. Metadata only — it grants no control over what it lists.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Report claim and role state for one task instead of listing the project"}
+                },
+                "required": []
+            }),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_state::AppState;
+    use crate::global_context::GlobalContext;
+    use crate::tasks::types::{TaskMeta as StoredTaskMeta, TaskStatus};
+    use refact_chat_api::TaskMeta as ThreadTaskMeta;
+
+    async fn setup_task(board: TaskBoard) -> (Arc<GlobalContext>, tempfile::TempDir) {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let task_dir = temp.path().join(".refact").join("tasks").join("task-1");
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+        let now = Utc::now().to_rfc3339();
+        storage::save_task_meta(
+            gcx.clone(),
+            "task-1",
+            &StoredTaskMeta {
+                schema_version: 1,
+                id: "task-1".to_string(),
+                name: "Task".to_string(),
+                status: TaskStatus::Active,
+                created_at: now.clone(),
+                updated_at: now,
+                cards_total: 0,
+                cards_done: 0,
+                cards_failed: 0,
+                agents_active: 0,
+                base_branch: None,
+                base_commit: None,
+                default_agent_model: None,
+                is_name_generated: false,
+                last_agents_summary_at: None,
+                planner_session_state: None,
+            },
+        )
+        .await
+        .unwrap();
+        storage::create_board(gcx.clone(), "task-1", &board)
+            .await
+            .unwrap();
+        (gcx, temp)
+    }
+
+    async fn chat_ccx(gcx: Arc<GlobalContext>, chat_id: &str) -> Arc<AMutex<AtCommandsContext>> {
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                Vec::new(),
+                chat_id.to_string(),
+                None,
+                "model".to_string(),
+                Some(ThreadTaskMeta {
+                    task_id: "task-1".to_string(),
+                    role: "planner".to_string(),
+                    agent_id: None,
+                    card_id: None,
+                    planner_chat_id: Some(chat_id.to_string()),
+                }),
+                None,
+            )
+            .await,
+        ))
+    }
+
+    fn tool_text(contexts: Vec<ContextEnum>) -> String {
+        match contexts
+            .into_iter()
+            .next()
+            .expect("tool produced no message")
+        {
+            ContextEnum::ChatMessage(message) => message.content.content_text_only(),
+            _ => panic!("expected a tool chat message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn moving_to_doing_is_blocked_until_an_override_is_recorded() {
+        let board = TaskBoard {
+            cards: vec![
+                card("T-1", "Dependency", "planned", "P1", vec![]),
+                card("T-2", "Dependent", "planned", "P1", vec!["T-1"]),
+            ],
+            ..Default::default()
+        };
+        let (gcx, _temp) = setup_task(board).await;
+        let ccx = chat_ccx(gcx.clone(), "planner-chat").await;
+        let args = HashMap::from([
+            ("card_id".to_string(), json!("T-2")),
+            ("column".to_string(), json!("doing")),
+        ]);
+
+        let blocked = ToolTaskBoardMoveCard::new()
+            .tool_execute(ccx.clone(), &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+        let decoded: Value = serde_json::from_str(&blocked).unwrap();
+        assert_eq!(decoded["code"], "dependency_unsatisfied");
+        assert!(decoded["message"].as_str().unwrap().contains("T-1"));
+        assert_eq!(
+            storage::load_board(gcx.clone(), "task-1")
+                .await
+                .unwrap()
+                .get_card("T-2")
+                .unwrap()
+                .column,
+            "planned"
+        );
+
+        let terminal = HashMap::from([
+            ("card_id".to_string(), json!("T-2")),
+            ("column".to_string(), json!("failed")),
+        ]);
+        ToolTaskBoardMoveCard::new()
+            .tool_execute(ccx.clone(), &"call".to_string(), &terminal)
+            .await
+            .unwrap();
+
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.owner_chat_id = Some("planner-chat".to_string());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        storage::override_card_dependencies(
+            gcx.clone(),
+            "task-1",
+            "T-2",
+            "planner-chat",
+            "dependency verified out of band",
+        )
+        .await
+        .unwrap();
+
+        ToolTaskBoardMoveCard::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        assert_eq!(board.get_card("T-2").unwrap().column, "doing");
+        assert_eq!(
+            board.dependency_overrides["T-2"].reason,
+            "dependency verified out of band"
+        );
+    }
+
+    #[tokio::test]
+    async fn board_claim_tool_gives_one_holder_and_supports_idempotent_retry() {
+        let board = TaskBoard {
+            cards: vec![card("T-1", "Claimable", "planned", "P1", vec![])],
+            ..Default::default()
+        };
+        let (gcx, _temp) = setup_task(board).await;
+        let first = chat_ccx(gcx.clone(), "agent-one").await;
+        let second = chat_ccx(gcx.clone(), "agent-two").await;
+        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
+
+        let claimed: Value = serde_json::from_str(&tool_text(
+            ToolTaskBoardClaimCard::new()
+                .tool_execute(first.clone(), &"call".to_string(), &args)
+                .await
+                .unwrap()
+                .1,
+        ))
+        .unwrap();
+        assert_eq!(claimed["already_held"], json!(false));
+
+        let retried: Value = serde_json::from_str(&tool_text(
+            ToolTaskBoardClaimCard::new()
+                .tool_execute(first.clone(), &"call".to_string(), &args)
+                .await
+                .unwrap()
+                .1,
+        ))
+        .unwrap();
+        assert_eq!(retried["already_held"], json!(true));
+
+        let denied = ToolTaskBoardClaimCard::new()
+            .tool_execute(second, &"call".to_string(), &args)
+            .await
+            .unwrap_err();
+        let decoded: Value = serde_json::from_str(&denied).unwrap();
+        assert_eq!(decoded["code"], "already_claimed");
+
+        let released = HashMap::from([
+            ("card_id".to_string(), json!("T-1")),
+            ("release".to_string(), json!(true)),
+        ]);
+        ToolTaskBoardClaimCard::new()
+            .tool_execute(first, &"call".to_string(), &released)
+            .await
+            .unwrap();
+        assert!(storage::load_board(gcx, "task-1")
+            .await
+            .unwrap()
+            .card_claims
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn board_discover_reports_state_without_conferring_control() {
+        let board = TaskBoard {
+            cards: vec![card("T-1", "Claimable", "planned", "P1", vec![])],
+            ..Default::default()
+        };
+        let (gcx, _temp) = setup_task(board).await;
+        let holder = chat_ccx(gcx.clone(), "agent-one").await;
+        let observer = chat_ccx(gcx.clone(), "agent-two").await;
+        ToolTaskBoardClaimCard::new()
+            .tool_execute(
+                holder,
+                &"call".to_string(),
+                &HashMap::from([("card_id".to_string(), json!("T-1"))]),
+            )
+            .await
+            .unwrap();
+
+        let discovered = tool_text(
+            ToolTaskBoardDiscover::new()
+                .tool_execute(
+                    observer.clone(),
+                    &"call".to_string(),
+                    &HashMap::from([("task_id".to_string(), json!("task-1"))]),
+                )
+                .await
+                .unwrap()
+                .1,
+        );
+
+        assert!(discovered.contains("T-1"));
+        assert!(discovered.contains("agent-one"));
+        let denied = ToolTaskBoardClaimCard::new()
+            .tool_execute(
+                observer,
+                &"call".to_string(),
+                &HashMap::from([("card_id".to_string(), json!("T-1"))]),
+            )
+            .await
+            .unwrap_err();
+        assert!(denied.contains("already_claimed"));
+    }
 
     #[test]
     fn update_card_schema_includes_target_files() {

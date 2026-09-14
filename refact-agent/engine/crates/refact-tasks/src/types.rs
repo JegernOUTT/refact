@@ -73,6 +73,92 @@ pub struct TaskBoard {
     pub review_policy: BoardReviewPolicy,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub review_attestations: std::collections::BTreeMap<String, BoardReviewAttestation>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub card_claims: std::collections::BTreeMap<String, CardClaim>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub dependency_overrides: std::collections::BTreeMap<String, DependencyOverride>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardClaim {
+    pub claimant_chat_id: String,
+    pub idempotency_key: String,
+    pub claimed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencyOverride {
+    pub overridden_by: String,
+    pub reason: String,
+    pub overridden_at: String,
+    pub unsatisfied: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimOutcome {
+    Claimed,
+    AlreadyHeld,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardRuleViolation {
+    CardNotFound {
+        card_id: String,
+    },
+    AlreadyClaimed {
+        card_id: String,
+        holder: String,
+    },
+    DependenciesUnsatisfied {
+        card_id: String,
+        unsatisfied: Vec<String>,
+    },
+    RoleDenied {
+        card_id: String,
+        reason: String,
+    },
+}
+
+impl BoardRuleViolation {
+    pub fn code(&self) -> &'static str {
+        match self {
+            BoardRuleViolation::CardNotFound { .. } => "not_found_or_not_visible",
+            BoardRuleViolation::AlreadyClaimed { .. } => "already_claimed",
+            BoardRuleViolation::DependenciesUnsatisfied { .. } => "dependency_unsatisfied",
+            BoardRuleViolation::RoleDenied { .. } => "scope_denied",
+        }
+    }
+
+    pub fn retryable(&self) -> bool {
+        matches!(self, BoardRuleViolation::DependenciesUnsatisfied { .. })
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            BoardRuleViolation::CardNotFound { card_id } => {
+                format!("card {card_id} not found on this board")
+            }
+            BoardRuleViolation::AlreadyClaimed { card_id, holder } => {
+                format!("card {card_id} is already claimed by {holder}")
+            }
+            BoardRuleViolation::DependenciesUnsatisfied {
+                card_id,
+                unsatisfied,
+            } => format!(
+                "card {card_id} is blocked by unsatisfied dependencies: {}",
+                unsatisfied.join(", ")
+            ),
+            BoardRuleViolation::RoleDenied { card_id, reason } => {
+                format!("card {card_id}: {reason}")
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for BoardRuleViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -126,6 +212,8 @@ impl Default for TaskBoard {
             reviewer_chat_ids: Vec::new(),
             review_policy: BoardReviewPolicy::default(),
             review_attestations: std::collections::BTreeMap::new(),
+            card_claims: std::collections::BTreeMap::new(),
+            dependency_overrides: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -594,6 +682,45 @@ impl TaskBoard {
         Ok(())
     }
 
+    pub fn validate_claims(&self, max_claim_key_len: usize) -> Result<(), String> {
+        for (card_id, claim) in &self.card_claims {
+            if self.get_card(card_id).is_none() {
+                return Err(format!("Claim references missing card {card_id}"));
+            }
+            if claim.claimant_chat_id.trim().is_empty() {
+                return Err(format!("Claim on card {card_id} has an empty claimant"));
+            }
+            if claim.idempotency_key.trim().is_empty() {
+                return Err(format!(
+                    "Claim on card {card_id} has an empty idempotency key"
+                ));
+            }
+            if claim.idempotency_key.chars().count() > max_claim_key_len {
+                return Err(format!(
+                    "Claim idempotency key on card {card_id} exceeds the configured maximum of {max_claim_key_len} characters"
+                ));
+            }
+        }
+        for (card_id, override_record) in &self.dependency_overrides {
+            if self.get_card(card_id).is_none() {
+                return Err(format!(
+                    "Dependency override references missing card {card_id}"
+                ));
+            }
+            if override_record.overridden_by.trim().is_empty() {
+                return Err(format!(
+                    "Dependency override on card {card_id} has no recorded principal"
+                ));
+            }
+            if override_record.reason.trim().is_empty() {
+                return Err(format!(
+                    "Dependency override on card {card_id} has no recorded reason"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_authority(&self, max_reviewers: usize) -> Result<(), String> {
         if self.reviewer_chat_ids.len() > max_reviewers {
             return Err(format!(
@@ -645,9 +772,180 @@ impl TaskBoard {
         Ok(())
     }
 
-    pub fn validate_for_write(&self, max_reviewers: usize) -> Result<(), String> {
+    pub fn validate_for_write(
+        &self,
+        max_reviewers: usize,
+        max_claim_key_len: usize,
+    ) -> Result<(), String> {
         self.validate_dependencies()?;
-        self.validate_authority(max_reviewers)
+        self.validate_authority(max_reviewers)?;
+        self.validate_claims(max_claim_key_len)
+    }
+
+    pub fn card_claim(&self, card_id: &str) -> Option<&CardClaim> {
+        self.card_claims.get(card_id)
+    }
+
+    pub fn unsatisfied_dependencies(
+        &self,
+        card_id: &str,
+    ) -> Result<Vec<String>, BoardRuleViolation> {
+        let card = self
+            .get_card(card_id)
+            .ok_or_else(|| BoardRuleViolation::CardNotFound {
+                card_id: card_id.to_string(),
+            })?;
+        Ok(card
+            .depends_on
+            .iter()
+            .filter(|dependency| {
+                self.get_card(dependency)
+                    .is_none_or(|dependency_card| dependency_card.column != "done")
+            })
+            .cloned()
+            .collect())
+    }
+
+    pub fn dependency_gate(&self, card_id: &str) -> Result<(), BoardRuleViolation> {
+        let unsatisfied = self.unsatisfied_dependencies(card_id)?;
+        if unsatisfied.is_empty() || self.dependency_overrides.contains_key(card_id) {
+            return Ok(());
+        }
+        Err(BoardRuleViolation::DependenciesUnsatisfied {
+            card_id: card_id.to_string(),
+            unsatisfied,
+        })
+    }
+
+    /// Terminal columns are always reachable; only entering `doing` is gated on
+    /// dependencies, and an explicit recorded override lifts that gate.
+    pub fn ensure_column_move_allowed(
+        &self,
+        card_id: &str,
+        column: &str,
+    ) -> Result<(), BoardRuleViolation> {
+        if self.get_card(card_id).is_none() {
+            return Err(BoardRuleViolation::CardNotFound {
+                card_id: card_id.to_string(),
+            });
+        }
+        if column == "doing" {
+            return self.dependency_gate(card_id);
+        }
+        Ok(())
+    }
+
+    pub fn claim_card(
+        &mut self,
+        card_id: &str,
+        claimant_chat_id: &str,
+        idempotency_key: &str,
+        claimed_at: String,
+    ) -> Result<ClaimOutcome, BoardRuleViolation> {
+        self.dependency_gate(card_id)?;
+        match self.card_claims.get(card_id) {
+            Some(existing)
+                if existing.claimant_chat_id == claimant_chat_id
+                    && existing.idempotency_key == idempotency_key =>
+            {
+                Ok(ClaimOutcome::AlreadyHeld)
+            }
+            Some(existing) => Err(BoardRuleViolation::AlreadyClaimed {
+                card_id: card_id.to_string(),
+                holder: existing.claimant_chat_id.clone(),
+            }),
+            None => {
+                self.card_claims.insert(
+                    card_id.to_string(),
+                    CardClaim {
+                        claimant_chat_id: claimant_chat_id.to_string(),
+                        idempotency_key: idempotency_key.to_string(),
+                        claimed_at,
+                    },
+                );
+                Ok(ClaimOutcome::Claimed)
+            }
+        }
+    }
+
+    pub fn release_claim(
+        &mut self,
+        card_id: &str,
+        claimant_chat_id: &str,
+    ) -> Result<(), BoardRuleViolation> {
+        match self.card_claims.get(card_id) {
+            None => Ok(()),
+            Some(existing) if existing.claimant_chat_id == claimant_chat_id => {
+                self.card_claims.remove(card_id);
+                Ok(())
+            }
+            Some(existing) => Err(BoardRuleViolation::AlreadyClaimed {
+                card_id: card_id.to_string(),
+                holder: existing.claimant_chat_id.clone(),
+            }),
+        }
+    }
+
+    pub fn record_dependency_override(
+        &mut self,
+        card_id: &str,
+        overridden_by: &str,
+        reason: &str,
+        overridden_at: String,
+    ) -> Result<Vec<String>, BoardRuleViolation> {
+        let unsatisfied = self.unsatisfied_dependencies(card_id)?;
+        self.dependency_overrides.insert(
+            card_id.to_string(),
+            DependencyOverride {
+                overridden_by: overridden_by.to_string(),
+                reason: reason.to_string(),
+                overridden_at,
+                unsatisfied: unsatisfied.clone(),
+            },
+        );
+        Ok(unsatisfied)
+    }
+
+    /// Boards without an owner are legacy boards and keep their previous
+    /// behaviour. Once ownership exists, finalising a card requires the owner
+    /// or an assigned reviewer, and the claimant may never finalise its own
+    /// card unless self-review is explicitly enabled.
+    pub fn authorize_finalizer(
+        &self,
+        card_id: &str,
+        principal: &str,
+        allow_self_review: bool,
+    ) -> Result<(), BoardRuleViolation> {
+        if self.get_card(card_id).is_none() {
+            return Err(BoardRuleViolation::CardNotFound {
+                card_id: card_id.to_string(),
+            });
+        }
+        let Some(owner) = self.owner_chat_id.as_deref() else {
+            return Ok(());
+        };
+        let is_owner = owner == principal;
+        let is_reviewer = self
+            .reviewer_chat_ids
+            .iter()
+            .any(|reviewer| reviewer == principal);
+        if !is_owner && !is_reviewer {
+            return Err(BoardRuleViolation::RoleDenied {
+                card_id: card_id.to_string(),
+                reason: "finalising requires the board owner or an assigned reviewer".to_string(),
+            });
+        }
+        let claims_the_card = self
+            .card_claims
+            .get(card_id)
+            .is_some_and(|claim| claim.claimant_chat_id == principal);
+        if claims_the_card && !allow_self_review {
+            return Err(BoardRuleViolation::RoleDenied {
+                card_id: card_id.to_string(),
+                reason: "self-review is refused; enable coordination.board_allow_self_review to permit the claimant to finalise its own card".to_string(),
+            });
+        }
+        Ok(())
     }
 
     pub fn dependencies_satisfied(&self, card_id: &str) -> Result<(), String> {
@@ -688,13 +986,15 @@ impl TaskBoard {
         }
     }
 
-    pub fn authorize_reviewer(&self, chat_id: &str) -> Result<(), String> {
+    pub fn authorize_reviewer(&self, chat_id: &str, allow_self_review: bool) -> Result<(), String> {
         let owner = self.owner_chat_id.as_deref() == Some(chat_id);
         let assigned = self
             .reviewer_chat_ids
             .iter()
             .any(|reviewer| reviewer == chat_id);
-        if assigned || (owner && self.review_policy == BoardReviewPolicy::OwnerAllowed) {
+        if assigned
+            || (owner && allow_self_review && self.review_policy == BoardReviewPolicy::OwnerAllowed)
+        {
             Ok(())
         } else if owner {
             Err("task review policy requires an independent assigned reviewer".to_string())
@@ -707,8 +1007,9 @@ impl TaskBoard {
         &self,
         card_id: &str,
         report: &VerifierReport,
+        allow_self_review: bool,
     ) -> Result<(), String> {
-        if self.review_policy == BoardReviewPolicy::OwnerAllowed {
+        if allow_self_review && self.review_policy == BoardReviewPolicy::OwnerAllowed {
             return Ok(());
         }
         let attestation = self.review_attestations.get(card_id).ok_or_else(|| {
@@ -768,8 +1069,9 @@ impl TaskBoard {
         reviewer_chat_id: &str,
         report: &VerifierReport,
         reviewed_at: String,
+        allow_self_review: bool,
     ) -> Result<(), String> {
-        self.authorize_reviewer(reviewer_chat_id)?;
+        self.authorize_reviewer(reviewer_chat_id, allow_self_review)?;
         self.review_attestations.insert(
             card_id.to_string(),
             BoardReviewAttestation {
@@ -1343,6 +1645,208 @@ mod tests {
             vec![("Reported dependency".into(), "finished cleanly".into())]
         );
         assert!(board.get_dependency_reports("missing").is_empty());
+    }
+
+    #[test]
+    fn claim_is_compare_and_set_and_idempotent_for_the_same_key() {
+        let mut board = TaskBoard {
+            cards: vec![card("T-1", "Claimable", "planned", vec![])],
+            ..TaskBoard::default()
+        };
+
+        assert_eq!(
+            board.claim_card("T-1", "agent-a", "key-a", "t0".into()),
+            Ok(ClaimOutcome::Claimed)
+        );
+        assert_eq!(
+            board.claim_card("T-1", "agent-a", "key-a", "t1".into()),
+            Ok(ClaimOutcome::AlreadyHeld)
+        );
+        assert_eq!(
+            board.claim_card("T-1", "agent-b", "key-b", "t2".into()),
+            Err(BoardRuleViolation::AlreadyClaimed {
+                card_id: "T-1".into(),
+                holder: "agent-a".into()
+            })
+        );
+        assert_eq!(
+            board.claim_card("T-1", "agent-a", "other-key", "t3".into()),
+            Err(BoardRuleViolation::AlreadyClaimed {
+                card_id: "T-1".into(),
+                holder: "agent-a".into()
+            })
+        );
+        assert_eq!(board.card_claim("T-1").unwrap().claimed_at, "t0");
+
+        assert!(board.release_claim("T-1", "agent-b").is_err());
+        board.release_claim("T-1", "agent-a").unwrap();
+        assert!(board.card_claim("T-1").is_none());
+        assert_eq!(
+            board.claim_card("missing", "agent-a", "key", "t4".into()),
+            Err(BoardRuleViolation::CardNotFound {
+                card_id: "missing".into()
+            })
+        );
+    }
+
+    #[test]
+    fn dependency_gate_blocks_doing_until_dependencies_are_done_or_overridden() {
+        let mut board = TaskBoard {
+            cards: vec![
+                card("T-1", "Dependency", "planned", vec![]),
+                card("T-2", "Dependent", "planned", vec!["T-1"]),
+            ],
+            ..TaskBoard::default()
+        };
+
+        let blocked = BoardRuleViolation::DependenciesUnsatisfied {
+            card_id: "T-2".into(),
+            unsatisfied: vec!["T-1".into()],
+        };
+        assert_eq!(
+            board.ensure_column_move_allowed("T-2", "doing"),
+            Err(blocked)
+        );
+        assert_eq!(
+            board.claim_card("T-2", "agent-a", "key", "t0".into()),
+            Err(BoardRuleViolation::DependenciesUnsatisfied {
+                card_id: "T-2".into(),
+                unsatisfied: vec!["T-1".into()]
+            })
+        );
+        assert!(board.ensure_column_move_allowed("T-2", "failed").is_ok());
+        assert!(board.ensure_column_move_allowed("T-2", "planned").is_ok());
+        assert!(board.ensure_column_move_allowed("T-1", "doing").is_ok());
+
+        assert_eq!(
+            board
+                .record_dependency_override("T-2", "planner-chat", "hotfix", "t1".into())
+                .unwrap(),
+            vec!["T-1".to_string()]
+        );
+        assert!(board.ensure_column_move_allowed("T-2", "doing").is_ok());
+        let recorded = &board.dependency_overrides["T-2"];
+        assert_eq!(recorded.overridden_by, "planner-chat");
+        assert_eq!(recorded.reason, "hotfix");
+        assert_eq!(recorded.unsatisfied, vec!["T-1".to_string()]);
+
+        board.dependency_overrides.clear();
+        board.get_card_mut("T-1").unwrap().column = "done".into();
+        assert!(board.ensure_column_move_allowed("T-2", "doing").is_ok());
+    }
+
+    #[test]
+    fn finalising_validates_roles_and_refuses_self_review_by_default() {
+        let mut board = TaskBoard {
+            cards: vec![card("T-1", "Reviewable", "doing", vec![])],
+            owner_chat_id: Some("planner-chat".into()),
+            reviewer_chat_ids: vec!["reviewer-chat".into()],
+            ..TaskBoard::default()
+        };
+        board
+            .claim_card("T-1", "agent-chat", "key", "t0".into())
+            .unwrap();
+
+        assert!(board
+            .authorize_finalizer("T-1", "stranger-chat", false)
+            .is_err());
+        assert!(board
+            .authorize_finalizer("T-1", "agent-chat", false)
+            .is_err());
+        assert!(board
+            .authorize_finalizer("T-1", "planner-chat", false)
+            .is_ok());
+        assert!(board
+            .authorize_finalizer("T-1", "reviewer-chat", false)
+            .is_ok());
+
+        board.reviewer_chat_ids.push("agent-chat".into());
+        assert_eq!(
+            board.authorize_finalizer("T-1", "agent-chat", false),
+            Err(BoardRuleViolation::RoleDenied {
+                card_id: "T-1".into(),
+                reason: "self-review is refused; enable coordination.board_allow_self_review to permit the claimant to finalise its own card".into()
+            })
+        );
+        assert!(board.authorize_finalizer("T-1", "agent-chat", true).is_ok());
+    }
+
+    #[test]
+    fn board_without_owner_keeps_legacy_finalising_behaviour() {
+        let board = TaskBoard {
+            cards: vec![card("T-1", "Legacy", "doing", vec![])],
+            ..TaskBoard::default()
+        };
+
+        assert!(board.authorize_finalizer("T-1", "any-chat", false).is_ok());
+        assert!(board
+            .authorize_finalizer("missing", "any-chat", false)
+            .is_err());
+    }
+
+    #[test]
+    fn legacy_board_without_claim_fields_loads_and_round_trips_without_them() {
+        let board: TaskBoard = serde_json::from_str(
+            r#"{"cards":[{
+                "id":"T-1","title":"Legacy","column":"planned",
+                "created_at":"2026-05-16T00:00:00Z","started_at":null,
+                "completed_at":null,"assignee":null,"agent_chat_id":null
+            }]}"#,
+        )
+        .unwrap();
+
+        assert!(board.card_claims.is_empty());
+        assert!(board.dependency_overrides.is_empty());
+        assert!(board.validate_for_write(256, 256).is_ok());
+        assert!(board.ensure_column_move_allowed("T-1", "doing").is_ok());
+        let encoded = serde_json::to_string(&board).unwrap();
+        assert!(!encoded.contains("card_claims"));
+        assert!(!encoded.contains("dependency_overrides"));
+    }
+
+    #[test]
+    fn claim_validation_rejects_orphans_and_oversized_idempotency_keys() {
+        let mut board = TaskBoard {
+            cards: vec![card("T-1", "Claimable", "planned", vec![])],
+            ..TaskBoard::default()
+        };
+        board
+            .claim_card("T-1", "agent-a", "0123456789", "t0".into())
+            .unwrap();
+
+        assert!(board.validate_for_write(256, 10).is_ok());
+        assert!(board
+            .validate_for_write(256, 9)
+            .unwrap_err()
+            .contains("exceeds the configured maximum"));
+
+        board.card_claims.insert(
+            "ghost".into(),
+            CardClaim {
+                claimant_chat_id: "agent-a".into(),
+                idempotency_key: "key".into(),
+                claimed_at: "t0".into(),
+            },
+        );
+        assert!(board
+            .validate_for_write(256, 256)
+            .unwrap_err()
+            .contains("missing card ghost"));
+    }
+
+    #[test]
+    fn reviewer_authorisation_requires_the_self_review_flag_for_the_owner() {
+        let board = TaskBoard {
+            cards: vec![card("T-1", "Reviewable", "doing", vec![])],
+            owner_chat_id: Some("planner-chat".into()),
+            reviewer_chat_ids: vec!["reviewer-chat".into()],
+            ..TaskBoard::default()
+        };
+
+        assert!(board.authorize_reviewer("planner-chat", false).is_err());
+        assert!(board.authorize_reviewer("planner-chat", true).is_ok());
+        assert!(board.authorize_reviewer("reviewer-chat", false).is_ok());
+        assert!(board.authorize_reviewer("stranger-chat", true).is_err());
     }
 
     #[test]

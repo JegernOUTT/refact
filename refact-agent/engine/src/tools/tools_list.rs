@@ -696,6 +696,8 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_task_board::ToolTaskBoardMoveCard::new()),
         Box::new(crate::tools::tool_task_board::ToolTaskBoardDeleteCard::new()),
         Box::new(crate::tools::tool_task_board::ToolTaskReadyCards::new()),
+        Box::new(crate::tools::tool_task_board::ToolTaskBoardClaimCard::new()),
+        Box::new(crate::tools::tool_task_board::ToolTaskBoardDiscover::new()),
         Box::new(crate::tools::tool_task_board_authority::ToolTaskBoardAuthority::new()),
         Box::new(crate::tools::tool_task_batch::ToolBoardCreateBatch::new()),
         Box::new(crate::tools::tool_task_agent::ToolTaskAgentUpdate::new()),

@@ -12,7 +12,11 @@ use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
 use crate::files_correction::get_project_dirs;
 use super::board_lock::{self, BoardLockGuard, BOARD_LOCK_FILE};
-use super::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus, TrajectoryInfo};
+use super::types::{
+    BoardCard, BoardReviewPolicy, BoardRuleViolation, CardClaim, ClaimOutcome, DependencyOverride,
+    TaskBoard, TaskMeta, TaskStatus, TrajectoryInfo,
+};
+use crate::coordination::error::WorkError;
 use super::events::{emit_task_event, emit_task_updated, TaskEvent};
 use crate::coordination::board_rows::{self, BoardProvenance};
 
@@ -275,18 +279,31 @@ async fn locked_task_dir(
     Ok((canonical, guard))
 }
 
-async fn board_max_reviewers(gcx: Arc<GlobalContext>, task_id: &str) -> Result<usize, String> {
+async fn board_coordination(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+) -> Result<refact_work_core::CoordinationSettings, String> {
     let task_dir = find_task_dir(gcx, task_id).await?;
     let project_root = task_dir
         .parent()
         .and_then(Path::parent)
         .and_then(Path::parent)
         .ok_or_else(|| format!("Task directory {} has no project root", task_dir.display()))?;
-    Ok(
-        crate::runtime_settings::coordination_for_project(project_root)
-            .await?
-            .board_max_reviewers,
+    crate::runtime_settings::coordination_for_project(project_root).await
+}
+
+fn validate_board(
+    board: &TaskBoard,
+    settings: &refact_work_core::CoordinationSettings,
+) -> Result<(), String> {
+    board.validate_for_write(
+        settings.board_max_reviewers,
+        settings.board_claim_key_max_len,
     )
+}
+
+fn rule_error(violation: BoardRuleViolation) -> String {
+    WorkError::new(violation.code(), violation.message(), violation.retryable()).to_string()
 }
 
 /// Create `board.yaml` for a task that must not have one yet.
@@ -298,12 +315,10 @@ pub async fn create_board(
     task_id: &str,
     board: &TaskBoard,
 ) -> Result<(), BoardSaveError> {
-    let max_reviewers = board_max_reviewers(gcx.clone(), task_id)
+    let settings = board_coordination(gcx.clone(), task_id)
         .await
         .map_err(BoardSaveError::from)?;
-    board
-        .validate_for_write(max_reviewers)
-        .map_err(BoardSaveError::from)?;
+    validate_board(board, &settings).map_err(BoardSaveError::from)?;
     let source = board_rows::actor_provenance(&gcx).await?;
     let (task_dir, guard) = locked_task_dir(gcx.clone(), task_id).await?;
     let existing = read_board_from_dir(&task_dir).await?;
@@ -324,7 +339,7 @@ pub async fn save_board(
     task_id: &str,
     board: &TaskBoard,
 ) -> Result<(), String> {
-    board.validate_for_write(board_max_reviewers(gcx.clone(), task_id).await?)?;
+    validate_board(board, &board_coordination(gcx.clone(), task_id).await?)?;
     let (task_dir, guard) = locked_task_dir(gcx.clone(), task_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -339,12 +354,10 @@ pub async fn save_board_checked(
     expected_rev: u64,
     board: &TaskBoard,
 ) -> Result<(), BoardSaveError> {
-    let max_reviewers = board_max_reviewers(gcx.clone(), task_id)
+    let settings = board_coordination(gcx.clone(), task_id)
         .await
         .map_err(BoardSaveError::from)?;
-    board
-        .validate_for_write(max_reviewers)
-        .map_err(BoardSaveError::Failed)?;
+    validate_board(board, &settings).map_err(BoardSaveError::Failed)?;
     let source = board_rows::actor_provenance(&gcx).await?;
     let (task_dir, guard) = locked_task_dir(gcx.clone(), task_id).await?;
     let (existing, previous) = read_board_with_provenance(&task_dir).await?;
@@ -366,7 +379,6 @@ pub async fn update_board_atomic<F, T>(
 ) -> Result<(TaskBoard, T), String>
 where
     F: FnOnce(&mut TaskBoard) -> Result<T, String>,
-    T: Default,
 {
     let planner_actor = match crate::file_activity::current_actor() {
         Some(actor)
@@ -392,7 +404,6 @@ pub async fn update_board_atomic_as_reviewer<F, T>(
 ) -> Result<(TaskBoard, T), String>
 where
     F: FnOnce(&mut TaskBoard) -> Result<T, String>,
-    T: Default,
 {
     if !crate::chat::trajectories::chat_id_is_planner_for_task(
         gcx.clone(),
@@ -422,9 +433,8 @@ async fn update_board_atomic_with_reviewer<F, T>(
 ) -> Result<(TaskBoard, T), String>
 where
     F: FnOnce(&mut TaskBoard) -> Result<T, String>,
-    T: Default,
 {
-    let max_reviewers = board_max_reviewers(gcx.clone(), task_id).await?;
+    let settings = board_coordination(gcx.clone(), task_id).await?;
     let source = board_rows::actor_provenance(&gcx).await?;
     let (task_dir, guard) = locked_task_dir(gcx.clone(), task_id).await?;
 
@@ -440,10 +450,10 @@ where
         board.authorize_owner(actor)?;
     }
     if let Some(reviewer) = reviewer_actor.as_deref() {
-        board.authorize_reviewer(reviewer)?;
+        board.authorize_reviewer(reviewer, settings.board_allow_self_review)?;
     }
     let result = updater(&mut board)?;
-    board.validate_for_write(max_reviewers)?;
+    validate_board(&board, &settings)?;
     let new_failed = board
         .cards
         .iter()
@@ -494,6 +504,151 @@ where
     )
     .await;
     Ok((board, result))
+}
+
+/// Compare-and-set claim inside the guarded board transaction: the card must be
+/// unclaimed, or already held by the same requester under the same idempotency
+/// key. Every other requester loses with a structured `already_claimed` error
+/// and the board is not rewritten.
+pub async fn claim_card(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    card_id: &str,
+    claimant_chat_id: &str,
+    idempotency_key: &str,
+) -> Result<(TaskBoard, ClaimOutcome), String> {
+    let card_id = card_id.to_string();
+    let claimant_chat_id = claimant_chat_id.to_string();
+    let idempotency_key = idempotency_key.to_string();
+    let claimed_at = Utc::now().to_rfc3339();
+    update_board_atomic(gcx, task_id, move |board| {
+        board
+            .claim_card(&card_id, &claimant_chat_id, &idempotency_key, claimed_at)
+            .map_err(rule_error)
+    })
+    .await
+}
+
+pub async fn release_card_claim(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    card_id: &str,
+    claimant_chat_id: &str,
+) -> Result<TaskBoard, String> {
+    let card_id = card_id.to_string();
+    let claimant_chat_id = claimant_chat_id.to_string();
+    let (board, ()) = update_board_atomic(gcx, task_id, move |board| {
+        board
+            .release_claim(&card_id, &claimant_chat_id)
+            .map_err(rule_error)
+    })
+    .await?;
+    Ok(board)
+}
+
+/// Explicit, separately named dependency override. It is recorded on the board
+/// with the acting principal and reason; there is no silent bypass.
+pub async fn override_card_dependencies(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    card_id: &str,
+    overridden_by: &str,
+    reason: &str,
+) -> Result<(TaskBoard, Vec<String>), String> {
+    if reason.trim().is_empty() {
+        return Err(WorkError::invalid("dependency override requires a reason").to_string());
+    }
+    let card_id = card_id.to_string();
+    let overridden_by = overridden_by.to_string();
+    let reason = reason.to_string();
+    let overridden_at = Utc::now().to_rfc3339();
+    update_board_atomic(gcx, task_id, move |board| {
+        board.require_owner(&overridden_by)?;
+        board
+            .record_dependency_override(&card_id, &overridden_by, &reason, overridden_at)
+            .map_err(rule_error)
+    })
+    .await
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscoveredCard {
+    pub task_id: String,
+    pub card_id: String,
+    pub title: Option<String>,
+    pub column: Option<String>,
+    pub agent_chat_id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscoveredBoardAuthority {
+    pub task_id: String,
+    pub rev: u64,
+    pub owner_chat_id: Option<String>,
+    pub reviewer_chat_ids: Vec<String>,
+    pub review_policy: BoardReviewPolicy,
+    pub claims: std::collections::BTreeMap<String, CardClaim>,
+    pub dependency_overrides: std::collections::BTreeMap<String, DependencyOverride>,
+}
+
+/// Read-only project-wide discovery served from the published board projection,
+/// so it never reopens every `board.yaml`. Metadata only: the ids it returns
+/// confer no authority over the cards they name.
+pub async fn discover_project_cards(
+    gcx: Arc<GlobalContext>,
+) -> Result<(Vec<DiscoveredCard>, bool), String> {
+    let project_dirs = get_project_dirs(gcx.clone()).await;
+    let root = project_dirs.first().ok_or("No workspace folder found")?;
+    let (rows, unavailable) = gcx.work_boards.rows(root).await;
+    let mut cards = rows
+        .into_iter()
+        .filter_map(|row| {
+            Some(DiscoveredCard {
+                task_id: row.metadata.task_id?,
+                card_id: row.metadata.card_id?,
+                title: row.title,
+                column: row.metadata.runtime_status,
+                agent_chat_id: row.chat_id,
+            })
+        })
+        .collect::<Vec<_>>();
+    cards.sort_by(|a, b| {
+        a.task_id
+            .cmp(&b.task_id)
+            .then_with(|| a.card_id.cmp(&b.card_id))
+    });
+    cards.dedup_by(|a, b| a.task_id == b.task_id && a.card_id == b.card_id);
+    Ok((cards, unavailable))
+}
+
+/// Claim and role state for a single board. Metadata only; it grants nothing.
+pub async fn discover_board_authority(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+) -> Result<DiscoveredBoardAuthority, String> {
+    let board = load_board(gcx, task_id).await?;
+    Ok(DiscoveredBoardAuthority {
+        task_id: task_id.to_string(),
+        rev: board.rev,
+        owner_chat_id: board.owner_chat_id,
+        reviewer_chat_ids: board.reviewer_chat_ids,
+        review_policy: board.review_policy,
+        claims: board.card_claims,
+        dependency_overrides: board.dependency_overrides,
+    })
+}
+
+pub async fn board_allows_self_review(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+) -> Result<bool, String> {
+    Ok(board_coordination(gcx, task_id)
+        .await?
+        .board_allow_self_review)
+}
+
+pub fn violation_error(violation: BoardRuleViolation) -> String {
+    rule_error(violation)
 }
 
 pub async fn load_planner_instructions(
@@ -998,7 +1153,7 @@ mod tests {
                 "create_board",
                 "save_board",
                 "save_board_checked",
-                "update_board_atomic"
+                "update_board_atomic_with_reviewer"
             ]
             .into_iter()
             .map(str::to_string)
@@ -1522,6 +1677,269 @@ mod tests {
         assert!(ids
             .iter()
             .all(|id| id.starts_with("planner-task-planner-race-")));
+    }
+
+    async fn task_with_cards(
+        root: &std::path::Path,
+        task_id: &str,
+        cards: Vec<BoardCard>,
+    ) -> Arc<GlobalContext> {
+        let gcx = task_with_board(root, task_id).await;
+        update_board_atomic(gcx.clone(), task_id, move |board| {
+            board.cards = cards;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        gcx
+    }
+
+    fn claimable_card(id: &str, depends_on: Vec<&str>, column: &str) -> BoardCard {
+        BoardCard {
+            id: id.to_string(),
+            title: id.to_string(),
+            column: column.to_string(),
+            priority: "P1".to_string(),
+            depends_on: depends_on.into_iter().map(String::from).collect(),
+            instructions: String::new(),
+            assignee: None,
+            agent_chat_id: None,
+            status_updates: vec![],
+            comments: vec![],
+            final_report: None,
+            final_report_structured: None,
+            verifier_report: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            started_at: None,
+            last_heartbeat_at: None,
+            completed_at: None,
+            agent_branch: None,
+            agent_worktree: None,
+            agent_worktree_name: None,
+            base_branch: None,
+            base_commit: None,
+            ab_variants: None,
+            team_members: vec![],
+            target_files: vec![],
+            scope_guard_mode: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_claims_leave_exactly_one_winner_and_one_board_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = task_with_cards(
+            temp.path(),
+            "task-claim-race",
+            vec![claimable_card("T-1", vec![], "planned")],
+        )
+        .await;
+        let base_rev = load_board(gcx.clone(), "task-claim-race")
+            .await
+            .unwrap()
+            .rev;
+
+        let mut handles = vec![];
+        for index in 0..8 {
+            let gcx = gcx.clone();
+            handles.push(tokio::spawn(async move {
+                claim_card(
+                    gcx,
+                    "task-claim-race",
+                    "T-1",
+                    &format!("agent-{index}"),
+                    &format!("key-{index}"),
+                )
+                .await
+            }));
+        }
+        let mut winners = vec![];
+        let mut losers = vec![];
+        for handle in handles {
+            match handle.await.unwrap() {
+                Ok((_, outcome)) => winners.push(outcome),
+                Err(error) => losers.push(error),
+            }
+        }
+
+        assert_eq!(winners, vec![ClaimOutcome::Claimed]);
+        assert_eq!(losers.len(), 7);
+        for error in &losers {
+            let decoded: serde_json::Value = serde_json::from_str(error).unwrap();
+            assert_eq!(decoded["code"], "already_claimed");
+            assert_eq!(decoded["retryable"], false);
+        }
+        let board = load_board(gcx, "task-claim-race").await.unwrap();
+        assert_eq!(board.rev, base_rev + 1);
+        assert_eq!(board.card_claims.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn repeating_a_claim_with_the_same_key_keeps_the_original_holder_stamp() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = task_with_cards(
+            temp.path(),
+            "task-claim-retry",
+            vec![claimable_card("T-1", vec![], "planned")],
+        )
+        .await;
+
+        let (first, outcome) = claim_card(gcx.clone(), "task-claim-retry", "T-1", "agent-a", "key")
+            .await
+            .unwrap();
+        assert_eq!(outcome, ClaimOutcome::Claimed);
+        let (second, outcome) =
+            claim_card(gcx.clone(), "task-claim-retry", "T-1", "agent-a", "key")
+                .await
+                .unwrap();
+
+        assert_eq!(outcome, ClaimOutcome::AlreadyHeld);
+        assert_eq!(second.rev, first.rev + 1);
+        assert_eq!(
+            second.card_claims["T-1"].claimed_at,
+            first.card_claims["T-1"].claimed_at
+        );
+    }
+
+    #[tokio::test]
+    async fn claiming_a_blocked_card_reports_its_unsatisfied_dependencies() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = task_with_cards(
+            temp.path(),
+            "task-claim-blocked",
+            vec![
+                claimable_card("T-1", vec![], "planned"),
+                claimable_card("T-2", vec!["T-1"], "planned"),
+            ],
+        )
+        .await;
+
+        let error = claim_card(gcx.clone(), "task-claim-blocked", "T-2", "agent-a", "key")
+            .await
+            .unwrap_err();
+
+        let decoded: serde_json::Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(decoded["code"], "dependency_unsatisfied");
+        assert_eq!(decoded["retryable"], true);
+        assert!(decoded["message"].as_str().unwrap().contains("T-1"));
+        assert!(load_board(gcx, "task-claim-blocked")
+            .await
+            .unwrap()
+            .card_claims
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn dependency_override_is_owner_gated_and_recorded_on_the_board() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = task_with_cards(
+            temp.path(),
+            "task-override",
+            vec![
+                claimable_card("T-1", vec![], "planned"),
+                claimable_card("T-2", vec!["T-1"], "planned"),
+            ],
+        )
+        .await;
+        update_board_atomic(gcx.clone(), "task-override", |board| {
+            board.owner_chat_id = Some("planner-chat".to_string());
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert!(override_card_dependencies(
+            gcx.clone(),
+            "task-override",
+            "T-2",
+            "other-chat",
+            "why"
+        )
+        .await
+        .is_err());
+        assert!(override_card_dependencies(
+            gcx.clone(),
+            "task-override",
+            "T-2",
+            "planner-chat",
+            "   "
+        )
+        .await
+        .is_err());
+
+        let (board, unsatisfied) = override_card_dependencies(
+            gcx.clone(),
+            "task-override",
+            "T-2",
+            "planner-chat",
+            "dependency landed out of band",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(unsatisfied, vec!["T-1".to_string()]);
+        let recorded = &board.dependency_overrides["T-2"];
+        assert_eq!(recorded.overridden_by, "planner-chat");
+        assert_eq!(recorded.reason, "dependency landed out of band");
+        claim_card(gcx, "task-override", "T-2", "agent-a", "key")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_reports_claim_and_role_state_without_granting_control() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = task_with_cards(
+            temp.path(),
+            "task-discovery",
+            vec![claimable_card("T-1", vec![], "planned")],
+        )
+        .await;
+        update_board_atomic(gcx.clone(), "task-discovery", |board| {
+            board.owner_chat_id = Some("planner-chat".to_string());
+            board.reviewer_chat_ids = vec!["reviewer-chat".to_string()];
+            Ok(())
+        })
+        .await
+        .unwrap();
+        claim_card(gcx.clone(), "task-discovery", "T-1", "agent-a", "key")
+            .await
+            .unwrap();
+
+        let (cards, _) = discover_project_cards(gcx.clone()).await.unwrap();
+        let authority = discover_board_authority(gcx.clone(), "task-discovery")
+            .await
+            .unwrap();
+
+        assert!(cards
+            .iter()
+            .any(|card| card.task_id == "task-discovery" && card.card_id == "T-1"));
+        assert_eq!(authority.owner_chat_id.as_deref(), Some("planner-chat"));
+        assert_eq!(
+            authority.reviewer_chat_ids,
+            vec!["reviewer-chat".to_string()]
+        );
+        assert_eq!(authority.claims["T-1"].claimant_chat_id, "agent-a");
+
+        let discovered = cards
+            .iter()
+            .find(|card| card.card_id == "T-1")
+            .unwrap()
+            .clone();
+        let denied = claim_card(
+            gcx.clone(),
+            &discovered.task_id,
+            &discovered.card_id,
+            "curious-chat",
+            "key",
+        )
+        .await
+        .unwrap_err();
+        assert!(denied.contains("already_claimed"));
+        assert_eq!(
+            load_board(gcx, "task-discovery").await.unwrap().card_claims["T-1"].claimant_chat_id,
+            "agent-a"
+        );
     }
 
     #[tokio::test]

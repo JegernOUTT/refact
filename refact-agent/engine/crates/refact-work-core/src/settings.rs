@@ -57,6 +57,8 @@ pub struct CoordinationSettings {
     pub peer_grant_default_ttl_secs: u64,
     pub peer_grant_max_ttl_secs: u64,
     pub board_max_reviewers: usize,
+    pub board_claim_key_max_len: usize,
+    pub board_allow_self_review: bool,
     pub agent_wait_default_ms: u64,
     pub agent_wait_max_ms: u64,
     pub agent_wait_max_agents: usize,
@@ -121,6 +123,8 @@ impl Default for CoordinationSettings {
             peer_grant_default_ttl_secs: 3600,
             peer_grant_max_ttl_secs: 604_800,
             board_max_reviewers: 256,
+            board_claim_key_max_len: 256,
+            board_allow_self_review: false,
             agent_wait_default_ms: 60_000,
             agent_wait_max_ms: 30 * 60 * 1000,
             agent_wait_max_agents: 128,
@@ -362,6 +366,7 @@ impl CoordinationSettings {
             ("delivery_status_retention", self.delivery_status_retention),
             ("agent_message_max_chars", self.agent_message_max_chars),
             ("board_max_reviewers", self.board_max_reviewers),
+            ("board_claim_key_max_len", self.board_claim_key_max_len),
             ("agent_wait_max_agents", self.agent_wait_max_agents),
         ] {
             at_least(&mut v, field, value as u64, 1);

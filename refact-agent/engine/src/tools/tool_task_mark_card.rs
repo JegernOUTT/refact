@@ -28,6 +28,22 @@ async fn get_task_id(
         .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())
 }
 
+async fn authorize_finalizer(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    task_id: &str,
+    card_id: &str,
+) -> Result<(), String> {
+    let (gcx, principal) = {
+        let ccx_lock = ccx.lock().await;
+        (ccx_lock.app.gcx.clone(), ccx_lock.chat_id.clone())
+    };
+    let allow_self_review = storage::board_allows_self_review(gcx.clone(), task_id).await?;
+    storage::load_board(gcx, task_id)
+        .await?
+        .authorize_finalizer(card_id, &principal, allow_self_review)
+        .map_err(storage::violation_error)
+}
+
 pub struct ToolTaskMarkCardDone;
 pub struct ToolTaskMarkCardFailed;
 
@@ -77,6 +93,7 @@ impl Tool for ToolTaskMarkCardDone {
             .get("report")
             .and_then(|v| v.as_str())
             .ok_or("Missing 'report'")?;
+        authorize_finalizer(&ccx, &task_id, card_id).await?;
 
         let gcx = ccx.lock().await.app.gcx.clone();
 
@@ -134,6 +151,215 @@ impl Tool for ToolTaskMarkCardDone {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_state::AppState;
+    use crate::global_context::GlobalContext;
+    use crate::tasks::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus};
+    use refact_chat_api::TaskMeta as ThreadTaskMeta;
+    use serde_json::json;
+
+    fn card(id: &str) -> BoardCard {
+        BoardCard {
+            id: id.to_string(),
+            title: id.to_string(),
+            column: "doing".to_string(),
+            priority: "P1".to_string(),
+            depends_on: vec![],
+            instructions: String::new(),
+            assignee: None,
+            agent_chat_id: None,
+            status_updates: vec![],
+            comments: vec![],
+            final_report: None,
+            final_report_structured: None,
+            verifier_report: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            started_at: None,
+            last_heartbeat_at: None,
+            completed_at: None,
+            agent_branch: None,
+            agent_worktree: None,
+            agent_worktree_name: None,
+            base_branch: None,
+            base_commit: None,
+            ab_variants: None,
+            team_members: vec![],
+            target_files: vec![],
+            scope_guard_mode: Default::default(),
+        }
+    }
+
+    async fn setup_task() -> (Arc<GlobalContext>, tempfile::TempDir) {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        tokio::fs::create_dir_all(temp.path().join(".refact").join("tasks").join("task-1"))
+            .await
+            .unwrap();
+        let now = Utc::now().to_rfc3339();
+        storage::save_task_meta(
+            gcx.clone(),
+            "task-1",
+            &TaskMeta {
+                schema_version: 1,
+                id: "task-1".to_string(),
+                name: "Task".to_string(),
+                status: TaskStatus::Active,
+                created_at: now.clone(),
+                updated_at: now,
+                cards_total: 0,
+                cards_done: 0,
+                cards_failed: 0,
+                agents_active: 0,
+                base_branch: None,
+                base_commit: None,
+                default_agent_model: None,
+                is_name_generated: false,
+                last_agents_summary_at: None,
+                planner_session_state: None,
+            },
+        )
+        .await
+        .unwrap();
+        storage::create_board(
+            gcx.clone(),
+            "task-1",
+            &TaskBoard {
+                cards: vec![card("T-1")],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        (gcx, temp)
+    }
+
+    async fn chat_ccx(gcx: Arc<GlobalContext>, chat_id: &str) -> Arc<AMutex<AtCommandsContext>> {
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                Vec::new(),
+                chat_id.to_string(),
+                None,
+                "model".to_string(),
+                Some(ThreadTaskMeta {
+                    task_id: "task-1".to_string(),
+                    role: "planner".to_string(),
+                    agent_id: None,
+                    card_id: None,
+                    planner_chat_id: Some(chat_id.to_string()),
+                }),
+                None,
+            )
+            .await,
+        ))
+    }
+
+    fn done_args() -> HashMap<String, Value> {
+        HashMap::from([
+            ("card_id".to_string(), json!("T-1")),
+            ("report".to_string(), json!("finished")),
+        ])
+    }
+
+    #[tokio::test]
+    async fn legacy_board_without_an_owner_still_finalises() {
+        let (gcx, _temp) = setup_task().await;
+        let ccx = chat_ccx(gcx.clone(), "any-chat").await;
+
+        ToolTaskMarkCardDone::new()
+            .tool_execute(ccx, &"call".to_string(), &done_args())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage::load_board(gcx, "task-1")
+                .await
+                .unwrap()
+                .get_card("T-1")
+                .unwrap()
+                .column,
+            "done"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalising_refuses_a_principal_without_a_board_role() {
+        let (gcx, _temp) = setup_task().await;
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.owner_chat_id = Some("planner-chat".to_string());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let stranger = chat_ccx(gcx.clone(), "stranger-chat").await;
+
+        let denied = ToolTaskMarkCardDone::new()
+            .tool_execute(stranger, &"call".to_string(), &done_args())
+            .await
+            .unwrap_err();
+
+        let decoded: Value = serde_json::from_str(&denied).unwrap();
+        assert_eq!(decoded["code"], "scope_denied");
+        assert!(decoded["message"]
+            .as_str()
+            .unwrap()
+            .contains("board owner or an assigned reviewer"));
+        assert_eq!(
+            storage::load_board(gcx, "task-1")
+                .await
+                .unwrap()
+                .get_card("T-1")
+                .unwrap()
+                .column,
+            "doing"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalising_refuses_self_review_by_the_claimant() {
+        let (gcx, _temp) = setup_task().await;
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.owner_chat_id = Some("planner-chat".to_string());
+            board.reviewer_chat_ids = vec!["agent-chat".to_string()];
+            Ok(())
+        })
+        .await
+        .unwrap();
+        storage::claim_card(gcx.clone(), "task-1", "T-1", "agent-chat", "key")
+            .await
+            .unwrap();
+
+        let claimant = chat_ccx(gcx.clone(), "agent-chat").await;
+        let denied = ToolTaskMarkCardDone::new()
+            .tool_execute(claimant, &"call".to_string(), &done_args())
+            .await
+            .unwrap_err();
+        assert!(denied.contains("self-review is refused"));
+
+        let owner = chat_ccx(gcx.clone(), "planner-chat").await;
+        ToolTaskMarkCardDone::new()
+            .tool_execute(owner, &"call".to_string(), &done_args())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage::load_board(gcx, "task-1")
+                .await
+                .unwrap()
+                .get_card("T-1")
+                .unwrap()
+                .column,
+            "done"
+        );
+    }
+}
+
 #[async_trait]
 impl Tool for ToolTaskMarkCardFailed {
     fn tool_description(&self) -> ToolDesc {
@@ -168,6 +394,7 @@ impl Tool for ToolTaskMarkCardFailed {
             .get("reason")
             .and_then(|v| v.as_str())
             .ok_or("Missing 'reason'")?;
+        authorize_finalizer(&ccx, &task_id, card_id).await?;
 
         let gcx = ccx.lock().await.app.gcx.clone();
 
