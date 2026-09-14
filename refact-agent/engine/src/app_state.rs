@@ -343,6 +343,9 @@ pub struct AppState {
     pub agent_approvals: refact_work_core::ApprovalRegistry,
     pub peer_grants: crate::coordination::peer_authority::PeerGrantRegistry,
     pub broadcast_limits: crate::coordination::broadcast::BroadcastLimiter,
+    /// Live waits declared by whatever is actually blocked, read by the
+    /// wait-for graph.
+    pub wait_graph: refact_work_core::WaitRegistry,
 }
 
 pub struct AppActivitySink {

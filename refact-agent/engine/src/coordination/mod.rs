@@ -11,6 +11,7 @@ mod capsule_render;
 #[cfg(test)]
 mod capsule_tests;
 pub mod catalog;
+pub mod deadlock;
 pub mod error;
 pub mod history;
 pub mod paging;

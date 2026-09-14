@@ -8,6 +8,7 @@ pub mod contracts;
 pub mod identity;
 pub mod scheduler;
 pub mod settings;
+pub mod waitgraph;
 
 pub use contracts::{ActivityState, WorkOrigin, WorkPhase, WorkSummary, WorkerProjection};
 pub use identity::{CheckoutKey, ProjectKey, RunKey, RuntimeKind, WorkKey, WorkScope};
@@ -18,4 +19,8 @@ pub use scheduler::{
 pub use settings::{
     coordination_settings, install_coordination_settings, CoordinationSettings, SettingsError,
     SettingsViolation,
+};
+pub use waitgraph::{
+    detect, detect_stable, DeadlockReport, Detection, RunFacts, WaitEdge, WaitGraph,
+    WaitGraphBounds, WaitHandle, WaitKind, WaitNode, WaitRegistry, WaitTarget, DEADLOCK_CODE,
 };

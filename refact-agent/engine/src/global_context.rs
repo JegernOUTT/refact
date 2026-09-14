@@ -419,6 +419,7 @@ pub struct GlobalContext {
     pub agent_approvals: refact_work_core::ApprovalRegistry,
     pub peer_grants: crate::coordination::peer_authority::PeerGrantRegistry,
     pub broadcast_limits: crate::coordination::broadcast::BroadcastLimiter,
+    pub wait_graph: refact_work_core::WaitRegistry,
     pub scheduler_config: SchedulerConfig,
     pub hooks_config: HooksConfig,
     pub terminal_security_config: TerminalSecurityConfig,
@@ -514,6 +515,7 @@ impl GlobalContext {
             agent_approvals: self.agent_approvals.clone(),
             peer_grants: self.peer_grants.clone(),
             broadcast_limits: self.broadcast_limits.clone(),
+            wait_graph: self.wait_graph.clone(),
         }
     }
 }
@@ -950,6 +952,7 @@ pub async fn create_global_context(
         agent_approvals: refact_work_core::ApprovalRegistry::from_settings(),
         peer_grants: Default::default(),
         broadcast_limits: Default::default(),
+        wait_graph: Default::default(),
         scheduler_config,
         hooks_config,
         terminal_security_config,
@@ -1283,6 +1286,7 @@ pub mod tests {
             agent_approvals: refact_work_core::ApprovalRegistry::from_settings(),
             peer_grants: Default::default(),
             broadcast_limits: Default::default(),
+            wait_graph: Default::default(),
             scheduler_config: SchedulerConfig::default(),
             hooks_config: HooksConfig::default(),
             terminal_security_config: TerminalSecurityConfig::default(),

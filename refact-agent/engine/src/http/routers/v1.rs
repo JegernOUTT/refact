@@ -278,6 +278,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
     let builder = Router::new()
         .route("/work", get(work::list))
         .route("/work/subscribe", get(work::subscribe))
+        .route("/work/wait-graph", get(work::wait_graph))
         .route("/work/:id", get(work::inspect))
         .route("/ping", get(handle_v1_ping))
         .route(

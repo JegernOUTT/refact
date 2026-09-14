@@ -139,6 +139,36 @@ pub async fn list(
     ))
 }
 
+/// Read-only view of who is waiting on whom, filtered to the runs this caller
+/// may already see.
+pub async fn wait_graph(
+    State(app): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    query: ExtractedQuery,
+) -> Result<Json<service::Inspection>, WorkError> {
+    authorize(&app, &headers, peer.map(|p| p.0))?;
+    let Query(query) = query.map_err(|_| WorkError::invalid("invalid Work query"))?;
+    if query.path.is_some() || query.states.is_some() || query.scope.is_some() {
+        return Err(WorkError::invalid(
+            "the wait graph only accepts chat_id, limit and cursor",
+        ));
+    }
+    let caller = caller(&app, &query).await?;
+    Ok(Json(
+        service::inspect(
+            &app,
+            &caller,
+            service::InspectRequest {
+                selector: service::InspectSelector::WaitGraph {},
+                cursor: query.cursor,
+                limit: query.limit,
+            },
+        )
+        .await?,
+    ))
+}
+
 pub async fn inspect(
     State(app): State<AppState>,
     Path(id): Path<String>,

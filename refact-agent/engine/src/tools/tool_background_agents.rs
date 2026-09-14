@@ -1385,13 +1385,18 @@ impl Tool for ToolAgentWait {
             settings.agent_wait_max_ms,
         )?;
         let (app, parent_chat_id) = background_agent_context(&ccx).await;
+        let waiting =
+            crate::coordination::deadlock::declare_agent_wait(&app, &parent_chat_id, &targets);
         if targets.len() == 1 {
             let agent_id = &targets[0];
-            let record = app
-                .agents
-                .wait(&parent_chat_id, agent_id, Duration::from_millis(timeout_ms))
-                .await
-                .map_err(|error| map_registry_error(agent_id, error))?;
+            let record = tokio::select! {
+                settled = app
+                    .agents
+                    .wait(&parent_chat_id, agent_id, Duration::from_millis(timeout_ms)) => {
+                    settled.map_err(|error| map_registry_error(agent_id, error))?
+                }
+                report = waiting.refused() => return Err(report.to_string()),
+            };
             let content = if record.status.is_terminal() {
                 format_agent_result(&record, false).await?
             } else {
@@ -1437,8 +1442,13 @@ impl Tool for ToolAgentWait {
         let mut first_terminal = already_terminal;
         if first_terminal.is_none() {
             let mut pending: Vec<_> = waits.collect();
+            let refused = waiting.refused();
+            tokio::pin!(refused);
             while !pending.is_empty() {
-                let ((agent_id, result), _, rest) = futures::future::select_all(pending).await;
+                let ((agent_id, result), _, rest) = tokio::select! {
+                    settled = futures::future::select_all(pending) => settled,
+                    report = &mut refused => return Err(report.to_string()),
+                };
                 pending = rest;
                 match result {
                     Ok(record) if record.status.is_terminal() => {

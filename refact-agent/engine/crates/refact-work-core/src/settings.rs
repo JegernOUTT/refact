@@ -52,6 +52,14 @@ pub struct CoordinationSettings {
     pub max_pending_questions: usize,
     pub question_default_expiry_secs: u64,
     pub question_max_expiry_secs: u64,
+    pub deadlock_detection_enabled: bool,
+    pub deadlock_scan_interval_ms: u64,
+    pub deadlock_max_nodes: usize,
+    pub deadlock_max_edges: usize,
+    pub deadlock_detection_attempts: usize,
+    /// Reporting is always on; breaking a detected cycle by cancelling the
+    /// refused waiter stays opt-in.
+    pub deadlock_auto_cancel: bool,
     pub delivery_default_ttl_secs: u64,
     pub delivery_max_ttl_secs: u64,
     pub delivery_max_pending: usize,
@@ -137,6 +145,12 @@ impl Default for CoordinationSettings {
             max_pending_questions: 256,
             question_default_expiry_secs: 1800,
             question_max_expiry_secs: 604_800,
+            deadlock_detection_enabled: true,
+            deadlock_scan_interval_ms: 5_000,
+            deadlock_max_nodes: 4096,
+            deadlock_max_edges: 16384,
+            deadlock_detection_attempts: 3,
+            deadlock_auto_cancel: false,
             delivery_default_ttl_secs: 86_400,
             delivery_max_ttl_secs: 604_800,
             delivery_max_pending: 4096,
@@ -489,6 +503,22 @@ impl CoordinationSettings {
             self.lock_poll_interval_ms,
             1,
         );
+        at_least(
+            &mut v,
+            "deadlock_scan_interval_ms",
+            self.deadlock_scan_interval_ms,
+            1,
+        );
+        for (field, value) in [
+            ("deadlock_max_nodes", self.deadlock_max_nodes),
+            ("deadlock_max_edges", self.deadlock_max_edges),
+            (
+                "deadlock_detection_attempts",
+                self.deadlock_detection_attempts,
+            ),
+        ] {
+            at_least(&mut v, field, value as u64, 1);
+        }
 
         not_greater(
             &mut v,
@@ -657,6 +687,28 @@ mod tests {
                 settings.question_default_expiry_secs = settings.question_max_expiry_secs + 1
             },
             |settings: &mut CoordinationSettings| settings.question_max_expiry_secs = 31_536_001,
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn deadlock_bounds_default_usable_and_reject_zero() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(settings.deadlock_detection_enabled);
+        assert!(!settings.deadlock_auto_cancel);
+        assert!(settings.deadlock_scan_interval_ms >= 1);
+        assert!(settings.deadlock_max_nodes >= 1);
+        assert!(settings.deadlock_max_edges >= settings.deadlock_max_nodes);
+        assert!(settings.deadlock_detection_attempts >= 2);
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.deadlock_scan_interval_ms = 0,
+            |settings: &mut CoordinationSettings| settings.deadlock_max_nodes = 0,
+            |settings: &mut CoordinationSettings| settings.deadlock_max_edges = 0,
+            |settings: &mut CoordinationSettings| settings.deadlock_detection_attempts = 0,
         ] {
             let mut settings = CoordinationSettings::default();
             mutate(&mut settings);

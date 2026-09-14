@@ -16,10 +16,19 @@ use super::types::{OverviewScope, WorkOverview, WorkOverviewRequest, WorkRootRef
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InspectSelector {
-    Work { work_id: String },
-    Files { paths: Vec<String> },
-    Worktree { worktree_id: String },
+    Work {
+        work_id: String,
+    },
+    Files {
+        paths: Vec<String>,
+    },
+    Worktree {
+        worktree_id: String,
+    },
     ProjectWorktrees {},
+    /// Read-only view of who is waiting on whom, restricted to the runs this
+    /// caller may already see.
+    WaitGraph {},
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -39,6 +48,8 @@ pub struct Inspection {
     /// candidate, not a physical file conflict, and never a lock.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub integration_overlaps: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_graph: Option<super::deadlock::WaitGraphView>,
     #[serde(flatten)]
     pub page: WorkOverview,
 }
@@ -398,6 +409,18 @@ pub async fn inspect(
             roots = catalog.roots.by_id.values().cloned().collect();
             Vec::new()
         }
+        InspectSelector::WaitGraph {} => Vec::new(),
+    };
+    let wait_graph = match &request.selector {
+        InspectSelector::WaitGraph {} => Some(super::deadlock::visible_view(
+            app,
+            &catalog
+                .all_rows()
+                .iter()
+                .map(|row| row.key.to_string())
+                .collect(),
+        )),
+        _ => None,
     };
     let overview_request = WorkOverviewRequest {
         cursor: request.cursor.clone(),
@@ -426,6 +449,7 @@ pub async fn inspect(
         selector: request.selector,
         row,
         integration_overlaps,
+        wait_graph,
         page,
     })
 }

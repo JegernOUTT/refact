@@ -373,6 +373,21 @@ impl ApprovalRegistry {
         pending
     }
 
+    /// Every request that is still awaiting a decision, across all parents.
+    /// The wait-for graph needs the undecided set, not one parent's view.
+    pub fn undecided(&self, now: u64) -> Vec<PendingApproval> {
+        let mut entries = self.entries.lock().unwrap();
+        self.expire_locked(&mut entries, now);
+        let mut pending: Vec<_> = entries
+            .values()
+            .filter(|entry| entry.decision.is_none())
+            .map(|entry| entry.pending.clone())
+            .collect();
+        pending
+            .sort_by(|left, right| (left.created_at, &left.id).cmp(&(right.created_at, &right.id)));
+        pending
+    }
+
     pub fn expire(&self, now: u64) {
         let mut entries = self.entries.lock().unwrap();
         self.expire_locked(&mut entries, now);

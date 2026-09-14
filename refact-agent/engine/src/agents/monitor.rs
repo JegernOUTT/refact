@@ -13,6 +13,7 @@ const STUCK_AFTER: TimeDelta = TimeDelta::minutes(20);
 
 pub async fn run_background_agent_monitor(app: AppState, shutdown: Arc<AtomicBool>) {
     tracing::info!("Starting background agent monitor");
+    let detector = crate::coordination::deadlock::DeadlockDetector::start(app.clone());
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
@@ -24,6 +25,9 @@ pub async fn run_background_agent_monitor(app: AppState, shutdown: Arc<AtomicBoo
             _ = tokio::time::sleep(MONITOR_INTERVAL) => {}
             _ = wait_for_shutdown(shutdown.clone()) => break,
         }
+    }
+    if let Some(detector) = detector {
+        detector.shutdown().await;
     }
     app.agent_executions.begin_shutdown();
     crate::tasks::admission::shutdown(&app).await;
