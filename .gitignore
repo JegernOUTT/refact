@@ -336,3 +336,6 @@ refact-agent/engine/e2e-*.txt
 node_modules
 
 .refact/review_scratch/
+
+# vite temp config artifacts
+vite.config.ts.timestamp-*
