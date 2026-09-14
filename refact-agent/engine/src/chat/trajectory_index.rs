@@ -798,6 +798,8 @@ struct DirectoryEntryIds {
 // Cross-directory hints derived from the per-directory indexes the coordinator has loaded.
 // Never authoritative: a hit is re-verified against a fresh listing, a miss falls back to the
 // caller's own scan, so a stale hint can neither resolve a dead path nor hide a live one.
+// `dirs_by_id` preserves the order in which each directory was first registered, which is
+// coordinator-load order and not the caller's directory order.
 #[derive(Default)]
 struct TrajectoryIndexEntryLocations {
     dirs_by_id: HashMap<String, Vec<PathBuf>>,
@@ -1145,7 +1147,8 @@ impl TrajectoryIndexCoordinator {
             .directory_has_displayable_entries(&key, Instant::now(), self.generation_ttl)
     }
 
-    /// Directories the id-map believes hold `chat_id`, without listing anything.
+    /// Directories the id-map believes hold `chat_id`, in the order each directory was first
+    /// registered with this coordinator, without listing anything.
     pub fn entry_dirs_for_id(&self, chat_id: &str) -> Vec<PathBuf> {
         self.entry_locations_mut().dirs_for_id(chat_id)
     }
@@ -1153,6 +1156,12 @@ impl TrajectoryIndexCoordinator {
     /// Resolves one chat id straight to its directories instead of sweeping every known
     /// trajectory directory. Each hint costs one listing call, and every hit is re-checked
     /// against that directory's freshly validated entries.
+    ///
+    /// Hits come back in coordinator-load order: the order in which each directory was first
+    /// registered by any listing, reconcile, or upsert from any caller. That is not
+    /// `list_trajectory_dirs` order. An id that lives in exactly one directory resolves
+    /// identically either way; an id duplicated across directories can resolve to a different,
+    /// still valid, file than a full scan would have returned first.
     pub async fn find_entries_by_id(
         &self,
         chat_id: &str,
@@ -1162,8 +1171,12 @@ impl TrajectoryIndexCoordinator {
         let mut found = Vec::with_capacity(dirs.len());
         for dir in dirs {
             self.record_listing_caller(caller);
-            let Ok(entries) = self.list_entries_shared(&dir, None).await else {
-                continue;
+            let entries = match self.list_entries_shared(&dir, None).await {
+                Ok(entries) => entries,
+                Err(error) => {
+                    tracing::warn!("Failed to read trajectory index {:?}: {}", dir, error);
+                    continue;
+                }
             };
             if let Some(entry) = entries.iter().find(|entry| entry.id == chat_id) {
                 found.push((dir, entry.clone()));
@@ -1172,6 +1185,7 @@ impl TrajectoryIndexCoordinator {
         found
     }
 
+    #[cfg(test)]
     pub async fn find_entry_by_id(
         &self,
         chat_id: &str,
@@ -1376,6 +1390,7 @@ impl TrajectoryIndexCoordinator {
         Ok((*index).clone())
     }
 
+    #[cfg(test)]
     pub async fn list_entries(
         &self,
         dir: &Path,
@@ -3357,20 +3372,7 @@ pub async fn remove_trajectory_index_entry_with_rollout(
     .await
 }
 
-pub async fn list_trajectory_entries_with_rollout(
-    coordinator: &TrajectoryIndexCoordinator,
-    dir: &Path,
-    source_hint: Option<TrajectorySourceIdentity>,
-) -> Result<Vec<TrajectoryIndexEntry>, String> {
-    list_trajectory_entries_with_rollout_for(
-        coordinator,
-        dir,
-        source_hint,
-        TrajectoryIndexListingCaller::ChatApi,
-    )
-    .await
-}
-
+#[cfg(test)]
 pub async fn list_trajectory_entries_with_rollout_for(
     coordinator: &TrajectoryIndexCoordinator,
     dir: &Path,
@@ -5634,8 +5636,9 @@ mod tests {
             .find_entries_by_id("chat-1", TrajectoryIndexListingCaller::ChatPathLookup)
             .await;
 
-        // Precedence: the directory registered first wins, which is the directory order the
-        // callers scan in, so a duplicated id resolves exactly as the full scan resolved it.
+        // Precedence is coordinator-load order: the directory registered first wins. Here that
+        // is the listing order above, not `list_trajectory_dirs` order, and a duplicated id may
+        // therefore resolve to a different (still valid) file than the full scan would pick.
         assert_eq!(
             hits.iter().map(|(dir, _)| dir.clone()).collect::<Vec<_>>(),
             vec![canonical(&first), canonical(&second)]

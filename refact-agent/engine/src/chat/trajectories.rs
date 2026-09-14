@@ -2021,7 +2021,9 @@ async fn indexed_candidate_paths_in_dirs(
 
 // O(1) in the number of trajectory directories: the coordinator resolves the chat id through its
 // cross-directory id map instead of listing every directory. A miss returns nothing and the caller
-// falls back to the full scan, so this can only ever save work, never change the answer.
+// falls back to the full scan below, so this can only ever save work. Hits arrive in
+// coordinator-load order rather than `list_trajectory_dirs` order, so an id duplicated across
+// directories can resolve to a different (still valid) file than the full scan would pick first.
 async fn indexed_candidate_paths_by_id(
     gcx: &Arc<GlobalContext>,
     chat_id: &str,
