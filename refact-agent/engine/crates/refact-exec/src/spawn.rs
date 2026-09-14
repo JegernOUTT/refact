@@ -450,18 +450,6 @@ fn drain_reader_into_registry(
     }
 }
 
-fn pump_blocking_output(
-    registry: ExecRegistry,
-    process_id: crate::types::ExecProcessId,
-    stream: ExecOutputStream,
-    reader: Box<dyn Read + Send>,
-    progress_tx: Option<mpsc::UnboundedSender<crate::types::ExecOutputChunk>>,
-) -> AbortOnDropTask {
-    AbortOnDropTask(tokio::task::spawn_blocking(move || {
-        drain_reader_into_registry(registry, process_id, stream, reader, progress_tx)
-    }))
-}
-
 // A pty reader only reaches EOF once the pty is closed, and the registry entry that owns the pty
 // is what the reader keeps alive. On the blocking pool that is a cycle: runtime shutdown waits for
 // blocking tasks, the registry can never drop, and the pty never closes. An owned thread is not

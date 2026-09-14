@@ -22157,6 +22157,7 @@ mod tests {
                 target_files: Vec::new(),
                 scope_guard_mode: Default::default(),
             }],
+            ..Default::default()
         };
         tokio::fs::write(
             task_dir.join("board.yaml"),
@@ -22298,6 +22299,7 @@ mod tests {
                 target_files: Vec::new(),
                 scope_guard_mode: Default::default(),
             }],
+            ..Default::default()
         };
         tokio::fs::write(
             task_dir.join("board.yaml"),

@@ -533,7 +533,11 @@ impl TaskBoard {
         let mut indegree = vec![0usize; self.cards.len()];
         let mut dependents = vec![Vec::new(); self.cards.len()];
         for card in &self.cards {
-            if card.depends_on.iter().any(|dependency| dependency == &card.id) {
+            if card
+                .depends_on
+                .iter()
+                .any(|dependency| dependency == &card.id)
+            {
                 return Err(format!("Card {} cannot depend on itself", card.id));
             }
             let mut unique = std::collections::HashSet::new();
@@ -552,7 +556,10 @@ impl TaskBoard {
                 .iter()
                 .find(|dependency| !by_id.contains_key(dependency.as_str()))
             {
-                return Err(format!("Card {} dependency {} does not exist", card.id, missing));
+                return Err(format!(
+                    "Card {} dependency {} does not exist",
+                    card.id, missing
+                ));
             }
         }
         for (card_index, card) in self.cards.iter().enumerate() {
@@ -683,7 +690,10 @@ impl TaskBoard {
 
     pub fn authorize_reviewer(&self, chat_id: &str) -> Result<(), String> {
         let owner = self.owner_chat_id.as_deref() == Some(chat_id);
-        let assigned = self.reviewer_chat_ids.iter().any(|reviewer| reviewer == chat_id);
+        let assigned = self
+            .reviewer_chat_ids
+            .iter()
+            .any(|reviewer| reviewer == chat_id);
         if assigned || (owner && self.review_policy == BoardReviewPolicy::OwnerAllowed) {
             Ok(())
         } else if owner {

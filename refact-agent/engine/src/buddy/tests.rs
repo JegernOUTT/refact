@@ -4793,6 +4793,7 @@ fn task_health_emits_stuck_fact() {
         rev: 0,
         columns: vec![],
         cards: vec![make_board_card("c1", "doing", Some("agent-1"), None)],
+        ..Default::default()
     };
     let entries = vec![TaskHealthEntry {
         meta,
@@ -4818,6 +4819,7 @@ fn task_health_no_fact_for_completed() {
         rev: 0,
         columns: vec![],
         cards: vec![make_board_card("c1", "doing", Some("agent-1"), None)],
+        ..Default::default()
     };
     let entries = vec![TaskHealthEntry {
         meta,
@@ -7582,6 +7584,7 @@ fn task_stuck_uses_heartbeat_not_started_at() {
             Some("agent-1"),
             Some(&(now - Duration::hours(1)).to_rfc3339()),
         )],
+        ..Default::default()
     };
 
     // Fresh heartbeat (1 min ago) — no stuck fact even though started_at is 1h old.
@@ -7621,6 +7624,7 @@ fn task_abandoned_requires_no_heartbeat_ever() {
         rev: 0,
         columns: vec![],
         cards: vec![],
+        ..Default::default()
     };
 
     // Has a heartbeat — NOT abandoned even if old.
@@ -7659,6 +7663,7 @@ fn task_cluster_requires_file_overlap() {
         rev: 0,
         columns: vec![],
         cards: vec![],
+        ..Default::default()
     };
 
     // Similar names but disjoint files — no duplicate fact.
@@ -9224,6 +9229,7 @@ fn task_stuck_no_started_at_fallback_when_no_heartbeat() {
             Some("agent-1"),
             Some(&(now - Duration::hours(5)).to_rfc3339()),
         )],
+        ..Default::default()
     };
     let entries = vec![TaskHealthEntry {
         meta: make_task_meta("t1", "Old started", TaskStatus::Active, &now.to_rfc3339()),
@@ -9244,6 +9250,7 @@ fn task_stuck_uses_persisted_heartbeat_when_recent() {
         rev: 0,
         columns: vec![],
         cards: vec![make_board_card("c1", "doing", Some("agent-1"), None)],
+        ..Default::default()
     };
     let entries = vec![TaskHealthEntry {
         meta: make_task_meta(
@@ -9269,6 +9276,7 @@ fn task_stuck_when_persisted_heartbeat_stale() {
         rev: 0,
         columns: vec![],
         cards: vec![make_board_card("c1", "doing", Some("agent-1"), None)],
+        ..Default::default()
     };
     let entries = vec![TaskHealthEntry {
         meta: make_task_meta(

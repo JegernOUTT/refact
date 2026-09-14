@@ -49,7 +49,9 @@ async fn verified_target(
 ) -> Result<String, String> {
     let target = required_string(args, "target_chat_id")?;
     if !chat_id_is_planner_for_task(gcx, &target, task_id).await {
-        return Err("target_chat_id is not an authenticated planner chat for this task".to_string());
+        return Err(
+            "target_chat_id is not an authenticated planner chat for this task".to_string(),
+        );
     }
     Ok(target)
 }
@@ -71,7 +73,9 @@ impl Tool for ToolTaskBoardAuthority {
             "claim_owner" | "set_review_policy" | "get" => None,
             other => return Err(format!("Unknown board authority action '{other}'")),
         };
-        let policy = (action == "set_review_policy").then(|| parse_policy(args)).transpose()?;
+        let policy = (action == "set_review_policy")
+            .then(|| parse_policy(args))
+            .transpose()?;
         if action == "get" {
             let board = storage::load_board(gcx, &task_id).await?;
             let receipt = json!({
@@ -105,7 +109,9 @@ impl Tool for ToolTaskBoardAuthority {
                     board.require_owner(&actor_for_update)?;
                     let target = target_for_update.as_ref().expect("target validated");
                     if board.owner_chat_id.as_deref() == Some(target.as_str()) {
-                        return Err("task board owner cannot also be an assigned reviewer".to_string());
+                        return Err(
+                            "task board owner cannot also be an assigned reviewer".to_string()
+                        );
                     }
                     if !board.reviewer_chat_ids.contains(target) {
                         board.reviewer_chat_ids.push(target.clone());

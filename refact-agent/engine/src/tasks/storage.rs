@@ -282,9 +282,11 @@ async fn board_max_reviewers(gcx: Arc<GlobalContext>, task_id: &str) -> Result<u
         .and_then(Path::parent)
         .and_then(Path::parent)
         .ok_or_else(|| format!("Task directory {} has no project root", task_dir.display()))?;
-    Ok(crate::runtime_settings::coordination_for_project(project_root)
-        .await?
-        .board_max_reviewers)
+    Ok(
+        crate::runtime_settings::coordination_for_project(project_root)
+            .await?
+            .board_max_reviewers,
+    )
 }
 
 /// Create `board.yaml` for a task that must not have one yet.
@@ -342,7 +344,7 @@ pub async fn save_board_checked(
         .map_err(BoardSaveError::from)?;
     board
         .validate_for_write(max_reviewers)
-        .map_err(BoardSaveError::Storage)?;
+        .map_err(BoardSaveError::Failed)?;
     let source = board_rows::actor_provenance(&gcx).await?;
     let (task_dir, guard) = locked_task_dir(gcx.clone(), task_id).await?;
     let (existing, previous) = read_board_with_provenance(&task_dir).await?;

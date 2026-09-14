@@ -842,10 +842,24 @@ mod tests {
         assert_eq!(loaded.pending_deliveries, vec![delivery.clone()]);
         let restored =
             get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id).await;
+        let restored = restored.lock().await.pending_deliveries_for_snapshot();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].id, delivery.id);
         assert_eq!(
-            restored.lock().await.pending_deliveries_for_snapshot(),
-            vec![delivery]
+            restored[0]
+                .messages
+                .iter()
+                .map(|message| message.content.content_text_only())
+                .collect::<Vec<_>>(),
+            delivery
+                .messages
+                .iter()
+                .map(|message| message.content.content_text_only())
+                .collect::<Vec<_>>()
         );
+        assert_eq!(restored[0].push, delivery.push);
+        assert_eq!(restored[0].enqueued_at_ms, delivery.enqueued_at_ms);
+        assert!(restored[0].expires_at_ms.is_some());
     }
 
     #[test]
