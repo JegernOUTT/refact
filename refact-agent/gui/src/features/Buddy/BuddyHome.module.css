@@ -47,14 +47,26 @@
   background: transparent;
 }
 
-.topTitle {
+.topIdentity {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex: 1;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.topTitle {
   min-width: 0;
   overflow: hidden;
-  text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
   letter-spacing: 0.02em;
+}
+
+.statusPill {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 /* Reserves the same slot the settings gear used to occupy so the centered
@@ -64,8 +76,12 @@
   width: var(--rf-control-h);
 }
 
-/* Hero — the world canvas owns the full card width; identity moved to the
- * summary strip below so no column steals horizontal space from the scene. */
+.presenceSlot {
+  min-width: 0;
+}
+
+/* Hero — the scene sits at the top of every tab, compact by default so the
+ * tab strip stays inside the first viewport; Play expands it. */
 .heroCard {
   min-width: 0;
   overflow: hidden;
@@ -73,12 +89,50 @@
 }
 
 .heroCard [data-testid="buddy-world"] {
-  height: clamp(280px, 38vh, 430px);
-  min-height: 240px;
+  height: clamp(180px, 24vh, 260px);
+  min-height: 160px;
   margin: 0;
   border-color: var(--rf-border);
   background: var(--rf-surface-1);
   box-shadow: inset 0 0 0 var(--rf-hairline) var(--rf-surface-2);
+}
+
+.heroCardExpanded [data-testid="buddy-world"] {
+  height: clamp(280px, 38vh, 430px);
+  min-height: 240px;
+}
+
+.statusCard {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-space-2) var(--rf-space-3);
+}
+
+.statusText {
+  min-width: 0;
+}
+
+.editorialCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-panel-pad);
+}
+
+.editorialText,
+.editorialStatus {
+  min-width: 0;
+}
+
+.editorialActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  min-width: 0;
 }
 
 /* Project setup strip — pinned right below the identity bar. */
@@ -115,6 +169,12 @@
   min-width: 0;
 }
 
+/* Content-sized columns that only stretch to equal widths when there is room,
+ * so narrow viewports scroll the strip instead of truncating every label. */
+.tabs .tabsList {
+  grid-auto-columns: minmax(max-content, 1fr);
+}
+
 .tabContent {
   min-width: 0;
 }
@@ -126,6 +186,58 @@
   overflow: hidden;
 }
 
+.tabPanelSplit {
+  display: flex;
+  gap: var(--rf-space-3);
+  height: clamp(320px, 52vh, 560px);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tabPanelSplit > * {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+.tabNotice {
+  display: block;
+  min-width: 0;
+  padding: var(--rf-space-2) 0;
+}
+
+.tabNoticeList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.tabNoticeRow {
+  display: block;
+  min-width: 0;
+}
+
+.playPanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.playActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.playHint {
+  min-width: 0;
+}
+
 .settingsSection {
   min-width: 0;
   overflow: hidden;
@@ -135,33 +247,26 @@
   min-width: 0;
 }
 
+.settingsStack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+}
+
 .draftSection {
   min-width: 0;
 }
 
-.inboxOverlay {
-  position: fixed;
-  top: var(--rf-space-6);
-  right: var(--rf-space-4);
-  width: min(380px, calc(100vw - 2 * var(--rf-space-4)));
-  max-height: calc(100vh - 2 * var(--rf-space-6));
-  overflow-y: auto;
-  z-index: var(--rf-z-overlay, 40);
-  display: grid;
+.draftNotice {
+  display: flex;
+  flex-direction: column;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-3);
-  background: var(--rf-surface-glass);
-  border: 1px solid var(--rf-color-border-subtle, var(--gray-a5));
-  border-radius: var(--rf-radius-card, 12px);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay, 12px));
+  min-width: 0;
+  padding: var(--rf-panel-pad);
 }
 
-.inboxHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--rf-space-2);
+.draftNoticeText {
+  min-width: 0;
 }
 
 .draftPanel {
@@ -248,12 +353,22 @@
   }
 
   .heroCard [data-testid="buddy-world"] {
+    height: 180px;
+    min-height: 160px;
+  }
+
+  .heroCardExpanded [data-testid="buddy-world"] {
     height: 250px;
     min-height: 220px;
   }
 
   .tabPanel {
     height: min(460px, 70vh);
+  }
+
+  .tabPanelSplit {
+    flex-direction: column;
+    height: min(620px, 84vh);
   }
 
   .draftMeta {
@@ -271,6 +386,11 @@
   }
 
   .heroCard [data-testid="buddy-world"] {
+    height: 170px;
+    min-height: 150px;
+  }
+
+  .heroCardExpanded [data-testid="buddy-world"] {
     height: 230px;
     min-height: 210px;
   }

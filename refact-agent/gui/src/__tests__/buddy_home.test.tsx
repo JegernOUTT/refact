@@ -1518,6 +1518,188 @@ describe("BuddyHome_renders_all_sections", () => {
   });
 });
 
+describe("BuddyHome_layout_contract", () => {
+  const layoutHandlers = [
+    http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
+    http.get("*/v1/stats/llm/summary", () =>
+      HttpResponse.json({
+        totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
+      }),
+    ),
+    http.get("*/v1/setup/status", () =>
+      HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+    ),
+  ];
+
+  it("keeps the scene above the tab strip on every tab", async () => {
+    server.use(
+      ...layoutHandlers,
+      http.get("*/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [] }),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    const { user } = render(<BuddyHome />, { store });
+
+    await screen.findByTestId("buddy-home-content");
+    const hero = screen.getByTestId("buddy-home-hero");
+    expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
+    expect(hero.compareDocumentPosition(screen.getByRole("tablist"))).toBe(4);
+
+    for (const name of [
+      "Opportunities",
+      "Recent errors",
+      "Activity",
+      "Settings",
+    ]) {
+      await user.click(screen.getByRole("tab", { name }));
+      expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
+    }
+  });
+
+  it.each([
+    ["enabled", "On"],
+    ["disabled", "Local only"],
+    ["unavailable", "Off"],
+  ] as const)(
+    "renders the %s work authority branch with its own status pill",
+    async (mode, label) => {
+      server.use(
+        ...layoutHandlers,
+        http.get("*/v1/buddy/operator/status", () =>
+          HttpResponse.json(operatorStatus(mode)),
+        ),
+        http.get("*/v1/buddy/opportunities", () =>
+          HttpResponse.json({ opportunities: [] }),
+        ),
+        http.get("*/v1/buddy/work", () =>
+          HttpResponse.json({
+            schema_version: 1,
+            project: operatorStatus("enabled").project,
+            data: [],
+            next_cursor: null,
+          }),
+        ),
+      );
+      const store = setUpStore({ ...CONFIG_STATE });
+      store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+      render(<BuddyHome />, { store });
+
+      const pill = await screen.findByTestId("buddy-operator-status");
+      await waitFor(() => expect(pill).toHaveAttribute("data-state", mode));
+      expect(pill).toHaveTextContent(label);
+
+      if (mode === "enabled") {
+        expect(
+          await screen.findByRole("heading", { name: "Buddy Desk" }),
+        ).toBeInTheDocument();
+      }
+      const retry = screen.queryByRole("button", {
+        name: "Retry work authority",
+      });
+      if (mode === "unavailable") expect(retry).toBeInTheDocument();
+      else expect(retry).toBeNull();
+    },
+  );
+
+  it("renders a broken status pill and the retry branch when status fails", async () => {
+    server.use(
+      ...layoutHandlers,
+      http.get(
+        "*/v1/buddy/operator/status",
+        () => new HttpResponse(null, { status: 500 }),
+      ),
+      http.get("*/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [] }),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyHome />, { store });
+
+    const pill = await screen.findByTestId("buddy-operator-status");
+    await waitFor(() => expect(pill).toHaveAttribute("data-state", "error"));
+    expect(pill).toHaveTextContent("Broken");
+    expect(
+      await screen.findByRole("button", { name: "Retry work authority" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("buddy-opportunities-feed")).toBeNull();
+  });
+
+  it("shows the opportunity list exactly once", async () => {
+    const opportunity = makeOpportunity({ id: "single-surface" });
+    server.use(
+      ...layoutHandlers,
+      http.get("*/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [opportunity] }),
+      ),
+      http.get("*/v1/buddy/briefing", () =>
+        HttpResponse.json({
+          date: "2024-01-01",
+          top_cards: [
+            {
+              id: opportunity.id,
+              priority: "high",
+              summary: opportunity.summary,
+            },
+          ],
+          receipts: [],
+          job_runs: [],
+          spend: { tokens_in: 1, tokens_out: 1 },
+          pulse: { diagnostics_last_hour: 0 },
+        }),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(makePulse(), { opportunities: [opportunity] }),
+      ),
+    );
+
+    const { user } = render(<BuddyHome />, { store });
+
+    await screen.findByTestId("buddy-home-content");
+    await user.click(screen.getByRole("tab", { name: "Opportunities" }));
+
+    const feeds = await screen.findAllByTestId("buddy-opportunities-feed");
+    expect(feeds).toHaveLength(1);
+    expect(
+      within(feeds[0]).getByText("Model config is broken"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("buddy-briefing-card")).toBeNull();
+  });
+
+  it("keeps compliance prose and unstyled elements out of the page", async () => {
+    const source = await readGuiSource("features/Buddy/BuddyHome.tsx");
+
+    expect(source).not.toContain("<p>");
+    expect(source).not.toContain("<section");
+    expect(source).not.toContain("Needs you above");
+    expect(source).not.toContain("never permissions");
+    expect(source).not.toContain("Play is optional");
+    expect(source).not.toContain("Back to Desk");
+  });
+
+  it("sizes the tab strip so narrow viewports scroll instead of truncating", async () => {
+    const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
+
+    expect(readCssBlock(css, ".tabs .tabsList")).toContain(
+      "grid-auto-columns: minmax(max-content, 1fr)",
+    );
+    expect(
+      readCssBlock(css, '.heroCard [data-testid="buddy-world"]'),
+    ).toContain("height: clamp(180px, 24vh, 260px)");
+    expect(
+      readCssBlock(css, '.heroCardExpanded [data-testid="buddy-world"]'),
+    ).toContain("height: clamp(280px, 38vh, 430px)");
+  });
+});
+
 describe("BuddyWorld_dynamic_environment", () => {
   it("renders when matchMedia is unavailable", () => {
     const originalMatchMedia = window.matchMedia;
@@ -4774,7 +4956,7 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     server.use(...commonHandlers);
 
     const { user } = render(<BuddyHome />, { store });
-    await user.click(screen.getByRole("tab", { name: "Recent chats" }));
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
     const panel = await screen.findByTestId("buddy-recent-chats");
     expect(panel.className).not.toContain("panelScroll");
     expect(panel.className).toContain("glass");
