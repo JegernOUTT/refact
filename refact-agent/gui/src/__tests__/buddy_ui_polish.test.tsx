@@ -411,26 +411,58 @@ describe("buddy UI polish", () => {
       preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
     });
 
-    expect(screen.queryByTestId("buddy-world")).not.toBeInTheDocument();
     expect(screen.getByTestId("buddy-presence")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Open Play" }));
+    const world = await screen.findByTestId("buddy-world");
+    expect(screen.getByTestId("buddy-world-canvas")).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-world-character")).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
+    expect(world.compareDocumentPosition(screen.getByRole("tablist"))).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
+      "data-compact-bubble",
+      "true",
+    );
+
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "Pulse",
+      "Opportunities",
+      "Recent errors",
+      "Activity",
+      "Play",
+      "Settings",
+    ]);
+
+    await user.click(screen.getByRole("tab", { name: "Play" }));
     await waitFor(() => {
-      expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
-      expect(screen.getByTestId("buddy-world-canvas")).toBeInTheDocument();
-      expect(screen.getByTestId("buddy-world-character")).toBeInTheDocument();
-      expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
+      expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
+        "data-compact-bubble",
+        "false",
+      );
+    });
+    expect(screen.getByTestId("buddy-world")).toBe(world);
+    expect(screen.getByTestId("buddy-world-canvas")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Close Play" }));
+    await waitFor(() => {
+      expect(screen.queryByTestId("buddy-world")).not.toBeInTheDocument();
     });
 
-    // The former grid panels are now individual tabs after Buddy's world.
-    await user.click(screen.getByRole("tab", { name: "Personality" }));
+    await user.click(screen.getByRole("button", { name: "Open Play" }));
+    expect(await screen.findByTestId("buddy-world")).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
     expect(
       await screen.findByTestId("buddy-personality-panel"),
     ).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Personality" })).toBeNull();
 
     await user.click(screen.getByRole("tab", { name: "Activity" }));
     expect(
       await screen.findByTestId("buddy-activity-panel"),
     ).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-recent-chats")).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Recent errors" }));
     expect(
