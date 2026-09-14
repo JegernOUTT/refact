@@ -655,11 +655,13 @@ pub async fn handle_mode_transition_apply(
             "Cannot transition an empty chat".to_string(),
         ));
     }
+    let reconstruction_input = refact_core::active_context::legacy_rebuild_input(&messages)
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let rebuilt = reconstruct_context(
         gcx.clone(),
         ReconstructionRequest {
-            messages: &messages,
+            messages: &reconstruction_input,
             target_mode: &target_mode,
             target_mode_description: &req.target_mode_description,
             parent_chat_id: Some(chat_id.as_str()),
@@ -850,11 +852,13 @@ pub async fn handle_planner_from_transition(
             "Cannot transition an empty chat".to_string(),
         ));
     }
+    let reconstruction_input = refact_core::active_context::legacy_rebuild_input(&messages)
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let rebuilt = reconstruct_context(
         gcx.clone(),
         ReconstructionRequest {
-            messages: &messages,
+            messages: &reconstruction_input,
             target_mode: &target_mode,
             target_mode_description: &req.target_mode_description,
             parent_chat_id: Some(req.source_chat_id.as_str()),

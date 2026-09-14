@@ -700,7 +700,7 @@ async fn finalize_handoff_inner(
     let outcome = Box::pin(crate::agentic::mode_transition::reconstruct_context(
         gcx.clone(),
         crate::agentic::mode_transition::ReconstructionRequest {
-            messages: &raw_messages,
+            messages: &messages,
             target_mode: &canonical_mode,
             target_mode_description: &mode_description,
             parent_chat_id: Some(&chat_id),

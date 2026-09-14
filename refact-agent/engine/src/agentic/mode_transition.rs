@@ -5,9 +5,9 @@ pub use refact_agentic::mode_transition::{
     count_images_in_messages, current_base_goal_message, extract_conversation_metadata,
     extract_initial_plan_text, format_annotated_messages, format_budget_summary, format_file_list,
     format_memory_list, insert_goal_messages_before_plan, is_goal_delta_event,
-    make_pinned_plan_message, message_symbols, normalize_goal_message_content, parse_llm_response,
-    push_context_file_with_budget, text_symbols, transfer_goal_ownership, GoalTransferResult,
-    truncate_utf8,
+    make_pinned_plan_message, message_symbols, normalize_control_metadata,
+    normalize_goal_message_content, parse_llm_response, push_context_file_with_budget,
+    text_symbols, transfer_goal_ownership, GoalTransferResult, truncate_utf8,
 };
 
 use std::path::PathBuf;
@@ -617,6 +617,7 @@ pub async fn reconstruct_context(
     let mut messages = refact_agentic::mode_transition::assemble_reconstruction(
         request.messages,
         &decisions,
+        request.target_mode,
         &workspace_dirs,
         budget,
         request.preserve_goal_messages,
@@ -699,9 +700,10 @@ pub async fn assemble_new_chat<T: PathsAccess + ?Sized>(
     context: &T,
     original_messages: &[ChatMessage],
     decisions: &ParsedDecisions,
+    target_mode: &str,
 ) -> Result<Vec<ChatMessage>, String> {
     let workspace_dirs = context.workspace_folders();
-    assemble_new_chat_pure(original_messages, decisions, &workspace_dirs).await
+    assemble_new_chat_pure(original_messages, decisions, target_mode, &workspace_dirs).await
 }
 
 #[cfg(test)]
@@ -1329,7 +1331,7 @@ mod tests {
             ..Default::default()
         };
 
-        let new_messages = assemble_new_chat(&paths, &original_messages, &decisions)
+        let new_messages = assemble_new_chat(&paths, &original_messages, &decisions, "agent")
             .await
             .unwrap();
         let message_symbols = new_messages
@@ -1380,7 +1382,7 @@ mod tests {
             ..Default::default()
         };
 
-        let new_messages = assemble_new_chat(&paths, &original_messages, &decisions)
+        let new_messages = assemble_new_chat(&paths, &original_messages, &decisions, "agent")
             .await
             .unwrap();
         let file_symbols = new_messages
