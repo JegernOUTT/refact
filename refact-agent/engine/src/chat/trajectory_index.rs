@@ -788,6 +788,11 @@ fn entry_counts_as_displayable_chat(entry: &TrajectoryIndexEntry) -> bool {
 struct DirectoryEntryIds {
     displayable: HashMap<String, bool>,
     displayable_count: usize,
+    // Only a full listing may answer "this directory renders nothing". An incremental
+    // register from an upsert knows one id, never the whole directory.
+    synced: bool,
+    // Mirrors the owning state's generation_verified_at, which sits behind an async lock.
+    verified_at: Option<Instant>,
 }
 
 // Cross-directory hints derived from the per-directory indexes the coordinator has loaded.
@@ -844,6 +849,7 @@ impl TrajectoryIndexEntryLocations {
                 })
         });
         if unchanged {
+            self.mark_synced(dir);
             return;
         }
         let current: HashSet<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
@@ -865,6 +871,19 @@ impl TrajectoryIndexEntryLocations {
         for entry in entries {
             self.register(dir, &entry.id, entry_counts_as_displayable_chat(entry));
         }
+        self.mark_synced(dir);
+    }
+
+    fn mark_synced(&mut self, dir: &Path) {
+        if let Some(ids) = self.ids_by_dir.get_mut(dir) {
+            ids.synced = true;
+        }
+    }
+
+    fn set_verified_at(&mut self, dir: &Path, verified_at: Option<Instant>) {
+        if let Some(ids) = self.ids_by_dir.get_mut(dir) {
+            ids.verified_at = verified_at;
+        }
     }
 
     fn forget_directory(&mut self, dir: &Path) {
@@ -885,10 +904,21 @@ impl TrajectoryIndexEntryLocations {
         self.dirs_by_id.get(id).cloned().unwrap_or_default()
     }
 
-    fn directory_has_displayable_entries(&self, dir: &Path) -> Option<bool> {
-        self.ids_by_dir
-            .get(dir)
-            .map(|ids| ids.displayable_count > 0)
+    fn directory_has_displayable_entries(
+        &self,
+        dir: &Path,
+        now: Instant,
+        ttl: Duration,
+    ) -> Option<bool> {
+        let ids = self.ids_by_dir.get(dir)?;
+        if !ids.synced {
+            return None;
+        }
+        let verified = !ttl.is_zero()
+            && ids
+                .verified_at
+                .is_some_and(|verified_at| now.duration_since(verified_at) < ttl);
+        verified.then(|| ids.displayable_count > 0)
     }
 }
 
@@ -1084,6 +1114,11 @@ impl TrajectoryIndexCoordinator {
         self.entry_locations_mut().sync_directory(key, entries);
     }
 
+    fn sync_generation_verified_at(&self, state: &TrajectoryIndexDirectoryState) {
+        self.entry_locations_mut()
+            .set_verified_at(&state.key, state.generation_verified_at);
+    }
+
     fn canonical_directory_key(&self, dir: &Path) -> PathBuf {
         if let Some(key) = self.entry_locations_mut().canonical_by_raw.get(dir) {
             return key.clone();
@@ -1099,12 +1134,15 @@ impl TrajectoryIndexCoordinator {
         key
     }
 
-    /// Directories the coordinator has already indexed and that hold no chat the sidebar would
-    /// render. `None` means "unknown" (never loaded, or evicted), so the caller must still list.
+    /// Directories the coordinator has fully listed, re-verified against disk within the
+    /// generation TTL, and that hold no chat the sidebar would render. `None` means "unknown"
+    /// (never listed, only touched by an upsert, evicted, or verified too long ago), so the
+    /// caller must still list. A directory is never skipped on the strength of a hint that a
+    /// single upsert produced, and a skip is only ever as stale as the listing cache itself.
     pub fn directory_has_displayable_entries(&self, dir: &Path) -> Option<bool> {
         let key = self.canonical_directory_key(dir);
         self.entry_locations_mut()
-            .directory_has_displayable_entries(&key)
+            .directory_has_displayable_entries(&key, Instant::now(), self.generation_ttl)
     }
 
     /// Directories the id-map believes hold `chat_id`, without listing anything.
@@ -1202,6 +1240,7 @@ impl TrajectoryIndexCoordinator {
             state_guard.set_index(index);
             state_guard.generation = Some(loaded.generation);
             state_guard.generation_verified_at = Some(Instant::now());
+            self.sync_generation_verified_at(&state_guard);
             state_guard.loaded = true;
             state_guard.journal_cursor = Some(loaded.cursor);
             if loaded.needs_flush {
@@ -1241,6 +1280,7 @@ impl TrajectoryIndexCoordinator {
             &entry.id,
             entry_counts_as_displayable_chat(&entry),
         );
+        self.sync_generation_verified_at(&state_guard);
         push_pending_mutation(&mut state_guard, TrajectoryIndexMutation::Upsert(entry));
         Ok(())
     }
@@ -1261,6 +1301,7 @@ impl TrajectoryIndexCoordinator {
             for chat_id in &chat_ids {
                 locations.unregister(&state_guard.key, chat_id);
             }
+            locations.set_verified_at(&state_guard.key, None);
         }
         push_pending_mutation(&mut state_guard, TrajectoryIndexMutation::Remove(chat_ids));
         Ok(())
@@ -1330,6 +1371,7 @@ impl TrajectoryIndexCoordinator {
         let mut state_guard = state.lock().await;
         state_guard.generation = Some(generation);
         state_guard.generation_verified_at = Some(Instant::now());
+        self.sync_generation_verified_at(&state_guard);
         drop(state_guard);
         Ok((*index).clone())
     }
@@ -1428,9 +1470,9 @@ impl TrajectoryIndexCoordinator {
         let fresh = cached_index_is_fresh(dir, index_file_names(&index), generation)
             .await
             .unwrap_or(false);
-        if fresh {
-            state.lock().await.generation_verified_at = Some(Instant::now());
-        }
+        let mut state_guard = state.lock().await;
+        state_guard.generation_verified_at = fresh.then(Instant::now);
+        self.sync_generation_verified_at(&state_guard);
         fresh
     }
 
@@ -1544,6 +1586,7 @@ impl TrajectoryIndexCoordinator {
         refresh_generation_after_index_write(&mut state_guard, &dir, &index);
         let index = Arc::new(index);
         self.sync_entry_locations(&state_guard.key, &index.entries);
+        self.sync_generation_verified_at(&state_guard);
         state_guard.set_index(index);
         state_guard.recovery_flush_required = false;
         Ok(())
@@ -5743,6 +5786,91 @@ mod tests {
             sidebar_refresh(&coordinator, &dirs).await,
             vec!["chat-1".to_string(), "review-1".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn upsert_before_first_listing_does_not_hide_the_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let coordinator =
+            TrajectoryIndexCoordinator::new().with_generation_ttl(Duration::from_secs(30));
+
+        // A non-displayable chat lands in a directory the coordinator has never listed.
+        let planner = write_trajectory(&dir, "planner-1", "Planner", "task_planner").await;
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &planner).await)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            coordinator.directory_has_displayable_entries(&dir),
+            None,
+            "one upsert never knows the whole directory"
+        );
+        assert_eq!(
+            sidebar_refresh(&coordinator, &[dir.clone()]).await,
+            vec!["chat-1".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn externally_created_displayable_chat_in_a_skipped_dir_is_still_rendered() {
+        let temp = tempfile::tempdir().unwrap();
+        let coordinator =
+            TrajectoryIndexCoordinator::new().with_generation_ttl(Duration::from_millis(1));
+        let chats_dir = temp.path().join("trajectories");
+        let task_dir = temp.path().join("tasks/task-1/trajectories/planner");
+        write_trajectory(&chats_dir, "chat-1", "One", "agent").await;
+        write_trajectory(&task_dir, "planner-1", "Planner", "task_planner").await;
+        let dirs = vec![chats_dir, task_dir.clone()];
+        assert_eq!(
+            sidebar_refresh(&coordinator, &dirs).await,
+            vec!["chat-1".to_string()]
+        );
+
+        // an external writer creates a real chat in the skipped directory, without any upsert
+        write_trajectory(&task_dir, "review-1", "Review", "agent").await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert_eq!(
+            sidebar_refresh(&coordinator, &dirs).await,
+            vec!["chat-1".to_string(), "review-1".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_genuinely_empty_directory_is_still_skipped() {
+        let temp = tempfile::tempdir().unwrap();
+        let scope = TrajectoryIndexListingCounterScope::local();
+        let coordinator = TrajectoryIndexCoordinator::with_listing_counter_scope(scope.clone())
+            .with_generation_ttl(Duration::from_secs(30));
+        let chats_dir = temp.path().join("trajectories");
+        let task_dir = temp.path().join("tasks/task-1/trajectories/agents");
+        write_trajectory(&chats_dir, "chat-1", "One", "agent").await;
+        write_trajectory(&task_dir, "agent-1", "Agent", "task_agent").await;
+        let dirs = vec![chats_dir, task_dir.clone()];
+        assert_eq!(
+            sidebar_refresh(&coordinator, &dirs).await,
+            vec!["chat-1".to_string()]
+        );
+
+        assert_eq!(
+            coordinator.directory_has_displayable_entries(&task_dir),
+            Some(false)
+        );
+        scope.reset();
+        assert_eq!(
+            sidebar_refresh(&coordinator, &dirs).await,
+            vec!["chat-1".to_string()]
+        );
+        let counters = scope.snapshot();
+        assert_eq!(
+            listing_calls(&counters, TrajectoryIndexListingCaller::Sidebar),
+            1,
+            "a known-empty directory must not cost a listing call"
+        );
+        assert_eq!(counters.directory_scans, 0);
     }
 
     #[tokio::test]
