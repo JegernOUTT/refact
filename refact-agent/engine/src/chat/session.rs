@@ -2222,7 +2222,7 @@ impl ChatSession {
             {
                 continue;
             }
-            delivery.ensure_ttl_secs(now, settings.delivery_default_ttl_secs);
+            delivery.ensure_restored_ttl_secs(now, settings.delivery_default_ttl_secs);
             if delivery.is_expired_at(now) {
                 self.record_dropped_delivery(delivery.id, DeliveryStatus::Expired);
                 continue;

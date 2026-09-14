@@ -1782,7 +1782,7 @@ fn normalize_delivery_state(records: &mut HashMap<String, BackgroundAgent>) {
         let mut expired = Vec::new();
         let mut newest_by_key: HashMap<String, String> = HashMap::new();
         for delivery in &mut record.pending_deliveries {
-            delivery.ensure_ttl_secs(now_ms, settings.delivery_default_ttl_secs);
+            delivery.ensure_restored_ttl_secs(now_ms, settings.delivery_default_ttl_secs);
             if delivery.is_expired_at(now_ms) {
                 expired.push(delivery.id.clone());
             }

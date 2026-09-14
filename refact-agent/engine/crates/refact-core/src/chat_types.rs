@@ -1430,6 +1430,11 @@ impl PartialEq for PendingDelivery {
 
 pub const DELIVERY_EXTRA_KEY: &str = "delivery";
 
+/// Deliveries cannot predate the delivery queue itself, so a persisted
+/// `enqueued_at_ms` below this instant is a synthetic or corrupted value rather
+/// than a wall-clock reading.
+pub const MIN_PLAUSIBLE_DELIVERY_ENQUEUE_MS: u64 = 1_700_000_000_000;
+
 fn delivery_epoch_ms_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1499,6 +1504,26 @@ impl PendingDelivery {
         if self.expires_at_ms.is_none() {
             self.set_ttl_secs(ttl_secs);
         }
+    }
+
+    /// True when `enqueued_at_ms` can be a real wall-clock reading. A persisted
+    /// value below the floor never came from a clock, so measuring a ttl from it
+    /// would report a queued delivery as decades overdue.
+    pub fn has_plausible_enqueue_time(&self) -> bool {
+        self.enqueued_at_ms >= MIN_PLAUSIBLE_DELIVERY_ENQUEUE_MS
+    }
+
+    /// Restore-time ttl stamping. Identical to `ensure_ttl_secs` for a record
+    /// with a real enqueue time, so a delivery that sat on disk keeps its
+    /// original lifetime. A record with no persisted deadline and no usable
+    /// enqueue time measures its lifetime from `now_ms` instead, so reloading
+    /// never silently expires a delivery that was never actually old. A
+    /// persisted deadline always wins over both.
+    pub fn ensure_restored_ttl_secs(&mut self, now_ms: u64, ttl_secs: u64) {
+        if self.expires_at_ms.is_none() && !self.has_plausible_enqueue_time() {
+            self.expires_at_ms = Some(Self::deadline_ms(now_ms, ttl_secs));
+        }
+        self.ensure_ttl_secs(now_ms, ttl_secs);
     }
 
     pub fn is_expired_at(&self, now_ms: u64) -> bool {
@@ -1708,6 +1733,43 @@ mod delivery_tests {
         assert_eq!(legacy.enqueued_at_ms, 90_000);
         assert_eq!(legacy.expires_at_ms, Some(150_000));
         assert!(!legacy.is_expired_at(90_000));
+    }
+
+    #[test]
+    fn restore_ttl_never_expires_a_delivery_with_a_synthetic_enqueue_time() {
+        let now = MIN_PLAUSIBLE_DELIVERY_ENQUEUE_MS + 10_000_000;
+
+        let mut synthetic =
+            PendingDelivery::with_id("synthetic", Vec::new(), PushMode::Append, "test", false);
+        synthetic.enqueued_at_ms = 42;
+        synthetic.expires_at_ms = None;
+        synthetic.ensure_restored_ttl_secs(now, 60);
+        assert_eq!(synthetic.enqueued_at_ms, 42);
+        assert_eq!(synthetic.expires_at_ms, Some(now + 60_000));
+        assert!(!synthetic.is_expired_at(now));
+
+        let mut unknown: PendingDelivery =
+            serde_json::from_value(serde_json::json!({"id": "unknown"})).unwrap();
+        unknown.ensure_restored_ttl_secs(now, 60);
+        assert_eq!(unknown.enqueued_at_ms, now);
+        assert_eq!(unknown.expires_at_ms, Some(now + 60_000));
+        assert!(!unknown.is_expired_at(now));
+
+        let mut aged =
+            PendingDelivery::with_id("aged", Vec::new(), PushMode::Append, "test", false);
+        aged.enqueued_at_ms = now - 61_000;
+        aged.expires_at_ms = None;
+        aged.ensure_restored_ttl_secs(now, 60);
+        assert_eq!(aged.expires_at_ms, Some(now - 1_000));
+        assert!(aged.is_expired_at(now));
+
+        let mut pinned =
+            PendingDelivery::with_id("pinned", Vec::new(), PushMode::Append, "test", false);
+        pinned.enqueued_at_ms = 42;
+        pinned.expires_at_ms = Some(now - 1);
+        pinned.ensure_restored_ttl_secs(now, 60);
+        assert_eq!(pinned.expires_at_ms, Some(now - 1));
+        assert!(pinned.is_expired_at(now));
     }
 
     #[test]

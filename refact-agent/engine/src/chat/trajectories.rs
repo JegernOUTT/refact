@@ -2241,8 +2241,36 @@ async fn read_existing_trajectory_object(
         .map(Some)
 }
 
+/// Per-thread trajectory metadata read counter. `cargo test` gives every test
+/// its own thread and a `#[tokio::test]` runtime is driven on that thread, so a
+/// test that asserts on read counts observes only the reads it caused instead of
+/// a process-wide total that unrelated concurrent tests inflate.
 #[cfg(test)]
-static TRAJECTORY_METADATA_DISK_READS: AtomicUsize = AtomicUsize::new(0);
+struct ThreadLocalDiskReadCounter;
+
+#[cfg(test)]
+impl ThreadLocalDiskReadCounter {
+    fn fetch_add(&self, value: usize, _ordering: Ordering) -> usize {
+        TRAJECTORY_METADATA_DISK_READS_ON_THIS_THREAD.with(|reads| {
+            let previous = reads.get();
+            reads.set(previous.saturating_add(value));
+            previous
+        })
+    }
+
+    fn load(&self, _ordering: Ordering) -> usize {
+        TRAJECTORY_METADATA_DISK_READS_ON_THIS_THREAD.with(std::cell::Cell::get)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TRAJECTORY_METADATA_DISK_READS_ON_THIS_THREAD: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+static TRAJECTORY_METADATA_DISK_READS: ThreadLocalDiskReadCounter = ThreadLocalDiskReadCounter;
 #[cfg(test)]
 fn reset_test_trajectory_watcher_task() {
     let mut guard = TRAJECTORY_WATCHER_TASK
@@ -21608,6 +21636,114 @@ mod tests {
             .unwrap()
             .pending_deliveries
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_pending_delivery_without_expiry_survives_restore_unexpired() {
+        use refact_core::chat_types::{DeliveryStatus, PushMode};
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "legacy-pending-no-expiry";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(chat_id)
+            .join(format!("{chat_id}.json"));
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "id": chat_id,
+                "title": "Legacy",
+                "messages": [],
+                "pending_deliveries": [{
+                    "id": "legacy-pending",
+                    "messages": [
+                        serde_json::to_value(ChatMessage::new(
+                            "user".to_string(),
+                            "queued".to_string(),
+                        ))
+                        .unwrap()
+                    ],
+                    "push": "when_idle",
+                    "source": "planner",
+                    "wake": true,
+                    "supersede_key": "agent_steer:T-1"
+                }]
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(loaded.pending_deliveries.len(), 1);
+        assert_eq!(loaded.pending_deliveries[0].enqueued_at_ms, 0);
+        assert!(loaded.pending_deliveries[0].expires_at_ms.is_none());
+
+        let mut restored = ChatSession::new(chat_id.to_string());
+        restored.restore_pending_deliveries(loaded.pending_deliveries);
+
+        assert_eq!(
+            restored.delivery_status("legacy-pending"),
+            DeliveryStatus::Pending,
+            "a record written before ttl existed must not be read as expired at epoch zero"
+        );
+        let pending = restored.pending_deliveries_for_snapshot();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].push, PushMode::WhenIdle);
+        assert_eq!(pending[0].supersede_key.as_deref(), Some("agent_steer:T-1"));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!(pending[0].expires_at_ms.is_some());
+        assert!(!pending[0].is_expired_at(now));
+    }
+
+    #[tokio::test]
+    async fn pending_delivery_round_trip_preserves_identity_supersede_key_and_pending_state() {
+        use refact_core::chat_types::{DeliveryStatus, PendingDelivery, PushMode};
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "pending-identity-roundtrip";
+        let mut session = ChatSession::new(chat_id.to_string());
+        session.created_at = "2024-01-01T00:00:00Z".to_string();
+        let mut delivery = PendingDelivery::with_id(
+            "steer-1",
+            vec![ChatMessage::new("user".to_string(), "steer".to_string())],
+            PushMode::WhenIdle,
+            "planner",
+            true,
+        );
+        delivery.supersede_key = Some("agent_steer:T-1".to_string());
+        delivery.set_ttl_secs(3_600);
+        session.pending_deliveries.push_back(delivery.clone());
+
+        save_trajectory_snapshot(gcx.clone(), trajectory_snapshot_from_session(&session))
+            .await
+            .unwrap();
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(loaded.pending_deliveries, vec![delivery.clone()]);
+
+        let mut restored = ChatSession::new(chat_id.to_string());
+        restored.restore_pending_deliveries(loaded.pending_deliveries);
+
+        let pending = restored.pending_deliveries_for_snapshot();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, delivery.id);
+        assert_eq!(pending[0].supersede_key, delivery.supersede_key);
+        assert_eq!(pending[0].push, delivery.push);
+        assert_eq!(pending[0].source, delivery.source);
+        assert_eq!(pending[0].enqueued_at_ms, delivery.enqueued_at_ms);
+        assert_eq!(pending[0].expires_at_ms, delivery.expires_at_ms);
+        assert_eq!(
+            restored.delivery_status(&delivery.id),
+            DeliveryStatus::Pending
+        );
     }
 
     #[tokio::test]
