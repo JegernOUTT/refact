@@ -177,7 +177,7 @@ pub(crate) async fn drain_background_agent_inbox(
         return;
     };
     import_runner_local_deliveries(&app, &agent_id, &chat_id, messages).await;
-    match app.agents.drain_deliveries(&agent_id, false).await {
+    match crate::agents::delivery::drain_authorized(&app, &agent_id, false).await {
         Ok(deliveries) => {
             append_runner_deliveries(messages, deliveries);
         }
@@ -1935,7 +1935,8 @@ pub async fn run_subchat(
             // with this drain so a successful enqueue cannot be stranded on exit.
             let wake = if let Some(agent_id) = config.background_agent_id.as_deref() {
                 import_runner_local_deliveries(&app, agent_id, &chat_id, &completed).await;
-                let deliveries = app.agents.finish_delivery_turn(agent_id).await?;
+                let deliveries =
+                    crate::agents::delivery::finish_authorized_turn(&app, agent_id).await?;
                 let wake = append_runner_deliveries(&mut completed, deliveries);
                 crate::agents::delivery::publish_runner_queue(&app, agent_id).await;
                 wake
@@ -2363,7 +2364,8 @@ async fn runner_model_turn(
             if app.agents.has_preempt(agent_id).await {
                 // A concurrent new preemption can retry, but never busy-spin on
                 // a failed durable drain: let the registry error reach the caller.
-                let deliveries = app.agents.drain_deliveries(agent_id, false).await?;
+                let deliveries =
+                    crate::agents::delivery::drain_authorized(&app, agent_id, false).await?;
                 append_runner_deliveries(messages, deliveries);
                 crate::agents::delivery::publish_runner_queue(&app, agent_id).await;
             }

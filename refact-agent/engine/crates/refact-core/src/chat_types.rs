@@ -1362,6 +1362,16 @@ pub struct DeliveryStatusRecord {
     pub status: DeliveryStatus,
 }
 
+/// The consent a cross-root peer delivery was authorized under. Carried on the
+/// envelope so the same directional grant is re-checked when the delivery is
+/// drained: a grant revoked or expired after enqueue stops it before it lands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerMailStamp {
+    pub project: String,
+    pub sender_root: String,
+    pub recipient_root: String,
+}
+
 /// A batch of messages waiting to be appended to a chat at a boundary chosen by
 /// `push`. `id` is stable across the pending queue, SSE, and the delivered
 /// messages (stamped into `extra.delivery`), so dedupe works after a restart.
@@ -1392,6 +1402,10 @@ pub struct PendingDelivery {
     /// reported `Superseded` instead of landing out of date.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersede_key: Option<String>,
+    /// Set only for consented cross-root peer mail; absent for every delivery
+    /// inside one agent tree, which needs no peer authority at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_mail: Option<PeerMailStamp>,
 }
 
 /// Narrow equality: compares metadata directly and messages by their JSON
@@ -1402,6 +1416,7 @@ impl PartialEq for PendingDelivery {
             && self.thread_patch == other.thread_patch
             && self.expires_at_ms == other.expires_at_ms
             && self.supersede_key == other.supersede_key
+            && self.peer_mail == other.peer_mail
             && self.id == other.id
             && self.push == other.push
             && self.source == other.source
@@ -1456,6 +1471,7 @@ impl PendingDelivery {
             enqueued_at_ms: delivery_epoch_ms_now(),
             expires_at_ms: None,
             supersede_key: None,
+            peer_mail: None,
             thread_patch: None,
             after_tool_call_id: None,
         }
@@ -1629,6 +1645,31 @@ mod delivery_tests {
         assert!(minimal.messages.is_empty());
         assert!(minimal.expires_at_ms.is_none());
         assert!(minimal.supersede_key.is_none());
+        assert!(
+            minimal.peer_mail.is_none(),
+            "a record written before peer mail existed carries no consent"
+        );
+
+        let mut peer =
+            PendingDelivery::with_id("peer", Vec::new(), PushMode::Append, "mail", false);
+        peer.peer_mail = Some(PeerMailStamp {
+            project: "project".to_string(),
+            sender_root: "root-a".to_string(),
+            recipient_root: "root-b".to_string(),
+        });
+        let restored: PendingDelivery =
+            serde_json::from_str(&serde_json::to_string(&peer).unwrap()).unwrap();
+        assert_eq!(restored, peer);
+        assert_ne!(
+            restored, minimal,
+            "consent is part of the envelope's identity"
+        );
+        assert!(
+            !serde_json::to_string(&minimal)
+                .unwrap()
+                .contains("peer_mail"),
+            "an ordinary delivery serializes byte-for-byte as before"
+        );
     }
 
     #[test]

@@ -418,6 +418,7 @@ pub struct GlobalContext {
     pub agent_executions: Arc<crate::agents::execution::ExecutionRegistry>,
     pub agent_approvals: refact_work_core::ApprovalRegistry,
     pub peer_grants: crate::coordination::peer_authority::PeerGrantRegistry,
+    pub broadcast_limits: crate::coordination::broadcast::BroadcastLimiter,
     pub scheduler_config: SchedulerConfig,
     pub hooks_config: HooksConfig,
     pub terminal_security_config: TerminalSecurityConfig,
@@ -512,6 +513,7 @@ impl GlobalContext {
             work_boards: self.work_boards.clone(),
             agent_approvals: self.agent_approvals.clone(),
             peer_grants: self.peer_grants.clone(),
+            broadcast_limits: self.broadcast_limits.clone(),
         }
     }
 }
@@ -947,6 +949,7 @@ pub async fn create_global_context(
         work_boards: Arc::new(Default::default()),
         agent_approvals: refact_work_core::ApprovalRegistry::from_settings(),
         peer_grants: Default::default(),
+        broadcast_limits: Default::default(),
         scheduler_config,
         hooks_config,
         terminal_security_config,
@@ -1279,6 +1282,7 @@ pub mod tests {
             work_boards: Arc::new(Default::default()),
             agent_approvals: refact_work_core::ApprovalRegistry::from_settings(),
             peer_grants: Default::default(),
+            broadcast_limits: Default::default(),
             scheduler_config: SchedulerConfig::default(),
             hooks_config: HooksConfig::default(),
             terminal_security_config: TerminalSecurityConfig::default(),

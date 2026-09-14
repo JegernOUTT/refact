@@ -59,6 +59,11 @@ pub struct CoordinationSettings {
     pub agent_message_max_chars: usize,
     pub peer_grant_default_ttl_secs: u64,
     pub peer_grant_max_ttl_secs: u64,
+    pub peer_grant_max_count: usize,
+    pub broadcast_rate_limit: usize,
+    pub broadcast_rate_window_secs: u64,
+    pub mailbox_default_rows: usize,
+    pub mailbox_max_rows: usize,
     pub board_max_reviewers: usize,
     pub board_claim_key_max_len: usize,
     pub board_allow_self_review: bool,
@@ -131,6 +136,11 @@ impl Default for CoordinationSettings {
             agent_message_max_chars: 65_536,
             peer_grant_default_ttl_secs: 3600,
             peer_grant_max_ttl_secs: 604_800,
+            peer_grant_max_count: 256,
+            broadcast_rate_limit: 32,
+            broadcast_rate_window_secs: 60,
+            mailbox_default_rows: 20,
+            mailbox_max_rows: 200,
             board_max_reviewers: 256,
             board_claim_key_max_len: 256,
             board_allow_self_review: false,
@@ -370,6 +380,10 @@ impl CoordinationSettings {
                 self.peer_grant_default_ttl_secs,
             ),
             ("peer_grant_max_ttl_secs", self.peer_grant_max_ttl_secs),
+            (
+                "broadcast_rate_window_secs",
+                self.broadcast_rate_window_secs,
+            ),
         ] {
             at_least(&mut v, field, value, 1);
         }
@@ -377,6 +391,10 @@ impl CoordinationSettings {
             ("delivery_max_pending", self.delivery_max_pending),
             ("delivery_status_retention", self.delivery_status_retention),
             ("agent_message_max_chars", self.agent_message_max_chars),
+            ("peer_grant_max_count", self.peer_grant_max_count),
+            ("broadcast_rate_limit", self.broadcast_rate_limit),
+            ("mailbox_default_rows", self.mailbox_default_rows),
+            ("mailbox_max_rows", self.mailbox_max_rows),
             ("board_max_reviewers", self.board_max_reviewers),
             ("board_claim_key_max_len", self.board_claim_key_max_len),
             ("agent_wait_max_agents", self.agent_wait_max_agents),
@@ -510,6 +528,13 @@ impl CoordinationSettings {
             "peer_grant_max_ttl_secs",
             self.peer_grant_max_ttl_secs,
         );
+        not_greater(
+            &mut v,
+            "mailbox_default_rows",
+            self.mailbox_default_rows as u64,
+            "mailbox_max_rows",
+            self.mailbox_max_rows as u64,
+        );
 
         if v.is_empty() {
             Ok(())
@@ -606,6 +631,30 @@ mod tests {
                 settings.question_default_expiry_secs = settings.question_max_expiry_secs + 1
             },
             |settings: &mut CoordinationSettings| settings.question_max_expiry_secs = 31_536_001,
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn peer_mail_bounds_default_usable_and_reject_invalid_values() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(settings.peer_grant_max_count >= 1);
+        assert!(settings.broadcast_rate_limit >= 1);
+        assert!(settings.broadcast_rate_window_secs >= 1);
+        assert!(settings.mailbox_default_rows <= settings.mailbox_max_rows);
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.peer_grant_max_count = 0,
+            |settings: &mut CoordinationSettings| settings.broadcast_rate_limit = 0,
+            |settings: &mut CoordinationSettings| settings.broadcast_rate_window_secs = 0,
+            |settings: &mut CoordinationSettings| settings.mailbox_default_rows = 0,
+            |settings: &mut CoordinationSettings| settings.mailbox_max_rows = 0,
+            |settings: &mut CoordinationSettings| {
+                settings.mailbox_default_rows = settings.mailbox_max_rows + 1
+            },
         ] {
             let mut settings = CoordinationSettings::default();
             mutate(&mut settings);

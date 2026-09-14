@@ -12,7 +12,7 @@ use crate::tasks::storage;
 use crate::tools::planner_delivery::{self, CardGuard, CardTarget, DeliveryReport};
 use crate::tools::task_tool_helpers::required_string;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
-use refact_core::chat_types::PushMode;
+use refact_core::chat_types::{DeliveryOutcome, PushMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BroadcastPriority {
@@ -59,6 +59,7 @@ impl BroadcastResult {
     fn receipt(&self) -> Value {
         let (outcome, reached, reason) = match &self.status {
             BroadcastStatus::Notified => ("delivered", true, None),
+            BroadcastStatus::Duplicate => ("duplicate", false, None),
             BroadcastStatus::SkippedExcluded => ("excluded", false, None),
             BroadcastStatus::Skipped(reason) => ("skipped", false, Some(reason.clone())),
             BroadcastStatus::Failed(reason) => ("failed", false, Some(reason.clone())),
@@ -76,6 +77,9 @@ impl BroadcastResult {
 #[derive(Debug, PartialEq, Eq)]
 enum BroadcastStatus {
     Notified,
+    /// The delivery layer already accepted this exact message for this card,
+    /// so the repeat was dropped rather than landing twice.
+    Duplicate,
     SkippedExcluded,
     Skipped(String),
     Failed(String),
@@ -162,6 +166,9 @@ fn format_output(results: &[BroadcastResult], notified_count: usize, message: &s
     for result in results {
         let status = match &result.status {
             BroadcastStatus::Notified => "notified".to_string(),
+            BroadcastStatus::Duplicate => {
+                "not delivered (already sent this exact message)".to_string()
+            }
             BroadcastStatus::SkippedExcluded => "skipped (in exclude_cards)".to_string(),
             BroadcastStatus::Skipped(reason) => format!("skipped ({})", reason),
             BroadcastStatus::Failed(error) => format!("failed ({})", error),
@@ -224,11 +231,19 @@ async fn broadcast_to_target(
         task_id,
         &target,
         CardGuard::doing(),
-        planner_delivery::single_message_delivery(
-            broadcast_message.to_string(),
-            push,
-            "tools.task_broadcast",
-            true,
+        planner_delivery::with_dedupe_id(
+            planner_delivery::single_message_delivery(
+                broadcast_message.to_string(),
+                push,
+                "tools.task_broadcast",
+                true,
+            ),
+            crate::coordination::broadcast::broadcast_delivery_id(
+                task_id,
+                &target.card_id,
+                &target.chat_id,
+                broadcast_message,
+            ),
         ),
     )
     .await;
@@ -248,6 +263,13 @@ async fn broadcast_to_target(
 
     let status = match (&report, record_error) {
         (DeliveryReport::Delivered { .. }, None) if reached => BroadcastStatus::Notified,
+        (
+            DeliveryReport::Delivered {
+                outcome: DeliveryOutcome::Duplicate,
+                ..
+            },
+            None,
+        ) => BroadcastStatus::Duplicate,
         (DeliveryReport::Delivered { .. }, Some(error)) if reached => BroadcastStatus::Failed(
             format!("delivered, but delivery status update failed: {}", error),
         ),
@@ -321,10 +343,18 @@ impl Tool for ToolTaskBroadcast {
         let push = planner_delivery::parse_push_mode(args)?;
         let broadcast_message = priority.format_message(&message);
 
-        let (gcx, chat_facade) = {
+        let (gcx, chat_facade, broadcast_limits) = {
             let ccx_lock = ccx.lock().await;
-            (ccx_lock.app.gcx.clone(), ccx_lock.app.chat.facade.clone())
+            (
+                ccx_lock.app.gcx.clone(),
+                ccx_lock.app.chat.facade.clone(),
+                ccx_lock.app.broadcast_limits.clone(),
+            )
         };
+        broadcast_limits.admit(
+            &task_id,
+            chrono::Utc::now().timestamp_millis().max(0) as u64,
+        )?;
 
         let board = storage::load_board(gcx.clone(), &task_id).await?;
         let targets: Vec<CardTarget> = board
@@ -406,6 +436,7 @@ mod tests {
 
     struct MockChatFacade {
         delivered: StdMutex<Vec<(String, PendingDelivery)>>,
+        accepted_ids: StdMutex<HashSet<String>>,
         failures: StdMutex<HashMap<String, String>>,
     }
 
@@ -413,6 +444,7 @@ mod tests {
         fn new(failures: &[(&str, &str)]) -> Self {
             Self {
                 delivered: StdMutex::new(vec![]),
+                accepted_ids: StdMutex::new(HashSet::new()),
                 failures: StdMutex::new(
                     failures
                         .iter()
@@ -469,6 +501,15 @@ mod tests {
         ) -> Result<DeliveryOutcome, String> {
             if let Some(error) = self.failures.lock().unwrap().get(chat_id).cloned() {
                 return Err(error);
+            }
+            // Mirrors the real delivery layer: one id is accepted once.
+            if !self
+                .accepted_ids
+                .lock()
+                .unwrap()
+                .insert(format!("{chat_id}/{}", delivery.id))
+            {
+                return Ok(DeliveryOutcome::Duplicate);
             }
             self.delivered
                 .lock()
@@ -1056,6 +1097,117 @@ mod tests {
         for (_, delivery) in deliveries {
             assert_eq!(delivery.push, PushMode::Preempt);
         }
+    }
+
+    /// The same logical broadcast reaches a recipient once. The repeat is
+    /// reported as a dropped duplicate, never as a second delivery.
+    #[tokio::test]
+    async fn task_broadcast_delivers_one_logical_message_to_a_card_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(
+            temp.path(),
+            vec![test_card("T-22", "auto-nudge", "doing", Some("chat-22"))],
+        )
+        .await;
+        let mock = Arc::new(MockChatFacade::new(&[]));
+        let ccx = planner_ccx(gcx.clone(), mock.clone(), "planner").await;
+
+        let first = ToolTaskBroadcast::new()
+            .tool_execute(
+                ccx.clone(),
+                &"first".to_string(),
+                &args(&[("message", json!("Use API Y"))]),
+            )
+            .await
+            .unwrap();
+        let repeat = ToolTaskBroadcast::new()
+            .tool_execute(
+                ccx.clone(),
+                &"repeat".to_string(),
+                &args(&[("message", json!("Use API Y"))]),
+            )
+            .await
+            .unwrap();
+        let different = ToolTaskBroadcast::new()
+            .tool_execute(
+                ccx,
+                &"different".to_string(),
+                &args(&[("message", json!("Use API Z"))]),
+            )
+            .await
+            .unwrap();
+
+        let ids: Vec<String> = mock
+            .deliveries()
+            .into_iter()
+            .map(|(_, delivery)| delivery.id)
+            .collect();
+        assert_eq!(ids.len(), 2, "the repeat was recognised and dropped");
+        assert_ne!(ids[0], ids[1], "a different message is a different stream");
+        assert_eq!(
+            ids[0],
+            crate::coordination::broadcast::broadcast_delivery_id(
+                "task-1",
+                "T-22",
+                "chat-22",
+                &BroadcastPriority::Steer.format_message("Use API Y"),
+            ),
+            "the id must be a pure function of task, card, chat and message"
+        );
+
+        let receipts = |result: &(bool, Vec<ContextEnum>)| match &result.1[0] {
+            ContextEnum::ChatMessage(message) => message.extra["delivery_receipts"].clone(),
+            _ => panic!("expected chat message"),
+        };
+        assert_eq!(receipts(&first)["notified"], 1);
+        assert_eq!(receipts(&first)["cards"][0]["outcome"], "delivered");
+        assert_eq!(receipts(&repeat)["notified"], 0);
+        assert_eq!(receipts(&repeat)["cards"][0]["outcome"], "duplicate");
+        assert_eq!(receipts(&repeat)["cards"][0]["reached"], false);
+        assert_eq!(receipts(&different)["notified"], 1);
+        assert!(output_text(repeat).contains("already sent this exact message"));
+    }
+
+    #[tokio::test]
+    async fn task_broadcast_rate_limit_refuses_truthfully_without_sending_anything() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(
+            temp.path(),
+            vec![test_card("T-22", "auto-nudge", "doing", Some("chat-22"))],
+        )
+        .await;
+        let mock = Arc::new(MockChatFacade::new(&[]));
+        let ccx = planner_ccx(gcx.clone(), mock.clone(), "planner").await;
+        let limit = refact_work_core::coordination_settings().broadcast_rate_limit;
+
+        for index in 0..limit {
+            ToolTaskBroadcast::new()
+                .tool_execute(
+                    ccx.clone(),
+                    &format!("call-{index}"),
+                    &args(&[("message", json!(format!("message {index}")))]),
+                )
+                .await
+                .unwrap();
+        }
+        let error = ToolTaskBroadcast::new()
+            .tool_execute(
+                ccx,
+                &"over".to_string(),
+                &args(&[("message", json!("one too many"))]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("broadcast rate limit reached"), "{error}");
+        assert!(error.contains("nothing was sent"), "{error}");
+        assert_eq!(mock.deliveries().len(), limit);
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        assert_eq!(
+            board.get_card("T-22").unwrap().status_updates.len(),
+            limit * 2,
+            "a refused broadcast must not write a pending status"
+        );
     }
 
     #[tokio::test]

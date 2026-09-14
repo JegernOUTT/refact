@@ -5,6 +5,7 @@ pub(crate) mod board_bootstrap;
 pub mod board_index;
 pub(crate) mod board_rows;
 pub(crate) mod bounds;
+pub mod broadcast;
 pub mod capsule;
 mod capsule_render;
 #[cfg(test)]

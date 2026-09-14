@@ -32,6 +32,10 @@ pub struct ToolProgressReport {
     pub config_path: String,
 }
 
+pub struct ToolAgentMailbox {
+    pub config_path: String,
+}
+
 fn tool_desc(
     config_path: String,
     name: &str,
@@ -152,16 +156,37 @@ pub async fn records_for_root(app: &AppState, root_chat_id: &str) -> Vec<(Backgr
     result
 }
 
+/// One refusal for every cross-root denial. An agent that does not exist, an
+/// agent whose project scope is unknown, and an agent that exists but was
+/// never granted mail all read identically, so the error cannot be used to
+/// discover a peer the caller is not allowed to know about.
+fn peer_mail_refusal(agent_id: &str) -> String {
+    format!(
+        "Background agent '{agent_id}' is not reachable from this chat. Cross-root mail requires an explicit same-project mail grant; discovery grants no messaging or control authority."
+    )
+}
+
+/// `Ok(_, None)` is an ordinary delivery inside the caller's own agent tree.
+/// `Ok(_, Some(stamp))` is consented cross-root peer mail, and the stamp is
+/// what the delivery layer re-checks before the message lands.
 async fn can_message_agent(
     app: &AppState,
     caller_chat_id: &str,
     root_chat_id: &str,
     caller_agent_id: Option<&str>,
     target_agent_id: &str,
-) -> Result<BackgroundAgent, String> {
-    let target = app.agents.get_any(target_agent_id).await?;
+) -> Result<
+    (
+        BackgroundAgent,
+        Option<refact_core::chat_types::PeerMailStamp>,
+    ),
+    String,
+> {
+    let Ok(target) = app.agents.get_any(target_agent_id).await else {
+        return Err(peer_mail_refusal(target_agent_id));
+    };
     if target.parent_chat_id == caller_chat_id {
-        return Ok(target);
+        return Ok((target, None));
     }
     if let Some(caller_agent_id) = caller_agent_id {
         if app
@@ -171,7 +196,7 @@ async fn can_message_agent(
             .iter()
             .any(|record| record.agent_id == target_agent_id)
         {
-            return Ok(target);
+            return Ok((target, None));
         }
     } else {
         let in_root_tree = app.agents.list_all().await.iter().any(|record| {
@@ -180,31 +205,38 @@ async fn can_message_agent(
                     || record.parent_root_chat_id.as_deref() == Some(root_chat_id))
         });
         if in_root_tree {
-            return Ok(target);
+            return Ok((target, None));
         }
     }
     let target_root = target
         .parent_root_chat_id
         .as_deref()
-        .unwrap_or(target.parent_chat_id.as_str());
+        .unwrap_or(target.parent_chat_id.as_str())
+        .to_string();
     if target_root == root_chat_id {
         return Err("You may only message your direct children or descendants.".to_string());
     }
-    let source_root = app
-        .agent_executions
-        .saved_scope(target_agent_id)
-        .ok_or_else(|| "Peer agent project scope is unavailable.".to_string())?;
+    let Some(source_root) = app.agent_executions.saved_scope(target_agent_id) else {
+        return Err(peer_mail_refusal(target_agent_id));
+    };
     let project = crate::coordination::roots::project_identity(&source_root);
     if app.peer_grants.allows(
         &project,
         root_chat_id,
-        target_root,
+        &target_root,
         crate::coordination::peer_authority::PeerAuthority::Mail,
         delivery_now_ms(),
     ) {
-        return Ok(target);
+        return Ok((
+            target,
+            Some(refact_core::chat_types::PeerMailStamp {
+                project,
+                sender_root: root_chat_id.to_string(),
+                recipient_root: target_root,
+            }),
+        ));
     }
-    Err("Peer messaging requires an explicit same-project mail grant; discovery grants no messaging or control authority.".to_string())
+    Err(peer_mail_refusal(target_agent_id))
 }
 
 fn delivery_now_ms() -> u64 {
@@ -554,7 +586,7 @@ impl Tool for ToolAgentMessage {
             return Ok(output(tool_call_id, "Note sent to parent.".to_string()));
         }
 
-        let target = can_message_agent(
+        let (target, peer_mail) = can_message_agent(
             &app,
             &chat_id,
             &root_chat_id,
@@ -562,6 +594,14 @@ impl Tool for ToolAgentMessage {
             &to,
         )
         .await?;
+        if peer_mail.is_some() {
+            if push == PushMode::Preempt {
+                return Err("Peer mail is informational: a mail grant carries no authority to interrupt another root. Use push=append or push=when_idle.".to_string());
+            }
+            if reply_to.is_some() {
+                return Err("Peer mail cannot answer another root's question: a mail grant carries no control over that agent.".to_string());
+            }
+        }
         if let Some(question_id) = reply_to.as_deref() {
             let updated = app
                 .agents
@@ -579,17 +619,24 @@ impl Tool for ToolAgentMessage {
             .as_deref()
             .map(|question_id| format!("Answer to {question_id}: {text}"))
             .unwrap_or(text);
+        let from = if peer_mail.is_some() {
+            "peer"
+        } else {
+            "parent"
+        };
         let mut delivery = PendingDelivery::new(
             vec![crate::chat::internal_roles::event(
                 crate::chat::internal_roles::EventSubkind::SystemNotice,
                 "agents.message",
-                json!({"from": "parent"}),
-                format!("[message from parent]\n{message_text}"),
+                json!({"from": from}),
+                format!("[message from {from}]\n{message_text}"),
             )],
             push,
             "agents.message".to_string(),
-            true,
+            // Peer mail is informational: it never wakes another root's agent.
+            peer_mail.is_none(),
         );
+        delivery.peer_mail = peer_mail;
         delivery.set_ttl_secs(ttl_secs);
         let delivery_id = delivery.id.clone();
         let outcome = crate::agents::delivery::deliver_to_agent(app, &to, delivery).await?;
@@ -659,6 +706,217 @@ impl Tool for ToolProgressReport {
             tool_call_id,
             format!("Progress updated: {status_line}"),
         ))
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec![]
+    }
+}
+
+struct MailboxAudit(Vec<(usize, refact_privacy::FileRecord)>);
+
+impl refact_privacy::PrivacyAudited for MailboxAudit {
+    fn privacy_records(
+        &self,
+    ) -> Result<Vec<(usize, refact_privacy::FileRecord)>, refact_privacy::PrivacyAuditError> {
+        Ok(self.0.clone())
+    }
+}
+
+struct MailboxRow {
+    id: String,
+    status: refact_chat_api::DeliveryStatus,
+    delivery: Option<PendingDelivery>,
+}
+
+impl MailboxRow {
+    fn value(&self) -> Value {
+        let mut row = json!({"delivery_id": self.id, "status": self.status});
+        if let Some(delivery) = &self.delivery {
+            row["source"] = json!(delivery.source);
+            row["push"] = json!(delivery.push);
+            row["from_peer"] = json!(delivery.peer_mail.is_some());
+            row["enqueued_at_ms"] = json!(delivery.enqueued_at_ms);
+            row["expires_at_ms"] = json!(delivery.expires_at_ms);
+            row["preview"] = json!(truncate(&delivery.preview_text(), 200));
+        }
+        row
+    }
+
+    fn line(&self) -> String {
+        match &self.delivery {
+            Some(delivery) => format!(
+                "- {} — {:?} — source: {} — push: {} — from: {} — {}",
+                short_id(&self.id),
+                self.status,
+                delivery.source,
+                delivery.push.as_str(),
+                if delivery.peer_mail.is_some() {
+                    "peer"
+                } else {
+                    "own tree"
+                },
+                truncate(&delivery.preview_text(), 120),
+            ),
+            None => format!("- {} — {:?}", short_id(&self.id), self.status),
+        }
+    }
+}
+
+/// A row is shown only when every privacy record its payload carries is
+/// allowed to reach the model that is reading the mailbox. A refused row is
+/// omitted outright, and totals are counted after filtering, so neither the
+/// row nor its existence is disclosed.
+fn mailbox_row_permitted(
+    gcx: &std::sync::Arc<crate::global_context::GlobalContext>,
+    model: &crate::caps::BaseModelRecord,
+    delivery: &PendingDelivery,
+) -> bool {
+    let Ok(records) = refact_privacy::records_from_messages(&delivery.messages) else {
+        return false;
+    };
+    crate::privacy::destinations::clear_for_model(gcx, MailboxAudit(records), model).is_ok()
+}
+
+async fn mailbox_rows(app: &AppState, chat_id: &str, agent_id: Option<&str>) -> Vec<MailboxRow> {
+    let (pending, dropped) = match agent_id {
+        Some(agent_id) => match app.agents.get_any(agent_id).await {
+            Ok(record) => (
+                record.pending_deliveries,
+                record.dropped_deliveries.into_iter().collect::<Vec<_>>(),
+            ),
+            Err(_) => (Vec::new(), Vec::new()),
+        },
+        None => {
+            let session = app.chat.sessions.read().await.get(chat_id).cloned();
+            match session {
+                Some(session) => {
+                    let session = session.lock().await;
+                    (
+                        session.pending_deliveries.iter().cloned().collect(),
+                        session.dropped_deliveries.iter().cloned().collect(),
+                    )
+                }
+                None => (Vec::new(), Vec::new()),
+            }
+        }
+    };
+    let mut rows: Vec<MailboxRow> = pending
+        .into_iter()
+        .map(|delivery| MailboxRow {
+            id: delivery.id.clone(),
+            status: refact_chat_api::DeliveryStatus::Pending,
+            delivery: Some(delivery),
+        })
+        .collect();
+    rows.extend(dropped.into_iter().map(|record| MailboxRow {
+        id: record.id,
+        status: record.status,
+        delivery: None,
+    }));
+    rows
+}
+
+#[async_trait]
+impl Tool for ToolAgentMailbox {
+    fn tool_description(&self) -> ToolDesc {
+        let settings = refact_work_core::coordination_settings();
+        tool_desc(
+            self.config_path.clone(),
+            "agent_mailbox",
+            "Agent Mailbox",
+            "List your own pending and recently finished message deliveries with their truthful status. Shows only your mailbox; it never lists another root's messages.",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "limit": {"type": "integer", "minimum": 1, "maximum": settings.mailbox_max_rows, "description": "Rows per page."},
+                    "offset": {"type": "integer", "minimum": 0, "description": "Rows to skip; use it with the reported total to page."}
+                },
+                "required": []
+            }),
+        )
+    }
+
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let settings = refact_work_core::coordination_settings();
+        let limit = match args.get("limit") {
+            None | Some(Value::Null) => settings.mailbox_default_rows,
+            Some(value) => value
+                .as_u64()
+                .map(|limit| limit as usize)
+                .filter(|limit| (1..=settings.mailbox_max_rows).contains(limit))
+                .ok_or_else(|| {
+                    format!(
+                        "argument `limit` must be an integer between 1 and {}",
+                        settings.mailbox_max_rows
+                    )
+                })?,
+        };
+        let offset = match args.get("offset") {
+            None | Some(Value::Null) => 0usize,
+            Some(value) => value
+                .as_u64()
+                .map(|offset| offset as usize)
+                .ok_or_else(|| "argument `offset` must be a non-negative integer".to_string())?,
+        };
+        let (app, chat_id, _root_chat_id, agent_id) = context(&ccx).await;
+        // The destination is the model that will read this listing; an unknown
+        // or uncompilable policy is rejected by `policy_key` rather than
+        // defaulting to disclosure.
+        let model = crate::caps::BaseModelRecord {
+            id: ccx.lock().await.current_model.clone(),
+            ..Default::default()
+        };
+        let before = crate::coordination::privacy_guard::policy_key(&app.gcx, &model)
+            .map_err(|_| "mailbox privacy policy is unavailable".to_string())?;
+        let rows = mailbox_rows(&app, &chat_id, agent_id.as_deref())
+            .await
+            .into_iter()
+            .filter(|row| match &row.delivery {
+                Some(delivery) => mailbox_row_permitted(&app.gcx, &model, delivery),
+                None => true,
+            })
+            .collect::<Vec<_>>();
+        if crate::coordination::privacy_guard::policy_key(&app.gcx, &model)
+            .map_err(|_| "mailbox privacy policy is unavailable".to_string())?
+            != before
+        {
+            return Err("mailbox privacy policy is unavailable".to_string());
+        }
+        let total = rows.len();
+        let page = rows.iter().skip(offset).take(limit).collect::<Vec<_>>();
+        let mut text = format!(
+            "# Mailbox\n\nshowing {} of {total} (offset {offset})\n\n",
+            page.len()
+        );
+        if page.is_empty() {
+            text.push_str("No deliveries.");
+        } else {
+            for row in &page {
+                text.push_str(&row.line());
+                text.push('\n');
+            }
+        }
+        let mut result = output(tool_call_id, text);
+        if let Some(ContextEnum::ChatMessage(message)) = result.1.first_mut() {
+            message.extra.insert(
+                "mailbox".into(),
+                json!({
+                    "total": total,
+                    "offset": offset,
+                    "limit": limit,
+                    "next_offset": (offset + page.len() < total).then_some(offset + page.len()),
+                    "rows": page.iter().map(|row| row.value()).collect::<Vec<_>>(),
+                }),
+            );
+        }
+        Ok(result)
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -1032,6 +1290,230 @@ mod tests {
             .is_empty());
     }
 
+    async fn agent_ccx(
+        app: &AppState,
+        chat_id: &str,
+        model: &str,
+        agent_id: Option<String>,
+    ) -> Arc<AMutex<AtCommandsContext>> {
+        let ccx = Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                app.clone(),
+                4096,
+                20,
+                false,
+                vec![],
+                chat_id.to_string(),
+                Some("root".to_string()),
+                model.to_string(),
+                None,
+                None,
+            )
+            .await,
+        ));
+        ccx.lock().await.background_agent_id = agent_id;
+        ccx
+    }
+
+    fn mailbox_of(result: &(bool, Vec<ContextEnum>)) -> Value {
+        match &result.1[0] {
+            ContextEnum::ChatMessage(message) => message.extra["mailbox"].clone(),
+            _ => panic!("expected tool message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_lists_the_callers_own_deliveries_bounded_and_paged() {
+        let (app, ccx) = test_context("root", "root", None).await;
+        let child = create(&app, "root", "child").await;
+        let mut message = ToolAgentMessage {
+            config_path: String::new(),
+        };
+        for index in 0..5 {
+            message
+                .tool_execute(
+                    ccx.clone(),
+                    &format!("m{index}"),
+                    &args(&[
+                        ("to", json!(child.agent_id)),
+                        ("text", json!(format!("note {index}"))),
+                    ]),
+                )
+                .await
+                .unwrap();
+        }
+        let child_ccx = agent_ccx(
+            &app,
+            "child-chat",
+            "test/model",
+            Some(child.agent_id.clone()),
+        )
+        .await;
+        let mut mailbox = ToolAgentMailbox {
+            config_path: String::new(),
+        };
+
+        let settings = refact_work_core::coordination_settings();
+        for bad in [json!(0), json!(settings.mailbox_max_rows + 1), json!("all")] {
+            assert!(mailbox
+                .tool_execute(
+                    child_ccx.clone(),
+                    &"bad".to_string(),
+                    &args(&[("limit", bad.clone())]),
+                )
+                .await
+                .unwrap_err()
+                .contains("limit"));
+        }
+
+        let first = mailbox
+            .tool_execute(
+                child_ccx.clone(),
+                &"first".to_string(),
+                &args(&[("limit", json!(2))]),
+            )
+            .await
+            .unwrap();
+        let page = mailbox_of(&first);
+        assert_eq!(page["total"], 5);
+        assert_eq!(page["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(page["next_offset"], 2);
+        assert_eq!(page["rows"][0]["status"], "pending");
+        assert_eq!(page["rows"][0]["source"], "agents.message");
+        assert_eq!(page["rows"][0]["from_peer"], false);
+        assert!(page["rows"][0]["preview"]
+            .as_str()
+            .unwrap()
+            .contains("note 0"));
+
+        let last = mailbox_of(
+            &mailbox
+                .tool_execute(
+                    child_ccx.clone(),
+                    &"last".to_string(),
+                    &args(&[("limit", json!(2)), ("offset", json!(4))]),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(last["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(last["next_offset"], Value::Null);
+
+        let other = agent_ccx(&app, "other-chat", "test/model", None).await;
+        let empty = mailbox_of(
+            &mailbox
+                .tool_execute(other, &"other".to_string(), &HashMap::new())
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            empty["total"], 0,
+            "a mailbox lists only the caller's own deliveries"
+        );
+    }
+
+    /// A row the current model may not receive is omitted outright, and the
+    /// reported total counts only what was disclosed, so the hidden row leaks
+    /// neither content nor its own existence. Switching models re-evaluates it.
+    #[tokio::test]
+    async fn mailbox_rows_are_filtered_per_model_without_leaking_a_count() {
+        let (app, ccx) = test_context("root", "root", None).await;
+        let child = create(&app, "root", "child").await;
+        app.gcx.privacy_policy_load.write().unwrap().policy =
+            std::sync::Arc::new(refact_privacy::PrivacyPolicy {
+                zones: vec![refact_privacy::Zone {
+                    name: "guarded".into(),
+                    patterns: vec!["**/secret/**".into()],
+                    send_to: vec!["trusted".into()],
+                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
+                }],
+                ..Default::default()
+            });
+        ToolAgentMessage {
+            config_path: String::new(),
+        }
+        .tool_execute(
+            ccx,
+            &"plain".to_string(),
+            &args(&[("to", json!(child.agent_id)), ("text", json!("plain note"))]),
+        )
+        .await
+        .unwrap();
+
+        let mut guarded_message = ChatMessage::new("user".into(), "guarded note".into());
+        crate::privacy::records::merge_records(
+            &mut guarded_message,
+            [refact_privacy::FileRecord {
+                path: "/secret/a".into(),
+                zone: "guarded".into(),
+                attribution: refact_privacy::Attribution::Declared,
+            }],
+        );
+        crate::agents::delivery::deliver_to_agent(
+            app.clone(),
+            &child.agent_id,
+            PendingDelivery::with_id(
+                "guarded-delivery",
+                vec![guarded_message],
+                PushMode::Append,
+                "agents.message".to_string(),
+                false,
+            ),
+        )
+        .await
+        .unwrap();
+
+        let mut mailbox = ToolAgentMailbox {
+            config_path: String::new(),
+        };
+        for (model, expected_total, expect_guarded) in
+            [("trusted/model", 2, true), ("other/model", 1, false)]
+        {
+            let caller = agent_ccx(&app, "child-chat", model, Some(child.agent_id.clone())).await;
+            let result = mailbox
+                .tool_execute(caller, &model.to_string(), &HashMap::new())
+                .await
+                .unwrap();
+            let page = mailbox_of(&result);
+            assert_eq!(page["total"], expected_total, "{model}");
+            assert_eq!(
+                page["rows"].as_array().unwrap().len(),
+                expected_total,
+                "{model}"
+            );
+            let rendered = text(result);
+            assert_eq!(
+                rendered.contains("guarded-delivery") || rendered.contains("guarded note"),
+                expect_guarded,
+                "{model}"
+            );
+            assert!(!rendered.contains("hidden"), "{model}: {rendered}");
+        }
+
+        app.gcx.privacy_policy_load.write().unwrap().policy =
+            std::sync::Arc::new(refact_privacy::PrivacyPolicy {
+                zones: vec![refact_privacy::Zone {
+                    name: "broken".into(),
+                    patterns: vec!["[".into()],
+                    send_to: vec!["*".into()],
+                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
+                }],
+                ..Default::default()
+            });
+        let caller = agent_ccx(
+            &app,
+            "child-chat",
+            "trusted/model",
+            Some(child.agent_id.clone()),
+        )
+        .await;
+        assert!(mailbox
+            .tool_execute(caller, &"broken".to_string(), &HashMap::new())
+            .await
+            .unwrap_err()
+            .contains("privacy policy is unavailable"));
+    }
+
     #[tokio::test]
     async fn parent_message_rejects_agent_outside_its_tree() {
         let (app, ccx) = test_context("root", "root", None).await;
@@ -1047,7 +1529,202 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.contains("Peer agent project scope is unavailable"));
+        assert_eq!(error, peer_mail_refusal(&outsider.agent_id));
+    }
+
+    /// Every denial reads the same, so the error cannot be used to learn that
+    /// a peer exists, what it is called, or which root it belongs to.
+    #[tokio::test]
+    async fn a_refused_peer_message_reveals_nothing_about_the_peer() {
+        let (app, ccx) = test_context("root-a", "root-a", None).await;
+        let hidden = create(&app, "root-b", "secret-peer-title").await;
+        app.agent_executions
+            .remember_scope(&hidden.agent_id, std::env::temp_dir());
+        let mut tool = ToolAgentMessage {
+            config_path: String::new(),
+        };
+        let mut errors = Vec::new();
+        for target in [
+            hidden.agent_id.clone(),
+            "00000000-0000-0000-0000-000000000000".to_string(),
+        ] {
+            let error = tool
+                .tool_execute(
+                    ccx.clone(),
+                    &"denied".to_string(),
+                    &args(&[("to", json!(target)), ("text", json!("hello"))]),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error, peer_mail_refusal(&target));
+            errors.push(error);
+        }
+        let without_id = errors
+            .iter()
+            .map(|error| {
+                error
+                    .replace(&hidden.agent_id, "")
+                    .replace("00000000-0000-0000-0000-000000000000", "")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            without_id[0], without_id[1],
+            "an existing peer and an unknown id must be indistinguishable"
+        );
+        for error in &errors {
+            assert!(!error.contains("secret-peer-title"), "{error}");
+            assert!(!error.contains("root-b"), "{error}");
+        }
+    }
+
+    /// Mail is informational: it carries no authority to interrupt the other
+    /// root, to answer its questions, or to wake it.
+    #[tokio::test]
+    async fn a_mail_grant_conveys_no_control_over_the_peer() {
+        let (app, ccx) = test_context("root-a", "root-a", None).await;
+        let peer = create(&app, "root-b", "peer").await;
+        app.agent_executions
+            .remember_scope(&peer.agent_id, std::env::temp_dir());
+        let project = crate::coordination::roots::project_identity(&std::env::temp_dir());
+        app.peer_grants
+            .grant(
+                crate::coordination::peer_authority::PeerGrant {
+                    project: project.clone(),
+                    sender_root: "root-a".to_string(),
+                    recipient_root: "root-b".to_string(),
+                    authority: crate::coordination::peer_authority::PeerAuthority::Mail,
+                    granted_by: "user".to_string(),
+                    expires_at_ms: delivery_now_ms() + 10_000,
+                },
+                delivery_now_ms(),
+            )
+            .unwrap();
+        let mut tool = ToolAgentMessage {
+            config_path: String::new(),
+        };
+        let preempt = tool
+            .tool_execute(
+                ccx.clone(),
+                &"preempt".to_string(),
+                &args(&[
+                    ("to", json!(peer.agent_id)),
+                    ("text", json!("stop")),
+                    ("push", json!("preempt")),
+                ]),
+            )
+            .await
+            .unwrap_err();
+        assert!(preempt.contains("no authority to interrupt"), "{preempt}");
+        let (_, question_id) = app
+            .agents
+            .add_question(&peer.agent_id, "May I?".to_string())
+            .await
+            .unwrap();
+        let answer = tool
+            .tool_execute(
+                ccx.clone(),
+                &"answer".to_string(),
+                &args(&[
+                    ("to", json!(peer.agent_id)),
+                    ("text", json!("yes")),
+                    ("reply_to", json!(question_id)),
+                ]),
+            )
+            .await
+            .unwrap_err();
+        assert!(answer.contains("no control over that agent"), "{answer}");
+        assert!(
+            app.agents.get_any(&peer.agent_id).await.unwrap().questions[0]
+                .answer
+                .is_none(),
+            "a refused peer answer must not mutate the peer's question"
+        );
+        assert!(app
+            .agents
+            .get_any(&peer.agent_id)
+            .await
+            .unwrap()
+            .pending_deliveries
+            .is_empty());
+
+        tool.tool_execute(
+            ccx,
+            &"informational".to_string(),
+            &args(&[("to", json!(peer.agent_id)), ("text", json!("fyi"))]),
+        )
+        .await
+        .unwrap();
+        let queued = app
+            .agents
+            .get_any(&peer.agent_id)
+            .await
+            .unwrap()
+            .pending_deliveries;
+        assert!(!queued[0].wake, "peer mail must never wake another root");
+        assert_eq!(
+            queued[0]
+                .peer_mail
+                .as_ref()
+                .map(|stamp| (stamp.sender_root.as_str(), stamp.recipient_root.as_str())),
+            Some(("root-a", "root-b"))
+        );
+    }
+
+    /// Consent is re-checked at delivery, not only at send time.
+    #[tokio::test]
+    async fn a_grant_revoked_between_enqueue_and_drain_stops_the_delivery() {
+        for revoke in [true, false] {
+            let (app, ccx) = test_context("root-a", "root-a", None).await;
+            let peer = create(&app, "root-b", "peer").await;
+            app.agent_executions
+                .remember_scope(&peer.agent_id, std::env::temp_dir());
+            let project = crate::coordination::roots::project_identity(&std::env::temp_dir());
+            app.peer_grants
+                .grant(
+                    crate::coordination::peer_authority::PeerGrant {
+                        project: project.clone(),
+                        sender_root: "root-a".to_string(),
+                        recipient_root: "root-b".to_string(),
+                        authority: crate::coordination::peer_authority::PeerAuthority::Mail,
+                        granted_by: "user".to_string(),
+                        expires_at_ms: delivery_now_ms() + 60_000,
+                    },
+                    delivery_now_ms(),
+                )
+                .unwrap();
+            let queued = ToolAgentMessage {
+                config_path: String::new(),
+            }
+            .tool_execute(
+                ccx,
+                &"peer".to_string(),
+                &args(&[("to", json!(peer.agent_id)), ("text", json!("fyi"))]),
+            )
+            .await
+            .unwrap();
+            let delivery_id = receipt_of(&queued)["delivery_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+
+            if revoke {
+                assert!(app.peer_grants.revoke(&project, "root-a", "root-b"));
+            }
+            let drained = crate::agents::delivery::drain_authorized(&app, &peer.agent_id, false)
+                .await
+                .unwrap();
+            assert_eq!(drained.len(), usize::from(!revoke), "revoke={revoke}");
+            assert_eq!(
+                app.agents
+                    .delivery_status(&peer.agent_id, &delivery_id)
+                    .await,
+                if revoke {
+                    refact_chat_api::DeliveryStatus::Failed
+                } else {
+                    refact_chat_api::DeliveryStatus::Pending
+                }
+            );
+        }
     }
 
     #[tokio::test]

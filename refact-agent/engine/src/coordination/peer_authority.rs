@@ -19,6 +19,13 @@ impl PeerAuthority {
             PeerAuthority::Control => 3,
         }
     }
+
+    /// The only place the ladder is read. `Metadata` never satisfies `Mail`
+    /// and `Mail` never satisfies `Control`, so discovering a peer grants no
+    /// messaging and holding mail grants no cancel, preempt or mutation.
+    pub fn allows(self, required: PeerAuthority) -> bool {
+        self.rank() >= required.rank()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,11 +65,13 @@ impl PeerGrantRegistry {
             .grants
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        grants.retain(|_, existing| existing.expires_at_ms > now_ms);
         if let Some(existing) = grants.get(&key) {
-            if existing.expires_at_ms > now_ms && existing.authority.rank() > grant.authority.rank()
-            {
+            if existing.authority.rank() > grant.authority.rank() {
                 return Err("peer grant cannot be silently narrowed or replaced".to_string());
             }
+        } else if grants.len() >= refact_work_core::coordination_settings().peer_grant_max_count {
+            return Err("peer grant registry is full".to_string());
         }
         grants.insert(key, grant);
         Ok(())
@@ -87,7 +96,7 @@ impl PeerGrantRegistry {
                 sender_root.to_string(),
                 recipient_root.to_string(),
             ))
-            .is_some_and(|grant| grant.authority.rank() >= required.rank())
+            .is_some_and(|grant| grant.authority.allows(required))
     }
 
     pub fn revoke(&self, project: &str, sender_root: &str, recipient_root: &str) -> bool {
@@ -131,6 +140,71 @@ mod tests {
         assert!(!registry.allows("project", "root-a", "root-b", PeerAuthority::Control, 3));
         assert!(!registry.allows("project", "root-b", "root-a", PeerAuthority::Metadata, 3));
         assert!(!registry.allows("project", "root-a", "root-b", PeerAuthority::Metadata, 100));
+    }
+
+    /// The whole ladder in one table: a held authority satisfies itself and
+    /// everything below it, and nothing above it.
+    #[test]
+    fn the_authority_ladder_is_strict_in_both_directions() {
+        use PeerAuthority::{Control, Mail, Metadata};
+        for (held, required, expected) in [
+            (Metadata, Metadata, true),
+            (Metadata, Mail, false),
+            (Metadata, Control, false),
+            (Mail, Metadata, true),
+            (Mail, Mail, true),
+            (Mail, Control, false),
+            (Control, Metadata, true),
+            (Control, Mail, true),
+            (Control, Control, true),
+        ] {
+            assert_eq!(held.allows(required), expected, "{held:?} -> {required:?}");
+            let registry = PeerGrantRegistry::default();
+            registry.grant(grant(held, 100), 1).unwrap();
+            assert_eq!(
+                registry.allows("project", "root-a", "root-b", required, 2),
+                expected,
+                "registry {held:?} -> {required:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn grants_are_bounded_and_expired_entries_free_room() {
+        let registry = PeerGrantRegistry::default();
+        let max = refact_work_core::coordination_settings().peer_grant_max_count;
+        for index in 0..max {
+            registry
+                .grant(
+                    PeerGrant {
+                        recipient_root: format!("root-{index}"),
+                        ..grant(PeerAuthority::Mail, 100)
+                    },
+                    1,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            registry
+                .grant(
+                    PeerGrant {
+                        recipient_root: "overflow".to_string(),
+                        ..grant(PeerAuthority::Mail, 100)
+                    },
+                    1,
+                )
+                .unwrap_err(),
+            "peer grant registry is full"
+        );
+        registry
+            .grant(
+                PeerGrant {
+                    recipient_root: "overflow".to_string(),
+                    ..grant(PeerAuthority::Mail, 200)
+                },
+                101,
+            )
+            .unwrap();
     }
 
     #[test]

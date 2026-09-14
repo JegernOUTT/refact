@@ -342,6 +342,7 @@ pub struct AppState {
     pub agent_executions: Arc<crate::agents::execution::ExecutionRegistry>,
     pub agent_approvals: refact_work_core::ApprovalRegistry,
     pub peer_grants: crate::coordination::peer_authority::PeerGrantRegistry,
+    pub broadcast_limits: crate::coordination::broadcast::BroadcastLimiter,
 }
 
 pub struct AppActivitySink {

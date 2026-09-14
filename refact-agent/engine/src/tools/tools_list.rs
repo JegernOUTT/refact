@@ -773,6 +773,9 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_agent_interact::ToolProgressReport {
             config_path: config_path.clone(),
         }),
+        Box::new(crate::tools::tool_agent_interact::ToolAgentMailbox {
+            config_path: config_path.clone(),
+        }),
         Box::new(crate::tools::tool_background_agents::ToolAgentList {
             config_path: config_path.clone(),
         }),

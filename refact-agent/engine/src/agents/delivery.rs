@@ -1,6 +1,70 @@
 use refact_core::chat_types::{DeliveryOutcome, PendingDelivery, PushMode};
 
 use crate::app_state::AppState;
+use crate::coordination::peer_authority::PeerAuthority;
+
+/// Consent is re-checked here, not only when the message was prepared: a grant
+/// revoked or expired while the delivery sat in the queue stops it before it
+/// can land. Deliveries without a peer stamp never needed peer authority.
+pub fn peer_delivery_authorized(app: &AppState, delivery: &PendingDelivery) -> bool {
+    let Some(stamp) = &delivery.peer_mail else {
+        return true;
+    };
+    app.peer_grants.allows(
+        &stamp.project,
+        &stamp.sender_root,
+        &stamp.recipient_root,
+        PeerAuthority::Mail,
+        chrono::Utc::now().timestamp_millis().max(0) as u64,
+    )
+}
+
+/// Drop every drained delivery whose peer consent no longer holds, recording
+/// it as a terminal `Failed` so its status never reads as delivered.
+async fn retain_authorized(
+    app: &AppState,
+    agent_id: &str,
+    deliveries: Vec<PendingDelivery>,
+) -> Vec<PendingDelivery> {
+    let mut authorized = Vec::with_capacity(deliveries.len());
+    for delivery in deliveries {
+        if peer_delivery_authorized(app, &delivery) {
+            authorized.push(delivery);
+            continue;
+        }
+        if let Err(error) = app
+            .agents
+            .record_delivery_status(
+                agent_id,
+                &delivery.id,
+                refact_chat_api::DeliveryStatus::Failed,
+            )
+            .await
+        {
+            tracing::warn!(%agent_id, %error, "Failed to drop a revoked peer delivery");
+        }
+    }
+    authorized
+}
+
+/// The only drain a runner may use: identical to the registry drain except a
+/// revoked peer grant stops the delivery at the boundary.
+pub async fn drain_authorized(
+    app: &AppState,
+    agent_id: &str,
+    idle: bool,
+) -> Result<Vec<PendingDelivery>, String> {
+    let deliveries = app.agents.drain_deliveries(agent_id, idle).await?;
+    Ok(retain_authorized(app, agent_id, deliveries).await)
+}
+
+pub async fn finish_authorized_turn(
+    app: &AppState,
+    agent_id: &str,
+) -> Result<Vec<PendingDelivery>, String> {
+    let deliveries = app.agents.finish_delivery_turn(agent_id).await?;
+    Ok(retain_authorized(app, agent_id, deliveries).await)
+}
 
 async fn live_runner(app: &AppState, chat_id: &str) -> Option<String> {
     let agent_id = app.agents.find_agent_id_by_child_chat_id(chat_id).await?;
@@ -78,7 +142,13 @@ pub async fn recover_runner_deliveries(app: &AppState, chat_id: &str) -> Result<
             .set_runner_pending_deliveries(Vec::new());
     }
     let mut recovered = 0;
-    for mut delivery in app.agents.pending_deliveries(&agent_id).await {
+    for mut delivery in retain_authorized(
+        app,
+        &agent_id,
+        app.agents.pending_deliveries(&agent_id).await,
+    )
+    .await
+    {
         let id = delivery.id.clone();
         delivery.wake = false;
         let outcome = Box::pin(crate::chat::delivery::deliver_to_chat(
