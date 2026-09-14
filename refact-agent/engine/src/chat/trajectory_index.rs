@@ -781,7 +781,8 @@ struct PendingTrajectoryIndexMutation {
 
 #[derive(Default)]
 struct TrajectoryIndexDirectoryState {
-    index: Option<TrajectoryIndex>,
+    index: Option<Arc<TrajectoryIndex>>,
+    entries: Option<Arc<Vec<TrajectoryIndexEntry>>>,
     generation: Option<DirectoryGeneration>,
     generation_verified_at: Option<Instant>,
     loaded: bool,
@@ -800,6 +801,16 @@ impl TrajectoryIndexDirectoryState {
             && self
                 .generation_verified_at
                 .is_some_and(|verified_at| now.duration_since(verified_at) < ttl)
+    }
+
+    fn set_index(&mut self, index: Arc<TrajectoryIndex>) {
+        self.index = Some(index);
+        self.entries = None;
+    }
+
+    fn index_mut(&mut self) -> Option<&mut TrajectoryIndex> {
+        self.entries = None;
+        self.index.as_mut().map(Arc::make_mut)
     }
 }
 
@@ -998,7 +1009,7 @@ impl TrajectoryIndexCoordinator {
                     apply_mutation_to_index(&mut index, &pending.mutation)?;
                 }
             }
-            state_guard.index = Some(index);
+            state_guard.set_index(Arc::new(index));
             state_guard.generation = Some(loaded.generation);
             state_guard.generation_verified_at = Some(Instant::now());
             state_guard.loaded = true;
@@ -1021,20 +1032,17 @@ impl TrajectoryIndexCoordinator {
         source_hint: Option<TrajectorySourceIdentity>,
     ) -> Result<TrajectoryIndex, String> {
         let state = self.ensure_loaded(dir, source_hint).await?;
-        let snapshot = state
-            .lock()
-            .await
-            .index
-            .clone()
-            .ok_or_else(|| "Trajectory index coordinator did not load an index".to_string());
-        snapshot
+        let index = state.lock().await.index.clone();
+        index
+            .map(|index| (*index).clone())
+            .ok_or_else(|| "Trajectory index coordinator did not load an index".to_string())
     }
 
     pub async fn upsert(&self, dir: &Path, entry: TrajectoryIndexEntry) -> Result<(), String> {
         validate_trajectory_index_entry(&entry)?;
         let state = self.directory_state(dir).await?;
         let mut state_guard = state.lock().await;
-        if let Some(index) = state_guard.index.as_mut() {
+        if let Some(index) = state_guard.index_mut() {
             apply_mutation_to_index(index, &TrajectoryIndexMutation::Upsert(entry.clone()))?;
         }
         refresh_generation_for_entry(&mut state_guard, dir, &entry.file_name);
@@ -1048,7 +1056,7 @@ impl TrajectoryIndexCoordinator {
         }
         let state = self.directory_state(dir).await?;
         let mut state_guard = state.lock().await;
-        if let Some(index) = state_guard.index.as_mut() {
+        if let Some(index) = state_guard.index_mut() {
             apply_mutation_to_index(index, &TrajectoryIndexMutation::Remove(chat_ids.clone()))?;
         }
         state_guard.generation = None;
@@ -1063,11 +1071,9 @@ impl TrajectoryIndexCoordinator {
         source_hint: Option<TrajectorySourceIdentity>,
     ) -> Result<TrajectoryIndex, String> {
         let state = self.ensure_loaded(dir, source_hint.clone()).await?;
-        let index = state
-            .lock()
-            .await
-            .index
-            .clone()
+        let index = state.lock().await.index.clone();
+        let index = index
+            .map(|index| (*index).clone())
             .ok_or_else(|| "Trajectory index coordinator did not load an index".to_string())?;
         let reconcile_span =
             coordinator_span(PerfComponent::TrajectoryIndexCoordinatorReconcile, dir);
@@ -1109,7 +1115,8 @@ impl TrajectoryIndexCoordinator {
                 apply_mutation_to_index(&mut index, &pending.mutation)?;
             }
         }
-        state_guard.index = Some(index.clone());
+        let index = Arc::new(index);
+        state_guard.set_index(index.clone());
         if reconciled.1 {
             push_pending_mutation(
                 &mut state_guard,
@@ -1122,7 +1129,7 @@ impl TrajectoryIndexCoordinator {
         state_guard.generation = Some(generation);
         state_guard.generation_verified_at = Some(Instant::now());
         drop(state_guard);
-        Ok(index)
+        Ok((*index).clone())
     }
 
     pub async fn list_entries(
@@ -1130,37 +1137,35 @@ impl TrajectoryIndexCoordinator {
         dir: &Path,
         source_hint: Option<TrajectorySourceIdentity>,
     ) -> Result<Vec<TrajectoryIndexEntry>, String> {
+        let entries = self.list_entries_shared(dir, source_hint).await?;
+        Ok(Arc::try_unwrap(entries).unwrap_or_else(|entries| (*entries).clone()))
+    }
+
+    pub async fn list_entries_shared(
+        &self,
+        dir: &Path,
+        source_hint: Option<TrajectorySourceIdentity>,
+    ) -> Result<Arc<Vec<TrajectoryIndexEntry>>, String> {
         let state = self.ensure_loaded(dir, source_hint.clone()).await?;
         if state.lock().await.recovery_flush_required {
             self.flush_directory(dir).await?;
         }
         let now = Instant::now();
-        let (entries, indexed_file_names, generation, within_ttl) = {
+        let (loaded, has_generation, within_ttl) = {
             let state_guard = state.lock().await;
-            let index = state_guard
-                .index
-                .as_ref()
-                .ok_or_else(|| "Trajectory index coordinator did not load an index".to_string())?;
             (
-                index.entries.clone(),
-                index_file_names(index),
-                state_guard.generation.clone(),
+                state_guard.index.is_some(),
+                state_guard.generation.is_some(),
                 state_guard.generation_is_within_ttl(now, self.generation_ttl),
             )
         };
-        let fresh = match generation {
-            Some(_) if within_ttl => true,
-            Some(generation) => {
-                self.listing_counter_scope.record_generation_check();
-                let fresh = cached_index_is_fresh(dir, indexed_file_names, generation)
-                    .await
-                    .unwrap_or(false);
-                if fresh {
-                    state.lock().await.generation_verified_at = Some(Instant::now());
-                }
-                fresh
-            }
-            None => false,
+        if !loaded {
+            return Err("Trajectory index coordinator did not load an index".to_string());
+        }
+        let fresh = if has_generation && within_ttl {
+            true
+        } else {
+            self.generation_matches_disk(dir, &state).await
         };
         if !fresh {
             let recovery_flush_required = matches!(
@@ -1179,11 +1184,33 @@ impl TrajectoryIndexCoordinator {
                 drop(state_guard);
                 self.flush_directory(dir).await?;
             }
-            return Ok(entries);
+            return Ok(Arc::new(entries));
         }
         self.listing_counter_scope.record_listing_cache_hit();
         record_coordinator_count(PerfComponent::TrajectoryIndexCacheHit);
-        Ok(entries)
+        shared_entries(&state).await
+    }
+
+    async fn generation_matches_disk(
+        &self,
+        dir: &Path,
+        state: &Arc<AMutex<TrajectoryIndexDirectoryState>>,
+    ) -> bool {
+        let (index, generation) = {
+            let state_guard = state.lock().await;
+            (state_guard.index.clone(), state_guard.generation.clone())
+        };
+        let (Some(index), Some(generation)) = (index, generation) else {
+            return false;
+        };
+        self.listing_counter_scope.record_generation_check();
+        let fresh = cached_index_is_fresh(dir, index_file_names(&index), generation)
+            .await
+            .unwrap_or(false);
+        if fresh {
+            state.lock().await.generation_verified_at = Some(Instant::now());
+        }
+        fresh
     }
 
     pub async fn flush_directory(&self, dir: &Path) -> Result<(), String> {
@@ -1294,7 +1321,7 @@ impl TrajectoryIndexCoordinator {
             }
         }
         refresh_generation_after_index_write(&mut state_guard, &dir, &index);
-        state_guard.index = Some(index);
+        state_guard.set_index(Arc::new(index));
         state_guard.recovery_flush_required = false;
         Ok(())
     }
@@ -1362,6 +1389,30 @@ pub async fn trajectory_index_coordinator_background_task(
     if let Err(error) = coordinator.checkpoint_all().await {
         tracing::warn!("trajectory index coordinator shutdown checkpoint failed: {error}");
     }
+}
+
+async fn shared_entries(
+    state: &Arc<AMutex<TrajectoryIndexDirectoryState>>,
+) -> Result<Arc<Vec<TrajectoryIndexEntry>>, String> {
+    let (cached, index) = {
+        let state_guard = state.lock().await;
+        (state_guard.entries.clone(), state_guard.index.clone())
+    };
+    if let Some(cached) = cached {
+        return Ok(cached);
+    }
+    let index = index
+        .ok_or_else(|| "Trajectory index coordinator did not load an index".to_string())?;
+    let entries = Arc::new(index.entries.clone());
+    let mut state_guard = state.lock().await;
+    if state_guard
+        .index
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, &index))
+    {
+        state_guard.entries = Some(entries.clone());
+    }
+    Ok(entries)
 }
 
 fn push_pending_mutation(
@@ -3060,9 +3111,21 @@ pub async fn list_trajectory_entries_with_rollout_for(
     source_hint: Option<TrajectorySourceIdentity>,
     caller: TrajectoryIndexListingCaller,
 ) -> Result<Vec<TrajectoryIndexEntry>, String> {
+    let entries =
+        list_trajectory_entries_with_rollout_shared_for(coordinator, dir, source_hint, caller)
+            .await?;
+    Ok(Arc::try_unwrap(entries).unwrap_or_else(|entries| (*entries).clone()))
+}
+
+pub async fn list_trajectory_entries_with_rollout_shared_for(
+    coordinator: &TrajectoryIndexCoordinator,
+    dir: &Path,
+    source_hint: Option<TrajectorySourceIdentity>,
+    caller: TrajectoryIndexListingCaller,
+) -> Result<Arc<Vec<TrajectoryIndexEntry>>, String> {
     coordinator.record_listing_caller(caller);
     if trajectory_index_coordinator_rollout_enabled() {
-        coordinator.list_entries(dir, source_hint).await
+        coordinator.list_entries_shared(dir, source_hint).await
     } else {
         list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
             dir,
@@ -3070,6 +3133,7 @@ pub async fn list_trajectory_entries_with_rollout_for(
             &coordinator.listing_counter_scope,
         )
         .await
+        .map(Arc::new)
     }
 }
 
@@ -4915,6 +4979,137 @@ mod tests {
         let counters = listing_counter_scope.snapshot();
         assert_eq!(counters.generation_checks, 1);
         assert_eq!(counters.directory_scans, 1);
+    }
+
+    async fn write_internal_trajectory(dir: &Path, id: &str) {
+        fs::create_dir_all(dir).await.unwrap();
+        let value = json!({
+            "id": id,
+            "title": id,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:01Z",
+            "model": "test-model",
+            "mode": "agent",
+            "tool_use": "agent",
+            "messages": [],
+            "link_type": "internal:tool-trace"
+        });
+        fs::write(
+            dir.join(format!("{id}.json")),
+            serde_json::to_string_pretty(&value).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_entries_within_ttl_does_not_rebuild_file_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        write_trajectory(&dir, "chat-1", "One", "agent").await;
+        write_trajectory(&dir, "chat-2", "Two", "agent").await;
+        write_internal_trajectory(&dir, "trace-1").await;
+        let scope = TrajectoryIndexListingCounterScope::local();
+        let coordinator = TrajectoryIndexCoordinator::with_listing_counter_scope(scope.clone())
+            .with_generation_ttl(Duration::from_secs(30));
+        let cold = coordinator.list_entries(&dir, None).await.unwrap();
+        assert_eq!(cold.len(), 2);
+
+        scope.reset();
+        let warm = coordinator.list_entries(&dir, None).await.unwrap();
+        let counters = scope.snapshot();
+
+        assert_eq!(warm, cold);
+        assert_eq!(counters.generation_checks, 0);
+        assert_eq!(counters.directory_scans, 0);
+        assert_eq!(counters.index_reads, 0);
+        assert_eq!(counters.cache_hits, 1);
+    }
+
+    #[tokio::test]
+    async fn list_entries_within_ttl_shares_one_allocation_across_calls() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let coordinator =
+            TrajectoryIndexCoordinator::new().with_generation_ttl(Duration::from_secs(30));
+        let first = coordinator.list_entries_shared(&dir, None).await.unwrap();
+        let second = coordinator.list_entries_shared(&dir, None).await.unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let path = write_trajectory(&dir, "chat-1", "Renamed", "agent").await;
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+        let after_upsert = coordinator.list_entries_shared(&dir, None).await.unwrap();
+        assert!(!Arc::ptr_eq(&first, &after_upsert));
+        assert_eq!(after_upsert[0].title, "Renamed");
+    }
+
+    #[tokio::test]
+    async fn list_entries_outside_ttl_still_validates_freshness() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let scope = TrajectoryIndexListingCounterScope::local();
+        let coordinator = TrajectoryIndexCoordinator::with_listing_counter_scope(scope.clone())
+            .with_generation_ttl(Duration::from_millis(50));
+        assert_eq!(coordinator.list_entries(&dir, None).await.unwrap().len(), 1);
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        scope.reset();
+        let unchanged = coordinator.list_entries(&dir, None).await.unwrap();
+        let counters = scope.snapshot();
+        assert_eq!(unchanged.len(), 1);
+        assert_eq!(counters.generation_checks, 1);
+        assert_eq!(counters.directory_scans, 0);
+        assert_eq!(counters.cache_hits, 1);
+
+        write_trajectory(&dir, "chat-2", "Two", "agent").await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        scope.reset();
+        let changed = coordinator.list_entries(&dir, None).await.unwrap();
+        let counters = scope.snapshot();
+        assert_eq!(changed.len(), 2);
+        assert_eq!(counters.generation_checks, 1);
+        assert_eq!(counters.directory_scans, 1);
+        assert_eq!(counters.cache_hits, 0);
+    }
+
+    #[tokio::test]
+    async fn cached_and_revalidated_listings_return_identical_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        for id in ["chat-1", "chat-2", "chat-3"] {
+            write_trajectory(&dir, id, "Title", "agent").await;
+        }
+        write_trajectory(&dir.join("chat-1"), "subchat-1", "Sub", "agent").await;
+        for id in ["trace-1", "trace-2"] {
+            write_internal_trajectory(&dir, id).await;
+        }
+
+        let revalidating = TrajectoryIndexCoordinator::new();
+        let mut revalidated = revalidating.list_entries(&dir, None).await.unwrap();
+        revalidating.flush_all().await.unwrap();
+
+        let caching =
+            TrajectoryIndexCoordinator::new().with_generation_ttl(Duration::from_secs(30));
+        let mut cached = caching.list_entries(&dir, None).await.unwrap();
+        let mut cached_again = caching.list_entries(&dir, None).await.unwrap();
+
+        for entries in [&mut revalidated, &mut cached, &mut cached_again] {
+            entries.sort_by(|a, b| a.id.cmp(&b.id));
+        }
+        assert_eq!(cached.len(), 4);
+        assert_eq!(
+            serde_json::to_string(&cached).unwrap(),
+            serde_json::to_string(&revalidated).unwrap()
+        );
+        assert_eq!(cached_again, cached);
+        let index = read_trajectory_index(&dir).await.unwrap().unwrap();
+        assert_eq!(index.skipped_files.len(), 2);
     }
 
     #[tokio::test]

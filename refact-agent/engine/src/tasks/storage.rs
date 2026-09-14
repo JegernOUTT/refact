@@ -551,7 +551,7 @@ pub async fn list_task_trajectories_for(
         .await
         .chat
         .trajectory_index_coordinator;
-    let entries = crate::chat::trajectory_index::list_trajectory_entries_with_rollout_for(
+    let entries = crate::chat::trajectory_index::list_trajectory_entries_with_rollout_shared_for(
         &coordinator,
         &traj_dir,
         None,
@@ -559,7 +559,7 @@ pub async fn list_task_trajectories_for(
     )
     .await?;
     let mut trajectories: Vec<TrajectoryInfo> = entries
-        .into_iter()
+        .iter()
         .filter(|entry| {
             should_list_task_trajectory(
                 role,
@@ -567,14 +567,14 @@ pub async fn list_task_trajectories_for(
             )
         })
         .map(|entry| TrajectoryInfo {
-            id: entry.id,
-            title: entry.title,
-            created_at: entry.created_at,
-            updated_at: entry.updated_at,
+            id: entry.id.clone(),
+            title: entry.title.clone(),
+            created_at: entry.created_at.clone(),
+            updated_at: entry.updated_at.clone(),
             session_state: None,
-            mode: Some(entry.mode),
-            parent_id: entry.parent_id,
-            waiting_for_card_ids: entry.waiting_for_card_ids,
+            mode: Some(entry.mode.clone()),
+            parent_id: entry.parent_id.clone(),
+            waiting_for_card_ids: entry.waiting_for_card_ids.clone(),
         })
         .collect();
 

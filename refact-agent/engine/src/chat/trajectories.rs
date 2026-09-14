@@ -1901,7 +1901,7 @@ async fn indexed_candidate_paths_in_dirs(
     let mut paths = Vec::new();
     let app = AppState::from_gcx(gcx.clone()).await;
     for dir in dirs {
-        let entries = match trajectory_index::list_trajectory_entries_with_rollout_for(
+        let entries = match trajectory_index::list_trajectory_entries_with_rollout_shared_for(
             &app.chat.trajectory_index_coordinator,
             dir,
             None,
@@ -1915,13 +1915,11 @@ async fn indexed_candidate_paths_in_dirs(
                 continue;
             }
         };
-        for entry in entries {
+        for entry in entries.iter() {
             if entry.id == chat_id
-                && trajectory_index::trajectory_index_entry_is_fresh(dir, &entry).await
+                && trajectory_index::trajectory_index_entry_is_fresh(dir, entry).await
             {
-                paths.push(trajectory_index::trajectory_file_path_for_entry(
-                    dir, &entry,
-                ));
+                paths.push(trajectory_index::trajectory_file_path_for_entry(dir, entry));
             }
         }
     }
@@ -5878,7 +5876,7 @@ async fn remove_stale_trajectory_index_entries(gcx: Arc<GlobalContext>, chat_id:
         dirs
     };
     for dir in dirs {
-        let entries = match trajectory_index::list_trajectory_entries_with_rollout_for(
+        let entries = match trajectory_index::list_trajectory_entries_with_rollout_shared_for(
             &app.chat.trajectory_index_coordinator,
             &dir,
             None,
@@ -5893,7 +5891,7 @@ async fn remove_stale_trajectory_index_entries(gcx: Arc<GlobalContext>, chat_id:
             }
         };
         let mut should_remove = false;
-        for entry in &entries {
+        for entry in entries.iter() {
             if entry.id == chat_id
                 && !trajectory_index::trajectory_index_entry_is_fresh(&dir, entry).await
             {
@@ -7752,7 +7750,7 @@ async fn collect_trajectory_list_candidates(
         if !is_real_dir(&trajectories_dir).await {
             continue;
         }
-        let entries = match trajectory_index::list_trajectory_entries_with_rollout_for(
+        let entries = match trajectory_index::list_trajectory_entries_with_rollout_shared_for(
             &app.chat.trajectory_index_coordinator,
             &trajectories_dir,
             None,
@@ -7769,7 +7767,7 @@ async fn collect_trajectory_list_candidates(
                 continue;
             }
         };
-        for entry in entries {
+        for entry in entries.iter() {
             if matches!(entry.source, trajectory_index::TrajectoryIndexSource::Buddy) {
                 continue;
             }
@@ -7789,7 +7787,7 @@ async fn collect_trajectory_list_candidates(
             }
             candidates.push(trajectory_index::list_candidate_from_entry(
                 &trajectories_dir,
-                &entry,
+                entry,
             ));
         }
     }
@@ -8082,7 +8080,7 @@ pub async fn list_all_trajectories_meta(
         if !is_real_dir(&trajectories_dir).await {
             continue;
         }
-        let entries = match trajectory_index::list_trajectory_entries_with_rollout_for(
+        let entries = match trajectory_index::list_trajectory_entries_with_rollout_shared_for(
             &app.chat.trajectory_index_coordinator,
             &trajectories_dir,
             None,
@@ -8099,7 +8097,7 @@ pub async fn list_all_trajectories_meta(
                 continue;
             }
         };
-        for entry in entries {
+        for entry in entries.iter() {
             if matches!(entry.source, trajectory_index::TrajectoryIndexSource::Buddy) {
                 continue;
             }
@@ -8107,13 +8105,13 @@ pub async fn list_all_trajectories_meta(
                 continue;
             }
             if seen_ids.insert(entry.id.clone()) {
-                let mut meta = trajectory_index::meta_from_entry(&trajectories_dir, &entry);
+                let mut meta = trajectory_index::meta_from_entry(&trajectories_dir, entry);
                 if let Some(worktree) = meta.worktree.clone() {
                     meta.worktree =
                         validate_loaded_worktree_strict(app.clone(), &meta.id, worktree).await;
                 }
                 apply_task_trajectory_context(
-                    &trajectory_index::trajectory_file_path_for_entry(&trajectories_dir, &entry),
+                    &trajectory_index::trajectory_file_path_for_entry(&trajectories_dir, entry),
                     &task_roots,
                     &mut meta,
                 );
