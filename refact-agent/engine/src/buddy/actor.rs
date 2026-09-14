@@ -606,6 +606,25 @@ impl BuddyService {
         }
     }
 
+    /// Production rollout entry point. Capabilities follow
+    /// `BuddySettings::operator_enabled`, which defaults to on; a store that cannot
+    /// be opened leaves `outcome_runtime` at `None` so the status route reports
+    /// `unavailable` instead of `enabled`, and nothing existing is rewritten.
+    pub fn enable_operator_from_settings(&mut self) {
+        self.operator_features =
+            super::operator_runtime::OperatorFeatures::from_settings(&self.settings);
+        if !self.operator_features.storage {
+            return;
+        }
+        match super::operator_runtime::open_project_runtime(&self.project_root) {
+            Ok(runtime) => self.outcome_runtime = Some(runtime),
+            Err(error) => warn!(
+                "buddy: operator store unavailable, operator status stays unavailable: {}",
+                error
+            ),
+        }
+    }
+
     /// Push a record into the writer queue. The writer task applies them in
     /// strict order — see [`run_runtime_queue_writer`].
     fn persist_record(&self, record: RuntimeQueueRecord) {
@@ -2900,6 +2919,7 @@ pub async fn buddy_background_task(gcx: AppState) {
         events_tx,
         Some(queue_tx),
     );
+    service.enable_operator_from_settings();
     service.set_memory_ops(memory_ops);
     service
         .draft_store
@@ -3426,6 +3446,11 @@ pub async fn buddy_background_task(gcx: AppState) {
         for handle in &background_tasks {
             handle.abort();
         }
+    }
+    // Release the operator store's exclusive writer lock so the next engine or
+    // daemon owner can open it; the database itself is left untouched.
+    if let Some(runtime) = service.as_ref().and_then(|svc| svc.outcome_runtime.clone()) {
+        runtime.shutdown().await;
     }
     drop(service);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), writer_handle).await;

@@ -25,6 +25,11 @@ pub struct OperatorStatus {
 }
 
 /// Read-only rollout discovery: an unavailable store must never enable legacy writers.
+/// `mode` is a pure function of (settings.operator_enabled, runtime presence, project
+/// scope): `disabled` only when the user turned the operator off, `enabled` only when
+/// the durable store is open for the single active project root, `unavailable`
+/// otherwise — including a service that has not started yet, a store that failed to
+/// open, and a multi-root or mismatched workspace scope.
 pub async fn handle_operator_status(
     State(app): State<AppState>,
 ) -> Result<axum::Json<OperatorStatus>, ScratchError> {
@@ -34,14 +39,10 @@ pub async fn handle_operator_status(
     let features = service.map(|s| s.operator_features).unwrap_or_default();
     let current = service.filter(|s| roots.len() == 1 && roots[0] == s.project_root);
     let runtime = current.and_then(|s| s.outcome_runtime.as_ref());
-    let mode = if current.is_none() {
-        "unavailable"
-    } else if !features.storage {
-        "disabled"
-    } else if runtime.is_some() {
-        "enabled"
-    } else {
-        "unavailable"
+    let mode = match service {
+        Some(service) if !service.operator_features.storage => "disabled",
+        Some(_) if runtime.is_some() => "enabled",
+        _ => "unavailable",
     };
     Ok(axum::Json(OperatorStatus {
         schema_version: 1,
@@ -890,24 +891,22 @@ mod resource_http_tests {
             "unavailable"
         );
         let (tx, _) = tokio::sync::broadcast::channel(16);
+        let mut settings = crate::buddy::settings::BuddySettings::default();
+        settings.operator_enabled = false;
         let service = crate::buddy::actor::BuddyService::new(
             root.path().to_path_buf(),
             crate::buddy::state::default_buddy_state(),
-            Default::default(),
+            settings,
             vec![],
             crate::buddy::runtime_queue::RuntimeQueue::new(),
             tx,
             None,
         );
         *app.buddy.buddy.lock().await = Some(service);
-        assert_eq!(
-            handle_operator_status(State(app.clone()))
-                .await
-                .unwrap()
-                .0
-                .mode,
-            "disabled"
-        );
+        let status = handle_operator_status(State(app.clone())).await.unwrap().0;
+        assert_eq!(status.mode, "disabled");
+        assert!(!status.features.storage);
+        assert!(!status.features.actions);
         app.buddy
             .buddy
             .lock()
@@ -920,6 +919,121 @@ mod resource_http_tests {
             handle_operator_status(State(app)).await.unwrap().0.mode,
             "unavailable"
         );
+    }
+
+    #[tokio::test]
+    async fn default_settings_enable_the_operator_and_store_failure_reports_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            canonical.join("cache"),
+            canonical.join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![canonical.clone()];
+        let app = AppState::from_gcx(gcx).await;
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let mut service = crate::buddy::actor::BuddyService::new(
+            canonical.clone(),
+            crate::buddy::state::default_buddy_state(),
+            crate::buddy::settings::BuddySettings::default(),
+            vec![],
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        );
+        service.enable_operator_from_settings();
+        assert!(service.operator_features.storage);
+        assert!(service.operator_features.actions);
+        assert!(service.operator_features.supervision);
+        assert!(service.operator_features.improvement);
+        assert!(service.operator_features.editorial);
+        let runtime = service.outcome_runtime.clone().unwrap();
+        let project = runtime.project();
+        *app.buddy.buddy.lock().await = Some(service);
+        let status = handle_operator_status(State(app.clone())).await.unwrap().0;
+        assert_eq!(status.mode, "enabled");
+        assert!(status.features.storage);
+        assert_eq!(status.project.unwrap(), project);
+        // A second holder cannot take the same store; the degraded path reports
+        // unavailable, never enabled, and never rewrites the existing database.
+        let contended = tempfile::tempdir().unwrap();
+        let contended = contended.path().canonicalize().unwrap();
+        let holder = crate::buddy::operator_runtime::open_project_runtime(&contended).unwrap();
+        let database = contended.join(".refact/buddy/operator.sqlite");
+        let before = std::fs::read(&database).unwrap();
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let mut blocked = crate::buddy::actor::BuddyService::new(
+            contended.clone(),
+            crate::buddy::state::default_buddy_state(),
+            crate::buddy::settings::BuddySettings::default(),
+            vec![],
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        );
+        blocked.enable_operator_from_settings();
+        assert!(blocked.operator_features.storage);
+        assert!(blocked.outcome_runtime.is_none());
+        *app.buddy.buddy.lock().await = Some(blocked);
+        assert_eq!(
+            handle_operator_status(State(app)).await.unwrap().0.mode,
+            "unavailable"
+        );
+        assert_eq!(std::fs::read(&database).unwrap(), before);
+        holder.shutdown().await;
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn operator_opt_out_reports_disabled_and_writes_no_operator_store() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let mut settings = crate::buddy::settings::BuddySettings::default();
+        settings.operator_enabled = false;
+        let mut service = crate::buddy::actor::BuddyService::new(
+            canonical.clone(),
+            crate::buddy::state::default_buddy_state(),
+            settings,
+            vec![],
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        );
+        service.enable_operator_from_settings();
+        assert!(!service.operator_features.storage);
+        assert!(!service.operator_features.actions);
+        assert!(!service.operator_features.supervision);
+        assert!(!service.operator_features.improvement);
+        assert!(!service.operator_features.editorial);
+        assert!(service.outcome_runtime.is_none());
+        assert!(!canonical.join(".refact/buddy/operator.sqlite").exists());
+        assert!(!canonical.join(".refact/buddy/operator.lock").exists());
+        assert!(service.add_opportunity_with_cooldown(legacy_opportunity(), 60));
+        assert_eq!(service.snapshot().opportunities.len(), 1);
+    }
+
+    fn legacy_opportunity() -> crate::buddy::types::BuddyOpportunity {
+        let now = chrono::Utc::now();
+        crate::buddy::types::BuddyOpportunity {
+            id: "legacy".into(),
+            kind: crate::buddy::types::BuddyOpportunityKind::JobFinding,
+            summary: "Legacy path still works when the operator is off".into(),
+            priority: crate::buddy::types::BuddyPriority::Normal,
+            confidence: 0.5,
+            fact_keys: vec![],
+            cooldown_key: "legacy:opt-out".into(),
+            cooldown_secs: 60,
+            status: crate::buddy::types::OpportunityStatus::New,
+            proposed_actions: vec![],
+            humor: None,
+            humor_allowed: false,
+            related: Default::default(),
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+            resolved_at: None,
+        }
     }
 
     #[tokio::test]

@@ -223,6 +223,7 @@ pub struct BuddySettingsRequest {
     pub muted_chat_ids: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_optional_field")]
     pub daily_llm_token_budget: Option<Option<u64>>,
+    pub operator_enabled: Option<bool>,
     pub observers: Option<ObserverTogglesPatch>,
     pub palette_index: Option<usize>,
 }
@@ -342,6 +343,9 @@ impl BuddySettingsRequest {
         }
         if let Some(v) = self.daily_llm_token_budget {
             settings.daily_llm_token_budget = v.filter(|budget| *budget > 0);
+        }
+        if let Some(v) = self.operator_enabled {
+            settings.operator_enabled = v;
         }
         if let Some(observers) = &self.observers {
             observers.apply_to(&mut settings.observers);

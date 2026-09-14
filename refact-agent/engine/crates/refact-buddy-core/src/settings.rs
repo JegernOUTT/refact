@@ -131,6 +131,8 @@ pub struct BuddySettings {
     pub muted_chat_ids: Vec<String>,
     #[serde(default)]
     pub daily_llm_token_budget: Option<u64>,
+    #[serde(default = "default_true")]
+    pub operator_enabled: bool,
     #[serde(default)]
     pub observers: ObserverToggles,
 }
@@ -174,6 +176,7 @@ impl Default for BuddySettings {
             muted_intents: Vec::new(),
             muted_chat_ids: Vec::new(),
             daily_llm_token_budget: None,
+            operator_enabled: true,
             observers: ObserverToggles::default(),
         }
     }
@@ -198,6 +201,21 @@ mod tests {
         assert!(settings.muted_intents.is_empty());
         assert!(settings.muted_chat_ids.is_empty());
         assert_eq!(settings.daily_llm_token_budget, None);
+        assert!(settings.operator_enabled);
+    }
+
+    #[test]
+    fn operator_enabled_defaults_on_and_round_trips_explicit_opt_out() {
+        assert!(BuddySettings::default().operator_enabled);
+        let disabled: BuddySettings = serde_json::from_str(
+            r#"{"enabled":true,"auto_diagnostics":true,"auto_issue_creation":false,"operator_enabled":false}"#,
+        )
+        .unwrap();
+        assert!(!disabled.operator_enabled);
+        let json = serde_json::to_string(&disabled).unwrap();
+        assert!(json.contains("\"operator_enabled\":false"));
+        let back: BuddySettings = serde_json::from_str(&json).unwrap();
+        assert!(!back.operator_enabled);
     }
 
     #[test]

@@ -881,6 +881,47 @@ fn test_settings_request_tone_fields_mark_persona_dirty() {
     }
 }
 
+#[tokio::test]
+async fn test_operator_enabled_patch_round_trip_preserves_unknown_and_unrelated_fields() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join(".refact/buddy/settings.json");
+    tokio::fs::create_dir_all(path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(
+        &path,
+        br#"{"enabled":true,"auto_diagnostics":true,"auto_issue_creation":false,"quiet_hours_start":9,"future_field":{"kept":[1,2]}}"#,
+    )
+    .await
+    .unwrap();
+
+    let loaded = super::settings::load_settings(root.path()).await;
+    assert!(loaded.operator_enabled);
+    assert_eq!(loaded.quiet_hours_start, 9);
+
+    let req: crate::http::routers::v1::buddy::BuddySettingsRequest =
+        serde_json::from_str(r#"{"operator_enabled":false}"#).unwrap();
+    let mut next = loaded;
+    req.apply_to_settings(&mut next);
+    assert!(!next.operator_enabled);
+    assert_eq!(next.quiet_hours_start, 9);
+    super::settings::save_settings(root.path(), &next)
+        .await
+        .unwrap();
+
+    let document: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+    assert_eq!(document["future_field"]["kept"], serde_json::json!([1, 2]));
+    assert_eq!(document["operator_enabled"], serde_json::json!(false));
+    assert_eq!(document["quiet_hours_start"], serde_json::json!(9));
+
+    let reloaded = super::settings::load_settings(root.path()).await;
+    assert!(!reloaded.operator_enabled);
+    assert_eq!(reloaded.quiet_hours_start, 9);
+    assert_eq!(reloaded.enabled, next.enabled);
+    assert_eq!(reloaded.autonomy_level, next.autonomy_level);
+}
+
 #[test]
 fn test_settings_storage_metadata_paths() {
     let root = std::path::PathBuf::from("/tmp/active-buddy-root");

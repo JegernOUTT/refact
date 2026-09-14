@@ -1,5 +1,10 @@
+use std::path::Path;
+
 use axum::http::HeaderMap;
-use refact_buddy_core::operator_types::{NativeSourceIdentity, NativeSourceKind};
+use refact_buddy_core::operator_types::{
+    NativeSourceIdentity, NativeSourceKind, ProjectIdentity, WorkerIdentity,
+};
+use sha2::{Digest, Sha256};
 
 use crate::app_state::AppState;
 use super::outcome_runtime::OutcomeRuntime;
@@ -23,6 +28,19 @@ pub enum OperatorCapability {
 }
 
 impl OperatorFeatures {
+    pub fn from_settings(settings: &refact_buddy_core::settings::BuddySettings) -> Self {
+        if !settings.operator_enabled {
+            return Self::default();
+        }
+        Self {
+            storage: true,
+            actions: true,
+            supervision: true,
+            improvement: true,
+            editorial: true,
+        }
+    }
+
     pub fn allows(self, capability: OperatorCapability) -> bool {
         self.storage
             && match capability {
@@ -33,6 +51,42 @@ impl OperatorFeatures {
                 OperatorCapability::Editorial => self.editorial,
             }
     }
+}
+
+/// Identity for the project's operator store, hashed exactly like the daemon
+/// registry so both processes address the same durable project.
+pub fn project_identity(project_root: &Path) -> Result<ProjectIdentity, String> {
+    let canonical = std::fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let canonical = dunce::simplified(&canonical).to_path_buf();
+    if canonical != project_root {
+        return Err(format!(
+            "project root {project_root:?} is not its own canonical path {canonical:?}"
+        ));
+    }
+    let canonical_root = canonical.to_string_lossy().into_owned();
+    let mut hasher = Sha256::new();
+    hasher.update(canonical_root.as_bytes());
+    Ok(ProjectIdentity {
+        project_id: hex::encode(hasher.finalize()),
+        canonical_root,
+    })
+}
+
+pub fn engine_worker_identity() -> WorkerIdentity {
+    let epoch = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    WorkerIdentity {
+        worker_id: "engine-buddy-actor".to_string(),
+        engine_instance_id: format!("engine:{}:{}", std::process::id(), epoch),
+        epoch,
+    }
+}
+
+/// Open the durable operator store for the live service. Every failure is an
+/// error the caller reports as `unavailable`; nothing here removes or rewrites data.
+pub fn open_project_runtime(project_root: &Path) -> Result<OutcomeRuntime, String> {
+    let project = project_identity(project_root)?;
+    OutcomeRuntime::open(project_root, project, engine_worker_identity())
+        .map_err(|error| error.to_string())
 }
 
 pub async fn runtime(
@@ -113,6 +167,33 @@ mod tests {
             ..Default::default()
         }
         .allows(OperatorCapability::Actions));
+    }
+
+    #[test]
+    fn default_settings_open_every_capability_and_opt_out_closes_them() {
+        let mut settings = refact_buddy_core::settings::BuddySettings::default();
+        let enabled = OperatorFeatures::from_settings(&settings);
+        assert!(enabled.storage);
+        assert!(enabled.actions);
+        assert!(enabled.supervision);
+        assert!(enabled.improvement);
+        assert!(enabled.editorial);
+        for capability in [
+            OperatorCapability::Storage,
+            OperatorCapability::Actions,
+            OperatorCapability::Supervision,
+            OperatorCapability::Improvement,
+            OperatorCapability::Editorial,
+        ] {
+            assert!(enabled.allows(capability));
+        }
+        settings.operator_enabled = false;
+        let disabled = OperatorFeatures::from_settings(&settings);
+        assert!(!disabled.storage);
+        assert!(!disabled.actions);
+        assert!(!disabled.supervision);
+        assert!(!disabled.improvement);
+        assert!(!disabled.editorial);
     }
 
     #[tokio::test]
