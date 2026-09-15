@@ -48,19 +48,19 @@ pub async fn active_durable_cron_store(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::ffi::OsString;
     use std::sync::Arc;
 
     use super::*;
 
-    struct EnvGuard {
+    pub(crate) struct EnvGuard {
         key: &'static str,
         previous: Option<OsString>,
     }
 
     impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
+        pub(crate) fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var_os(key);
             std::env::set_var(key, value);
             Self { key, previous }

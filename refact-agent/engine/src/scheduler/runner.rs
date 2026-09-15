@@ -113,7 +113,7 @@ impl CronRunner {
     }
 
     async fn run(mut self) {
-        if !runner_enabled(&self.gcx.scheduler_config) {
+        if !self.enabled() {
             return;
         }
         self.catch_up().await;
@@ -262,6 +262,14 @@ impl CronRunner {
         }
     }
 
+    /// `REFACT_DISABLE_SCHEDULER` is a startup gate, resolved into
+    /// `SchedulerConfig::enabled` by `with_startup_overrides`. A live runner
+    /// reads that snapshot: re-reading the process environment on every tick
+    /// drops a due fire with no run record when another thread flips it.
+    fn enabled(&self) -> bool {
+        self.gcx.scheduler_config.enabled
+    }
+
     fn missed_grace_config(&self) -> MissedRunGraceConfig {
         MissedRunGraceConfig::from(&self.gcx.scheduler_config)
     }
@@ -271,7 +279,7 @@ impl CronRunner {
     }
 
     async fn fire_due_tasks(&mut self, now: u64) {
-        if !runner_enabled(&self.gcx.scheduler_config) {
+        if !self.enabled() {
             return;
         }
         let due_tasks = self
@@ -1704,7 +1712,9 @@ mod tests {
     use crate::chat::types::{ChatSession, SessionState};
     use crate::coordination::outbox;
     use crate::scheduler::store::InMemoryCronStore;
-    use crate::scheduler::types::{DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS, RECENT_RUNS_CAP};
+    use crate::scheduler::types::{
+        DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS, RECENT_RUNS_CAP, SCHEDULER_DISABLE_ENV,
+    };
 
     fn task(id: &str, now: u64) -> Job {
         let mut task = Job::new_cron_agent_chat(
@@ -2719,6 +2729,88 @@ mod tests {
         runner.fire_due_tasks(now + 480_000).await;
 
         assert!(store.get("command_transient_retry").await.is_none());
+    }
+
+    /// The kill switch is a startup gate. A running runner must not lose a due
+    /// retry because another thread flipped the process environment.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn env_kill_switch_flip_does_not_suppress_a_due_retry() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(one_shot_command_due_task(
+                "command_kill_switch_retry",
+                now,
+                transient_failing_command(),
+            ))
+            .await
+            .unwrap();
+        let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
+        let mut runner = CronRunner::new(store.clone(), gcx);
+
+        runner.fire_due_tasks(now).await;
+        let stored = store.get("command_kill_switch_retry").await.unwrap();
+        assert_eq!(stored.fire_count, 1);
+        assert_eq!(stored.retry_attempts, 1);
+        assert_eq!(stored.trigger_at_ms, Some(now + 60_000));
+
+        let _guard = crate::scheduler::tests::EnvGuard::set(SCHEDULER_DISABLE_ENV, "1");
+        runner.fire_due_tasks(now + 60_000).await;
+
+        let stored = store.get("command_kill_switch_retry").await.unwrap();
+        assert_eq!(stored.fire_count, 2);
+        assert_eq!(stored.retry_attempts, 2);
+        assert_eq!(stored.trigger_at_ms, Some(now + 180_000));
+    }
+
+    /// Cron-lane backpressure holds a retry back without touching its backoff
+    /// chain: the same attempt fires once a permit frees.
+    #[tokio::test]
+    async fn saturated_cron_lane_defers_retry_without_losing_backoff() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(one_shot_command_due_task(
+                "command_saturated_retry",
+                now,
+                transient_failing_command(),
+            ))
+            .await
+            .unwrap();
+        let (_workspace, gcx) = gcx_with_session_and_config(SessionState::Idle, |config| {
+            config.max_concurrent_runs = 1;
+        })
+        .await;
+        let mut runner = CronRunner::new(store.clone(), gcx);
+
+        runner.fire_due_tasks(now).await;
+        let after_first_fire = store.get("command_saturated_retry").await.unwrap();
+        assert_eq!(after_first_fire.fire_count, 1);
+        assert_eq!(after_first_fire.retry_attempts, 1);
+        assert_eq!(after_first_fire.trigger_at_ms, Some(now + 60_000));
+
+        let permit = runner.run_semaphore.clone().try_acquire_owned().unwrap();
+        runner.fire_due_tasks(now + 60_000).await;
+
+        let deferred = store.get("command_saturated_retry").await.unwrap();
+        assert_eq!(deferred.fire_count, 1);
+        assert_eq!(deferred.retry_attempts, 1);
+        assert_eq!(deferred.trigger_at_ms, Some(now + 60_000));
+        assert_eq!(deferred.last_status.as_deref(), Some("error"));
+        assert_eq!(deferred.recent_runs, after_first_fire.recent_runs);
+        assert_eq!(
+            runner.deferred_until_ms.get("command_saturated_retry"),
+            Some(&(now + 60_000 + IDLE_DEFER_MS))
+        );
+
+        drop(permit);
+        runner.fire_due_tasks(now + 60_000).await;
+
+        let fired = store.get("command_saturated_retry").await.unwrap();
+        assert_eq!(fired.fire_count, 2);
+        assert_eq!(fired.retry_attempts, 2);
+        assert_eq!(fired.trigger_at_ms, Some(now + 180_000));
     }
 
     #[tokio::test]
