@@ -16,6 +16,7 @@ pub mod deadlock;
 pub mod decomposition;
 pub mod disagreement;
 pub mod error;
+pub mod fact_ledger;
 pub mod file_provenance;
 pub mod history;
 pub mod leases;

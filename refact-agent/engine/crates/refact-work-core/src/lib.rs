@@ -24,16 +24,18 @@ pub use settings::{
 pub use store::filesystem::{classify_mounts, classify_path, FilesystemKind};
 pub use store::records::{
     now_ms, AccessKind, ActivityObservationRecord, Adjudication, AdjudicationRefusal,
-    AdjudicationVerdict, CausalCause, CausalEventRecord, CausalKind, DecompositionOutcomeRecord,
-    DeliveryOutboxRecord, DeliveryState, DisagreementPosition, DisagreementRecord,
-    DisagreementStatus, EngineInstanceRecord, EvidenceKind, EvidenceRef, FilingRefusal,
-    IntentState, LeaseAcquisition, LeaseAuthority, LeaseRecord, PruneReport, QueuedWorkRecord,
-    RunIntentRecord,
+    AdjudicationVerdict, CausalCause, CausalEventRecord, CausalKind, ClaimAssessment,
+    ClaimCorroboration, ClaimPolicy, ClaimProvenance, ClaimRecord, ClaimRefusal, ClaimStatus,
+    ClaimSubject, ClaimSubjectKind, ClaimVerdict, DecompositionOutcomeRecord, DeliveryOutboxRecord,
+    DeliveryState, DisagreementPosition, DisagreementRecord, DisagreementStatus,
+    EngineInstanceRecord, EvidenceKind, EvidenceRef, FilingRefusal, IntentState, LeaseAcquisition,
+    LeaseAuthority, LeaseRecord, PruneReport, QueuedWorkRecord, RunIntentRecord,
+    CONFIDENCE_CERTAIN_PER_MILLE,
 };
 pub use store::schema::SCHEMA_VERSION;
 pub use store::{
-    default_store_path, CoordinationStore, DisagreementFiling, ProjectAccess, StoreError,
-    StoreWarning,
+    default_store_path, ClaimFiling, CoordinationStore, DisagreementFiling, ProjectAccess,
+    StoreError, StoreWarning,
 };
 pub use waitgraph::{
     detect, detect_stable, DeadlockReport, Detection, RunFacts, WaitEdge, WaitGraph,

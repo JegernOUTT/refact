@@ -403,6 +403,8 @@ tools:
   - disagreement_file
   - disagreement_list
   - disagreement_adjudicate
+  - claim_record
+  - claim_list
   - review
   - apply_patch
   - update_textdoc

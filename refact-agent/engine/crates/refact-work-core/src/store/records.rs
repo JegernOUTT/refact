@@ -671,6 +671,449 @@ impl DisagreementRecord {
     }
 }
 
+/// What a claim is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimSubjectKind {
+    File,
+    Symbol,
+    Behaviour,
+    Config,
+}
+
+impl ClaimSubjectKind {
+    pub const ALL: [ClaimSubjectKind; 4] = [
+        ClaimSubjectKind::File,
+        ClaimSubjectKind::Symbol,
+        ClaimSubjectKind::Behaviour,
+        ClaimSubjectKind::Config,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ClaimSubjectKind::File => "file",
+            ClaimSubjectKind::Symbol => "symbol",
+            ClaimSubjectKind::Behaviour => "behaviour",
+            ClaimSubjectKind::Config => "config",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<ClaimSubjectKind> {
+        ClaimSubjectKind::ALL
+            .into_iter()
+            .find(|k| k.as_str() == raw)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ClaimSubject {
+    pub kind: ClaimSubjectKind,
+    pub reference: String,
+}
+
+impl ClaimSubject {
+    pub fn new(kind: ClaimSubjectKind, reference: impl Into<String>) -> Self {
+        ClaimSubject {
+            kind,
+            reference: reference.into(),
+        }
+    }
+}
+
+impl fmt::Display for ClaimSubject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.kind.as_str(), self.reference)
+    }
+}
+
+/// Where one assertion came from: which run made it, on what evidence, when.
+///
+/// A claim carries one of these per independent run that reached it, so a read
+/// can never hand back a bare assertion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimProvenance {
+    pub author: WorkKey,
+    pub run_generation: i64,
+    pub evidence: Vec<EvidenceRef>,
+    pub observed_at_ms: i64,
+}
+
+impl ClaimProvenance {
+    /// Whether these two records name the same run. A run agreeing with itself
+    /// is not corroboration.
+    pub fn same_run(&self, other: &ClaimProvenance) -> bool {
+        self.author == other.author && self.run_generation == other.run_generation
+    }
+}
+
+/// Where a recorded claim stands.
+///
+/// `Contested` is not a demotion and not a decision: it means a contradicting
+/// claim is also on record and a disagreement was filed. Both sides carry it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimStatus {
+    Active,
+    Contested,
+    Stale,
+    Retracted,
+}
+
+impl ClaimStatus {
+    pub const ALL: [ClaimStatus; 4] = [
+        ClaimStatus::Active,
+        ClaimStatus::Contested,
+        ClaimStatus::Stale,
+        ClaimStatus::Retracted,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ClaimStatus::Active => "active",
+            ClaimStatus::Contested => "contested",
+            ClaimStatus::Stale => "stale",
+            ClaimStatus::Retracted => "retracted",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<ClaimStatus> {
+        ClaimStatus::ALL.into_iter().find(|s| s.as_str() == raw)
+    }
+
+    /// Whether this claim still says anything about the world.
+    pub fn is_standing(&self) -> bool {
+        matches!(self, ClaimStatus::Active | ClaimStatus::Contested)
+    }
+
+    /// Whether retention may drop it by age.
+    pub fn is_settled(&self) -> bool {
+        matches!(self, ClaimStatus::Stale | ClaimStatus::Retracted)
+    }
+}
+
+pub const CONFIDENCE_CERTAIN_PER_MILLE: u32 = 1_000;
+
+/// Case and spacing are not disagreement. Everything past that is left alone:
+/// two assertions that differ in wording are treated as different assertions
+/// rather than guessed at.
+fn normalize_claim_text(text: &str) -> String {
+    text.split_whitespace()
+        .map(|word| word.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_end_matches(['.', '!', ';'])
+        .to_string()
+}
+
+/// Why a claim could not be recorded at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimRefusal {
+    EmptyId,
+    EmptySubject,
+    EmptyRevision,
+    EmptyPredicate,
+    EmptyAssertion,
+    NoProvenance,
+    ConfidenceOutOfRange(u32),
+}
+
+impl fmt::Display for ClaimRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ClaimRefusal::EmptyId => write!(f, "a claim needs an id"),
+            ClaimRefusal::EmptySubject => write!(f, "a claim needs the subject it is about"),
+            ClaimRefusal::EmptyRevision => write!(
+                f,
+                "a claim needs the revision of the subject it was read from"
+            ),
+            ClaimRefusal::EmptyPredicate => {
+                write!(f, "a claim needs the property it asserts about the subject")
+            }
+            ClaimRefusal::EmptyAssertion => write!(f, "a claim needs what it concluded"),
+            ClaimRefusal::NoProvenance => write!(
+                f,
+                "a claim needs provenance: which run reached it, on what evidence"
+            ),
+            ClaimRefusal::ConfidenceOutOfRange(value) => write!(
+                f,
+                "confidence {value} is outside 0..={CONFIDENCE_CERTAIN_PER_MILLE} per mille"
+            ),
+        }
+    }
+}
+
+/// What an incoming claim does to what is already on its topic.
+///
+/// There is no variant meaning "replaces": the newer write can raise a
+/// confidence or open a dispute, never rewrite an assertion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimVerdict {
+    /// Nothing standing on this topic at this revision.
+    New,
+    /// An independent run reached the same conclusion. Confidence rises on the
+    /// claim already on record; no second entry is made.
+    Corroborates { claim_id: String },
+    /// The same run restating what it already stated. Nothing changes.
+    Repeats { claim_id: String },
+    /// A different conclusion on the same topic. Both are kept and a
+    /// disagreement is filed.
+    Contradicts { claim_id: String },
+    /// A different conclusion, but one side is too unsure for the dispute to be
+    /// worth adjudicating. Both are still kept; no disagreement is filed.
+    ContradictsBelowThreshold {
+        claim_id: String,
+        required_per_mille: u32,
+    },
+}
+
+impl ClaimVerdict {
+    pub fn claim_id(&self) -> Option<&str> {
+        match self {
+            ClaimVerdict::New => None,
+            ClaimVerdict::Corroborates { claim_id }
+            | ClaimVerdict::Repeats { claim_id }
+            | ClaimVerdict::Contradicts { claim_id }
+            | ClaimVerdict::ContradictsBelowThreshold { claim_id, .. } => Some(claim_id.as_str()),
+        }
+    }
+
+    pub fn is_contradiction(&self) -> bool {
+        matches!(
+            self,
+            ClaimVerdict::Contradicts { .. } | ClaimVerdict::ContradictsBelowThreshold { .. }
+        )
+    }
+}
+
+/// What reading the topic concluded, before anything is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimAssessment {
+    pub verdict: ClaimVerdict,
+    /// Claims on this topic argued against a revision that has since moved.
+    /// They are not evidence any more and have to be re-established.
+    pub staled: Vec<String>,
+}
+
+/// Bounds and thresholds the ledger is read against, so the decision never
+/// reaches for global settings itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimPolicy {
+    /// How much one independent corroboration raises confidence.
+    pub corroboration_step_per_mille: u32,
+    /// How sure both sides must be before a contradiction is worth filing as a
+    /// disagreement. Below it both claims are still kept.
+    pub contradiction_min_confidence_per_mille: u32,
+}
+
+/// What a corroboration did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimCorroboration {
+    Raised { from: u32, to: u32 },
+    AlreadyRecorded,
+}
+
+/// One typed statement about the codebase, with where it came from and how sure
+/// its authors were.
+///
+/// `subject` + `predicate` is the *topic*: what is being talked about and which
+/// property of it. `assertion` is the answer. Two claims on one topic either
+/// agree or contradict, and that is decidable without reading English.
+///
+/// A claim is an untrusted historical statement by an earlier run, never an
+/// instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimRecord {
+    pub project: ProjectKey,
+    pub claim_id: String,
+    pub subject: ClaimSubject,
+    /// Revision of the subject this claim was read from.
+    pub subject_revision: String,
+    /// The property asserted about the subject.
+    pub predicate: String,
+    /// What was concluded about that property.
+    pub assertion: String,
+    pub status: ClaimStatus,
+    pub confidence_per_mille: u32,
+    /// Every independent run that reached this claim, oldest first. Appended
+    /// to, never replaced.
+    pub provenance: Vec<ClaimProvenance>,
+    /// Disagreement records this claim is a side of.
+    pub contested_by: Vec<String>,
+    pub asserted_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+impl ClaimRecord {
+    pub fn validate(&self) -> Result<(), ClaimRefusal> {
+        if self.claim_id.trim().is_empty() {
+            return Err(ClaimRefusal::EmptyId);
+        }
+        if self.subject.reference.trim().is_empty() {
+            return Err(ClaimRefusal::EmptySubject);
+        }
+        if self.subject_revision.trim().is_empty() {
+            return Err(ClaimRefusal::EmptyRevision);
+        }
+        if self.predicate.trim().is_empty() {
+            return Err(ClaimRefusal::EmptyPredicate);
+        }
+        if self.assertion.trim().is_empty() {
+            return Err(ClaimRefusal::EmptyAssertion);
+        }
+        if self.provenance.is_empty() {
+            return Err(ClaimRefusal::NoProvenance);
+        }
+        if self.confidence_per_mille > CONFIDENCE_CERTAIN_PER_MILLE {
+            return Err(ClaimRefusal::ConfidenceOutOfRange(
+                self.confidence_per_mille,
+            ));
+        }
+        Ok(())
+    }
+
+    /// What this claim is about, as one comparable key.
+    pub fn topic_key(&self) -> String {
+        format!("{}|{}", self.subject, normalize_claim_text(&self.predicate))
+    }
+
+    pub fn same_topic(&self, other: &ClaimRecord) -> bool {
+        self.subject == other.subject
+            && normalize_claim_text(&self.predicate) == normalize_claim_text(&other.predicate)
+    }
+
+    pub fn same_conclusion(&self, other: &ClaimRecord) -> bool {
+        normalize_claim_text(&self.assertion) == normalize_claim_text(&other.assertion)
+    }
+
+    /// Same topic, same revision, opposite conclusions. Anything argued against
+    /// a different revision is not a contradiction — the two were not reading
+    /// the same thing.
+    pub fn contradicts(&self, other: &ClaimRecord) -> bool {
+        self.same_topic(other)
+            && self.subject_revision == other.subject_revision
+            && self.status.is_standing()
+            && other.status.is_standing()
+            && !self.same_conclusion(other)
+    }
+
+    pub fn is_stale_against(&self, current_revision: &str) -> bool {
+        self.subject_revision != current_revision
+    }
+
+    /// The runs behind `incoming` that this claim does not already carry.
+    pub fn novel_provenance(&self, incoming: &[ClaimProvenance]) -> Vec<ClaimProvenance> {
+        incoming
+            .iter()
+            .filter(|candidate| {
+                !self
+                    .provenance
+                    .iter()
+                    .any(|recorded| recorded.same_run(candidate))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Record independent agreement: append the run and raise confidence.
+    /// The assertion itself is untouched.
+    pub fn corroborate(
+        &mut self,
+        incoming: &[ClaimProvenance],
+        step_per_mille: u32,
+        at_ms: i64,
+    ) -> ClaimCorroboration {
+        let novel = self.novel_provenance(incoming);
+        if novel.is_empty() {
+            return ClaimCorroboration::AlreadyRecorded;
+        }
+        let from = self.confidence_per_mille;
+        let raise = step_per_mille.saturating_mul(novel.len() as u32);
+        self.confidence_per_mille = from.saturating_add(raise).min(CONFIDENCE_CERTAIN_PER_MILLE);
+        self.provenance.extend(novel);
+        self.updated_at_ms = at_ms;
+        ClaimCorroboration::Raised {
+            from,
+            to: self.confidence_per_mille,
+        }
+    }
+
+    /// Note that this claim is one side of a filed disagreement. Nothing about
+    /// what it asserts changes.
+    pub fn mark_contested(&mut self, disagreement_id: &str, at_ms: i64) {
+        if !self
+            .contested_by
+            .iter()
+            .any(|recorded| recorded == disagreement_id)
+        {
+            self.contested_by.push(disagreement_id.to_string());
+        }
+        self.status = ClaimStatus::Contested;
+        self.updated_at_ms = at_ms;
+    }
+
+    pub fn mark_stale(&mut self, at_ms: i64) {
+        self.status = ClaimStatus::Stale;
+        self.updated_at_ms = at_ms;
+    }
+
+    pub fn retract(&mut self, at_ms: i64) {
+        self.status = ClaimStatus::Retracted;
+        self.updated_at_ms = at_ms;
+    }
+
+    /// Read this claim against what the ledger already holds on its topic.
+    ///
+    /// Side-effect free, so the decision can be inspected before anything is
+    /// written — and so it can be tested without a store.
+    pub fn assess(&self, on_topic: &[ClaimRecord], policy: &ClaimPolicy) -> ClaimAssessment {
+        let mut staled = Vec::new();
+        let mut live: Vec<&ClaimRecord> = Vec::new();
+        for existing in on_topic {
+            if existing.claim_id == self.claim_id || !self.same_topic(existing) {
+                continue;
+            }
+            if existing.status == ClaimStatus::Retracted {
+                continue;
+            }
+            if existing.is_stale_against(&self.subject_revision) {
+                if existing.status != ClaimStatus::Stale {
+                    staled.push(existing.claim_id.clone());
+                }
+                continue;
+            }
+            live.push(existing);
+        }
+        if let Some(agreeing) = live.iter().find(|existing| self.same_conclusion(existing)) {
+            let claim_id = agreeing.claim_id.clone();
+            let verdict = if agreeing.novel_provenance(&self.provenance).is_empty() {
+                ClaimVerdict::Repeats { claim_id }
+            } else {
+                ClaimVerdict::Corroborates { claim_id }
+            };
+            return ClaimAssessment { verdict, staled };
+        }
+        if let Some(opposing) = live.first() {
+            let threshold = policy.contradiction_min_confidence_per_mille;
+            let claim_id = opposing.claim_id.clone();
+            let verdict = if self.confidence_per_mille >= threshold
+                && opposing.confidence_per_mille >= threshold
+            {
+                ClaimVerdict::Contradicts { claim_id }
+            } else {
+                ClaimVerdict::ContradictsBelowThreshold {
+                    claim_id,
+                    required_per_mille: threshold,
+                }
+            };
+            return ClaimAssessment { verdict, staled };
+        }
+        ClaimAssessment {
+            verdict: ClaimVerdict::New,
+            staled,
+        }
+    }
+}
+
 /// Which boundary produced a causal event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -780,6 +1223,7 @@ pub struct PruneReport {
     pub decomposition_outcomes: usize,
     pub disagreements: usize,
     pub causal_events: usize,
+    pub claims: usize,
 }
 
 impl PruneReport {
@@ -793,5 +1237,6 @@ impl PruneReport {
             + self.decomposition_outcomes
             + self.disagreements
             + self.causal_events
+            + self.claims
     }
 }

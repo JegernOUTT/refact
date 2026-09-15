@@ -265,6 +265,8 @@ tools:
   - disagreement_file
   - disagreement_list
   - disagreement_adjudicate
+  - claim_record
+  - claim_list
   - agent_finish
   - task_mem_save
   - task_mem_search

@@ -93,7 +93,7 @@ struct AdjudicateArgs {
 }
 
 /// `runtime:id` as `WorkKey` prints it; a bare id is a background agent.
-fn parse_author(raw: &str) -> WorkKey {
+pub(crate) fn parse_author(raw: &str) -> WorkKey {
     match raw.split_once(':') {
         Some((runtime, id)) => match RuntimeKind::parse(runtime) {
             Some(runtime) if !id.is_empty() => WorkKey::new(runtime, id),

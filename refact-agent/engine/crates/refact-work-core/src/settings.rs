@@ -1,4 +1,5 @@
 use crate::contracts::WorkPriority;
+use crate::store::records::CONFIDENCE_CERTAIN_PER_MILLE;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -181,6 +182,20 @@ pub struct CoordinationSettings {
     /// Dissent is a signal, not automatically a blocker, so this is off unless
     /// a project asks for it.
     pub disagreement_blocks_completion: bool,
+    /// Claims one project's fact ledger may hold. Past it the least recently
+    /// touched are evicted, deterministically.
+    pub store_max_claims: usize,
+    /// Claims one subject may carry. Recording past the cap is refused rather
+    /// than evicting something another run established.
+    pub claim_max_per_subject: usize,
+    /// How long a settled claim is kept. A standing or contested claim is never
+    /// dropped by age.
+    pub claim_retention_ms: u64,
+    /// How much one independent corroboration raises a claim's confidence.
+    pub claim_corroboration_step_per_mille: usize,
+    /// How sure both sides must be before a contradiction is filed as a
+    /// disagreement. Below it both claims are still kept, unmerged.
+    pub claim_contradiction_min_confidence_per_mille: usize,
     /// Causal events retained, both in the in-memory recorder and in the
     /// store. Beyond it the oldest events are evicted and any trace that
     /// needed them reports itself incomplete rather than guessing.
@@ -369,6 +384,11 @@ impl Default for CoordinationSettings {
             disagreement_max_open: 64,
             disagreement_retention_ms: 30 * 24 * 60 * 60 * 1_000,
             disagreement_blocks_completion: false,
+            store_max_claims: 4_096,
+            claim_max_per_subject: 64,
+            claim_retention_ms: 30 * 24 * 60 * 60 * 1_000,
+            claim_corroboration_step_per_mille: 100,
+            claim_contradiction_min_confidence_per_mille: 250,
             store_max_causal_events: 16_384,
             team_max_count: 32,
             team_role_max_count: 16,
@@ -703,6 +723,12 @@ impl CoordinationSettings {
             ),
             ("store_max_disagreements", self.store_max_disagreements),
             ("disagreement_max_open", self.disagreement_max_open),
+            ("store_max_claims", self.store_max_claims),
+            ("claim_max_per_subject", self.claim_max_per_subject),
+            (
+                "claim_corroboration_step_per_mille",
+                self.claim_corroboration_step_per_mille,
+            ),
             ("store_max_causal_events", self.store_max_causal_events),
             ("decomposition_min_samples", self.decomposition_min_samples),
             ("team_max_count", self.team_max_count),
@@ -726,6 +752,21 @@ impl CoordinationSettings {
             "disagreement_retention_ms",
             self.disagreement_retention_ms,
             1,
+        );
+        at_least(&mut v, "claim_retention_ms", self.claim_retention_ms, 1);
+        not_greater(
+            &mut v,
+            "claim_contradiction_min_confidence_per_mille",
+            self.claim_contradiction_min_confidence_per_mille as u64,
+            "full certainty",
+            CONFIDENCE_CERTAIN_PER_MILLE as u64,
+        );
+        not_greater(
+            &mut v,
+            "claim_corroboration_step_per_mille",
+            self.claim_corroboration_step_per_mille as u64,
+            "full certainty",
+            CONFIDENCE_CERTAIN_PER_MILLE as u64,
         );
         at_least(
             &mut v,

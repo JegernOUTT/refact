@@ -7,6 +7,7 @@ pub const MIGRATIONS: &[&str] = &[
     V6_DECOMPOSITION_OUTCOMES,
     V7_DISAGREEMENTS,
     V8_CAUSAL_EVENTS,
+    V9_CLAIMS,
 ];
 
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -180,4 +181,27 @@ CREATE INDEX idx_causal_events_time
     ON causal_events (project, recorded_at_ms);
 CREATE INDEX idx_causal_events_scope
     ON causal_events (project, scope, recorded_at_ms);
+";
+
+const V9_CLAIMS: &str = "
+CREATE TABLE claims (
+    project TEXT NOT NULL,
+    claim_id TEXT NOT NULL,
+    subject_kind TEXT NOT NULL,
+    subject_ref TEXT NOT NULL,
+    subject_revision TEXT NOT NULL,
+    predicate TEXT NOT NULL,
+    assertion TEXT NOT NULL,
+    status TEXT NOT NULL,
+    confidence_per_mille INTEGER NOT NULL,
+    provenance TEXT NOT NULL,
+    contested_by TEXT NOT NULL,
+    asserted_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (project, claim_id)
+) WITHOUT ROWID;
+CREATE INDEX idx_claims_subject
+    ON claims (project, subject_kind, subject_ref, updated_at_ms);
+CREATE INDEX idx_claims_status
+    ON claims (project, status, updated_at_ms);
 ";

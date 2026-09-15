@@ -7,10 +7,11 @@ use crate::identity::{CheckoutKey, ProjectKey, RunKey, RuntimeKind, WorkKey};
 use crate::settings::{CoordinationSettings, SettingsError};
 use filesystem::FilesystemKind;
 use records::{
-    AccessKind, ActivityObservationRecord, CausalCause, CausalEventRecord, CausalKind,
-    DecompositionOutcomeRecord, DeliveryOutboxRecord, DeliveryState, DisagreementRecord,
-    DisagreementStatus, EngineInstanceRecord, IntentState, LeaseAcquisition, LeaseAuthority,
-    LeaseRecord, PresenceMark, PruneReport, QueuedWorkRecord, RunIntentRecord,
+    AccessKind, ActivityObservationRecord, CausalCause, CausalEventRecord, CausalKind, ClaimRecord,
+    ClaimStatus, ClaimSubject, ClaimSubjectKind, DecompositionOutcomeRecord, DeliveryOutboxRecord,
+    DeliveryState, DisagreementRecord, DisagreementStatus, EngineInstanceRecord, IntentState,
+    LeaseAcquisition, LeaseAuthority, LeaseRecord, PresenceMark, PruneReport, QueuedWorkRecord,
+    RunIntentRecord,
 };
 use rusqlite::{params, OptionalExtension};
 use std::fmt;
@@ -35,6 +36,10 @@ const DISAGREEMENT_COLUMNS: &str = "project, record_id, claim, subject, status, 
      adjudication, open_reason, filed_at_ms, updated_at_ms";
 const CAUSAL_COLUMNS: &str = "project, event_id, seq, kind, runtime, work_id, scope, causes, \
      recorded_at_ms, paths";
+
+const CLAIM_COLUMNS: &str = "project, claim_id, subject_kind, subject_ref, subject_revision, \
+     predicate, assertion, status, confidence_per_mille, provenance, contested_by, \
+     asserted_at_ms, updated_at_ms";
 
 static NEXT_STORE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -288,6 +293,18 @@ pub enum DisagreementFiling {
     Exists(Box<DisagreementRecord>),
     /// The project already holds as many open disagreements as it is allowed.
     OpenLimit(usize),
+}
+
+/// The outcome of recording a claim.
+///
+/// `Exists` carries the stored claim **untouched**. There is no variant that
+/// replaces an assertion, because no statement in this crate can.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimFiling {
+    Recorded(Box<ClaimRecord>),
+    Exists(Box<ClaimRecord>),
+    /// The subject already carries as many claims as it is allowed.
+    SubjectLimit(usize),
 }
 
 pub struct CoordinationStore {
@@ -2011,13 +2028,260 @@ impl CoordinationStore {
             .map_err(|err| from_tokio(&self.path, err))
     }
 
+    /// Record a claim. A `claim_id` already on record is returned as it stands,
+    /// never replaced.
+    ///
+    /// This is the only statement in the crate that writes an assertion, and it
+    /// is an INSERT. `predicate`, `assertion`, `subject` and `subject_revision`
+    /// appear in no UPDATE anywhere, so a later writer cannot rewrite what an
+    /// earlier run established.
+    pub async fn record_claim(
+        &self,
+        access: &ProjectAccess,
+        record: &ClaimRecord,
+    ) -> Result<ClaimFiling, StoreError> {
+        let scope = self.scope_for(access, &record.project)?;
+        let max_per_subject = self.settings.claim_max_per_subject as i64;
+        let record = record.clone();
+        let provenance = serde_json::to_string(&record.provenance)
+            .map_err(|err| StoreError::Decode(err.to_string()))?;
+        let contested_by = serde_json::to_string(&record.contested_by)
+            .map_err(|err| StoreError::Decode(err.to_string()))?;
+        self.conn
+            .call(move |conn| {
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let existing = tx
+                    .query_row(
+                        &format!(
+                            "SELECT {CLAIM_COLUMNS} FROM claims \
+                             WHERE project = ?1 AND claim_id = ?2"
+                        ),
+                        params![scope, record.claim_id],
+                        claim_columns,
+                    )
+                    .optional()?;
+                if let Some(existing) = existing {
+                    tx.commit()?;
+                    return Ok(ClaimFiling::Exists(Box::new(decode_claim(existing)?)));
+                }
+                let held: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM claims \
+                     WHERE project = ?1 AND subject_kind = ?2 AND subject_ref = ?3",
+                    params![
+                        scope,
+                        record.subject.kind.as_str(),
+                        record.subject.reference
+                    ],
+                    |row| row.get(0),
+                )?;
+                if held >= max_per_subject {
+                    tx.commit()?;
+                    return Ok(ClaimFiling::SubjectLimit(max_per_subject as usize));
+                }
+                tx.execute(
+                    "INSERT INTO claims (project, claim_id, subject_kind, subject_ref, \
+                     subject_revision, predicate, assertion, status, confidence_per_mille, \
+                     provenance, contested_by, asserted_at_ms, updated_at_ms) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![
+                        scope,
+                        record.claim_id,
+                        record.subject.kind.as_str(),
+                        record.subject.reference,
+                        record.subject_revision,
+                        record.predicate,
+                        record.assertion,
+                        record.status.as_str(),
+                        record.confidence_per_mille as i64,
+                        provenance,
+                        contested_by,
+                        record.asserted_at_ms,
+                        record.updated_at_ms
+                    ],
+                )?;
+                tx.commit()?;
+                Ok(ClaimFiling::Recorded(Box::new(record)))
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// Write back what corroboration did: the confidence and the runs behind
+    /// it. What the claim asserts is not in this statement.
+    pub async fn put_claim_confidence(
+        &self,
+        access: &ProjectAccess,
+        record: &ClaimRecord,
+    ) -> Result<bool, StoreError> {
+        let scope = self.scope_for(access, &record.project)?;
+        let record = record.clone();
+        let provenance = serde_json::to_string(&record.provenance)
+            .map_err(|err| StoreError::Decode(err.to_string()))?;
+        self.conn
+            .call(move |conn| {
+                let changed = conn.execute(
+                    "UPDATE claims SET confidence_per_mille = ?3, provenance = ?4, \
+                     updated_at_ms = ?5 WHERE project = ?1 AND claim_id = ?2",
+                    params![
+                        scope,
+                        record.claim_id,
+                        record.confidence_per_mille as i64,
+                        provenance,
+                        record.updated_at_ms
+                    ],
+                )?;
+                Ok(changed > 0)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// Write back where a claim stands: contested, stale or retracted, and the
+    /// disagreements it is a side of. What it asserts is not in this statement.
+    pub async fn put_claim_standing(
+        &self,
+        access: &ProjectAccess,
+        record: &ClaimRecord,
+    ) -> Result<bool, StoreError> {
+        let scope = self.scope_for(access, &record.project)?;
+        let record = record.clone();
+        let contested_by = serde_json::to_string(&record.contested_by)
+            .map_err(|err| StoreError::Decode(err.to_string()))?;
+        self.conn
+            .call(move |conn| {
+                let changed = conn.execute(
+                    "UPDATE claims SET status = ?3, contested_by = ?4, updated_at_ms = ?5 \
+                     WHERE project = ?1 AND claim_id = ?2",
+                    params![
+                        scope,
+                        record.claim_id,
+                        record.status.as_str(),
+                        contested_by,
+                        record.updated_at_ms
+                    ],
+                )?;
+                Ok(changed > 0)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    pub async fn get_claim(
+        &self,
+        access: &ProjectAccess,
+        claim_id: &str,
+    ) -> Result<Option<ClaimRecord>, StoreError> {
+        let scope = self.scope(access)?;
+        let claim_id = claim_id.to_string();
+        self.conn
+            .call(move |conn| {
+                let row = conn
+                    .query_row(
+                        &format!(
+                            "SELECT {CLAIM_COLUMNS} FROM claims \
+                             WHERE project = ?1 AND claim_id = ?2"
+                        ),
+                        params![scope, claim_id],
+                        claim_columns,
+                    )
+                    .optional()?;
+                match row {
+                    Some(row) => Ok(Some(decode_claim(row)?)),
+                    None => Ok(None),
+                }
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// Claims of this project, newest first and bounded by `store_max_claims`.
+    pub async fn list_claims(
+        &self,
+        access: &ProjectAccess,
+        status: Option<ClaimStatus>,
+    ) -> Result<Vec<ClaimRecord>, StoreError> {
+        let scope = self.scope(access)?;
+        let limit = self.settings.store_max_claims as i64;
+        let status = status.map(|status| status.as_str().to_string());
+        self.conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {CLAIM_COLUMNS} FROM claims \
+                     WHERE project = ?1 AND (?2 IS NULL OR status = ?2) \
+                     ORDER BY updated_at_ms DESC, claim_id DESC LIMIT ?3"
+                ))?;
+                let rows = stmt.query_map(params![scope, status, limit], claim_columns)?;
+                let mut records = Vec::new();
+                for row in rows {
+                    records.push(decode_claim(row?)?);
+                }
+                Ok(records)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// Every claim recorded about one subject, whatever revision or state.
+    /// This is what an incoming claim is assessed against.
+    pub async fn claims_on_subject(
+        &self,
+        access: &ProjectAccess,
+        subject: &ClaimSubject,
+    ) -> Result<Vec<ClaimRecord>, StoreError> {
+        let scope = self.scope(access)?;
+        let limit = self.settings.store_max_claims as i64;
+        let kind = subject.kind.as_str().to_string();
+        let reference = subject.reference.clone();
+        self.conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {CLAIM_COLUMNS} FROM claims \
+                     WHERE project = ?1 AND subject_kind = ?2 AND subject_ref = ?3 \
+                     ORDER BY asserted_at_ms ASC, claim_id ASC LIMIT ?4"
+                ))?;
+                let rows = stmt.query_map(params![scope, kind, reference, limit], claim_columns)?;
+                let mut records = Vec::new();
+                for row in rows {
+                    records.push(decode_claim(row?)?);
+                }
+                Ok(records)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// Delete settled claims last touched before `cutoff_ms`. A standing or
+    /// contested claim is never dropped by age.
+    pub async fn expire_claims(
+        &self,
+        access: &ProjectAccess,
+        cutoff_ms: i64,
+    ) -> Result<usize, StoreError> {
+        let scope = self.scope(access)?;
+        let settled = sql_settled_claim_states();
+        self.conn
+            .call(move |conn| {
+                let removed = conn.execute(
+                    &format!(
+                        "DELETE FROM claims WHERE project = ?1 AND status IN ({settled}) \
+                         AND updated_at_ms < ?2"
+                    ),
+                    params![scope, cutoff_ms],
+                )?;
+                Ok(removed)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
     pub async fn prune(&self, access: &ProjectAccess) -> Result<PruneReport, StoreError> {
         let scope = self.scope(access)?;
         let settings = self.settings.clone();
         self.conn
             .call(move |conn| {
                 let settled = format!("AND state IN ({})", sql_terminal_delivery_states());
-                let specs: [(&str, &[&str], &str, i64, &str); 9] = [
+                let specs: [(&str, &[&str], &str, i64, &str); 10] = [
                     (
                         "engine_instances",
                         &["instance_id"],
@@ -2081,6 +2345,13 @@ impl CoordinationStore {
                         settings.store_max_causal_events as i64,
                         "",
                     ),
+                    (
+                        "claims",
+                        &["claim_id"],
+                        "updated_at_ms",
+                        settings.store_max_claims as i64,
+                        "",
+                    ),
                 ];
                 let mut report = PruneReport::default();
                 let tx =
@@ -2107,7 +2378,8 @@ impl CoordinationStore {
                         "activity_observations" => report.activity_observations = removed,
                         "decomposition_outcomes" => report.decomposition_outcomes = removed,
                         "disagreements" => report.disagreements = removed,
-                        _ => report.causal_events = removed,
+                        "causal_events" => report.causal_events = removed,
+                        _ => report.claims = removed,
                     }
                 }
                 tx.commit()?;
@@ -2132,6 +2404,17 @@ fn sql_terminal_delivery_states() -> String {
         .filter(DeliveryState::is_terminal)
         .collect::<Vec<_>>();
     sql_state_list(&terminal)
+}
+
+/// Claim states retention may drop. Derived from `ClaimStatus::is_settled`, so
+/// a new standing state can never fall out of the ledger by omission.
+fn sql_settled_claim_states() -> String {
+    ClaimStatus::ALL
+        .into_iter()
+        .filter(ClaimStatus::is_settled)
+        .map(|status| format!("'{}'", status.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Two peers creating the same database attempt the journal switch in
@@ -2575,6 +2858,73 @@ fn decode_disagreement(
         adjudication,
         open_reason: columns.open_reason,
         filed_at_ms: columns.filed_at_ms,
+        updated_at_ms: columns.updated_at_ms,
+    })
+}
+
+struct ClaimColumns {
+    project: String,
+    claim_id: String,
+    subject_kind: String,
+    subject_ref: String,
+    subject_revision: String,
+    predicate: String,
+    assertion: String,
+    status: String,
+    confidence_per_mille: i64,
+    provenance: String,
+    contested_by: String,
+    asserted_at_ms: i64,
+    updated_at_ms: i64,
+}
+
+fn claim_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClaimColumns> {
+    Ok(ClaimColumns {
+        project: row.get(0)?,
+        claim_id: row.get(1)?,
+        subject_kind: row.get(2)?,
+        subject_ref: row.get(3)?,
+        subject_revision: row.get(4)?,
+        predicate: row.get(5)?,
+        assertion: row.get(6)?,
+        status: row.get(7)?,
+        confidence_per_mille: row.get(8)?,
+        provenance: row.get(9)?,
+        contested_by: row.get(10)?,
+        asserted_at_ms: row.get(11)?,
+        updated_at_ms: row.get(12)?,
+    })
+}
+
+fn decode_claim(columns: ClaimColumns) -> Result<ClaimRecord, tokio_rusqlite::Error> {
+    let status = ClaimStatus::parse(&columns.status).ok_or_else(|| {
+        decode(format!(
+            "unknown claim status `{}` in claims",
+            columns.status
+        ))
+    })?;
+    let kind = ClaimSubjectKind::parse(&columns.subject_kind).ok_or_else(|| {
+        decode(format!(
+            "unknown claim subject kind `{}` in claims",
+            columns.subject_kind
+        ))
+    })?;
+    let provenance = serde_json::from_str(&columns.provenance)
+        .map_err(|err| decode(format!("unreadable provenance in claims: {err}")))?;
+    let contested_by = serde_json::from_str(&columns.contested_by)
+        .map_err(|err| decode(format!("unreadable contested_by in claims: {err}")))?;
+    Ok(ClaimRecord {
+        project: ProjectKey::new(columns.project),
+        claim_id: columns.claim_id,
+        subject: ClaimSubject::new(kind, columns.subject_ref),
+        subject_revision: columns.subject_revision,
+        predicate: columns.predicate,
+        assertion: columns.assertion,
+        status,
+        confidence_per_mille: columns.confidence_per_mille.clamp(0, u32::MAX as i64) as u32,
+        provenance,
+        contested_by,
+        asserted_at_ms: columns.asserted_at_ms,
         updated_at_ms: columns.updated_at_ms,
     })
 }

@@ -772,6 +772,12 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
                 config_path: config_path.clone(),
             },
         ),
+        Box::new(crate::tools::tool_fact_ledger::ToolClaimRecord {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_fact_ledger::ToolClaimList {
+            config_path: config_path.clone(),
+        }),
         Box::new(crate::tools::tool_agent_interact::ToolAgentsOverview {
             config_path: config_path.clone(),
         }),
