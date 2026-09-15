@@ -175,6 +175,11 @@ fn task_card_from_mapping(
     if let Some(kind) = &kind {
         push_unique(&mut tags, format!("kind:{}", kind));
     }
+    for (field, prefix) in [("role", "role"), ("agent_id", "agent"), ("run_id", "run")] {
+        if let Some(value) = yaml_string(mapping, field) {
+            push_unique(&mut tags, format!("{}:{}", prefix, value));
+        }
+    }
     for tag in task_card_tags(mapping) {
         push_unique(&mut tags, tag);
     }
@@ -584,6 +589,75 @@ mod tests {
             )),
             Some("T-1".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn task_memory_cards_carry_provenance_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let memories_dir = dir.path().join(".refact/tasks/task-1/memories");
+        tokio::fs::create_dir_all(&memories_dir).await.unwrap();
+        tokio::fs::write(
+            memories_dir.join("private.md"),
+            "---\ntitle: Private\ntask_id: task-1\nkind: finding\nnamespace: agent:A-1\nrole: agents\nagent_id: A-1\nrun_id: chat-a1\n---\n\nprivate needle",
+        )
+        .await
+        .unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+
+        let index = build_knowledge_index(gcx).await;
+        let hits = index.search(
+            "needle",
+            &KnowledgeSearchFilters {
+                scope: Some("task".to_string()),
+                task_id: Some("task-1".to_string()),
+                ..Default::default()
+            },
+            10,
+        );
+
+        assert_eq!(hits.len(), 1);
+        let tags = &hits[0].card.tags;
+        assert!(tags.contains(&"namespace:agent:A-1".to_string()));
+        assert!(tags.contains(&"role:agents".to_string()));
+        assert!(tags.contains(&"agent:A-1".to_string()));
+        assert!(tags.contains(&"run:chat-a1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn related_memories_section_still_excludes_the_current_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        tokio::fs::write(
+            knowledge_dir.join("current.md"),
+            "---\ntitle: Current Root\ntags: [shared]\n---\n\ncurrent body",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            knowledge_dir.join("other.md"),
+            "---\ntitle: Other Card\ntags: [shared]\n---\n\nother body",
+        )
+        .await
+        .unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+
+        let cards = build_knowledge_index(gcx)
+            .await
+            .related_for_tags(&vec!["shared".to_string()], 5);
+        let current_path = cards
+            .iter()
+            .find(|card| card.title == "Current Root")
+            .unwrap()
+            .file_path
+            .clone();
+
+        let section = format_related_memories_section(&cards, Some(&current_path));
+
+        assert!(section.contains("Other Card"));
+        assert!(!section.contains("Current Root"));
     }
 
     #[tokio::test]

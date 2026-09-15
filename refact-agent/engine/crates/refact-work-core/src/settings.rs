@@ -9,6 +9,9 @@ use std::sync::{OnceLock, RwLock};
 pub struct CoordinationSettings {
     pub enabled: bool,
     pub auto_inject_enabled: bool,
+    /// Let the task planner read `agent:<id>` memories it does not own. Off by
+    /// default; every grant is audited.
+    pub memory_supervisor_override: bool,
     pub max_active_engine: usize,
     pub max_active_project: usize,
     pub max_active_root: usize,
@@ -235,6 +238,7 @@ impl Default for CoordinationSettings {
         CoordinationSettings {
             enabled: true,
             auto_inject_enabled: true,
+            memory_supervisor_override: false,
             max_active_engine: 32,
             max_active_project: 16,
             max_active_root: 16,

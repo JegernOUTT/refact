@@ -108,6 +108,7 @@ const fn coordination_string_enum(
 static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_bool("enabled"),
     coordination_bool("auto_inject_enabled"),
+    coordination_bool("memory_supervisor_override"),
     coordination_integer("max_active_engine", 1, 4_096),
     coordination_integer("max_active_project", 1, 4_096),
     coordination_integer("max_active_root", 1, 4_096),
