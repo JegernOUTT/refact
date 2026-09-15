@@ -16,7 +16,7 @@ use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::process::Child;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::daemon::events::EventBus;
@@ -125,7 +125,7 @@ pub struct Supervisor {
     idle_timeout_secs: u64,
     worker_executable: Result<PathBuf, String>,
     client: reqwest::Client,
-    shutdown_tx: broadcast::Sender<String>,
+    shutdown_tx: watch::Sender<Option<String>>,
 }
 
 impl Supervisor {
@@ -152,7 +152,7 @@ impl Supervisor {
         daemon_auth_token: Option<String>,
         worker_executable: Result<PathBuf, String>,
     ) -> Arc<Self> {
-        let (shutdown_tx, _) = broadcast::channel(16);
+        let (shutdown_tx, _) = watch::channel(None);
         Arc::new(Self {
             workers: RwLock::new(HashMap::new()),
             events,
@@ -177,7 +177,7 @@ impl Supervisor {
     }
 
     pub fn request_shutdown(&self, reason: String) {
-        let _ = self.shutdown_tx.send(reason);
+        self.shutdown_tx.send_replace(Some(reason));
     }
 
     pub async fn set_daemon_port(&self, port: u16) {
@@ -830,7 +830,7 @@ impl Supervisor {
                 return Err("worker readiness timed out".to_string());
             }
             tokio::select! {
-                _ = shutdown_rx.recv() => {
+                _ = shutdown_requested(&mut shutdown_rx) => {
                     return Err("worker startup cancelled by daemon shutdown".to_string());
                 }
                 _ = tokio::time::sleep(READINESS_POLL) => {}
@@ -945,7 +945,7 @@ impl Supervisor {
                 return Ok(ReadinessOutcome::Timeout);
             }
             let response = tokio::select! {
-                _ = shutdown_rx.recv() => return Ok(ReadinessOutcome::Shutdown),
+                _ = shutdown_requested(&mut shutdown_rx) => return Ok(ReadinessOutcome::Shutdown),
                 response = self.client.get(&url).send() => response,
             };
             if let Ok(response) = response {
@@ -959,7 +959,7 @@ impl Supervisor {
                 }
             }
             tokio::select! {
-                _ = shutdown_rx.recv() => return Ok(ReadinessOutcome::Shutdown),
+                _ = shutdown_requested(&mut shutdown_rx) => return Ok(ReadinessOutcome::Shutdown),
                 _ = tokio::time::sleep(READINESS_POLL) => {}
             }
         }
@@ -1566,6 +1566,18 @@ async fn lsp_port_accepts(port: u16) -> bool {
     )
 }
 
+async fn shutdown_requested(shutdown_rx: &mut watch::Receiver<Option<String>>) {
+    loop {
+        let already_requested = shutdown_rx.borrow().is_some();
+        if already_requested {
+            return;
+        }
+        if shutdown_rx.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 fn worker_unavailable_reason(info: &WorkerInfo) -> String {
     match &info.state {
         WorkerState::Failed { reason } => reason.clone(),
@@ -1676,6 +1688,11 @@ fn runtime_restart_delay(delay: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::events::DaemonEvent;
+    use tokio::sync::broadcast;
+
+    const HANG_GUARD: Duration =
+        Duration::from_secs(READINESS_TIMEOUT.as_secs() + KILL_WAIT_TIMEOUT.as_secs());
 
     struct EnvGuard {
         keys: Vec<(&'static str, Option<String>)>,
@@ -2022,19 +2039,41 @@ mod tests {
         }
     }
 
-    async fn wait_for_starting(supervisor: &Supervisor, project_id: &str) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+    async fn without_hanging<F: Future>(future: F, what: &str) -> F::Output {
+        match tokio::time::timeout(HANG_GUARD, future).await {
+            Ok(output) => output,
+            Err(_) => panic!(
+                "{what} never finished within {HANG_GUARD:?}, so the supervisor outlived its own readiness bound of {READINESS_TIMEOUT:?}"
+            ),
+        }
+    }
+
+    async fn wait_for_starting(
+        events: &mut broadcast::Receiver<DaemonEvent>,
+        start: &mut JoinHandle<Result<WorkerInfo, String>>,
+        project_id: &str,
+    ) {
         loop {
-            if supervisor
-                .worker_info(project_id)
-                .await
-                .map(|info| matches!(info.state, WorkerState::Starting))
-                .unwrap_or(false)
-            {
-                return;
+            tokio::select! {
+                event = events.recv() => match event {
+                    Ok(event) => {
+                        if event.kind == "worker_starting"
+                            && event.project_id.as_deref() == Some(project_id)
+                        {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        panic!("daemon event bus dropped {skipped} events before worker_starting");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("daemon event bus closed before worker_starting");
+                    }
+                },
+                joined = &mut *start => {
+                    panic!("worker startup returned before it ever reported startup: {joined:?}");
+                }
             }
-            assert!(Instant::now() < deadline, "worker did not enter startup");
-            tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
 
@@ -2050,30 +2089,25 @@ mod tests {
         };
         std::env::set_var("FAKE_WORKER_DELAY_READY", "30");
         let dir = tempfile::tempdir().unwrap();
-        let supervisor = Supervisor::new(
-            EventBus::new(dir.path().join("events.jsonl")),
-            dir.path().join("daemon"),
-            8488,
-        );
+        let events = EventBus::new(dir.path().join("events.jsonl"));
+        let supervisor = Supervisor::new(events.clone(), dir.path().join("daemon"), 8488);
         let entry = test_entry(dir.path().to_path_buf());
-        let start = tokio::spawn({
+        let mut event_rx = events.subscribe();
+        let mut start = tokio::spawn({
             let supervisor = supervisor.clone();
             let entry = entry.clone();
             async move { supervisor.ensure_worker(&entry).await }
         });
 
-        wait_for_starting(&supervisor, &entry.id).await;
-        let stopped =
-            tokio::time::timeout(Duration::from_secs(2), supervisor.stop_worker(&entry.id))
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-
-        assert_eq!(stopped.state, WorkerState::Stopped);
-        let start_info = tokio::time::timeout(Duration::from_secs(10), start)
+        wait_for_starting(&mut event_rx, &mut start, &entry.id).await;
+        let stopped = without_hanging(supervisor.stop_worker(&entry.id), "stop_worker")
             .await
             .unwrap()
+            .unwrap();
+
+        assert_eq!(stopped.state, WorkerState::Stopped);
+        let start_info = without_hanging(start, "worker startup")
+            .await
             .unwrap()
             .unwrap();
         assert!(matches!(
@@ -2098,31 +2132,32 @@ mod tests {
         };
         std::env::set_var("FAKE_WORKER_DELAY_READY", "30");
         let dir = tempfile::tempdir().unwrap();
-        let supervisor = Supervisor::new(
-            EventBus::new(dir.path().join("events.jsonl")),
-            dir.path().join("daemon"),
-            8488,
-        );
+        let events = EventBus::new(dir.path().join("events.jsonl"));
+        let supervisor = Supervisor::new(events.clone(), dir.path().join("daemon"), 8488);
         let entry = test_entry(dir.path().to_path_buf());
-        let start = tokio::spawn({
+        let mut event_rx = events.subscribe();
+        let mut start = tokio::spawn({
             let supervisor = supervisor.clone();
             let entry = entry.clone();
             async move { supervisor.ensure_worker(&entry).await }
         });
 
-        wait_for_starting(&supervisor, &entry.id).await;
+        wait_for_starting(&mut event_rx, &mut start, &entry.id).await;
         supervisor.request_shutdown("test shutdown".to_string());
-        let info = tokio::time::timeout(Duration::from_secs(10), start)
+        let info = without_hanging(start, "worker startup after daemon shutdown")
             .await
-            .unwrap()
             .unwrap()
             .unwrap();
 
-        assert!(matches!(info.state, WorkerState::Failed { .. }));
-        assert!(info
-            .last_error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("shutdown"));
+        assert_eq!(
+            info.state,
+            WorkerState::Failed {
+                reason: "worker startup cancelled by daemon shutdown".to_string()
+            }
+        );
+        assert_eq!(
+            info.last_error.as_deref(),
+            Some("worker startup cancelled by daemon shutdown")
+        );
     }
 }
