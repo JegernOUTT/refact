@@ -437,14 +437,22 @@ impl Tool for ToolSubagent {
                     }
                 }
             }
+            let finished_children = app.agents.list_all().await;
+            let handoff_key = crate::agents::handoff::metric_key(
+                resolved_profile
+                    .as_ref()
+                    .map(|profile| profile.name.as_str()),
+                &req.config_name,
+            );
+            let handoff_finding = crate::agents::handoff::finding_for(
+                &finished_children,
+                &handoff_key,
+                &handoff_limits,
+                crate::agents::handoff::FindingWindow::now(),
+            );
             let mut handoff_metric = crate::agents::handoff::metric_for(
-                &app.agents.list_all().await,
-                &crate::agents::handoff::metric_key(
-                    resolved_profile
-                        .as_ref()
-                        .map(|profile| profile.name.as_str()),
-                    &req.config_name,
-                ),
+                &finished_children,
+                &handoff_key,
                 &handoff_limits,
                 handoff_metric_max_records,
             );
@@ -460,6 +468,15 @@ impl Tool for ToolSubagent {
                 if let ChatContent::SimpleText(text) = &mut message.content {
                     text.push_str("\n\n## Handoff Sufficiency (prior children)\n");
                     text.push_str(&metric.summary_lines().join("\n"));
+                }
+            }
+            if let ContextEnum::ChatMessage(message) = &mut preview {
+                message
+                    .extra
+                    .insert("handoff_finding".into(), json!(handoff_finding));
+                if let ChatContent::SimpleText(text) = &mut message.content {
+                    text.push_str("\n\n## Handoff Brief Signal\n");
+                    text.push_str(&handoff_finding.summary_lines().join("\n"));
                 }
             }
             if let ContextEnum::ChatMessage(message) = &mut preview {
@@ -1857,9 +1874,18 @@ mod tests {
         assert_eq!(metric["gaps_by_category"]["missing_file"], 1);
         assert_eq!(metric["suggested_sources"], json!([path]));
         assert_eq!(metric["withheld_sources"], 0);
+        let finding = &after[0].extra["handoff_finding"];
+        assert_eq!(finding["status"], "insufficient_data");
+        assert_eq!(finding["key"], "profile:reviewer");
+        assert_eq!(finding["samples"], 1);
         let text = after[0].content.content_text_only();
         assert!(text.contains("## Handoff Sufficiency (prior children)"));
         assert!(text.contains("suggestion only; this launch's scope and authority are unchanged"));
+        assert!(text.contains("## Handoff Brief Signal"));
+        assert!(
+            text.contains("insufficient_data"),
+            "one child is not a trend: {text}"
+        );
         assert_eq!(
             after[0].extra["effective_tools"],
             before[0].extra["effective_tools"]

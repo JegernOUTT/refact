@@ -118,6 +118,11 @@ pub struct CoordinationSettings {
     pub handoff_report_max_chars: usize,
     /// Finished children scanned when aggregating the handoff metric.
     pub handoff_metric_max_records: usize,
+    /// Child declarations required before the handoff finding states a verdict
+    /// instead of `insufficient_data`.
+    pub handoff_finding_min_samples: usize,
+    /// Age of the newest-first finished children a handoff finding may count.
+    pub handoff_finding_retention_ms: u64,
     /// Upgrades a declared-intent `reject` path scope to canonical enforcement.
     pub strict_path_scope_default: bool,
     pub max_path_scope_entries: usize,
@@ -298,6 +303,8 @@ impl Default for CoordinationSettings {
             handoff_report_max_entries: 16,
             handoff_report_max_chars: 512,
             handoff_metric_max_records: 512,
+            handoff_finding_min_samples: 5,
+            handoff_finding_retention_ms: 7 * 24 * 60 * 60 * 1_000,
             strict_path_scope_default: false,
             max_path_scope_entries: 256,
             agent_closed_retained_max: 64,
@@ -455,6 +462,14 @@ impl CoordinationSettings {
             (
                 "handoff_metric_max_records",
                 self.handoff_metric_max_records as u64,
+            ),
+            (
+                "handoff_finding_min_samples",
+                self.handoff_finding_min_samples as u64,
+            ),
+            (
+                "handoff_finding_retention_ms",
+                self.handoff_finding_retention_ms,
             ),
             ("max_path_scope_entries", self.max_path_scope_entries as u64),
             ("max_work_views", self.max_work_views as u64),
@@ -1222,10 +1237,17 @@ mod tests {
         assert!(settings.handoff_report_max_entries >= 1);
         assert!(settings.handoff_report_max_chars >= 64);
         assert!(settings.handoff_metric_max_records >= 1);
+        assert!(
+            settings.handoff_finding_min_samples >= 2,
+            "one complaint is not a trend"
+        );
+        assert!(settings.handoff_finding_retention_ms >= 60_000);
         for mutate in [
             |settings: &mut CoordinationSettings| settings.handoff_report_max_entries = 0,
             |settings: &mut CoordinationSettings| settings.handoff_report_max_chars = 0,
             |settings: &mut CoordinationSettings| settings.handoff_metric_max_records = 0,
+            |settings: &mut CoordinationSettings| settings.handoff_finding_min_samples = 0,
+            |settings: &mut CoordinationSettings| settings.handoff_finding_retention_ms = 0,
         ] {
             let mut settings = CoordinationSettings::default();
             mutate(&mut settings);

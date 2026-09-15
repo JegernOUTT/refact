@@ -444,7 +444,7 @@ contract without a completed final message stays "not evaluated".
 Every subagent prompt carries optional handoff-sufficiency instructions. A child may close its final
 message with exactly one ```handoff block (`{"gaps":[{category, detail, path?, extra_steps?}]}`,
 categories `missing_file`, `missing_decision`, `missing_message_context`, `ambiguous_requirement`,
-`missing_verification_command`, `other`) — a deliberately different fence from the deliverable
+`missing_verification_command`, `expected_discovery`, `other`) — a deliberately different fence from the deliverable
 contract's single ```json block. `refact_chat_api::handoff::parse_report` turns it into
 `BackgroundAgent.handoff` with provenance (`source: "child_declaration"`, `claimed_by`,
 `claimed_at_ms`). Absent is `unknown`, never "sufficient", and never blocks completion; an
@@ -456,6 +456,16 @@ the same destination-model privacy filtering as any other content before they re
 into a `handoff_metric` shown in the launch preview. Suggested sources are a suggestion only: the
 report is the child's claim about its brief and can never widen tool authority, path scope or
 budget.
+
+The same aggregation produces a `handoff_finding` review signal in the launch preview
+(`insufficient_data` / `no_recurring_gap` / `brief_improvement`). The sample is the declarations,
+not the completions: a child that declared nothing says nothing about its brief. Below
+`handoff_finding_min_samples` declarations inside the `handoff_finding_retention_ms` window the
+answer is `insufficient_data`, never a verdict, and a category recurs only when at least
+`HANDOFF_MIN_RECURRING_CHILDREN` distinct children reported it. `expected_discovery` — what an
+exploratory card asked the child to find out — and the unclassified `other` are never evidence of a
+short brief. The finding is advisory: it names the profile, the recurring category and the sample
+size, and never edits a launch template, profile or specification.
 
 ### CodeGraph tools
 

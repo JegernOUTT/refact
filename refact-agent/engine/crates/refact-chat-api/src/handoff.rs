@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -13,16 +13,18 @@ pub enum HandoffGapCategory {
     MissingMessageContext,
     AmbiguousRequirement,
     MissingVerificationCommand,
+    ExpectedDiscovery,
     Other,
 }
 
 impl HandoffGapCategory {
-    pub const ALL: [HandoffGapCategory; 6] = [
+    pub const ALL: [HandoffGapCategory; 7] = [
         HandoffGapCategory::MissingFile,
         HandoffGapCategory::MissingDecision,
         HandoffGapCategory::MissingMessageContext,
         HandoffGapCategory::AmbiguousRequirement,
         HandoffGapCategory::MissingVerificationCommand,
+        HandoffGapCategory::ExpectedDiscovery,
         HandoffGapCategory::Other,
     ];
 
@@ -33,6 +35,7 @@ impl HandoffGapCategory {
             Self::MissingMessageContext => "missing_message_context",
             Self::AmbiguousRequirement => "ambiguous_requirement",
             Self::MissingVerificationCommand => "missing_verification_command",
+            Self::ExpectedDiscovery => "expected_discovery",
             Self::Other => "other",
         }
     }
@@ -48,6 +51,20 @@ impl HandoffGapCategory {
     /// the launch specification. Everything else needs a human or planner edit.
     pub fn mechanically_fixable(self) -> bool {
         matches!(self, Self::MissingFile)
+    }
+
+    /// Evidence that the brief itself was short. A discovery the card asked for
+    /// is not evidence — a research card is supposed to discover things — and
+    /// the unclassified catch-all is not evidence either, because a signal built
+    /// on "the child looked something up" is a noise generator.
+    pub fn brief_gap(self) -> bool {
+        !matches!(self, Self::ExpectedDiscovery | Self::Other)
+    }
+
+    /// A gap the child could not close by reading the project: it had to pick an
+    /// answer. Counted apart from the gaps it closed by discovery.
+    pub fn required_guess(self) -> bool {
+        matches!(self, Self::MissingDecision | Self::AmbiguousRequirement)
     }
 }
 
@@ -164,7 +181,7 @@ pub fn render_instructions(limits: &HandoffLimits) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "# Handoff sufficiency (optional)\nIf your brief was missing something you had to discover or guess, you MAY end your final message with exactly one ```{HANDOFF_BLOCK_TAG} block:\n```{HANDOFF_BLOCK_TAG}\n{{\"gaps\":[{{\"category\":\"missing_file\",\"detail\":\"had to read the retry helper to learn the backoff rule\",\"path\":\"src/auth/retry.rs\",\"extra_steps\":3}}]}}\n```\nCategories: {categories}. At most {} entries and {} characters per field; anything longer is truncated with an explicit marker. Omitting the block is not a failure and is recorded as `unknown`, never as `sufficient`. This measures the brief you were given, not your work, and it grants no tools, paths or budget.",
+        "# Handoff sufficiency (optional)\nIf your brief was missing something you had to discover or guess, you MAY end your final message with exactly one ```{HANDOFF_BLOCK_TAG} block:\n```{HANDOFF_BLOCK_TAG}\n{{\"gaps\":[{{\"category\":\"missing_file\",\"detail\":\"had to read the retry helper to learn the backoff rule\",\"path\":\"src/auth/retry.rs\",\"extra_steps\":3}}]}}\n```\nCategories: {categories}. Use `expected_discovery` when the card asked you to find that out: it is recorded and never counted as a short brief. At most {} entries and {} characters per field; anything longer is truncated with an explicit marker. Omitting the block is not a failure and is recorded as `unknown`, never as `sufficient`. This measures the brief you were given, not your work, and it grants no tools, paths or budget.",
         limits.max_entries, limits.max_chars
     )
 }
@@ -289,6 +306,13 @@ pub struct HandoffMetric {
     pub extra_steps: u32,
     #[serde(default)]
     pub gaps_by_category: BTreeMap<String, u32>,
+    /// Distinct children that reported each category at least once, so one
+    /// child listing the same category twice cannot look like a pattern.
+    #[serde(default)]
+    pub children_by_category: BTreeMap<String, u32>,
+    /// Gaps the child closed by choosing an answer rather than by discovery.
+    #[serde(default)]
+    pub guessed: u32,
     #[serde(default)]
     pub suggested_sources: Vec<String>,
     /// Suggestions dropped because the destination may not receive the path.
@@ -331,6 +355,153 @@ impl HandoffMetric {
     }
 }
 
+/// Distinct children that must report one category before it is a recurring
+/// pattern rather than a single child's complaint.
+pub const HANDOFF_MIN_RECURRING_CHILDREN: u32 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffCategorySignal {
+    pub category: String,
+    pub children: u32,
+    pub gaps: u32,
+}
+
+/// The review signal for one launch key. It names the key, what recurred and
+/// how large the sample was. It is advisory: nothing here edits a launch
+/// specification, a profile or any other template.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum HandoffFinding {
+    InsufficientData {
+        key: String,
+        samples: u32,
+        required: u32,
+    },
+    NoRecurringGap {
+        key: String,
+        samples: u32,
+    },
+    BriefImprovement {
+        key: String,
+        samples: u32,
+        recurring: Vec<HandoffCategorySignal>,
+        guessed: u32,
+    },
+}
+
+impl HandoffFinding {
+    pub fn key(&self) -> &str {
+        match self {
+            Self::InsufficientData { key, .. }
+            | Self::NoRecurringGap { key, .. }
+            | Self::BriefImprovement { key, .. } => key,
+        }
+    }
+
+    pub fn samples(&self) -> u32 {
+        match self {
+            Self::InsufficientData { samples, .. }
+            | Self::NoRecurringGap { samples, .. }
+            | Self::BriefImprovement { samples, .. } => *samples,
+        }
+    }
+
+    /// Model-facing text. A refusal reads as a refusal, never as a verdict.
+    pub fn summary_lines(&self) -> Vec<String> {
+        match self {
+            Self::InsufficientData {
+                key,
+                samples,
+                required,
+            } => vec![format!(
+                "- {key}: insufficient_data — {samples} child declaration(s) of {required} required; no verdict is offered"
+            )],
+            Self::NoRecurringGap { key, samples } => vec![format!(
+                "- {key}: no recurring brief gap over {samples} child declaration(s)"
+            )],
+            Self::BriefImprovement {
+                key,
+                samples,
+                recurring,
+                guessed,
+            } => {
+                let mut lines = vec![format!(
+                    "- {key}: a recurring brief gap over {samples} child declaration(s)"
+                )];
+                for signal in recurring {
+                    lines.push(format!(
+                        "  - {}: {} of {} children, {} gap(s)",
+                        signal.category, signal.children, samples, signal.gaps
+                    ));
+                }
+                if *guessed > 0 {
+                    lines.push(format!(
+                        "  - {guessed} gap(s) the child had to guess rather than discover"
+                    ));
+                }
+                lines.push(
+                    "  - review signal only; no launch template, profile or specification was changed"
+                        .to_string(),
+                );
+                lines
+            }
+        }
+    }
+}
+
+impl HandoffMetric {
+    /// The declarations are the sample: a completion that declared nothing says
+    /// nothing about the brief it was given, so it never counts toward a
+    /// verdict. Below `min_samples` the answer is `insufficient_data`.
+    pub fn finding(&self, min_samples: u32) -> HandoffFinding {
+        let required = min_samples.max(1);
+        let samples = self.reported;
+        if samples < required {
+            return HandoffFinding::InsufficientData {
+                key: self.key.clone(),
+                samples,
+                required,
+            };
+        }
+        let mut recurring: Vec<HandoffCategorySignal> = self
+            .children_by_category
+            .iter()
+            .filter(|(category, children)| {
+                HandoffGapCategory::parse(category).brief_gap()
+                    && **children >= HANDOFF_MIN_RECURRING_CHILDREN
+            })
+            .map(|(category, children)| HandoffCategorySignal {
+                category: category.clone(),
+                children: *children,
+                gaps: self
+                    .gaps_by_category
+                    .get(category)
+                    .copied()
+                    .unwrap_or(*children),
+            })
+            .collect();
+        if recurring.is_empty() {
+            return HandoffFinding::NoRecurringGap {
+                key: self.key.clone(),
+                samples,
+            };
+        }
+        recurring.sort_by(|left, right| {
+            right
+                .children
+                .cmp(&left.children)
+                .then_with(|| right.gaps.cmp(&left.gaps))
+                .then_with(|| left.category.cmp(&right.category))
+        });
+        HandoffFinding::BriefImprovement {
+            key: self.key.clone(),
+            samples,
+            recurring,
+            guessed: self.guessed,
+        }
+    }
+}
+
 /// Bounded aggregation over finished children. `None` is an absent declaration,
 /// which counts as `unknown` rather than as a sufficient handoff.
 pub fn aggregate<'a, I>(entries: I, limits: &HandoffLimits) -> Vec<HandoffMetric>
@@ -358,11 +529,16 @@ where
         } else {
             metric.with_gaps = metric.with_gaps.saturating_add(1);
         }
+        let mut reported_categories: BTreeSet<HandoffGapCategory> = BTreeSet::new();
         for gap in &report.gaps {
             metric.gaps = metric.gaps.saturating_add(1);
             metric.extra_steps = metric
                 .extra_steps
                 .saturating_add(gap.extra_steps.unwrap_or(0));
+            if gap.category.required_guess() {
+                metric.guessed = metric.guessed.saturating_add(1);
+            }
+            reported_categories.insert(gap.category);
             *metric
                 .gaps_by_category
                 .entry(gap.category.as_str().to_string())
@@ -381,6 +557,12 @@ where
             {
                 metric.suggested_sources.push(path.to_string());
             }
+        }
+        for category in reported_categories {
+            *metric
+                .children_by_category
+                .entry(category.as_str().to_string())
+                .or_default() += 1;
         }
     }
     by_key.into_values().collect()
@@ -539,6 +721,139 @@ mod tests {
         assert_eq!(reviewer.suggested_sources, vec!["src/a.rs"]);
         assert_eq!(metrics[0].key, "config:subagent");
         assert_eq!(metrics[0].completions, 1);
+    }
+
+    fn declared(categories: &[&str]) -> HandoffReport {
+        let gaps = categories
+            .iter()
+            .map(|category| format!(r#"{{"category":"{category}","detail":"d"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        parse_report(
+            &block(&format!(r#"{{"gaps":[{gaps}]}}"#)),
+            "agent",
+            0,
+            &HandoffLimits::default(),
+        )
+        .unwrap()
+    }
+
+    fn metric_of(reports: &[HandoffReport]) -> HandoffMetric {
+        aggregate(
+            reports
+                .iter()
+                .map(|report| ("profile:reviewer", Some(report))),
+            &HandoffLimits::default(),
+        )
+        .remove(0)
+    }
+
+    #[test]
+    fn below_the_minimum_sample_the_finding_refuses_instead_of_stating_a_verdict() {
+        let metric = metric_of(&[declared(&["missing_file"]), declared(&["missing_file"])]);
+        let finding = metric.finding(3);
+        let HandoffFinding::InsufficientData {
+            key,
+            samples,
+            required,
+        } = &finding
+        else {
+            panic!("expected a refusal, got {finding:?}");
+        };
+        assert_eq!(key, "profile:reviewer");
+        assert_eq!(*samples, 2);
+        assert_eq!(*required, 3);
+        let rendered = finding.summary_lines().join("\n");
+        assert!(rendered.contains("insufficient_data"), "{rendered}");
+        assert!(rendered.contains("no verdict is offered"), "{rendered}");
+
+        let silent = aggregate(
+            (0..5).map(|_| ("profile:reviewer", None)),
+            &HandoffLimits::default(),
+        )
+        .remove(0);
+        assert_eq!(silent.completions, 5);
+        assert!(
+            matches!(
+                silent.finding(3),
+                HandoffFinding::InsufficientData { samples: 0, .. }
+            ),
+            "completions that declared nothing are not a sample"
+        );
+    }
+
+    #[test]
+    fn a_recurring_category_names_the_key_the_category_and_the_sample_size() {
+        let metric = metric_of(&[
+            declared(&["missing_decision", "missing_file"]),
+            declared(&["missing_decision"]),
+            declared(&["ambiguous_requirement"]),
+        ]);
+        let finding = metric.finding(3);
+        let HandoffFinding::BriefImprovement {
+            key,
+            samples,
+            recurring,
+            guessed,
+        } = &finding
+        else {
+            panic!("expected a finding, got {finding:?}");
+        };
+        assert_eq!(key, "profile:reviewer");
+        assert_eq!(*samples, 3);
+        assert_eq!(recurring.len(), 1, "only the repeated category recurs");
+        assert_eq!(recurring[0].category, "missing_decision");
+        assert_eq!(recurring[0].children, 2);
+        assert_eq!(*guessed, 3, "decisions and ambiguity had to be guessed");
+        let rendered = finding.summary_lines().join("\n");
+        assert!(rendered.contains("profile:reviewer"), "{rendered}");
+        assert!(rendered.contains("missing_decision"), "{rendered}");
+        assert!(rendered.contains("3 child declaration(s)"), "{rendered}");
+        assert!(
+            rendered.contains("no launch template, profile or specification was changed"),
+            "{rendered}"
+        );
+
+        let one_child_twice = metric_of(&[
+            declared(&["missing_file", "missing_file"]),
+            declared(&["ambiguous_requirement"]),
+            declared(&[]),
+        ]);
+        assert_eq!(one_child_twice.gaps_by_category["missing_file"], 2);
+        assert_eq!(one_child_twice.children_by_category["missing_file"], 1);
+        assert!(
+            matches!(
+                one_child_twice.finding(3),
+                HandoffFinding::NoRecurringGap { .. }
+            ),
+            "one child repeating itself is not a trend"
+        );
+    }
+
+    #[test]
+    fn an_exploratory_cards_discoveries_are_never_a_short_brief() {
+        let metric = metric_of(&[
+            declared(&["expected_discovery", "expected_discovery"]),
+            declared(&["expected_discovery"]),
+            declared(&["expected_discovery"]),
+            declared(&["other"]),
+            declared(&["other"]),
+        ]);
+        assert_eq!(metric.children_by_category["expected_discovery"], 3);
+        assert_eq!(metric.children_by_category["other"], 2);
+        assert_eq!(metric.guessed, 0);
+        let finding = metric.finding(3);
+        assert!(
+            matches!(finding, HandoffFinding::NoRecurringGap { samples: 5, .. }),
+            "a card that asked for discovery is not an inadequate brief: {finding:?}"
+        );
+        assert!(!HandoffGapCategory::ExpectedDiscovery.brief_gap());
+        assert!(!HandoffGapCategory::Other.brief_gap());
+        assert!(HandoffGapCategory::MissingFile.brief_gap());
+        assert_eq!(
+            HandoffGapCategory::parse("expected_discovery"),
+            HandoffGapCategory::ExpectedDiscovery
+        );
     }
 
     #[test]

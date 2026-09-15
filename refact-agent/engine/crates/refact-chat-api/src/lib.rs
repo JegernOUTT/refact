@@ -32,8 +32,9 @@ pub use question::{
 };
 pub use deliverable::{DeliverableContract, DeliverableStatus, DELIVERABLE_CHECK_STRUCTURAL};
 pub use handoff::{
-    HandoffGap, HandoffGapCategory, HandoffLimits, HandoffMetric, HandoffReport,
-    HandoffSufficiency, HANDOFF_BLOCK_TAG, HANDOFF_SOURCE_CHILD_DECLARATION,
+    HandoffCategorySignal, HandoffFinding, HandoffGap, HandoffGapCategory, HandoffLimits,
+    HandoffMetric, HandoffReport, HandoffSufficiency, HANDOFF_BLOCK_TAG,
+    HANDOFF_MIN_RECURRING_CHILDREN, HANDOFF_SOURCE_CHILD_DECLARATION,
 };
 pub use tool_enrichment::{
     attach_tool_enrichment, attach_tool_enrichment_to_extra, redact_tool_enrichment,

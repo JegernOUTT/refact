@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use refact_chat_api::handoff::{HandoffLimits, HandoffMetric, HandoffReport};
+use refact_chat_api::handoff::{HandoffFinding, HandoffLimits, HandoffMetric, HandoffReport};
 
 use crate::agents::types::BackgroundAgent;
 use crate::app_state::AppState;
@@ -113,9 +113,21 @@ pub fn aggregate_records(
     limits: &HandoffLimits,
     max_records: usize,
 ) -> Vec<HandoffMetric> {
+    aggregate_since(records, limits, max_records, None)
+}
+
+fn aggregate_since(
+    records: &[BackgroundAgent],
+    limits: &HandoffLimits,
+    max_records: usize,
+    oldest_ms: Option<i64>,
+) -> Vec<HandoffMetric> {
     let mut finished = records
         .iter()
         .filter(|record| record.status.is_terminal())
+        .filter(|record| {
+            oldest_ms.is_none_or(|oldest| record.last_update_at.timestamp_millis() >= oldest)
+        })
         .collect::<Vec<_>>();
     finished.sort_by(|left, right| right.last_update_at.cmp(&left.last_update_at));
     let keyed = finished
@@ -129,6 +141,73 @@ pub fn aggregate_records(
             .map(|(key, report)| (key.as_str(), report.as_ref())),
         limits,
     )
+}
+
+/// The bounded slice of finished children one finding may read: a record cap
+/// and a retention window, so this stays a metric rather than a transcript
+/// store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FindingWindow {
+    pub now_ms: i64,
+    pub retention_ms: i64,
+    pub max_records: usize,
+    pub min_samples: u32,
+}
+
+impl FindingWindow {
+    pub fn current(now_ms: i64) -> Self {
+        let settings = crate::runtime_settings::current().coordination;
+        FindingWindow {
+            now_ms,
+            retention_ms: settings.handoff_finding_retention_ms as i64,
+            max_records: settings.handoff_metric_max_records,
+            min_samples: settings.handoff_finding_min_samples as u32,
+        }
+    }
+
+    pub fn now() -> Self {
+        Self::current(chrono::Utc::now().timestamp_millis())
+    }
+
+    fn oldest_ms(&self) -> i64 {
+        self.now_ms.saturating_sub(self.retention_ms.max(1))
+    }
+}
+
+/// The review signal for every launch key inside the window. Advisory: it names
+/// what recurred and never edits a profile or launch specification.
+pub fn findings(
+    records: &[BackgroundAgent],
+    limits: &HandoffLimits,
+    window: FindingWindow,
+) -> Vec<HandoffFinding> {
+    aggregate_since(
+        records,
+        limits,
+        window.max_records,
+        Some(window.oldest_ms()),
+    )
+    .iter()
+    .map(|metric| metric.finding(window.min_samples))
+    .collect()
+}
+
+/// A key nothing was recorded for is `insufficient_data` with a zero sample,
+/// never a clean bill of health.
+pub fn finding_for(
+    records: &[BackgroundAgent],
+    key: &str,
+    limits: &HandoffLimits,
+    window: FindingWindow,
+) -> HandoffFinding {
+    findings(records, limits, window)
+        .into_iter()
+        .find(|finding| finding.key() == key)
+        .unwrap_or_else(|| HandoffFinding::InsufficientData {
+            key: key.to_string(),
+            samples: 0,
+            required: window.min_samples.max(1),
+        })
 }
 
 pub fn metric_for(
@@ -261,5 +340,176 @@ mod tests {
         assert!(metric_for(&records, "profile:missing", &limits, 64).is_none());
         assert_eq!(aggregate_records(&records, &limits, 1).len(), 1);
         assert_eq!(record_key(&profiled), "profile:reviewer");
+    }
+
+    fn gap(category: HandoffGapCategory) -> HandoffGap {
+        HandoffGap {
+            category,
+            detail: "d".to_string(),
+            path: None,
+            extra_steps: None,
+        }
+    }
+
+    fn declared(agent_id: &str, at: &str, gaps: Vec<HandoffGap>) -> BackgroundAgent {
+        let mut record = record(agent_id, "completed", at);
+        record.profile_name = Some("reviewer".to_string());
+        record.handoff = Some(HandoffReport {
+            sufficiency: if gaps.is_empty() {
+                HandoffSufficiency::Sufficient
+            } else {
+                HandoffSufficiency::GapsReported
+            },
+            source: refact_chat_api::HANDOFF_SOURCE_CHILD_DECLARATION.to_string(),
+            claimed_by: agent_id.to_string(),
+            claimed_at_ms: 1,
+            gaps,
+            notes: Vec::new(),
+        });
+        record
+    }
+
+    fn window(min_samples: u32) -> FindingWindow {
+        FindingWindow {
+            now_ms: chrono::DateTime::parse_from_rfc3339("2026-01-10T00:00:00Z")
+                .unwrap()
+                .timestamp_millis(),
+            retention_ms: 7 * 24 * 60 * 60 * 1_000,
+            max_records: 64,
+            min_samples,
+        }
+    }
+
+    #[test]
+    fn a_handoff_finding_stays_insufficient_until_the_sample_is_large_enough() {
+        let limits = HandoffLimits::default();
+        let records = vec![
+            declared(
+                "one",
+                "2026-01-09T00:00:00Z",
+                vec![gap(HandoffGapCategory::MissingDecision)],
+            ),
+            declared(
+                "two",
+                "2026-01-09T01:00:00Z",
+                vec![gap(HandoffGapCategory::MissingDecision)],
+            ),
+        ];
+        let finding = finding_for(&records, "profile:reviewer", &limits, window(3));
+        assert!(
+            matches!(
+                &finding,
+                HandoffFinding::InsufficientData {
+                    samples: 2,
+                    required: 3,
+                    ..
+                }
+            ),
+            "{finding:?}"
+        );
+        let rendered = finding.summary_lines().join("\n");
+        assert!(rendered.contains("insufficient_data"), "{rendered}");
+        assert!(!rendered.contains("recurring brief gap"), "{rendered}");
+
+        let unseen = finding_for(&records, "profile:absent", &limits, window(3));
+        assert!(
+            matches!(unseen, HandoffFinding::InsufficientData { samples: 0, .. }),
+            "a key nothing was recorded for is not a clean bill of health"
+        );
+
+        let mut enough = records;
+        enough.push(declared(
+            "three",
+            "2026-01-09T02:00:00Z",
+            vec![gap(HandoffGapCategory::MissingDecision)],
+        ));
+        let finding = finding_for(&enough, "profile:reviewer", &limits, window(3));
+        let HandoffFinding::BriefImprovement {
+            key,
+            samples,
+            recurring,
+            guessed,
+        } = &finding
+        else {
+            panic!("expected a finding, got {finding:?}");
+        };
+        assert_eq!(key, "profile:reviewer");
+        assert_eq!(*samples, 3);
+        assert_eq!(recurring[0].category, "missing_decision");
+        assert_eq!(recurring[0].children, 3);
+        assert_eq!(*guessed, 3);
+    }
+
+    #[test]
+    fn an_exploratory_card_never_reads_as_an_inadequate_brief_and_no_template_is_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let template = dir.path().join("reviewer.yaml");
+        let body = "agent_profile:\n  name: reviewer\n  tools: [cat]\n";
+        std::fs::write(&template, body).unwrap();
+        let before = std::fs::read(&template).unwrap();
+
+        let limits = HandoffLimits::default();
+        let records = (0..4)
+            .map(|index| {
+                declared(
+                    &format!("explorer-{index}"),
+                    &format!("2026-01-09T0{index}:00:00Z"),
+                    vec![
+                        gap(HandoffGapCategory::ExpectedDiscovery),
+                        gap(HandoffGapCategory::Other),
+                    ],
+                )
+            })
+            .collect::<Vec<_>>();
+        let finding = finding_for(&records, "profile:reviewer", &limits, window(3));
+        assert!(
+            matches!(finding, HandoffFinding::NoRecurringGap { samples: 4, .. }),
+            "a research card's discoveries are not a short brief: {finding:?}"
+        );
+
+        assert_eq!(std::fs::read(&template).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(&template).unwrap(), body);
+    }
+
+    #[test]
+    fn the_handoff_retention_window_bounds_the_records_a_finding_counts() {
+        let limits = HandoffLimits::default();
+        let mut records = (0..3)
+            .map(|index| {
+                declared(
+                    &format!("recent-{index}"),
+                    &format!("2026-01-0{}T00:00:00Z", index + 5),
+                    vec![gap(HandoffGapCategory::MissingFile)],
+                )
+            })
+            .collect::<Vec<_>>();
+        records.push(declared(
+            "ancient",
+            "2025-06-01T00:00:00Z",
+            vec![gap(HandoffGapCategory::MissingFile)],
+        ));
+
+        let inside = finding_for(&records, "profile:reviewer", &limits, window(3));
+        assert_eq!(inside.samples(), 3, "the aged record must not be counted");
+
+        let narrow = FindingWindow {
+            retention_ms: 24 * 60 * 60 * 1_000,
+            ..window(3)
+        };
+        let finding = finding_for(&records, "profile:reviewer", &limits, narrow);
+        assert!(
+            matches!(finding, HandoffFinding::InsufficientData { samples: 0, .. }),
+            "{finding:?}"
+        );
+
+        let capped = FindingWindow {
+            max_records: 2,
+            ..window(3)
+        };
+        assert_eq!(
+            finding_for(&records, "profile:reviewer", &limits, capped).samples(),
+            2
+        );
+        assert_eq!(findings(&records, &limits, window(3)).len(), 1);
     }
 }
