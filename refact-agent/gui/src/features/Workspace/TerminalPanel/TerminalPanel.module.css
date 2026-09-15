@@ -389,6 +389,16 @@
   }
 }
 
+/* The workbench body is a fixed-height box, so a narrow dock leaves the empty
+ * state no room to spend on gutters: tighten padding and gaps instead of
+ * letting the copy overflow a clipped body. */
+@container (max-width: 320px) {
+  .emptyState.emptyState {
+    gap: var(--rf-space-1);
+    padding: var(--rf-space-2);
+  }
+}
+
 @container (max-width: 560px) {
   .titleText {
     display: none;

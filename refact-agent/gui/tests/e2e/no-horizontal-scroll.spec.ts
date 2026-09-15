@@ -399,7 +399,7 @@ test.describe("overlay right-edge regressions", () => {
     await page.goto("/tests/e2e/route-showcase.html?route=overlay-regression");
     await page.locator("[data-element='app-root']").waitFor();
 
-    await page.getByLabel("Compress or Handoff").click();
+    await page.getByLabel("Compress or rebuild context").click();
     await page.getByRole("dialog").waitFor();
 
     const trajectoryGutters = await page.evaluate<GutterMeasurement[]>(() => {
@@ -464,24 +464,24 @@ test.describe("overlay right-edge regressions", () => {
       expect(edge.delta, edge.details).toBeLessThanOrEqual(maxDelta);
     }
 
-    await page.getByRole("tab", { name: "Handoff" }).click();
+    await page.getByRole("tab", { name: "LLM compression" }).click();
 
-    const handoffEdges = await page.evaluate<EdgeMeasurement[]>(() => {
+    const llmCompressEdges = await page.evaluate<EdgeMeasurement[]>(() => {
       const rect = (el: Element) => el.getBoundingClientRect();
-      const create = [...document.querySelectorAll("button")].find(
-        (el) => el.textContent?.trim() === "Create",
+      const rebuild = [...document.querySelectorAll("button")].find(
+        (el) => el.textContent?.trim() === "Rebuild context",
       );
-      const label = create?.querySelector("span");
-      if (!create || !label) {
+      const label = rebuild?.querySelector("span");
+      if (!rebuild || !label) {
         return [
-          { name: "trajectory create", delta: 999, details: "missing target" },
+          { name: "trajectory rebuild", delta: 999, details: "missing target" },
         ];
       }
-      const buttonRect = rect(create);
+      const buttonRect = rect(rebuild);
       const labelRect = rect(label);
       return [
         {
-          name: "trajectory create button",
+          name: "trajectory rebuild button",
           delta: Math.abs(
             labelRect.left -
               buttonRect.left -
@@ -492,11 +492,13 @@ test.describe("overlay right-edge regressions", () => {
       ];
     });
 
-    for (const edge of handoffEdges) {
+    for (const edge of llmCompressEdges) {
       expect(edge.delta, edge.details).toBeLessThanOrEqual(1);
     }
 
     await page.keyboard.press("Escape");
+    await page.mouse.move(0, 0);
+    await page.getByLabel("Compress or rebuild context").blur();
     await page.getByLabel("Select model").click();
     await page.getByRole("listbox", { name: "Models" }).waitFor();
 
@@ -522,6 +524,7 @@ test.describe("overlay right-edge regressions", () => {
     }
 
     await page.keyboard.press("Escape");
+    await page.mouse.move(0, 0);
     await page.getByRole("button", { name: /Agent/ }).click();
     await page.getByRole("dialog").waitFor();
 

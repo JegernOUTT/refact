@@ -15,8 +15,8 @@
 }
 
 .label {
+  min-width: 0;
   color: var(--rf-color-fg);
-  white-space: nowrap;
 }
 
 .spacer {
