@@ -60,8 +60,9 @@ pub use handles::{
     CheckedState, ElementHandle, ElementState, ElementStateName, HandleError, HandleRegistry,
 };
 pub use frames::{
-    FRAME_DETACHED_GUIDANCE, FRAME_DETACHED_PREFIX, FrameExecutionContext, FrameHandle, FrameId,
-    FrameInvalidation, FrameLocatorError, FrameSessionId, FrameTree, frame_detached_message,
+    FRAME_DETACHED_GUIDANCE, FRAME_DETACHED_PREFIX, FRAME_OWNER_MISSING_GUIDANCE,
+    FrameExecutionContext, FrameHandle, FrameId, FrameInvalidation, FrameLocatorError,
+    FrameSessionId, FrameTree, frame_detached_message, frame_owner_missing_message,
 };
 pub use files::{DownloadMonitor, DownloadTracker, FileChooserManager};
 pub use hit_target::{

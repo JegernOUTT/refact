@@ -276,16 +276,29 @@ impl FrameInvalidation {
 
 pub const FRAME_DETACHED_PREFIX: &str = "frame_detached:";
 pub const FRAME_DETACHED_GUIDANCE: &str = "re-run the step once the new iframe has loaded";
+pub const FRAME_OWNER_MISSING_GUIDANCE: &str =
+    "re-run the step once the iframe exists or fix the frame locator";
+
+fn frame_summary(summary: Option<&str>) -> String {
+    summary
+        .map(|summary| format!(" ({summary})"))
+        .unwrap_or_default()
+}
 
 pub fn frame_detached_message(index: usize, summary: Option<&str>, source: Option<&str>) -> String {
-    let summary = summary
-        .map(|summary| format!(" ({summary})"))
-        .unwrap_or_default();
+    let summary = frame_summary(summary);
     let source = source
         .map(|source| format!(": {source}"))
         .unwrap_or_default();
     format!(
         "{FRAME_DETACHED_PREFIX} frame {index}{summary} was detached or replaced while resolving{source}; {FRAME_DETACHED_GUIDANCE}"
+    )
+}
+
+pub fn frame_owner_missing_message(index: usize, summary: Option<&str>) -> String {
+    let summary = frame_summary(summary);
+    format!(
+        "{FRAME_DETACHED_PREFIX} frame {index}{summary} matched no iframe element; {FRAME_OWNER_MISSING_GUIDANCE}"
     )
 }
 
@@ -303,6 +316,9 @@ pub enum FrameLocatorError {
     FrameDetached {
         index: usize,
         source: Option<String>,
+    },
+    FrameOwnerMissing {
+        index: usize,
     },
     Handle(HandleError),
 }
@@ -332,6 +348,9 @@ impl Display for FrameLocatorError {
             ),
             Self::FrameDetached { index, source } => {
                 formatter.write_str(&frame_detached_message(*index, None, source.as_deref()))
+            }
+            Self::FrameOwnerMissing { index } => {
+                formatter.write_str(&frame_owner_missing_message(*index, None))
             }
             Self::Handle(error) => Display::fmt(error, formatter),
         }
@@ -428,74 +447,7 @@ impl WorldManager {
 
         for (index, owner_locator) in owner_locators.iter().enumerate() {
             reject_oopif(&frame_tree, &frame_id).map_err(ChainFailure::fatal)?;
-            let owners = self
-                .call_injected_handles_in_frame(
-                    tab,
-                    &frame_id,
-                    "resolveAll",
-                    Value::Array(vec![owner_locator.clone()]),
-                )
-                .map_err(|error| ChainFailure::classify(index, Some(&frame_id), error.into()))?;
-            if owners.is_empty() {
-                return Err(ChainFailure::fatal(FrameLocatorError::FrameDetached {
-                    index,
-                    source: None,
-                }));
-            }
-            let owner = match strict_owner(owners) {
-                Ok(owner) => owner,
-                Err(owners) => {
-                    let previews = owners
-                        .iter()
-                        .take(5)
-                        .filter_map(|owner| {
-                            self.call_function_on(
-                                tab,
-                                owner,
-                                "function() { return this.outerHTML.substring(0, 200); }",
-                                Vec::new(),
-                            )
-                            .ok()
-                            .and_then(|value| value.as_str().map(str::to_string))
-                        })
-                        .collect();
-                    let error = FrameLocatorError::StrictViolation {
-                        count: owners.len(),
-                        previews,
-                    };
-                    for owner in owners {
-                        let _ = self.release_handle(tab, &owner);
-                    }
-                    return Err(ChainFailure::fatal(error));
-                }
-            };
-            let is_frame = self.call_function_on(
-                tab,
-                &owner,
-                "function() { return this instanceof HTMLIFrameElement || this instanceof HTMLFrameElement; }",
-                Vec::new(),
-            );
-            let is_frame = match is_frame {
-                Ok(is_frame) => is_frame,
-                Err(error) => {
-                    let _ = self.release_handle(tab, &owner);
-                    return Err(ChainFailure::classify(index, Some(&frame_id), error.into()));
-                }
-            };
-            if is_frame != Value::Bool(true) {
-                let _ = self.release_handle(tab, &owner);
-                return Err(ChainFailure::fatal(FrameLocatorError::ExpectedFrameElement));
-            }
-            let content_frame_id = self.content_frame_for_handle(tab, &owner);
-            let _ = self.release_handle(tab, &owner);
-            let content_frame_id = content_frame_id
-                .map_err(|error| ChainFailure::classify(index, Some(&frame_id), error.into()))?;
-            frame_id = match content_frame_id {
-                Some(content_frame_id) => content_frame_id,
-                None => {
-                    return Err(ChainFailure::fatal(FrameLocatorError::NoContentFrame));
-                }
-            };
+            frame_id = self.descend_into_owner_frame(tab, &frame_id, index, owner_locator)?;
         }
         reject_oopif(&frame_tree, &frame_id).map_err(ChainFailure::fatal)?;
         let target_index = owner_locators.len().saturating_sub(1);
@@ -506,6 +458,79 @@ impl WorldManager {
             Value::Array(vec![target_locator]),
         )
         .map_err(|error| ChainFailure::classify(target_index, Some(&frame_id), error.into()))
+    }
+
+    fn descend_into_owner_frame(
+        &self,
+        tab: &Tab,
+        frame_id: &str,
+        index: usize,
+        owner_locator: &Value,
+    ) -> Result<FrameId, ChainFailure> {
+        let classify =
+            |error: FrameLocatorError| ChainFailure::classify(index, Some(frame_id), error);
+        let owners = self
+            .call_injected_handles_in_frame(
+                tab,
+                frame_id,
+                "resolveAll",
+                Value::Array(vec![owner_locator.clone()]),
+            )
+            .map_err(|error| classify(error.into()))?;
+        if owners.is_empty() {
+            return Err(ChainFailure::fatal(FrameLocatorError::FrameOwnerMissing {
+                index,
+            }));
+        }
+        let owner = strict_owner(owners)
+            .map_err(|owners| ChainFailure::fatal(self.strict_owner_violation(tab, owners)))?;
+        let is_frame = self.call_function_on(
+            tab,
+            &owner,
+            "function() { return this instanceof HTMLIFrameElement || this instanceof HTMLFrameElement; }",
+            Vec::new(),
+        );
+        let is_frame = match is_frame {
+            Ok(is_frame) => is_frame,
+            Err(error) => {
+                let _ = self.release_handle(tab, &owner);
+                return Err(classify(error.into()));
+            }
+        };
+        if is_frame != Value::Bool(true) {
+            let _ = self.release_handle(tab, &owner);
+            return Err(ChainFailure::fatal(FrameLocatorError::ExpectedFrameElement));
+        }
+        let content_frame_id = self.content_frame_for_handle(tab, &owner);
+        let _ = self.release_handle(tab, &owner);
+        content_frame_id
+            .map_err(|error| classify(error.into()))?
+            .ok_or_else(|| ChainFailure::fatal(FrameLocatorError::NoContentFrame))
+    }
+
+    fn strict_owner_violation(&self, tab: &Tab, owners: Vec<ElementHandle>) -> FrameLocatorError {
+        let previews = owners
+            .iter()
+            .take(5)
+            .filter_map(|owner| {
+                self.call_function_on(
+                    tab,
+                    owner,
+                    "function() { return this.outerHTML.substring(0, 200); }",
+                    Vec::new(),
+                )
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+            })
+            .collect();
+        let error = FrameLocatorError::StrictViolation {
+            count: owners.len(),
+            previews,
+        };
+        for owner in owners {
+            let _ = self.release_handle(tab, &owner);
+        }
+        error
     }
 }
 
@@ -686,17 +711,46 @@ mod tests {
     }
 
     #[test]
-    fn missing_frame_owner_reports_a_detachment_without_a_retry() {
-        let failure = ChainFailure::fatal(FrameLocatorError::FrameDetached {
-            index: 0,
-            source: None,
-        });
+    fn missing_frame_owner_reports_an_empty_match_without_a_retry() {
+        let failure = ChainFailure::fatal(FrameLocatorError::FrameOwnerMissing { index: 0 });
 
         assert!(!failure.is_stale());
+        let message = failure.error.to_string();
+        assert!(message.starts_with(FRAME_DETACHED_PREFIX));
+        assert!(message.contains("matched no iframe element"));
+        assert!(!message.contains("detached or replaced"));
         assert_eq!(
-            failure.error.to_string(),
+            message,
             format!(
-                "{FRAME_DETACHED_PREFIX} frame 0 was detached or replaced while resolving; {FRAME_DETACHED_GUIDANCE}"
+                "{FRAME_DETACHED_PREFIX} frame 0 matched no iframe element; {FRAME_OWNER_MISSING_GUIDANCE}"
+            )
+        );
+    }
+
+    #[test]
+    fn missing_frame_owner_names_the_locator_that_matched_nothing() {
+        let message = frame_owner_missing_message(1, Some("css=iframe#nope"));
+
+        assert_eq!(
+            message,
+            format!(
+                "{FRAME_DETACHED_PREFIX} frame 1 (css=iframe#nope) matched no iframe element; {FRAME_OWNER_MISSING_GUIDANCE}"
+            )
+        );
+    }
+
+    #[test]
+    fn replaced_frame_still_reports_a_detachment() {
+        let message = FrameLocatorError::FrameDetached {
+            index: 0,
+            source: Some("No frame for given id".to_string()),
+        }
+        .to_string();
+
+        assert_eq!(
+            message,
+            format!(
+                "{FRAME_DETACHED_PREFIX} frame 0 was detached or replaced while resolving: No frame for given id; {FRAME_DETACHED_GUIDANCE}"
             )
         );
     }

@@ -4592,12 +4592,16 @@ async fn removed_iframe_reports_a_structured_frame_detachment() {
     assert!(!report.ok, "a removed iframe must fail: {report:?}");
     let error = report.steps[1].error.as_deref().unwrap_or_default();
     assert!(
-        error.starts_with("frame_detached: frame 0 (css=iframe)"),
-        "unstructured detachment error: {report:?}"
+        error.starts_with("frame_detached: frame 0 (css=iframe) matched no iframe element"),
+        "unstructured empty frame owner error: {report:?}"
     );
     assert!(
-        error.ends_with("re-run the step once the new iframe has loaded"),
-        "detachment error lost its guidance: {report:?}"
+        !error.contains("detached or replaced"),
+        "an iframe that was never there must not be reported as replaced: {report:?}"
+    );
+    assert!(
+        error.ends_with("re-run the step once the iframe exists or fix the frame locator"),
+        "empty frame owner error lost its guidance: {report:?}"
     );
 }
 

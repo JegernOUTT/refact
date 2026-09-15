@@ -735,6 +735,10 @@ fn frame_locator_error_message(
             let summary = locator.frames.get(index).map(describe_locator);
             refact_browser::frame_detached_message(index, summary.as_deref(), source.as_deref())
         }
+        refact_browser::FrameLocatorError::FrameOwnerMissing { index } => {
+            let summary = locator.frames.get(index).map(describe_locator);
+            refact_browser::frame_owner_missing_message(index, summary.as_deref())
+        }
         error => error.to_string(),
     }
 }
@@ -8065,18 +8069,17 @@ fn poll_locator_until<T>(
 }
 
 fn is_transient_page_error(error: &str) -> bool {
+    if refact_browser::is_stale_frame_error(error) {
+        return true;
+    }
     let lower = error.to_ascii_lowercase();
     if lower.starts_with(refact_browser::FRAME_DETACHED_PREFIX) {
         return true;
     }
     [
-        "cannot find context",
-        "execution context was destroyed",
         "inspected target navigated",
         "no node with given id",
-        "could not find object with given id",
         "could not find node with given id",
-        "cannot find object",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
@@ -13722,23 +13725,21 @@ mod tests {
     }
 
     #[test]
-    fn a_removed_iframe_reports_a_detachment_without_a_cdp_cause() {
+    fn a_frame_locator_that_matches_nothing_says_so_instead_of_claiming_a_detachment() {
         let locator =
-            BrowserLocator::css(".inner").in_frames(vec![BrowserLocator::css("iframe#f")]);
+            BrowserLocator::css(".inner").in_frames(vec![BrowserLocator::css("iframe#nope")]);
 
         let message = frame_locator_error_message(
             &locator,
-            refact_browser::FrameLocatorError::FrameDetached {
-                index: 0,
-                source: None,
-            },
+            refact_browser::FrameLocatorError::FrameOwnerMissing { index: 0 },
         );
 
         assert_eq!(
             message,
-            "frame_detached: frame 0 (css=iframe#f) was detached or replaced while resolving; \
-             re-run the step once the new iframe has loaded"
+            "frame_detached: frame 0 (css=iframe#nope) matched no iframe element; \
+             re-run the step once the iframe exists or fix the frame locator"
         );
+        assert!(!message.contains("detached or replaced"));
     }
 
     #[test]
@@ -13760,15 +13761,43 @@ mod tests {
             &BrowserLocator::css(".inner").in_frames(vec![BrowserLocator::css("iframe")]),
             refact_browser::FrameLocatorError::FrameDetached {
                 index: 0,
-                source: None,
+                source: Some("No frame for given id".to_string()),
             },
+        );
+        let missing = frame_locator_error_message(
+            &BrowserLocator::css(".inner").in_frames(vec![BrowserLocator::css("iframe")]),
+            refact_browser::FrameLocatorError::FrameOwnerMissing { index: 0 },
         );
 
         assert!(is_transient_page_error(&detached));
+        assert!(is_transient_page_error(&missing));
         assert_eq!(
             poll_deadline_error(Some(detached.clone()), "Timed out after 5000ms".to_string()),
             detached
         );
+        assert_eq!(
+            poll_deadline_error(Some(missing.clone()), "Timed out after 5000ms".to_string()),
+            missing
+        );
+    }
+
+    #[test]
+    fn transient_page_errors_reuse_the_shared_stale_frame_markers() {
+        for stale in refact_browser::STALE_FRAME_MARKERS {
+            assert!(
+                is_transient_page_error(stale),
+                "missed stale frame marker: {stale}"
+            );
+            assert!(
+                is_transient_page_error(&stale.to_ascii_uppercase()),
+                "stale frame marker is case sensitive: {stale}"
+            );
+        }
+        assert!(is_transient_page_error(&format!(
+            "{} frame 0 matched no iframe element",
+            refact_browser::FRAME_DETACHED_PREFIX
+        )));
+        assert!(!is_transient_page_error("Element is not visible"));
     }
 
     #[test]
