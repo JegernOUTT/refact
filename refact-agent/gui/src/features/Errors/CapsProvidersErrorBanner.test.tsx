@@ -100,7 +100,7 @@ describe("CapsProvidersErrorBanner", () => {
     });
     expect(providersHits).toBeGreaterThan(providersHitsBeforeRetry);
     expect(capsHits).toBeGreaterThan(1);
-    expect(store.getState().error.message).toBeNull();
+    expect(store.getState().error.capsProviders.message).toBeNull();
   });
 
   it("stays dismissed once the user dismisses it", async () => {
@@ -120,6 +120,52 @@ describe("CapsProvidersErrorBanner", () => {
     await waitFor(() => {
       expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     });
+  });
+
+  it("dismisses the banner without dropping a stored route error", async () => {
+    server.use(
+      http.get("*/v1/providers", () =>
+        HttpResponse.json({ providers: [activeProvider] }),
+      ),
+      http.get("*/v1/caps", () =>
+        HttpResponse.json({ detail: "caps exploded" }, { status: 500 }),
+      ),
+    );
+
+    const { user, store } = renderBanner();
+
+    await screen.findByRole("alert");
+    store.dispatch(setError("deleting integrations."));
+
+    await user.click(screen.getByRole("button", { name: "Dismiss" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+    expect(store.getState().error.message).toBe("deleting integrations.");
+  });
+
+  it("keeps a route error out of the banner while a caps failure is stored", async () => {
+    server.use(
+      http.get("*/v1/providers", () =>
+        HttpResponse.json({ providers: [activeProvider] }),
+      ),
+      http.get("*/v1/caps", () =>
+        HttpResponse.json({ detail: "caps exploded" }, { status: 500 }),
+      ),
+    );
+
+    const { store } = renderBanner();
+
+    await screen.findByRole("alert");
+    store.dispatch(setError("deleting integrations."));
+
+    await waitFor(() => {
+      expect(store.getState().error.message).toBe("deleting integrations.");
+    });
+    expect(store.getState().error.capsProviders.message).toBe("caps exploded");
+    expect(screen.getByRole("alert")).toHaveTextContent("caps exploded");
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
   });
 
   it("ignores errors that belong to a route-local surface", async () => {

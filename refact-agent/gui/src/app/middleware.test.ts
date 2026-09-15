@@ -1839,3 +1839,89 @@ describe("context limit middleware", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe("providers rejection middleware", () => {
+  function makeStore() {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response(null, { status: 200 })),
+    );
+    return setUpStore({
+      config: { host: "vscode", lspPort: 8001, themeProps: {} },
+    });
+  }
+
+  function rejection(
+    thunk: "executeQuery" | "executeMutation",
+    endpointName: string,
+    originalArgs: unknown,
+    data: unknown,
+  ): UnknownAction {
+    return {
+      type: `providers/${thunk}/rejected`,
+      payload: { status: 500, data },
+      error: { message: "Rejected" },
+      meta: {
+        requestId: `${endpointName}-request`,
+        requestStatus: "rejected",
+        condition: false,
+        rejectedWithValue: true,
+        aborted: false,
+        arg: {
+          type: thunk === "executeQuery" ? "query" : "mutation",
+          endpointName,
+          originalArgs,
+          queryCacheKey: `${endpointName}(undefined)`,
+          subscribe: false,
+        },
+      },
+    };
+  }
+
+  const providersFetchRejected = rejection(
+    "executeQuery",
+    "getConfiguredProviders",
+    undefined,
+    "boom",
+  );
+  const providerUpdateRejected = rejection(
+    "executeMutation",
+    "updateProvider",
+    { providerName: "openai", settings: {} },
+    "boom",
+  );
+
+  it("uses fetch-specific fallback text for a getConfiguredProviders rejection", () => {
+    const store = makeStore();
+
+    store.dispatch(providersFetchRejected);
+
+    expect(store.getState().error.capsProviders.message).toBe(
+      "fetching providers from lsp",
+    );
+    expect(store.getState().error.message).toBeNull();
+  });
+
+  it("keeps the mutation fallback text for an updateProvider rejection", () => {
+    const store = makeStore();
+
+    store.dispatch(providerUpdateRejected);
+
+    expect(store.getState().error.message).toBe("provider update error.");
+    expect(store.getState().error.capsProviders.message).toBeNull();
+  });
+
+  it("does not let a stored caps/providers error swallow a route rejection", () => {
+    const store = makeStore();
+
+    store.dispatch(providersFetchRejected);
+    store.dispatch(providerUpdateRejected);
+
+    expect(store.getState().error.capsProviders.message).toBe(
+      "fetching providers from lsp",
+    );
+    expect(store.getState().error.message).toBe("provider update error.");
+  });
+});

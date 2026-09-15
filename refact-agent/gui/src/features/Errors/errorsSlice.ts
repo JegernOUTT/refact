@@ -6,37 +6,34 @@ import type {
 
 export type ErrorSource = "caps_providers";
 
-export type ErrorPayload =
-  | string
-  | {
-      message: string;
-      error_info?: UserErrorInfo;
-      source?: ErrorSource;
-    };
-
-export type ErrorSliceState = {
-  message: string | null;
-  isAuthError?: boolean;
-  category?: UserErrorCategory;
+export type ErrorDetails = {
+  message: string;
   error_info?: UserErrorInfo;
   source?: ErrorSource;
 };
 
-const initialState: ErrorSliceState = { message: null };
+export type ErrorPayload = string | ErrorDetails;
 
-function applyErrorPayload(state: ErrorSliceState, payload: ErrorPayload) {
-  if (typeof payload === "string") {
-    state.message = payload;
-    state.category = undefined;
-    state.error_info = undefined;
-    state.source = undefined;
-    return;
-  }
+export type ErrorSlotState = {
+  message: string | null;
+  category?: UserErrorCategory;
+  error_info?: UserErrorInfo;
+};
 
-  state.message = payload.message;
-  state.category = payload.error_info?.category;
-  state.error_info = payload.error_info;
-  state.source = payload.source;
+export type ErrorSliceState = ErrorSlotState & {
+  isAuthError?: boolean;
+  capsProviders: ErrorSlotState;
+};
+
+const initialState: ErrorSliceState = {
+  message: null,
+  capsProviders: { message: null },
+};
+
+function clearSlot(slot: ErrorSlotState) {
+  slot.message = null;
+  slot.category = undefined;
+  slot.error_info = undefined;
 }
 
 export const errorSlice = createSlice({
@@ -44,40 +41,48 @@ export const errorSlice = createSlice({
   initialState,
   reducers: {
     setError: (state, action: PayloadAction<ErrorPayload>) => {
-      if (state.message) return;
-      applyErrorPayload(state, action.payload);
+      const payload: ErrorDetails =
+        typeof action.payload === "string"
+          ? { message: action.payload }
+          : action.payload;
+      const slot: ErrorSlotState =
+        payload.source === "caps_providers" ? state.capsProviders : state;
+
+      if (slot.message) return;
+
+      slot.message = payload.message;
+      slot.category = payload.error_info?.category;
+      slot.error_info = payload.error_info;
     },
     setIsAuthError: (state, action: PayloadAction<boolean>) => {
       state.isAuthError = action.payload;
     },
     clearError: (state, _action: PayloadAction) => {
-      state.message = null;
-      state.category = undefined;
-      state.error_info = undefined;
+      clearSlot(state);
       state.isAuthError = undefined;
-      state.source = undefined;
+    },
+    clearCapsProvidersError: (state, _action: PayloadAction) => {
+      clearSlot(state.capsProviders);
+      state.isAuthError = undefined;
     },
   },
   selectors: {
-    getErrorMessage: (state) => state.message,
+    getErrorMessage: (state) => state.message ?? state.capsProviders.message,
     getIsAuthError: (state) => state.isAuthError,
-    getErrorCategory: (state) => state.category,
-    getErrorInfo: (state) => state.error_info,
-    getErrorSource: (state) => state.source,
-    getCapsProvidersErrorMessage: (state) =>
-      state.source === "caps_providers" ? state.message : null,
-    getRouteErrorMessage: (state) =>
-      state.source === "caps_providers" ? null : state.message,
+    getErrorCategory: (state) => state.category ?? state.capsProviders.category,
+    getErrorInfo: (state) => state.error_info ?? state.capsProviders.error_info,
+    getCapsProvidersErrorMessage: (state) => state.capsProviders.message,
+    getRouteErrorMessage: (state) => state.message,
   },
 });
 
-export const { setError, setIsAuthError, clearError } = errorSlice.actions;
+export const { setError, setIsAuthError, clearError, clearCapsProvidersError } =
+  errorSlice.actions;
 export const {
   getErrorMessage,
   getIsAuthError,
   getErrorCategory,
   getErrorInfo,
-  getErrorSource,
   getCapsProvidersErrorMessage,
   getRouteErrorMessage,
 } = errorSlice.selectors;

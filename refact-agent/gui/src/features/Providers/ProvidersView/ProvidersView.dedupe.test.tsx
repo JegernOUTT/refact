@@ -21,7 +21,7 @@ vi.mock("../../DefaultModels", () => ({
 const CAPS_ERROR = "fetching caps from lsp";
 const ROUTE_ERROR = "provider update error.";
 
-function renderProvidersRoute(error: ErrorPayload) {
+function renderProvidersRoute(...errors: ErrorPayload[]) {
   const store = setUpStore({
     config: {
       apiKey: "test",
@@ -30,7 +30,7 @@ function renderProvidersRoute(error: ErrorPayload) {
       host: "vscode",
     },
   });
-  store.dispatch(setError(error));
+  errors.forEach((error) => store.dispatch(setError(error)));
   return render(
     <>
       <CapsProvidersErrorBanner onRetry={() => void 0} isRetrying={false} />
@@ -56,6 +56,17 @@ describe("Providers route error de-duplication", () => {
     renderProvidersRoute(ROUTE_ERROR);
 
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(document.body).toHaveTextContent(ROUTE_ERROR);
+  });
+
+  it("renders a route error raised while the caps banner is shown", () => {
+    renderProvidersRoute(
+      { message: CAPS_ERROR, source: "caps_providers" },
+      ROUTE_ERROR,
+    );
+
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.getAllByText(CAPS_ERROR)).toHaveLength(1);
     expect(document.body).toHaveTextContent(ROUTE_ERROR);
   });
 });

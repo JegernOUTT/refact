@@ -5,7 +5,7 @@ import { Button } from "../../components/ui";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import {
-  clearError,
+  clearCapsProvidersError,
   getCapsProvidersErrorMessage,
   getIsAuthError,
 } from "./errorsSlice";
@@ -24,7 +24,7 @@ export const CapsProvidersErrorBanner: React.FC<
   const isAuthError = useAppSelector(getIsAuthError);
 
   const onDismiss = useCallback(() => {
-    dispatch(clearError());
+    dispatch(clearCapsProvidersError());
   }, [dispatch]);
 
   if (!message) return null;

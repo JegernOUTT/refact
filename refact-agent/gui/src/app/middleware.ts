@@ -74,8 +74,9 @@ import { commandsApi, isDetailMessage } from "../services/refact/commands";
 import { pathApi } from "../services/refact/path";
 import { pingApi } from "../services/refact/ping";
 import {
+  clearCapsProvidersError,
   clearError,
-  getErrorSource,
+  getCapsProvidersErrorMessage,
   setError,
   setIsAuthError,
 } from "../features/Errors/errorsSlice";
@@ -1153,14 +1154,18 @@ startListening({
         | undefined;
       const errorStatus = payload?.status;
       const isAuthError = errorStatus === 401;
+      const isProvidersFetch =
+        providersApi.endpoints.getConfiguredProviders.matchRejected(action);
       const message = isAuthError
         ? AUTH_ERROR_MESSAGE
         : isDetailMessage(payload?.data)
           ? (payload.data as { detail: string }).detail
-          : `provider update error.`;
+          : isProvidersFetch
+            ? `fetching providers from lsp`
+            : `provider update error.`;
 
       listenerApi.dispatch(
-        providersApi.endpoints.getConfiguredProviders.matchRejected(action)
+        isProvidersFetch
           ? setError({ message, source: "caps_providers" })
           : setError(message),
       );
@@ -1203,7 +1208,7 @@ startListening({
   ),
   effect: (_action, listenerApi) => {
     const state = listenerApi.getState();
-    if (getErrorSource(state) !== "caps_providers") return;
+    if (!getCapsProvidersErrorMessage(state)) return;
     if (capsApi.endpoints.getCaps.select(undefined)(state).isError) return;
     if (
       providersApi.endpoints.getConfiguredProviders.select(undefined)(state)
@@ -1211,7 +1216,7 @@ startListening({
     ) {
       return;
     }
-    listenerApi.dispatch(clearError());
+    listenerApi.dispatch(clearCapsProvidersError());
   },
 });
 
@@ -1223,6 +1228,7 @@ startListening({
     if (action.payload.status === "online") {
       if (previousStatus === "online") return;
       listenerApi.dispatch(clearError());
+      listenerApi.dispatch(clearCapsProvidersError());
       listenerApi.dispatch(capsApi.util.resetApiState());
       listenerApi.dispatch(modelsApi.util.resetApiState());
       listenerApi.dispatch(providersApi.util.resetApiState());
