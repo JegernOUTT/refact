@@ -1674,7 +1674,33 @@ async fn click_obscured_waits_for_overlay() {
     case.setup_world();
     case.tab
         .evaluate(
-            "const overlay = document.createElement('div'); overlay.id = 'overlay'; overlay.textContent = 'blocking overlay'; overlay.style.cssText = 'position:fixed;inset:0;z-index:10'; document.body.append(overlay); setTimeout(() => overlay.remove(), 2500)",
+            "const fixture = document.querySelector('#overlay'); if (fixture) { fixture.style.display = 'none'; } true",
+            false,
+        )
+        .unwrap();
+    let warm_up_started = std::time::Instant::now();
+    let warm_up = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::Click {
+            locator: BrowserLocator::css("#target"),
+            timeout_ms: None,
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+    let warm_up_ms = warm_up_started
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
+    assert!(
+        warm_up.ok,
+        "warm-up click on an unobstructed target failed: {warm_up:?}"
+    );
+    case.navigate("overlay.html");
+
+    let overlay_lifetime_ms = warm_up_ms.saturating_mul(3).clamp(2_500, 15_000);
+    case.tab
+        .evaluate(
+            &format!("const overlay = document.createElement('div'); overlay.id = 'overlay'; overlay.textContent = 'blocking overlay'; overlay.style.cssText = 'position:fixed;inset:0;z-index:10'; document.body.append(overlay); setTimeout(() => overlay.remove(), {overlay_lifetime_ms})"),
             false,
         )
         .unwrap();
@@ -1683,25 +1709,29 @@ async fn click_obscured_waits_for_overlay() {
         &[
             BrowserStep::Click {
                 locator: BrowserLocator::css("#target"),
-                timeout_ms: None,
+                timeout_ms: Some(overlay_lifetime_ms + 10_000),
             },
             BrowserStep::WaitForText {
                 text: "clicked after overlay".to_string(),
-                timeout_ms: Some(2_000),
+                timeout_ms: Some((overlay_lifetime_ms / 2).max(2_000)),
             },
         ],
         &ImagePolicy::browser_capture(),
     );
     assert!(
         report.ok,
-        "click should wait for overlay removal: {report:?}"
+        "click should wait for overlay removal (warm-up {warm_up_ms}ms, overlay {overlay_lifetime_ms}ms): {report:?}"
     );
     let diagnostics = report.steps[0]
         .actionability
         .as_ref()
         .expect("retried click should include actionability diagnostics");
-    assert!(diagnostics.attempts.unwrap_or_default() > 0);
+    assert!(
+        diagnostics.attempts.unwrap_or_default() > 0,
+        "click did not exercise the retry path (warm-up {warm_up_ms}ms, overlay {overlay_lifetime_ms}ms): {diagnostics:?}"
+    );
     assert_eq!(diagnostics.receives_events, Some(true));
+    assert!(diagnostics.intercepting_element.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
