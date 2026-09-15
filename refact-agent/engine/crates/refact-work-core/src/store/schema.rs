@@ -5,6 +5,7 @@ pub const MIGRATIONS: &[&str] = &[
     V4_ACTIVITY_PROVENANCE,
     V5_LEASE_HOLDER_INSTANCE,
     V6_DECOMPOSITION_OUTCOMES,
+    V7_DISAGREEMENTS,
 ];
 
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -138,4 +139,24 @@ CREATE INDEX idx_decomposition_outcomes_class
     ON decomposition_outcomes (project, work_class, recorded_at_ms);
 CREATE INDEX idx_decomposition_outcomes_time
     ON decomposition_outcomes (project, recorded_at_ms);
+";
+
+const V7_DISAGREEMENTS: &str = "
+CREATE TABLE disagreements (
+    project TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    claim TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    status TEXT NOT NULL,
+    positions TEXT NOT NULL,
+    adjudication TEXT,
+    open_reason TEXT,
+    filed_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (project, record_id)
+) WITHOUT ROWID;
+CREATE INDEX idx_disagreements_status
+    ON disagreements (project, status, updated_at_ms);
+CREATE INDEX idx_disagreements_time
+    ON disagreements (project, updated_at_ms);
 ";

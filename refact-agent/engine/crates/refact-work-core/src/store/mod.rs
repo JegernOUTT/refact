@@ -8,8 +8,9 @@ use crate::settings::{CoordinationSettings, SettingsError};
 use filesystem::FilesystemKind;
 use records::{
     AccessKind, ActivityObservationRecord, DecompositionOutcomeRecord, DeliveryOutboxRecord,
-    DeliveryState, EngineInstanceRecord, IntentState, LeaseAcquisition, LeaseAuthority,
-    LeaseRecord, PresenceMark, PruneReport, QueuedWorkRecord, RunIntentRecord,
+    DeliveryState, DisagreementRecord, DisagreementStatus, EngineInstanceRecord, IntentState,
+    LeaseAcquisition, LeaseAuthority, LeaseRecord, PresenceMark, PruneReport, QueuedWorkRecord,
+    RunIntentRecord,
 };
 use rusqlite::{params, OptionalExtension};
 use std::fmt;
@@ -29,6 +30,9 @@ const ACTIVITY_COLUMNS: &str = "project, record_id, runtime, work_id, path, acce
 const DECOMPOSITION_COLUMNS: &str = "project, record_id, runtime, work_id, work_class, \
      fan_out_group, sibling_count, wall_clock_ms, tokens, turns, tool_calls, succeeded, \
      reworked, recorded_at_ms, paths";
+
+const DISAGREEMENT_COLUMNS: &str = "project, record_id, claim, subject, status, positions, \
+     adjudication, open_reason, filed_at_ms, updated_at_ms";
 
 static NEXT_STORE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -269,6 +273,19 @@ enum LeaseWrite {
     NotHeld,
     Expired(i64),
     Fenced(i64),
+}
+
+/// The outcome of filing a disagreement.
+///
+/// `Exists` carries the stored record **untouched**: a second filing under the
+/// same id never overwrites the positions already argued, so the last writer
+/// cannot silently become the only writer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisagreementFiling {
+    Filed(Box<DisagreementRecord>),
+    Exists(Box<DisagreementRecord>),
+    /// The project already holds as many open disagreements as it is allowed.
+    OpenLimit(usize),
 }
 
 pub struct CoordinationStore {
@@ -1723,13 +1740,191 @@ impl CoordinationStore {
             .map_err(|err| from_tokio(&self.path, err))
     }
 
+    /// File a disagreement. An id already on record is returned as it stands,
+    /// never replaced: both sides of a filed dispute outlive any later writer.
+    pub async fn file_disagreement(
+        &self,
+        access: &ProjectAccess,
+        record: &DisagreementRecord,
+    ) -> Result<DisagreementFiling, StoreError> {
+        let scope = self.scope_for(access, &record.project)?;
+        let max_open = self.settings.disagreement_max_open as i64;
+        let record = record.clone();
+        let positions = serde_json::to_string(&record.positions)
+            .map_err(|err| StoreError::Decode(err.to_string()))?;
+        let adjudication = optional_json(&record.adjudication)?;
+        self.conn
+            .call(move |conn| {
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let existing = tx
+                    .query_row(
+                        &format!(
+                            "SELECT {DISAGREEMENT_COLUMNS} FROM disagreements \
+                             WHERE project = ?1 AND record_id = ?2"
+                        ),
+                        params![scope, record.record_id],
+                        disagreement_columns,
+                    )
+                    .optional()?;
+                if let Some(existing) = existing {
+                    tx.commit()?;
+                    return Ok(DisagreementFiling::Exists(Box::new(decode_disagreement(
+                        existing,
+                    )?)));
+                }
+                if record.status.is_open() {
+                    let open: i64 = tx.query_row(
+                        "SELECT COUNT(*) FROM disagreements WHERE project = ?1 AND status = ?2",
+                        params![scope, DisagreementStatus::Open.as_str()],
+                        |row| row.get(0),
+                    )?;
+                    if open >= max_open {
+                        tx.commit()?;
+                        return Ok(DisagreementFiling::OpenLimit(max_open as usize));
+                    }
+                }
+                tx.execute(
+                    "INSERT INTO disagreements (project, record_id, claim, subject, status, \
+                     positions, adjudication, open_reason, filed_at_ms, updated_at_ms) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        scope,
+                        record.record_id,
+                        record.claim,
+                        record.subject,
+                        record.status.as_str(),
+                        positions,
+                        adjudication,
+                        record.open_reason,
+                        record.filed_at_ms,
+                        record.updated_at_ms
+                    ],
+                )?;
+                tx.commit()?;
+                Ok(DisagreementFiling::Filed(Box::new(record)))
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// Write back how a disagreement was settled.
+    ///
+    /// Only the outcome columns are set. `claim`, `subject` and `positions`
+    /// appear in no update statement anywhere, so a resolution cannot rewrite
+    /// what either side argued.
+    pub async fn put_disagreement_resolution(
+        &self,
+        access: &ProjectAccess,
+        record: &DisagreementRecord,
+    ) -> Result<bool, StoreError> {
+        let scope = self.scope_for(access, &record.project)?;
+        let record = record.clone();
+        let adjudication = optional_json(&record.adjudication)?;
+        self.conn
+            .call(move |conn| {
+                let changed = conn.execute(
+                    "UPDATE disagreements SET status = ?3, adjudication = ?4, open_reason = ?5, \
+                     updated_at_ms = ?6 WHERE project = ?1 AND record_id = ?2",
+                    params![
+                        scope,
+                        record.record_id,
+                        record.status.as_str(),
+                        adjudication,
+                        record.open_reason,
+                        record.updated_at_ms
+                    ],
+                )?;
+                Ok(changed > 0)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    pub async fn get_disagreement(
+        &self,
+        access: &ProjectAccess,
+        record_id: &str,
+    ) -> Result<Option<DisagreementRecord>, StoreError> {
+        let scope = self.scope(access)?;
+        let record_id = record_id.to_string();
+        self.conn
+            .call(move |conn| {
+                let row = conn
+                    .query_row(
+                        &format!(
+                            "SELECT {DISAGREEMENT_COLUMNS} FROM disagreements \
+                             WHERE project = ?1 AND record_id = ?2"
+                        ),
+                        params![scope, record_id],
+                        disagreement_columns,
+                    )
+                    .optional()?;
+                match row {
+                    Some(row) => Ok(Some(decode_disagreement(row)?)),
+                    None => Ok(None),
+                }
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// Disagreements of this project, newest first and bounded by
+    /// `store_max_disagreements`.
+    pub async fn list_disagreements(
+        &self,
+        access: &ProjectAccess,
+        status: Option<DisagreementStatus>,
+    ) -> Result<Vec<DisagreementRecord>, StoreError> {
+        let scope = self.scope(access)?;
+        let limit = self.settings.store_max_disagreements as i64;
+        let status = status.map(|status| status.as_str().to_string());
+        self.conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {DISAGREEMENT_COLUMNS} FROM disagreements \
+                     WHERE project = ?1 AND (?2 IS NULL OR status = ?2) \
+                     ORDER BY updated_at_ms DESC, record_id DESC LIMIT ?3"
+                ))?;
+                let rows = stmt.query_map(params![scope, status, limit], disagreement_columns)?;
+                let mut records = Vec::new();
+                for row in rows {
+                    records.push(decode_disagreement(row?)?);
+                }
+                Ok(records)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// Delete settled disagreements last touched before `cutoff_ms`. An open
+    /// record is never dropped by age: unresolved dissent is still signal.
+    pub async fn expire_disagreements(
+        &self,
+        access: &ProjectAccess,
+        cutoff_ms: i64,
+    ) -> Result<usize, StoreError> {
+        let scope = self.scope(access)?;
+        self.conn
+            .call(move |conn| {
+                let removed = conn.execute(
+                    "DELETE FROM disagreements WHERE project = ?1 AND status <> ?2 \
+                     AND updated_at_ms < ?3",
+                    params![scope, DisagreementStatus::Open.as_str(), cutoff_ms],
+                )?;
+                Ok(removed)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
     pub async fn prune(&self, access: &ProjectAccess) -> Result<PruneReport, StoreError> {
         let scope = self.scope(access)?;
         let settings = self.settings.clone();
         self.conn
             .call(move |conn| {
                 let settled = format!("AND state IN ({})", sql_terminal_delivery_states());
-                let specs: [(&str, &[&str], &str, i64, &str); 7] = [
+                let specs: [(&str, &[&str], &str, i64, &str); 8] = [
                     (
                         "engine_instances",
                         &["instance_id"],
@@ -1779,6 +1974,13 @@ impl CoordinationStore {
                         settings.store_max_decomposition_outcomes as i64,
                         "",
                     ),
+                    (
+                        "disagreements",
+                        &["record_id"],
+                        "updated_at_ms",
+                        settings.store_max_disagreements as i64,
+                        "",
+                    ),
                 ];
                 let mut report = PruneReport::default();
                 let tx =
@@ -1803,7 +2005,8 @@ impl CoordinationStore {
                         "leases" => report.leases = removed,
                         "delivery_outbox" => report.delivery_outbox = removed,
                         "activity_observations" => report.activity_observations = removed,
-                        _ => report.decomposition_outcomes = removed,
+                        "decomposition_outcomes" => report.decomposition_outcomes = removed,
+                        _ => report.disagreements = removed,
                     }
                 }
                 tx.commit()?;
@@ -2205,6 +2408,73 @@ fn decode_outbox(columns: OutboxColumns) -> Result<DeliveryOutboxRecord, tokio_r
         created_at_ms,
         updated_at_ms,
         payload,
+    })
+}
+
+fn optional_json<T: serde::Serialize>(value: &Option<T>) -> Result<Option<String>, StoreError> {
+    value
+        .as_ref()
+        .map(|value| {
+            serde_json::to_string(value).map_err(|err| StoreError::Decode(err.to_string()))
+        })
+        .transpose()
+}
+
+struct DisagreementColumns {
+    project: String,
+    record_id: String,
+    claim: String,
+    subject: String,
+    status: String,
+    positions: String,
+    adjudication: Option<String>,
+    open_reason: Option<String>,
+    filed_at_ms: i64,
+    updated_at_ms: i64,
+}
+
+fn disagreement_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<DisagreementColumns> {
+    Ok(DisagreementColumns {
+        project: row.get(0)?,
+        record_id: row.get(1)?,
+        claim: row.get(2)?,
+        subject: row.get(3)?,
+        status: row.get(4)?,
+        positions: row.get(5)?,
+        adjudication: row.get(6)?,
+        open_reason: row.get(7)?,
+        filed_at_ms: row.get(8)?,
+        updated_at_ms: row.get(9)?,
+    })
+}
+
+fn decode_disagreement(
+    columns: DisagreementColumns,
+) -> Result<DisagreementRecord, tokio_rusqlite::Error> {
+    let status = DisagreementStatus::parse(&columns.status).ok_or_else(|| {
+        decode(format!(
+            "unknown disagreement status `{}` in disagreements",
+            columns.status
+        ))
+    })?;
+    let positions = serde_json::from_str(&columns.positions)
+        .map_err(|err| decode(format!("unreadable positions in disagreements: {err}")))?;
+    let adjudication = columns
+        .adjudication
+        .map(|raw| serde_json::from_str(&raw))
+        .transpose()
+        .map_err(|err| decode(format!("unreadable adjudication in disagreements: {err}")))?;
+    Ok(DisagreementRecord {
+        project: ProjectKey::new(columns.project),
+        record_id: columns.record_id,
+        claim: columns.claim,
+        subject: columns.subject,
+        positions,
+        status,
+        adjudication,
+        open_reason: columns.open_reason,
+        filed_at_ms: columns.filed_at_ms,
+        updated_at_ms: columns.updated_at_ms,
     })
 }
 

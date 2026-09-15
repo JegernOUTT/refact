@@ -160,6 +160,17 @@ pub struct CoordinationSettings {
     pub store_max_outbox_messages: usize,
     pub store_max_activity_observations: usize,
     pub store_max_decomposition_outcomes: usize,
+    pub store_max_disagreements: usize,
+    /// Open disagreements one project may hold at once. Filing past the cap is
+    /// refused rather than silently evicting a dispute nobody settled.
+    pub disagreement_max_open: usize,
+    /// How long a settled disagreement is kept. An open one is never dropped by
+    /// age, however old it is.
+    pub disagreement_retention_ms: u64,
+    /// Whether an open disagreement stops work from being reported complete.
+    /// Dissent is a signal, not automatically a blocker, so this is off unless
+    /// a project asks for it.
+    pub disagreement_blocks_completion: bool,
     /// Comparable runs a cohort needs before the decomposition advisor reports
     /// a figure at all. Below it the advisor refuses rather than averaging a
     /// handful of runs into something that reads like a law.
@@ -324,6 +335,10 @@ impl Default for CoordinationSettings {
             store_max_outbox_messages: 65_536,
             store_max_activity_observations: 262_144,
             store_max_decomposition_outcomes: 4_096,
+            store_max_disagreements: 4_096,
+            disagreement_max_open: 64,
+            disagreement_retention_ms: 30 * 24 * 60 * 60 * 1_000,
+            disagreement_blocks_completion: false,
             decomposition_min_samples: 5,
             outbox_retention_secs: 604_800,
             outbox_prune_interval_secs: 3_600,
@@ -648,10 +663,18 @@ impl CoordinationSettings {
                 "store_max_decomposition_outcomes",
                 self.store_max_decomposition_outcomes,
             ),
+            ("store_max_disagreements", self.store_max_disagreements),
+            ("disagreement_max_open", self.disagreement_max_open),
             ("decomposition_min_samples", self.decomposition_min_samples),
         ] {
             at_least(&mut v, field, value as u64, 1);
         }
+        at_least(
+            &mut v,
+            "disagreement_retention_ms",
+            self.disagreement_retention_ms,
+            1,
+        );
         at_least(
             &mut v,
             "store_busy_timeout_ms",
@@ -1297,6 +1320,28 @@ mod tests {
         for mutate in [
             |settings: &mut CoordinationSettings| settings.store_max_decomposition_outcomes = 0,
             |settings: &mut CoordinationSettings| settings.decomposition_min_samples = 0,
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn disagreement_bounds_default_usable_and_reject_zero() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(
+            !settings.disagreement_blocks_completion,
+            "dissent must not block completion unless a project asks for it"
+        );
+        assert!(settings.store_max_disagreements >= 1024);
+        assert!(settings.disagreement_max_open >= 1);
+        assert!(settings.disagreement_retention_ms >= 86_400_000);
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.store_max_disagreements = 0,
+            |settings: &mut CoordinationSettings| settings.disagreement_max_open = 0,
+            |settings: &mut CoordinationSettings| settings.disagreement_retention_ms = 0,
         ] {
             let mut settings = CoordinationSettings::default();
             mutate(&mut settings);

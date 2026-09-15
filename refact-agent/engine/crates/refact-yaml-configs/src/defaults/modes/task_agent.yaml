@@ -262,6 +262,9 @@ tools:
   - agent_resume
   - work_overview
   - work_inspect
+  - disagreement_file
+  - disagreement_list
+  - disagreement_adjudicate
   - agent_finish
   - task_mem_save
   - task_mem_search

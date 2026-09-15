@@ -761,6 +761,17 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_work_inspect::ToolWorkInspect {
             config_path: config_path.clone(),
         }),
+        Box::new(crate::tools::tool_disagreement::ToolDisagreementFile {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_disagreement::ToolDisagreementList {
+            config_path: config_path.clone(),
+        }),
+        Box::new(
+            crate::tools::tool_disagreement::ToolDisagreementAdjudicate {
+                config_path: config_path.clone(),
+            },
+        ),
         Box::new(crate::tools::tool_agent_interact::ToolAgentsOverview {
             config_path: config_path.clone(),
         }),

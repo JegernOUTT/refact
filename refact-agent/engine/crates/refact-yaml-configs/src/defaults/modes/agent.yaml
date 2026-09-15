@@ -291,6 +291,9 @@ tools:
   - agent_resume
   - work_overview
   - work_inspect
+  - disagreement_file
+  - disagreement_list
+  - disagreement_adjudicate
   - review
   - tasks_set
   - task_done

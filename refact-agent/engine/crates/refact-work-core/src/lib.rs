@@ -23,12 +23,17 @@ pub use settings::{
 };
 pub use store::filesystem::{classify_mounts, classify_path, FilesystemKind};
 pub use store::records::{
-    now_ms, AccessKind, ActivityObservationRecord, DecompositionOutcomeRecord,
-    DeliveryOutboxRecord, DeliveryState, EngineInstanceRecord, IntentState, LeaseAcquisition,
-    LeaseAuthority, LeaseRecord, PruneReport, QueuedWorkRecord, RunIntentRecord,
+    now_ms, AccessKind, ActivityObservationRecord, Adjudication, AdjudicationRefusal,
+    AdjudicationVerdict, DecompositionOutcomeRecord, DeliveryOutboxRecord, DeliveryState,
+    DisagreementPosition, DisagreementRecord, DisagreementStatus, EngineInstanceRecord,
+    EvidenceKind, EvidenceRef, FilingRefusal, IntentState, LeaseAcquisition, LeaseAuthority,
+    LeaseRecord, PruneReport, QueuedWorkRecord, RunIntentRecord,
 };
 pub use store::schema::SCHEMA_VERSION;
-pub use store::{default_store_path, CoordinationStore, ProjectAccess, StoreError, StoreWarning};
+pub use store::{
+    default_store_path, CoordinationStore, DisagreementFiling, ProjectAccess, StoreError,
+    StoreWarning,
+};
 pub use waitgraph::{
     detect, detect_stable, DeadlockReport, Detection, RunFacts, WaitEdge, WaitGraph,
     WaitGraphBounds, WaitHandle, WaitKind, WaitNode, WaitRegistry, WaitTarget, DEADLOCK_CODE,
