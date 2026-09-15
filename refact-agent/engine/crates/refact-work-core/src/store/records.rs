@@ -265,6 +265,40 @@ pub struct ActivityObservationRecord {
     pub checkout: Option<String>,
 }
 
+/// What one finished run actually cost, and whether it ran alone.
+///
+/// `sibling_count` counts this run plus the runs that overlapped it under the
+/// same parent: `1` is a single agent, anything above that is fan-out. Nothing
+/// here is an estimate — every field is measured or left at what the runner
+/// reported.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecompositionOutcomeRecord {
+    pub project: ProjectKey,
+    pub record_id: String,
+    pub work: WorkKey,
+    /// What kind of work this was, so only comparable runs are compared.
+    pub work_class: String,
+    pub fan_out_group: Option<String>,
+    pub sibling_count: i64,
+    pub wall_clock_ms: i64,
+    pub tokens: i64,
+    pub turns: i64,
+    pub tool_calls: i64,
+    pub succeeded: bool,
+    /// The work had to be run again rather than landing on the first attempt.
+    pub reworked: bool,
+    pub recorded_at_ms: i64,
+    /// Paths this run declared, kept so a model-facing surface can be filtered
+    /// against the destination privacy policy.
+    pub paths: Vec<String>,
+}
+
+impl DecompositionOutcomeRecord {
+    pub fn fanned_out(&self) -> bool {
+        self.sibling_count > 1
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PruneReport {
     pub engine_instances: usize,
@@ -273,6 +307,7 @@ pub struct PruneReport {
     pub leases: usize,
     pub delivery_outbox: usize,
     pub activity_observations: usize,
+    pub decomposition_outcomes: usize,
 }
 
 impl PruneReport {
@@ -283,5 +318,6 @@ impl PruneReport {
             + self.leases
             + self.delivery_outbox
             + self.activity_observations
+            + self.decomposition_outcomes
     }
 }

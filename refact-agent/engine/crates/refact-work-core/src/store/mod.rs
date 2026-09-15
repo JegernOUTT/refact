@@ -7,9 +7,9 @@ use crate::identity::{CheckoutKey, ProjectKey, RunKey, RuntimeKind, WorkKey};
 use crate::settings::{CoordinationSettings, SettingsError};
 use filesystem::FilesystemKind;
 use records::{
-    AccessKind, ActivityObservationRecord, DeliveryOutboxRecord, DeliveryState,
-    EngineInstanceRecord, IntentState, LeaseAcquisition, LeaseAuthority, LeaseRecord, PresenceMark,
-    PruneReport, QueuedWorkRecord, RunIntentRecord,
+    AccessKind, ActivityObservationRecord, DecompositionOutcomeRecord, DeliveryOutboxRecord,
+    DeliveryState, EngineInstanceRecord, IntentState, LeaseAcquisition, LeaseAuthority,
+    LeaseRecord, PresenceMark, PruneReport, QueuedWorkRecord, RunIntentRecord,
 };
 use rusqlite::{params, OptionalExtension};
 use std::fmt;
@@ -25,6 +25,10 @@ const WAL_SWITCH_POLL: Duration = Duration::from_millis(20);
 const ACTIVITY_COLUMNS: &str = "project, record_id, runtime, work_id, path, access, \
      content_hash, observed_at_ms, file_key, file_alias, instance_id, tool_call, \
      content_hash_before, checkout";
+
+const DECOMPOSITION_COLUMNS: &str = "project, record_id, runtime, work_id, work_class, \
+     fan_out_group, sibling_count, wall_clock_ms, tokens, turns, tool_calls, succeeded, \
+     reworked, recorded_at_ms, paths";
 
 static NEXT_STORE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -1617,13 +1621,115 @@ impl CoordinationStore {
             .map_err(|err| from_tokio(&self.path, err))
     }
 
+    /// Record what one finished run cost. Replaying the same `record_id`
+    /// overwrites it, so a run can never be counted twice.
+    pub async fn put_decomposition_outcome(
+        &self,
+        access: &ProjectAccess,
+        record: &DecompositionOutcomeRecord,
+    ) -> Result<(), StoreError> {
+        let scope = self.scope_for(access, &record.project)?;
+        let record = record.clone();
+        let paths = serde_json::to_string(&record.paths)
+            .map_err(|err| StoreError::Decode(err.to_string()))?;
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO decomposition_outcomes (project, record_id, runtime, work_id, \
+                     work_class, fan_out_group, sibling_count, wall_clock_ms, tokens, turns, \
+                     tool_calls, succeeded, reworked, recorded_at_ms, paths) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
+                     ON CONFLICT(project, record_id) DO UPDATE SET runtime = excluded.runtime, \
+                     work_id = excluded.work_id, work_class = excluded.work_class, \
+                     fan_out_group = excluded.fan_out_group, \
+                     sibling_count = excluded.sibling_count, \
+                     wall_clock_ms = excluded.wall_clock_ms, tokens = excluded.tokens, \
+                     turns = excluded.turns, tool_calls = excluded.tool_calls, \
+                     succeeded = excluded.succeeded, reworked = excluded.reworked, \
+                     recorded_at_ms = excluded.recorded_at_ms, paths = excluded.paths",
+                    params![
+                        scope,
+                        record.record_id,
+                        record.work.runtime.as_str(),
+                        record.work.id,
+                        record.work_class,
+                        record.fan_out_group,
+                        record.sibling_count,
+                        record.wall_clock_ms,
+                        record.tokens,
+                        record.turns,
+                        record.tool_calls,
+                        record.succeeded as i64,
+                        record.reworked as i64,
+                        record.recorded_at_ms,
+                        paths
+                    ],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// Recorded outcomes of this project, newest first and bounded by
+    /// `store_max_decomposition_outcomes`.
+    pub async fn list_decomposition_outcomes(
+        &self,
+        access: &ProjectAccess,
+        work_class: Option<&str>,
+    ) -> Result<Vec<DecompositionOutcomeRecord>, StoreError> {
+        let scope = self.scope(access)?;
+        let limit = self.settings.store_max_decomposition_outcomes as i64;
+        let work_class = work_class.map(str::to_string);
+        self.conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {DECOMPOSITION_COLUMNS} FROM decomposition_outcomes \
+                     WHERE project = ?1 AND (?2 IS NULL OR work_class = ?2) \
+                     ORDER BY recorded_at_ms DESC, record_id DESC LIMIT ?3"
+                ))?;
+                let rows =
+                    stmt.query_map(params![scope, work_class, limit], decomposition_columns)?;
+                let mut records = Vec::new();
+                for row in rows {
+                    records.push(decode_decomposition(row?)?);
+                }
+                Ok(records)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// Keep the newest `max_records` outcomes and delete the rest. The order is
+    /// total, so the same overflow always evicts the same rows.
+    pub async fn prune_decomposition_outcomes(
+        &self,
+        access: &ProjectAccess,
+        max_records: usize,
+    ) -> Result<usize, StoreError> {
+        let scope = self.scope(access)?;
+        let limit = max_records as i64;
+        self.conn
+            .call(move |conn| {
+                let removed = conn.execute(
+                    "DELETE FROM decomposition_outcomes WHERE project = ?1 AND record_id IN \
+                     (SELECT record_id FROM decomposition_outcomes WHERE project = ?1 \
+                     ORDER BY recorded_at_ms DESC, record_id DESC LIMIT -1 OFFSET ?2)",
+                    params![scope, limit],
+                )?;
+                Ok(removed)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
     pub async fn prune(&self, access: &ProjectAccess) -> Result<PruneReport, StoreError> {
         let scope = self.scope(access)?;
         let settings = self.settings.clone();
         self.conn
             .call(move |conn| {
                 let settled = format!("AND state IN ({})", sql_terminal_delivery_states());
-                let specs: [(&str, &[&str], &str, i64, &str); 6] = [
+                let specs: [(&str, &[&str], &str, i64, &str); 7] = [
                     (
                         "engine_instances",
                         &["instance_id"],
@@ -1666,6 +1772,13 @@ impl CoordinationStore {
                         settings.store_max_activity_observations as i64,
                         "",
                     ),
+                    (
+                        "decomposition_outcomes",
+                        &["record_id"],
+                        "recorded_at_ms",
+                        settings.store_max_decomposition_outcomes as i64,
+                        "",
+                    ),
                 ];
                 let mut report = PruneReport::default();
                 let tx =
@@ -1689,7 +1802,8 @@ impl CoordinationStore {
                         "queued_work" => report.queued_work = removed,
                         "leases" => report.leases = removed,
                         "delivery_outbox" => report.delivery_outbox = removed,
-                        _ => report.activity_observations = removed,
+                        "activity_observations" => report.activity_observations = removed,
+                        _ => report.decomposition_outcomes = removed,
                     }
                 }
                 tx.commit()?;
@@ -2091,6 +2205,73 @@ fn decode_outbox(columns: OutboxColumns) -> Result<DeliveryOutboxRecord, tokio_r
         created_at_ms,
         updated_at_ms,
         payload,
+    })
+}
+
+struct DecompositionColumns {
+    project: String,
+    record_id: String,
+    runtime: String,
+    work_id: String,
+    work_class: String,
+    fan_out_group: Option<String>,
+    sibling_count: i64,
+    wall_clock_ms: i64,
+    tokens: i64,
+    turns: i64,
+    tool_calls: i64,
+    succeeded: i64,
+    reworked: i64,
+    recorded_at_ms: i64,
+    paths: String,
+}
+
+fn decomposition_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<DecompositionColumns> {
+    Ok(DecompositionColumns {
+        project: row.get(0)?,
+        record_id: row.get(1)?,
+        runtime: row.get(2)?,
+        work_id: row.get(3)?,
+        work_class: row.get(4)?,
+        fan_out_group: row.get(5)?,
+        sibling_count: row.get(6)?,
+        wall_clock_ms: row.get(7)?,
+        tokens: row.get(8)?,
+        turns: row.get(9)?,
+        tool_calls: row.get(10)?,
+        succeeded: row.get(11)?,
+        reworked: row.get(12)?,
+        recorded_at_ms: row.get(13)?,
+        paths: row.get(14)?,
+    })
+}
+
+fn decode_decomposition(
+    columns: DecompositionColumns,
+) -> Result<DecompositionOutcomeRecord, tokio_rusqlite::Error> {
+    let runtime = RuntimeKind::parse(&columns.runtime).ok_or_else(|| {
+        decode(format!(
+            "unknown runtime kind `{}` in decomposition_outcomes",
+            columns.runtime
+        ))
+    })?;
+    let paths: Vec<String> = serde_json::from_str(&columns.paths)
+        .map_err(|err| decode(format!("unreadable paths in decomposition_outcomes: {err}")))?;
+    Ok(DecompositionOutcomeRecord {
+        project: ProjectKey::new(columns.project),
+        record_id: columns.record_id,
+        work: WorkKey::new(runtime, columns.work_id),
+        work_class: columns.work_class,
+        fan_out_group: columns.fan_out_group,
+        sibling_count: columns.sibling_count,
+        wall_clock_ms: columns.wall_clock_ms,
+        tokens: columns.tokens,
+        turns: columns.turns,
+        tool_calls: columns.tool_calls,
+        succeeded: columns.succeeded != 0,
+        reworked: columns.reworked != 0,
+        recorded_at_ms: columns.recorded_at_ms,
+        paths,
     })
 }
 

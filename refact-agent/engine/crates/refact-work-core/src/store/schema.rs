@@ -4,6 +4,7 @@ pub const MIGRATIONS: &[&str] = &[
     V3_ENGINE_PRESENCE_MARK,
     V4_ACTIVITY_PROVENANCE,
     V5_LEASE_HOLDER_INSTANCE,
+    V6_DECOMPOSITION_OUTCOMES,
 ];
 
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -112,4 +113,29 @@ CREATE INDEX idx_activity_observations_file_key
 
 const V5_LEASE_HOLDER_INSTANCE: &str = "
 ALTER TABLE leases ADD COLUMN holder_instance TEXT NOT NULL DEFAULT '';
+";
+
+const V6_DECOMPOSITION_OUTCOMES: &str = "
+CREATE TABLE decomposition_outcomes (
+    project TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    runtime TEXT NOT NULL,
+    work_id TEXT NOT NULL,
+    work_class TEXT NOT NULL,
+    fan_out_group TEXT,
+    sibling_count INTEGER NOT NULL,
+    wall_clock_ms INTEGER NOT NULL,
+    tokens INTEGER NOT NULL,
+    turns INTEGER NOT NULL,
+    tool_calls INTEGER NOT NULL,
+    succeeded INTEGER NOT NULL,
+    reworked INTEGER NOT NULL,
+    recorded_at_ms INTEGER NOT NULL,
+    paths TEXT NOT NULL,
+    PRIMARY KEY (project, record_id)
+) WITHOUT ROWID;
+CREATE INDEX idx_decomposition_outcomes_class
+    ON decomposition_outcomes (project, work_class, recorded_at_ms);
+CREATE INDEX idx_decomposition_outcomes_time
+    ON decomposition_outcomes (project, recorded_at_ms);
 ";

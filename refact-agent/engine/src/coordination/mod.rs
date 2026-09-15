@@ -12,6 +12,7 @@ mod capsule_render;
 mod capsule_tests;
 pub mod catalog;
 pub mod deadlock;
+pub mod decomposition;
 pub mod error;
 pub mod file_provenance;
 pub mod history;

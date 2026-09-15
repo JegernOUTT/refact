@@ -2904,6 +2904,7 @@ fn format_notice_files(files: &[String]) -> String {
 }
 
 pub async fn emit_background_agent_update(app: AppState, record: &BackgroundAgent) {
+    crate::coordination::decomposition::observe_agent_outcome(&app, record).await;
     let mut destinations = vec![record.parent_chat_id.clone()];
     if let Some(root_chat_id) = record.parent_root_chat_id.as_ref() {
         if root_chat_id != &record.parent_chat_id {

@@ -189,6 +189,8 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("store_max_leases", 1, 4_000_000),
     coordination_integer("store_max_outbox_messages", 1, 4_000_000),
     coordination_integer("store_max_activity_observations", 1, 16_000_000),
+    coordination_integer("store_max_decomposition_outcomes", 1, 4_000_000),
+    coordination_integer("decomposition_min_samples", 1, 100_000),
     coordination_integer("outbox_retention_secs", 1, 31_536_000),
     coordination_integer("outbox_prune_interval_secs", 1, 86_400),
     coordination_integer("run_intent_retention_secs", 1, 31_536_000),

@@ -462,6 +462,28 @@ impl Tool for ToolSubagent {
                     text.push_str(&metric.summary_lines().join("\n"));
                 }
             }
+            if let ContextEnum::ChatMessage(message) = &mut preview {
+                let destination =
+                    crate::agents::handoff::parent_destination(&app, &parent_chat_id).await;
+                let advice = crate::coordination::decomposition::advise_for_model(
+                    &app,
+                    destination.as_ref(),
+                    &crate::agents::handoff::metric_key(
+                        resolved_profile
+                            .as_ref()
+                            .map(|profile| profile.name.as_str()),
+                        &req.config_name,
+                    ),
+                )
+                .await;
+                message
+                    .extra
+                    .insert("decomposition_advice".into(), json!(advice));
+                if let ChatContent::SimpleText(text) = &mut message.content {
+                    text.push_str("\n\n## Decomposition Cost (prior runs)\n");
+                    text.push_str(&crate::coordination::decomposition::render(&advice));
+                }
+            }
             if let (Some(scope), Some(resolved), ContextEnum::ChatMessage(message)) =
                 (&launch_scope, &resolved_launch, &mut preview)
             {

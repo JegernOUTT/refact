@@ -23,9 +23,9 @@ pub use settings::{
 };
 pub use store::filesystem::{classify_mounts, classify_path, FilesystemKind};
 pub use store::records::{
-    now_ms, AccessKind, ActivityObservationRecord, DeliveryOutboxRecord, DeliveryState,
-    EngineInstanceRecord, IntentState, LeaseAcquisition, LeaseAuthority, LeaseRecord, PruneReport,
-    QueuedWorkRecord, RunIntentRecord,
+    now_ms, AccessKind, ActivityObservationRecord, DecompositionOutcomeRecord,
+    DeliveryOutboxRecord, DeliveryState, EngineInstanceRecord, IntentState, LeaseAcquisition,
+    LeaseAuthority, LeaseRecord, PruneReport, QueuedWorkRecord, RunIntentRecord,
 };
 pub use store::schema::SCHEMA_VERSION;
 pub use store::{default_store_path, CoordinationStore, ProjectAccess, StoreError, StoreWarning};

@@ -146,6 +146,11 @@ pub struct CoordinationSettings {
     pub store_max_leases: usize,
     pub store_max_outbox_messages: usize,
     pub store_max_activity_observations: usize,
+    pub store_max_decomposition_outcomes: usize,
+    /// Comparable runs a cohort needs before the decomposition advisor reports
+    /// a figure at all. Below it the advisor refuses rather than averaging a
+    /// handful of runs into something that reads like a law.
+    pub decomposition_min_samples: usize,
     /// How long a settled outbox message is kept before retention deletes it.
     /// Messages whose outcome is still unknown are never pruned by age.
     pub outbox_retention_secs: u64,
@@ -301,6 +306,8 @@ impl Default for CoordinationSettings {
             store_max_leases: 16_384,
             store_max_outbox_messages: 65_536,
             store_max_activity_observations: 262_144,
+            store_max_decomposition_outcomes: 4_096,
+            decomposition_min_samples: 5,
             outbox_retention_secs: 604_800,
             outbox_prune_interval_secs: 3_600,
             run_intent_retention_secs: 604_800,
@@ -606,6 +613,11 @@ impl CoordinationSettings {
                 "store_max_activity_observations",
                 self.store_max_activity_observations,
             ),
+            (
+                "store_max_decomposition_outcomes",
+                self.store_max_decomposition_outcomes,
+            ),
+            ("decomposition_min_samples", self.decomposition_min_samples),
         ] {
             at_least(&mut v, field, value as u64, 1);
         }
@@ -1207,6 +1219,22 @@ mod tests {
             |settings: &mut CoordinationSettings| settings.store_max_leases = 0,
             |settings: &mut CoordinationSettings| settings.store_max_outbox_messages = 0,
             |settings: &mut CoordinationSettings| settings.store_max_activity_observations = 0,
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn decomposition_bounds_default_usable_and_reject_zero() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(settings.store_max_decomposition_outcomes >= 1024);
+        assert!(settings.decomposition_min_samples >= 2);
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.store_max_decomposition_outcomes = 0,
+            |settings: &mut CoordinationSettings| settings.decomposition_min_samples = 0,
         ] {
             let mut settings = CoordinationSettings::default();
             mutate(&mut settings);
