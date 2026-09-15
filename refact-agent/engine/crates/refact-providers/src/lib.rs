@@ -6,6 +6,7 @@ pub mod instance;
 pub mod llm_http_retry;
 pub mod models_dev_provider;
 pub mod oauth_refresh;
+pub mod pressure;
 mod registry;
 pub mod traits;
 

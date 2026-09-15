@@ -151,6 +151,37 @@ pub struct CoordinationSettings {
     /// reconciliation prunes it. A run whose outcome is unknown is never
     /// pruned by age, however old it is.
     pub run_intent_retention_secs: u64,
+    /// Adapts outbound provider concurrency to observed rate-limit pressure.
+    /// Disabling it leaves provider traffic ungoverned.
+    pub provider_pressure_enabled: bool,
+    /// Ceiling for one provider credential bucket; growth never exceeds it.
+    pub provider_max_concurrency: usize,
+    /// Floor for one bucket; halving never drops below it.
+    pub provider_min_concurrency: usize,
+    /// Concurrency a freshly observed bucket starts at.
+    pub provider_initial_concurrency: usize,
+    /// Slots a background surge may never occupy, so interactive traffic keeps
+    /// a way through a saturated bucket.
+    pub provider_interactive_reserved_slots: usize,
+    /// Consecutive successes before concurrency grows by one.
+    pub provider_aimd_increase_after_successes: usize,
+    /// How long after a halving further rate-limit pressure is absorbed without
+    /// halving again, so one burst cannot collapse a bucket to the floor.
+    pub provider_aimd_decrease_cooldown_ms: u64,
+    /// Attempts a retryable failure class gets before the original cause is
+    /// surfaced.
+    pub provider_retry_max_attempts: usize,
+    pub provider_retry_base_backoff_ms: u64,
+    pub provider_retry_max_backoff_ms: u64,
+    /// Jitter span added to a computed backoff, in per-mille of that backoff.
+    pub provider_retry_jitter_per_mille: usize,
+    /// Consecutive retryable failures before the bucket's breaker opens.
+    pub provider_breaker_failure_threshold: usize,
+    pub provider_breaker_cooldown_ms: u64,
+    /// Upper bound on an honoured `Retry-After`; a provider cannot park traffic
+    /// for longer than this.
+    pub provider_max_retry_after_ms: u64,
+    pub provider_pressure_max_buckets: usize,
 }
 
 impl Default for CoordinationSettings {
@@ -259,6 +290,21 @@ impl Default for CoordinationSettings {
             outbox_retention_secs: 604_800,
             outbox_prune_interval_secs: 3_600,
             run_intent_retention_secs: 604_800,
+            provider_pressure_enabled: true,
+            provider_max_concurrency: 16,
+            provider_min_concurrency: 1,
+            provider_initial_concurrency: 4,
+            provider_interactive_reserved_slots: 1,
+            provider_aimd_increase_after_successes: 8,
+            provider_aimd_decrease_cooldown_ms: 1_000,
+            provider_retry_max_attempts: 4,
+            provider_retry_base_backoff_ms: 500,
+            provider_retry_max_backoff_ms: 60_000,
+            provider_retry_jitter_per_mille: 250,
+            provider_breaker_failure_threshold: 8,
+            provider_breaker_cooldown_ms: 30_000,
+            provider_max_retry_after_ms: 300_000,
+            provider_pressure_max_buckets: 4_096,
         }
     }
 }
@@ -774,6 +820,90 @@ impl CoordinationSettings {
             self.mailbox_max_rows as u64,
         );
 
+        for (field, value) in [
+            (
+                "provider_max_concurrency",
+                self.provider_max_concurrency as u64,
+            ),
+            (
+                "provider_min_concurrency",
+                self.provider_min_concurrency as u64,
+            ),
+            (
+                "provider_initial_concurrency",
+                self.provider_initial_concurrency as u64,
+            ),
+            (
+                "provider_aimd_increase_after_successes",
+                self.provider_aimd_increase_after_successes as u64,
+            ),
+            (
+                "provider_retry_max_attempts",
+                self.provider_retry_max_attempts as u64,
+            ),
+            (
+                "provider_retry_base_backoff_ms",
+                self.provider_retry_base_backoff_ms,
+            ),
+            (
+                "provider_retry_max_backoff_ms",
+                self.provider_retry_max_backoff_ms,
+            ),
+            (
+                "provider_breaker_failure_threshold",
+                self.provider_breaker_failure_threshold as u64,
+            ),
+            (
+                "provider_breaker_cooldown_ms",
+                self.provider_breaker_cooldown_ms,
+            ),
+            (
+                "provider_max_retry_after_ms",
+                self.provider_max_retry_after_ms,
+            ),
+            (
+                "provider_pressure_max_buckets",
+                self.provider_pressure_max_buckets as u64,
+            ),
+        ] {
+            at_least(&mut v, field, value, 1);
+        }
+        not_greater(
+            &mut v,
+            "provider_min_concurrency",
+            self.provider_min_concurrency as u64,
+            "provider_initial_concurrency",
+            self.provider_initial_concurrency as u64,
+        );
+        not_greater(
+            &mut v,
+            "provider_initial_concurrency",
+            self.provider_initial_concurrency as u64,
+            "provider_max_concurrency",
+            self.provider_max_concurrency as u64,
+        );
+        not_greater(
+            &mut v,
+            "provider_interactive_reserved_slots",
+            self.provider_interactive_reserved_slots as u64,
+            "provider_max_concurrency_minus_one",
+            self.provider_max_concurrency.saturating_sub(1) as u64,
+        );
+        not_greater(
+            &mut v,
+            "provider_retry_base_backoff_ms",
+            self.provider_retry_base_backoff_ms,
+            "provider_retry_max_backoff_ms",
+            self.provider_retry_max_backoff_ms,
+        );
+        not_greater(
+            &mut v,
+            "provider_retry_jitter_per_mille",
+            self.provider_retry_jitter_per_mille as u64,
+            "provider_retry_jitter_per_mille_max",
+            1000,
+        );
+
         if v.is_empty() {
             Ok(())
         } else {
@@ -1057,6 +1187,45 @@ mod tests {
             |settings: &mut CoordinationSettings| {
                 settings.merge_lease_poll_interval_ms = settings.merge_lease_wait_ms + 1
             },
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn provider_pressure_bounds_default_generous_and_reject_invalid_values() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(settings.provider_pressure_enabled);
+        assert!(settings.provider_min_concurrency <= settings.provider_initial_concurrency);
+        assert!(settings.provider_initial_concurrency <= settings.provider_max_concurrency);
+        assert!(settings.provider_interactive_reserved_slots < settings.provider_max_concurrency);
+        assert!(settings.provider_retry_base_backoff_ms <= settings.provider_retry_max_backoff_ms);
+        assert!(settings.provider_retry_jitter_per_mille <= 1000);
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.provider_max_concurrency = 0,
+            |settings: &mut CoordinationSettings| settings.provider_min_concurrency = 0,
+            |settings: &mut CoordinationSettings| settings.provider_initial_concurrency = 0,
+            |settings: &mut CoordinationSettings| settings.provider_retry_max_attempts = 0,
+            |settings: &mut CoordinationSettings| settings.provider_breaker_failure_threshold = 0,
+            |settings: &mut CoordinationSettings| settings.provider_breaker_cooldown_ms = 0,
+            |settings: &mut CoordinationSettings| settings.provider_max_retry_after_ms = 0,
+            |settings: &mut CoordinationSettings| settings.provider_pressure_max_buckets = 0,
+            |settings: &mut CoordinationSettings| {
+                settings.provider_min_concurrency = settings.provider_initial_concurrency + 1
+            },
+            |settings: &mut CoordinationSettings| {
+                settings.provider_initial_concurrency = settings.provider_max_concurrency + 1
+            },
+            |settings: &mut CoordinationSettings| {
+                settings.provider_interactive_reserved_slots = settings.provider_max_concurrency
+            },
+            |settings: &mut CoordinationSettings| {
+                settings.provider_retry_base_backoff_ms = settings.provider_retry_max_backoff_ms + 1
+            },
+            |settings: &mut CoordinationSettings| settings.provider_retry_jitter_per_mille = 1001,
         ] {
             let mut settings = CoordinationSettings::default();
             mutate(&mut settings);

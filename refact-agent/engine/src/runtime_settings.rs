@@ -191,6 +191,21 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("outbox_retention_secs", 1, 31_536_000),
     coordination_integer("outbox_prune_interval_secs", 1, 86_400),
     coordination_integer("run_intent_retention_secs", 1, 31_536_000),
+    coordination_bool("provider_pressure_enabled"),
+    coordination_integer("provider_max_concurrency", 1, 4_096),
+    coordination_integer("provider_min_concurrency", 1, 4_096),
+    coordination_integer("provider_initial_concurrency", 1, 4_096),
+    coordination_integer("provider_interactive_reserved_slots", 0, 4_095),
+    coordination_integer("provider_aimd_increase_after_successes", 1, 100_000),
+    coordination_integer("provider_aimd_decrease_cooldown_ms", 0, 3_600_000),
+    coordination_integer("provider_retry_max_attempts", 1, 100),
+    coordination_integer("provider_retry_base_backoff_ms", 1, 3_600_000),
+    coordination_integer("provider_retry_max_backoff_ms", 1, 86_400_000),
+    coordination_integer("provider_retry_jitter_per_mille", 0, 1_000),
+    coordination_integer("provider_breaker_failure_threshold", 1, 10_000),
+    coordination_integer("provider_breaker_cooldown_ms", 1, 86_400_000),
+    coordination_integer("provider_max_retry_after_ms", 1, 86_400_000),
+    coordination_integer("provider_pressure_max_buckets", 1, 1_000_000),
 ];
 
 pub fn coordination_field_bounds() -> &'static [CoordinationFieldBound] {
@@ -373,6 +388,9 @@ fn install_crate_limits(settings: &TrajectoryRuntimeSettings) {
         refact_work_core::install_coordination_settings(settings.coordination.clone())
     {
         tracing::warn!("keeping previous coordination settings: {error}");
+    }
+    if let Err(error) = crate::llm::pressure::install_provider_pressure(&settings.coordination) {
+        tracing::warn!("keeping previous provider pressure settings: {error}");
     }
 }
 
