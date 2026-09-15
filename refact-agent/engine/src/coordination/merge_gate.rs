@@ -747,6 +747,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_merge_revalidation_runs_fresh_evidence_against_the_merged_tree() {
+        use crate::chat::evidence::{EvidenceDefaults, EvidenceRunner, SpecAuthority, VerificationSpec};
+        use crate::chat::evidence_cache::{
+            execute_cached, revalidate_merged_tree, test_cache, CacheMode,
+        };
+        use crate::chat::verify_cmd::VerifyCommandPolicy;
+        use crate::tasks::types::{VerificationOutcome, VerificationResult};
+
+        struct FixedRunner {
+            exit_code: i32,
+            seen: Arc<Mutex<Vec<PathBuf>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl EvidenceRunner for FixedRunner {
+            async fn run(
+                &mut self,
+                worktree: &Path,
+                spec: &VerificationSpec,
+            ) -> VerificationResult {
+                self.seen.lock().unwrap().push(worktree.to_path_buf());
+                VerificationResult {
+                    command: spec.command.clone(),
+                    exit_code: Some(self.exit_code),
+                    passed: self.exit_code == 0,
+                    output_tail: "merged tree output".to_string(),
+                    outcome: match self.exit_code {
+                        0 => VerificationOutcome::Passed,
+                        _ => VerificationOutcome::CommandFailed,
+                    },
+                    from_cache: false,
+                    executed_at: None,
+                }
+            }
+        }
+
+        fn contract() -> VerificationSpec {
+            let mut spec = VerificationSpec::propose(
+                "T-1#0",
+                "cargo test --lib",
+                SpecAuthority::CardInstructions,
+                &EvidenceDefaults {
+                    timeout_secs: 60,
+                    output_cap_bytes: 4_000,
+                },
+            );
+            spec.cache.deterministic_inputs = vec!["feature.txt".to_string()];
+            spec
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        init_repo(&source);
+        let service = WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap();
+        let (gate, _leases) = shared_gate(&Uuid::new_v4().to_string()).await;
+        let (id, worktree_root) = worktree_with_commit(
+            &service,
+            "refact/chat/revalidate",
+            "feature.txt",
+            "feature\n",
+        )
+        .await;
+        let cache = test_cache();
+
+        let branch_service = crate::chat::evidence::EvidenceService::new(
+            VerifyCommandPolicy::permissive(),
+            crate::chat::evidence::EvidenceContext {
+                worktree: worktree_root.clone(),
+                commit: None,
+                content_revision: "T-1@7".to_string(),
+            },
+        );
+        let mut green = FixedRunner {
+            exit_code: 0,
+            seen: Arc::new(Mutex::new(Vec::new())),
+        };
+        let branch_evidence = execute_cached(
+            &branch_service,
+            &cache,
+            contract(),
+            &mut green,
+            CacheMode::Replay,
+            1_000,
+        )
+        .await;
+        assert!(
+            branch_evidence.verdict.is_passed(),
+            "the branch proved itself green"
+        );
+
+        let checkouts = Arc::new(Mutex::new(Vec::new()));
+        let seen = checkouts.clone();
+        let outcome = merge_under_lease(
+            &gate,
+            &service,
+            &id,
+            MergeWorktreeRequest {
+                delete_after_merge: true,
+                ..merge_request()
+            },
+            Some(verification(VerificationStage::PreMerge, true)),
+            |checkout: PathBuf| async move {
+                let mut red = FixedRunner { exit_code: 1, seen };
+                revalidate_merged_tree(
+                    checkout,
+                    vec![contract()],
+                    VerifyCommandPolicy::permissive(),
+                    "T-1@8".to_string(),
+                    &cache,
+                    &mut red,
+                )
+                .await
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.response.merged);
+        assert_eq!(
+            checkouts.lock().unwrap().as_slice(),
+            [source.clone()],
+            "revalidation must execute against the merged checkout, not the branch worktree"
+        );
+        let post_merge = outcome
+            .post_merge
+            .as_ref()
+            .expect("the merged tree is verified");
+        assert_eq!(post_merge.stage, VerificationStage::PostMerge);
+        assert!(
+            !post_merge.passed,
+            "a cached green branch result must never stand in for the merged tree"
+        );
+        assert_eq!(post_merge.exit_code, Some(1));
+        assert!(outcome.pre_merge.as_ref().is_some_and(|pre| pre.passed));
+        assert!(!outcome.merged_tree_verified());
+        assert!(
+            worktree_root.exists() && outcome.source_preserved(),
+            "a failed reverification keeps the source worktree on disk"
+        );
+    }
+
+    #[tokio::test]
     async fn a_conflicting_merge_reports_its_files_and_preserves_both_worktrees() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");

@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::chat::evidence_cache::CacheDeclaration;
 use crate::chat::types::{CriterionEvidence, CriterionVerdict, GoalCriterion, VerdictSource};
 use crate::chat::verify_cmd::{
     instruction_verification_commands, looks_like_command, parse_verification_argv,
@@ -159,6 +160,7 @@ pub struct VerificationSpec {
     pub expected_exit_codes: Vec<i32>,
     pub expected_artifacts: Vec<ExpectedArtifact>,
     pub toolchain_inputs: Vec<String>,
+    pub cache: CacheDeclaration,
 }
 
 impl VerificationSpec {
@@ -185,6 +187,7 @@ impl VerificationSpec {
             expected_exit_codes: vec![0],
             expected_artifacts: Vec::new(),
             toolchain_inputs: Vec::new(),
+            cache: CacheDeclaration::default(),
         }
     }
 
@@ -286,10 +289,17 @@ pub struct EvidenceRecord {
     pub output_tail: String,
     pub artifacts: Vec<ArtifactCheck>,
     pub fingerprint: ExecutionFingerprint,
+    /// When the command actually ran. A replayed record keeps the original
+    /// execution time here, never the replay time.
     pub started_at: String,
     pub finished_at: String,
     pub accepted_by: Option<String>,
     pub reason: Option<String>,
+    /// True when this record was replayed from the evidence cache instead of
+    /// executed. A consumer that ignores this reads a replay as a fresh run.
+    pub from_cache: bool,
+    /// When the replay happened, set only on a cache hit.
+    pub replayed_at: Option<String>,
 }
 
 impl EvidenceRecord {
@@ -300,6 +310,8 @@ impl EvidenceRecord {
             passed: self.verdict.is_passed(),
             output_tail: self.output_tail.clone(),
             outcome: self.outcome,
+            from_cache: self.from_cache,
+            executed_at: Some(self.started_at.clone()),
         }
     }
 }
@@ -332,6 +344,8 @@ pub(crate) fn unexecuted_record(
             .as_ref()
             .map(|acceptance| acceptance.accepted_by.clone()),
         reason: Some(reason),
+        from_cache: false,
+        replayed_at: None,
     }
 }
 
@@ -415,7 +429,23 @@ impl EvidenceService {
                 .as_ref()
                 .map(|acceptance| acceptance.accepted_by.clone()),
             reason,
+            from_cache: false,
+            replayed_at: None,
         }
+    }
+
+    /// The tree this service's evidence is about.
+    pub fn worktree(&self) -> &Path {
+        &self.context.worktree
+    }
+
+    /// The verification policy in force, as a value a cache key can carry.
+    pub fn policy_fingerprint(&self) -> String {
+        self.policy.fingerprint()
+    }
+
+    pub fn accept(&self, spec: VerificationSpec) -> Result<VerificationSpec, SpecRejection> {
+        spec.accept(&self.policy, EVIDENCE_POLICY_AUTHORITY)
     }
 
     /// Accept a proposal under policy, then execute it. Refusal produces a blocked
@@ -429,7 +459,7 @@ impl EvidenceService {
             return self.execute(&spec, runner).await;
         }
         let proposal = spec.clone();
-        match spec.accept(&self.policy, EVIDENCE_POLICY_AUTHORITY) {
+        match self.accept(spec) {
             Ok(accepted) => self.execute(&accepted, runner).await,
             Err(rejection) => unexecuted_record(
                 &proposal,
@@ -601,6 +631,8 @@ pub struct GateBlock {
     pub verdict: EvidenceVerdict,
     pub exit_code: Option<i32>,
     pub reason: String,
+    /// True when the blocking evidence was replayed rather than executed.
+    pub from_cache: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -649,6 +681,7 @@ pub fn evaluate_gates(specs: &[VerificationSpec], evidence: &[EvidenceRecord]) -
                 verdict: EvidenceVerdict::NotRun,
                 exit_code: None,
                 reason: format!("Verification command never ran: {}", spec.command),
+                from_cache: false,
             });
             continue;
         };
@@ -662,6 +695,7 @@ pub fn evaluate_gates(specs: &[VerificationSpec], evidence: &[EvidenceRecord]) -
                     "Verification evidence superseded: {} was verified at revision {}, spec is at {}",
                     spec.command, record.spec_revision, spec.revision
                 ),
+                from_cache: record.from_cache,
             });
             continue;
         }
@@ -677,7 +711,9 @@ pub fn evaluate_gates(specs: &[VerificationSpec], evidence: &[EvidenceRecord]) -
                     &spec.command,
                     record.exit_code,
                     record.reason.as_deref(),
+                    record,
                 ),
+                from_cache: record.from_cache,
             }),
         }
     }
@@ -689,9 +725,21 @@ pub fn evaluate_gates(specs: &[VerificationSpec], evidence: &[EvidenceRecord]) -
             exit_code: None,
             reason: "No verification commands found in card instructions or final report"
                 .to_string(),
+            from_cache: false,
         });
     }
     outcome
+}
+
+/// A replayed verdict says what an earlier run found, never that a command just ran.
+pub fn replay_note(record: &EvidenceRecord) -> Option<String> {
+    match record.from_cache {
+        true => Some(format!(
+            "replayed from cache, not re-executed; originally executed at {}",
+            record.started_at
+        )),
+        false => None,
+    }
 }
 
 fn gate_reason(
@@ -699,6 +747,7 @@ fn gate_reason(
     command: &str,
     exit_code: Option<i32>,
     detail: Option<&str>,
+    record: &EvidenceRecord,
 ) -> String {
     let detail = detail.map(str::trim).filter(|detail| !detail.is_empty());
     let head = match verdict {
@@ -716,6 +765,11 @@ fn gate_reason(
     let exit = match exit_code {
         Some(code) => format!(" (exit code {})", code),
         None => " (no exit code)".to_string(),
+    };
+    let detail = match (detail, replay_note(record)) {
+        (Some(detail), Some(replay)) => Some(format!("{} — {}", detail, replay)),
+        (Some(detail), None) => Some(detail.to_string()),
+        (None, replay) => replay,
     };
     match detail {
         Some(detail) => format!("{}{} [{}] — {}", head, exit, verdict.label(), detail),
@@ -827,6 +881,9 @@ pub fn evidence_note(record: &EvidenceRecord) -> String {
     }
 }
 
+/// A card's verification contracts. The card's declared `target_files` are the only
+/// inputs its evidence may be cached on: a card that declares none is re-run every
+/// time rather than keyed on inputs nobody named.
 pub fn specs_from_card(card: &BoardCard, defaults: &EvidenceDefaults) -> Vec<VerificationSpec> {
     let mut specs: Vec<VerificationSpec> = Vec::new();
     for command in instruction_verification_commands(card) {
@@ -856,6 +913,9 @@ pub fn specs_from_card(card: &BoardCard, defaults: &EvidenceDefaults) -> Vec<Ver
             },
             defaults,
         ));
+    }
+    for spec in specs.iter_mut() {
+        spec.cache.deterministic_inputs = card.target_files.clone();
     }
     specs
 }
@@ -920,6 +980,8 @@ mod tests {
                 passed: exit_code == 0,
                 output_tail: "runner output".to_string(),
                 outcome: self.outcome.unwrap_or(VerificationOutcome::Unknown),
+                from_cache: false,
+                executed_at: None,
             }
         }
     }

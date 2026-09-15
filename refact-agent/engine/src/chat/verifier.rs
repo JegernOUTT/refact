@@ -295,9 +295,25 @@ pub async fn verify_card(
         },
     );
     let mut runner = SystemEvidenceRunner { gcx: gcx.clone() };
-    let evidence = service
-        .accept_and_execute_all(specs.clone(), &mut runner)
-        .await;
+    let cache = crate::chat::evidence_cache::evidence_cache();
+    {
+        let mut guard = cache.lock().await;
+        guard.set_limits(crate::chat::evidence_cache::EvidenceCacheLimits::from_settings());
+        tracing::debug!(
+            card_id = %card.id,
+            entries = guard.len(),
+            bytes = guard.bytes(),
+            "evidence cache bounds applied before verification"
+        );
+    }
+    let evidence = crate::chat::evidence_cache::execute_cached_all(
+        &service,
+        cache,
+        specs.clone(),
+        &mut runner,
+        crate::chat::evidence_cache::CacheMode::Replay,
+    )
+    .await;
     let command_results = evidence
         .iter()
         .map(EvidenceRecord::to_verification_result)
@@ -466,6 +482,8 @@ pub(crate) async fn run_verification_argv_impl(
             passed: false,
             output_tail: "empty verification command".to_string(),
             outcome: VerificationOutcome::Rejected,
+            from_cache: false,
+            executed_at: None,
         };
     };
     let effective_cwd = cwd.map_or_else(|| worktree.to_path_buf(), |cwd| worktree.join(cwd));
@@ -476,6 +494,8 @@ pub(crate) async fn run_verification_argv_impl(
             passed: false,
             output_tail: reason,
             outcome: VerificationOutcome::InfrastructureFailed,
+            from_cache: false,
+            executed_at: None,
         };
     }
     let request = match build_exec_request(
@@ -503,6 +523,8 @@ pub(crate) async fn run_verification_argv_impl(
                 passed: false,
                 output_tail: format!("failed to spawn command: {}", error.message),
                 outcome: VerificationOutcome::PolicyDenied,
+                from_cache: false,
+                executed_at: None,
             };
         }
     };
@@ -515,6 +537,8 @@ pub(crate) async fn run_verification_argv_impl(
                 passed: false,
                 output_tail: format!("failed to spawn command: {}", error),
                 outcome: VerificationOutcome::InfrastructureFailed,
+                from_cache: false,
+                executed_at: None,
             };
         }
     };
@@ -575,6 +599,8 @@ pub(crate) async fn run_verification_argv_impl(
         passed,
         output_tail: tail_chars(&output, MAX_OUTPUT_TAIL_CHARS),
         outcome,
+        from_cache: false,
+        executed_at: None,
     }
 }
 
@@ -730,6 +756,8 @@ mod tests {
                 passed,
                 output_tail: "ok".to_string(),
                 outcome: VerificationOutcome::Unknown,
+                from_cache: false,
+                executed_at: None,
             }],
             concerns: if passed {
                 Vec::new()
@@ -806,6 +834,8 @@ mod tests {
                 passed: true,
                 output_tail: "ok".to_string(),
                 outcome: VerificationOutcome::Unknown,
+                from_cache: false,
+                executed_at: None,
             }],
             ..Default::default()
         });
@@ -899,6 +929,8 @@ mod tests {
                 passed: true,
                 output_tail: "ok".to_string(),
                 outcome: VerificationOutcome::Unknown,
+                from_cache: false,
+                executed_at: None,
             }],
             concerns: Vec::new(),
             recommendation: "merge".to_string(),
@@ -919,6 +951,8 @@ mod tests {
                 passed: false,
                 output_tail: "failed".to_string(),
                 outcome: VerificationOutcome::Unknown,
+                from_cache: false,
+                executed_at: None,
             }],
             concerns: vec!["Verification command failed: cargo test".to_string()],
             recommendation: "fix-needed".to_string(),

@@ -771,6 +771,7 @@ pub fn sub_goal_gate_blocks(rollup: &refact_chat_api::SubGoalRollup) -> Vec<Gate
             },
             exit_code: None,
             reason: lane.reason.clone(),
+            from_cache: false,
         })
         .collect()
 }

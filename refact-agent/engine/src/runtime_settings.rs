@@ -55,6 +55,9 @@ const GOAL_REVIEW_MAX_REPAIR_ATTEMPTS_DEFAULT: usize = 2;
 const GOAL_REVIEW_SPOT_CHECK_PERCENT_DEFAULT: usize = 0;
 const GOAL_SUB_GOAL_MAX_DEPTH_DEFAULT: usize = refact_chat_api::DEFAULT_SUB_GOAL_MAX_DEPTH;
 const GOAL_SUB_GOAL_MAX_FAN_OUT_DEFAULT: usize = refact_chat_api::DEFAULT_SUB_GOAL_MAX_FAN_OUT;
+const VERIFICATION_EVIDENCE_CACHE_MAX_ENTRIES_DEFAULT: usize = 512;
+const VERIFICATION_EVIDENCE_CACHE_MAX_BYTES_DEFAULT: usize = 8_388_608;
+const VERIFICATION_EVIDENCE_CACHE_TTL_SECS_DEFAULT: u64 = 3_600;
 
 pub use refact_work_core::CoordinationSettings;
 
@@ -340,6 +343,11 @@ pub struct TrajectoryRuntimeSettings {
     pub goal_sub_goal_max_depth: usize,
     /// How many child lanes one sub-goal may own.
     pub goal_sub_goal_max_fan_out: usize,
+    /// Bounds on the replayable evidence cache. Eviction is deterministic, so
+    /// these decide exactly which entries survive.
+    pub verification_evidence_cache_max_entries: usize,
+    pub verification_evidence_cache_max_bytes: usize,
+    pub verification_evidence_cache_ttl_secs: u64,
     pub coordination: CoordinationSettings,
 }
 
@@ -404,6 +412,10 @@ impl Default for TrajectoryRuntimeSettings {
             goal_review_spot_check_percent: GOAL_REVIEW_SPOT_CHECK_PERCENT_DEFAULT,
             goal_sub_goal_max_depth: GOAL_SUB_GOAL_MAX_DEPTH_DEFAULT,
             goal_sub_goal_max_fan_out: GOAL_SUB_GOAL_MAX_FAN_OUT_DEFAULT,
+            verification_evidence_cache_max_entries:
+                VERIFICATION_EVIDENCE_CACHE_MAX_ENTRIES_DEFAULT,
+            verification_evidence_cache_max_bytes: VERIFICATION_EVIDENCE_CACHE_MAX_BYTES_DEFAULT,
+            verification_evidence_cache_ttl_secs: VERIFICATION_EVIDENCE_CACHE_TTL_SECS_DEFAULT,
             coordination: CoordinationSettings::default(),
         }
     }
@@ -830,6 +842,24 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
         settings.goal_sub_goal_max_fan_out,
         1,
         256,
+    )?;
+    validate_usize(
+        "verification_evidence_cache_max_entries",
+        settings.verification_evidence_cache_max_entries,
+        1,
+        100_000,
+    )?;
+    validate_usize(
+        "verification_evidence_cache_max_bytes",
+        settings.verification_evidence_cache_max_bytes,
+        1_024,
+        268_435_456,
+    )?;
+    validate_u64(
+        "verification_evidence_cache_ttl_secs",
+        settings.verification_evidence_cache_ttl_secs,
+        60,
+        604_800,
     )?;
     validate_coordination(&settings.coordination)
 }

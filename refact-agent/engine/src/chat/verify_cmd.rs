@@ -53,6 +53,14 @@ impl VerifyCommandPolicy {
         }
     }
 
+    /// A stable rendering of the policy in force. Two policies that would judge
+    /// commands differently must never share a fingerprint.
+    pub(crate) fn fingerprint(&self) -> String {
+        let mut deny = self.deny.clone();
+        deny.sort();
+        format!("mode={:?};deny={}", self.mode, deny.join(","))
+    }
+
     pub(crate) fn check(&self, command: &str) -> Result<(), String> {
         let segments = extract_command_segments(command);
         match first_matching_rule(command, &segments, &self.deny) {

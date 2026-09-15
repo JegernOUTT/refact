@@ -246,6 +246,11 @@ pub struct VerificationResult {
     pub passed: bool,
     pub output_tail: String,
     pub outcome: VerificationOutcome,
+    /// True when this result was replayed from the evidence cache rather than
+    /// produced by a run of the command.
+    pub from_cache: bool,
+    /// When the command actually ran, carried through replays unchanged.
+    pub executed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1464,6 +1469,8 @@ mod tests {
                 passed: true,
                 output_tail: "test result: ok".into(),
                 outcome: VerificationOutcome::Unknown,
+                from_cache: false,
+                executed_at: None,
             }],
             followup_cards: vec![SuggestedCard {
                 title: "Render structured reports in GUI".into(),
@@ -1491,6 +1498,8 @@ mod tests {
                 passed: false,
                 output_tail: "test failed".into(),
                 outcome: VerificationOutcome::Unknown,
+                from_cache: false,
+                executed_at: None,
             }],
             concerns: vec!["Diff removes a required guard".into()],
             recommendation: "fix-needed".into(),
@@ -1531,6 +1540,8 @@ mod tests {
                 passed: false,
                 output_tail: "failure tail".into(),
                 outcome: VerificationOutcome::Unknown,
+                from_cache: false,
+                executed_at: None,
             }],
             followup_cards: vec![SuggestedCard {
                 title: "Fix follow-up".into(),
@@ -1567,6 +1578,8 @@ mod tests {
                 passed: true,
                 output_tail: String::new(),
                 outcome: VerificationOutcome::Unknown,
+                from_cache: false,
+                executed_at: None,
             }],
             ..Default::default()
         };
@@ -1586,6 +1599,8 @@ mod tests {
                 passed: false,
                 output_tail: "before\n```\n## Fake Section\n```\nafter".into(),
                 outcome: VerificationOutcome::Unknown,
+                from_cache: false,
+                executed_at: None,
             }],
             ..Default::default()
         };
