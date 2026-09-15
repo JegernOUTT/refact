@@ -251,6 +251,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn monitor_never_flags_approval_waiting_as_stalled() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let (record, _, _) = app
+            .agents
+            .create(CreateAgentRequest {
+                parent_chat_id: "parent-approval".to_string(),
+                parent_root_chat_id: None,
+                parent_tool_call_id: None,
+                kind: BgAgentKind::Subagent,
+                config_name: "subagent".to_string(),
+                title: "approval".to_string(),
+                prompt: "prompt".to_string(),
+                target_files: vec![],
+                model: "model".to_string(),
+                model_type: None,
+                goal_summary: None,
+                plan_present: false,
+                worktree_id: None,
+                worktree_branch: None,
+            })
+            .await
+            .unwrap();
+        app.agents
+            .mark_running(&record.agent_id, "approval-child".to_string())
+            .await
+            .unwrap();
+        let waiting = app
+            .agents
+            .mark_waiting_for_approval(&record.agent_id)
+            .await
+            .unwrap();
+        assert_eq!(waiting.status, BgAgentStatus::WaitingForApproval);
+        app.agents
+            .set_last_update_at_for_test(&record.agent_id, Utc::now() - TimeDelta::minutes(25))
+            .await
+            .unwrap();
+
+        monitor_once(app.clone()).await.unwrap();
+
+        let updated = app
+            .agents
+            .get("parent-approval", &record.agent_id)
+            .await
+            .unwrap();
+        assert_eq!(updated.status, BgAgentStatus::WaitingForApproval);
+        assert!(!updated.status.is_terminal());
+        assert!(!updated
+            .progress
+            .as_deref()
+            .unwrap_or("")
+            .contains("20+ minutes"));
+    }
+
+    #[tokio::test]
     async fn monitor_retries_cooled_deferred_completion() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let workspace = tempfile::tempdir().unwrap();

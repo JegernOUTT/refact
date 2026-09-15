@@ -1739,6 +1739,7 @@ mod tests {
                 stall_grace: Duration::from_secs(5),
                 no_token_grace: Duration::from_secs(5),
             },
+            None,
         );
 
         assert_eq!(outcome, GoalNudgeOutcome::Skipped(GoalNudgeSkip::Quiescent));

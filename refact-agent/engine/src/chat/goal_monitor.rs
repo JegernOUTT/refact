@@ -6,6 +6,7 @@ use serde_json::json;
 use tokio::sync::Mutex as AMutex;
 use tokio::time::sleep;
 
+use crate::agents::execution::ExecutionState;
 use crate::app_state::AppState;
 use crate::chat::internal_roles::{self, EventSubkind};
 use crate::chat::process_command_queue;
@@ -67,6 +68,7 @@ pub enum GoalNudgeSkip {
     Aborted,
     Closed,
     WaitingForInput,
+    IntentionallyWaiting,
     Busy,
     UserMessageQueued,
     PendingCommand,
@@ -202,12 +204,14 @@ pub async fn dispatch_goal_nudge(
     let now_ms = epoch_ms_now();
     let (outcome, processor_flag) = {
         let mut session = session_arc.lock().await;
+        let execution = run_execution_state(&app, &session.chat_id);
         let outcome = try_apply_goal_nudge(
             &mut session,
             trigger,
             now_ms,
             Instant::now(),
             GoalNudgeConfig::default(),
+            execution,
         );
         let processor_flag = if outcome.nudged() {
             session.queue_notify.notify_one();
@@ -235,12 +239,31 @@ pub async fn dispatch_goal_nudge(
     outcome
 }
 
+/// Admission is the fuller source: it reports a run that is still queued and has
+/// never been admitted, which owns no `RunExecution` yet. The registry covers
+/// chat-runtime children, which have an execution but no admission entry.
+fn run_execution_state(app: &AppState, chat_id: &str) -> Option<ExecutionState> {
+    crate::tasks::admission::execution_state(chat_id)
+        .or_else(|| app.agent_executions.get(chat_id).map(|run| run.state()))
+}
+
+/// A run that released or never took its execution permit is waiting by design —
+/// on a child, an approval, a question or a timer — not stalling. Same triple
+/// `agents::monitor` and `tool_task_check_agents` already treat as waiting.
+fn intentionally_waiting(execution: Option<ExecutionState>) -> bool {
+    matches!(
+        execution,
+        Some(ExecutionState::Parked | ExecutionState::Acquiring | ExecutionState::Suspending)
+    )
+}
+
 pub fn try_apply_goal_nudge(
     session: &mut ChatSession,
     trigger: GoalNudgeTrigger,
     now_ms: u64,
     now_instant: Instant,
     config: GoalNudgeConfig,
+    execution: Option<ExecutionState>,
 ) -> GoalNudgeOutcome {
     if session.closed {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Closed);
@@ -272,6 +295,9 @@ pub fn try_apply_goal_nudge(
     }
     if crate::chat::summarization::compression_attempt_active(session) {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Busy);
+    }
+    if intentionally_waiting(execution) {
+        return GoalNudgeOutcome::Skipped(GoalNudgeSkip::IntentionallyWaiting);
     }
     if !goal.goal_nudge_ready_at_with_backoff(now_ms) {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Cooldown);
@@ -649,6 +675,7 @@ fn goal_terminal_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::execution::ExecutionState;
     use crate::call_validation::{ChatContent, ChatMessage, ChatUsage};
 
     fn config() -> GoalNudgeConfig {
@@ -706,7 +733,209 @@ mod tests {
     }
 
     fn apply_monitor(session: &mut ChatSession, now_ms: u64, now: Instant) -> GoalNudgeOutcome {
-        try_apply_goal_nudge(session, GoalNudgeTrigger::Monitor, now_ms, now, config())
+        apply_monitor_with(session, now_ms, now, None)
+    }
+
+    fn apply_monitor_with(
+        session: &mut ChatSession,
+        now_ms: u64,
+        now: Instant,
+        execution: Option<ExecutionState>,
+    ) -> GoalNudgeOutcome {
+        try_apply_goal_nudge(
+            session,
+            GoalNudgeTrigger::Monitor,
+            now_ms,
+            now,
+            config(),
+            execution,
+        )
+    }
+
+    async fn goal_app() -> (AppState, tempfile::TempDir) {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let workspace = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        (AppState::from_gcx(gcx).await, workspace)
+    }
+
+    async fn stalled_goal_session(app: &AppState, chat_id: &str) -> Arc<AMutex<ChatSession>> {
+        let mut session = ChatSession::new(chat_id.to_string());
+        session.install_goal(
+            "agent",
+            "ship the thing",
+            true,
+            GoalBudget {
+                max_turns: None,
+                max_minutes: None,
+                max_tokens: None,
+                max_cost_cents: None,
+                cooldown_ms: 1_000,
+                no_progress_token_threshold: 50,
+                no_progress_turns: None,
+                explicit: false,
+            },
+        );
+        session.last_activity = Instant::now() - Duration::from_secs(600);
+        session
+            .queue_processor_running
+            .store(true, Ordering::SeqCst);
+        let session = Arc::new(AMutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session.clone());
+        session
+    }
+
+    fn unique_chat_id(tag: &str) -> String {
+        format!("goal-monitor-{tag}-{}", uuid::Uuid::new_v4())
+    }
+
+    async fn admitted_execution(
+        app: &AppState,
+        chat_id: &str,
+    ) -> Arc<crate::agents::execution::RunExecution> {
+        crate::tasks::admission::reserve(app, chat_id, "project", "root", 0)
+            .await
+            .unwrap();
+        crate::tasks::admission::wait_for_permit(chat_id)
+            .await
+            .unwrap();
+        app.agent_executions.get(chat_id).unwrap()
+    }
+
+    async fn monitor_tick(app: &AppState, session: &Arc<AMutex<ChatSession>>) -> GoalNudgeOutcome {
+        dispatch_goal_nudge(app.clone(), session.clone(), GoalNudgeTrigger::Monitor).await
+    }
+
+    /// A run that parked its execution permit is waiting on a child, an approval,
+    /// a question or a timer. That is deliberate waiting, not a stall.
+    #[tokio::test]
+    async fn goal_monitor_never_nudges_a_parked_run() {
+        let (app, _workspace) = goal_app().await;
+        let chat_id = unique_chat_id("parked");
+        let session = stalled_goal_session(&app, &chat_id).await;
+        let execution = admitted_execution(&app, &chat_id).await;
+        execution.park().await.unwrap();
+        assert_eq!(execution.state(), ExecutionState::Parked);
+
+        for tick in 0..3 {
+            let outcome = monitor_tick(&app, &session).await;
+            assert_eq!(
+                outcome,
+                GoalNudgeOutcome::Skipped(GoalNudgeSkip::IntentionallyWaiting),
+                "parked run was nudged on tick {tick}"
+            );
+        }
+        assert_eq!(nudge_event_count(&*session.lock().await), 0);
+
+        crate::tasks::admission::end(&chat_id).await;
+        app.agent_executions.shutdown().await;
+    }
+
+    /// A run that has not been admitted yet has not stalled; it has not started.
+    #[tokio::test]
+    async fn goal_monitor_never_nudges_a_queued_run() {
+        let (app, _workspace) = goal_app().await;
+        let chat_id = unique_chat_id("queued");
+        let session = stalled_goal_session(&app, &chat_id).await;
+        crate::tasks::admission::reserve(&app, &chat_id, "project", "root", 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::tasks::admission::execution_state(&chat_id),
+            Some(ExecutionState::Acquiring)
+        );
+
+        for tick in 0..3 {
+            let outcome = monitor_tick(&app, &session).await;
+            assert_eq!(
+                outcome,
+                GoalNudgeOutcome::Skipped(GoalNudgeSkip::IntentionallyWaiting),
+                "queued run was nudged on tick {tick}"
+            );
+        }
+        assert_eq!(nudge_event_count(&*session.lock().await), 0);
+
+        crate::tasks::admission::end(&chat_id).await;
+        app.agent_executions.shutdown().await;
+    }
+
+    /// Negative control: suppressing parked/queued must not disable stall
+    /// detection. A run holding its permit and producing nothing is still stalled.
+    #[tokio::test]
+    async fn goal_monitor_still_nudges_a_running_run_with_no_progress() {
+        let (app, _workspace) = goal_app().await;
+        let chat_id = unique_chat_id("running");
+        let session = stalled_goal_session(&app, &chat_id).await;
+        let execution = admitted_execution(&app, &chat_id).await;
+        assert_eq!(execution.state(), ExecutionState::Running);
+
+        assert_eq!(
+            monitor_tick(&app, &session).await,
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
+        );
+
+        crate::tasks::admission::end(&chat_id).await;
+        app.agent_executions.shutdown().await;
+    }
+
+    /// Waiting is decided by the execution state alone, so every stall-shaped
+    /// session is nudge-free while waiting and nudged again once it runs.
+    #[test]
+    fn goal_monitor_skips_only_intentionally_waiting_execution_states() {
+        for state in [
+            ExecutionState::Parked,
+            ExecutionState::Acquiring,
+            ExecutionState::Suspending,
+        ] {
+            let (mut session, now) = old_idle_session();
+            assert_eq!(
+                apply_monitor_with(&mut session, 10_000, now, Some(state)),
+                GoalNudgeOutcome::Skipped(GoalNudgeSkip::IntentionallyWaiting),
+                "{state:?}"
+            );
+            assert_eq!(nudge_event_count(&session), 0, "{state:?}");
+            assert!(session.delivery_wake_sources.is_empty(), "{state:?}");
+        }
+
+        for execution in [
+            Some(ExecutionState::Running),
+            Some(ExecutionState::Gone),
+            None,
+        ] {
+            let (mut session, now) = old_idle_session();
+            assert_eq!(
+                apply_monitor_with(&mut session, 10_000, now, execution),
+                GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle),
+                "{execution:?}"
+            );
+        }
+    }
+
+    /// A goal the user paused must stay paused; nothing here may resume it.
+    #[tokio::test]
+    async fn goal_monitor_leaves_a_paused_goal_paused_while_parked() {
+        let (app, _workspace) = goal_app().await;
+        let chat_id = unique_chat_id("paused");
+        let session = stalled_goal_session(&app, &chat_id).await;
+        session.lock().await.goal_set_status(GoalStatus::Paused);
+        let execution = admitted_execution(&app, &chat_id).await;
+        execution.park().await.unwrap();
+
+        for _ in 0..3 {
+            assert!(!monitor_tick(&app, &session).await.nudged());
+            assert_eq!(
+                session.lock().await.goal.as_ref().unwrap().status,
+                GoalStatus::Paused
+            );
+        }
+
+        crate::tasks::admission::end(&chat_id).await;
+        app.agent_executions.shutdown().await;
     }
 
     fn event_payload(message: &ChatMessage) -> &serde_json::Value {
@@ -715,6 +944,17 @@ mod tests {
             .get("event")
             .and_then(|event| event.get("payload"))
             .unwrap()
+    }
+
+    fn nudge_event_count(session: &ChatSession) -> usize {
+        session
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == "event"
+                    && event_payload(message).get("kind") == Some(&json!("nudge"))
+            })
+            .count()
     }
 
     #[test]
@@ -1251,6 +1491,7 @@ mod tests {
                 10_000,
                 now,
                 config(),
+                None,
             ),
             GoalNudgeOutcome::Nudged(GoalNudgeReason::TurnEnd)
         );
@@ -1474,6 +1715,7 @@ mod tests {
             10_100,
             now + Duration::from_secs(1),
             config(),
+            None,
         );
         assert_eq!(
             cooldown_outcome,
