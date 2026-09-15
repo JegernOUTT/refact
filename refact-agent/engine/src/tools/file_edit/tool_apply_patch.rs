@@ -554,7 +554,12 @@ Rules:
 - Show 3 lines of context above/below each change
 - Use @@ to narrow scope when needed for uniqueness
 - Multiple @@ can be chained for precision
-- Use *** End of File for appending at end"#;
+- Use *** End of File for appending at end
+
+Multiple file sections are applied one file at a time and are NOT atomic: there
+is no journal, so a failure part-way leaves the earlier files already changed.
+The error names exactly which files changed and which did not. Each individual
+file is replaced durably, so no file is ever left truncated."#;
 
 const APPLY_PATCH_PARAM_DESCRIPTION: &str = r#"The patch content in envelope format:
 *** Begin Patch
@@ -641,6 +646,53 @@ mod tests {
             std::fs::read_to_string(dir.path().join("b")).unwrap(),
             "external\n"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(durable_fault)]
+    async fn a_multi_file_patch_failing_midway_reports_exactly_which_files_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
+        for file in ["a", "b"] {
+            std::fs::write(dir.path().join(file), "before\n").unwrap();
+        }
+        let args = HashMap::from([("patch".into(), json!("*** Begin Patch\n*** Update File: a\n@@\n-before\n+after\n*** Update File: b\n@@\n-before\n+after\n*** End Patch"))]);
+        let plan = plan_patch(gcx.clone(), &args, None, None).await.unwrap();
+        let armed = crate::file_activity::durable_fault::arm_for(
+            crate::file_activity::durable_fault::AFTER_TEMP_WRITE,
+            dir.path().join("b").to_string_lossy().to_string(),
+        );
+
+        let error = super::super::patch_transaction::apply(gcx, &plan)
+            .await
+            .unwrap_err();
+        drop(armed);
+
+        assert!(error.contains("not atomic"), "{error}");
+        assert!(error.contains("Changed: ["), "{error}");
+        assert!(error.contains("Unchanged: ["), "{error}");
+        let changed = error.split("Changed: [").nth(1).unwrap();
+        let (changed, rest) = changed.split_once(']').unwrap();
+        let unchanged = rest.split("Unchanged: [").nth(1).unwrap();
+        let (unchanged, _) = unchanged.split_once(']').unwrap();
+        assert!(changed.ends_with("a"), "changed list was {changed:?}");
+        assert!(unchanged.ends_with("b"), "unchanged list was {unchanged:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a")).unwrap(),
+            "after\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("b")).unwrap(),
+            "before\n",
+            "the file that failed was left truncated instead of fully old"
+        );
+        let leftovers = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".durable-tmp"))
+            .count();
+        assert_eq!(leftovers, 0, "temp files were left behind");
     }
 
     #[tokio::test]

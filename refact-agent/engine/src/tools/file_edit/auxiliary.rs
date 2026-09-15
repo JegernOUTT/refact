@@ -524,21 +524,18 @@ pub async fn write_file_with_intent(
     }
 
     if let Some(write_guard) = write_guard {
-        use tokio::io::AsyncWriteExt;
-        let mut options = tokio::fs::OpenOptions::new();
-        options.write(true);
-        if disk_preimage.is_some() {
-            options.truncate(true);
+        let mode = if disk_preimage.is_some() {
+            crate::file_activity::ReplaceMode::Replace
         } else {
-            options.create_new(true);
-        }
-        let mut file = options.open(path).await.map_err(|e| e.to_string())?;
-        file.write_all(file_text.as_bytes()).await.map_err(|e| {
-            let err = format!("Failed to write file: {:?}\nERROR: {}", path, e);
-            warn!("{err}");
-            err
-        })?;
-        file.flush().await.map_err(|e| e.to_string())?;
+            crate::file_activity::ReplaceMode::CreateNew
+        };
+        crate::file_activity::write_file_durably(path, file_text.as_bytes(), mode)
+            .await
+            .map_err(|e| {
+                let err = format!("Failed to write file: {:?}\nERROR: {}", path, e);
+                warn!("{err}");
+                err
+            })?;
         record_edit(path, disk_preimage.as_deref(), Some(file_text));
         remove_memory_document_for_path(gcx.clone(), path).await;
         write_guard.commit(

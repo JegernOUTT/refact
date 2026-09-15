@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock as AsyncRwLock, OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
@@ -211,6 +212,399 @@ fn current_state(path: &Path) -> Result<Option<(String, u64)>, String> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("Failed to inspect {:?}: {}", path, e)),
     }
+}
+static FILE_FSYNCS: AtomicU64 = AtomicU64::new(0);
+static DIR_FSYNCS: AtomicU64 = AtomicU64::new(0);
+static DURABLE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+const MAX_SYMLINK_HOPS: usize = 32;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct DurabilityCounters {
+    pub file_fsyncs: u64,
+    pub dir_fsyncs: u64,
+}
+
+/// Observable seam: every durable file and directory fsync is counted here, so
+/// a test can assert the syscall actually happened instead of trusting a claim.
+pub fn durability_counters() -> DurabilityCounters {
+    DurabilityCounters {
+        file_fsyncs: FILE_FSYNCS.load(Ordering::Relaxed),
+        dir_fsyncs: DIR_FSYNCS.load(Ordering::Relaxed),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplaceMode {
+    /// The file must not exist, so a racing creator still loses the create.
+    CreateNew,
+    /// Replace existing content, creating the file when it is absent.
+    Replace,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplacementKind {
+    Created,
+    Renamed,
+    InPlaceHardLinked,
+}
+
+/// Test-only record of which exact paths were fsynced, so a test can assert
+/// the syscall happened for its own file and directory instead of watching a
+/// global counter that every other parallel test also moves.
+#[cfg(test)]
+pub(crate) mod durable_observed {
+    use std::path::Path;
+    use std::sync::{Mutex, OnceLock};
+
+    fn slot() -> &'static Mutex<(Vec<String>, Vec<String>)> {
+        static SLOT: OnceLock<Mutex<(Vec<String>, Vec<String>)>> = OnceLock::new();
+        SLOT.get_or_init(|| Mutex::new((Vec::new(), Vec::new())))
+    }
+
+    pub fn record_file(path: &Path) {
+        slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .0
+            .push(path.to_string_lossy().to_string());
+    }
+
+    pub fn record_dir(path: &Path) {
+        slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .1
+            .push(path.to_string_lossy().to_string());
+    }
+
+    pub fn file_fsyncs_under(prefix: &Path) -> usize {
+        let prefix = prefix.to_string_lossy().to_string();
+        let guard = slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard
+            .0
+            .iter()
+            .filter(|path| path.starts_with(&prefix))
+            .count()
+    }
+
+    pub fn dir_fsyncs_for(dir: &Path) -> usize {
+        let dir = dir.to_string_lossy().to_string();
+        let guard = slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.1.iter().filter(|path| *path == &dir).count()
+    }
+}
+
+/// Test-only crash simulation. It stops a replacement at exactly the two
+/// points that matter — after the temp file is durable but before the rename,
+/// and after the rename but before the directory fsync — optionally only for
+/// paths matching a needle, so a multi-file apply can be failed at one file.
+#[cfg(test)]
+pub(crate) mod durable_fault {
+    use std::path::Path;
+    use std::sync::{Mutex, OnceLock};
+
+    pub const AFTER_TEMP_WRITE: u8 = 1;
+    pub const AFTER_RENAME: u8 = 2;
+
+    type Fault = Option<(u8, String)>;
+
+    fn slot() -> &'static Mutex<Fault> {
+        static SLOT: OnceLock<Mutex<Fault>> = OnceLock::new();
+        SLOT.get_or_init(|| Mutex::new(None))
+    }
+
+    fn set(fault: Fault) {
+        *slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = fault;
+    }
+
+    pub struct Armed;
+
+    impl Drop for Armed {
+        fn drop(&mut self) {
+            set(None);
+        }
+    }
+
+    /// Arming is always scoped to a path needle so an armed fault can never
+    /// reach a file belonging to another test running in parallel. Tests that
+    /// arm must also share one `#[serial]` key, because only one fault is held
+    /// at a time.
+    pub fn arm_for(point: u8, needle: impl Into<String>) -> Armed {
+        set(Some((point, needle.into())));
+        Armed
+    }
+
+    pub fn triggered(point: u8, path: &Path) -> bool {
+        match &*slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        {
+            Some((armed, needle)) => {
+                *armed == point && path.to_string_lossy().contains(needle.as_str())
+            }
+            None => false,
+        }
+    }
+}
+
+fn temp_path_for(target: &Path) -> PathBuf {
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    let unique = DURABLE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    target.with_file_name(format!(
+        ".{}.{}.{}.durable-tmp",
+        name,
+        std::process::id(),
+        unique
+    ))
+}
+
+fn hard_link_count(metadata: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.nlink()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        1
+    }
+}
+
+/// Resolves the inode that should receive the bytes. `open()` follows
+/// symlinks, so replacing the link's target (rather than the link itself)
+/// reproduces the behaviour an in-place write already had. This picks a write
+/// destination only; file identity for locking still comes solely from
+/// `resolve_key`.
+async fn resolve_symlink_target(path: &Path) -> Result<PathBuf, String> {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        let metadata = match tokio::fs::symlink_metadata(&current).await {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(current),
+            Err(e) => return Err(format!("Failed to inspect {:?}: {}", current, e)),
+        };
+        if !metadata.file_type().is_symlink() {
+            return Ok(current);
+        }
+        let link = tokio::fs::read_link(&current)
+            .await
+            .map_err(|e| format!("Failed to read link {:?}: {}", current, e))?;
+        current = if link.is_absolute() {
+            link
+        } else {
+            current
+                .parent()
+                .map(|parent| parent.join(&link))
+                .unwrap_or(link)
+        };
+    }
+    Err(format!(
+        "{:?} exceeds {} symlink hops",
+        path, MAX_SYMLINK_HOPS
+    ))
+}
+
+async fn sync_file(file: &tokio::fs::File, path: &Path) -> Result<(), String> {
+    file.sync_all()
+        .await
+        .map_err(|e| format!("Failed to fsync {:?}: {}", path, e))?;
+    FILE_FSYNCS.fetch_add(1, Ordering::Relaxed);
+    #[cfg(test)]
+    durable_observed::record_file(path);
+    Ok(())
+}
+
+/// Forces the directory entry itself to disk. Without this the rename that
+/// published the new file can be lost even though the file contents survived.
+pub async fn sync_dir(dir: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let owned = dir.to_path_buf();
+        tokio::task::spawn_blocking(move || std::fs::File::open(&owned)?.sync_all())
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("Failed to fsync directory {:?}: {}", dir, e))?;
+        DIR_FSYNCS.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        durable_observed::record_dir(dir);
+        Ok(())
+    }
+    // Windows has no directory-fsync equivalent: a directory handle cannot be
+    // flushed, so only the file contents above are forced to disk.
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
+async fn create_exclusively(target: &Path, contents: &[u8]) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .await
+        .map_err(|e| format!("Failed to create {:?}: {}", target, e))?;
+    let written = async {
+        file.write_all(contents)
+            .await
+            .map_err(|e| format!("Failed to write {:?}: {}", target, e))?;
+        file.flush()
+            .await
+            .map_err(|e| format!("Failed to flush {:?}: {}", target, e))?;
+        sync_file(&file, target).await
+    }
+    .await;
+    drop(file);
+    if let Err(error) = written {
+        let _ = tokio::fs::remove_file(target).await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn write_temp_then_rename(
+    target: &Path,
+    contents: &[u8],
+    permissions: Option<std::fs::Permissions>,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let tmp = temp_path_for(target);
+    let result = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .await
+            .map_err(|e| format!("Failed to create {:?}: {}", tmp, e))?;
+        let written = async {
+            file.write_all(contents)
+                .await
+                .map_err(|e| format!("Failed to write {:?}: {}", tmp, e))?;
+            file.flush()
+                .await
+                .map_err(|e| format!("Failed to flush {:?}: {}", tmp, e))?;
+            sync_file(&file, &tmp).await
+        }
+        .await;
+        drop(file);
+        written?;
+        if let Some(permissions) = permissions {
+            tokio::fs::set_permissions(&tmp, permissions)
+                .await
+                .map_err(|e| format!("Failed to set permissions on {:?}: {}", tmp, e))?;
+        }
+        #[cfg(test)]
+        if durable_fault::triggered(durable_fault::AFTER_TEMP_WRITE, target) {
+            return Err("injected failure after temp write".to_string());
+        }
+        // A plain rename replaces the destination on both unix and Windows.
+        // The target is never removed first, so it is never briefly absent.
+        tokio::fs::rename(&tmp, target)
+            .await
+            .map_err(|e| format!("Failed to rename {:?} to {:?}: {}", tmp, target, e))
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    result
+}
+
+async fn write_in_place(target: &Path, contents: &[u8]) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(target)
+        .await
+        .map_err(|e| format!("Failed to open {:?}: {}", target, e))?;
+    let written = async {
+        file.write_all(contents)
+            .await
+            .map_err(|e| format!("Failed to write {:?}: {}", target, e))?;
+        file.flush()
+            .await
+            .map_err(|e| format!("Failed to flush {:?}: {}", target, e))?;
+        sync_file(&file, target).await
+    }
+    .await;
+    drop(file);
+    written
+}
+
+/// Crash-durable whole-file write. What is actually guaranteed, by outcome:
+///
+/// * `Created` — the file did not exist. It is created exclusively, written,
+///   fsynced, and the parent directory is fsynced. A crash part-way can leave
+///   a short new file, but no previous content can be lost.
+/// * `Renamed` — a temp file in the same directory is written, fsynced, given
+///   the target's permissions and renamed over it, then the parent directory
+///   is fsynced. A crash leaves either the whole old file or the whole new
+///   file, never a truncated one.
+/// * `InPlaceHardLinked` — the target has more than one hard link. Renaming
+///   would break that link and split one file into two, so the content is
+///   written in place and fsynced. This is durable but NOT atomic: a crash can
+///   leave partial content. It is the only outcome that can.
+///
+/// A symlinked target is resolved first: the link is left alone and the file
+/// it points at is replaced. Permissions are preserved; ownership is preserved
+/// only in the in-place case, because the renamed replacement is a new inode
+/// owned by this process.
+///
+/// On Windows the rename still replaces the destination without removing it
+/// first, but there is no directory fsync, so only file contents are forced.
+pub async fn write_file_durably(
+    path: &Path,
+    contents: &[u8],
+    mode: ReplaceMode,
+) -> Result<ReplacementKind, String> {
+    let target = resolve_symlink_target(path).await?;
+    let parent = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .ok_or_else(|| format!("{:?} has no parent directory", target))?;
+
+    let existing = match tokio::fs::metadata(&target).await {
+        Ok(metadata) => Some(metadata),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("Failed to inspect {:?}: {}", target, e)),
+    };
+
+    if matches!(mode, ReplaceMode::CreateNew) || existing.is_none() {
+        create_exclusively(&target, contents).await?;
+        sync_dir(&parent).await?;
+        return Ok(ReplacementKind::Created);
+    }
+
+    let metadata = existing.ok_or_else(|| format!("{:?} disappeared", target))?;
+    if !metadata.is_file() {
+        return Err(format!("{:?} is not a regular file", target));
+    }
+    if hard_link_count(&metadata) > 1 {
+        write_in_place(&target, contents).await?;
+        return Ok(ReplacementKind::InPlaceHardLinked);
+    }
+    write_temp_then_rename(&target, contents, Some(metadata.permissions())).await?;
+    #[cfg(test)]
+    if durable_fault::triggered(durable_fault::AFTER_RENAME, &target) {
+        return Err("injected failure after rename".to_string());
+    }
+    sync_dir(&parent).await?;
+    Ok(ReplacementKind::Renamed)
 }
 
 fn lock_dir() -> PathBuf {
@@ -789,6 +1183,180 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path).unwrap(), "changed");
     }
     use super::*;
+
+    fn count_temp_files(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".durable-tmp"))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn replacement_is_atomic_and_fsyncs_the_file_and_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, "old\r\ncontent\r\n").unwrap();
+        let before = durability_counters();
+
+        let kind = write_file_durably(&path, b"new\r\ncontent\r\n", ReplaceMode::Replace)
+            .await
+            .unwrap();
+
+        assert_eq!(kind, ReplacementKind::Renamed);
+        assert_eq!(std::fs::read(&path).unwrap(), b"new\r\ncontent\r\n");
+        assert!(
+            durable_observed::file_fsyncs_under(dir.path()) >= 1,
+            "the replacement contents were never fsynced"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            durable_observed::dir_fsyncs_for(dir.path()),
+            1,
+            "parent directory was not fsynced, so the rename may not survive power loss"
+        );
+        assert!(durability_counters().file_fsyncs > before.file_fsyncs);
+        assert_eq!(count_temp_files(dir.path()), 0);
+    }
+
+    #[tokio::test]
+    async fn replacement_preserves_permissions_and_arbitrary_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.bin");
+        std::fs::write(&path, [0x00, 0xff, 0xfe, b'\r', b'\n']).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
+
+        write_file_durably(&path, &[0xff, 0x00, b'\n'], ReplaceMode::Replace)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), [0xff, 0x00, b'\n']);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o640, "permissions were not preserved");
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(durable_fault)]
+    async fn failure_before_the_rename_leaves_the_original_byte_identical_and_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, "original").unwrap();
+        let armed = durable_fault::arm_for(
+            durable_fault::AFTER_TEMP_WRITE,
+            path.to_string_lossy().to_string(),
+        );
+
+        let error = write_file_durably(&path, b"replacement", ReplaceMode::Replace)
+            .await
+            .unwrap_err();
+        drop(armed);
+
+        assert!(
+            error.contains("injected failure after temp write"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+        assert_eq!(
+            count_temp_files(dir.path()),
+            0,
+            "temp file was not cleaned up"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(durable_fault)]
+    async fn failure_after_the_rename_leaves_the_new_content_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, "original").unwrap();
+        let armed = durable_fault::arm_for(
+            durable_fault::AFTER_RENAME,
+            path.to_string_lossy().to_string(),
+        );
+
+        let error = write_file_durably(&path, b"replacement", ReplaceMode::Replace)
+            .await
+            .unwrap_err();
+        drop(armed);
+
+        assert!(error.contains("injected failure after rename"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
+        assert_eq!(count_temp_files(dir.path()), 0);
+    }
+
+    #[tokio::test]
+    async fn create_new_refuses_an_existing_file_and_never_overwrites_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, "existing").unwrap();
+
+        assert!(
+            write_file_durably(&path, b"clobber", ReplaceMode::CreateNew)
+                .await
+                .is_err()
+        );
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_target_keeps_the_link_and_replaces_the_file_it_points_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        let link = dir.path().join("link.txt");
+        std::fs::write(&target, "old").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let kind = write_file_durably(&link, b"new", ReplaceMode::Replace)
+            .await
+            .unwrap();
+
+        assert_eq!(kind, ReplacementKind::Renamed);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink was replaced by a regular file"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hardlinked_target_is_written_in_place_so_both_names_stay_one_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        let alias = dir.path().join("alias.txt");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::hard_link(&path, &alias).unwrap();
+
+        let kind = write_file_durably(&path, b"new", ReplaceMode::Replace)
+            .await
+            .unwrap();
+
+        assert_eq!(kind, ReplacementKind::InPlaceHardLinked);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_to_string(&alias).unwrap(),
+            "new",
+            "the hard link was broken instead of being written through"
+        );
+        assert!(
+            durable_observed::file_fsyncs_under(dir.path()) >= 1,
+            "the in-place write was not fsynced"
+        );
+        assert_eq!(count_temp_files(dir.path()), 0);
+    }
 
     #[test]
     fn byte_digests_distinguish_invalid_utf8_sequences() {

@@ -23,18 +23,6 @@ use crate::coordination::board_rows::{self, BoardProvenance};
 const TASKS_DIR: &str = "tasks";
 const PLANNER_ID_COUNTER_FILE: &str = "planner_next_id";
 
-async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
-    #[cfg(windows)]
-    if dest_path.exists() {
-        fs::remove_file(dest_path)
-            .await
-            .map_err(|e| format!("Failed to remove existing file: {}", e))?;
-    }
-    fs::rename(tmp_path, dest_path)
-        .await
-        .map_err(|e| format!("Failed to rename: {}", e))
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BoardConflict {
     pub expected: u64,
@@ -251,7 +239,6 @@ async fn write_board_locked(
         ));
     }
     let board_path = task_dir.join("board.yaml");
-    let tmp_path = task_dir.join("board.yaml.tmp");
     let mut value = serde_yaml::to_value(board).map_err(|e| e.to_string())?;
     value
         .as_mapping_mut()
@@ -261,10 +248,12 @@ async fn write_board_locked(
             serde_yaml::to_value(provenance).map_err(|e| e.to_string())?,
         );
     let content = serde_yaml::to_string(&value).map_err(|e| e.to_string())?;
-    fs::write(&tmp_path, &content)
-        .await
-        .map_err(|e| e.to_string())?;
-    atomic_write_file(&tmp_path, &board_path).await?;
+    crate::file_activity::write_file_durably(
+        &board_path,
+        content.as_bytes(),
+        crate::file_activity::ReplaceMode::Replace,
+    )
+    .await?;
     gcx.work_boards.publish(task_dir, Some((board, provenance)));
     Ok(())
 }
@@ -880,11 +869,13 @@ async fn read_planner_id_counter(task_dir: &Path) -> u32 {
 
 async fn write_planner_id_counter(task_dir: &Path, value: u32) -> Result<(), String> {
     let path = task_dir.join(PLANNER_ID_COUNTER_FILE);
-    let tmp_path = task_dir.join(format!("{}.tmp", PLANNER_ID_COUNTER_FILE));
-    fs::write(&tmp_path, value.to_string())
-        .await
-        .map_err(|e| e.to_string())?;
-    atomic_write_file(&tmp_path, &path).await
+    crate::file_activity::write_file_durably(
+        &path,
+        value.to_string().as_bytes(),
+        crate::file_activity::ReplaceMode::Replace,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Reserve the next planner chat id in the standard `planner-{task_id}-{n}` format.

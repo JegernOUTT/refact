@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
 
 use crate::file_activity::{begin_writes, WriteIntent, WriteKind};
 use crate::global_context::GlobalContext;
@@ -88,8 +87,11 @@ pub(super) async fn apply(gcx: Arc<GlobalContext>, plan: &ApplyPatchResult) -> R
             }
         }
     }
+    // Applying several files is deliberately NOT atomic: there is no journal,
+    // so a failure part-way leaves the earlier files replaced. Each individual
+    // file is still replaced durably, so no file is ever left truncated.
     let mut applied = 0usize;
-    for result in &plan.file_results {
+    for (index, result) in plan.file_results.iter().enumerate() {
         let operation: Result<(), String> = async {
             let source = if result.action == "rename" {
                 Some(PathBuf::from(
@@ -116,21 +118,17 @@ pub(super) async fn apply(gcx: Arc<GlobalContext>, plan: &ApplyPatchResult) -> R
                         .await
                         .map_err(|error| error.to_string())?;
                 }
-                let mut options = tokio::fs::OpenOptions::new();
-                options.write(true);
-                if result.action == "add" || source.is_some() {
-                    options.create_new(true);
+                let mode = if result.action == "add" || source.is_some() {
+                    crate::file_activity::ReplaceMode::CreateNew
                 } else {
-                    options.truncate(true);
-                }
-                let mut file = options
-                    .open(&result.path)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                file.write_all(result.after.as_bytes())
-                    .await
-                    .map_err(|error| error.to_string())?;
-                file.flush().await.map_err(|error| error.to_string())?;
+                    crate::file_activity::ReplaceMode::Replace
+                };
+                crate::file_activity::write_file_durably(
+                    &result.path,
+                    result.after.as_bytes(),
+                    mode,
+                )
+                .await?;
                 guards
                     .get_mut(&result.path)
                     .ok_or("missing patch guard")?
@@ -174,7 +172,20 @@ pub(super) async fn apply(gcx: Arc<GlobalContext>, plan: &ApplyPatchResult) -> R
         }
         .await;
         if let Err(error) = operation {
-            return Err(format!("patch failed after {applied} completed operations; partial changes are retained: {error}"));
+            let names = |results: &[super::tool_apply_patch::SingleFileResult]| {
+                results
+                    .iter()
+                    .map(|result| result.path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            return Err(format!(
+                "patch is not atomic and stopped at {} after {applied} of {} files: {error}. Changed: [{}]. Unchanged: [{}]. Each listed file is fully old or fully new, never truncated.",
+                result.path.display(),
+                plan.file_results.len(),
+                names(&plan.file_results[..index]),
+                names(&plan.file_results[index..]),
+            ));
         }
         applied += 1;
     }
