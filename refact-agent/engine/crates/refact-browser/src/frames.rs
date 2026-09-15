@@ -274,12 +274,36 @@ impl FrameInvalidation {
     }
 }
 
+pub const FRAME_DETACHED_PREFIX: &str = "frame_detached:";
+pub const FRAME_DETACHED_GUIDANCE: &str = "re-run the step once the new iframe has loaded";
+
+pub fn frame_detached_message(index: usize, summary: Option<&str>, source: Option<&str>) -> String {
+    let summary = summary
+        .map(|summary| format!(" ({summary})"))
+        .unwrap_or_default();
+    let source = source
+        .map(|source| format!(": {source}"))
+        .unwrap_or_default();
+    format!(
+        "{FRAME_DETACHED_PREFIX} frame {index}{summary} was detached or replaced while resolving{source}; {FRAME_DETACHED_GUIDANCE}"
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FrameLocatorError {
-    StrictViolation { count: usize, previews: Vec<String> },
+    StrictViolation {
+        count: usize,
+        previews: Vec<String>,
+    },
     ExpectedFrameElement,
     NoContentFrame,
-    OutOfProcessFrame { frame_id: FrameId },
+    OutOfProcessFrame {
+        frame_id: FrameId,
+    },
+    FrameDetached {
+        index: usize,
+        source: Option<String>,
+    },
     Handle(HandleError),
 }
 
@@ -306,6 +330,9 @@ impl Display for FrameLocatorError {
                 formatter,
                 "Out-of-process iframe {frame_id} is not supported by this browser connection"
             ),
+            Self::FrameDetached { index, source } => {
+                formatter.write_str(&frame_detached_message(*index, None, source.as_deref()))
+            }
             Self::Handle(error) => Display::fmt(error, formatter),
         }
     }
@@ -319,6 +346,48 @@ impl From<HandleError> for FrameLocatorError {
     }
 }
 
+struct ChainFailure {
+    error: FrameLocatorError,
+    stale_frame: Option<FrameId>,
+}
+
+impl ChainFailure {
+    fn fatal(error: FrameLocatorError) -> Self {
+        Self {
+            error,
+            stale_frame: None,
+        }
+    }
+
+    fn classify(index: usize, frame_id: Option<&str>, error: FrameLocatorError) -> Self {
+        let message = error.to_string();
+        if !crate::is_stale_frame_error(&message) {
+            return Self::fatal(error);
+        }
+        Self {
+            error: FrameLocatorError::FrameDetached {
+                index,
+                source: Some(message),
+            },
+            stale_frame: frame_id.map(str::to_string),
+        }
+    }
+
+    fn is_stale(&self) -> bool {
+        matches!(
+            self.error,
+            FrameLocatorError::FrameDetached {
+                source: Some(_),
+                ..
+            }
+        )
+    }
+}
+
+fn resolution_error(message: impl Into<String>) -> FrameLocatorError {
+    FrameLocatorError::Handle(HandleError::Resolution(message.into()))
+}
+
 impl WorldManager {
     pub fn resolve_frame_locator(
         &self,
@@ -326,30 +395,53 @@ impl WorldManager {
         owner_locators: &[Value],
         target_locator: Value,
     ) -> Result<Vec<ElementHandle>, FrameLocatorError> {
+        match self.resolve_frame_locator_once(tab, owner_locators, target_locator.clone()) {
+            Ok(handles) => Ok(handles),
+            Err(failure) if failure.is_stale() => {
+                if let Some(frame_id) = &failure.stale_frame {
+                    self.frame_detached(tab.get_target_id(), frame_id);
+                }
+                self.resolve_frame_locator_once(tab, owner_locators, target_locator)
+                    .map_err(|failure| failure.error)
+            }
+            Err(failure) => Err(failure.error),
+        }
+    }
+
+    fn resolve_frame_locator_once(
+        &self,
+        tab: &Tab,
+        owner_locators: &[Value],
+        target_locator: Value,
+    ) -> Result<Vec<ElementHandle>, ChainFailure> {
         self.ensure_utility_world(tab)
-            .map_err(|error| FrameLocatorError::Handle(HandleError::Resolution(error)))?;
+            .map_err(|error| ChainFailure::classify(0, None, resolution_error(error)))?;
         let frame_tree = self.frame_tree(tab.get_target_id()).ok_or_else(|| {
-            FrameLocatorError::Handle(HandleError::Resolution(
-                "Browser utility world has no frame tree".to_string(),
-            ))
+            ChainFailure::fatal(resolution_error("Browser utility world has no frame tree"))
         })?;
         let mut frame_id = frame_tree
             .main_frame_id()
             .ok_or_else(|| {
-                FrameLocatorError::Handle(HandleError::Resolution(
-                    "Browser utility world has no main frame".to_string(),
-                ))
+                ChainFailure::fatal(resolution_error("Browser utility world has no main frame"))
             })?
             .to_string();
 
-        for owner_locator in owner_locators {
-            reject_oopif(&frame_tree, &frame_id)?;
-            let owners = self.call_injected_handles_in_frame(
-                tab,
-                &frame_id,
-                "resolveAll",
-                Value::Array(vec![owner_locator.clone()]),
-            )?;
+        for (index, owner_locator) in owner_locators.iter().enumerate() {
+            reject_oopif(&frame_tree, &frame_id).map_err(ChainFailure::fatal)?;
+            let owners = self
+                .call_injected_handles_in_frame(
+                    tab,
+                    &frame_id,
+                    "resolveAll",
+                    Value::Array(vec![owner_locator.clone()]),
+                )
+                .map_err(|error| ChainFailure::classify(index, Some(&frame_id), error.into()))?;
+            if owners.is_empty() {
+                return Err(ChainFailure::fatal(FrameLocatorError::FrameDetached {
+                    index,
+                    source: None,
+                }));
+            }
             let owner = match strict_owner(owners) {
                 Ok(owner) => owner,
                 Err(owners) => {
@@ -374,7 +466,7 @@ impl WorldManager {
                     for owner in owners {
                         let _ = self.release_handle(tab, &owner);
                     }
-                    return Err(error);
+                    return Err(ChainFailure::fatal(error));
                 }
             };
             let is_frame = self.call_function_on(
@@ -387,26 +479,33 @@ impl WorldManager {
                 Ok(is_frame) => is_frame,
                 Err(error) => {
                     let _ = self.release_handle(tab, &owner);
-                    return Err(error.into());
+                    return Err(ChainFailure::classify(index, Some(&frame_id), error.into()));
                 }
             };
             if is_frame != Value::Bool(true) {
                 let _ = self.release_handle(tab, &owner);
-                return Err(FrameLocatorError::ExpectedFrameElement);
+                return Err(ChainFailure::fatal(FrameLocatorError::ExpectedFrameElement));
             }
             let content_frame_id = self.content_frame_for_handle(tab, &owner);
             let _ = self.release_handle(tab, &owner);
-            let content_frame_id = content_frame_id?;
-            frame_id = content_frame_id.ok_or(FrameLocatorError::NoContentFrame)?;
+            let content_frame_id = content_frame_id
+                .map_err(|error| ChainFailure::classify(index, Some(&frame_id), error.into()))?;
+            frame_id = match content_frame_id {
+                Some(content_frame_id) => content_frame_id,
+                None => {
+                    return Err(ChainFailure::fatal(FrameLocatorError::NoContentFrame));
+                }
+            };
         }
-        reject_oopif(&frame_tree, &frame_id)?;
+        reject_oopif(&frame_tree, &frame_id).map_err(ChainFailure::fatal)?;
+        let target_index = owner_locators.len().saturating_sub(1);
         self.call_injected_handles_in_frame(
             tab,
             &frame_id,
             "resolveAll",
             Value::Array(vec![target_locator]),
         )
-        .map_err(FrameLocatorError::from)
+        .map_err(|error| ChainFailure::classify(target_index, Some(&frame_id), error.into()))
     }
 }
 
@@ -549,6 +648,57 @@ mod tests {
         };
         assert!(error.to_string().contains("resolved to 2 iframe elements"));
         assert!(error.to_string().contains("1. <iframe id=first>"));
+    }
+
+    #[test]
+    fn stale_chain_errors_become_retryable_frame_detachments() {
+        let failure = ChainFailure::classify(
+            1,
+            Some("inner"),
+            resolution_error(
+                "Failed to create browser utility world for frame 42: No frame for given id",
+            ),
+        );
+
+        assert!(failure.is_stale());
+        assert_eq!(failure.stale_frame.as_deref(), Some("inner"));
+        let message = failure.error.to_string();
+        assert!(message.starts_with(FRAME_DETACHED_PREFIX));
+        assert!(message.contains("frame 1 was detached or replaced while resolving"));
+        assert!(message.contains("No frame for given id"));
+        assert!(message.ends_with(FRAME_DETACHED_GUIDANCE));
+    }
+
+    #[test]
+    fn unrelated_chain_errors_stay_fatal() {
+        let failure = ChainFailure::classify(
+            0,
+            Some("inner"),
+            resolution_error("Element handle object-1 is no longer valid"),
+        );
+
+        assert!(!failure.is_stale());
+        assert_eq!(failure.stale_frame, None);
+        assert_eq!(
+            failure.error.to_string(),
+            "Element handle object-1 is no longer valid"
+        );
+    }
+
+    #[test]
+    fn missing_frame_owner_reports_a_detachment_without_a_retry() {
+        let failure = ChainFailure::fatal(FrameLocatorError::FrameDetached {
+            index: 0,
+            source: None,
+        });
+
+        assert!(!failure.is_stale());
+        assert_eq!(
+            failure.error.to_string(),
+            format!(
+                "{FRAME_DETACHED_PREFIX} frame 0 was detached or replaced while resolving; {FRAME_DETACHED_GUIDANCE}"
+            )
+        );
     }
 
     #[test]

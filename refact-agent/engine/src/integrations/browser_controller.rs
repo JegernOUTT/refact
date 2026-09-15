@@ -583,13 +583,12 @@ fn intercepts_pointer_events(description: String) -> ActionabilityDiagnostic {
 /// Errors that mean the document the action was dispatched into no longer exists, so the
 /// dispatched pointer event cannot be verified, only trusted.
 pub fn action_outcome_is_lost_to_navigation(error: &str) -> bool {
+    if refact_browser::is_stale_frame_error(error) {
+        return true;
+    }
     let error = error.to_ascii_lowercase();
     [
-        "cannot find context with specified id",
-        "execution context was destroyed",
         "inspected target navigated or closed",
-        "no frame for given id",
-        "cannot find object with given id",
         "object couldn't be returned by value",
         "target closed",
         "invalidated",
@@ -719,9 +718,24 @@ fn resolve_locator_handles(
                     .map_err(|error| format!("Failed to serialize frame locator: {error}"))?;
                 world
                     .resolve_frame_locator(tab, &owners, locator_value)
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| frame_locator_error_message(locator, error))
             }
         }
+    }
+}
+
+/// Names the frame that went stale with the locator the caller wrote, so a replaced iframe reads as
+/// a re-runnable condition instead of a raw CDP failure.
+fn frame_locator_error_message(
+    locator: &BrowserLocator,
+    error: refact_browser::FrameLocatorError,
+) -> String {
+    match error {
+        refact_browser::FrameLocatorError::FrameDetached { index, source } => {
+            let summary = locator.frames.get(index).map(describe_locator);
+            refact_browser::frame_detached_message(index, summary.as_deref(), source.as_deref())
+        }
+        error => error.to_string(),
     }
 }
 
@@ -7593,6 +7607,7 @@ fn step_check_uncheck(
 
 fn poll_deadline_error(last_error: Option<String>, timeout_message: String) -> String {
     match last_error {
+        Some(error) if error.starts_with(refact_browser::FRAME_DETACHED_PREFIX) => error,
         Some(error) => format!("Polling failed: {error}"),
         None => timeout_message,
     }
@@ -8051,6 +8066,9 @@ fn poll_locator_until<T>(
 
 fn is_transient_page_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
+    if lower.starts_with(refact_browser::FRAME_DETACHED_PREFIX) {
+        return true;
+    }
     [
         "cannot find context",
         "execution context was destroyed",
@@ -13681,6 +13699,96 @@ mod tests {
             poll_deadline_error(None, "Timed out after 5000ms".to_string()),
             "Timed out after 5000ms"
         );
+    }
+
+    #[test]
+    fn replaced_iframe_reports_the_frame_locator_instead_of_the_raw_cdp_error() {
+        let mut frame = BrowserLocator::css("iframe");
+        frame.nth = Some(0);
+        let locator = BrowserLocator::css(".ql-editor").in_frames(vec![frame]);
+
+        let message = frame_locator_error_message(
+            &locator,
+            refact_browser::FrameLocatorError::FrameDetached {
+                index: 0,
+                source: Some("No frame for given id".to_string()),
+            },
+        );
+
+        assert!(message.starts_with("frame_detached: frame 0 (css=iframe.nth(0))"));
+        assert!(message.contains("was detached or replaced while resolving"));
+        assert!(message.contains("No frame for given id"));
+        assert!(message.ends_with("re-run the step once the new iframe has loaded"));
+    }
+
+    #[test]
+    fn a_removed_iframe_reports_a_detachment_without_a_cdp_cause() {
+        let locator =
+            BrowserLocator::css(".inner").in_frames(vec![BrowserLocator::css("iframe#f")]);
+
+        let message = frame_locator_error_message(
+            &locator,
+            refact_browser::FrameLocatorError::FrameDetached {
+                index: 0,
+                source: None,
+            },
+        );
+
+        assert_eq!(
+            message,
+            "frame_detached: frame 0 (css=iframe#f) was detached or replaced while resolving; \
+             re-run the step once the new iframe has loaded"
+        );
+    }
+
+    #[test]
+    fn other_frame_locator_errors_keep_their_own_wording() {
+        let locator = BrowserLocator::css("button").in_frames(vec![BrowserLocator::css("iframe")]);
+
+        assert_eq!(
+            frame_locator_error_message(
+                &locator,
+                refact_browser::FrameLocatorError::NoContentFrame
+            ),
+            "Frame locator iframe has no attached content frame"
+        );
+    }
+
+    #[test]
+    fn polling_waits_through_a_replaced_iframe_and_reports_it_verbatim() {
+        let detached = frame_locator_error_message(
+            &BrowserLocator::css(".inner").in_frames(vec![BrowserLocator::css("iframe")]),
+            refact_browser::FrameLocatorError::FrameDetached {
+                index: 0,
+                source: None,
+            },
+        );
+
+        assert!(is_transient_page_error(&detached));
+        assert_eq!(
+            poll_deadline_error(Some(detached.clone()), "Timed out after 5000ms".to_string()),
+            detached
+        );
+    }
+
+    #[test]
+    fn stale_frame_markers_still_count_as_navigation_loss() {
+        for lost in [
+            "No frame for given id",
+            "Cannot find context with specified id",
+            "Execution context was destroyed",
+            "Cannot find object with given id",
+            "Inspected target navigated or closed",
+            "Element handle object-1 is invalidated",
+        ] {
+            assert!(
+                action_outcome_is_lost_to_navigation(lost),
+                "missed navigation loss: {lost}"
+            );
+        }
+        assert!(!action_outcome_is_lost_to_navigation(
+            "Element is not visible"
+        ));
     }
 
     #[test]

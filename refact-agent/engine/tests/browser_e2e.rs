@@ -4520,6 +4520,89 @@ async fn ambiguous_iframe_owner_reports_strict_violation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn frame_chain_survives_iframe_replacement() {
+    let Some(case) = BrowserCase::start("iframe-replace.html").await else {
+        return;
+    };
+    let frames = vec![BrowserLocator::css("iframe")];
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[
+            BrowserStep::WaitForSelector {
+                locator: BrowserLocator::css(".inner").in_frames(frames.clone()),
+                state: None,
+                timeout_ms: Some(5_000),
+            },
+            BrowserStep::Click {
+                locator: BrowserLocator::css("#replace"),
+                timeout_ms: None,
+            },
+            BrowserStep::WaitForSelector {
+                locator: BrowserLocator::css(".inner").in_frames(frames.clone()),
+                state: None,
+                timeout_ms: Some(5_000),
+            },
+            BrowserStep::Click {
+                locator: BrowserLocator::css(".inner").in_frames(frames.clone()),
+                timeout_ms: None,
+            },
+            BrowserStep::GetText {
+                locator: BrowserLocator::css("#clicked").in_frames(frames),
+            },
+        ],
+    );
+
+    assert!(
+        report.ok,
+        "frame chain did not survive iframe replacement: {report:?}"
+    );
+    assert_eq!(
+        report.steps[4].data.as_ref().unwrap()["text"],
+        json!("clicked")
+    );
+    let rendered = format!("{report:?}").to_lowercase();
+    assert!(
+        !rendered.contains("no frame for given id"),
+        "raw stale-frame CDP error surfaced: {report:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn removed_iframe_reports_a_structured_frame_detachment() {
+    let Some(case) = BrowserCase::start("iframe-replace.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[
+            BrowserStep::Click {
+                locator: BrowserLocator::css("#remove"),
+                timeout_ms: None,
+            },
+            BrowserStep::WaitForSelector {
+                locator: BrowserLocator::css(".inner")
+                    .in_frames(vec![BrowserLocator::css("iframe")]),
+                state: None,
+                timeout_ms: Some(1_000),
+            },
+        ],
+    );
+
+    assert!(!report.ok, "a removed iframe must fail: {report:?}");
+    let error = report.steps[1].error.as_deref().unwrap_or_default();
+    assert!(
+        error.starts_with("frame_detached: frame 0 (css=iframe)"),
+        "unstructured detachment error: {report:?}"
+    );
+    assert!(
+        error.ends_with("re-run the step once the new iframe has loaded"),
+        "detachment error lost its guidance: {report:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn nested_shadow_dom_button_and_input_are_actionable() {
     let Some(case) = BrowserCase::start("shadow-dom.html").await else {
         return;

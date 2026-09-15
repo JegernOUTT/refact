@@ -992,7 +992,7 @@ impl WorldManager {
             .attach(frame_id.to_string(), Some(parent_frame_id.to_string()));
     }
 
-    fn frame_detached(&self, target_id: &str, frame_id: &str) {
+    pub(crate) fn frame_detached(&self, target_id: &str, frame_id: &str) {
         let mut state = self.state.lock().unwrap();
         let invalidation = state
             .tabs
@@ -1300,6 +1300,46 @@ mod tests {
         let attach = oopif_auto_attach();
         assert!(attach.auto_attach);
         assert_eq!(attach.flatten, Some(true));
+    }
+
+    #[test]
+    fn stale_frame_errors_are_classified_case_insensitively() {
+        for stale in [
+            "Failed to create browser utility world for frame 42: No frame for given id",
+            "Cannot find context with specified id",
+            "Execution context was destroyed.",
+            "cannot find object with given id",
+        ] {
+            assert!(
+                crate::is_stale_frame_error(stale),
+                "missed stale frame error: {stale}"
+            );
+        }
+
+        for alive in [
+            "",
+            "Element not found",
+            "Timed out after 5000ms",
+            "Element handle object-1 is no longer valid",
+            "Strict mode violation: frame locator resolved to 2 iframe elements",
+            "Unable to make method calls because underlying connection is closed",
+        ] {
+            assert!(
+                !crate::is_stale_frame_error(alive),
+                "false positive stale frame error: {alive}"
+            );
+        }
+    }
+
+    #[test]
+    fn detaching_a_frame_drops_its_utility_world_context() {
+        let manager = WorldManager::default();
+        manager.context_created(TAB, 7, UTILITY_WORLD_NAME);
+        manager.record_context(TAB, FRAME.to_string(), 7);
+
+        manager.frame_detached(TAB, FRAME);
+
+        assert_eq!(manager.context_for_frame(TAB, &FRAME.to_string()), None);
     }
 
     #[test]

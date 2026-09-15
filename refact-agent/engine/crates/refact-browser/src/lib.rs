@@ -60,8 +60,8 @@ pub use handles::{
     CheckedState, ElementHandle, ElementState, ElementStateName, HandleError, HandleRegistry,
 };
 pub use frames::{
-    FrameExecutionContext, FrameHandle, FrameId, FrameInvalidation, FrameLocatorError,
-    FrameSessionId, FrameTree,
+    FRAME_DETACHED_GUIDANCE, FRAME_DETACHED_PREFIX, FrameExecutionContext, FrameHandle, FrameId,
+    FrameInvalidation, FrameLocatorError, FrameSessionId, FrameTree, frame_detached_message,
 };
 pub use files::{DownloadMonitor, DownloadTracker, FileChooserManager};
 pub use hit_target::{
@@ -1209,6 +1209,22 @@ pub const TRANSPORT_DEAD_MARKERS: [&str; 4] = [
 pub fn is_transport_dead_error(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     TRANSPORT_DEAD_MARKERS
+        .iter()
+        .any(|marker| error.contains(marker))
+}
+
+/// CDP errors raised when a frame id, its execution context, or a handle inside it belongs to a
+/// generation of the document that the page has already replaced.
+pub const STALE_FRAME_MARKERS: [&str; 4] = [
+    "no frame for given id",
+    "cannot find context with specified id",
+    "execution context was destroyed",
+    "cannot find object with given id",
+];
+
+pub fn is_stale_frame_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    STALE_FRAME_MARKERS
         .iter()
         .any(|marker| error.contains(marker))
 }
