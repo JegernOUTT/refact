@@ -18738,6 +18738,7 @@ mod tests {
             stop_reason: None,
             transferred_from: None,
             transferred_to: None,
+            sub_goals: Default::default(),
         };
 
         let loaded = clamp_goal_snapshot_for_load(goal);
@@ -18762,6 +18763,7 @@ mod tests {
             stop_reason: None,
             transferred_from: None,
             transferred_to: None,
+            sub_goals: Default::default(),
         };
         assert_eq!(
             clamp_goal_snapshot_for_load(goal).status,
@@ -18782,6 +18784,7 @@ mod tests {
             stop_reason: None,
             transferred_from: None,
             transferred_to: None,
+            sub_goals: Default::default(),
         };
         assert_eq!(
             clamp_goal_snapshot_for_load(inactive).status,
@@ -18805,6 +18808,7 @@ mod tests {
             stop_reason: None,
             transferred_from: None,
             transferred_to: None,
+            sub_goals: Default::default(),
         };
         assert_eq!(
             clamp_goal_snapshot_for_load(goal).status,
@@ -18835,6 +18839,7 @@ mod tests {
             stop_reason: None,
             transferred_from: None,
             transferred_to: None,
+            sub_goals: Default::default(),
         };
 
         let loaded = clamp_goal_snapshot_for_load(goal);

@@ -11,7 +11,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ChatMeta, ChatUsage, SamplingParameters};
 use crate::chat::evidence::{
     evaluate_goal_gates, measured_criterion_verdicts, specs_from_criteria, unexecuted_record,
-    EvidenceContext, EvidenceDefaults, EvidenceRecord, EvidenceService, EvidenceVerdict,
+    EvidenceContext, EvidenceDefaults, EvidenceRecord, EvidenceService, EvidenceVerdict, GateBlock,
     GateOutcome, SystemEvidenceRunner, VerificationSpec,
 };
 use crate::chat::internal_roles::{self, EventSubkind};
@@ -749,6 +749,41 @@ pub async fn resolve_goal_evidence(
 
 /// Gate precedence, as a decision the caller cannot argue with: while a required gate
 /// blocks, the judge's opinion is discarded even when it was already produced.
+/// A required child lane that is not met gates the parent exactly like a failed
+/// verification command. Built from `SubGoalRollup`, which reads structured
+/// criterion verdicts and never the child's `result_summary`.
+pub fn sub_goal_gate_blocks(rollup: &refact_chat_api::SubGoalRollup) -> Vec<GateBlock> {
+    rollup
+        .blocking()
+        .into_iter()
+        .map(|lane| GateBlock {
+            spec_id: format!("subgoal:{}", lane.node_id),
+            command: if lane.title.is_empty() {
+                lane.node_id.clone()
+            } else {
+                lane.title.clone()
+            },
+            verdict: match lane.outcome {
+                refact_chat_api::SubGoalOutcome::Failed => EvidenceVerdict::Failed,
+                refact_chat_api::SubGoalOutcome::Blocked => EvidenceVerdict::Blocked,
+                refact_chat_api::SubGoalOutcome::Superseded => EvidenceVerdict::Superseded,
+                _ => EvidenceVerdict::NotRun,
+            },
+            exit_code: None,
+            reason: lane.reason.clone(),
+        })
+        .collect()
+}
+
+/// Folds the child rollup into the same `GateOutcome` the evidence gates use,
+/// so `judge_allowed` already accounts for it and no second decision path
+/// exists.
+pub fn merge_sub_goal_gates(gates: &mut GateOutcome, rollup: &refact_chat_api::SubGoalRollup) {
+    gates.required_total += rollup.required_total;
+    gates.required_passed += rollup.required_met;
+    gates.blocks.extend(sub_goal_gate_blocks(rollup));
+}
+
 pub fn goal_verdict_from_evidence(
     evidence: &GoalEvidence,
     judged: Option<GoalVerifierReply>,
@@ -805,7 +840,7 @@ pub async fn run_goal_verification(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> Result<GoalVerifierReply, String> {
-    let (criteria, worktree_root, author, content_revision) = {
+    let (criteria, worktree_root, author, content_revision, sub_goals) = {
         let session = session_arc.lock().await;
         (
             session
@@ -820,9 +855,10 @@ pub async fn run_goal_verification(
                 .map(|worktree| worktree.root.clone()),
             session.chat_id.clone(),
             format!("{}@{}", session.chat_id, session.trajectory_version),
+            session.sub_goal_rollup(),
         )
     };
-    let evidence = resolve_goal_evidence(
+    let mut evidence = resolve_goal_evidence(
         app.gcx.clone(),
         &criteria,
         &author,
@@ -830,6 +866,7 @@ pub async fn run_goal_verification(
         content_revision,
     )
     .await;
+    merge_sub_goal_gates(&mut evidence.gates, &sub_goals);
     if !evidence.gates.judge_allowed() {
         return Ok(goal_verdict_from_evidence(&evidence, None));
     }

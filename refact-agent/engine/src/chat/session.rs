@@ -326,6 +326,7 @@ pub(crate) fn goal_snapshot_from_messages(
                     .and_then(|value| value.as_str())
                     .map(str::to_string)
             }),
+        sub_goals: prior.map(|goal| goal.sub_goals.clone()).unwrap_or_default(),
     };
     if !has_prior
         && matches!(
@@ -900,6 +901,78 @@ impl ChatSession {
         self.goal_ledger_append(GoalLedgerOp::SnoozeSet { until_ms });
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
+        true
+    }
+
+    pub(crate) fn sub_goal_graph(&self) -> refact_chat_api::SubGoalGraph {
+        refact_chat_api::reduce_goal_ledger(&self.goal_ledger)
+            .map(|state| state.sub_goals)
+            .unwrap_or_default()
+    }
+
+    /// Rolls the goal's required and optional child lanes into one mechanical
+    /// decision. Reads structured criterion verdicts only.
+    pub(crate) fn sub_goal_rollup(&self) -> refact_chat_api::SubGoalRollup {
+        refact_chat_api::aggregate_sub_goals(
+            &self.sub_goal_graph(),
+            refact_chat_api::ROOT_SUB_GOAL_ID,
+        )
+    }
+
+    /// Validates the whole prospective graph before a single op is written, so
+    /// a cycle is a structured rejection rather than a runtime surprise.
+    pub(crate) fn declare_sub_goals(
+        &mut self,
+        declaration: refact_chat_api::SubGoalDeclaration,
+    ) -> Result<u64, refact_chat_api::SubGoalDeclarationError> {
+        self.sub_goal_graph()
+            .validate_declaration(&declaration, crate::runtime_settings::sub_goal_limits())?;
+        let seq = self.goal_ledger_append(GoalLedgerOp::SubGoalsDeclared { declaration });
+        self.mark_persisted_runtime_changed();
+        Ok(seq)
+    }
+
+    pub(crate) fn dispatch_sub_goal(
+        &mut self,
+        node_id: &str,
+        owner: Option<refact_chat_api::SubGoalOwner>,
+    ) -> bool {
+        if self.sub_goal_graph().node(node_id).is_none() {
+            return false;
+        }
+        self.goal_ledger_append(GoalLedgerOp::SubGoalDispatched {
+            node_id: node_id.to_string(),
+            owner,
+        });
+        self.mark_persisted_runtime_changed();
+        true
+    }
+
+    pub(crate) fn record_sub_goal_report(
+        &mut self,
+        node_id: &str,
+        report: refact_chat_api::SubGoalReport,
+    ) -> bool {
+        if self.sub_goal_graph().node(node_id).is_none() {
+            return false;
+        }
+        self.goal_ledger_append(GoalLedgerOp::SubGoalReported {
+            node_id: node_id.to_string(),
+            report,
+        });
+        self.mark_persisted_runtime_changed();
+        true
+    }
+
+    pub(crate) fn supersede_sub_goal(&mut self, node_id: &str, reason: &str) -> bool {
+        if self.sub_goal_graph().node(node_id).is_none() {
+            return false;
+        }
+        self.goal_ledger_append(GoalLedgerOp::SubGoalSuperseded {
+            node_id: node_id.to_string(),
+            reason: reason.to_string(),
+        });
+        self.mark_persisted_runtime_changed();
         true
     }
 
@@ -4837,6 +4910,7 @@ mod tests {
                 stop_reason: None,
                 transferred_from: None,
                 transferred_to: None,
+                sub_goals: Default::default(),
             }
         }
 
@@ -5351,6 +5425,168 @@ mod tests {
                 .any(|entry| matches!(entry.op, GoalLedgerOp::Installed { version: 1, .. })));
         }
 
+        fn lane(id: &str, criteria: &[&str]) -> refact_chat_api::SubGoalNode {
+            refact_chat_api::SubGoalNode::new(id, id).with_criteria(criteria.to_vec())
+        }
+
+        fn met(id: &str, met: bool) -> refact_chat_api::CriterionVerdict {
+            refact_chat_api::CriterionVerdict {
+                id: id.to_string(),
+                met,
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn a_child_reporting_done_prose_with_a_failed_criterion_blocks_the_parent() {
+            let mut session = make_session();
+            install(&mut session);
+            session
+                .declare_sub_goals(refact_chat_api::SubGoalDeclaration {
+                    nodes: vec![lane("lint", &["c1"])],
+                    edges: vec![refact_chat_api::SubGoalEdge::required(
+                        refact_chat_api::ROOT_SUB_GOAL_ID,
+                        "lint",
+                    )],
+                })
+                .expect("declaration is valid");
+
+            assert!(session.record_sub_goal_report(
+                "lint",
+                refact_chat_api::SubGoalReport {
+                    claimed_outcome: refact_chat_api::SubGoalOutcome::Met,
+                    criteria_verdicts: vec![met("c1", false)],
+                    result_summary: "DONE — all green, ship it".to_string(),
+                    reported_at_ms: 10,
+                },
+            ));
+
+            let rollup = session.sub_goal_rollup();
+            assert!(!rollup.parent_may_proceed());
+            assert_eq!(
+                rollup.lanes[0].outcome,
+                refact_chat_api::SubGoalOutcome::Failed
+            );
+
+            let mut gates = crate::chat::evidence::GateOutcome::default();
+            crate::chat::goal_verifier::merge_sub_goal_gates(&mut gates, &rollup);
+            assert!(!gates.judge_allowed());
+            assert!(gates.reasons()[0].contains("c1"));
+        }
+
+        #[test]
+        fn required_lanes_met_by_verdicts_let_the_parent_proceed() {
+            let mut session = make_session();
+            install(&mut session);
+            session
+                .declare_sub_goals(refact_chat_api::SubGoalDeclaration {
+                    nodes: vec![lane("lint", &["c1"])],
+                    edges: vec![refact_chat_api::SubGoalEdge::required(
+                        refact_chat_api::ROOT_SUB_GOAL_ID,
+                        "lint",
+                    )],
+                })
+                .expect("declaration is valid");
+            session.record_sub_goal_report(
+                "lint",
+                refact_chat_api::SubGoalReport {
+                    claimed_outcome: refact_chat_api::SubGoalOutcome::Met,
+                    criteria_verdicts: vec![met("c1", true)],
+                    result_summary: "it broke everything".to_string(),
+                    reported_at_ms: 10,
+                },
+            );
+
+            let rollup = session.sub_goal_rollup();
+            assert!(rollup.parent_may_proceed());
+
+            let mut gates = crate::chat::evidence::GateOutcome::default();
+            crate::chat::goal_verifier::merge_sub_goal_gates(&mut gates, &rollup);
+            assert!(gates.judge_allowed());
+        }
+
+        #[test]
+        fn declaring_a_cycle_is_rejected_and_writes_no_ledger_op() {
+            let mut session = make_session();
+            install(&mut session);
+            session
+                .declare_sub_goals(refact_chat_api::SubGoalDeclaration {
+                    nodes: vec![lane("a", &[]), lane("b", &[])],
+                    edges: vec![
+                        refact_chat_api::SubGoalEdge::required(
+                            refact_chat_api::ROOT_SUB_GOAL_ID,
+                            "a",
+                        ),
+                        refact_chat_api::SubGoalEdge::required("a", "b"),
+                    ],
+                })
+                .expect("declaration is valid");
+            let before = session.goal_ledger.len();
+
+            let error = session
+                .declare_sub_goals(refact_chat_api::SubGoalDeclaration {
+                    nodes: Vec::new(),
+                    edges: vec![refact_chat_api::SubGoalEdge::required("b", "a")],
+                })
+                .expect_err("a cycle must be rejected");
+
+            assert!(matches!(
+                error,
+                refact_chat_api::SubGoalDeclarationError::Cycle { .. }
+            ));
+            assert!(error.to_string().contains('a'));
+            assert_eq!(session.goal_ledger.len(), before);
+        }
+
+        #[test]
+        fn an_undispatched_optional_lane_does_not_block_and_reports_not_run() {
+            let mut session = make_session();
+            install(&mut session);
+            session
+                .declare_sub_goals(refact_chat_api::SubGoalDeclaration {
+                    nodes: vec![lane("audit", &[])],
+                    edges: vec![refact_chat_api::SubGoalEdge::optional(
+                        refact_chat_api::ROOT_SUB_GOAL_ID,
+                        "audit",
+                    )],
+                })
+                .expect("declaration is valid");
+
+            let rollup = session.sub_goal_rollup();
+            assert!(rollup.parent_may_proceed());
+            assert_eq!(
+                rollup.optional_lanes()[0].outcome,
+                refact_chat_api::SubGoalOutcome::NotRun
+            );
+            assert!(!rollup.optional_lanes()[0].dispatched);
+        }
+
+        #[test]
+        fn reports_for_unknown_lanes_are_refused() {
+            let mut session = make_session();
+            install(&mut session);
+            let before = session.goal_ledger.len();
+
+            assert!(!session.record_sub_goal_report("ghost", Default::default()));
+            assert!(!session.dispatch_sub_goal("ghost", None));
+            assert!(!session.supersede_sub_goal("ghost", "gone"));
+            assert_eq!(session.goal_ledger.len(), before);
+        }
+
+        #[test]
+        fn a_goal_without_sub_goals_gates_exactly_as_before() {
+            let mut session = make_session();
+            install(&mut session);
+
+            let rollup = session.sub_goal_rollup();
+            assert!(rollup.parent_may_proceed());
+            assert_eq!(rollup.required_total, 0);
+
+            let mut gates = crate::chat::evidence::GateOutcome::default();
+            crate::chat::goal_verifier::merge_sub_goal_gates(&mut gates, &rollup);
+            assert_eq!(gates, crate::chat::evidence::GateOutcome::default());
+        }
+
         #[test]
         fn ledger_status_changed_since_guards_verification_epoch() {
             let mut session = make_session();
@@ -5827,6 +6063,7 @@ mod tests {
             stop_reason: None,
             transferred_from: None,
             transferred_to: None,
+            sub_goals: Default::default(),
         };
 
         let session = ChatSession::new_with_trajectory(

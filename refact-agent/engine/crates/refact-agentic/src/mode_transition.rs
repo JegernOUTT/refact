@@ -1058,6 +1058,9 @@ fn goal_snapshot_for_transfer(
         transferred_to: existing
             .and_then(|goal| goal.transferred_to.clone())
             .or_else(|| goal_meta_string(meta, "transferred_to")),
+        sub_goals: existing
+            .map(|goal| goal.sub_goals.clone())
+            .unwrap_or_default(),
     })
 }
 

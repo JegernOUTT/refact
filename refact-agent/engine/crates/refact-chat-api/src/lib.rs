@@ -14,11 +14,18 @@ pub mod notification_event;
 pub mod plan_role;
 pub mod question;
 pub mod role_projection;
+pub mod sub_goal;
 pub mod tool_enrichment;
 
 pub use goal_ledger::{
     goal_budget_exhaustion_status, reduce_goal_ledger, seed_transferred_goal_ledger,
     status_changed_since, GoalLedgerEntry, GoalLedgerOp, GoalLedgerState,
+};
+pub use sub_goal::{
+    aggregate_sub_goals, sub_goal_effective_outcome, SubGoalDeclaration, SubGoalDeclarationError,
+    SubGoalEdge, SubGoalEdgeKind, SubGoalGraph, SubGoalLane, SubGoalLimits, SubGoalNode,
+    SubGoalNodeState, SubGoalOutcome, SubGoalOwner, SubGoalReport, SubGoalRollup,
+    DEFAULT_SUB_GOAL_MAX_DEPTH, DEFAULT_SUB_GOAL_MAX_FAN_OUT, ROOT_SUB_GOAL_ID,
 };
 
 pub use chat_local_types::{
@@ -408,6 +415,10 @@ pub struct GoalSnapshot {
     pub stop_reason: Option<String>,
     pub transferred_from: Option<String>,
     pub transferred_to: Option<String>,
+    /// Child lanes composed under this one goal. Empty for every goal that
+    /// never declared any, so an older snapshot reads unchanged.
+    #[serde(default, skip_serializing_if = "sub_goal::SubGoalGraph::is_empty")]
+    pub sub_goals: sub_goal::SubGoalGraph,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -1432,6 +1443,7 @@ mod tests {
             stop_reason: None,
             transferred_from: Some("source-chat".to_string()),
             transferred_to: Some("target-chat".to_string()),
+            sub_goals: sub_goal::SubGoalGraph::default(),
         }
     }
 

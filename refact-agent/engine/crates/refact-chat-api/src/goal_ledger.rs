@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::sub_goal::{SubGoalDeclaration, SubGoalGraph, SubGoalOwner, SubGoalReport};
 use crate::{GoalAttempt, GoalBudget, GoalCriterion, GoalEvent, GoalProgress, GoalSnapshot, GoalStatus};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,6 +57,23 @@ pub enum GoalLedgerOp {
         source_chat_id: String,
         #[serde(default)]
         progress: GoalProgress,
+    },
+    SubGoalsDeclared {
+        declaration: SubGoalDeclaration,
+    },
+    SubGoalDispatched {
+        node_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<SubGoalOwner>,
+    },
+    SubGoalReported {
+        node_id: String,
+        report: SubGoalReport,
+    },
+    SubGoalSuperseded {
+        node_id: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        reason: String,
     },
 }
 
@@ -132,6 +150,7 @@ pub struct GoalLedgerState {
     pub stop_reason: Option<String>,
     pub transferred_from: Option<String>,
     pub transferred_to: Option<String>,
+    pub sub_goals: SubGoalGraph,
     pub last_seq: u64,
 }
 
@@ -154,6 +173,7 @@ impl GoalLedgerState {
             stop_reason: None,
             transferred_from: None,
             transferred_to: None,
+            sub_goals: SubGoalGraph::default(),
             last_seq: 0,
         }
     }
@@ -172,6 +192,7 @@ impl GoalLedgerState {
         if self.transferred_to.is_some() {
             snapshot.transferred_to = self.transferred_to.clone();
         }
+        snapshot.sub_goals = self.sub_goals.clone();
     }
 }
 
@@ -295,6 +316,18 @@ fn apply_op(state: &mut GoalLedgerState, op: &GoalLedgerOp, at_ms: u64) {
             state.progress = progress.clone();
             state.transferred_from = Some(source_chat_id.clone());
             state.transferred_to = None;
+        }
+        GoalLedgerOp::SubGoalsDeclared { declaration } => {
+            state.sub_goals.apply_declaration(declaration);
+        }
+        GoalLedgerOp::SubGoalDispatched { node_id, owner } => {
+            state.sub_goals.mark_dispatched(node_id, owner.clone());
+        }
+        GoalLedgerOp::SubGoalReported { node_id, report } => {
+            state.sub_goals.record_report(node_id, report.clone());
+        }
+        GoalLedgerOp::SubGoalSuperseded { node_id, reason } => {
+            state.sub_goals.supersede(node_id, reason);
         }
     }
 }
@@ -545,6 +578,137 @@ mod tests {
             },
         ));
         assert!(status_changed_since(&with_stop, 2));
+    }
+
+    #[test]
+    fn a_legacy_ledger_without_sub_goal_ops_replays_identically() {
+        let legacy = serde_json::json!([
+            {"seq": 1, "at_ms": 1000, "op": "installed", "version": 1, "active": true,
+             "budget": {"cooldown_ms": 1000, "no_progress_token_threshold": 200000}},
+            {"seq": 2, "at_ms": 2000, "op": "progress_recorded", "tokens": 42, "made_progress": true},
+            {"seq": 3, "at_ms": 3000, "op": "transferred_out", "target_chat_id": "elsewhere"}
+        ]);
+        let entries: Vec<GoalLedgerEntry> = serde_json::from_value(legacy).unwrap();
+        let state = reduce_goal_ledger(&entries).unwrap();
+
+        assert_eq!(state.status, GoalStatus::Transferred);
+        assert_eq!(state.transferred_to.as_deref(), Some("elsewhere"));
+        assert_eq!(state.progress.tokens_used, 42);
+        assert!(state.sub_goals.is_empty());
+        assert_eq!(state.last_seq, 3);
+
+        let mut snapshot = GoalSnapshot::default();
+        state.apply_to_snapshot(&mut snapshot);
+        assert!(snapshot.sub_goals.is_empty());
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert!(
+            json.get("sub_goals").is_none(),
+            "an empty sub-goal graph must not appear on the wire"
+        );
+    }
+
+    #[test]
+    fn sub_goal_ops_replay_deterministically_and_decide_the_parent() {
+        let declaration = SubGoalDeclaration {
+            nodes: vec![
+                crate::SubGoalNode::new("a", "A").with_criteria(["c1"]),
+                crate::SubGoalNode::new("b", "B").with_criteria(["c2"]),
+            ],
+            edges: vec![
+                crate::SubGoalEdge::required(crate::ROOT_SUB_GOAL_ID, "a"),
+                crate::SubGoalEdge::optional(crate::ROOT_SUB_GOAL_ID, "b"),
+            ],
+        };
+        let entries = vec![
+            installed(1),
+            entry(
+                2,
+                2_000,
+                GoalLedgerOp::SubGoalsDeclared {
+                    declaration: declaration.clone(),
+                },
+            ),
+            entry(
+                3,
+                3_000,
+                GoalLedgerOp::SubGoalDispatched {
+                    node_id: "a".to_string(),
+                    owner: Some(SubGoalOwner::background_agent("bg-1")),
+                },
+            ),
+            entry(
+                4,
+                4_000,
+                GoalLedgerOp::SubGoalReported {
+                    node_id: "a".to_string(),
+                    report: SubGoalReport {
+                        claimed_outcome: crate::SubGoalOutcome::Met,
+                        criteria_verdicts: vec![crate::CriterionVerdict {
+                            id: "c1".to_string(),
+                            met: true,
+                            ..Default::default()
+                        }],
+                        result_summary: "DONE".to_string(),
+                        reported_at_ms: 4_000,
+                    },
+                },
+            ),
+        ];
+
+        let state = reduce_goal_ledger(&entries).unwrap();
+        assert_eq!(state, reduce_goal_ledger(&entries).unwrap());
+
+        let rollup = crate::aggregate_sub_goals(&state.sub_goals, crate::ROOT_SUB_GOAL_ID);
+        assert!(rollup.parent_may_proceed());
+        assert_eq!(rollup.required_total, 1);
+        assert_eq!(rollup.optional_lanes().len(), 1);
+        assert_eq!(
+            rollup.optional_lanes()[0].outcome,
+            crate::SubGoalOutcome::NotRun
+        );
+
+        let round_tripped: Vec<GoalLedgerEntry> =
+            serde_json::from_value(serde_json::to_value(&entries).unwrap()).unwrap();
+        assert_eq!(reduce_goal_ledger(&round_tripped).unwrap(), state);
+    }
+
+    #[test]
+    fn a_superseded_required_lane_replays_as_blocking() {
+        let entries = vec![
+            installed(1),
+            entry(
+                2,
+                2_000,
+                GoalLedgerOp::SubGoalsDeclared {
+                    declaration: SubGoalDeclaration {
+                        nodes: vec![crate::SubGoalNode::new("a", "A")],
+                        edges: vec![crate::SubGoalEdge::required(crate::ROOT_SUB_GOAL_ID, "a")],
+                    },
+                },
+            ),
+            entry(
+                3,
+                3_000,
+                GoalLedgerOp::SubGoalReported {
+                    node_id: "a".to_string(),
+                    report: SubGoalReport {
+                        claimed_outcome: crate::SubGoalOutcome::Met,
+                        ..Default::default()
+                    },
+                },
+            ),
+            entry(
+                4,
+                4_000,
+                GoalLedgerOp::SubGoalSuperseded {
+                    node_id: "a".to_string(),
+                    reason: "scope changed".to_string(),
+                },
+            ),
+        ];
+        let state = reduce_goal_ledger(&entries).unwrap();
+        let rollup = crate::aggregate_sub_goals(&state.sub_goals, crate::ROOT_SUB_GOAL_ID);
+        assert!(!rollup.parent_may_proceed());
     }
 
     #[test]

@@ -1,4 +1,7 @@
 use chrono::{TimeDelta, Utc};
+use refact_chat_api::{
+    CriterionVerdict, DeliverableStatus, SubGoalOutcome, SubGoalOwner, SubGoalReport, VerdictSource,
+};
 use refact_core::chat_types::{DeliveryOutcome, PendingDelivery, PushMode};
 
 use crate::agents::types::{BackgroundAgent, BgAgentStatus};
@@ -30,6 +33,151 @@ fn cap_file_list(files: &[String], max: usize) -> Vec<String> {
     capped
 }
 
+fn deliverable_note(status: &DeliverableStatus) -> String {
+    if status.met {
+        return format!("{} check passed", status.check);
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if !status.missing_sections.is_empty() {
+        parts.push(format!(
+            "missing sections: {}",
+            status.missing_sections.join(", ")
+        ));
+    }
+    if let Some(error) = status.schema_error.as_ref() {
+        parts.push(format!("schema: {error}"));
+    }
+    if status.evidence_missing {
+        parts.push("no evidence reported".to_string());
+    }
+    if parts.is_empty() {
+        format!("{} check failed", status.check)
+    } else {
+        parts.join("; ")
+    }
+}
+
+/// The structured outcome a finished child owes its parent: its terminal status
+/// plus the structural deliverable check it was held to. `result_summary` rides
+/// along as a human-readable companion and is never read by aggregation.
+pub(crate) fn sub_goal_report_from_agent(record: &BackgroundAgent) -> SubGoalReport {
+    let claimed_outcome = match record.status {
+        BgAgentStatus::Completed => SubGoalOutcome::Met,
+        BgAgentStatus::Failed => SubGoalOutcome::Failed,
+        BgAgentStatus::Cancelled | BgAgentStatus::Interrupted | BgAgentStatus::Closed => {
+            SubGoalOutcome::Blocked
+        }
+        _ => SubGoalOutcome::Dispatched,
+    };
+    let criteria_verdicts = record
+        .deliverable_status
+        .as_ref()
+        .map(|status| {
+            vec![CriterionVerdict {
+                id: format!("deliverable:{}", status.check),
+                met: status.met,
+                note: deliverable_note(status),
+                source: VerdictSource::Measured,
+                evidence: None,
+            }]
+        })
+        .unwrap_or_default();
+    SubGoalReport {
+        claimed_outcome,
+        criteria_verdicts,
+        result_summary: record.result_summary.clone().unwrap_or_default(),
+        reported_at_ms: record
+            .finished_at
+            .unwrap_or(record.created_at)
+            .timestamp_millis()
+            .max(0) as u64,
+    }
+}
+
+async fn parent_sub_goal_lane(app: &AppState, record: &BackgroundAgent) -> Option<String> {
+    let session_arc = {
+        let sessions = app.gcx.chat_sessions.read().await;
+        sessions.get(&record.parent_chat_id).cloned()
+    }?;
+    let owner = SubGoalOwner::background_agent(&record.agent_id);
+    let session = session_arc.lock().await;
+    session
+        .sub_goal_graph()
+        .nodes
+        .iter()
+        .find(|state| state.node.owner.as_ref() == Some(&owner))
+        .map(|state| state.node.id.clone())
+}
+
+/// Files a finished child's structured verdicts on the parent lane it owns. A
+/// child closed by its parent supersedes the lane instead of reporting on it.
+pub(crate) async fn record_sub_goal_outcome(app: &AppState, record: &BackgroundAgent) {
+    let Some(node_id) = parent_sub_goal_lane(app, record).await else {
+        return;
+    };
+    let session_arc = {
+        let sessions = app.gcx.chat_sessions.read().await;
+        sessions.get(&record.parent_chat_id).cloned()
+    };
+    let Some(session_arc) = session_arc else {
+        return;
+    };
+    let mut session = session_arc.lock().await;
+    if record.status == BgAgentStatus::Closed {
+        session.supersede_sub_goal(&node_id, "closed by parent");
+        return;
+    }
+    session.record_sub_goal_report(&node_id, sub_goal_report_from_agent(record));
+}
+
+/// Opens a lane for a child launched under a parent that is pursuing a goal, so
+/// the child's eventual verdicts have somewhere to land. The lane is optional:
+/// composing a required lane is the parent's explicit choice, and an automatic
+/// one must never start gating a goal that never asked for it.
+async fn ensure_sub_goal_lane(app: &AppState, record: &BackgroundAgent) -> Option<String> {
+    if let Some(node_id) = parent_sub_goal_lane(app, record).await {
+        return Some(node_id);
+    }
+    let session_arc = {
+        let sessions = app.gcx.chat_sessions.read().await;
+        sessions.get(&record.parent_chat_id).cloned()
+    }?;
+    let mut session = session_arc.lock().await;
+    session.goal.as_ref()?;
+    let node_id = format!("agent:{}", record.agent_id);
+    let declaration = refact_chat_api::SubGoalDeclaration {
+        nodes: vec![
+            refact_chat_api::SubGoalNode::new(node_id.clone(), record.title.clone())
+                .with_owner(SubGoalOwner::background_agent(&record.agent_id)),
+        ],
+        edges: vec![refact_chat_api::SubGoalEdge::optional(
+            refact_chat_api::ROOT_SUB_GOAL_ID,
+            node_id.clone(),
+        )],
+    };
+    session.declare_sub_goals(declaration).ok()?;
+    Some(node_id)
+}
+
+/// Marks the lane this agent owns as dispatched, so a lane in flight never
+/// reads as `not_run`.
+pub(crate) async fn mark_sub_goal_dispatched(app: &AppState, record: &BackgroundAgent) {
+    let Some(node_id) = ensure_sub_goal_lane(app, record).await else {
+        return;
+    };
+    let session_arc = {
+        let sessions = app.gcx.chat_sessions.read().await;
+        sessions.get(&record.parent_chat_id).cloned()
+    };
+    let Some(session_arc) = session_arc else {
+        return;
+    };
+    session_arc.lock().await.dispatch_sub_goal(
+        &node_id,
+        Some(SubGoalOwner::background_agent(&record.agent_id)),
+    );
+}
+
 pub async fn push_completion_to_parent(
     app: AppState,
     record: &BackgroundAgent,
@@ -37,6 +185,7 @@ pub async fn push_completion_to_parent(
     if already_pushed(record) {
         return Ok(());
     }
+    record_sub_goal_outcome(&app, record).await;
 
     let delivery = build_completion_delivery(record);
     let id = delivery.id.clone();

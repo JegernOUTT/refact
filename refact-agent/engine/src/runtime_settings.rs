@@ -53,6 +53,8 @@ const VERIFICATION_EVIDENCE_TIMEOUT_SECS_DEFAULT: u64 = 600;
 const VERIFICATION_EVIDENCE_OUTPUT_CAP_BYTES_DEFAULT: usize = 4_000;
 const GOAL_REVIEW_MAX_REPAIR_ATTEMPTS_DEFAULT: usize = 2;
 const GOAL_REVIEW_SPOT_CHECK_PERCENT_DEFAULT: usize = 0;
+const GOAL_SUB_GOAL_MAX_DEPTH_DEFAULT: usize = refact_chat_api::DEFAULT_SUB_GOAL_MAX_DEPTH;
+const GOAL_SUB_GOAL_MAX_FAN_OUT_DEFAULT: usize = refact_chat_api::DEFAULT_SUB_GOAL_MAX_FAN_OUT;
 
 pub use refact_work_core::CoordinationSettings;
 
@@ -334,6 +336,10 @@ pub struct TrajectoryRuntimeSettings {
     /// Share of children whose claimed-complete work a parent samples for
     /// review. Zero disables sampling.
     pub goal_review_spot_check_percent: usize,
+    /// How deep a sub-goal lane may sit below the top-level goal.
+    pub goal_sub_goal_max_depth: usize,
+    /// How many child lanes one sub-goal may own.
+    pub goal_sub_goal_max_fan_out: usize,
     pub coordination: CoordinationSettings,
 }
 
@@ -396,6 +402,8 @@ impl Default for TrajectoryRuntimeSettings {
             goal_review_enabled: false,
             goal_review_max_repair_attempts: GOAL_REVIEW_MAX_REPAIR_ATTEMPTS_DEFAULT,
             goal_review_spot_check_percent: GOAL_REVIEW_SPOT_CHECK_PERCENT_DEFAULT,
+            goal_sub_goal_max_depth: GOAL_SUB_GOAL_MAX_DEPTH_DEFAULT,
+            goal_sub_goal_max_fan_out: GOAL_SUB_GOAL_MAX_FAN_OUT_DEFAULT,
             coordination: CoordinationSettings::default(),
         }
     }
@@ -811,7 +819,28 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
         0,
         100,
     )?;
+    validate_usize(
+        "goal_sub_goal_max_depth",
+        settings.goal_sub_goal_max_depth,
+        1,
+        32,
+    )?;
+    validate_usize(
+        "goal_sub_goal_max_fan_out",
+        settings.goal_sub_goal_max_fan_out,
+        1,
+        256,
+    )?;
     validate_coordination(&settings.coordination)
+}
+
+/// Live depth and fan-out caps for the sub-goal DAG.
+pub fn sub_goal_limits() -> refact_chat_api::SubGoalLimits {
+    let settings = current();
+    refact_chat_api::SubGoalLimits {
+        max_depth: settings.goal_sub_goal_max_depth,
+        max_fan_out: settings.goal_sub_goal_max_fan_out,
+    }
 }
 
 /// Live bounds for the deterministic hidden plan/goal projection.

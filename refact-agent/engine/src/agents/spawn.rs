@@ -2413,6 +2413,7 @@ async fn run_spawned_agent(
                 && !abort_flag.load(Ordering::Relaxed)
                 && !launch_stopping(&app) =>
         {
+            crate::agents::push::mark_sub_goal_dispatched(&app, &record).await;
             emit_background_agent_update(app.clone(), &record).await;
         }
         Ok(record) if record.status.is_terminal() => {
