@@ -1,30 +1,17 @@
 import { http, HttpResponse, delay } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { STUB_CAPS_RESPONSE } from "../../__fixtures__/caps";
+import {
+  activeProvider,
+  capsFailsOnceThenSucceeds,
+  inactiveProvider,
+} from "../../__fixtures__/providers";
 import { setUpStore } from "../../app/store";
 import { updateConfig } from "../Config/configSlice";
 import { setBackendStatus } from "../Connection";
-import type { ProviderListItem } from "../../services/refact";
 import { render, screen, waitFor } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { LoginPage } from "./LoginPage";
-
-const activeProvider: ProviderListItem = {
-  name: "openai",
-  base_provider: "openai",
-  display_name: "OpenAI",
-  enabled: true,
-  readonly: false,
-  has_credentials: true,
-  status: "active",
-  model_count: 1,
-};
-
-const inactiveProvider: ProviderListItem = {
-  ...activeProvider,
-  status: "configured",
-};
 
 function renderLoginPage() {
   const store = setUpStore({
@@ -66,22 +53,13 @@ describe("LoginPage provider error recovery", () => {
 
   it("re-issues providers and caps on Retry and continues after success", async () => {
     let providersHits = 0;
-    let capsHits = 0;
+    const caps = capsFailsOnceThenSucceeds();
     server.use(
       http.get("*/v1/providers", () => {
         providersHits += 1;
         return HttpResponse.json({ providers: [activeProvider] });
       }),
-      http.get("*/v1/caps", () => {
-        capsHits += 1;
-        if (capsHits === 1) {
-          return HttpResponse.json(
-            { detail: "caps exploded" },
-            { status: 500 },
-          );
-        }
-        return HttpResponse.json(STUB_CAPS_RESPONSE);
-      }),
+      caps.handler,
     );
 
     const { user } = renderLoginPage();
@@ -95,30 +73,19 @@ describe("LoginPage provider error recovery", () => {
       expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
     });
     expect(providersHits).toBeGreaterThan(providersHitsBeforeRetry);
-    expect(capsHits).toBeGreaterThan(1);
+    expect(caps.hits()).toBeGreaterThan(1);
     expect(
       screen.queryByRole("button", { name: "Retry" }),
     ).not.toBeInTheDocument();
   });
 
   it("keeps the error state with a busy Retry while the retry is in flight", async () => {
-    let capsHits = 0;
     server.use(
       http.get("*/v1/providers", async () => {
         await delay(100);
         return HttpResponse.json({ providers: [activeProvider] });
       }),
-      http.get("*/v1/caps", async () => {
-        capsHits += 1;
-        if (capsHits === 1) {
-          return HttpResponse.json(
-            { detail: "caps exploded" },
-            { status: 500 },
-          );
-        }
-        await delay(100);
-        return HttpResponse.json(STUB_CAPS_RESPONSE);
-      }),
+      capsFailsOnceThenSucceeds({ successDelayMs: 100 }).handler,
     );
 
     const { user } = renderLoginPage();

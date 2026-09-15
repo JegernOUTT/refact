@@ -6,25 +6,17 @@ import { act } from "react-dom/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { STUB_CAPS_RESPONSE } from "../__fixtures__/caps";
+import {
+  activeProvider,
+  capsFailsOnceThenSucceeds,
+} from "../__fixtures__/providers";
 import { setUpStore } from "../app/store";
 import { updateConfig } from "../features/Config/configSlice";
 import { setBackendStatus } from "../features/Connection";
-import type { ProviderListItem } from "../services/refact";
 import { server } from "../utils/mockServer";
 import { useProviderBootstrapState } from "./useProvidersQuery";
 
-const activeProvider: ProviderListItem = {
-  name: "openai",
-  base_provider: "openai",
-  display_name: "OpenAI",
-  enabled: true,
-  readonly: false,
-  has_credentials: true,
-  status: "active",
-  model_count: 1,
-};
-
-function setup() {
+function setup({ offline }: { offline?: boolean } = {}) {
   const store = setUpStore({
     config: {
       apiKey: "test",
@@ -36,7 +28,9 @@ function setup() {
   store.dispatch(
     updateConfig({ backendReady: true, connectionStatus: "ready" }),
   );
-  store.dispatch(setBackendStatus({ status: "online" }));
+  store.dispatch(
+    setBackendStatus(offline ? { status: "offline" } : { status: "online" }),
+  );
   const wrapper = ({ children }: { children: React.ReactNode }) => (
     <Provider store={store}>{children}</Provider>
   );
@@ -87,21 +81,12 @@ describe("useProviderBootstrapState retry", () => {
   });
 
   it("reaches ready when a retried caps request succeeds", async () => {
-    let capsHits = 0;
+    const caps = capsFailsOnceThenSucceeds();
     server.use(
       http.get("*/v1/providers", () =>
         HttpResponse.json({ providers: [activeProvider] }),
       ),
-      http.get("*/v1/caps", () => {
-        capsHits += 1;
-        if (capsHits === 1) {
-          return HttpResponse.json(
-            { detail: "caps exploded" },
-            { status: 500 },
-          );
-        }
-        return HttpResponse.json(STUB_CAPS_RESPONSE);
-      }),
+      caps.handler,
     );
 
     const { result } = setup();
@@ -118,5 +103,60 @@ describe("useProviderBootstrapState retry", () => {
       expect(result.current.status).toBe("ready");
     });
     expect(result.current.isRetrying).toBe(false);
+    expect(caps.hits()).toBeGreaterThan(1);
+  });
+
+  it("does not throw and resets isRetrying when both queries are skipped", async () => {
+    server.use(
+      http.get("*/v1/ping", () => HttpResponse.error()),
+      http.get("*/v1/providers", () =>
+        HttpResponse.json({ providers: [activeProvider] }),
+      ),
+      http.get("*/v1/caps", () => HttpResponse.json(STUB_CAPS_RESPONSE)),
+    );
+
+    const { result } = setup({ offline: true });
+
+    await waitFor(() => {
+      expect(result.current.status).toBe("backend_offline");
+    });
+
+    expect(() => {
+      act(() => {
+        result.current.retry();
+      });
+    }).not.toThrow();
+
+    await waitFor(() => {
+      expect(result.current.isRetrying).toBe(false);
+    });
+    expect(result.current.status).toBe("backend_offline");
+  });
+
+  it("keeps status pure while a retry is in flight", async () => {
+    server.use(
+      http.get("*/v1/providers", () =>
+        HttpResponse.json({ providers: [activeProvider] }),
+      ),
+      http.get("*/v1/caps", () => HttpResponse.json(STUB_CAPS_RESPONSE)),
+    );
+
+    const { result } = setup();
+
+    await waitFor(() => {
+      expect(result.current.status).toBe("ready");
+    });
+
+    act(() => {
+      result.current.retry();
+    });
+
+    expect(result.current.isRetrying).toBe(true);
+    expect(result.current.status).not.toBe("provider_error");
+
+    await waitFor(() => {
+      expect(result.current.isRetrying).toBe(false);
+    });
+    expect(result.current.status).toBe("ready");
   });
 });

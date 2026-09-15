@@ -31,6 +31,14 @@ export function useGetConfiguredProvidersQuery() {
   });
 }
 
+function refetchIfStarted(refetch: () => Promise<unknown>): Promise<unknown> {
+  try {
+    return refetch();
+  } catch {
+    return Promise.resolve();
+  }
+}
+
 function selectCapsQueryIsReady(state: RootState) {
   const queryState = capsApi.endpoints.getCaps.select(undefined)(state);
   return queryState.isSuccess || queryState.data !== undefined;
@@ -56,7 +64,10 @@ export function useProviderBootstrapState() {
   const refetchCaps = capsQuery.refetch;
   const retry = useCallback(() => {
     setIsRetrying(true);
-    void Promise.all([refetchProviders(), refetchCaps()]).finally(() => {
+    void Promise.allSettled([
+      refetchIfStarted(refetchProviders),
+      refetchIfStarted(refetchCaps),
+    ]).finally(() => {
       setIsRetrying(false);
     });
   }, [refetchProviders, refetchCaps]);
@@ -75,7 +86,7 @@ export function useProviderBootstrapState() {
   } else if (backendStatus === "offline") {
     status = "backend_offline";
   } else if (providersLoading || capsLoading) {
-    status = isRetrying ? "provider_error" : "provider_loading";
+    status = "provider_loading";
   } else if (providersQuery.isError || capsQuery.isError) {
     status = "provider_error";
   } else if (hasAnyActiveProvider) {

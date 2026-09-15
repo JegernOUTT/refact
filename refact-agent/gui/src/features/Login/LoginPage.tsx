@@ -35,8 +35,16 @@ export const LoginPage: React.FC = () => {
   const canShowProviderSetup = providerBootstrap.canShowProviderSetup;
   const visibleCurrentProvider = canShowProviderSetup ? currentProvider : null;
 
+  const showProviderError =
+    providerBootstrap.status === "provider_error" ||
+    (providerBootstrap.isRetrying &&
+      providerBootstrap.status === "provider_loading");
+  const surfaceStatus = showProviderError
+    ? "provider_error"
+    : providerBootstrap.status;
+
   const bootstrapCopy = React.useMemo(() => {
-    switch (providerBootstrap.status) {
+    switch (surfaceStatus) {
       case "backend_connecting":
         return {
           title: "Connecting to Refact",
@@ -83,7 +91,7 @@ export const LoginPage: React.FC = () => {
           status: "Enable at least one model to continue",
         };
     }
-  }, [providerBootstrap.status]);
+  }, [surfaceStatus]);
 
   const onContinue = useCallback(() => {
     dispatch(push({ name: "history" }));
@@ -122,7 +130,7 @@ export const LoginPage: React.FC = () => {
 
         {!visibleCurrentProvider && !canShowProviderSetup && (
           <div className={styles.bootstrapState}>
-            {providerBootstrap.status === "provider_error" ? (
+            {showProviderError ? (
               <EmptyState
                 title="Unable to load providers"
                 description="Check that the local Refact engine is running and the UI is using the correct port."
