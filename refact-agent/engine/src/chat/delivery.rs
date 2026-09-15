@@ -13,8 +13,9 @@
 //! Session deliveries are persisted in the durable outbox before they are
 //! accepted, so transport is at-least-once across a restart. The recipient
 //! deduplicates by delivery id, which makes insertion logically exactly-once;
-//! it is not a claim about external side effects. See
-//! [`crate::coordination::outbox`].
+//! it is not a claim about external side effects. When no usable outbox exists
+//! the delivery still happens, in memory only, and the lost durability is
+//! reported rather than assumed. See [`crate::coordination::outbox`].
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -81,24 +82,17 @@ pub async fn deliver_to_chat(
         .cloned()
         .ok_or_else(|| format!("chat '{chat_id}' is unavailable"))?;
 
-    // Durability first, and with no session lock held across store I/O: a
-    // delivery this engine cannot persist is not one it can claim to accept.
+    // Durability first, and with no session lock held across store I/O. A store
+    // this engine cannot use costs the message its durability, not its
+    // delivery: the outbox drops out, the loss is reported, and the rest of the
+    // path is the in-memory one that ran before the outbox existed.
     let source_root = crate::coordination::scope::session_source_root(&*session_arc.lock().await);
     let project = outbox::project_key_for_root(&app, source_root).await;
-    let outbox = outbox::outbox_for(&app, project)
-        .await
-        .map_err(|error| format!("durable delivery outbox is unavailable: {error}"))?;
     let delivery_id = delivery.id.clone();
-    if let Some(outbox) = &outbox {
-        outbox
-            .persist_accepted(chat_id, &delivery)
-            .await
-            .map_err(|error| format!("delivery could not be made durable: {error}"))?;
-        outbox
-            .mark_dispatched(&delivery_id)
-            .await
-            .map_err(|error| format!("delivery could not be made durable: {error}"))?;
-    }
+    let outbox = match outbox::outbox_for(&app, project).await {
+        Some(outbox) if outbox.accept_for_dispatch(chat_id, &delivery).await => Some(outbox),
+        _ => None,
+    };
 
     let (accepted, status, wake, should_start_processor, processor_running, queue_notify) = {
         let mut session = session_arc.lock().await;
@@ -220,7 +214,6 @@ async fn record_outbox_status(
 /// after a restart never resurrects a message that already settled.
 async fn record_drained_statuses(
     app: &AppState,
-    chat_id: &str,
     source_root: Option<std::path::PathBuf>,
     statuses: Vec<(String, DeliveryStatus)>,
 ) {
@@ -228,13 +221,8 @@ async fn record_drained_statuses(
         return;
     }
     let project = outbox::project_key_for_root(app, source_root).await;
-    let outbox = match outbox::outbox_for(app, project).await {
-        Ok(Some(outbox)) => outbox,
-        Ok(None) => return,
-        Err(error) => {
-            tracing::warn!(%chat_id, %error, "durable delivery outbox is unavailable");
-            return;
-        }
+    let Some(outbox) = outbox::outbox_for(app, project).await else {
+        return;
     };
     for (delivery_id, status) in statuses {
         record_outbox_status(Some(&outbox), &delivery_id, status).await;
@@ -247,7 +235,7 @@ pub async fn drain_deliveries_at_boundary(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> bool {
-    let (delivered, wake, processor_running, queue_notify, chat_id, source_root, statuses) = {
+    let (delivered, wake, processor_running, queue_notify, source_root, statuses) = {
         let mut session = session_arc.lock().await;
         session.drain_post_tool_side_effects();
         if session.pending_deliveries.is_empty() {
@@ -272,7 +260,6 @@ pub async fn drain_deliveries_at_boundary(
             wake,
             session.queue_processor_running.clone(),
             session.queue_notify.clone(),
-            session.chat_id.clone(),
             crate::coordination::scope::session_source_root(&session),
             statuses,
         )
@@ -282,7 +269,7 @@ pub async fn drain_deliveries_at_boundary(
         return false;
     }
 
-    record_drained_statuses(&app, &chat_id, source_root, statuses).await;
+    record_drained_statuses(&app, source_root, statuses).await;
 
     maybe_save_trajectory_with_intent(
         app.clone(),

@@ -130,6 +130,9 @@ pub enum StoreWarning {
         mount_point: String,
         path: String,
     },
+    /// The store could not be opened or written. Whatever depended on it for
+    /// durability ran without it and must not be reported as persisted.
+    DurabilityUnavailable { path: String, reason: String },
 }
 
 impl fmt::Display for StoreWarning {
@@ -143,6 +146,11 @@ impl fmt::Display for StoreWarning {
                 f,
                 "coordination store path {path} lives on `{fs_type}` mounted at {mount_point}; \
                  opened anyway because store_allow_non_local_filesystem is set"
+            ),
+            StoreWarning::DurabilityUnavailable { path, reason } => write!(
+                f,
+                "coordination store {path} is unavailable ({reason}); work continues \
+                 without durability and will not survive a restart"
             ),
         }
     }

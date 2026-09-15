@@ -12,6 +12,11 @@
 //! recorded is left in `InFlight`, reported as needing inspection, and never
 //! replayed automatically.
 //!
+//! Durability is additive. A store that cannot be opened or written degrades
+//! delivery to in-memory at-least-once instead of failing it, and says so
+//! through [`note_durability_unavailable`]; a message that was not persisted
+//! is never reported as durable.
+//!
 //! Only deliveries that the chat-session transport owns are persisted here.
 //! Deliveries routed to a live background-agent runner keep their single owner
 //! in the agent registry; mirroring them would be a second transport for the
@@ -20,12 +25,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use refact_work_core::{
     default_store_path, CoordinationSettings, CoordinationStore, DeliveryOutboxRecord,
-    DeliveryState, ProjectKey, StoreError,
+    DeliveryState, ProjectKey, StoreError, StoreWarning,
 };
 use tokio::sync::{Mutex as AMutex, OnceCell};
 
@@ -37,6 +42,10 @@ use crate::chat::types::{DeliveryStatus, PendingDelivery};
 pub const UNSCOPED_PROJECT: &str = "no-project";
 
 const SHUTDOWN_POLL: Duration = Duration::from_millis(200);
+
+/// Distinct durability failures retained for reporting; a store that keeps
+/// failing must not grow this without bound.
+const MAX_DEGRADED_WARNINGS: usize = 32;
 
 #[derive(Debug)]
 pub struct RecoveredDelivery {
@@ -113,6 +122,21 @@ impl DeliveryOutbox {
     pub async fn mark_dispatched(&self, delivery_id: &str) -> Result<(), StoreError> {
         self.transition(delivery_id, DeliveryState::InFlight, true)
             .await
+    }
+
+    /// Persist and hand off in one step. `false` means durability could not be
+    /// achieved: the caller proceeds without it rather than refusing to
+    /// deliver, and the failure is reported through the store warning channel.
+    pub async fn accept_for_dispatch(&self, recipient: &str, delivery: &PendingDelivery) -> bool {
+        if let Err(error) = self.persist_accepted(recipient, delivery).await {
+            note_durability_unavailable(self.store.path(), error.to_string());
+            return false;
+        }
+        if let Err(error) = self.mark_dispatched(&delivery.id).await {
+            note_durability_unavailable(self.store.path(), error.to_string());
+            return false;
+        }
+        true
     }
 
     /// Record what the recipient itself reports. `Unknown` writes nothing: an
@@ -250,18 +274,53 @@ async fn store_for_path(
     .map(Arc::clone)
 }
 
-/// The engine's durable outbox for `project`, or `None` when coordination is
-/// disabled — the only configuration that runs without durable delivery.
-pub async fn outbox_for(
-    app: &AppState,
-    project: ProjectKey,
-) -> Result<Option<DeliveryOutbox>, StoreError> {
+/// Report that durability is unavailable, through the store's own warning
+/// channel. Nothing downstream may then describe the affected work as
+/// persisted.
+pub fn note_durability_unavailable(path: &Path, reason: String) {
+    let warning = StoreWarning::DurabilityUnavailable {
+        path: path.display().to_string(),
+        reason,
+    };
+    tracing::warn!("coordination store: {warning}");
+    let mut warnings = degraded_warnings()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !warnings.contains(&warning) && warnings.len() < MAX_DEGRADED_WARNINGS {
+        warnings.push(warning);
+    }
+}
+
+/// Every distinct durability failure this process has reported.
+pub fn durability_warnings() -> Vec<StoreWarning> {
+    degraded_warnings()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+fn degraded_warnings() -> &'static Mutex<Vec<StoreWarning>> {
+    static WARNINGS: OnceLock<Mutex<Vec<StoreWarning>>> = OnceLock::new();
+    WARNINGS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// The engine's durable outbox for `project`, or `None` when there is none to
+/// use. Durability is additive: coordination being disabled, and a store that
+/// cannot be opened, both leave the caller with in-memory delivery rather than
+/// no delivery. An unopenable store is reported, never passed off as working.
+pub async fn outbox_for(app: &AppState, project: ProjectKey) -> Option<DeliveryOutbox> {
     let settings = crate::file_activity::settings();
     if !settings.enabled {
-        return Ok(None);
+        return None;
     }
-    let store = store_for_path(&default_store_path(&app.paths.cache_dir), &settings).await?;
-    Ok(Some(DeliveryOutbox::with_store(store, project)))
+    let path = default_store_path(&app.paths.cache_dir);
+    match store_for_path(&path, &settings).await {
+        Ok(store) => Some(DeliveryOutbox::with_store(store, project)),
+        Err(error) => {
+            note_durability_unavailable(&path, error.to_string());
+            None
+        }
+    }
 }
 
 pub async fn project_key_for_root(app: &AppState, source_root: Option<PathBuf>) -> ProjectKey {
@@ -330,13 +389,8 @@ pub async fn outbox_recovery_background_task(app: AppState, shutdown: Arc<Atomic
     }
     let settings = crate::file_activity::settings();
     let project = project_key_for_root(&app, None).await;
-    let outbox = match outbox_for(&app, project).await {
-        Ok(Some(outbox)) => outbox,
-        Ok(None) => return,
-        Err(error) => {
-            tracing::warn!("durable delivery outbox is unavailable: {error}");
-            return;
-        }
+    let Some(outbox) = outbox_for(&app, project).await else {
+        return;
     };
     if shutdown.load(Ordering::SeqCst) {
         return;
@@ -690,7 +744,7 @@ mod tests {
         );
 
         let project = project_key_for_root(&app, None).await;
-        let outbox = outbox_for(&app, project).await.unwrap().unwrap();
+        let outbox = outbox_for(&app, project).await.unwrap();
         assert_eq!(
             outbox.status_of("refused").await.unwrap(),
             Some(DeliveryState::Failed),

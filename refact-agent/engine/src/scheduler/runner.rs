@@ -1692,14 +1692,17 @@ async fn wait_for_shutdown(shutdown_flag: Arc<AtomicBool>) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
 
     use chrono::TimeZone;
+    use refact_work_core::DeliveryState;
     use tokio::sync::Mutex as AMutex;
 
     use super::*;
     use crate::chat::internal_roles::EVENT_ROLE;
     use crate::chat::types::{ChatSession, SessionState};
+    use crate::coordination::outbox;
     use crate::scheduler::store::InMemoryCronStore;
     use crate::scheduler::types::{DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS, RECENT_RUNS_CAP};
 
@@ -1940,6 +1943,37 @@ mod tests {
         (workspace, gcx)
     }
 
+    /// A gcx whose cache directory is the test's own, so the coordination store
+    /// this engine would use can be made unusable without touching any other
+    /// test.
+    async fn gcx_with_session_in_own_cache(
+        state: SessionState,
+    ) -> (tempfile::TempDir, SharedGlobalContext) {
+        let workspace = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            workspace.path().join("cache"),
+            workspace.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let mut session = ChatSession::new("chat-1".to_string());
+        session.set_runtime_state(state, None);
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert("chat-1".to_string(), Arc::new(AMutex::new(session)));
+        (workspace, gcx)
+    }
+
+    /// Park a plain file where the store's directory belongs, so opening it
+    /// fails the way a real deployment without a usable store does.
+    fn block_coordination_store(gcx: &SharedGlobalContext) -> PathBuf {
+        let blocked = gcx.cache_dir.join("coordination");
+        std::fs::write(&blocked, "not a directory").unwrap();
+        blocked
+    }
+
     async fn gcx_with_closed_session() -> (tempfile::TempDir, SharedGlobalContext) {
         let (workspace, gcx) = gcx_with_session(SessionState::Idle).await;
         let session = session(&gcx).await;
@@ -1973,7 +2007,7 @@ mod tests {
             let sessions = gcx.chat_sessions.read().await;
             sessions.get(chat_id).cloned().unwrap()
         };
-        let deadline = TokioInstant::now() + Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             {
                 let session = session_arc.lock().await;
@@ -1997,7 +2031,7 @@ mod tests {
                 }
             }
             assert!(
-                TokioInstant::now() < deadline,
+                std::time::Instant::now() < deadline,
                 "isolated session must receive the scheduled prompt"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2020,8 +2054,12 @@ mod tests {
             .unwrap()
     }
 
+    /// The fire this waits for crosses a real thread (the coordination store
+    /// runs its own), so the budget is wall clock. A paused virtual clock
+    /// auto-advances through two seconds in well under a millisecond and would
+    /// time out before any of that work could land.
     async fn wait_for_fire(gcx: &SharedGlobalContext) {
-        let deadline = TokioInstant::now() + Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             {
                 let session = session(gcx).await;
@@ -2045,7 +2083,7 @@ mod tests {
                 }
             }
             assert!(
-                TokioInstant::now() < deadline,
+                std::time::Instant::now() < deadline,
                 "scheduled task did not fire"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2268,6 +2306,114 @@ mod tests {
         assert_eq!(stored.last_status.as_deref(), Some("deferred"));
         assert_eq!(stored.fire_count, 0);
         assert_eq!(stored.last_fired_at_ms, Some(now - 120_000));
+        let session = session(&gcx).await;
+        let session = session.lock().await;
+        assert!(session.messages.iter().all(|m| m.role != EVENT_ROLE));
+    }
+
+    #[tokio::test]
+    async fn fires_without_durability_when_the_store_cannot_be_opened() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store.add(due_task("cron_no_outbox", now)).await.unwrap();
+        let (_workspace, gcx) = gcx_with_session_in_own_cache(SessionState::Idle).await;
+        let blocked = block_coordination_store(&gcx);
+        let mut runner = CronRunner::new(store.clone(), gcx.clone());
+
+        runner.fire_due_tasks(now).await;
+
+        let stored = store.get("cron_no_outbox").await.unwrap();
+        assert_eq!(stored.last_status.as_deref(), Some("fired"));
+        assert_eq!(stored.fire_count, 1);
+        assert_eq!(stored.last_fired_at_ms, Some(now));
+        {
+            let session = session(&gcx).await;
+            let session = session.lock().await;
+            let _ = event_message(&session, "cron_fire", "cron_no_outbox");
+            assert!(session.messages.iter().any(|message| message.role == "user"
+                && message.content.content_text_only() == "scheduled prompt"));
+        }
+
+        let reported = outbox::durability_warnings();
+        assert!(
+            reported
+                .iter()
+                .any(|warning| warning.to_string().contains(&blocked.display().to_string())),
+            "a store that cannot be opened must be reported, not passed off as durable: {reported:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fired_delivery_is_persisted_when_the_store_is_available() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(due_task("cron_outbox_persist", now))
+            .await
+            .unwrap();
+        let (_workspace, gcx) = gcx_with_session_in_own_cache(SessionState::Idle).await;
+        let mut runner = CronRunner::new(store.clone(), gcx.clone());
+
+        runner.fire_due_tasks(now).await;
+
+        let stored = store.get("cron_outbox_persist").await.unwrap();
+        assert_eq!(stored.last_status.as_deref(), Some("fired"));
+        let app = AppState::from_gcx(gcx).await;
+        let project = outbox::project_key_for_root(&app, None).await;
+        let outbox = outbox::outbox_for(&app, project)
+            .await
+            .expect("a usable store must yield an outbox");
+        assert_eq!(
+            outbox
+                .status_of("cron-cron_outbox_persist-0-turn")
+                .await
+                .unwrap(),
+            Some(DeliveryState::Delivered),
+            "a fired scheduled turn stays durable when the store is available"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_enqueue_without_durability_keeps_rejection_semantics() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(one_shot_task("cron_degraded_one_shot", now))
+            .await
+            .unwrap();
+        store
+            .add(due_task("cron_degraded_recurring", now))
+            .await
+            .unwrap();
+        let (_workspace, gcx) = gcx_with_session_in_own_cache(SessionState::Idle).await;
+        block_coordination_store(&gcx);
+        {
+            let session_arc = session(&gcx).await;
+            let mut session = session_arc.lock().await;
+            for idx in 0..max_queue_size() {
+                session.pending_deliveries.push_back(
+                    refact_core::chat_types::PendingDelivery::with_id(
+                        format!("queued-{idx}"),
+                        vec![scheduled_prompt_message("queued".into())],
+                        PushMode::Append,
+                        "test",
+                        false,
+                    ),
+                );
+            }
+        }
+        let mut runner = CronRunner::new(store.clone(), gcx.clone());
+
+        runner.fire_due_tasks(now).await;
+
+        let one_shot = store.get("cron_degraded_one_shot").await.unwrap();
+        assert_eq!(one_shot.last_status.as_deref(), Some("deferred"));
+        assert_eq!(one_shot.fire_count, 0);
+        assert_eq!(one_shot.last_fired_at_ms, None);
+        let recurring = store.get("cron_degraded_recurring").await.unwrap();
+        assert_eq!(recurring.last_status.as_deref(), Some("deferred"));
+        assert_eq!(recurring.fire_count, 0);
+        assert_eq!(recurring.last_fired_at_ms, Some(now - 120_000));
         let session = session(&gcx).await;
         let session = session.lock().await;
         assert!(session.messages.iter().all(|m| m.role != EVENT_ROLE));
