@@ -103,6 +103,13 @@ pub struct CoordinationSettings {
     pub board_max_reviewers: usize,
     pub board_claim_key_max_len: usize,
     pub board_allow_self_review: bool,
+    /// Cards one derived dependency wave may submit at once. Waves order
+    /// submission only; admission capacity still governs execution, so the
+    /// overflow is reported as undispatched rather than refused.
+    pub max_wave_width: usize,
+    /// Stages one pipeline lane may declare. A deeper lane is refused, because
+    /// the depth is declared by the caller rather than derived from the DAG.
+    pub max_pipeline_depth: usize,
     pub agent_wait_default_ms: u64,
     pub agent_wait_max_ms: u64,
     pub agent_wait_max_agents: usize,
@@ -320,6 +327,8 @@ impl Default for CoordinationSettings {
             board_max_reviewers: 256,
             board_claim_key_max_len: 256,
             board_allow_self_review: false,
+            max_wave_width: 8,
+            max_pipeline_depth: 16,
             agent_wait_default_ms: 60_000,
             agent_wait_max_ms: 30 * 60 * 1000,
             agent_wait_max_agents: 128,
@@ -532,6 +541,8 @@ impl CoordinationSettings {
                 self.work_subscription_interval_ms,
             ),
             ("inspect_max_paths", self.inspect_max_paths as u64),
+            ("max_wave_width", self.max_wave_width as u64),
+            ("max_pipeline_depth", self.max_pipeline_depth as u64),
         ] {
             at_least(&mut v, field, value, 1);
         }

@@ -12,6 +12,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, TaskBoard};
+use crate::tasks::waves::{plan_schedule, Lane, LaneKind, LaneOutcome, LaneStage, Wave, WaveLimits};
 use crate::tools::tool_task_board::ToolTaskBoardCreateCard;
 use crate::tools::tool_task_mark_card::{ToolTaskMarkCardDone, ToolTaskMarkCardFailed};
 use crate::tools::tool_task_merge_agent::ToolTaskMergeAgent;
@@ -226,6 +227,15 @@ struct SpawnBatchResult {
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct ScheduledSpawnBatchResult {
+    waves: Vec<Wave>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    admitted_wave: Option<usize>,
+    lanes: Vec<LaneOutcome>,
+    results: Vec<SpawnBatchResult>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 struct MergeBatchResult {
     card_id: String,
     merged: bool,
@@ -323,6 +333,129 @@ fn validate_spawn_agent_cards(
     }
 
     errors
+}
+
+fn optional_bool(value: &Value, key: &str) -> Result<bool, String> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(false),
+        Some(value) => refact_tool_api::coerce_bool(value)
+            .ok_or_else(|| format!("'{}' must be a boolean", key)),
+    }
+}
+
+fn parse_lane_stage(value: &Value) -> Result<LaneStage, String> {
+    if !value.is_object() {
+        return Err("lane stage must be an object".to_string());
+    }
+    Ok(LaneStage {
+        card_id: required_string(value, "card_id")?,
+        agent_id: optional_nonempty_string(value, "agent_id")?,
+        optional: optional_bool(value, "optional")?,
+    })
+}
+
+fn parse_lane(value: &Value) -> Result<Lane, String> {
+    if !value.is_object() {
+        return Err("lane must be an object".to_string());
+    }
+    let stages = value
+        .get("stages")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "Missing 'stages' array".to_string())?
+        .iter()
+        .map(parse_lane_stage)
+        .collect::<Result<Vec<LaneStage>, String>>()?;
+    Ok(Lane {
+        name: required_string(value, "name")?,
+        kind: LaneKind::parse(&required_string(value, "kind")?)?,
+        stages,
+        optional: optional_bool(value, "optional")?,
+    })
+}
+
+fn parse_schedule(args: &HashMap<String, Value>) -> Result<Option<Vec<Lane>>, String> {
+    match args.get("schedule") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(schedule)) => {
+            let lanes = schedule
+                .get("lanes")
+                .and_then(|value| value.as_array())
+                .ok_or_else(|| "'schedule' requires a 'lanes' array".to_string())?;
+            if lanes.is_empty() {
+                return Err("'schedule.lanes' cannot be empty".to_string());
+            }
+            lanes
+                .iter()
+                .map(parse_lane)
+                .collect::<Result<Vec<Lane>, String>>()
+                .map(Some)
+        }
+        Some(_) => Err("'schedule' must be an object".to_string()),
+    }
+}
+
+/// Result to record for a card before anything is spawned.
+///
+/// `None` means the card is left to the wave schedule to explain. A card that
+/// never parsed is always reported, because a malformed entry cannot be
+/// scheduled and must not disappear from the output.
+fn pre_dispatch_result(
+    fallback_name: &str,
+    parsed: &Result<SpawnBatchItem, String>,
+    validation_error: Option<&str>,
+    is_selected: impl Fn(&str) -> bool,
+) -> Option<SpawnBatchResult> {
+    let card_id = match parsed {
+        Ok(item) if !is_selected(&item.card_id) => return None,
+        Ok(item) => item.card_id.clone(),
+        Err(_) => fallback_name.to_string(),
+    };
+    validation_error.map(|error| SpawnBatchResult {
+        card_id,
+        agent_chat_id: None,
+        success: false,
+        error: Some(error.to_string()),
+    })
+}
+
+fn wave_limits() -> WaveLimits {
+    let settings = refact_work_core::coordination_settings();
+    WaveLimits {
+        max_wave_width: settings.max_wave_width,
+        max_pipeline_depth: settings.max_pipeline_depth,
+    }
+}
+
+fn reconcile_schedule_with_cards(
+    lanes: &[Lane],
+    parsed: &[Result<SpawnBatchItem, String>],
+) -> Result<(), String> {
+    let requested: HashSet<&str> = parsed
+        .iter()
+        .filter_map(|item| item.as_ref().ok())
+        .map(|item| item.card_id.as_str())
+        .collect();
+    let mut placed = HashSet::new();
+    for lane in lanes {
+        for stage in &lane.stages {
+            if !requested.contains(stage.card_id.as_str()) {
+                return Err(format!(
+                    "schedule lane '{}' stages card {} which is not listed in 'cards'",
+                    lane.name, stage.card_id
+                ));
+            }
+            placed.insert(stage.card_id.as_str());
+        }
+    }
+    for item in parsed.iter().filter_map(|item| item.as_ref().ok()) {
+        if !placed.contains(item.card_id.as_str()) {
+            return Err(format!(
+                "card {} is not placed in any schedule lane",
+                item.card_id
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_mark_item(value: &Value, text_key: &str) -> Result<(String, String), String> {
@@ -753,7 +886,7 @@ impl Tool for ToolSpawnAgentsBatch {
             source: make_source(),
             experimental: false,
             allow_parallel: false,
-            description: "Spawn task agents for up to 10 ready planned cards in parallel."
+            description: "Spawn task agents for up to 10 ready planned cards in parallel. Pass 'schedule' to order submission into dependency waves with explicit parallel, sequential and pipeline lanes."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -773,6 +906,38 @@ impl Tool for ToolSpawnAgentsBatch {
                             },
                             "required": ["card_id"]
                         }
+                    },
+                    "schedule": {
+                        "type": "object",
+                        "description": "Optional. Waves are derived from the dependency DAG, never declared: a wave only admits once every required card in the previous wave is terminal. Every card in 'cards' must be placed in exactly one lane stage.",
+                        "properties": {
+                            "lanes": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "type": "string" },
+                                        "kind": { "type": "string", "enum": LaneKind::NAMES },
+                                        "optional": { "type": "boolean", "default": false, "description": "Optional lanes never hold a wave open" },
+                                        "stages": {
+                                            "type": "array",
+                                            "description": "Ordered positions. A pipeline advances by position, so the same agent_id may appear more than once.",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "card_id": { "type": "string" },
+                                                    "agent_id": { "type": "string" },
+                                                    "optional": { "type": "boolean", "default": false }
+                                                },
+                                                "required": ["card_id"]
+                                            }
+                                        }
+                                    },
+                                    "required": ["name", "kind", "stages"]
+                                }
+                            }
+                        },
+                        "required": ["lanes"]
                     }
                 },
                 "required": ["cards"]
@@ -800,31 +965,47 @@ impl Tool for ToolSpawnAgentsBatch {
         let parsed: Vec<Result<SpawnBatchItem, String>> =
             raw_items.iter().map(parse_spawn_item).collect();
         let board = storage::load_board(gcx.clone(), &task_id).await?;
+        let schedule = match parse_schedule(args)? {
+            None => None,
+            Some(lanes) => {
+                reconcile_schedule_with_cards(&lanes, &parsed)?;
+                Some(plan_schedule(&board, &lanes, &wave_limits())?)
+            }
+        };
+        let selected: Option<HashSet<String>> = schedule
+            .as_ref()
+            .map(|schedule| schedule.dispatch.iter().cloned().collect());
+        let is_selected = |card_id: &str| {
+            selected
+                .as_ref()
+                .map(|selected| selected.contains(card_id))
+                .unwrap_or(true)
+        };
         let validation_errors = validate_spawn_agent_cards(&board, &parsed);
         let mut results: Vec<Option<SpawnBatchResult>> = raw_items
             .iter()
             .enumerate()
             .map(|(idx, value)| {
-                validation_errors[idx]
-                    .as_ref()
-                    .map(|error| SpawnBatchResult {
-                        card_id: parsed[idx]
-                            .as_ref()
-                            .map(|item| item.card_id.clone())
-                            .unwrap_or_else(|_| item_name(value, idx)),
-                        agent_chat_id: None,
-                        success: false,
-                        error: Some(error.clone()),
-                    })
+                pre_dispatch_result(
+                    &item_name(value, idx),
+                    &parsed[idx],
+                    validation_errors[idx].as_deref(),
+                    &is_selected,
+                )
             })
             .collect();
         let mut joins = JoinSet::new();
+        let mut dispatched: Vec<usize> = Vec::new();
 
         for (idx, item) in parsed.iter().enumerate() {
             if validation_errors[idx].is_some() {
                 continue;
             }
+            if !item.as_ref().is_ok_and(|item| is_selected(&item.card_id)) {
+                continue;
+            }
             let item = item.as_ref().map_err(|e| e.clone())?.clone();
+            dispatched.push(idx);
             let ccx_clone = ccx.clone();
             let gcx_clone = gcx.clone();
             let task_id_clone = task_id.clone();
@@ -871,7 +1052,11 @@ impl Tool for ToolSpawnAgentsBatch {
             match joined {
                 Ok((idx, result)) => results[idx] = Some(result),
                 Err(error) => {
-                    let idx = results.iter().position(Option::is_none).unwrap_or(0);
+                    let idx = dispatched
+                        .iter()
+                        .copied()
+                        .find(|idx| results[*idx].is_none())
+                        .unwrap_or(0);
                     results[idx] = Some(SpawnBatchResult {
                         card_id: item_name(&raw_items[idx], idx),
                         agent_chat_id: None,
@@ -883,7 +1068,18 @@ impl Tool for ToolSpawnAgentsBatch {
         }
 
         let results: Vec<SpawnBatchResult> = results.into_iter().flatten().collect();
-        batch_tool_message(tool_call_id, &results)
+        match schedule {
+            None => batch_tool_message(tool_call_id, &results),
+            Some(schedule) => batch_tool_message(
+                tool_call_id,
+                &ScheduledSpawnBatchResult {
+                    waves: schedule.waves,
+                    admitted_wave: schedule.admitted_wave,
+                    lanes: schedule.lanes,
+                    results,
+                },
+            ),
+        }
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -1679,6 +1875,215 @@ The agent's work has been successfully merged back to the target branch.
         let card = board.get_card("T-1").unwrap();
         assert_eq!(card.column, "done");
         assert_eq!(card.final_report.as_deref(), Some("done cleanly"));
+    }
+
+    #[test]
+    fn spawn_agents_batch_without_a_schedule_stays_unscheduled() {
+        let args = HashMap::from([("cards".to_string(), json!([{ "card_id": "T-1" }]))]);
+
+        assert_eq!(parse_schedule(&args).unwrap(), None);
+    }
+
+    #[test]
+    fn spawn_agents_batch_schedule_is_absent_from_the_legacy_output_shape() {
+        let results = vec![SpawnBatchResult {
+            card_id: "T-1".to_string(),
+            agent_chat_id: None,
+            success: true,
+            error: None,
+        }];
+
+        let rendered = serde_json::to_value(&results).unwrap();
+
+        assert!(rendered.is_array());
+        assert_eq!(rendered[0]["card_id"], json!("T-1"));
+    }
+
+    #[test]
+    fn spawn_agents_batch_parses_every_lane_kind() {
+        let args = HashMap::from([(
+            "schedule".to_string(),
+            json!({
+                "lanes": [
+                    { "name": "roots", "kind": "parallel", "stages": [{ "card_id": "T-1" }] },
+                    { "name": "chain", "kind": "sequential", "stages": [{ "card_id": "T-2" }] },
+                    {
+                        "name": "review",
+                        "kind": "pipeline",
+                        "optional": true,
+                        "stages": [
+                            { "card_id": "T-3", "agent_id": "reviewer" },
+                            { "card_id": "T-4", "agent_id": "reviewer", "optional": true }
+                        ]
+                    }
+                ]
+            }),
+        )]);
+
+        let lanes = parse_schedule(&args).unwrap().unwrap();
+
+        assert_eq!(lanes[0].kind, LaneKind::Parallel);
+        assert_eq!(lanes[1].kind, LaneKind::Sequential);
+        assert_eq!(lanes[2].kind, LaneKind::Pipeline);
+        assert!(lanes[2].optional);
+        assert_eq!(lanes[2].stages[0].agent_id.as_deref(), Some("reviewer"));
+        assert_eq!(lanes[2].stages[1].agent_id.as_deref(), Some("reviewer"));
+        assert!(lanes[2].stages[1].optional);
+    }
+
+    #[test]
+    fn spawn_agents_batch_rejects_an_unknown_lane_kind() {
+        let args = HashMap::from([(
+            "schedule".to_string(),
+            json!({ "lanes": [{ "name": "roots", "kind": "waves", "stages": [] }] }),
+        )]);
+
+        let error = parse_schedule(&args).unwrap_err();
+
+        assert!(error.contains("unknown lane kind"), "{error}");
+    }
+
+    #[test]
+    fn spawn_agents_batch_requires_every_requested_card_to_be_placed_in_a_lane() {
+        let parsed = vec![
+            parse_spawn_item(&json!({ "card_id": "T-1" })),
+            parse_spawn_item(&json!({ "card_id": "T-2" })),
+        ];
+        let lanes = vec![Lane {
+            name: "roots".to_string(),
+            kind: LaneKind::Parallel,
+            stages: vec![LaneStage {
+                card_id: "T-1".to_string(),
+                agent_id: None,
+                optional: false,
+            }],
+            optional: false,
+        }];
+
+        let error = reconcile_schedule_with_cards(&lanes, &parsed).unwrap_err();
+
+        assert!(
+            error.contains("T-2 is not placed in any schedule lane"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn spawn_agents_batch_rejects_a_lane_staging_an_unrequested_card() {
+        let parsed = vec![parse_spawn_item(&json!({ "card_id": "T-1" }))];
+        let lanes = vec![Lane {
+            name: "roots".to_string(),
+            kind: LaneKind::Parallel,
+            stages: vec![
+                LaneStage {
+                    card_id: "T-1".to_string(),
+                    agent_id: None,
+                    optional: false,
+                },
+                LaneStage {
+                    card_id: "T-9".to_string(),
+                    agent_id: None,
+                    optional: false,
+                },
+            ],
+            optional: false,
+        }];
+
+        let error = reconcile_schedule_with_cards(&lanes, &parsed).unwrap_err();
+
+        assert!(error.contains("not listed in 'cards'"), "{error}");
+    }
+
+    #[test]
+    fn spawn_agents_batch_schedule_dispatches_only_the_admitted_wave() {
+        let board = TaskBoard {
+            cards: vec![
+                card("T-1", "planned", vec![]),
+                card("T-2", "planned", vec!["T-1"]),
+            ],
+            ..Default::default()
+        };
+        let lanes = vec![Lane {
+            name: "roots".to_string(),
+            kind: LaneKind::Parallel,
+            stages: vec![
+                LaneStage {
+                    card_id: "T-1".to_string(),
+                    agent_id: None,
+                    optional: false,
+                },
+                LaneStage {
+                    card_id: "T-2".to_string(),
+                    agent_id: None,
+                    optional: false,
+                },
+            ],
+            optional: false,
+        }];
+
+        let schedule = plan_schedule(&board, &lanes, &wave_limits()).unwrap();
+
+        assert_eq!(schedule.dispatch, vec!["T-1".to_string()]);
+        assert_eq!(schedule.admitted_wave, Some(0));
+    }
+
+    #[test]
+    fn wave_limits_come_from_coordination_settings() {
+        let settings = refact_work_core::CoordinationSettings::default();
+
+        assert_eq!(
+            wave_limits(),
+            WaveLimits {
+                max_wave_width: settings.max_wave_width,
+                max_pipeline_depth: settings.max_pipeline_depth,
+            }
+        );
+        assert!(settings.max_wave_width >= 1);
+        assert!(settings.max_pipeline_depth >= 1);
+    }
+
+    #[test]
+    fn a_malformed_card_is_reported_even_when_a_schedule_excludes_it() {
+        let malformed = parse_spawn_item(&json!({ "suggested_steps": 3 }));
+        assert!(malformed.is_err());
+
+        let result =
+            pre_dispatch_result("<item 1>", &malformed, Some("Missing 'card_id'"), |_| false)
+                .expect("a card that never parsed must not vanish from the output");
+
+        assert_eq!(result.card_id, "<item 1>");
+        assert!(!result.success);
+        assert_eq!(result.error.as_deref(), Some("Missing 'card_id'"));
+    }
+
+    #[test]
+    fn a_card_the_schedule_did_not_admit_is_left_to_the_lane_report() {
+        let parsed = parse_spawn_item(&json!({ "card_id": "T-2" }));
+
+        assert_eq!(
+            pre_dispatch_result("T-2", &parsed, Some("not ready"), |_| false),
+            None
+        );
+        assert!(pre_dispatch_result("T-2", &parsed, Some("not ready"), |_| true).is_some());
+        assert_eq!(
+            pre_dispatch_result("T-2", &parsed, None, |_| true),
+            None,
+            "an admitted card with no validation error is spawned, not pre-reported"
+        );
+    }
+
+    #[test]
+    fn spawn_agents_batch_publishes_the_schedule_in_its_input_schema() {
+        let schema = ToolSpawnAgentsBatch::new().tool_description().input_schema;
+        let lane = &schema["properties"]["schedule"]["properties"]["lanes"]["items"];
+
+        assert_eq!(lane["properties"]["kind"]["enum"], json!(LaneKind::NAMES));
+        assert_eq!(
+            schema["required"],
+            json!(["cards"]),
+            "schedule must stay optional for existing callers"
+        );
+        assert!(lane["properties"]["stages"]["items"]["properties"]["agent_id"].is_object());
     }
 
     #[test]

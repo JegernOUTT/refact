@@ -190,6 +190,8 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("board_max_reviewers", 1, 100_000),
     coordination_integer("board_claim_key_max_len", 1, 100_000),
     coordination_bool("board_allow_self_review"),
+    coordination_integer("max_wave_width", 1, 10_000),
+    coordination_integer("max_pipeline_depth", 1, 10_000),
     coordination_integer("agent_wait_default_ms", 1, 3_600_000),
     coordination_integer("agent_wait_max_ms", 1, 86_400_000),
     coordination_integer("agent_wait_max_agents", 1, 10_000),
