@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
+  ChevronRight,
   ClipboardList,
   FileSearch,
   Inbox,
@@ -9,6 +10,7 @@ import {
 import { Button, Icon, Surface, Text } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
+  useGetBuddyDeskActionsQuery,
   useGetBuddyOperatorArtifactQuery,
   useGetBuddyOperatorWorkQuery,
   useGetBuddyOperatorWorkItemQuery,
@@ -48,9 +50,13 @@ const viewForState: Record<WorkItemState, WorkView> = {
 const emptyView: Record<WorkView, string> = {
   "Needs you": "Nothing needs you right now.",
   "Working on": "Nothing is in progress right now.",
-  Delivered: "Nothing has been delivered yet.",
+  Delivered: "No delivered work is saved in this project.",
   Watching: "Nothing is being watched right now.",
 };
+
+const NO_RESULT_YET = "No result yet";
+const NO_ACTION = "No action to take";
+const ACTION_STATUS_UNAVAILABLE = "Action status unavailable";
 
 const opaqueIdentifier = /[0-9a-f]{24,}/i;
 
@@ -69,6 +75,95 @@ function changedAt(value: string): string | null {
   const hours = Math.round(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
   return `${Math.round(hours / 24)}d ago`;
+}
+
+function changedAtAbsolute(value: string): string | null {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  return new Date(parsed).toLocaleString();
+}
+
+function WorkRow({
+  item,
+  endpointIdentity,
+  showState,
+  selected,
+  onOpen,
+}: {
+  item: WorkItem;
+  endpointIdentity: string;
+  showState: boolean;
+  selected: boolean;
+  onOpen: (item: WorkItem, trigger: HTMLButtonElement) => void;
+}) {
+  const artifactId = item.current_artifact_id;
+  const { currentData, isFetching, error } = useGetBuddyDeskActionsQuery(
+    {
+      id: item.id,
+      project_id: item.project.project_id,
+      endpoint_identity: endpointIdentity,
+    },
+    { skip: !artifactId },
+  );
+  const action = currentData?.data.find(
+    (candidate) =>
+      candidate.artifact_id === artifactId &&
+      candidate.artifact_revision === item.current_artifact_revision &&
+      candidate.spec.project.canonical_root === item.project.canonical_root,
+  );
+  const pending = isFetching && !currentData;
+  let verb: string | null = NO_ACTION;
+  if (!artifactId) verb = NO_RESULT_YET;
+  else if (error) verb = ACTION_STATUS_UNAVAILABLE;
+  else if (pending) verb = null;
+  else if (action) verb = action.label;
+  const changed = changedAt(item.last_material_change_at);
+  const absolute = changedAtAbsolute(item.last_material_change_at);
+  return (
+    <li>
+      <button
+        className={styles.item}
+        aria-current={selected ? "true" : undefined}
+        onClick={(event) => onOpen(item, event.currentTarget)}
+      >
+        <Text size="2" weight="medium" className={styles.name}>
+          {item.title}
+        </Text>
+        <span className={styles.itemMeta}>
+          {verb !== null && (
+            <Text
+              size="1"
+              weight={action ? "medium" : "regular"}
+              color={action ? "accent" : "gray"}
+            >
+              {verb}
+            </Text>
+          )}
+          <Text
+            size="1"
+            color="gray"
+            className={showState ? undefined : styles.srOnly}
+          >
+            {humanizeIdentifier(item.state)}
+          </Text>
+          {changed && (
+            <Text size="1" color="gray" title={absolute ?? undefined}>
+              {changed}
+              {absolute && (
+                <span className={styles.srOnly}>{` · ${absolute}`}</span>
+              )}
+            </Text>
+          )}
+        </span>
+        <Icon
+          icon={ChevronRight}
+          size="sm"
+          tone="muted"
+          className={styles.chevron}
+        />
+      </button>
+    </li>
+  );
 }
 
 function WorkDetail({
@@ -309,6 +404,7 @@ function DeskContent({
   const filtered = records.filter(
     ({ value }) => viewForState[value.state] === view,
   );
+  const distinctStates = new Set(filtered.map(({ value }) => value.state));
   const filtersApplied = query !== "" || attention !== "all";
   const collapsed =
     !expanded &&
@@ -361,6 +457,11 @@ function DeskContent({
     url.searchParams.set("buddy_project", item.project.project_id);
     url.searchParams.delete("chat");
     window.history.replaceState(window.history.state, "", url);
+  };
+  const open = (item: WorkItem, source: HTMLButtonElement) => {
+    trigger.current = source;
+    setSelectedId(item.id);
+    updateLink(item);
   };
 
   if (collapsed) {
@@ -534,38 +635,16 @@ function DeskContent({
                 </Text>
               )}
               <ul className={styles.items}>
-                {filtered.map(({ value }) => {
-                  const changed = changedAt(value.last_material_change_at);
-                  return (
-                    <li key={value.id}>
-                      <button
-                        className={styles.item}
-                        aria-current={
-                          selectedId === value.id ? "true" : undefined
-                        }
-                        onClick={(event) => {
-                          trigger.current = event.currentTarget;
-                          setSelectedId(value.id);
-                          updateLink(value);
-                        }}
-                      >
-                        <Text size="2" weight="medium" className={styles.name}>
-                          {value.title}
-                        </Text>
-                        <span className={styles.itemMeta}>
-                          <Text size="1" color="gray">
-                            {humanizeIdentifier(value.state)}
-                          </Text>
-                          {changed && (
-                            <Text size="1" color="gray">
-                              {changed}
-                            </Text>
-                          )}
-                        </span>
-                      </button>
-                    </li>
-                  );
-                })}
+                {filtered.map(({ value }) => (
+                  <WorkRow
+                    key={value.id}
+                    item={value}
+                    endpointIdentity={endpointIdentity}
+                    showState={distinctStates.size > 1}
+                    selected={selectedId === value.id}
+                    onOpen={open}
+                  />
+                ))}
               </ul>
               {currentData?.next_cursor != null && (
                 <Button

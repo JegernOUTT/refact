@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -9,6 +11,7 @@ import {
 } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { BuddyDesk } from "./BuddyDesk";
+import styles from "./BuddyDesk.module.css";
 import type {
   ActionExecution,
   ArtifactRevision,
@@ -60,6 +63,25 @@ const artifact: ArtifactRevision = {
   },
 };
 const record = <T,>(value: T) => ({ value, revision: 1, change_seq: 1 });
+
+function readGuiSource(path: string): Promise<string> {
+  return readFile(resolve(process.cwd(), "src", path), "utf8");
+}
+
+function readCssBlock(source: string, selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`(^|\\n)\\s*${escaped}\\s*{`).exec(source);
+  if (match?.index === undefined)
+    throw new Error(`Missing CSS block for ${selector}`);
+  const open = source.indexOf("{", match.index);
+  let depth = 0;
+  for (let i = open; i < source.length; i += 1) {
+    if (source[i] === "{") depth += 1;
+    if (source[i] === "}") depth -= 1;
+    if (depth === 0) return source.slice(open + 1, i);
+  }
+  throw new Error(`Unclosed CSS block for ${selector}`);
+}
 const envelope = <T,>(data: T, next_cursor: number | null = null) => ({
   schema_version: 1,
   project,
@@ -1000,5 +1022,175 @@ describe("BuddyDesk", () => {
     expect(
       screen.queryByRole("button", { name: "Preview exact change" }),
     ).toBeNull();
+  });
+
+  it("gives every row its registered action verb or an honest no-action phrase", async () => {
+    const withoutAction: WorkItem = {
+      ...item,
+      id: "work-2",
+      title: "Second diagnosis",
+    };
+    const withoutResult: WorkItem = {
+      ...item,
+      id: "work-3",
+      title: "Third diagnosis",
+      current_artifact_id: null,
+      current_artifact_revision: null,
+    };
+    const actionRequests: string[] = [];
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(
+          envelope([
+            record(item),
+            record(withoutAction),
+            record(withoutResult),
+          ]),
+        ),
+      ),
+      http.get("*/v1/buddy/work/:id/actions", ({ params }) => {
+        actionRequests.push(String(params.id));
+        return HttpResponse.json(
+          envelope(params.id === item.id ? [action] : []),
+        );
+      }),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    const row = await screen.findByRole("button", {
+      name: /Provider setup diagnosis/,
+    });
+    expect(
+      await within(row).findByText("Check saved evidence links", {
+        exact: true,
+      }),
+    ).toBeTruthy();
+    const plain = screen.getByRole("button", { name: /Second diagnosis/ });
+    expect(
+      await within(plain).findByText("No action to take", { exact: true }),
+    ).toBeTruthy();
+    const unfinished = screen.getByRole("button", {
+      name: /Third diagnosis/,
+    });
+    expect(
+      within(unfinished).getByText("No result yet", { exact: true }),
+    ).toBeTruthy();
+    expect(actionRequests).not.toContain(withoutResult.id);
+  });
+
+  it("drops the state badge when the whole view shares one state and keeps it when it differentiates", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(
+          envelope([
+            record(item),
+            record({ ...item, id: "work-2", title: "Second diagnosis" }),
+          ]),
+        ),
+      ),
+    );
+    const { unmount } = render(<BuddyDesk />, { preloadedState: config });
+    const row = await screen.findByRole("button", {
+      name: /Provider setup diagnosis/,
+    });
+    expect(
+      within(row).getByText("Needs attention", { exact: true }),
+    ).toHaveClass(styles.srOnly);
+    unmount();
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(
+          envelope([
+            record(item),
+            record({
+              ...item,
+              id: "work-2",
+              title: "Second diagnosis",
+              state: "blocked",
+            }),
+          ]),
+        ),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    const mixed = await screen.findByRole("button", {
+      name: /Provider setup diagnosis/,
+    });
+    expect(
+      within(mixed).getByText("Needs attention", { exact: true }),
+    ).not.toHaveClass(styles.srOnly);
+  });
+
+  it("keeps the reader pane collapsed until a row is selected", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(item)])),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+    );
+    const css = await readGuiSource("features/Buddy/BuddyDesk.module.css");
+    expect(readCssBlock(css, ".layout")).toContain(
+      "grid-template-columns: minmax(0, 1fr);",
+    );
+    expect(
+      readCssBlock(css, '.desk[data-detail-open="true"] .layout'),
+    ).toContain("grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr);");
+    render(<BuddyDesk />, { preloadedState: config });
+    const row = await screen.findByRole("button", {
+      name: /Provider setup diagnosis/,
+    });
+    const desk = screen.getByRole("region", { name: "Buddy Desk" });
+    expect(desk).toHaveAttribute("data-detail-open", "false");
+    expect(screen.queryByRole("article", { name: "Work detail" })).toBeNull();
+    expect(
+      screen.getByText(/Pick something on the left/).parentElement,
+    ).toHaveClass(styles.placeholder);
+    fireEvent.click(row);
+    expect(
+      await screen.findByRole("article", { name: "Work detail" }),
+    ).toBeTruthy();
+    expect(desk).toHaveAttribute("data-detail-open", "true");
+    expect(screen.queryByText(/Pick something on the left/)).toBeNull();
+  });
+
+  it("carries an absolute timestamp in the row tooltip and accessible name", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(item)])),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    const row = await screen.findByRole("button", {
+      name: /Provider setup diagnosis/,
+    });
+    const stamp = new Date(item.last_material_change_at).toLocaleString();
+    expect(row.querySelector("[title]")).toHaveAttribute("title", stamp);
+    expect(row.textContent).toContain(stamp);
+  });
+
+  it("separates an archive that was never populated from an empty filter result", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", ({ request }) =>
+        HttpResponse.json(
+          new URL(request.url).searchParams.get("search")
+            ? envelope([])
+            : envelope([record(item)]),
+        ),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    await screen.findByRole("button", { name: /Provider setup diagnosis/ });
+    fireEvent.click(screen.getByRole("button", { name: "Delivered" }));
+    expect(
+      await screen.findByText("No delivered work is saved in this project."),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Needs you" }));
+    fireEvent.change(await screen.findByRole("searchbox"), {
+      target: { value: "nothing" },
+    });
+    expect(
+      await screen.findByText("Nothing here matches those filters."),
+    ).toBeTruthy();
   });
 });
