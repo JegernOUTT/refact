@@ -42,7 +42,7 @@ impl Tool for ToolWorkOverview {
             input_schema: json!({"type":"object", "additionalProperties":false, "properties":{
                 "scope":{"type":"string","enum":["project","root"]},
                 "path":{"type":"string","description":"Authorized project/checkout file or directory path."},
-                "states":{"type":"array","items":{"type":"string","enum":["queued","running","parked","idle","waiting_user","completed","failed","cancelled","interrupted","unknown"]}},
+                "states":{"type":"array","items":{"type":"string","enum":crate::coordination::types::WorkStateTag::ALL.map(|state| state.as_str())}},
                 "limit":{"type":"integer","minimum":1,"maximum":crate::file_activity::settings().overview_max_rows},
                 "cursor":{"type":"string","description":"Opaque continuation; fetch a fresh snapshot on cursor_expired."}
             }}),

@@ -275,6 +275,8 @@ pub enum Disclosure {
 }
 
 impl Disclosure {
+    pub const ALL: [Disclosure; 2] = [Disclosure::Full, Disclosure::Withheld];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Disclosure::Full => "full",
@@ -404,6 +406,24 @@ pub enum Freshness {
     Stale,
     #[default]
     Unknown,
+}
+
+impl Freshness {
+    pub const ALL: [Freshness; 4] = [
+        Freshness::Live,
+        Freshness::Recent,
+        Freshness::Stale,
+        Freshness::Unknown,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Freshness::Live => "live",
+            Freshness::Recent => "recent",
+            Freshness::Stale => "stale",
+            Freshness::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

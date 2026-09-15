@@ -81,6 +81,116 @@ describe("Work panel", () => {
     expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
   });
 
+  it("renders a closed row instead of blanking the panel", async () => {
+    settingsHandler();
+    server.use(
+      http.get("*/v1/work", () =>
+        HttpResponse.json({
+          ...workFixture,
+          rows: [{ ...workFixture.rows[0], state: "closed" }],
+        }),
+      ),
+    );
+    renderPanel();
+    expect(await screen.findByLabelText("Work state")).toHaveAttribute(
+      "data-value",
+      "closed",
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("reports zero, one and many waiting questions without inventing a count", async () => {
+    settingsHandler();
+    server.use(
+      http.get("*/v1/work", () =>
+        HttpResponse.json({
+          ...workFixture,
+          rows: [
+            { ...workFixture.rows[0], open_questions: 0 },
+            {
+              ...workFixture.rows[0],
+              key: { runtime: "trajectory", id: "one" },
+              open_questions: 1,
+            },
+            {
+              ...workFixture.rows[0],
+              key: { runtime: "trajectory", id: "many" },
+              open_questions: 4,
+            },
+            {
+              ...workFixture.rows[0],
+              key: { runtime: "trajectory", id: "silent" },
+            },
+          ],
+          total: 4,
+          returned: 4,
+        }),
+      ),
+    );
+    renderPanel();
+    const questions = await screen.findAllByLabelText("Waiting questions");
+    expect(questions.map((node) => node.textContent)).toEqual([
+      "No waiting questions",
+      "1 waiting question",
+      "4 waiting questions",
+      "Waiting questions: unknown",
+    ]);
+    expect(questions[3]).toHaveAttribute("data-value", "unknown");
+  });
+
+  it("names the admission class a queued row waits in, or says unknown", async () => {
+    settingsHandler();
+    server.use(
+      http.get("*/v1/work", () =>
+        HttpResponse.json({
+          ...workFixture,
+          rows: [
+            { ...workFixture.rows[0], priority: "user_blocking" },
+            {
+              ...workFixture.rows[0],
+              key: { runtime: "trajectory", id: "plain" },
+            },
+          ],
+          total: 2,
+          returned: 2,
+        }),
+      ),
+    );
+    renderPanel();
+    const classes = await screen.findAllByLabelText("Admission class");
+    expect(classes[0]).toHaveAttribute("data-value", "user_blocking");
+    expect(classes[1]).toHaveAttribute("data-value", "unknown");
+    expect(classes[1]).toHaveTextContent("unknown");
+  });
+
+  it("withholds the per-row signals of a withheld row rather than guessing them", async () => {
+    settingsHandler();
+    server.use(
+      http.get("*/v1/work", () =>
+        HttpResponse.json({
+          ...workFixture,
+          rows: [
+            {
+              ...workFixture.rows[0],
+              title: undefined,
+              disclosure: "withheld",
+            },
+          ],
+        }),
+      ),
+    );
+    renderPanel();
+    await screen.findByText("Work withheld by privacy policy");
+    expect(
+      screen.queryByLabelText("Waiting questions"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Admission class")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Work state")).toHaveAttribute(
+      "data-value",
+      "queued",
+    );
+  });
+
   it("renders one, many and paged rows with truthful totals", async () => {
     settingsHandler();
     const many = Array.from({ length: 3 }, (_, index) => ({

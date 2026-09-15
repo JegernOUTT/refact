@@ -31,6 +31,9 @@ function WorkItem({
     ["Read", row.observed_reads],
     ["Written", row.observed_files],
   ];
+  // A withheld row deliberately omits waiting questions, admission class and
+  // file activity: the privacy guard already reduced them, so rendering
+  // "unknown" here would read as missing data rather than a policy decision.
   const withheld = row.disclosure === "withheld";
   return (
     <li className={styles.item}>
@@ -40,7 +43,11 @@ function WorkItem({
             ? "Work withheld by privacy policy"
             : row.title ?? humanizeIdentifier(row.kind)}
         </strong>
-        <Badge tone={row.attention ? "warning" : "muted"}>
+        <Badge
+          tone={row.attention ? "warning" : "muted"}
+          data-value={row.state}
+          aria-label="Work state"
+        >
           {humanizeIdentifier(row.state)}
         </Badge>
         {withheld && (
@@ -50,7 +57,10 @@ function WorkItem({
         )}
       </div>
       <span className={styles.muted}>
-        {humanizeIdentifier(row.kind)} · {humanizeIdentifier(row.freshness)}
+        {humanizeIdentifier(row.kind)} ·{" "}
+        <span aria-label="Freshness" data-value={row.freshness}>
+          {humanizeIdentifier(row.freshness)}
+        </span>
       </span>
       {row.attention && <span role="status">Needs attention</span>}
       {withheld ? (
@@ -74,6 +84,27 @@ function WorkItem({
   );
 }
 
+function WaitingQuestions({ count }: { count?: number }) {
+  return (
+    <span aria-label="Waiting questions" data-value={count ?? "unknown"}>
+      {count === undefined
+        ? "Waiting questions: unknown"
+        : count === 0
+          ? "No waiting questions"
+          : `${count} waiting ${count === 1 ? "question" : "questions"}`}
+    </span>
+  );
+}
+
+function AdmissionClass({ row }: { row: WorkRow }) {
+  return (
+    <span aria-label="Admission class" data-value={row.priority ?? "unknown"}>
+      Admission class:{" "}
+      {row.priority ? humanizeIdentifier(row.priority) : "unknown"}
+    </span>
+  );
+}
+
 function WorkItemDetail({
   row,
   filesByKind,
@@ -85,6 +116,8 @@ function WorkItemDetail({
     <>
       {row.summary && <p className={styles.summary}>{row.summary}</p>}
       {row.current_tool && <span>Tool: {row.current_tool}</span>}
+      <WaitingQuestions count={row.open_questions} />
+      <AdmissionClass row={row} />
       <span className="rf-wrap-anywhere">
         {row.root.branch ?? row.root.path ?? "Location unavailable"}
       </span>

@@ -2,18 +2,30 @@ export const workStates = [
   "queued",
   "running",
   "parked",
-  "idle",
   "waiting_user",
+  "idle",
   "completed",
   "failed",
   "cancelled",
   "interrupted",
+  "closed",
   "unknown",
 ] as const;
 export type WorkState = (typeof workStates)[number];
 
+export const workFreshness = ["live", "recent", "stale", "unknown"] as const;
+export type WorkFreshness = (typeof workFreshness)[number];
+
 export const workDisclosures = ["full", "withheld"] as const;
 export type WorkDisclosure = (typeof workDisclosures)[number];
+
+export const workPriorities = [
+  "user_blocking",
+  "interactive",
+  "normal",
+  "speculative",
+] as const;
+export type WorkPriority = (typeof workPriorities)[number];
 
 export type WorkRoot = {
   id: string;
@@ -34,7 +46,9 @@ export type WorkRow = {
   card_id?: string | null;
   root: WorkRoot;
   current_tool?: string;
-  freshness: "live" | "recent" | "stale" | "unknown";
+  freshness: WorkFreshness;
+  priority?: WorkPriority;
+  open_questions?: number;
   declared_files: string[];
   observed_files: string[];
   observed_reads: string[];
@@ -87,7 +101,10 @@ export function isWorkRow(value: unknown): value is WorkRow {
     typeof value.kind === "string" &&
     workStates.some((state) => state === value.state) &&
     typeof value.attention === "boolean" &&
-    ["live", "recent", "stale", "unknown"].includes(String(value.freshness)) &&
+    workFreshness.some((level) => level === value.freshness) &&
+    (value.priority === undefined ||
+      workPriorities.some((level) => level === value.priority)) &&
+    (value.open_questions === undefined || integer(value.open_questions)) &&
     isRoot(value.root) &&
     strings(value.declared_files) &&
     strings(value.observed_files) &&

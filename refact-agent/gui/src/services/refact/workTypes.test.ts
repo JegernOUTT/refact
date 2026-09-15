@@ -3,11 +3,32 @@ import {
   parseWorkFileOverlaps,
   parseWorkPage,
   withheldRowCount,
+  workDisclosures,
+  workFreshness,
   workSequence,
   workStates,
 } from "./workTypes";
 
 import { workFixture } from "./workFixtures";
+
+// The engine owns this vocabulary in src/coordination/types.rs. These literals
+// are the engine's own value names, not a GUI rewording; the engine test
+// `work_states_reach_the_gui_surface_under_the_engine_names` fails if either
+// side drifts.
+const engineWorkStates = [
+  "queued",
+  "running",
+  "parked",
+  "waiting_user",
+  "idle",
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+  "closed",
+  "unknown",
+];
+const engineFreshness = ["live", "recent", "stale", "unknown"];
 
 describe("Work contract", () => {
   it("accepts both runtime states and unknown measured usage", () => {
@@ -15,6 +36,40 @@ describe("Work contract", () => {
       const page = structuredClone(workFixture);
       page.rows[0].state = state;
       expect(parseWorkPage(page)).not.toBeNull();
+    }
+  });
+  it("names every state the engine can report, with no synonym", () => {
+    expect([...workStates]).toEqual(engineWorkStates);
+    expect([...workFreshness]).toEqual(engineFreshness);
+    expect([...workDisclosures]).toEqual(["full", "withheld"]);
+  });
+  it("accepts a closed row rather than discarding the whole page", () => {
+    const page = structuredClone(workFixture);
+    page.rows[0].state = "closed";
+    expect(parseWorkPage(page)?.rows[0].state).toBe("closed");
+  });
+  it("carries waiting questions and admission class, absent or present", () => {
+    for (const row of [
+      { open_questions: 0, priority: "normal" },
+      { open_questions: 3, priority: "user_blocking" },
+      {},
+    ]) {
+      const page = {
+        ...workFixture,
+        rows: [{ ...workFixture.rows[0], ...row }],
+      };
+      expect(parseWorkPage(page)).not.toBeNull();
+    }
+    for (const row of [
+      { open_questions: -1 },
+      { open_questions: "3" },
+      { priority: "urgent" },
+    ]) {
+      const page = {
+        ...workFixture,
+        rows: [{ ...workFixture.rows[0], ...row }],
+      };
+      expect(parseWorkPage(page)).toBeNull();
     }
   });
   it("rejects invalid nested payloads and false page counts", () => {

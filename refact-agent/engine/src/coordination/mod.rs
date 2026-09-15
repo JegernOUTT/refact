@@ -37,3 +37,5 @@ pub mod service;
 mod service_tests;
 pub mod teams;
 pub mod types;
+#[cfg(test)]
+mod work_vocabulary_tests;
