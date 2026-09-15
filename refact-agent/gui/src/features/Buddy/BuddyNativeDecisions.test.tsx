@@ -25,6 +25,27 @@ const snapshot = {
   truncated: false,
   questions: [row],
 };
+const workSession = {
+  chat_id: "chat-a",
+  title: "Finish multi-agent parity M1–M10",
+  model: "chosen/model",
+  state: "waiting_user_input",
+  persistence_pending: false,
+  goal: null,
+  agents: [],
+  agents_truncated: false,
+  pending_questions: 1,
+  approval_count: 0,
+  browser_decision_pending: false,
+  error: null,
+};
+const work = {
+  schema_version: 1,
+  project_root: "/scratch",
+  coverage: "loaded_native_sessions",
+  next_cursor: null,
+  sessions: [workSession],
+};
 const config = {
   config: { host: "vscode" as const, lspPort: 8001, themeProps: {} },
 };
@@ -45,6 +66,72 @@ describe("Buddy native decisions", () => {
           questions: [{ ...row, question: { ...question, questions } }],
         }),
       ).toThrow();
+  });
+
+  it("headlines a decision with the chat title and keeps the id as secondary detail", async () => {
+    server.use(
+      http.get("*/v1/buddy/decisions/current", () =>
+        HttpResponse.json(snapshot),
+      ),
+      http.get("*/v1/buddy/native-work", () => HttpResponse.json(work)),
+      http.get("*/v1/buddy/decisions/questions/chat-a/ask-1", () =>
+        HttpResponse.json(row),
+      ),
+    );
+    render(<BuddyNativeDecisions />, { preloadedState: config });
+    expect(
+      await screen.findByText("Finish multi-agent parity M1–M10"),
+    ).toBeTruthy();
+    expect(screen.queryByText("Question from an untitled chat")).toBeNull();
+    expect(screen.getByText("Chat chat-a")).toHaveAttribute("title", "chat-a");
+  });
+
+  it("names an untitled chat and truncates its id instead of headlining a UUID", async () => {
+    const chatId = "53ee2bb5-b29a-4488-a69e-b1b63113101e";
+    const untitled = {
+      ...row,
+      chat_id: chatId,
+      question: { ...question, tool_call_id: "ask-untitled" },
+    };
+    server.use(
+      http.get("*/v1/buddy/decisions/current", () =>
+        HttpResponse.json({ ...snapshot, questions: [untitled] }),
+      ),
+      http.get("*/v1/buddy/native-work", () =>
+        HttpResponse.json({
+          ...work,
+          sessions: [{ ...workSession, chat_id: chatId, title: "   " }],
+        }),
+      ),
+      http.get("*/v1/buddy/decisions/questions/:chat/:tool", () =>
+        HttpResponse.json(untitled),
+      ),
+    );
+    render(<BuddyNativeDecisions />, { preloadedState: config });
+    expect(
+      await screen.findByText("Question from an untitled chat"),
+    ).toBeTruthy();
+    expect(screen.queryByText(chatId)).toBeNull();
+    expect(screen.getByText("Chat 53ee2bb5…")).toHaveAttribute("title", chatId);
+  });
+
+  it("does not borrow a chat title from another project root", async () => {
+    server.use(
+      http.get("*/v1/buddy/decisions/current", () =>
+        HttpResponse.json(snapshot),
+      ),
+      http.get("*/v1/buddy/native-work", () =>
+        HttpResponse.json({ ...work, project_root: "/other" }),
+      ),
+      http.get("*/v1/buddy/decisions/questions/chat-a/ask-1", () =>
+        HttpResponse.json(row),
+      ),
+    );
+    render(<BuddyNativeDecisions />, { preloadedState: config });
+    expect(
+      await screen.findByText("Question from an untitled chat"),
+    ).toBeTruthy();
+    expect(screen.queryByText("Finish multi-agent parity M1–M10")).toBeNull();
   });
 
   it("sends a native answer once and waits for native resolution rather than HTTP queue acceptance", async () => {
@@ -131,7 +218,7 @@ describe("Buddy native decisions", () => {
         await act(async () => {
           await vi.advanceTimersByTimeAsync(50);
         });
-        expect(screen.getByText(/Question from chat chat-a/)).toBeTruthy();
+        expect(screen.getByText("Chat chat-a")).toBeTruthy();
       });
       questions = [
         row,
@@ -148,9 +235,9 @@ describe("Buddy native decisions", () => {
         await act(async () => {
           await vi.advanceTimersByTimeAsync(50);
         });
-        expect(screen.getByText(/Question from chat chat-b/)).toBeTruthy();
+        expect(screen.getByText("Chat chat-b")).toBeTruthy();
       });
-      expect(screen.getByText(/Question from chat chat-a/)).toBeTruthy();
+      expect(screen.getByText("Chat chat-a")).toBeTruthy();
     } finally {
       view.unmount();
       vi.useRealTimers();
@@ -183,7 +270,7 @@ describe("Buddy native decisions", () => {
     const seen = lists;
     fireEvent.click(screen.getByRole("button", { name: "Refresh questions" }));
     await waitFor(() => expect(lists).toBeGreaterThan(seen));
-    expect(screen.getByText(/Question from chat chat-a/)).toBeTruthy();
+    expect(screen.getByText("Chat chat-a")).toBeTruthy();
     expect(screen.queryByText(/No pending questions/)).toBeNull();
     expect(screen.queryByText(/Answered — confirmed/)).toBeNull();
     state = "answered";
@@ -258,9 +345,7 @@ describe("Buddy native decisions", () => {
     fireEvent.click(choice);
     current = { ...snapshot, project_root: "/other", questions: [] };
     fireEvent.click(screen.getByRole("button", { name: "Refresh questions" }));
-    await waitFor(() =>
-      expect(screen.queryByText(/Question from chat chat-a/)).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByText("Chat chat-a")).toBeNull());
     expect(screen.queryByRole("button", { name: "Submit answer" })).toBeNull();
   });
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CircleHelp, ShieldAlert } from "lucide-react";
 import { Badge, Button, Icon, Surface, Text } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
@@ -11,6 +11,7 @@ import {
   useAnswerBuddyNativeQuestionMutation,
   type NativeQuestionView,
 } from "../../services/refact/buddyDecisions";
+import { useGetBuddyNativeWorkQuery } from "../../services/refact/buddyNativeWork";
 import type { PendingQuestionAnswer } from "../../services/refact/types";
 import { BuddySectionHeader } from "./BuddySectionHeader";
 import styles from "./BuddyNativeDecisions.module.css";
@@ -19,6 +20,17 @@ import { BuddyNativeWork } from "./BuddyNativeWork";
 const DECISION_POLLING_INTERVAL_MS = 5000;
 const RETAINED_QUESTION_LIMIT = 20;
 const RENDERED_QUESTION_LIMIT = 100;
+const CHAT_ID_PREVIEW_LENGTH = 8;
+
+function chatTitleKey(projectRoot: string, chatId: string): string {
+  return JSON.stringify([projectRoot, chatId]);
+}
+
+function shortChatId(chatId: string): string {
+  return chatId.length > CHAT_ID_PREVIEW_LENGTH
+    ? `${chatId.slice(0, CHAT_ID_PREVIEW_LENGTH)}…`
+    : chatId;
+}
 
 function questionKey(row: NativeQuestionView): string {
   return JSON.stringify([
@@ -49,9 +61,11 @@ function mergeNativeQuestions(
 function QuestionForm({
   initial,
   identity,
+  chatTitle,
 }: {
   initial: NativeQuestionView;
   identity: string;
+  chatTitle?: string;
 }) {
   const [answerQuestion] = useAnswerBuddyNativeQuestionMutation();
   const [answers, setAnswers] = useState<Record<string, string | string[]>>({});
@@ -147,7 +161,15 @@ function QuestionForm({
       aria-label="Native decision"
     >
       <Text as="p" size="2" weight="medium" className={styles.questionTitle}>
-        Question from chat {initial.chat_id}
+        {chatTitle ?? "Question from an untitled chat"}
+      </Text>
+      <Text
+        as="p"
+        size="1"
+        className={styles.questionMeta}
+        title={initial.chat_id}
+      >
+        {`Chat ${shortChatId(initial.chat_id)}`}
       </Text>
       {initial.question.questions.map((q) => {
         const group = `${initial.chat_id}:${initial.question.tool_call_id}:${q.id}`;
@@ -321,6 +343,28 @@ function Decisions({ identity }: { identity: string }) {
       refetchOnReconnect: true,
     },
   );
+  const work = useGetBuddyNativeWorkQuery(
+    { endpoint_identity: identity },
+    {
+      refetchOnMountOrArgChange: true,
+      refetchOnFocus: true,
+      refetchOnReconnect: true,
+    },
+  );
+  const nativeWork = work.currentData;
+  const chatTitles = useMemo(() => {
+    const titles = new Map<string, string>();
+    if (!nativeWork) return titles;
+    for (const session of nativeWork.sessions) {
+      const label = session.title.trim();
+      if (label.length > 0)
+        titles.set(
+          chatTitleKey(nativeWork.project_root, session.chat_id),
+          label,
+        );
+    }
+    return titles;
+  }, [nativeWork]);
   const refetch = query.refetch;
   const [rendered, setRendered] = useState<NativeQuestionView[]>([]);
   const snapshot = query.currentData;
@@ -396,6 +440,9 @@ function Decisions({ identity }: { identity: string }) {
           )}`}
           initial={question}
           identity={identity}
+          chatTitle={chatTitles.get(
+            chatTitleKey(question.project_root, question.chat_id),
+          )}
         />
       ))}
     </Surface>

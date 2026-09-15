@@ -22,6 +22,11 @@
   color: var(--rf-color-fg);
 }
 
+.questionMeta {
+  margin: 0;
+  color: var(--rf-color-muted);
+}
+
 .answerGroup {
   display: flex;
   flex-direction: column;
