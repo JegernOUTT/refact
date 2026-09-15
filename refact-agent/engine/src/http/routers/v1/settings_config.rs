@@ -835,7 +835,7 @@ mod tests {
         );
         assert_eq!(
             initial.fields.len(),
-            49 + crate::runtime_settings::coordination_field_bounds().len()
+            51 + crate::runtime_settings::coordination_field_bounds().len()
         );
         assert!(initial
             .fields
