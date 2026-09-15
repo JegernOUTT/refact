@@ -15,6 +15,7 @@ import {
 import { statsApi } from "../services/refact/stats";
 import { codeIntelApi } from "../services/refact/codeIntel";
 import { workApi } from "../services/refact/work";
+import { causalApi } from "../services/refact/causal";
 import {
   capsApi,
   promptsApi,
@@ -158,6 +159,7 @@ const rootReducer = combineSlices(
     [statsApi.reducerPath]: statsApi.reducer,
     [codeIntelApi.reducerPath]: codeIntelApi.reducer,
     [workApi.reducerPath]: workApi.reducer,
+    [causalApi.reducerPath]: causalApi.reducer,
     [capsApi.reducerPath]: capsApi.reducer,
     [promptsApi.reducerPath]: promptsApi.reducer,
     [toolsApi.reducerPath]: toolsApi.reducer,
@@ -305,6 +307,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           statsApi.middleware,
           codeIntelApi.middleware,
           workApi.middleware,
+          causalApi.middleware,
           capsApi.middleware,
           promptsApi.middleware,
           toolsApi.middleware,

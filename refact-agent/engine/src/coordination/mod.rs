@@ -12,6 +12,7 @@ mod capsule_render;
 mod capsule_tests;
 pub mod catalog;
 pub mod causal;
+pub mod causal_view;
 pub mod deadlock;
 pub mod decomposition;
 pub mod disagreement;

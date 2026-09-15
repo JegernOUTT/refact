@@ -145,6 +145,7 @@ pub mod buddy_opportunities;
 pub mod buddy_pulse;
 pub mod bug_report;
 pub mod caps;
+mod causal;
 pub mod chat_based_handlers;
 mod chat_modes;
 pub mod code_completion;
@@ -280,6 +281,8 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/work/subscribe", get(work::subscribe))
         .route("/work/wait-graph", get(work::wait_graph))
         .route("/work/provenance", delete(work::forget_provenance))
+        .route("/work/causal", get(causal::trace))
+        .route("/work/causal/subscribe", get(causal::subscribe))
         .route("/work/:id", get(work::inspect))
         .route("/ping", get(handle_v1_ping))
         .route(

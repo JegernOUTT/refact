@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { SegmentedControl } from "../../../components/ui";
 import { AgentsSection } from "../../AgentsPanel";
+import { CausalTracePanel } from "../CausalTrace/CausalTracePanel";
 import { WorkPanel } from "./WorkPanel";
 import styles from "./WorkPanel.module.css";
 
@@ -21,12 +22,18 @@ export function AgentWorkSection({
         options={[
           { value: "agents", label: "This chat" },
           { value: "work", label: "Project work" },
+          { value: "causal", label: "Causality" },
         ]}
       />
-      {view === "agents" ? (
+      {view === "agents" && (
         <AgentsSection chatId={chatId} onNavigate={onNavigate} />
-      ) : (
-        <WorkPanel onNavigate={onNavigate} />
+      )}
+      {view === "work" && <WorkPanel onNavigate={onNavigate} />}
+      {view === "causal" && (
+        <CausalTracePanel
+          chatId={chatId ?? undefined}
+          onNavigate={onNavigate}
+        />
       )}
     </div>
   );

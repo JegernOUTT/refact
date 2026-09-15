@@ -37,7 +37,7 @@ impl IntoResponse for WorkError {
     }
 }
 
-fn authorize(
+pub(super) fn authorize(
     app: &AppState,
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
