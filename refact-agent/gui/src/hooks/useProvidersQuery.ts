@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { RootState } from "../app/store";
 import { capsApi, providersApi } from "../services/refact";
 import { useAppSelector } from "./useAppSelector";
@@ -51,6 +51,16 @@ export function useProviderBootstrapState() {
   const providersLoading = !providersQuery.isSuccess && !providersQuery.isError;
   const capsLoading = !capsQueryIsReady && !capsQuery.isError;
 
+  const [isRetrying, setIsRetrying] = useState(false);
+  const refetchProviders = providersQuery.refetch;
+  const refetchCaps = capsQuery.refetch;
+  const retry = useCallback(() => {
+    setIsRetrying(true);
+    void Promise.all([refetchProviders(), refetchCaps()]).finally(() => {
+      setIsRetrying(false);
+    });
+  }, [refetchProviders, refetchCaps]);
+
   let status: ProviderBootstrapStatus = "provider_loading";
   if (!hasReadyPluginBackend(config)) {
     if (config.connectionStatus === "failed") {
@@ -65,7 +75,7 @@ export function useProviderBootstrapState() {
   } else if (backendStatus === "offline") {
     status = "backend_offline";
   } else if (providersLoading || capsLoading) {
-    status = "provider_loading";
+    status = isRetrying ? "provider_error" : "provider_loading";
   } else if (providersQuery.isError || capsQuery.isError) {
     status = "provider_error";
   } else if (hasAnyActiveProvider) {
@@ -82,6 +92,8 @@ export function useProviderBootstrapState() {
     hasAnyActiveProvider,
     canAccessApp: status === "ready",
     canShowProviderSetup: status === "setup_required",
+    retry,
+    isRetrying,
   };
 }
 

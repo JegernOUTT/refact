@@ -126,6 +126,16 @@ export const LoginPage: React.FC = () => {
               <EmptyState
                 title="Unable to load providers"
                 description="Check that the local Refact engine is running and the UI is using the correct port."
+                action={
+                  <Button
+                    variant="primary"
+                    onClick={providerBootstrap.retry}
+                    disabled={providerBootstrap.isRetrying}
+                    loading={providerBootstrap.isRetrying}
+                  >
+                    Retry
+                  </Button>
+                }
               />
             ) : (
               <LoadingState label={bootstrapCopy.status} variant="full" />
