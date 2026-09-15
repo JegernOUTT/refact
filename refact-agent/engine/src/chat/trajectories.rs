@@ -9354,6 +9354,7 @@ mod tests {
 
             let stale = {
                 let mut session = session_arc.lock().await;
+                session.set_title("writer paths".to_string(), true);
                 session.add_message(ChatMessage::new("user".to_string(), "older".to_string()));
                 trajectory_snapshot_from_session(&session)
             };
@@ -9404,6 +9405,10 @@ mod tests {
                     .map(|message| message.content.content_text_only())
                     .collect::<Vec<_>>(),
                 vec!["older", "newer", "shutdown"]
+            );
+            assert!(
+                loaded.thread.is_title_generated,
+                "this fixture must not leave a background title-generation save racing the flush"
             );
         }
     }
