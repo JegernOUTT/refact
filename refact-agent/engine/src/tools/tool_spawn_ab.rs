@@ -16,10 +16,11 @@ use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{AbVariantInfo, AbVariants, BoardCard, StatusUpdate};
 use crate::tools::task_tool_helpers::{wait_for_agent_abort, AGENT_ABORT_TIMEOUT};
+use crate::tasks::assignment::{self, Assignment};
 use crate::tools::tool_task_spawn_agent::{
-    abandoned_worktrees_error, build_agent_prompt, build_agent_thread_params,
-    find_abandoned_worktrees, prepare_agent_worktree_with_suffix, resolve_agent_model,
-    resolve_invoking_planner_chat_id, PreparedWorktree,
+    abandoned_worktrees_error, build_agent_thread_params, find_abandoned_worktrees,
+    prepare_agent_worktree_with_suffix, resolve_agent_model, resolve_invoking_planner_chat_id,
+    PreparedWorktree,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::service::WorktreeService;
@@ -309,12 +310,11 @@ async fn create_variant_session(
         worktree,
     );
     let prompt_instructions = ab_prompt_instructions(card_instructions, spec);
-    let user_prompt = build_agent_prompt(
-        card_title,
-        &prompt_instructions,
-        dependency_context,
-        spec.suggested_steps,
-    );
+    assignment::clear_assignment(app.gcx.clone(), task_id, card_id).await;
+    let user_prompt = Assignment::new(card_id, card_title, &prompt_instructions)
+        .with_dependency_context(dependency_context)
+        .with_suggested_steps(spec.suggested_steps)
+        .render_prompt();
     let initial_message = event(
         EventSubkind::SystemNotice,
         "tool.spawn_ab",

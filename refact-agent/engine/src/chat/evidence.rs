@@ -20,7 +20,7 @@ use crate::chat::evidence_cache::CacheDeclaration;
 use crate::chat::evidence_revision::ContentRevision;
 use crate::chat::types::{CriterionEvidence, CriterionVerdict, GoalCriterion, VerdictSource};
 use crate::chat::verify_cmd::{
-    instruction_verification_commands, looks_like_command, parse_verification_argv,
+    instruction_commands, looks_like_command, parse_verification_argv,
     reported_verification_commands, VerifyCommandPolicy,
 };
 use crate::global_context::GlobalContext;
@@ -902,9 +902,23 @@ pub fn evidence_note(record: &EvidenceRecord) -> String {
 /// inputs its evidence may be cached on: a card that declares none is re-run every
 /// time rather than keyed on inputs nobody named.
 pub fn specs_from_card(card: &BoardCard, defaults: &EvidenceDefaults) -> Vec<VerificationSpec> {
+    let mut specs = instruction_specs(&card.id, &card.instructions, defaults);
+    for spec in specs.iter_mut() {
+        spec.cache.deterministic_inputs = card.target_files.clone();
+    }
+    append_reported_specs(&mut specs, card, &card.target_files, defaults);
+    specs
+}
+
+/// Planner-authored contracts recovered from instruction prose.
+pub(crate) fn instruction_specs(
+    card_id: &str,
+    instructions: &str,
+    defaults: &EvidenceDefaults,
+) -> Vec<VerificationSpec> {
     let mut specs: Vec<VerificationSpec> = Vec::new();
-    for command in instruction_verification_commands(card) {
-        let spec_id = format!("{}#{}", card.id, specs.len());
+    for command in instruction_commands(instructions) {
+        let spec_id = format!("{}#{}", card_id, specs.len());
         specs.push(VerificationSpec::propose(
             spec_id,
             command,
@@ -912,6 +926,17 @@ pub fn specs_from_card(card: &BoardCard, defaults: &EvidenceDefaults) -> Vec<Ver
             defaults,
         ));
     }
+    specs
+}
+
+/// Commands an agent said it ran. They only exist after dispatch, so they are read
+/// from the card and stay untrusted proposals.
+pub(crate) fn append_reported_specs(
+    specs: &mut Vec<VerificationSpec>,
+    card: &BoardCard,
+    cache_inputs: &[String],
+    defaults: &EvidenceDefaults,
+) {
     let agent = card
         .agent_chat_id
         .clone()
@@ -922,19 +947,17 @@ pub fn specs_from_card(card: &BoardCard, defaults: &EvidenceDefaults) -> Vec<Ver
             continue;
         }
         let spec_id = format!("{}#{}", card.id, specs.len());
-        specs.push(VerificationSpec::propose(
+        let mut spec = VerificationSpec::propose(
             spec_id,
             command,
             SpecAuthority::AgentProposal {
                 agent: agent.clone(),
             },
             defaults,
-        ));
+        );
+        spec.cache.deterministic_inputs = cache_inputs.to_vec();
+        specs.push(spec);
     }
-    for spec in specs.iter_mut() {
-        spec.cache.deterministic_inputs = card.target_files.clone();
-    }
-    specs
 }
 
 fn tail_chars(text: &str, max_chars: usize) -> String {

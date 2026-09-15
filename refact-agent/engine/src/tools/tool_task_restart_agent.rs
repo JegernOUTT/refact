@@ -14,8 +14,9 @@ use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate};
 use crate::tools::task_tool_helpers::{wait_for_agent_abort, AGENT_ABORT_TIMEOUT};
+use crate::tasks::assignment::{self, Assignment, AssignmentScope};
 use crate::tools::tool_task_spawn_agent::{
-    build_agent_prompt, build_agent_thread_params, mark_card_agent_started, prepare_agent_worktree,
+    build_agent_thread_params, mark_card_agent_started, prepare_agent_worktree,
     resolve_agent_model, restore_original_card_if_current_agent,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
@@ -844,12 +845,22 @@ impl ToolTaskRestartAgent {
             worktree_meta.clone(),
         );
 
-        let user_prompt = build_agent_prompt(
-            card_title,
-            card_instructions,
-            dependency_context,
-            suggested_steps,
-        );
+        let scope = storage::load_board(gcx.clone(), task_id)
+            .await
+            .ok()
+            .and_then(|board| {
+                board.get_card(card_id).map(|card| AssignmentScope {
+                    target_files: card.target_files.clone(),
+                    guard: card.scope_guard_mode,
+                })
+            })
+            .unwrap_or_default();
+        let assignment = Assignment::new(card_id, card_title, card_instructions)
+            .with_dependency_context(dependency_context)
+            .with_suggested_steps(suggested_steps)
+            .with_scope(scope);
+        assignment::record_assignment(gcx.clone(), task_id, &assignment).await;
+        let user_prompt = assignment.render_prompt();
 
         let user_msg = event(
             EventSubkind::SystemNotice,

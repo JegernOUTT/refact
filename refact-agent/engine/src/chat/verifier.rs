@@ -8,8 +8,8 @@ use chrono::Utc;
 use serde_json::{json, Value};
 
 use crate::chat::evidence::{
-    completion_decision, evaluate_gates, specs_from_card, EvidenceContext, EvidenceDefaults,
-    EvidenceRecord, EvidenceService, GateOutcome, SystemEvidenceRunner,
+    completion_decision, evaluate_gates, EvidenceContext, EvidenceDefaults, EvidenceRecord,
+    EvidenceService, GateOutcome, SystemEvidenceRunner,
 };
 use crate::chat::evidence_revision::supersede_stale;
 use crate::chat::internal_roles::{event, EventSubkind};
@@ -293,7 +293,10 @@ pub async fn verify_card(
     }
 
     let defaults = EvidenceDefaults::from_settings();
-    let specs = specs_from_card(&card, &defaults);
+    let assignment =
+        crate::tasks::assignment::load_assignment(gcx.clone(), &request.task_id, &card.id).await?;
+    let specs =
+        crate::tasks::assignment::specs_for_validation(assignment.as_ref(), &card, &defaults);
     let commit = git_head_commit(&worktree).await;
     let service = EvidenceService::new(
         VerifyCommandPolicy::load(gcx.clone()).await,
@@ -723,7 +726,7 @@ fn tail_chars(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::evidence::{gate_outcome_for_verdicts, EvidenceVerdict};
+    use crate::chat::evidence::{gate_outcome_for_verdicts, specs_from_card, EvidenceVerdict};
     use crate::chat::verify_cmd::verification_commands;
     use crate::tasks::types::{FinalReport, ScopeGuardMode, TaskBoard, TaskMeta, TaskStatus};
 

@@ -12,6 +12,7 @@ use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile}
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::trajectories::resolve_task_planner_controller_chat_id;
+use crate::tasks::assignment::{self, Assignment};
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate};
 use crate::global_context::{GlobalContext, try_load_caps_quickly_if_not_present};
@@ -610,16 +611,19 @@ async fn run_queued_board_agent(
         .get_card(&card_id)
         .map(|c| c.title.clone())
         .unwrap_or_default();
-    let card_instructions = board
-        .get_card(&card_id)
-        .map(|c| c.instructions.clone())
-        .unwrap_or_default();
     let dependency_context = board
         .get_dependency_reports(&card_id)
         .into_iter()
         .map(|(title, report)| format!("### {}\n{}", title, report))
         .collect::<Vec<_>>()
         .join("\n\n");
+    let assignment = board
+        .get_card(&card_id)
+        .map(Assignment::from_card)
+        .unwrap_or_else(|| Assignment::new(&card_id, &card_title, String::new()))
+        .with_dependency_context(dependency_context)
+        .with_suggested_steps(suggested_steps);
+    assignment::record_assignment(gcx.clone(), &task_id, &assignment).await;
 
     let thread = build_agent_thread_params(
         &agent_chat_id,
@@ -631,12 +635,7 @@ async fn run_queued_board_agent(
         &planner_chat_id,
         prepared_worktree.meta.clone(),
     );
-    let user_prompt = build_agent_prompt(
-        &card_title,
-        &card_instructions,
-        &dependency_context,
-        suggested_steps,
-    );
+    let user_prompt = assignment.render_prompt();
     let user_msg = event(
         EventSubkind::SystemNotice,
         "tool.task_spawn_agent",
@@ -700,32 +699,6 @@ impl ToolTaskSpawnAgent {
     pub fn new() -> Self {
         Self
     }
-}
-
-pub(crate) fn build_agent_prompt(
-    card_title: &str,
-    instructions: &str,
-    dependency_context: &str,
-    suggested_steps: usize,
-) -> String {
-    let dep_section = if dependency_context.is_empty() {
-        String::new()
-    } else {
-        format!("\n\n## Context from Dependencies\n{}", dependency_context)
-    };
-
-    format!(
-        r#"# Card: {card_title}
-
-## Instructions
-{instructions}{dep_section}
-
-## Guidelines
-- Suggested step budget: ~{suggested_steps} steps
-- Focus only on this specific card
-- Report progress clearly
-- **Remember to call `agent_finish()` when done!**"#
-    )
 }
 
 pub(crate) fn mark_card_agent_started(
@@ -1484,6 +1457,64 @@ mod tests {
             target_files: vec![],
             scope_guard_mode: Default::default(),
         }
+    }
+
+    fn evidence_defaults() -> crate::chat::evidence::EvidenceDefaults {
+        crate::chat::evidence::EvidenceDefaults {
+            timeout_secs: 60,
+            output_cap_bytes: 4_000,
+        }
+    }
+
+    #[test]
+    fn spawned_prompt_is_rendered_from_the_assignment_record() {
+        let mut card = test_card("T-1", "doing", None);
+        card.instructions = "Do the thing.".to_string();
+
+        let assignment = Assignment::from_card(&card)
+            .with_dependency_context("### Dep\nreport")
+            .with_suggested_steps(40);
+
+        assert_eq!(
+            assignment.render_prompt(),
+            "# Card: Card T-1\n\n## Instructions\nDo the thing.\n\n## Context from Dependencies\n### Dep\nreport\n\n## Guidelines\n- Suggested step budget: ~40 steps\n- Focus only on this specific card\n- Report progress clearly\n- **Remember to call `agent_finish()` when done!**"
+        );
+    }
+
+    #[test]
+    fn spawn_agent_validates_the_assignment_it_dispatched_not_the_edited_card() {
+        let mut card = test_card("T-1", "doing", None);
+        card.instructions = "## Verification\n- Verify: `cargo test --lib`".to_string();
+        card.target_files = vec!["src/lib.rs".to_string()];
+
+        let assignment = Assignment::from_card(&card).with_suggested_steps(40);
+        let dispatched_prompt = assignment.render_prompt();
+
+        card.instructions =
+            "## Verification\n- Verify: `cargo test --lib -- rewritten`".to_string();
+        card.target_files = vec!["src/rewritten.rs".to_string()];
+        card.scope_guard_mode = crate::tasks::types::ScopeGuardMode::Strict;
+
+        let validated = crate::tasks::assignment::specs_for_validation(
+            Some(&assignment),
+            &card,
+            &evidence_defaults(),
+        );
+
+        assert_eq!(assignment.render_prompt(), dispatched_prompt);
+        assert!(dispatched_prompt.contains("Verify: `cargo test --lib`"));
+        assert_eq!(
+            validated
+                .iter()
+                .map(|spec| spec.command.clone())
+                .collect::<Vec<_>>(),
+            vec!["cargo test --lib".to_string()]
+        );
+        assert_eq!(
+            assignment.scope.target_files,
+            vec!["src/lib.rs".to_string()],
+            "the dispatched scope is not rewritten by a later card edit"
+        );
     }
 
     #[test]

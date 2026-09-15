@@ -173,8 +173,14 @@ pub(crate) fn verification_commands(card: &BoardCard) -> Vec<String> {
 
 /// Commands the planner wrote into the card. Authored by the planner, still policy-checked.
 pub(crate) fn instruction_verification_commands(card: &BoardCard) -> Vec<String> {
+    instruction_commands(&card.instructions)
+}
+
+/// The same extraction against instruction prose captured elsewhere, such as the TASK
+/// leg of a dispatched assignment.
+pub(crate) fn instruction_commands(instructions: &str) -> Vec<String> {
     let mut commands = Vec::new();
-    for command in commands_from_instructions(&card.instructions) {
+    for command in commands_from_instructions(instructions) {
         push_expanded_unique(&mut commands, &command);
     }
     commands
