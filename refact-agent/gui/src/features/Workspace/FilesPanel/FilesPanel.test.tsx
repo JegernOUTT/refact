@@ -1086,6 +1086,18 @@ describe("FilesPanel", () => {
     ).toBeVisible();
   });
 
+  it("wraps the explorer header toggles instead of overflowing the dock sheet", () => {
+    const css = readFileSync(
+      "src/features/Workspace/FilesPanel/FilesPanel.module.css",
+      "utf8",
+    );
+    const headerToggles = /\.headerToggles\s*\{[^}]*\}/u.exec(css)?.[0] ?? "";
+
+    expect(headerToggles).toContain("flex-wrap: wrap");
+    expect(headerToggles).toContain("min-width: 0");
+    expect(headerToggles).toContain("flex: 0 1 auto");
+  });
+
   it("keeps the reduced-motion rule for live change highlights", () => {
     const css = readFileSync(
       "src/features/Workspace/FilesPanel/CodeMirrorEditor.module.css",

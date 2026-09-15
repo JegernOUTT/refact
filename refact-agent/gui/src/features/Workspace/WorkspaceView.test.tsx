@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { waitFor } from "@testing-library/react";
 
 import { type AppStore, setUpStore } from "../../app/store";
@@ -22,6 +22,7 @@ import {
 } from "./workspaceSlice";
 import { makeSurfaceKey, type SurfaceKey } from "./surfaceKey";
 import { updateConfig } from "../Config/configSlice";
+import { WORKSPACE_NARROW_QUERY } from "./workspaceBreakpoints";
 import { WorkspaceView } from "./WorkspaceView";
 
 const groupSplitViewCss = readFileSync(
@@ -32,6 +33,11 @@ const workspaceViewCss = readFileSync(
   "src/features/Workspace/WorkspaceView.module.css",
   "utf8",
 );
+const tokensCss = readFileSync("src/styles/tokens.css", "utf8");
+
+function tokenNumber(name: string): number {
+  return Number(new RegExp(`${name}:\\s*(\\d+)`).exec(tokensCss)?.[1]);
+}
 
 const chat = (id: string): SurfaceKey => makeSurfaceKey("chat", id);
 const task = (id: string): SurfaceKey => makeSurfaceKey("task", id);
@@ -121,7 +127,35 @@ function expectSurface(key: SurfaceKey) {
   expect(element).toBeInTheDocument();
 }
 
+const originalMatchMedia = window.matchMedia;
+
+function mockNarrow(narrow: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn(
+      (query: string): MediaQueryList =>
+        ({
+          matches: narrow && query === WORKSPACE_NARROW_QUERY,
+          media: query,
+          onchange: null,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        }) as MediaQueryList,
+    ),
+  });
+}
+
 describe("WorkspaceView", () => {
+  afterEach(() => {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: originalMatchMedia,
+    });
+  });
+
   it("always renders the activity rail with every section entry", () => {
     renderWorkspaceView(createWorkspaceStore());
 
@@ -303,6 +337,34 @@ describe("WorkspaceView", () => {
     expect(workspaceViewCss).toMatch(
       /@media \(hover: hover\) and \(pointer: fine\)[\s\S]*:focus-within \.unsplitSplitAffordance[\s\S]*opacity: var\(--rf-motion-opacity-visible\)/u,
     );
+  });
+
+  it("keeps the split affordance out of the mobile dock layout", () => {
+    mockNarrow(true);
+    renderWorkspaceView(createWorkspaceStore());
+
+    expectSurface(chat("chat-a"));
+    expect(
+      screen.queryByRole("button", { name: "Split active tab" }),
+    ).toBeNull();
+    expect(workspaceViewCss).toMatch(
+      /@media \(max-width: 767px\)\s*\{\s*\.unsplitSplitAffordance\s*\{[^}]*display: none/u,
+    );
+    expect(workspaceViewCss).toMatch(
+      /\.unsplitSplitAffordance\s*\{[^}]*z-index: var\(--rf-z-dropdown\)/u,
+    );
+    expect(tokenNumber("--rf-z-dropdown")).toBeLessThan(
+      tokenNumber("--rf-z-overlay"),
+    );
+  });
+
+  it("keeps the split affordance on the desktop layout", () => {
+    mockNarrow(false);
+    renderWorkspaceView(createWorkspaceStore());
+
+    expect(
+      screen.getByRole("button", { name: "Split active tab" }),
+    ).toBeVisible();
   });
 
   it("does not render a pane or split affordance for a non-chat active tab", () => {
