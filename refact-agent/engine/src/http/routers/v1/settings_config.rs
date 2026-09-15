@@ -510,6 +510,8 @@ fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         live_usize("review_max_diff_patch_bytes", 4_096, 268_435_456),
         live_usize("plan_checkpoint_delta_threshold", 1, 10_000),
         live_usize("plan_projection_max_chars", 1_024, 1_048_576),
+        live_usize("verification_evidence_timeout_secs", 10, 86_400),
+        live_usize("verification_evidence_output_cap_bytes", 256, 8_388_608),
     ];
     fields.extend(coordination_settings_fields(true));
     fields

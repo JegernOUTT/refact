@@ -49,6 +49,8 @@ const PLAN_CHECKPOINT_DELTA_THRESHOLD_DEFAULT: usize =
     refact_chat_api::role_projection::DEFAULT_CHECKPOINT_DELTA_THRESHOLD;
 const PLAN_PROJECTION_MAX_CHARS_DEFAULT: usize =
     refact_chat_api::role_projection::DEFAULT_PROJECTION_MAX_CHARS;
+const VERIFICATION_EVIDENCE_TIMEOUT_SECS_DEFAULT: u64 = 600;
+const VERIFICATION_EVIDENCE_OUTPUT_CAP_BYTES_DEFAULT: usize = 4_000;
 
 pub use refact_work_core::CoordinationSettings;
 
@@ -312,6 +314,8 @@ pub struct TrajectoryRuntimeSettings {
     /// Upper bound on the projected hidden plan/goal text. The approved base is
     /// always kept in full; only the delta region is bounded.
     pub plan_projection_max_chars: usize,
+    pub verification_evidence_timeout_secs: u64,
+    pub verification_evidence_output_cap_bytes: usize,
     pub coordination: CoordinationSettings,
 }
 
@@ -369,6 +373,8 @@ impl Default for TrajectoryRuntimeSettings {
             review_max_diff_patch_bytes: REVIEW_MAX_DIFF_PATCH_BYTES_DEFAULT,
             plan_checkpoint_delta_threshold: PLAN_CHECKPOINT_DELTA_THRESHOLD_DEFAULT,
             plan_projection_max_chars: PLAN_PROJECTION_MAX_CHARS_DEFAULT,
+            verification_evidence_timeout_secs: VERIFICATION_EVIDENCE_TIMEOUT_SECS_DEFAULT,
+            verification_evidence_output_cap_bytes: VERIFICATION_EVIDENCE_OUTPUT_CAP_BYTES_DEFAULT,
             coordination: CoordinationSettings::default(),
         }
     }
@@ -759,6 +765,18 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
         settings.plan_projection_max_chars,
         1_024,
         1_048_576,
+    )?;
+    validate_u64(
+        "verification_evidence_timeout_secs",
+        settings.verification_evidence_timeout_secs,
+        10,
+        86_400,
+    )?;
+    validate_usize(
+        "verification_evidence_output_cap_bytes",
+        settings.verification_evidence_output_cap_bytes,
+        256,
+        8_388_608,
     )?;
     validate_coordination(&settings.coordination)
 }

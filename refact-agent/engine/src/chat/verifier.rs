@@ -4,13 +4,18 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{json, Value};
 
+use crate::chat::evidence::{
+    completion_decision, evaluate_gates, specs_from_card, EvidenceContext, EvidenceDefaults,
+    EvidenceRecord, EvidenceService, GateOutcome, SystemEvidenceRunner,
+};
 use crate::chat::internal_roles::{event, EventSubkind};
-use crate::chat::verifier_diff::{git_changed_files_summary, resolve_verifier_diff_base};
-use crate::chat::verify_cmd::{parse_verification_argv, verification_commands, VerifyCommandPolicy};
+use crate::chat::verifier_diff::{
+    git_changed_files_summary, git_head_commit, resolve_verifier_diff_base,
+};
+use crate::chat::verify_cmd::VerifyCommandPolicy;
 use crate::exec::command_policy::{build_exec_request, CommandKind, CommandPolicyInput, ExecSource};
 use crate::exec::{ExecOutputStream, ExecStatus};
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
@@ -21,8 +26,7 @@ use crate::tasks::types::{
     VerifierReportClassification,
 };
 
-const VERIFY_TIMEOUT: Duration = Duration::from_secs(600);
-const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_OUTPUT_TAIL_CHARS: usize = 4000;
 const MAX_OUTPUT_CAPTURE_BYTES: usize = 512 * 1024;
 const MAX_DIFF_LINES: usize = 200;
@@ -108,36 +112,6 @@ pub struct VerifyCardRequest {
     pub task_id: String,
     pub card_id: String,
     pub expected_state: Option<ExpectedCardState>,
-}
-
-#[async_trait]
-trait VerificationCommandRunner: Send {
-    async fn run(
-        &mut self,
-        worktree: &Path,
-        command: &str,
-        cwd: Option<PathBuf>,
-        env: Vec<(String, String)>,
-        argv: Vec<String>,
-    ) -> VerificationResult;
-}
-
-struct SystemVerificationCommandRunner {
-    gcx: Arc<GlobalContext>,
-}
-
-#[async_trait]
-impl VerificationCommandRunner for SystemVerificationCommandRunner {
-    async fn run(
-        &mut self,
-        worktree: &Path,
-        command: &str,
-        cwd: Option<PathBuf>,
-        env: Vec<(String, String)>,
-        argv: Vec<String>,
-    ) -> VerificationResult {
-        run_verification_argv(self.gcx.clone(), worktree, command, cwd, env, argv).await
-    }
 }
 
 async fn check_cwd_in_worktree(worktree: &Path, effective_cwd: &Path) -> Result<(), String> {
@@ -310,82 +284,94 @@ pub async fn verify_card(
         ));
     }
 
-    let commands = verification_commands(&card);
-    let no_commands = commands.is_empty();
-    let mut command_results = Vec::new();
-    let mut concerns = Vec::new();
-
-    if no_commands {
-        concerns.push(
-            "No verification commands found in card instructions or final report".to_string(),
+    let defaults = EvidenceDefaults::from_settings();
+    let specs = specs_from_card(&card, &defaults);
+    let service = EvidenceService::new(
+        VerifyCommandPolicy::load(gcx.clone()).await,
+        EvidenceContext {
+            worktree: worktree.clone(),
+            commit: git_head_commit(&worktree).await,
+            content_revision: format!("{}@{}", card.id, board.rev),
+        },
+    );
+    let mut runner = SystemEvidenceRunner { gcx: gcx.clone() };
+    let evidence = service
+        .accept_and_execute_all(specs.clone(), &mut runner)
+        .await;
+    let command_results = evidence
+        .iter()
+        .map(EvidenceRecord::to_verification_result)
+        .collect::<Vec<_>>();
+    let gates = evaluate_gates(&specs, &evidence);
+    let reported_success = card
+        .final_report_structured
+        .as_ref()
+        .is_some_and(|report| report.success);
+    let decision = completion_decision(&gates, reported_success);
+    let mut concerns = decision.reasons;
+    if decision.reported_success && !decision.allowed {
+        concerns.insert(
+            0,
+            "Agent reported success, but a required verification gate did not pass".to_string(),
         );
     }
 
-    let command_policy = VerifyCommandPolicy::load(gcx.clone()).await;
-    for command in commands {
-        let result =
-            run_verification_command_with_policy(gcx.clone(), &worktree, &command, &command_policy)
-                .await;
-        if !result.passed {
-            concerns.push(format!("Verification command failed: {}", result.command));
-        }
-        command_results.push(result);
-    }
-
-    let worktree_base = if let Some(worktree_id) = card.agent_worktree_name.as_deref() {
-        let project_root = crate::files_correction::get_project_dirs(gcx.clone())
-            .await
-            .into_iter()
-            .next();
-        if let Some(project_root) = project_root {
-            match WorktreeService::new_async(gcx.cache_dir.clone(), project_root).await {
-                Ok(service) => service
-                    .get_worktree(worktree_id)
-                    .await
-                    .ok()
-                    .map(|view| (view.meta.base_commit, view.meta.base_branch)),
-                Err(_) => None,
+    // Gates decide before any model is consulted: a blocked gate means the judge
+    // never runs, so no amount of model confidence can turn it into a pass.
+    let (review_unavailable, review_has_concerns) = if gates.judge_allowed() {
+        let worktree_base = if let Some(worktree_id) = card.agent_worktree_name.as_deref() {
+            let project_root = crate::files_correction::get_project_dirs(gcx.clone())
+                .await
+                .into_iter()
+                .next();
+            if let Some(project_root) = project_root {
+                match WorktreeService::new_async(gcx.cache_dir.clone(), project_root).await {
+                    Ok(service) => service
+                        .get_worktree(worktree_id)
+                        .await
+                        .ok()
+                        .map(|view| (view.meta.base_commit, view.meta.base_branch)),
+                    Err(_) => None,
+                }
+            } else {
+                None
             }
         } else {
             None
-        }
-    } else {
-        None
-    };
-    let card_pair_present = card.base_commit.is_some() || card.base_branch.is_some();
-    let (base_commit, base_branch) = if card_pair_present {
-        (card.base_commit.clone(), card.base_branch.clone())
-    } else if let Some((commit, branch)) = worktree_base {
-        if commit.is_some() || branch.is_some() {
-            (commit, branch)
+        };
+        let card_pair_present = card.base_commit.is_some() || card.base_branch.is_some();
+        let (base_commit, base_branch) = if card_pair_present {
+            (card.base_commit.clone(), card.base_branch.clone())
+        } else if let Some((commit, branch)) = worktree_base {
+            if commit.is_some() || branch.is_some() {
+                (commit, branch)
+            } else {
+                (task_meta.base_commit, task_meta.base_branch)
+            }
         } else {
             (task_meta.base_commit, task_meta.base_branch)
-        }
+        };
+        let diff_base = resolve_verifier_diff_base(base_commit, base_branch)?;
+        let diff = git_changed_files_summary(&worktree, &diff_base, MAX_DIFF_LINES)
+            .await
+            .unwrap_or_else(|error| format!("diff unavailable: {}", error));
+        let prompt = verifier_prompt(&card, &command_results, &diff);
+        let review = run_verifier_review(gcx.clone(), prompt, card.agent_chat_id.as_deref()).await;
+        let review_unavailable = review.is_err();
+        let model_concerns = review.unwrap_or_else(|error| {
+            vec![format!(
+                "Verifier review subchat unavailable; human review recommended: {}",
+                error
+            )]
+        });
+        let review_has_concerns = !review_unavailable && !model_concerns.is_empty();
+        concerns.extend(model_concerns);
+        (review_unavailable, review_has_concerns)
     } else {
-        (task_meta.base_commit, task_meta.base_branch)
+        (false, false)
     };
-    let diff_base = resolve_verifier_diff_base(base_commit, base_branch)?;
-    let diff = git_changed_files_summary(&worktree, &diff_base, MAX_DIFF_LINES)
-        .await
-        .unwrap_or_else(|error| format!("diff unavailable: {}", error));
-    let prompt = verifier_prompt(&card, &command_results, &diff);
-    let review = run_verifier_review(gcx.clone(), prompt, card.agent_chat_id.as_deref()).await;
-    let review_unavailable = review.is_err();
-    let model_concerns = review.unwrap_or_else(|error| {
-        vec![format!(
-            "Verifier review subchat unavailable; human review recommended: {}",
-            error
-        )]
-    });
-    let review_has_concerns = !review_unavailable && !model_concerns.is_empty();
-    concerns.extend(model_concerns);
 
-    let classification = classify_verifier_report(
-        no_commands,
-        &command_results,
-        review_unavailable,
-        review_has_concerns,
-    );
+    let classification = classify_verifier_report(&gates, review_unavailable, review_has_concerns);
     let passed = classification == VerifierReportClassification::Passed;
     let recommendation = match classification {
         VerifierReportClassification::Passed => "merge",
@@ -425,41 +411,27 @@ pub(crate) fn outcome_is_infrastructure(outcome: &VerificationOutcome) -> bool {
     )
 }
 
+/// Gates first, judge second. A blocked gate settles the classification on its
+/// own; only once every required gate passed does the model's opinion matter.
 fn classify_verifier_report(
-    no_commands: bool,
-    command_results: &[VerificationResult],
+    gates: &GateOutcome,
     review_unavailable: bool,
     review_has_concerns: bool,
 ) -> VerifierReportClassification {
-    let command_verification_failed = no_commands
-        || command_results.iter().any(|result| {
-            matches!(
-                result.outcome,
-                VerificationOutcome::CommandFailed | VerificationOutcome::NoCommands
-            ) || (!result.passed && !outcome_is_infrastructure(&result.outcome))
-        });
-    if command_verification_failed || review_has_concerns {
+    if !gates.completion_allowed() {
+        return if gates.has_contract_violation() {
+            VerifierReportClassification::VerificationFailed
+        } else {
+            VerifierReportClassification::HumanReview
+        };
+    }
+    if review_has_concerns {
         return VerifierReportClassification::VerificationFailed;
     }
-    let infrastructure_failed = command_results
-        .iter()
-        .any(|result| outcome_is_infrastructure(&result.outcome) || !result.passed);
-    if infrastructure_failed || review_unavailable {
+    if review_unavailable {
         return VerifierReportClassification::HumanReview;
     }
-    if !command_results.is_empty()
-        && command_results.iter().all(|result| {
-            result.passed
-                && matches!(
-                    result.outcome,
-                    VerificationOutcome::Passed | VerificationOutcome::Unknown
-                )
-        })
-    {
-        VerifierReportClassification::Passed
-    } else {
-        VerifierReportClassification::VerificationFailed
-    }
+    VerifierReportClassification::Passed
 }
 
 fn launch_failure_report(error: String) -> VerifierReport {
@@ -475,79 +447,8 @@ fn launch_failure_report(error: String) -> VerifierReport {
     }
 }
 
-#[cfg(test)]
-async fn run_verification_command(
-    gcx: Arc<GlobalContext>,
-    worktree: &Path,
-    command: &str,
-) -> VerificationResult {
-    let policy = VerifyCommandPolicy::load(gcx.clone()).await;
-    run_verification_command_with_policy(gcx, worktree, command, &policy).await
-}
-
-async fn run_verification_command_with_policy(
-    gcx: Arc<GlobalContext>,
-    worktree: &Path,
-    command: &str,
-    policy: &VerifyCommandPolicy,
-) -> VerificationResult {
-    let mut runner = SystemVerificationCommandRunner { gcx };
-    run_verification_command_with_runner(worktree, command, policy, &mut runner).await
-}
-
-async fn run_verification_command_with_runner<R: VerificationCommandRunner>(
-    worktree: &Path,
-    command: &str,
-    policy: &VerifyCommandPolicy,
-    runner: &mut R,
-) -> VerificationResult {
-    let parsed = match parse_verification_argv(command) {
-        Ok(parsed) => parsed,
-        Err(reason) => {
-            return VerificationResult {
-                command: command.to_string(),
-                exit_code: None,
-                passed: false,
-                output_tail: format!("Cannot run as a command: {}", reason),
-                outcome: VerificationOutcome::Rejected,
-            };
-        }
-    };
-    if let Err(reason) = policy.check(command) {
-        return VerificationResult {
-            command: command.to_string(),
-            exit_code: None,
-            passed: false,
-            output_tail: format!("Denied by shell policy: {}", reason),
-            outcome: VerificationOutcome::PolicyDenied,
-        };
-    }
-    runner
-        .run(worktree, command, parsed.cwd, parsed.env, parsed.argv)
-        .await
-}
-
-async fn run_verification_argv(
-    gcx: Arc<GlobalContext>,
-    worktree: &Path,
-    command: &str,
-    cwd: Option<PathBuf>,
-    env: Vec<(String, String)>,
-    argv: Vec<String>,
-) -> VerificationResult {
-    run_verification_argv_impl(
-        gcx,
-        worktree,
-        command,
-        cwd,
-        env,
-        argv,
-        VERIFY_TIMEOUT,
-        DRAIN_TIMEOUT,
-    )
-    .await
-}
-
+/// The single confined exec path for verification commands. The evidence service
+/// and the post-merge runner both reach execution through here.
 pub(crate) async fn run_verification_argv_impl(
     gcx: Arc<GlobalContext>,
     worktree: &Path,
@@ -785,40 +686,9 @@ fn tail_chars(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::evidence::{gate_outcome_for_verdicts, EvidenceVerdict};
+    use crate::chat::verify_cmd::verification_commands;
     use crate::tasks::types::{FinalReport, ScopeGuardMode, TaskBoard, TaskMeta, TaskStatus};
-
-    #[derive(Default)]
-    struct MockVerificationRunner {
-        calls: Vec<(
-            PathBuf,
-            String,
-            Option<PathBuf>,
-            Vec<(String, String)>,
-            Vec<String>,
-        )>,
-    }
-
-    #[async_trait]
-    impl VerificationCommandRunner for MockVerificationRunner {
-        async fn run(
-            &mut self,
-            worktree: &Path,
-            command: &str,
-            cwd: Option<PathBuf>,
-            env: Vec<(String, String)>,
-            argv: Vec<String>,
-        ) -> VerificationResult {
-            self.calls
-                .push((worktree.to_path_buf(), command.to_string(), cwd, env, argv));
-            VerificationResult {
-                command: command.to_string(),
-                exit_code: Some(0),
-                passed: true,
-                output_tail: "ok".to_string(),
-                outcome: VerificationOutcome::Unknown,
-            }
-        }
-    }
 
     fn card(instructions: &str) -> BoardCard {
         BoardCard {
@@ -986,46 +856,35 @@ mod tests {
 
     #[test]
     fn typed_classification_does_not_infer_state_from_concern_text() {
-        let infrastructure = VerificationResult {
-            command: "cargo test".to_string(),
-            passed: false,
-            outcome: VerificationOutcome::InfrastructureFailed,
-            ..Default::default()
-        };
+        let unavailable = gate_outcome_for_verdicts(&[(true, EvidenceVerdict::Unavailable)]);
         assert_eq!(
-            classify_verifier_report(false, &[infrastructure], false, false),
+            classify_verifier_report(&unavailable, false, false),
             VerifierReportClassification::HumanReview
         );
-        let passed = VerificationResult {
-            command: "cargo test".to_string(),
-            passed: true,
-            outcome: VerificationOutcome::Passed,
-            ..Default::default()
-        };
+        let passed = gate_outcome_for_verdicts(&[(true, EvidenceVerdict::Passed)]);
         assert_eq!(
-            classify_verifier_report(false, &[passed.clone()], true, false),
+            classify_verifier_report(&passed, true, false),
             VerifierReportClassification::HumanReview
         );
         assert_eq!(
-            classify_verifier_report(false, &[passed], false, true),
+            classify_verifier_report(&passed, false, true),
             VerifierReportClassification::VerificationFailed
+        );
+        assert_eq!(
+            classify_verifier_report(&passed, false, false),
+            VerifierReportClassification::Passed
         );
     }
 
     #[test]
-    fn typed_classification_requires_commands_and_real_success() {
+    fn typed_classification_requires_gates_and_real_success() {
         assert_eq!(
-            classify_verifier_report(true, &[], false, false),
+            classify_verifier_report(&evaluate_gates(&[], &[]), false, false),
             VerifierReportClassification::VerificationFailed
         );
-        let result = VerificationResult {
-            command: "cargo test".to_string(),
-            passed: false,
-            outcome: VerificationOutcome::CommandFailed,
-            ..Default::default()
-        };
+        let failed = gate_outcome_for_verdicts(&[(true, EvidenceVerdict::Failed)]);
         assert_eq!(
-            classify_verifier_report(false, &[result], false, false),
+            classify_verifier_report(&failed, false, false),
             VerifierReportClassification::VerificationFailed
         );
     }
@@ -1216,198 +1075,87 @@ mod tests {
         assert!(card.verifier_report.as_ref().unwrap().passed);
     }
 
-    #[tokio::test]
-    async fn verifier_runs_argv_not_shell() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runner = MockVerificationRunner::default();
+    #[test]
+    fn a_card_with_no_verification_command_declares_no_required_gate() {
+        let card = card("## Acceptance Criteria\n- it works");
+        let defaults = EvidenceDefaults {
+            timeout_secs: 60,
+            output_cap_bytes: 4_000,
+        };
 
-        let result = run_verification_command_with_runner(
-            temp.path(),
-            "cd refact-agent/engine && cargo check",
-            &VerifyCommandPolicy::permissive(),
-            &mut runner,
-        )
-        .await;
+        let specs = specs_from_card(&card, &defaults);
+        let gates = evaluate_gates(&specs, &[]);
 
-        assert!(result.passed);
-        assert_eq!(runner.calls.len(), 1);
-        assert_eq!(runner.calls[0].0, temp.path());
-        assert_eq!(runner.calls[0].1, "cd refact-agent/engine && cargo check");
+        assert!(specs.is_empty());
         assert_eq!(
-            runner.calls[0].2,
-            Some(PathBuf::from("refact-agent/engine"))
+            classify_verifier_report(&gates, false, false),
+            VerifierReportClassification::VerificationFailed
         );
-        assert!(runner.calls[0].3.is_empty());
-        assert_eq!(runner.calls[0].4, vec!["cargo", "check"]);
-    }
-
-    #[tokio::test]
-    async fn verifier_threads_env_prefix_to_the_runner() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runner = MockVerificationRunner::default();
-
-        let result = run_verification_command_with_runner(
-            temp.path(),
-            "cd ui && FLEXUS_PYTHON=/abs/py pnpm typecheck",
-            &VerifyCommandPolicy::permissive(),
-            &mut runner,
-        )
-        .await;
-
-        assert!(result.passed, "{}", result.output_tail);
-        assert_eq!(runner.calls[0].2, Some(PathBuf::from("ui")));
-        assert_eq!(
-            runner.calls[0].3,
-            vec![("FLEXUS_PYTHON".to_string(), "/abs/py".to_string())]
-        );
-        assert_eq!(runner.calls[0].4, vec!["pnpm", "typecheck"]);
-    }
-
-    #[tokio::test]
-    async fn verifier_runs_previously_unsupported_binaries() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runner = MockVerificationRunner::default();
-
-        for command in [
-            "dotnet test",
-            "go test ./...",
-            "make check",
-            "gradlew build",
-        ] {
-            let result = run_verification_command_with_runner(
-                temp.path(),
-                command,
-                &VerifyCommandPolicy::permissive(),
-                &mut runner,
-            )
-            .await;
-            assert!(result.passed, "{command}: {}", result.output_tail);
-        }
-        assert_eq!(runner.calls.len(), 4);
-    }
-
-    #[tokio::test]
-    async fn verifier_denies_commands_matching_shell_policy_deny_rules() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runner = MockVerificationRunner::default();
-        let policy = VerifyCommandPolicy::from_shell_policy(
-            &crate::tools::shell_gate::ShellGatePolicy::default(),
-        );
-
-        let result = run_verification_command_with_runner(
-            temp.path(),
-            "sudo rm -rf /",
-            &policy,
-            &mut runner,
-        )
-        .await;
-
-        assert!(!result.passed);
-        assert_eq!(result.outcome, VerificationOutcome::PolicyDenied);
-        assert!(
-            result.output_tail.starts_with("Denied by shell policy:"),
-            "{}",
-            result.output_tail
-        );
-        assert!(runner.calls.is_empty());
-    }
-
-    fn command_result(
-        command: &str,
-        passed: bool,
-        outcome: VerificationOutcome,
-    ) -> VerificationResult {
-        VerificationResult {
-            command: command.to_string(),
-            exit_code: None,
-            passed,
-            output_tail: String::new(),
-            outcome,
-        }
+        assert!(gates.reasons()[0].contains("No verification commands found"));
     }
 
     #[test]
-    fn rejected_and_denied_commands_classify_as_human_review_not_verification_failure() {
-        for outcome in [
-            VerificationOutcome::Rejected,
-            VerificationOutcome::PolicyDenied,
-            VerificationOutcome::InfrastructureFailed,
-        ] {
-            let results = vec![command_result("dotnet test", false, outcome.clone())];
+    fn blocked_and_unavailable_gates_classify_as_human_review_not_verification_failure() {
+        for verdict in [EvidenceVerdict::Blocked, EvidenceVerdict::Unavailable] {
+            let gates = gate_outcome_for_verdicts(&[(true, verdict)]);
             assert_eq!(
-                classify_verifier_report(false, &results, false, false),
+                classify_verifier_report(&gates, false, false),
                 VerifierReportClassification::HumanReview,
-                "{outcome:?} must be infrastructure, not a verification failure"
+                "{verdict:?} means evidence was not obtained, not that the work failed"
             );
         }
     }
 
     #[test]
-    fn genuine_command_failure_still_classifies_as_verification_failure() {
-        let results = vec![command_result(
-            "cargo test",
-            false,
-            VerificationOutcome::CommandFailed,
-        )];
-        assert_eq!(
-            classify_verifier_report(false, &results, false, false),
-            VerifierReportClassification::VerificationFailed
-        );
+    fn a_genuine_gate_failure_still_classifies_as_verification_failure() {
+        for verdict in [
+            EvidenceVerdict::Failed,
+            EvidenceVerdict::NotRun,
+            EvidenceVerdict::Superseded,
+        ] {
+            let gates = gate_outcome_for_verdicts(&[(true, verdict)]);
+            assert_eq!(
+                classify_verifier_report(&gates, false, false),
+                VerifierReportClassification::VerificationFailed,
+                "{verdict:?} must fail verification"
+            );
+        }
 
-        let mixed = vec![
-            command_result("cargo build", true, VerificationOutcome::Passed),
-            command_result("cargo test", false, VerificationOutcome::CommandFailed),
-        ];
+        let mixed = gate_outcome_for_verdicts(&[
+            (true, EvidenceVerdict::Passed),
+            (true, EvidenceVerdict::Failed),
+        ]);
         assert_eq!(
-            classify_verifier_report(false, &mixed, false, false),
+            classify_verifier_report(&mixed, false, false),
             VerifierReportClassification::VerificationFailed
         );
     }
 
     #[test]
-    fn passed_and_rejected_mix_is_human_review() {
-        let results = vec![
-            command_result("cargo build", true, VerificationOutcome::Passed),
-            command_result("dotnet test", false, VerificationOutcome::Rejected),
-        ];
+    fn a_passed_and_blocked_mix_is_human_review() {
+        let gates = gate_outcome_for_verdicts(&[
+            (true, EvidenceVerdict::Passed),
+            (true, EvidenceVerdict::Blocked),
+        ]);
+
         assert_eq!(
-            classify_verifier_report(false, &results, false, false),
+            classify_verifier_report(&gates, false, false),
             VerifierReportClassification::HumanReview
         );
+        assert_eq!(gates.required_passed, 1);
+        assert_eq!(gates.required_total, 2);
     }
 
-    #[tokio::test]
-    async fn verifier_yolo_mode_allows_arbitrary_binary() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut runner = MockVerificationRunner::default();
-        let policy =
-            VerifyCommandPolicy::from_shell_policy(&crate::tools::shell_gate::ShellGatePolicy {
-                mode: crate::tools::shell_gate::ApprovalMode::Yolo,
-                ..crate::tools::shell_gate::ShellGatePolicy::default()
-            });
+    #[test]
+    fn a_failing_gate_outranks_a_model_that_reports_success() {
+        let gates = gate_outcome_for_verdicts(&[(true, EvidenceVerdict::Failed)]);
 
-        let result = run_verification_command_with_runner(
-            temp.path(),
-            "mycompany-verify --all",
-            &policy,
-            &mut runner,
-        )
-        .await;
-
-        assert!(result.passed, "{}", result.output_tail);
-        assert_eq!(runner.calls[0].4, vec!["mycompany-verify", "--all"]);
-    }
-
-    #[tokio::test]
-    async fn verifier_rejects_shell_syntax() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-
-        let result = run_verification_command(gcx, temp.path(), "cargo test | tee f").await;
-
-        assert!(!result.passed);
-        assert_eq!(result.outcome, VerificationOutcome::Rejected);
-        assert!(result.output_tail.starts_with("Cannot run as a command:"));
+        assert_eq!(
+            classify_verifier_report(&gates, false, false),
+            VerifierReportClassification::VerificationFailed
+        );
+        assert!(!gates.judge_allowed(), "the judge must not even be asked");
+        assert!(!completion_decision(&gates, true).allowed);
     }
 
     #[tokio::test]

@@ -156,10 +156,25 @@ fn env_name_len(bytes: &[u8]) -> usize {
 }
 
 pub(crate) fn verification_commands(card: &BoardCard) -> Vec<String> {
+    let mut commands = instruction_verification_commands(card);
+    for command in reported_verification_commands(card) {
+        push_unique(&mut commands, command);
+    }
+    commands
+}
+
+/// Commands the planner wrote into the card. Authored by the planner, still policy-checked.
+pub(crate) fn instruction_verification_commands(card: &BoardCard) -> Vec<String> {
     let mut commands = Vec::new();
     for command in commands_from_instructions(&card.instructions) {
         push_expanded_unique(&mut commands, &command);
     }
+    commands
+}
+
+/// Commands an agent reported running. Untrusted proposals until accepted under policy.
+pub(crate) fn reported_verification_commands(card: &BoardCard) -> Vec<String> {
+    let mut commands = Vec::new();
     if let Some(report) = card.final_report_structured.as_ref() {
         for result in &report.verification {
             push_expanded_unique(&mut commands, &result.command);
@@ -225,7 +240,7 @@ fn strip_sentence_period(value: &str) -> &str {
     }
 }
 
-fn looks_like_command(command: &str) -> bool {
+pub(crate) fn looks_like_command(command: &str) -> bool {
     let Ok(tokens) = shell_words::split(command) else {
         return false;
     };

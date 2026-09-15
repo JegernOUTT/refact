@@ -57,6 +57,14 @@ async fn run_git(worktree: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+pub(crate) async fn git_head_commit(worktree: &Path) -> Option<String> {
+    run_git(worktree, &["rev-parse", "HEAD"])
+        .await
+        .ok()
+        .map(|output| output.trim().to_string())
+        .filter(|commit| !commit.is_empty())
+}
+
 fn push_name_only(names: &mut Vec<String>, seen: &mut HashSet<String>, output: &str) {
     for line in output
         .lines()
