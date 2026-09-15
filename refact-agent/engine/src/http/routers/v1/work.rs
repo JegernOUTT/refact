@@ -427,6 +427,163 @@ mod tests {
         assert_eq!(ids(&gui).len(), 3);
     }
 
+    async fn next_snapshot(
+        body: &mut axum::body::BoxBody,
+        pending: &mut String,
+        raw: &mut String,
+    ) -> serde_json::Value {
+        use hyper::body::HttpBody;
+        loop {
+            if let Some(end) = pending.find("\n\n") {
+                let frame: String = pending.drain(..end + 2).collect();
+                if let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data:")) {
+                    return serde_json::from_str(data.trim()).unwrap();
+                }
+                continue;
+            }
+            let chunk = body.data().await.expect("stream ended").unwrap();
+            let text = String::from_utf8(chunk.to_vec()).unwrap();
+            raw.push_str(&text);
+            pending.push_str(&text);
+        }
+    }
+
+    async fn retitle(app: &AppState, chat_id: &str, title: &str) {
+        let session = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get(chat_id)
+            .cloned()
+            .unwrap();
+        session.lock().await.thread.title = title.into();
+    }
+
+    #[tokio::test]
+    async fn subscription_frames_hide_a_denied_peer_until_the_model_switch_re_evaluates_it() {
+        let (app, dir) = app(Some("work-test-token")).await;
+        {
+            let (project_root, _) =
+                crate::caps::project_model_defaults_state(app.gcx.clone()).await;
+            let mut caps = crate::caps::CodeAssistantCaps::default();
+            for id in ["trusted/model", "other/model"] {
+                caps.chat_models.insert(
+                    id.into(),
+                    std::sync::Arc::new(crate::caps::ChatModelRecord {
+                        base: crate::caps::BaseModelRecord {
+                            id: id.into(),
+                            ..Default::default()
+                        },
+                        supports_tools: true,
+                        supports_agent: true,
+                        ..Default::default()
+                    }),
+                );
+            }
+            let mut state = app.gcx.caps_state.write().await;
+            state.caps = Some(std::sync::Arc::new(caps));
+            state.loaded_project_root = Some(project_root);
+            state.last_attempted_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+        }
+        let guarded = dir.path().join("denied-peer-secret.rs");
+        std::fs::write(&guarded, "denied peer source").unwrap();
+        let guarded_path = guarded.to_string_lossy().to_string();
+        app.gcx.privacy_policy_load.write().unwrap().policy =
+            std::sync::Arc::new(refact_privacy::PrivacyPolicy {
+                zones: vec![refact_privacy::Zone {
+                    name: "guarded".into(),
+                    patterns: vec![guarded_path.clone()],
+                    send_to: vec!["trusted".into()],
+                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
+                }],
+                ..Default::default()
+            });
+        for (id, title) in [
+            ("sse-caller", "sse caller title"),
+            ("sse-denied", "denied peer title"),
+            ("sse-visible", "visible peer title"),
+        ] {
+            let mut session = crate::chat::types::ChatSession::new(id.into());
+            session.work_project_root = Some(dir.path().into());
+            session.thread.title = title.into();
+            session.thread.model = "other/model".into();
+            app.chat.sessions.write().await.insert(
+                id.into(),
+                std::sync::Arc::new(tokio::sync::Mutex::new(session)),
+            );
+        }
+        crate::file_activity::record_read(
+            Some("sse-denied"),
+            &guarded,
+            "denied peer source",
+            1,
+            1,
+            1,
+            None,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer work-test-token".parse().unwrap(),
+        );
+
+        tokio::time::pause();
+        let response = subscribe(
+            State(app.clone()),
+            Some(ConnectInfo("127.0.0.1:7".parse().unwrap())),
+            headers,
+            Ok(Query(WorkQuery {
+                chat_id: Some("sse-caller".into()),
+                ..Default::default()
+            })),
+        )
+        .await
+        .unwrap();
+        let mut body = response.into_body();
+        let mut pending = String::new();
+        let mut denied_bytes = String::new();
+
+        let first = next_snapshot(&mut body, &mut pending, &mut denied_bytes).await;
+        assert_eq!(first["total"], 2);
+        assert_eq!(first["returned"], 2);
+        assert_eq!(first["rows"].as_array().unwrap().len(), 2);
+
+        retitle(&app, "sse-visible", "visible peer retitled").await;
+        let second = next_snapshot(&mut body, &mut pending, &mut denied_bytes).await;
+        assert_eq!(second["total"], 2);
+        assert_eq!(second["rows"].as_array().unwrap().len(), 2);
+        assert_ne!(second["seq"], first["seq"]);
+        assert!(denied_bytes.contains("visible peer retitled"));
+        for secret in ["denied peer title", "sse-denied", guarded_path.as_str()] {
+            assert!(
+                !denied_bytes.contains(secret),
+                "'{secret}' reached the stream: {denied_bytes}"
+            );
+        }
+
+        let caller = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get("sse-caller")
+            .cloned()
+            .unwrap();
+        caller.lock().await.thread.model = "trusted/model".into();
+        let mut disclosed_bytes = String::new();
+        let third = next_snapshot(&mut body, &mut pending, &mut disclosed_bytes).await;
+        assert_eq!(third["total"], 3);
+        assert_eq!(third["rows"].as_array().unwrap().len(), 3);
+        assert_ne!(third["snapshot_id"], first["snapshot_id"]);
+        assert!(disclosed_bytes.contains("denied peer title"));
+        assert!(disclosed_bytes.contains(guarded_path.as_str()));
+        tokio::time::resume();
+    }
+
     #[tokio::test]
     async fn no_token_mode_requires_real_loopback_transport() {
         let (app, _dir) = app(None).await;
