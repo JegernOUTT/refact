@@ -182,6 +182,19 @@ pub struct CoordinationSettings {
     /// a figure at all. Below it the advisor refuses rather than averaging a
     /// handful of runs into something that reads like a law.
     pub decomposition_min_samples: usize,
+    /// Named teams one catalog may hold.
+    pub team_max_count: usize,
+    /// Roles one team may define.
+    pub team_role_max_count: usize,
+    /// Seats one roster may hold at once.
+    pub team_member_max_count: usize,
+    /// Mission-log entries one team keeps. The log is append-only, so the bound
+    /// is what stops it growing forever: the oldest entry is dropped and the
+    /// drop is counted rather than hidden.
+    pub team_mission_log_max_entries: usize,
+    /// How long a roster seat stays its holder's without a heartbeat. Inside
+    /// this window a member is still alive and cannot be reclaimed.
+    pub team_heartbeat_ttl_ms: u64,
     /// How long a settled outbox message is kept before retention deletes it.
     /// Messages whose outcome is still unknown are never pruned by age.
     pub outbox_retention_secs: u64,
@@ -348,6 +361,11 @@ impl Default for CoordinationSettings {
             disagreement_retention_ms: 30 * 24 * 60 * 60 * 1_000,
             disagreement_blocks_completion: false,
             store_max_causal_events: 16_384,
+            team_max_count: 32,
+            team_role_max_count: 16,
+            team_member_max_count: 64,
+            team_mission_log_max_entries: 512,
+            team_heartbeat_ttl_ms: 120_000,
             decomposition_min_samples: 5,
             outbox_retention_secs: 604_800,
             outbox_prune_interval_secs: 3_600,
@@ -676,9 +694,22 @@ impl CoordinationSettings {
             ("disagreement_max_open", self.disagreement_max_open),
             ("store_max_causal_events", self.store_max_causal_events),
             ("decomposition_min_samples", self.decomposition_min_samples),
+            ("team_max_count", self.team_max_count),
+            ("team_role_max_count", self.team_role_max_count),
+            ("team_member_max_count", self.team_member_max_count),
+            (
+                "team_mission_log_max_entries",
+                self.team_mission_log_max_entries,
+            ),
         ] {
             at_least(&mut v, field, value as u64, 1);
         }
+        at_least(
+            &mut v,
+            "team_heartbeat_ttl_ms",
+            self.team_heartbeat_ttl_ms,
+            1,
+        );
         at_least(
             &mut v,
             "disagreement_retention_ms",
