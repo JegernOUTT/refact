@@ -16,7 +16,13 @@ import {
   Tabs,
   Text,
 } from "../../components/ui";
-import { ArrowLeft, MessageCircle, Settings, Wrench } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  MessageCircle,
+  Settings,
+  Wrench,
+} from "lucide-react";
 import classNames from "classnames";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { pop, push, selectCurrentPage } from "../Pages/pagesSlice";
@@ -80,6 +86,7 @@ import { BuddyDesk } from "./BuddyDesk";
 import {
   buddyOperatorIdentity,
   useGetBuddyOperatorStatusQuery,
+  useGetBuddyOperatorWorkQuery,
   useGetBuddyLegacyDraftWorkQuery,
 } from "../../services/refact/buddyOperator";
 import { BuddyPresence } from "./BuddyPresence";
@@ -150,7 +157,7 @@ type BuddyHomeTab =
   | "play"
   | "settings";
 
-const BUDDY_HOME_TAB_ORDER: BuddyHomeTab[] = [
+const LEGACY_TAB_ORDER: BuddyHomeTab[] = [
   "pulse",
   "opportunities",
   "errors",
@@ -159,7 +166,15 @@ const BUDDY_HOME_TAB_ORDER: BuddyHomeTab[] = [
   "settings",
 ];
 
-const BUDDY_HOME_DEFAULT_TAB: BuddyHomeTab = "pulse";
+const OPERATOR_TAB_ORDER: BuddyHomeTab[] = [
+  "errors",
+  "activity",
+  "play",
+  "settings",
+];
+
+const LEGACY_DEFAULT_TAB: BuddyHomeTab = "pulse";
+const OPERATOR_DEFAULT_TAB: BuddyHomeTab = "activity";
 
 const BUDDY_HOME_TAB_LABELS: Record<BuddyHomeTab, string> = {
   pulse: "Pulse",
@@ -182,7 +197,7 @@ const OPERATOR_MODE_LABELS: Record<BuddyOperatorMode, string> = {
   error: "Broken",
   enabled: "On",
   disabled: "Local only",
-  unavailable: "Off",
+  unavailable: "Not responding",
 };
 
 const OPERATOR_MODE_TONES: Record<
@@ -193,8 +208,25 @@ const OPERATOR_MODE_TONES: Record<
   error: "danger",
   enabled: "success",
   disabled: "accent",
-  unavailable: "warning",
+  unavailable: "danger",
 };
+
+type BuddyOperatorFailure = Extract<BuddyOperatorMode, "error" | "unavailable">;
+
+const OPERATOR_FAILURE_TITLES: Record<BuddyOperatorFailure, string> = {
+  error: "Buddy's work service answered with an error",
+  unavailable: "Buddy's work service is not responding",
+};
+
+const OPERATOR_FAILURE_DETAIL: Record<BuddyOperatorFailure, string> = {
+  error:
+    "The engine replied, but not with anything this page can trust — so this is a connection failure, not an empty queue.",
+  unavailable:
+    "Nothing answered for saved work, proposals or pulse reports — so this is a connection failure, not an empty queue.",
+};
+
+const OPERATOR_FAILURE_SCOPE =
+  "Your chats, files and recent warnings are untouched. Progress, counters and project setup stay hidden until something can confirm them.";
 
 type ClipboardWriter = {
   clipboard?: {
@@ -353,16 +385,24 @@ const BuddyHomeContent: React.FC = () => {
       : "loading";
   const legacyCompatibility = operatorMode === "disabled";
   const operatorEnabled = operatorMode === "enabled";
-  const operatorNeedsRetry =
-    operatorMode === "unavailable" || operatorMode === "error";
+  const degraded: BuddyOperatorFailure | null =
+    operatorMode === "unavailable" || operatorMode === "error"
+      ? operatorMode
+      : null;
+  const operatorNeedsRetry = degraded !== null;
   const statusPill = (
     <Badge
-      size="xs"
+      size={degraded ? "md" : "xs"}
+      variant={degraded ? "outline" : "soft"}
       tone={OPERATOR_MODE_TONES[operatorMode]}
-      className={styles.statusPill}
+      className={classNames(
+        styles.statusPill,
+        degraded && styles.statusPillAlert,
+      )}
       data-testid="buddy-operator-status"
       data-state={operatorMode}
     >
+      {degraded && <Icon icon={AlertTriangle} size="sm" tone="danger" />}
       {OPERATOR_MODE_LABELS[operatorMode]}
     </Badge>
   );
@@ -399,10 +439,28 @@ const BuddyHomeContent: React.FC = () => {
   const { state, signal: buddySignal } = buddy;
   const [setupDismissed, setSetupDismissed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [activeTab, setActiveTab] = useState<BuddyHomeTab>(
-    BUDDY_HOME_DEFAULT_TAB,
-  );
+  const [chosenTab, setChosenTab] = useState<BuddyHomeTab | null>(null);
   const [sceneOpen, setSceneOpen] = useState(true);
+  const legacyTabs = legacyCompatibility || operatorMode === "loading";
+  const defaultTab = legacyTabs ? LEGACY_DEFAULT_TAB : OPERATOR_DEFAULT_TAB;
+  const tabOrder = useMemo(() => {
+    const order = legacyTabs ? LEGACY_TAB_ORDER : OPERATOR_TAB_ORDER;
+    return sceneOpen ? order : order.filter((tab) => tab !== "play");
+  }, [legacyTabs, sceneOpen]);
+  const activeTab =
+    chosenTab !== null && tabOrder.includes(chosenTab) ? chosenTab : defaultTab;
+  const deskWork = useGetBuddyOperatorWorkQuery(
+    {
+      cursor: undefined,
+      limit: 50,
+      endpoint_identity: operatorIdentity,
+      view: "needs_you",
+      search: "",
+      attention: "all",
+    },
+    { skip: !operatorEnabled, refetchOnMountOrArgChange: true },
+  );
+  const deskHasWork = (deskWork.currentData?.data.length ?? 0) > 0;
   const contentRef = useRef<HTMLElement>(null);
   const playPanelRef = useRef<HTMLDivElement>(null);
   const presenceRef = useRef<HTMLDivElement>(null);
@@ -421,13 +479,18 @@ const BuddyHomeContent: React.FC = () => {
     playPanelRef.current?.focus({ preventScroll: true });
   }, [activeTab]);
 
+  useEffect(() => {
+    if (!operatorNeedsRetry) return;
+    setSceneOpen(false);
+  }, [operatorNeedsRetry]);
+
   const handleToggleScene = useCallback(() => {
-    if (sceneOpen && activeTab === "play") setActiveTab(BUDDY_HOME_DEFAULT_TAB);
+    if (sceneOpen && activeTab === "play") setChosenTab(null);
     setSceneOpen(!sceneOpen);
   }, [activeTab, sceneOpen]);
 
   const handleLeavePlay = useCallback(() => {
-    setActiveTab(BUDDY_HOME_DEFAULT_TAB);
+    setChosenTab(null);
     if (contentRef.current) contentRef.current.scrollTop = 0;
     presenceRef.current?.focus({ preventScroll: true });
   }, []);
@@ -1043,6 +1106,59 @@ const BuddyHomeContent: React.FC = () => {
         className={classNames(styles.content, styles.homeContent, "rf-stagger")}
         data-testid="buddy-home-content"
       >
+        {degraded && (
+          <Surface
+            as="section"
+            variant="glass"
+            radius="card"
+            className={styles.degradedCard}
+            role="alert"
+            data-testid="buddy-operator-degraded"
+          >
+            <div className={styles.degradedHeader}>
+              <Icon icon={AlertTriangle} size="sm" tone="danger" />
+              <Text size="3" weight="bold" className={styles.degradedTitle}>
+                {OPERATOR_FAILURE_TITLES[degraded]}
+              </Text>
+            </div>
+            <Text size="2" className={styles.degradedText}>
+              {OPERATOR_FAILURE_DETAIL[degraded]}
+            </Text>
+            <Text size="2" color="gray" className={styles.degradedText}>
+              {OPERATOR_FAILURE_SCOPE}
+            </Text>
+            <div className={styles.degradedActions}>
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => void operator.refetch()}
+              >
+                Retry work authority
+              </Button>
+            </div>
+          </Surface>
+        )}
+
+        {operatorEnabled && (
+          <BuddyDesk
+            key={JSON.stringify([
+              operator.currentData?.worker,
+              mappedDraft.currentData?.data.value.id,
+            ])}
+            workId={
+              currentPage?.name === "buddy"
+                ? currentPage.workId ?? mappedDraft.currentData?.data.value.id
+                : undefined
+            }
+            projectId={
+              currentPage?.name === "buddy"
+                ? currentPage.workProjectId ??
+                  mappedDraft.currentData?.project.project_id
+                : undefined
+            }
+          />
+        )}
+
         <div ref={presenceRef} tabIndex={-1} className={styles.presenceSlot}>
           <BuddyPresence
             state={state}
@@ -1063,6 +1179,7 @@ const BuddyHomeContent: React.FC = () => {
             className={classNames(
               styles.heroCard,
               activeTab === "play" && styles.heroCardExpanded,
+              deskHasWork && activeTab !== "play" && styles.heroCardDemoted,
             )}
             data-testid="buddy-home-hero"
           >
@@ -1085,32 +1202,17 @@ const BuddyHomeContent: React.FC = () => {
                 onCare={(action, toy) => void handleCare(action, toy)}
                 onOpenPage={handleOpenWorldPage}
                 onSpeechControl={(control) => void handleSpeechControl(control)}
-                pendingCards={unreadOpportunities.length}
-                onOpenInbox={() => setActiveTab("opportunities")}
+                pendingCards={
+                  legacyCompatibility ? unreadOpportunities.length : 0
+                }
+                onOpenInbox={
+                  legacyCompatibility
+                    ? () => setChosenTab("opportunities")
+                    : undefined
+                }
                 verdictReaction={verdictReaction}
               />
             </BuddyErrorBoundary>
-          </Surface>
-        )}
-
-        {operatorNeedsRetry && (
-          <Surface
-            as="section"
-            variant="glass"
-            radius="card"
-            className={styles.statusCard}
-            role="status"
-          >
-            <Text size="2" color="gray" className={styles.statusText}>
-              Saved work is unavailable right now.
-            </Text>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => void operator.refetch()}
-            >
-              Retry work authority
-            </Button>
           </Surface>
         )}
 
@@ -1166,66 +1268,38 @@ const BuddyHomeContent: React.FC = () => {
           </Surface>
         )}
 
-        {operatorEnabled && (
-          <BuddyDesk
-            key={JSON.stringify([
-              operator.currentData?.worker,
-              mappedDraft.currentData?.data.value.id,
-            ])}
-            workId={
-              currentPage?.name === "buddy"
-                ? currentPage.workId ?? mappedDraft.currentData?.data.value.id
-                : undefined
-            }
-            projectId={
-              currentPage?.name === "buddy"
-                ? currentPage.workProjectId ??
-                  mappedDraft.currentData?.project.project_id
-                : undefined
-            }
-          />
-        )}
-
         <Tabs
           value={activeTab}
-          onValueChange={(value) => setActiveTab(value as BuddyHomeTab)}
+          onValueChange={(value) => setChosenTab(value as BuddyHomeTab)}
           className={styles.tabs}
         >
           <Tabs.List
-            activeIndex={BUDDY_HOME_TAB_ORDER.indexOf(activeTab)}
-            itemCount={BUDDY_HOME_TAB_ORDER.length}
+            activeIndex={tabOrder.indexOf(activeTab)}
+            itemCount={tabOrder.length}
             className={styles.tabsList}
           >
-            {BUDDY_HOME_TAB_ORDER.map((tab) => (
+            {tabOrder.map((tab) => (
               <Tabs.Trigger key={tab} value={tab}>
                 {BUDDY_HOME_TAB_LABELS[tab]}
               </Tabs.Trigger>
             ))}
           </Tabs.List>
 
-          <Tabs.Content value="pulse" className={styles.tabContent}>
-            {legacyCompatibility ? (
+          {legacyCompatibility && (
+            <Tabs.Content value="pulse" className={styles.tabContent}>
               <div className={styles.tabPanel}>
                 <BuddyPulseCard />
               </div>
-            ) : (
-              <Text size="2" color="gray" className={styles.tabNotice}>
-                Pulse reports are saved with your work below.
-              </Text>
-            )}
-          </Tabs.Content>
+            </Tabs.Content>
+          )}
 
-          <Tabs.Content value="opportunities" className={styles.tabContent}>
-            {legacyCompatibility ? (
+          {legacyCompatibility && (
+            <Tabs.Content value="opportunities" className={styles.tabContent}>
               <div className={styles.tabPanel}>
                 <BuddyOpportunitiesFeed />
               </div>
-            ) : (
-              <Text size="2" color="gray" className={styles.tabNotice}>
-                Open a work item below to read it or run its actions.
-              </Text>
-            )}
-          </Tabs.Content>
+            </Tabs.Content>
+          )}
 
           <Tabs.Content value="errors" className={styles.tabContent}>
             {legacyCompatibility ? (
@@ -1239,7 +1313,9 @@ const BuddyHomeContent: React.FC = () => {
             ) : (
               <div className={styles.tabNoticeList}>
                 <Text size="2" color="gray" className={styles.tabNotice}>
-                  Recent warnings, read-only.
+                  {recentErrors.length === 0
+                    ? "No warnings in the last six hours."
+                    : "Recent warnings, read-only."}
                 </Text>
                 {recentErrors.map((event) => (
                   <Text
@@ -1271,37 +1347,39 @@ const BuddyHomeContent: React.FC = () => {
             )}
           </Tabs.Content>
 
-          <Tabs.Content value="play" className={styles.tabContent}>
-            <div
-              ref={playPanelRef}
-              tabIndex={-1}
-              aria-label="Buddy Play"
-              className={styles.playPanel}
-            >
-              <div className={styles.playActions}>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  onClick={handleResetWorld}
-                  aria-label="Reset Buddy scene"
-                >
-                  Reset scene
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  onClick={handleLeavePlay}
-                >
-                  Leave Play
-                </Button>
+          {sceneOpen && (
+            <Tabs.Content value="play" className={styles.tabContent}>
+              <div
+                ref={playPanelRef}
+                tabIndex={-1}
+                aria-label="Buddy Play"
+                className={styles.playPanel}
+              >
+                <div className={styles.playActions}>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={handleResetWorld}
+                    aria-label="Reset Buddy scene"
+                  >
+                    Reset scene
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={handleLeavePlay}
+                  >
+                    Leave Play
+                  </Button>
+                </div>
+                <Text size="1" color="gray" className={styles.playHint}>
+                  Games run in the scene above.
+                </Text>
               </div>
-              <Text size="1" color="gray" className={styles.playHint}>
-                Games run in the scene above.
-              </Text>
-            </div>
-          </Tabs.Content>
+            </Tabs.Content>
+          )}
 
           <Tabs.Content value="settings" className={styles.tabContent}>
             <div
@@ -1330,20 +1408,22 @@ const BuddyHomeContent: React.FC = () => {
           </Tabs.Content>
         </Tabs>
 
-        <BuddySummaryStrip
-          name={name}
-          palette={palette}
-          stage={stage}
-          stageIndex={stageIndex}
-          xp={xp}
-          xpNext={xpNext}
-          xpFill={xpFill}
-          atMaxStage={atMaxStage}
-          pet={pet}
-          statsData={statsData}
-          successRate={successRate}
-          onViewStats={handleViewStats}
-        />
+        {!degraded && (
+          <BuddySummaryStrip
+            name={name}
+            palette={palette}
+            stage={stage}
+            stageIndex={stageIndex}
+            xp={xp}
+            xpNext={xpNext}
+            xpFill={xpFill}
+            atMaxStage={atMaxStage}
+            pet={pet}
+            statsData={statsData}
+            successRate={successRate}
+            onViewStats={handleViewStats}
+          />
+        )}
 
         <Surface
           as="section"
@@ -1352,6 +1432,7 @@ const BuddyHomeContent: React.FC = () => {
           animated="rise"
           className={styles.setupStrip}
           data-testid="buddy-setup-strip"
+          data-disabled={degraded ? "true" : undefined}
         >
           <span className={styles.setupLabel}>
             <Icon icon={Wrench} size="sm" tone="muted" />
@@ -1363,11 +1444,17 @@ const BuddyHomeContent: React.FC = () => {
               type="button"
               size="sm"
               variant={m.mode === "setup" ? "primary" : "ghost"}
+              disabled={operatorNeedsRetry}
               onClick={() => handleRunMode(m.mode)}
             >
               {m.label}
             </Button>
           ))}
+          {degraded && (
+            <Text size="1" color="gray" className={styles.setupNotice}>
+              Setup runs need the engine that just stopped answering.
+            </Text>
+          )}
         </Surface>
 
         {legacyCompatibility && draftId && (

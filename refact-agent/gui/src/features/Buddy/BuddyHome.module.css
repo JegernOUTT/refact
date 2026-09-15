@@ -69,6 +69,15 @@
   white-space: nowrap;
 }
 
+/* A failed work authority must not read as a colour swap on a 13px pill:
+ * the alert state gains an icon, a heavier border and its own outline ring. */
+.statusPillAlert {
+  gap: var(--rf-space-1);
+  border-width: var(--rf-focus-ring-w);
+  box-shadow: 0 0 0 var(--rf-hairline) var(--rf-color-danger);
+  letter-spacing: 0.02em;
+}
+
 /* Reserves the same slot the settings gear used to occupy so the centered
  * title stays balanced now that the gear lives in the first tab. */
 .topBarSpacer {
@@ -107,16 +116,41 @@
   min-height: 240px;
 }
 
-.statusCard {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--rf-space-2);
-  min-width: 0;
-  padding: var(--rf-space-2) var(--rf-space-3);
+/* When the Desk carries real work the scene drops to a strip: Pixel stays
+ * visible, but decoration never outranks the work above it. */
+.heroCardDemoted.heroCardDemoted [data-testid="buddy-world"] {
+  height: clamp(112px, 13vh, 150px);
+  min-height: 104px;
 }
 
-.statusText {
+/* Work authority failure banner. It leads the page so a total outage can
+ * never be mistaken for a quiet day. */
+.degradedCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-panel-pad);
+  border-color: var(--rf-color-danger);
+  box-shadow: inset var(--rf-focus-ring-w) 0 0 0 var(--rf-color-danger);
+}
+
+.degradedHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.degradedTitle,
+.degradedText {
+  min-width: 0;
+}
+
+.degradedActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
   min-width: 0;
 }
 
@@ -150,6 +184,11 @@
   padding: var(--rf-space-2) var(--rf-space-3);
 }
 
+.setupStrip[data-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
 .setupLabel {
   display: inline-flex;
   align-items: center;
@@ -163,6 +202,11 @@
   white-space: nowrap;
 }
 
+.setupNotice {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
 /* Panels now live in tabs (reusing the shared kit Tabs strip). Each data
  * panel gets a bounded slot so its internal scroll list keeps working; the
  * Settings tab is a tall form that grows naturally with the page scroll. */
@@ -170,12 +214,35 @@
   min-width: 0;
 }
 
+/* Content-sized columns that only stretch to equal widths when there is room,
+ * so narrow viewports scroll the strip instead of truncating every label.
+ * The scrollbar is kept visible rather than hover-only: at 360px the strip is
+ * the only way to reach the trailing tabs, and an invisible scroller reads as
+ * a dead end. */
 .tabsList {
   min-width: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rf-border-strong) transparent;
+  scroll-snap-type: x proximity;
 }
 
-/* Content-sized columns that only stretch to equal widths when there is room,
- * so narrow viewports scroll the strip instead of truncating every label. */
+.tabsList::-webkit-scrollbar {
+  height: var(--rf-space-1);
+}
+
+.tabsList::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tabsList::-webkit-scrollbar-thumb {
+  background-color: var(--rf-border-strong);
+  border-radius: var(--rf-radius-pill);
+}
+
+.tabsList [role="tab"] {
+  scroll-snap-align: start;
+}
+
 .tabs .tabsList {
   grid-auto-columns: minmax(max-content, 1fr);
 }

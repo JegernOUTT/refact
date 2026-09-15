@@ -55,6 +55,7 @@ import { formatFailureLabel } from "../features/Buddy/buddyUtils";
 import { useExecuteBuddyAction } from "../features/Buddy/hooks/useExecuteBuddyAction";
 import { executeBuddyNavigation } from "../features/Buddy/executeBuddyAction";
 import { PALETTES, STAGES } from "../features/Buddy/constants";
+import { SETUP_MODES } from "../features/Setup/setupModes";
 import type {
   BuddyOpportunity,
   BuddySuggestion,
@@ -322,12 +323,12 @@ describe("BuddyHome single work authority", () => {
       if (mode === "enabled")
         await screen.findByRole("region", { name: "Buddy Desk" });
       else await screen.findByRole("button", { name: "Retry work authority" });
-      for (const name of [
-        "Opportunities",
-        "Activity",
-        "Pulse",
-        "Recent errors",
-      ]) {
+      // Pulse and Opportunities were one-line redirects to the Desk once the
+      // operator owns the work, so they are retired outside legacy mode.
+      for (const name of ["Pulse", "Opportunities"]) {
+        expect(screen.queryByRole("tab", { name })).toBeNull();
+      }
+      for (const name of ["Recent errors", "Activity", "Settings"]) {
         await user.click(screen.getByRole("tab", { name }));
         expect(screen.queryByTestId("buddy-opportunities-feed")).toBeNull();
         expect(screen.queryByTestId("buddy-briefing-card")).toBeNull();
@@ -1629,7 +1630,7 @@ describe("BuddyHome_layout_contract", () => {
   it.each([
     ["enabled", "On"],
     ["disabled", "Local only"],
-    ["unavailable", "Off"],
+    ["unavailable", "Not responding"],
   ] as const)(
     "renders the %s work authority branch with its own status pill",
     async (mode, label) => {
@@ -1782,6 +1783,214 @@ describe("BuddyHome_layout_contract", () => {
         '.heroCardExpanded.heroCardExpanded [data-testid="buddy-world"]',
       ),
     ).toContain("height: clamp(280px, 38vh, 430px)");
+  });
+});
+
+describe("BuddyHome_operator_surface", () => {
+  const operatorProject = operatorStatus("enabled").project;
+  const record = (value: unknown) => ({ value, revision: 1, change_seq: 1 });
+  const envelope = (data: unknown) => ({
+    schema_version: 1,
+    project: operatorProject,
+    data,
+    next_cursor: null,
+  });
+  const workItem = (id: string, title: string) => ({
+    schema_version: 1,
+    id,
+    project: operatorProject,
+    subject: { resource_kind: "legacy_draft", resource_id: id, version: "1" },
+    kind: "proposal",
+    title,
+    state: "needs_attention",
+    native_sources: [],
+    current_artifact_id: `${id}-report`,
+    current_artifact_revision: 1,
+    last_material_change_at: "2026-01-01T00:00:00Z",
+  });
+  const surfaceHandlers = [
+    http.get("*/v1/buddy/opportunities", () =>
+      HttpResponse.json({ opportunities: [] }),
+    ),
+    http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
+    http.get("*/v1/stats/llm/summary", () =>
+      HttpResponse.json({
+        totals: { total_calls: 50, successful_calls: 48, total_tokens: 900 },
+      }),
+    ),
+    http.get("*/v1/setup/status", () =>
+      HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+    ),
+  ];
+
+  it("leads with the Desk and demotes the scene when work is waiting", async () => {
+    let workRequests = 0;
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get("*/v1/buddy/work", () => {
+        workRequests += 1;
+        return HttpResponse.json(
+          envelope([
+            record(workItem("desk-a", "Flaky provider keeps retrying")),
+            record(workItem("desk-b", "Two worktrees drifted apart")),
+          ]),
+        );
+      }),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyHome />, { store });
+
+    const desk = await screen.findByRole("region", { name: "Buddy Desk" });
+    expect(
+      await within(desk).findByText("Flaky provider keeps retrying"),
+    ).toBeInTheDocument();
+    expect(
+      within(desk).getByText("Two worktrees drifted apart"),
+    ).toBeInTheDocument();
+    expect(desk.compareDocumentPosition(screen.getByRole("tablist"))).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(
+      desk.compareDocumentPosition(screen.getByTestId("buddy-presence")),
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    await waitFor(() =>
+      expect(screen.getByTestId("buddy-home-hero").className).toContain(
+        "heroCardDemoted",
+      ),
+    );
+    // The fold probe must reuse the Desk's own cache entry, never a second fetch.
+    expect(workRequests).toBe(1);
+  });
+
+  it("keeps the scene at full height when the Desk has nothing waiting", async () => {
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get("*/v1/buddy/work", () => HttpResponse.json(envelope([]))),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyHome />, { store });
+
+    expect(
+      await screen.findByText("Nothing needs you right now."),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-home-hero").className).not.toContain(
+      "heroCardDemoted",
+    );
+  });
+
+  it.each([
+    [
+      "disabled",
+      [
+        "Pulse",
+        "Opportunities",
+        "Recent errors",
+        "Activity",
+        "Play",
+        "Settings",
+      ],
+    ],
+    ["enabled", ["Recent errors", "Activity", "Play", "Settings"]],
+    ["unavailable", ["Recent errors", "Activity", "Settings"]],
+  ] as const)(
+    "renders the %s tab set with no hollow signposts",
+    async (mode, tabs) => {
+      server.use(
+        ...surfaceHandlers,
+        http.get("*/v1/buddy/operator/status", () =>
+          HttpResponse.json(operatorStatus(mode)),
+        ),
+        http.get("*/v1/buddy/work", () => HttpResponse.json(envelope([]))),
+      );
+      const store = setUpStore({ ...CONFIG_STATE });
+      store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+      render(<BuddyHome />, { store });
+
+      await screen.findByTestId("buddy-home-content");
+      await waitFor(() =>
+        expect(
+          screen.getAllByRole("tab").map((tab) => tab.textContent),
+        ).toEqual([...tabs]),
+      );
+      const selected = screen.getByRole("tab", { selected: true });
+      expect(selected).toHaveTextContent(
+        mode === "disabled" ? "Pulse" : "Activity",
+      );
+    },
+  );
+
+  it("stops rendering cached progress and blocks setup runs when work authority fails", async () => {
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("unavailable")),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyHome />, { store });
+
+    const banner = await screen.findByTestId("buddy-operator-degraded");
+    expect(banner).toHaveAttribute("role", "alert");
+    expect(banner).toHaveTextContent(
+      "this is a connection failure, not an empty queue",
+    );
+    expect(
+      within(banner).getByRole("button", { name: "Retry work authority" }),
+    ).toBeInTheDocument();
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("buddy-world")).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("buddy-summary-strip")).not.toBeInTheDocument();
+    expect(screen.queryByText("View stats")).not.toBeInTheDocument();
+
+    const setupStrip = screen.getByTestId("buddy-setup-strip");
+    expect(setupStrip).toHaveAttribute("data-disabled", "true");
+    const setupButtons = within(setupStrip).getAllByRole("button");
+    expect(setupButtons).toHaveLength(SETUP_MODES.length);
+    for (const button of setupButtons) expect(button).toBeDisabled();
+
+    const pill = screen.getByTestId("buddy-operator-status");
+    expect(pill).toHaveAttribute("data-state", "unavailable");
+    expect(pill).toHaveTextContent("Not responding");
+  });
+
+  it("keeps the legacy surface whole when the operator is deliberately off", async () => {
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("disabled")),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyHome />, { store });
+
+    await screen.findByTestId("buddy-home-content");
+    expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("buddy-operator-degraded"),
+    ).not.toBeInTheDocument();
+    for (const button of within(
+      screen.getByTestId("buddy-setup-strip"),
+    ).getAllByRole("button")) {
+      expect(button).toBeEnabled();
+    }
   });
 });
 
