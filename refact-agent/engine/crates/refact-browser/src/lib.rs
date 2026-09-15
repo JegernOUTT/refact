@@ -1216,11 +1216,12 @@ pub fn is_transport_dead_error(error: &str) -> bool {
 
 /// CDP errors raised when a frame id, its execution context, or a handle inside it belongs to a
 /// generation of the document that the page has already replaced.
-pub const STALE_FRAME_MARKERS: [&str; 4] = [
+pub const STALE_FRAME_MARKERS: [&str; 5] = [
     "no frame for given id",
     "cannot find context with specified id",
     "execution context was destroyed",
     "cannot find object with given id",
+    "could not find object with given id",
 ];
 
 pub fn is_stale_frame_error(error: &str) -> bool {
