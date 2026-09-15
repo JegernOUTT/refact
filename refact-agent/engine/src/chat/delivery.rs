@@ -9,6 +9,12 @@
 //!   generation, never inside an open assistant/tool-result window.
 //! * `when_idle` — only after the whole turn (including the multi-step tool
 //!   loop) has finished.
+//!
+//! Session deliveries are persisted in the durable outbox before they are
+//! accepted, so transport is at-least-once across a restart. The recipient
+//! deduplicates by delivery id, which makes insertion logically exactly-once;
+//! it is not a claim about external side effects. See
+//! [`crate::coordination::outbox`].
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -19,8 +25,10 @@ use crate::app_state::AppState;
 use crate::chat::queue::process_command_queue;
 use crate::chat::trajectories::{maybe_save_trajectory_with_intent, try_save_trajectory_with_intent};
 use crate::chat::types::{
-    ChatSession, DeliveryOutcome, PendingDelivery, PushMode, SessionState, TrajectoryCommitIntent,
+    ChatSession, DeliveryOutcome, DeliveryStatus, PendingDelivery, PushMode, SessionState,
+    TrajectoryCommitIntent,
 };
+use crate::coordination::outbox;
 
 /// Deliver a batch of messages to `chat_id`.
 ///
@@ -73,31 +81,65 @@ pub async fn deliver_to_chat(
         .cloned()
         .ok_or_else(|| format!("chat '{chat_id}' is unavailable"))?;
 
-    let (outcome, wake, should_start_processor, processor_running, queue_notify) = {
+    // Durability first, and with no session lock held across store I/O: a
+    // delivery this engine cannot persist is not one it can claim to accept.
+    let source_root = crate::coordination::scope::session_source_root(&*session_arc.lock().await);
+    let project = outbox::project_key_for_root(&app, source_root).await;
+    let outbox = outbox::outbox_for(&app, project)
+        .await
+        .map_err(|error| format!("durable delivery outbox is unavailable: {error}"))?;
+    let delivery_id = delivery.id.clone();
+    if let Some(outbox) = &outbox {
+        outbox
+            .persist_accepted(chat_id, &delivery)
+            .await
+            .map_err(|error| format!("delivery could not be made durable: {error}"))?;
+        outbox
+            .mark_dispatched(&delivery_id)
+            .await
+            .map_err(|error| format!("delivery could not be made durable: {error}"))?;
+    }
+
+    let (accepted, status, wake, should_start_processor, processor_running, queue_notify) = {
         let mut session = session_arc.lock().await;
-        if session.closed {
-            return Err(format!("chat '{chat_id}' is closed"));
-        }
         let wake = delivery.wake;
-        let outcome = session.enqueue_delivery(delivery)?;
+        let accepted = if session.closed {
+            Err(format!("chat '{chat_id}' is closed"))
+        } else {
+            session.enqueue_delivery(delivery)
+        };
+        let status = session.delivery_status(&delivery_id);
         // Only a landed delivery can need a restart; queued ones will be drained
         // at their boundary by the turn that is already running.
-        let should_start_processor = wake
-            && (outcome == DeliveryOutcome::Delivered
-                || (outcome == DeliveryOutcome::Duplicate
-                    && !session.delivery_wake_sources.is_empty()))
-            && matches!(
+        let should_start_processor =
+            wake && accepted.as_ref().is_ok_and(|outcome| {
+                *outcome == DeliveryOutcome::Delivered
+                    || (*outcome == DeliveryOutcome::Duplicate
+                        && !session.delivery_wake_sources.is_empty())
+            }) && matches!(
                 session.runtime.state,
                 SessionState::Idle | SessionState::Completed | SessionState::WaitingUserInput
             );
         (
-            outcome,
+            accepted,
+            status,
             wake,
             should_start_processor,
             session.queue_processor_running.clone(),
             session.queue_notify.clone(),
         )
     };
+
+    // A refused delivery has a known outcome: it failed. Leaving it dispatched
+    // would report it forever as a message whose effect nobody knows.
+    let outcome = match accepted {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            record_outbox_status(outbox.as_ref(), &delivery_id, DeliveryStatus::Failed).await;
+            return Err(error);
+        }
+    };
+    record_outbox_status(outbox.as_ref(), &delivery_id, status).await;
 
     try_save_trajectory_with_intent(
         app.clone(),
@@ -161,31 +203,86 @@ pub async fn update_pending_delivery_in_chat(
     Ok(())
 }
 
+async fn record_outbox_status(
+    outbox: Option<&outbox::DeliveryOutbox>,
+    delivery_id: &str,
+    status: DeliveryStatus,
+) {
+    let Some(outbox) = outbox else {
+        return;
+    };
+    if let Err(error) = outbox.record_status(delivery_id, status).await {
+        tracing::warn!(%delivery_id, %error, "outbox could not record the delivery outcome");
+    }
+}
+
+/// Mirror what the recipient now reports into the durable outbox, so recovery
+/// after a restart never resurrects a message that already settled.
+async fn record_drained_statuses(
+    app: &AppState,
+    chat_id: &str,
+    source_root: Option<std::path::PathBuf>,
+    statuses: Vec<(String, DeliveryStatus)>,
+) {
+    if statuses.is_empty() {
+        return;
+    }
+    let project = outbox::project_key_for_root(app, source_root).await;
+    let outbox = match outbox::outbox_for(app, project).await {
+        Ok(Some(outbox)) => outbox,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(%chat_id, %error, "durable delivery outbox is unavailable");
+            return;
+        }
+    };
+    for (delivery_id, status) in statuses {
+        record_outbox_status(Some(&outbox), &delivery_id, status).await;
+    }
+}
+
 /// Land every pending delivery whose boundary is now open. Called from the
 /// generation/tool boundaries; safe to call when nothing is pending.
 pub async fn drain_deliveries_at_boundary(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> bool {
-    let (delivered, wake, processor_running, queue_notify) = {
+    let (delivered, wake, processor_running, queue_notify, chat_id, source_root, statuses) = {
         let mut session = session_arc.lock().await;
         session.drain_post_tool_side_effects();
         if session.pending_deliveries.is_empty() {
             return false;
         }
+        let tracked: Vec<String> = session
+            .pending_deliveries
+            .iter()
+            .map(|pending| pending.id.clone())
+            .collect();
         let (delivered_ids, wake) = session.drain_pending_deliveries();
+        let statuses: Vec<(String, DeliveryStatus)> = tracked
+            .into_iter()
+            .map(|id| {
+                let status = session.delivery_status(&id);
+                (id, status)
+            })
+            .collect();
 
         (
             !delivered_ids.is_empty(),
             wake,
             session.queue_processor_running.clone(),
             session.queue_notify.clone(),
+            session.chat_id.clone(),
+            crate::coordination::scope::session_source_root(&session),
+            statuses,
         )
     };
 
     if !delivered {
         return false;
     }
+
+    record_drained_statuses(&app, &chat_id, source_root, statuses).await;
 
     maybe_save_trajectory_with_intent(
         app.clone(),

@@ -936,6 +936,60 @@ impl CoordinationStore {
             .map_err(|err| from_tokio(&self.path, err))
     }
 
+    pub async fn list_outbox_messages_in_states(
+        &self,
+        access: &ProjectAccess,
+        states: &[DeliveryState],
+    ) -> Result<Vec<DeliveryOutboxRecord>, StoreError> {
+        let scope = self.scope(access)?;
+        let limit = self.settings.store_max_outbox_messages as i64;
+        if states.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted = sql_state_list(states);
+        self.conn
+            .call(move |conn| {
+                let sql = format!(
+                    "SELECT project, message_id, recipient, state, attempts, created_at_ms, \
+                     updated_at_ms, payload FROM delivery_outbox \
+                     WHERE project = ?1 AND state IN ({wanted}) \
+                     ORDER BY created_at_ms ASC, message_id ASC LIMIT ?2"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(params![scope, limit], outbox_columns)?;
+                let mut records = Vec::new();
+                for row in rows {
+                    records.push(decode_outbox(row?)?);
+                }
+                Ok(records)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// Delete settled outbox rows updated before `settled_before_ms`. A message
+    /// whose outcome is still unknown is never deleted, so recovery can always
+    /// surface it for inspection.
+    pub async fn prune_settled_outbox_messages(
+        &self,
+        access: &ProjectAccess,
+        settled_before_ms: i64,
+    ) -> Result<usize, StoreError> {
+        let scope = self.scope(access)?;
+        let terminal = sql_terminal_delivery_states();
+        self.conn
+            .call(move |conn| {
+                let sql = format!(
+                    "DELETE FROM delivery_outbox WHERE project = ?1 \
+                     AND state IN ({terminal}) AND updated_at_ms < ?2"
+                );
+                let removed = conn.execute(&sql, params![scope, settled_before_ms])?;
+                Ok(removed)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
     pub async fn delete_outbox_message(
         &self,
         access: &ProjectAccess,
@@ -1063,48 +1117,55 @@ impl CoordinationStore {
         let settings = self.settings.clone();
         self.conn
             .call(move |conn| {
-                let specs: [(&str, &[&str], &str, i64); 6] = [
+                let settled = format!("AND state IN ({})", sql_terminal_delivery_states());
+                let specs: [(&str, &[&str], &str, i64, &str); 6] = [
                     (
                         "engine_instances",
                         &["instance_id"],
                         "heartbeat_at_ms",
                         settings.store_max_engine_instances as i64,
+                        "",
                     ),
                     (
                         "run_intents",
                         &["runtime", "work_id", "attempt"],
                         "updated_at_ms",
                         settings.store_max_run_intents as i64,
+                        "",
                     ),
                     (
                         "queued_work",
                         &["runtime", "work_id"],
                         "enqueued_at_ms",
                         settings.store_max_queued_work as i64,
+                        "",
                     ),
                     (
                         "leases",
                         &["lease_key"],
                         "expires_at_ms",
                         settings.store_max_leases as i64,
+                        "",
                     ),
                     (
                         "delivery_outbox",
                         &["message_id"],
                         "updated_at_ms",
                         settings.store_max_outbox_messages as i64,
+                        settled.as_str(),
                     ),
                     (
                         "activity_observations",
                         &["record_id"],
                         "observed_at_ms",
                         settings.store_max_activity_observations as i64,
+                        "",
                     ),
                 ];
                 let mut report = PruneReport::default();
                 let tx =
                     conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                for (table, keys, order, limit) in specs {
+                for (table, keys, order, limit, filter) in specs {
                     let key_list = keys.join(", ");
                     let target = if keys.len() == 1 {
                         key_list.clone()
@@ -1112,8 +1173,8 @@ impl CoordinationStore {
                         format!("({key_list})")
                     };
                     let sql = format!(
-                        "DELETE FROM {table} WHERE project = ?1 AND {target} IN \
-                         (SELECT {key_list} FROM {table} WHERE project = ?1 \
+                        "DELETE FROM {table} WHERE project = ?1 {filter} AND {target} IN \
+                         (SELECT {key_list} FROM {table} WHERE project = ?1 {filter} \
                          ORDER BY {order} DESC LIMIT -1 OFFSET ?2)"
                     );
                     let removed = tx.execute(&sql, params![scope, limit])?;
@@ -1132,6 +1193,22 @@ impl CoordinationStore {
             .await
             .map_err(|err| from_tokio(&self.path, err))
     }
+}
+
+fn sql_state_list(states: &[DeliveryState]) -> String {
+    states
+        .iter()
+        .map(|state| format!("'{}'", state.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn sql_terminal_delivery_states() -> String {
+    let terminal = DeliveryState::ALL
+        .into_iter()
+        .filter(DeliveryState::is_terminal)
+        .collect::<Vec<_>>();
+    sql_state_list(&terminal)
 }
 
 fn prepare_parent_dir(path: &Path) -> Result<(), StoreError> {

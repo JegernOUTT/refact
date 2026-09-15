@@ -44,20 +44,30 @@ impl IntentState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryState {
+    /// Persisted and never dispatched: redelivering it repeats a transport
+    /// attempt that provably never reached the recipient.
     Pending,
+    /// Dispatched with no outcome recorded afterwards. The external effect is
+    /// unknown, so it is surfaced for inspection instead of being replayed.
     InFlight,
     Delivered,
+    Consumed,
     Failed,
     Expired,
+    Superseded,
+    Cancelled,
 }
 
 impl DeliveryState {
-    pub const ALL: [DeliveryState; 5] = [
+    pub const ALL: [DeliveryState; 8] = [
         DeliveryState::Pending,
         DeliveryState::InFlight,
         DeliveryState::Delivered,
+        DeliveryState::Consumed,
         DeliveryState::Failed,
         DeliveryState::Expired,
+        DeliveryState::Superseded,
+        DeliveryState::Cancelled,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -65,13 +75,28 @@ impl DeliveryState {
             DeliveryState::Pending => "pending",
             DeliveryState::InFlight => "in_flight",
             DeliveryState::Delivered => "delivered",
+            DeliveryState::Consumed => "consumed",
             DeliveryState::Failed => "failed",
             DeliveryState::Expired => "expired",
+            DeliveryState::Superseded => "superseded",
+            DeliveryState::Cancelled => "cancelled",
         }
     }
 
     pub fn parse(raw: &str) -> Option<DeliveryState> {
         DeliveryState::ALL.into_iter().find(|s| s.as_str() == raw)
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self, DeliveryState::Pending | DeliveryState::InFlight)
+    }
+
+    pub fn is_unknown_outcome(&self) -> bool {
+        matches!(self, DeliveryState::InFlight)
+    }
+
+    pub fn is_redeliverable(&self) -> bool {
+        matches!(self, DeliveryState::Pending)
     }
 }
 

@@ -105,6 +105,8 @@ pub async fn start_full_soak_background_tasks(gcx: Arc<GlobalContext>) -> Backgr
     let goal_monitor_app = app_state.clone();
     let background_agent_monitor_app = app_state.clone();
     let cache_maintenance_app = app_state.clone();
+    let outbox_app = app_state.clone();
+    let outbox_shutdown = gcx.shutdown_flag.clone();
     let background_agent_monitor_shutdown = gcx.shutdown_flag.clone();
     let trajectory_index_coordinator = gcx.trajectory_index_coordinator.clone();
     let trajectory_index_shutdown = gcx.shutdown_flag.clone();
@@ -130,6 +132,12 @@ pub async fn start_full_soak_background_tasks(gcx: Arc<GlobalContext>) -> Backgr
             background_agent_monitor_app,
             background_agent_monitor_shutdown,
         )),
+        tokio::spawn(
+            crate::coordination::outbox::outbox_recovery_background_task(
+                outbox_app,
+                outbox_shutdown,
+            ),
+        ),
         tokio::spawn(cache_maintenance_background_task(
             gcx.clone(),
             cache_maintenance_app,
@@ -163,6 +171,8 @@ pub async fn start_background_tasks(
     let goal_monitor_app = app_state.clone();
     let background_agent_monitor_app = app_state.clone();
     let cache_maintenance_app = app_state.clone();
+    let outbox_app = app_state.clone();
+    let outbox_shutdown = gcx.shutdown_flag.clone();
     let background_agent_monitor_shutdown = gcx.shutdown_flag.clone();
     let trajectory_index_coordinator = gcx.trajectory_index_coordinator.clone();
     let trajectory_index_shutdown = gcx.shutdown_flag.clone();
@@ -206,6 +216,12 @@ pub async fn start_background_tasks(
             background_agent_monitor_app,
             background_agent_monitor_shutdown,
         )),
+        tokio::spawn(
+            crate::coordination::outbox::outbox_recovery_background_task(
+                outbox_app,
+                outbox_shutdown,
+            ),
+        ),
         tokio::spawn(
             crate::providers::oauth_refresh::oauth_token_refresh_background_task(gcx.clone()),
         ),

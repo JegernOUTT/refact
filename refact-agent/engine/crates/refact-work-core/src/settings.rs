@@ -125,6 +125,11 @@ pub struct CoordinationSettings {
     pub store_max_leases: usize,
     pub store_max_outbox_messages: usize,
     pub store_max_activity_observations: usize,
+    /// How long a settled outbox message is kept before retention deletes it.
+    /// Messages whose outcome is still unknown are never pruned by age.
+    pub outbox_retention_secs: u64,
+    /// How often the durable outbox prunes settled messages.
+    pub outbox_prune_interval_secs: u64,
 }
 
 impl Default for CoordinationSettings {
@@ -224,6 +229,8 @@ impl Default for CoordinationSettings {
             store_max_leases: 16_384,
             store_max_outbox_messages: 65_536,
             store_max_activity_observations: 262_144,
+            outbox_retention_secs: 604_800,
+            outbox_prune_interval_secs: 3_600,
         }
     }
 }
@@ -506,6 +513,12 @@ impl CoordinationSettings {
         );
         at_least(
             &mut v,
+            "outbox_retention_secs",
+            self.outbox_retention_secs,
+            1,
+        );
+        at_least(
+            &mut v,
             "presence_stale_after_ms",
             self.presence_stale_after_ms,
             1,
@@ -516,6 +529,12 @@ impl CoordinationSettings {
             self.presence_heartbeat_interval_ms,
             "presence_stale_after_ms",
             self.presence_stale_after_ms,
+        );
+        at_least(
+            &mut v,
+            "outbox_prune_interval_secs",
+            self.outbox_prune_interval_secs,
+            1,
         );
         at_least(
             &mut v,
@@ -896,7 +915,11 @@ mod tests {
         assert!(settings.store_max_leases >= 1024);
         assert!(settings.store_max_outbox_messages >= 1024);
         assert!(settings.store_max_activity_observations >= 1024);
+        assert!(settings.outbox_retention_secs >= 86_400);
+        assert!(settings.outbox_prune_interval_secs >= 1);
         for mutate in [
+            |settings: &mut CoordinationSettings| settings.outbox_retention_secs = 0,
+            |settings: &mut CoordinationSettings| settings.outbox_prune_interval_secs = 0,
             |settings: &mut CoordinationSettings| settings.store_busy_timeout_ms = 0,
             |settings: &mut CoordinationSettings| settings.store_max_engine_instances = 0,
             |settings: &mut CoordinationSettings| settings.store_max_run_intents = 0,

@@ -14,6 +14,7 @@ pub mod catalog;
 pub mod deadlock;
 pub mod error;
 pub mod history;
+pub mod outbox;
 pub mod paging;
 pub mod peer_authority;
 pub mod presence;
