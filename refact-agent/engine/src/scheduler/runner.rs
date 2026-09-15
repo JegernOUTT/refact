@@ -311,11 +311,11 @@ impl CronRunner {
                 }
             }
             if task_can_use_cron_lane(&task) && handles.len() >= max_concurrent_runs {
-                self.defer_task(&task, now);
+                self.defer_for_backpressure(&task, now).await;
                 continue;
             }
             if task_can_use_cron_lane(&task) && self.run_semaphore.available_permits() == 0 {
-                self.defer_task(&task, now);
+                self.defer_for_backpressure(&task, now).await;
                 continue;
             }
             if !task_can_use_cron_lane(&task) {
@@ -323,7 +323,7 @@ impl CronRunner {
                 continue;
             }
             let Ok(permit) = self.run_semaphore.clone().try_acquire_owned() else {
-                self.defer_task(&task, now);
+                self.defer_for_backpressure(&task, now).await;
                 continue;
             };
             let store = self.store.clone();
@@ -949,6 +949,28 @@ impl CronRunner {
             .insert(task.id.clone(), now + IDLE_DEFER_MS);
     }
 
+    /// Backpressure is a deferral, not a failure: it reuses the delivery
+    /// rejection's `"deferred"` record so a throttled task is distinguishable
+    /// from an idle one, and it consumes no retry attempt.
+    async fn defer_for_backpressure(&mut self, task: &Job, now: u64) {
+        if let Err(error) = self
+            .record_run(
+                &task.id,
+                "deferred",
+                Some("scheduler at capacity".to_string()),
+                now,
+            )
+            .await
+        {
+            tracing::warn!(
+                "failed to record deferred scheduled task {}: {}",
+                task.id,
+                error
+            );
+        }
+        self.defer_task(task, now);
+    }
+
     fn defer_invalid_target_task(&mut self, task: &Job, now: u64) {
         self.deferred_until_ms
             .insert(task.id.clone(), now + INVALID_TARGET_DEFER_MS);
@@ -960,12 +982,13 @@ impl CronRunner {
         }
         if let Some(trigger_at_ms) = task.trigger_at_ms.filter(|at| *at <= now) {
             // A fresh explicit run-now overrides an older backoff; retrying the
-            // same rejected admission must still honor its defer timer.
-            let new_trigger = task.last_status.as_deref() != Some("deferred")
-                || task
-                    .recent_runs
-                    .last()
-                    .is_none_or(|run| trigger_at_ms > run.at_ms);
+            // same rejected admission must still honor its defer timer. Recency
+            // decides that, not `last_status`: a retry carries "error", and
+            // reading that as a fresh run-now skipped the window and hot-looped.
+            let new_trigger = task
+                .recent_runs
+                .last()
+                .is_none_or(|run| trigger_at_ms > run.at_ms);
             if new_trigger || !self.deferred_until_ms.contains_key(&task.id) {
                 return Some(trigger_at_ms);
             }
@@ -2765,7 +2788,14 @@ mod tests {
     }
 
     /// Cron-lane backpressure holds a retry back without touching its backoff
-    /// chain: the same attempt fires once a permit frees.
+    /// chain: the same attempt fires once the defer window elapses.
+    ///
+    /// F-7 moved three assertions here because they encoded the defects this
+    /// test was written alongside, not the contract: the deferral used to leave
+    /// `last_status` at `"error"` and add no run record (invisible backpressure),
+    /// and the retry used to be re-attempted at the very instant it had just
+    /// been deferred (the busy spin). The chain 60s -> 120s is what is
+    /// load-bearing; its absolute instants shift by one defer window.
     #[tokio::test]
     async fn saturated_cron_lane_defers_retry_without_losing_backoff() {
         let now = now_ms();
@@ -2797,20 +2827,157 @@ mod tests {
         assert_eq!(deferred.fire_count, 1);
         assert_eq!(deferred.retry_attempts, 1);
         assert_eq!(deferred.trigger_at_ms, Some(now + 60_000));
-        assert_eq!(deferred.last_status.as_deref(), Some("error"));
-        assert_eq!(deferred.recent_runs, after_first_fire.recent_runs);
+        assert_eq!(deferred.last_status.as_deref(), Some("deferred"));
+        assert_eq!(
+            deferred.recent_runs[..after_first_fire.recent_runs.len()],
+            after_first_fire.recent_runs[..]
+        );
+        assert_eq!(
+            deferred.recent_runs.len(),
+            after_first_fire.recent_runs.len() + 1
+        );
+        assert_eq!(deferred.recent_runs.last().unwrap().status, "deferred");
         assert_eq!(
             runner.deferred_until_ms.get("command_saturated_retry"),
             Some(&(now + 60_000 + IDLE_DEFER_MS))
         );
 
         drop(permit);
-        runner.fire_due_tasks(now + 60_000).await;
+        runner.fire_due_tasks(now + 60_000 + IDLE_DEFER_MS).await;
 
         let fired = store.get("command_saturated_retry").await.unwrap();
         assert_eq!(fired.fire_count, 2);
         assert_eq!(fired.retry_attempts, 2);
-        assert_eq!(fired.trigger_at_ms, Some(now + 180_000));
+        assert_eq!(
+            fired.trigger_at_ms,
+            Some(now + 60_000 + IDLE_DEFER_MS + 120_000)
+        );
+    }
+
+    /// The spin is ruled out by a *count*, never by a duration: a wall-clock
+    /// bound would measure the machine. This mirrors `run()` -- take the
+    /// earliest `scheduled_fire_at_ms`, advance a fake clock to it, fire -- and
+    /// a defer window that is not honoured returns an instant already in the
+    /// past, so the clock stands still while the wake-ups run away.
+    #[tokio::test]
+    async fn saturated_cron_lane_does_not_busy_spin_on_a_retrying_task() {
+        const WINDOW_MS: u64 = 5 * 60_000;
+        const MAX_WAKEUPS: u64 = WINDOW_MS / IDLE_DEFER_MS + 2;
+
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(one_shot_command_due_task(
+                "command_spin_guard",
+                now,
+                transient_failing_command(),
+            ))
+            .await
+            .unwrap();
+        let (_workspace, gcx) = gcx_with_session_and_config(SessionState::Idle, |config| {
+            config.max_concurrent_runs = 1;
+        })
+        .await;
+        let mut runner = CronRunner::new(store.clone(), gcx);
+
+        runner.fire_due_tasks(now).await;
+        let after_first_fire = store.get("command_spin_guard").await.unwrap();
+        assert_eq!(after_first_fire.last_status.as_deref(), Some("error"));
+        assert_eq!(after_first_fire.retry_attempts, 1);
+        assert_eq!(after_first_fire.trigger_at_ms, Some(now + 60_000));
+
+        let _permit = runner.run_semaphore.clone().try_acquire_owned().unwrap();
+        let mut clock = now;
+        let mut wakeups = 0u64;
+        while clock < now + WINDOW_MS {
+            let next = store
+                .list()
+                .await
+                .iter()
+                .filter_map(|task| runner.scheduled_fire_at_ms(task, clock))
+                .min()
+                .unwrap_or(clock + DEFAULT_SLEEP_MS);
+            clock = clock.max(next);
+            wakeups += 1;
+            assert!(
+                wakeups <= MAX_WAKEUPS,
+                "runner woke {wakeups} times within a {WINDOW_MS}ms window while the lane stayed \
+                 saturated (bound {MAX_WAKEUPS}): the defer window is not held and the loop spins"
+            );
+            runner.fire_due_tasks(clock).await;
+        }
+
+        let throttled = store.get("command_spin_guard").await.unwrap();
+        assert_eq!(throttled.last_status.as_deref(), Some("deferred"));
+        assert_eq!(throttled.fire_count, 1);
+        assert_eq!(throttled.retry_attempts, 1);
+        assert_eq!(throttled.trigger_at_ms, Some(now + 60_000));
+    }
+
+    /// The case that was broken: a retry carries `"error"`, and its defer window
+    /// must hold exactly as a rejected delivery's does. Without a defer entry
+    /// the same task stays due at its retry instant.
+    #[tokio::test]
+    async fn defer_window_is_honoured_while_last_status_is_error() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        let mut task = one_shot_command_due_task("command_defer_after_error", now, empty_command());
+        task.retry_attempts = 1;
+        task.trigger_at_ms = Some(now);
+        task.last_status = Some("error".to_string());
+        task.recent_runs = vec![CronRunRecord {
+            at_ms: now,
+            status: "error".to_string(),
+            error: Some("429 Too Many Requests".to_string()),
+        }];
+        store.add(task.clone()).await.unwrap();
+        let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
+        let mut runner = CronRunner::new(store.clone(), gcx);
+
+        assert!(runner.task_is_due(&task, now));
+
+        runner.defer_task(&task, now);
+
+        assert_eq!(
+            runner.scheduled_fire_at_ms(&task, now),
+            Some(now + IDLE_DEFER_MS)
+        );
+        assert!(!runner.task_is_due(&task, now + IDLE_DEFER_MS - 1));
+        assert!(runner.task_is_due(&task, now + IDLE_DEFER_MS));
+    }
+
+    /// A backpressured fire is a state, not silence: it must be distinguishable
+    /// from an idle task, and it must not spend a retry attempt.
+    #[tokio::test]
+    async fn backpressure_deferral_is_recorded_in_run_history() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        store
+            .add(command_due_task(
+                "command_backpressure_record",
+                now,
+                empty_command(),
+            ))
+            .await
+            .unwrap();
+        let (_workspace, gcx) = gcx_with_session_and_config(SessionState::Idle, |config| {
+            config.max_concurrent_runs = 1;
+        })
+        .await;
+        let mut runner = CronRunner::new(store.clone(), gcx);
+
+        let permit = runner.run_semaphore.clone().try_acquire_owned().unwrap();
+        runner.fire_due_tasks(now).await;
+        drop(permit);
+
+        let stored = store.get("command_backpressure_record").await.unwrap();
+        assert_eq!(stored.last_status.as_deref(), Some("deferred"));
+        assert_eq!(stored.recent_runs.len(), 1);
+        assert_eq!(stored.recent_runs[0].status, "deferred");
+        assert_eq!(stored.recent_runs[0].at_ms, now);
+        assert_eq!(stored.fire_count, 0);
+        assert_eq!(stored.retry_attempts, 0);
+        assert_eq!(stored.last_fired_at_ms, Some(now - 120_000));
     }
 
     #[tokio::test]
