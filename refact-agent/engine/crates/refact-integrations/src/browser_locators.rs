@@ -34,7 +34,7 @@ if (!window.__refact_inspect_element) {
       aria_label: el.getAttribute('aria-label') || null,
       role: el.getAttribute('role') || null,
       visible: rect.width > 0 && rect.height > 0 && visibility !== 'hidden' && visibility !== 'collapse',
-      enabled: !target.disabled,
+      enabled: !el.disabled,
       readonly: !!target.readOnly,
       content_editable: !!target.isContentEditable,
       value: (target.value !== undefined) ? String(target.value) : null,
@@ -372,12 +372,13 @@ mod tests {
         for read in [
             "target.tagName.toLowerCase()",
             "target.isContentEditable",
-            "enabled: !target.disabled",
             "readonly: !!target.readOnly",
             "value: (target.value !== undefined)",
         ] {
             assert!(INSPECT_ELEMENT_JS.contains(read), "missing {read}");
         }
+        assert!(INSPECT_ELEMENT_JS.contains("enabled: !el.disabled,"));
+        assert!(!INSPECT_ELEMENT_JS.contains("enabled: !target.disabled"));
     }
 
     #[test]

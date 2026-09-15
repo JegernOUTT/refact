@@ -6,10 +6,23 @@ use serde_json::Value;
 
 use crate::{
     ActionKind, ActionabilityDiagnostic, ActionabilityDriver, ActionabilityEngine,
-    ActionabilityTimeouts, CdpKeyboardDispatcher, CdpMouseDispatcher, ElementHandle,
+    ActionabilityTimeouts, CdpKeyboardDispatcher, CdpMouseDispatcher, ElementHandle, HandleError,
     HitTargetController, HitTargetPoint, HitTargetResult, Keyboard, LocatorOutcome, Mouse,
     MouseButton, SystemClock, WorldManager,
 };
+
+macro_rules! native_value_js {
+    () => {
+        r#"
+  const hasNativeValue = (node, tags) => {
+    if (!node || !tags.includes(node.tagName)) return false;
+    for (let proto = Object.getPrototypeOf(node); proto; proto = Object.getPrototypeOf(proto)) {
+      if (Object.getOwnPropertyDescriptor(proto, 'value')) return true;
+    }
+    return false;
+  };"#
+    };
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FillOutcome {
@@ -92,7 +105,7 @@ impl ActionabilityDriver for FormActionabilityDriver<'_> {
         self.world
             .element_states(self.tab, self.handle)
             .map_err(|error| match error {
-                crate::HandleError::Invalidated { .. } => ActionabilityDiagnostic::Detached,
+                HandleError::Invalidated { .. } => ActionabilityDiagnostic::Detached,
                 _ => ActionabilityDiagnostic::PrecheckFailed {
                     description: error.to_string(),
                 },
@@ -239,18 +252,28 @@ pub fn diagnostic_value(field_kind: &FieldKind, value: &str) -> String {
     }
 }
 
+const LABEL_RETARGET_NO_HANDLE: &str = "Element retargeting returned no handle";
+
+fn map_label_retarget_error(error: HandleError) -> Result<Option<ElementHandle>, FormError> {
+    match &error {
+        HandleError::Resolution(message) if message == LABEL_RETARGET_NO_HANDLE => Ok(None),
+        _ => Err(FormError::new(error.to_string())),
+    }
+}
+
 fn label_control(
     tab: &Tab,
     world: &WorldManager,
     handle: &ElementHandle,
     info: &ElementInfo,
-) -> Option<ElementHandle> {
+) -> Result<Option<ElementHandle>, FormError> {
     if info.tag != "label" {
-        return None;
+        return Ok(None);
     }
-    world
-        .call_function_handle_on(tab, handle, "function() { return this.control; }")
-        .ok()
+    match world.call_function_handle_on(tab, handle, "function() { return this.control; }") {
+        Ok(control) => Ok(Some(control)),
+        Err(error) => map_label_retarget_error(error),
+    }
 }
 
 pub fn fill(
@@ -278,7 +301,7 @@ pub fn fill(
             info.field_kind
         )));
     }
-    let control = label_control(tab, world, handle, info);
+    let control = label_control(tab, world, handle, info)?;
     let target = control.as_ref().unwrap_or(handle);
     let outcome =
         run_actionability(tab, world, target, ActionKind::Fill, false).and_then(|actionability| {
@@ -625,35 +648,34 @@ const PLAYWRIGHT_FILL_PREPARE: &str = r#"function(value) {
   return { needs_input: true };
 }"#;
 
-const VERIFY_VALUE: &str = r#"function(expected) {
+const VERIFY_VALUE: &str = concat!(
+    r#"function(expected) {
   const injected = globalThis.__refact_injected__;
-  const el = this.tagName === 'LABEL' && this.control ? this.control : this;
-  const hasNativeValue = (node) => {
-    const tag = node.tagName;
-    if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') return false;
-    const proto = Object.getPrototypeOf(node);
-    return !!(proto && Object.getOwnPropertyDescriptor(proto, 'value'));
-  };
+  const el = this.tagName === 'LABEL' && this.control ? this.control : this;"#,
+    native_value_js!(),
+    r#"
   if (!el || !el.isConnected) throw new Error('Element is not attached');
   if (el.isContentEditable) return { matches: (el.innerText || el.textContent || '') === expected };
-  if (!hasNativeValue(el)) return { matches: false, reason: 'not_editable' };
+  if (!hasNativeValue(el, ['INPUT', 'TEXTAREA', 'SELECT'])) return { matches: false, reason: 'not_editable' };
   let normalized = expected;
   const type = (el.type || '').toLowerCase();
   if (['date', 'time', 'datetime-local', 'month', 'range', 'week', 'number'].includes(type)) normalized = normalized.trim();
   if (type === 'color') normalized = normalized.trim().toLowerCase();
   if (type === 'password') return { matches: String(el.value || '').length === normalized.length };
   return { matches: String(el.value === undefined ? '' : el.value) === normalized };
-}"#;
+}"#
+);
 
 fn fallback_fill_function(strategy: &FillStrategy) -> &'static str {
     match strategy {
         FillStrategy::DomValueSetter => {
-            r#"function(text) {
+            concat!(
+                r#"function(text) {
   const injected = globalThis.__refact_injected__;
-  const el = this.tagName === 'LABEL' && this.control ? this.control : this;
-  const tag = el.tagName;
-  const proto = Object.getPrototypeOf(el);
-  if ((tag !== 'INPUT' && tag !== 'TEXTAREA') || !Object.getOwnPropertyDescriptor(proto, 'value'))
+  const el = this.tagName === 'LABEL' && this.control ? this.control : this;"#,
+                native_value_js!(),
+                r#"
+  if (!hasNativeValue(el, ['INPUT', 'TEXTAREA']))
     throw new Error('Element has no native value property');
   el.scrollIntoView({ block: 'center', behavior: 'instant' });
   el.focus();
@@ -662,12 +684,16 @@ fn fallback_fill_function(strategy: &FillStrategy) -> &'static str {
   el.dispatchEvent(new Event('change', { bubbles: true }));
   return true;
 }"#
+            )
         }
         FillStrategy::NativePrototypeSetter => {
-            r#"function(text) {
+            concat!(
+                r#"function(text) {
   const injected = globalThis.__refact_injected__;
-  const el = this.tagName === 'LABEL' && this.control ? this.control : this;
-  if (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')
+  const el = this.tagName === 'LABEL' && this.control ? this.control : this;"#,
+                native_value_js!(),
+                r#"
+  if (!hasNativeValue(el, ['INPUT', 'TEXTAREA']))
     throw new Error('Element has no native value property');
   const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
@@ -679,6 +705,7 @@ fn fallback_fill_function(strategy: &FillStrategy) -> &'static str {
   el.dispatchEvent(new Event('change', { bubbles: true }));
   return true;
 }"#
+            )
         }
         FillStrategy::ContentEditablePath => {
             r#"function(text) {
@@ -918,17 +945,65 @@ mod tests {
     #[test]
     fn verification_and_value_setters_reject_expando_values() {
         assert!(VERIFY_VALUE.contains(
-            "if (!hasNativeValue(el)) return { matches: false, reason: 'not_editable' };"
+            "if (!hasNativeValue(el, ['INPUT', 'TEXTAREA', 'SELECT'])) return { matches: false, \
+             reason: 'not_editable' };"
         ));
-        assert!(VERIFY_VALUE.contains("tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT'"));
         for strategy in [
             FillStrategy::DomValueSetter,
             FillStrategy::NativePrototypeSetter,
         ] {
-            assert!(
-                fallback_fill_function(&strategy).contains("Element has no native value property")
-            );
+            let function = fallback_fill_function(&strategy);
+            assert!(function.contains("if (!hasNativeValue(el, ['INPUT', 'TEXTAREA']))"));
+            assert!(function.contains("Element has no native value property"));
         }
+    }
+
+    #[test]
+    fn native_value_checks_walk_the_prototype_chain() {
+        for function in [
+            VERIFY_VALUE,
+            fallback_fill_function(&FillStrategy::DomValueSetter),
+            fallback_fill_function(&FillStrategy::NativePrototypeSetter),
+        ] {
+            assert!(function.contains(
+                "for (let proto = Object.getPrototypeOf(node); proto; proto = \
+                 Object.getPrototypeOf(proto)) {"
+            ));
+            assert!(function
+                .contains("if (Object.getOwnPropertyDescriptor(proto, 'value')) return true;"));
+            assert!(function.contains("if (!node || !tags.includes(node.tagName)) return false;"));
+            assert!(!function.contains("const proto = Object.getPrototypeOf(el);"));
+        }
+    }
+
+    #[test]
+    fn label_retarget_reports_protocol_failures_and_swallows_null_controls() {
+        assert_eq!(
+            map_label_retarget_error(HandleError::Resolution(
+                LABEL_RETARGET_NO_HANDLE.to_string()
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            map_label_retarget_error(HandleError::Protocol("Target closed".to_string()))
+                .unwrap_err()
+                .message,
+            "Target closed"
+        );
+        assert_eq!(
+            map_label_retarget_error(HandleError::Resolution("Node is detached".to_string()))
+                .unwrap_err()
+                .message,
+            "Node is detached"
+        );
+        assert_eq!(
+            map_label_retarget_error(HandleError::Invalidated {
+                object_id: "obj-7".to_string()
+            })
+            .unwrap_err()
+            .message,
+            "Element handle obj-7 is no longer valid"
+        );
     }
 
     #[test]
