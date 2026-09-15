@@ -40,6 +40,10 @@ pub struct CoordinationSettings {
     pub work_stream_timeout_ms: u64,
     pub work_reconnect_max_ms: u64,
     pub inspect_max_paths: usize,
+    /// How long an observed work-root existence probe is reused before the
+    /// directory is stat'ed again. Bounds the cost of reporting removed
+    /// checkouts: repeated projections inside this window probe nothing.
+    pub work_root_presence_ttl_ms: u64,
     pub capsule_token_budget: usize,
     pub capsule_max_rows: usize,
     pub min_interval_secs: u64,
@@ -165,6 +169,7 @@ impl Default for CoordinationSettings {
             work_stream_timeout_ms: 60_000,
             work_reconnect_max_ms: 10_000,
             inspect_max_paths: 200,
+            work_root_presence_ttl_ms: 60_000,
             capsule_token_budget: 1600,
             capsule_max_rows: 24,
             min_interval_secs: 60,
@@ -448,6 +453,12 @@ impl CoordinationSettings {
         );
         at_least(&mut v, "capsule_max_rows", self.capsule_max_rows as u64, 1);
         at_least(&mut v, "recent_window_secs", self.recent_window_secs, 1);
+        at_least(
+            &mut v,
+            "work_root_presence_ttl_ms",
+            self.work_root_presence_ttl_ms,
+            1,
+        );
         at_least(&mut v, "lock_timeout_secs", self.lock_timeout_secs, 1);
         at_least(
             &mut v,

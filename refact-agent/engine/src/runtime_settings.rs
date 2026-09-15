@@ -123,6 +123,7 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("min_interval_secs", 0, 86_400),
     coordination_integer("debounce_secs", 0, 3_600),
     coordination_integer("recent_window_secs", 60, 2_592_000),
+    coordination_integer("work_root_presence_ttl_ms", 100, 86_400_000),
     coordination_integer("lock_timeout_secs", 1, 3_600),
     coordination_integer("lock_poll_interval_ms", 1, 60_000),
     coordination_integer("approval_timeout_secs", 1, 604_800),

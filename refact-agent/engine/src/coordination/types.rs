@@ -182,6 +182,48 @@ impl WorkRootKind {
     }
 }
 
+/// Whether the directory behind a work root still exists on disk.
+///
+/// A removed or merged checkout keeps its registry record and stays
+/// inspectable, but it is no longer an active location. `Unknown` is the
+/// fail-closed answer: a probe that could not conclude (permission denied, IO
+/// error) never reports `Present` or `Missing`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RootPresence {
+    /// The checkout directory was observed on disk.
+    Present,
+    /// The recorded path is gone, or is no longer a directory.
+    Missing,
+    /// Not probed, or the probe could not conclude.
+    #[default]
+    Unknown,
+}
+
+impl RootPresence {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RootPresence::Present => "present",
+            RootPresence::Missing => "missing",
+            RootPresence::Unknown => "unknown",
+        }
+    }
+
+    /// True only when the checkout was positively observed. A root that is
+    /// missing or unproven is never counted as an active location.
+    pub fn is_active_location(&self) -> bool {
+        matches!(self, RootPresence::Present)
+    }
+
+    pub const ALL: [RootPresence; 3] = [
+        RootPresence::Present,
+        RootPresence::Missing,
+        RootPresence::Unknown,
+    ];
+}
+
 /// A location work happens in: the active worktree, or the source project
 /// checkout when the work is not worktree-scoped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,10 +242,15 @@ pub struct WorkRootRef {
     /// Absolute source workspace root. Redacted when privacy withholds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
+    /// Whether the checkout is still on disk. Defaults to `Unknown` so records
+    /// written before this field existed load without claiming to be live.
+    #[serde(default)]
+    pub presence: RootPresence,
 }
 
 impl WorkRootRef {
-    /// Drop everything that leaks a filesystem location.
+    /// Drop everything that leaks a filesystem location, including whether the
+    /// withheld path exists.
     pub fn redacted(&self) -> WorkRootRef {
         WorkRootRef {
             id: self.id.clone(),
@@ -212,6 +259,7 @@ impl WorkRootRef {
             branch: None,
             project: self.project.clone(),
             source_path: None,
+            presence: RootPresence::Unknown,
         }
     }
 }
@@ -527,6 +575,7 @@ mod tests {
                 branch: None,
                 project: "proj".to_string(),
                 source_path: Some("/p".to_string()),
+                presence: RootPresence::Present,
             },
             parent_chat_id: None,
             root_chat_id: None,
@@ -622,6 +671,36 @@ mod tests {
         let parsed: WorkInspectSelector =
             serde_json::from_value(serde_json::json!({"type": "project_worktrees"})).unwrap();
         assert_eq!(parsed, WorkInspectSelector::ProjectWorktrees);
+    }
+
+    #[test]
+    fn a_root_stored_before_presence_existed_loads_without_claiming_to_be_live() {
+        let legacy = serde_json::json!({
+            "id": "wt-1",
+            "kind": "worktree",
+            "path": "/p/wt-1",
+            "project": "proj",
+            "source_path": "/p"
+        });
+        let root: WorkRootRef = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(root.presence, RootPresence::Unknown);
+        assert!(!root.presence.is_active_location());
+    }
+
+    #[test]
+    fn presence_round_trips_through_its_string_form() {
+        for presence in RootPresence::ALL {
+            let json = serde_json::to_value(presence).unwrap();
+            assert_eq!(json, serde_json::json!(presence.as_str()));
+            assert_eq!(
+                serde_json::from_value::<RootPresence>(json).unwrap(),
+                presence
+            );
+        }
+        assert!(RootPresence::Present.is_active_location());
+        assert!(!RootPresence::Missing.is_active_location());
+        assert!(!RootPresence::Unknown.is_active_location());
     }
 
     #[test]

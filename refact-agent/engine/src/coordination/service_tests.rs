@@ -39,6 +39,136 @@ async fn fixture() -> (AppState, tempfile::TempDir, WorkCaller) {
     (app, dir, caller)
 }
 
+/// Register one worktree against the fixture project exactly as the worktree
+/// service persists it, and bind a live session to it.
+async fn registered_worktree(
+    app: &AppState,
+    source: &std::path::Path,
+    chat_id: &str,
+) -> (
+    crate::worktrees::service::WorktreeService,
+    crate::worktrees::types::WorktreeMeta,
+) {
+    let service = crate::worktrees::service::WorktreeService::new_async(
+        app.gcx.cache_dir.clone(),
+        source.to_path_buf(),
+    )
+    .await
+    .unwrap();
+    let mut registry = service.load_registry().await.unwrap();
+    let id = "wt-removed";
+    let root = service.worktree_path_for_id(id).unwrap();
+    tokio::fs::create_dir_all(&root).await.unwrap();
+    let meta = crate::worktrees::types::WorktreeMeta {
+        id: id.to_string(),
+        kind: "chat".to_string(),
+        root: root.clone(),
+        source_workspace_root: registry.source_workspace_root.clone(),
+        repo_root: registry.source_workspace_root.clone(),
+        branch: Some("feature".to_string()),
+        base_branch: None,
+        base_commit: None,
+        task_id: None,
+        card_id: None,
+        agent_id: None,
+        enforce: false,
+    };
+    registry
+        .records
+        .push(crate::worktrees::types::WorktreeRegistryRecord {
+            meta: meta.clone(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            last_seen_at: None,
+            references: Vec::new(),
+            last_known_status: None,
+        });
+    service.save_registry(&registry).await.unwrap();
+
+    let mut session = ChatSession::new(chat_id.to_string());
+    session.work_project_root = Some(source.to_path_buf());
+    session.thread.title = "work in the worktree".into();
+    session.thread.worktree = Some(meta.clone());
+    app.chat
+        .sessions
+        .write()
+        .await
+        .insert(chat_id.to_string(), Arc::new(Mutex::new(session)));
+    (service, meta)
+}
+
+#[serial(coordination_work_overview)]
+#[tokio::test]
+async fn a_removed_worktree_stays_inspectable_but_stops_reading_as_an_active_location() {
+    let (app, dir, caller) = fixture().await;
+    let (service, meta) = registered_worktree(&app, dir.path(), "in-worktree").await;
+    let touched = meta.root.join("touched.rs");
+    std::fs::write(&touched, "hello").unwrap();
+    crate::file_activity::record_read(Some("in-worktree"), &touched, "hello", 1, 1, 1, None);
+
+    super::roots::reset_presence_cache_for_test();
+    let live = overview(&app, &caller, WorkOverviewRequest::default())
+        .await
+        .unwrap();
+    let live_row = live
+        .rows
+        .iter()
+        .find(|row| row.chat_id.as_deref() == Some("in-worktree"))
+        .unwrap();
+    assert_eq!(live_row.root.presence, RootPresence::Present);
+    assert!(live_row.root.presence.is_active_location());
+
+    let registry_before = std::fs::read(service.registry_path()).unwrap();
+    std::fs::remove_dir_all(&meta.root).unwrap();
+    super::roots::reset_presence_cache_for_test();
+
+    let gone = overview(&app, &caller, WorkOverviewRequest::default())
+        .await
+        .unwrap();
+    let gone_row = gone
+        .rows
+        .iter()
+        .find(|row| row.chat_id.as_deref() == Some("in-worktree"))
+        .unwrap();
+    assert_eq!(gone_row.root.presence, RootPresence::Missing);
+    assert!(!gone_row.root.presence.is_active_location());
+    assert!(gone
+        .roots
+        .iter()
+        .any(|root| root.id == meta.id && root.presence == RootPresence::Missing));
+
+    let inventory = inspect(
+        &app,
+        &caller,
+        InspectRequest {
+            selector: InspectSelector::ProjectWorktrees {},
+            cursor: None,
+            limit: Some(50),
+        },
+    )
+    .await
+    .unwrap();
+    let listed = inventory
+        .page
+        .roots
+        .iter()
+        .find(|root| root.id == meta.id)
+        .expect("a removed worktree stays an inspectable historical record");
+    assert_eq!(listed.presence, RootPresence::Missing);
+
+    // Reporting a missing root must never repair, prune or recreate anything.
+    assert_eq!(
+        std::fs::read(service.registry_path()).unwrap(),
+        registry_before
+    );
+    assert!(!meta.root.exists());
+    let reloaded = service.load_registry().await.unwrap();
+    assert!(reloaded
+        .records
+        .iter()
+        .any(|record| record.meta.id == meta.id));
+}
+
 #[serial(coordination_work_overview)]
 #[tokio::test]
 async fn shared_projection_paginates_without_gaps_and_rejects_changed_state() {

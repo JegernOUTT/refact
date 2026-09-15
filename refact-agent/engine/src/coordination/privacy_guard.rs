@@ -125,7 +125,9 @@ pub fn clear_roots(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coordination::types::{Disclosure, WorkKindTag, WorkRootKind, WorkRootRef, WorkStateTag};
+    use crate::coordination::types::{
+        Disclosure, RootPresence, WorkKindTag, WorkRootKind, WorkRootRef, WorkStateTag,
+    };
     use refact_privacy::{Attribution, PrivacyPolicy, ShellBehavior, Zone};
     use refact_work_core::WorkKey;
 
@@ -145,6 +147,7 @@ mod tests {
                 branch: None,
                 project: "project".into(),
                 source_path: None,
+                presence: RootPresence::Unknown,
             },
             parent_chat_id: None,
             root_chat_id: None,

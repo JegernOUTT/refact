@@ -94,12 +94,15 @@ fn row_from_session(session: &ChatSession, roots: &ProjectRoots, stale: bool) ->
             .get(&meta.id)
             .cloned()
             .unwrap_or_else(|| roots::worktree_root_ref(meta)),
-        None => roots::project_root_ref(
-            session
-                .work_project_root
-                .as_deref()
-                .expect("scoped before projection"),
-        ),
+        None => {
+            let fresh = roots::project_root_ref(
+                session
+                    .work_project_root
+                    .as_deref()
+                    .expect("scoped before projection"),
+            );
+            roots.get(&fresh.id).cloned().unwrap_or(fresh)
+        }
     };
     let state = session_state(session);
     let attention = matches!(state, WorkStateTag::WaitingApproval | WorkStateTag::Failed)
