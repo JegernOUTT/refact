@@ -508,6 +508,8 @@ fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         live_usize("process_subscribe_preview_bytes", 50, 100_000),
         live_usize("review_diff_char_cap", 4_096, 8_388_608),
         live_usize("review_max_diff_patch_bytes", 4_096, 268_435_456),
+        live_usize("plan_checkpoint_delta_threshold", 1, 10_000),
+        live_usize("plan_projection_max_chars", 1_024, 1_048_576),
     ];
     fields.extend(coordination_settings_fields(true));
     fields
@@ -831,7 +833,7 @@ mod tests {
         );
         assert_eq!(
             initial.fields.len(),
-            47 + crate::runtime_settings::coordination_field_bounds().len()
+            49 + crate::runtime_settings::coordination_field_bounds().len()
         );
         assert!(initial
             .fields

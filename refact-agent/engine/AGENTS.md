@@ -231,15 +231,30 @@ Returns `{ "seq": number, "truncated": false }` for normal notes. Notes are capp
 
 #### `get_plan`
 
-Model-facing prompt: "Read the current plan installed on this chat. Returns the merged current content, mode, base version, creation timestamp, and delta count."
+Model-facing prompt: "Read the current plan installed on this chat. Returns the bounded current projection, mode, base version, creation timestamp, delta count, and checkpoint provenance when older updates were folded."
 
 Schema:
 
 ```json
-{ "type": "object", "properties": {}, "required": [] }
+{
+  "type": "object",
+  "properties": {
+    "include_history": { "type": "boolean", "description": "Return the complete append-only delta history instead of only the bounded projection." }
+  },
+  "required": []
+}
 ```
 
-Returns `{ "plan": null }` when no plan is installed or `{ "plan": { "content", "mode", "version", "created_at_ms", "delta_count" } }`. `content` is synthesized from the base `plan` plus append-only `plan_delta` notes; the base plan bytes are not rewritten.
+Returns `{ "plan": null }` when no plan is installed or `{ "plan": { "content", "mode", "version", "created_at_ms", "delta_count", "checkpoint" } }`, plus `history` when `include_history` is true. `content` is the deterministic projection of the base `plan` plus append-only `plan_delta` notes; the base plan bytes are never rewritten.
+
+### Approved-base checkpoints
+
+`crates/refact-chat-api/src/role_projection.rs` holds one pure `project_role()` used by both hidden roles. Given the approved base and the ordered deltas it always returns byte-identical text, so the same trajectory projects the same way on every read.
+
+- The approved base body is copied verbatim and is never truncated or rewritten; only the delta region is bounded.
+- Deltas beyond `plan_checkpoint_delta_threshold` (or beyond `plan_projection_max_chars`) collapse into a checkpoint line carrying approval provenance — folded revision, approved base version, installing mode, and `created_at_ms`. The most recent deltas stay verbatim.
+- Checkpointing is a context-budget decision, not a retention decision: nothing is removed from the trajectory, no `Never`-exempt message is dropped, and no wire prefix changes. `get_plan`/`get_goal` with `include_history: true` return the complete delta trail.
+- Both bounds are live trajectory settings registered in `src/runtime_settings.rs` and published by `http/routers/v1/settings_config.rs`; read them through `runtime_settings::plan_projection_limits()`.
 
 ### Goal tools
 
@@ -283,15 +298,23 @@ Returns `{ "seq": number, "truncated": false }` for normal notes. Notes are capp
 
 #### `get_goal`
 
-Model-facing prompt: "Read the current goal installed on this chat. Returns merged goal content, status, version, delta count, budget counters, latest verifier verdict, and gaps."
+Model-facing prompt: "Read the current goal installed on this chat. Returns the bounded goal projection, checkpoint provenance, status, version, delta count, budget counters, latest verifier verdict, and gaps."
 
 Schema:
 
 ```json
-{ "type": "object", "properties": {}, "required": [] }
+{
+  "type": "object",
+  "properties": {
+    "include_history": { "type": "boolean", "description": "Return the complete append-only delta history instead of only the bounded projection." }
+  },
+  "required": []
+}
 ```
 
-Returns `{ "goal": null }` when no goal is installed or `{ "goal": { "content", "status", "version", "delta_count", "turns_used", "tokens_used", "latest_verdict", "gaps" } }`. `content` is synthesized from the base `goal` plus append-only `goal_delta` notes; the base goal bytes are not rewritten.
+Returns `{ "goal": null }` when no goal is installed or `{ "goal": { "content", "checkpoint", "status", "version", "delta_count", "turns_used", "tokens_used", "latest_verdict", "gaps" } }`, plus `history` when `include_history` is true. `content` is the deterministic projection of the base `goal` plus append-only `goal_delta` notes (see Approved-base checkpoints); the base goal bytes are never rewritten.
+
+Goal restore keeps persisted status separate from authorization-to-autocontinue: loading a trajectory never re-arms pursuit on its own, and an explicitly paused or stopped goal stays that way even when the base goal message still records `active: true`.
 
 #### `validate_goal`
 

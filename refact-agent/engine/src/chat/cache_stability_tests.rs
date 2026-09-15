@@ -738,6 +738,75 @@ fn cache_stability_append_only_event_at_tail_preserves_prior_prefix() {
     assert!(is_append_only_prefix(&prev_body, &next_body));
 }
 
+/// Crossing a plan checkpoint is a projection decision only: every
+/// `Never`-exempt delta stays on the wire and the already-cached prefix bytes
+/// are untouched.
+#[test]
+fn cache_stability_plan_checkpoint_appends_without_changing_the_prior_wire_prefix() {
+    let approved = "# Approved plan\n\nNon-goal: never rewrite the approved base.";
+    let delta = |seq: u64| {
+        crate::chat::internal_roles::plan_delta(
+            "tool.update_plan",
+            json!({"seq": seq}),
+            format!("- update {seq}"),
+        )
+    };
+    let mut messages = vec![
+        system("stable system"),
+        user("approve the plan"),
+        crate::chat::internal_roles::plan("task_planner", 1, approved, None),
+    ];
+    messages.extend((1..=24u64).map(delta));
+    messages.push(assistant("worked through the first batch"));
+    messages.push(user("keep going"));
+    let before = messages.clone();
+    messages.extend((25..=60u64).map(delta));
+
+    let limits = refact_chat_api::role_projection::ProjectionLimits {
+        checkpoint_after_deltas: 24,
+        max_chars: 4_096,
+    };
+    let mut session = ChatSession::new("plan-checkpoint-wire".to_string());
+    session.messages = messages.clone();
+    let projection = crate::chat::plan_role::project_current_plan(&session, limits).unwrap();
+
+    assert_eq!(projection.checkpoint.unwrap().folded_deltas, 36);
+    assert!(projection.text.starts_with(approved));
+    assert_eq!(
+        session.messages[2].content.content_text_only(),
+        approved,
+        "the approved base message bytes must never be rewritten"
+    );
+
+    for anthropic in [false, true] {
+        let body = |messages: Vec<ChatMessage>| {
+            let request = LlmRequest::new("test/cache-openai".to_string(), messages).with_params(
+                CommonParams {
+                    max_tokens: 1024,
+                    ..Default::default()
+                },
+            );
+            sanitize_body_for_cache_guard(&if anthropic {
+                normalize_claude_code_cache_body(claude_body(&request, "claude-opus-4"))
+            } else {
+                openai_body(&request, "cache-openai")
+            })
+        };
+        let old = body(before.clone());
+        let new = body(messages.clone());
+
+        assert!(is_append_only_prefix(&old, &new), "anthropic={anthropic}");
+        assert_eq!(old["messages"][2], new["messages"][2]);
+        let serialized = new.to_string();
+        for seq in 1..=60u64 {
+            assert!(
+                serialized.contains(&format!("plan-update seq=\\\"{seq}\\\"")),
+                "delta {seq} dropped from the wire (anthropic={anthropic})"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn completed_prefix_fork_keeps_parent_wire_bytes_and_thinking_signatures_per_provider() {
     let model = "test/cache-openai";

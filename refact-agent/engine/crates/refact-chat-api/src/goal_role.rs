@@ -2,6 +2,10 @@ use refact_core::chat_types::ChatMessage;
 
 use crate::GoalBudget;
 use crate::internal_roles::{self, EVENT_ROLE, GOAL_ROLE};
+use crate::role_projection::{
+    delta_revision, project_role, ApprovedBase, ProjectedDelta, ProjectedRole, ProjectionLimits,
+    RoleProjection,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoalInstallReport {
@@ -86,6 +90,58 @@ pub fn synthesize_current_goal<S: GoalRoleSession + ?Sized>(session: &S) -> Opti
         .collect::<Vec<_>>()
         .join("\n\n");
     Some(format!("{base}\n\n---\n\n## Goal updates\n\n{notes}"))
+}
+
+/// The complete append-only audit trail: every delta note with its revision,
+/// in order. Checkpointing never removes an entry from this list.
+pub fn goal_delta_history<S: GoalRoleSession + ?Sized>(session: &S) -> Vec<(u64, String)> {
+    goal_delta_events(session)
+        .into_iter()
+        .enumerate()
+        .map(|(index, message)| {
+            (
+                delta_revision(message, index),
+                message.content.content_text_only(),
+            )
+        })
+        .collect()
+}
+
+/// Bounded, deterministic projection of the approved base plus its deltas.
+pub fn project_current_goal<S: GoalRoleSession + ?Sized>(
+    session: &S,
+    limits: ProjectionLimits,
+) -> Option<RoleProjection> {
+    let base = current_base_goal(session)?;
+    let body = base.content.content_text_only();
+    let meta = base.extra.get("goal");
+    let approved = ApprovedBase {
+        message_id: &base.message_id,
+        mode: meta
+            .and_then(|meta| meta.get("mode"))
+            .and_then(|mode| mode.as_str())
+            .unwrap_or_default(),
+        version: goal_version(base).unwrap_or(1),
+        created_at_ms: meta
+            .and_then(|meta| meta.get("created_at_ms"))
+            .and_then(|created| created.as_u64())
+            .unwrap_or(0),
+        body: &body,
+    };
+    let history = goal_delta_history(session);
+    let deltas: Vec<ProjectedDelta<'_>> = history
+        .iter()
+        .map(|(revision, note)| ProjectedDelta {
+            seq: *revision,
+            note,
+        })
+        .collect();
+    Some(project_role(
+        ProjectedRole::Goal,
+        &approved,
+        &deltas,
+        limits,
+    ))
 }
 
 pub fn goal_history<S: GoalRoleSession + ?Sized>(session: &S) -> Vec<&ChatMessage> {

@@ -1,6 +1,10 @@
 use refact_core::chat_types::ChatMessage;
 
 use crate::internal_roles::{self, EVENT_ROLE, PLAN_ROLE};
+use crate::role_projection::{
+    delta_revision, project_role, ApprovedBase, ProjectedDelta, ProjectedRole, ProjectionLimits,
+    RoleProjection,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanInstallReport {
@@ -83,6 +87,58 @@ pub fn synthesize_current_plan<S: PlanRoleSession + ?Sized>(session: &S) -> Opti
         .collect::<Vec<_>>()
         .join("\n\n");
     Some(format!("{base}\n\n---\n\n## Plan updates\n\n{notes}"))
+}
+
+/// The complete append-only audit trail: every delta note with its revision,
+/// in order. Checkpointing never removes an entry from this list.
+pub fn plan_delta_history<S: PlanRoleSession + ?Sized>(session: &S) -> Vec<(u64, String)> {
+    plan_delta_events(session)
+        .into_iter()
+        .enumerate()
+        .map(|(index, message)| {
+            (
+                delta_revision(message, index),
+                message.content.content_text_only(),
+            )
+        })
+        .collect()
+}
+
+/// Bounded, deterministic projection of the approved base plus its deltas.
+pub fn project_current_plan<S: PlanRoleSession + ?Sized>(
+    session: &S,
+    limits: ProjectionLimits,
+) -> Option<RoleProjection> {
+    let base = current_base_plan(session)?;
+    let body = base.content.content_text_only();
+    let meta = base.extra.get("plan");
+    let approved = ApprovedBase {
+        message_id: &base.message_id,
+        mode: meta
+            .and_then(|meta| meta.get("mode"))
+            .and_then(|mode| mode.as_str())
+            .unwrap_or_default(),
+        version: plan_version(base).unwrap_or(1),
+        created_at_ms: meta
+            .and_then(|meta| meta.get("created_at_ms"))
+            .and_then(|created| created.as_u64())
+            .unwrap_or(0),
+        body: &body,
+    };
+    let history = plan_delta_history(session);
+    let deltas: Vec<ProjectedDelta<'_>> = history
+        .iter()
+        .map(|(revision, note)| ProjectedDelta {
+            seq: *revision,
+            note,
+        })
+        .collect();
+    Some(project_role(
+        ProjectedRole::Plan,
+        &approved,
+        &deltas,
+        limits,
+    ))
 }
 
 pub fn plan_history<S: PlanRoleSession + ?Sized>(session: &S) -> Vec<&ChatMessage> {

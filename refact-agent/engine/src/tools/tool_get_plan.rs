@@ -21,7 +21,11 @@ impl ToolGetPlan {
     }
 }
 
-fn plan_value(session: &ChatSession, message: &ChatMessage) -> Result<Value, String> {
+fn plan_value(
+    session: &ChatSession,
+    message: &ChatMessage,
+    include_history: bool,
+) -> Result<Value, String> {
     let meta = message
         .extra
         .get("plan")
@@ -38,17 +42,27 @@ fn plan_value(session: &ChatSession, message: &ChatMessage) -> Result<Value, Str
         .get("created_at_ms")
         .and_then(Value::as_u64)
         .ok_or_else(|| "current plan is missing created_at_ms".to_string())?;
-    let content = plan_role::synthesize_current_plan(session)
-        .ok_or_else(|| "current plan could not be synthesized".to_string())?;
-    let delta_count = plan_role::plan_delta_events(session).len();
+    let projection =
+        plan_role::project_current_plan(session, crate::runtime_settings::plan_projection_limits())
+            .ok_or_else(|| "current plan could not be synthesized".to_string())?;
 
-    Ok(json!({
-        "content": content,
+    let mut value = json!({
+        "content": projection.text,
         "mode": mode,
         "version": version,
         "created_at_ms": created_at_ms,
-        "delta_count": delta_count,
-    }))
+        "delta_count": projection.delta_count,
+        "checkpoint": projection.checkpoint,
+    });
+    if include_history {
+        value["history"] = Value::Array(
+            plan_role::plan_delta_history(session)
+                .into_iter()
+                .map(|(revision, note)| json!({"seq": revision, "content": note}))
+                .collect(),
+        );
+    }
+    Ok(value)
 }
 
 fn output_message(tool_call_id: &str, value: Value) -> Result<ContextEnum, String> {
@@ -75,10 +89,15 @@ impl Tool for ToolGetPlan {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Read the current plan installed on this chat. Returns the merged current content, mode, base version, creation timestamp, and delta count.".to_string(),
+            description: "Read the current plan installed on this chat. Returns the bounded current projection, mode, base version, creation timestamp, delta count, and checkpoint provenance when older updates were folded.".to_string(),
             input_schema: json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "include_history": {
+                        "type": "boolean",
+                        "description": "Return the complete append-only delta history instead of only the bounded projection.",
+                    }
+                },
                 "required": [],
             }),
             output_schema: None,
@@ -90,8 +109,12 @@ impl Tool for ToolGetPlan {
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
         tool_call_id: &String,
-        _args: &HashMap<String, Value>,
+        args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let include_history = args
+            .get("include_history")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let (sessions, chat_id) = {
             let ccx = ccx.lock().await;
             (ccx.app.chat.sessions.clone(), ccx.chat_id.clone())
@@ -105,7 +128,7 @@ impl Tool for ToolGetPlan {
             .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
         let session = session_arc.lock().await.accepted_control_projection();
         let plan = match plan_role::current_base_plan(&session) {
-            Some(message) => plan_value(&session, message)?,
+            Some(message) => plan_value(&session, message, include_history)?,
             None => Value::Null,
         };
         Ok((
@@ -137,6 +160,11 @@ mod tests {
     };
     use crate::tools::tool_set_plan::ToolSetPlan;
     use crate::tools::tool_update_plan::ToolUpdatePlan;
+    use refact_chat_api::role_projection::ProjectionLimits;
+    use serial_test::serial;
+
+    const APPROVED_BASE: &str =
+        "# Approved plan\n\nShip M5.\n\nNon-goal: do not compact ordinary chat messages.";
 
     async fn ccx(app: AppState, chat_id: &str) -> Arc<AMutex<AtCommandsContext>> {
         Arc::new(AMutex::new(
@@ -393,6 +421,166 @@ mod tests {
         assert_eq!(output["plan"]["created_at_ms"], json!(created_at_ms));
         assert_eq!(output["plan"]["delta_count"], json!(2));
     }
+    fn plan_session_with_deltas(chat_id: &str, count: usize) -> ChatSession {
+        let mut session = ChatSession::new(chat_id.to_string());
+        session.install_plan("task_planner", APPROVED_BASE);
+        for seq in 1..=count {
+            session.add_message(internal_roles::plan_delta(
+                "tool.update_plan",
+                json!({"seq": seq}),
+                format!("- update {seq}"),
+            ));
+        }
+        session
+    }
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn get_plan_checkpoints_two_hundred_deltas_without_losing_approved_constraints() {
+        crate::runtime_settings::reset_for_test();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let chat_id = "get-plan-checkpoint";
+        insert_session(&app, plan_session_with_deltas(chat_id, 200)).await;
+        let limits = crate::runtime_settings::plan_projection_limits();
+
+        let output = result_json(
+            ToolGetPlan::new(String::new())
+                .tool_execute(
+                    ccx(app.clone(), chat_id).await,
+                    &"tc".to_string(),
+                    &HashMap::new(),
+                )
+                .await
+                .unwrap(),
+        );
+
+        let content = output["plan"]["content"].as_str().unwrap();
+        assert_eq!(output["plan"]["delta_count"], json!(200));
+        assert!(content.chars().count() <= limits.max_chars);
+        assert!(content.starts_with(APPROVED_BASE));
+        assert!(content.contains("Non-goal: do not compact ordinary chat messages."));
+        assert!(content.ends_with("- update 200"));
+        assert_eq!(
+            output["plan"]["checkpoint"]["folded_deltas"],
+            json!(200 - limits.checkpoint_after_deltas)
+        );
+        assert_eq!(output["plan"]["checkpoint"]["approved_version"], json!(1));
+        assert_eq!(
+            output["plan"]["checkpoint"]["approved_by"],
+            json!("task_planner")
+        );
+        assert!(output["plan"].get("history").is_none());
+
+        let messages = session_messages(&app, chat_id).await;
+        assert_eq!(messages[0].content.content_text_only(), APPROVED_BASE);
+        assert!(messages[0].extra["plan"].get("truncated").is_none());
+        assert_eq!(messages.iter().filter(|m| m.role == "event").count(), 200);
+    }
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn get_plan_history_recovers_the_full_audit_trail_after_checkpointing() {
+        crate::runtime_settings::reset_for_test();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let chat_id = "get-plan-history";
+        insert_session(&app, plan_session_with_deltas(chat_id, 200)).await;
+
+        let output = result_json(
+            ToolGetPlan::new(String::new())
+                .tool_execute(
+                    ccx(app.clone(), chat_id).await,
+                    &"tc".to_string(),
+                    &HashMap::from([("include_history".to_string(), json!(true))]),
+                )
+                .await
+                .unwrap(),
+        );
+
+        let history = output["plan"]["history"].as_array().unwrap();
+        assert!(
+            output["plan"]["checkpoint"]["folded_deltas"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(history.len(), 200);
+        assert_eq!(history[0], json!({"seq": 1, "content": "- update 1"}));
+        assert_eq!(history[199], json!({"seq": 200, "content": "- update 200"}));
+    }
+
+    #[tokio::test]
+    async fn legacy_plan_trajectory_without_checkpoint_loads_and_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        {
+            *app.workspace
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap() = vec![dir.path().to_path_buf()];
+        }
+        let trajectories_dir = dir.path().join(".refact").join("trajectories");
+        tokio::fs::create_dir_all(&trajectories_dir).await.unwrap();
+        let mut messages = vec![json!({
+            "role": "plan",
+            "content": "legacy base\n\nNon-goal: stay legacy.",
+            "plan": {"mode": "agent", "version": 1, "created_at_ms": 7}
+        })];
+        for index in 1..=100 {
+            messages.push(json!({
+                "role": "event",
+                "content": format!("- legacy update {index}"),
+                "event": {"subkind": "plan_delta", "source": "tool.update_plan", "payload": {}}
+            }));
+        }
+        tokio::fs::write(
+            trajectories_dir.join("legacy-plan.json"),
+            json!({
+                "id": "legacy-plan",
+                "title": "Legacy",
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "model": "model",
+                "mode": "agent",
+                "tool_use": "agent",
+                "messages": messages,
+                "include_project_info": true,
+                "checkpoints_enabled": true
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+
+        let loaded = load_trajectory_for_chat(gcx, "legacy-plan").await.unwrap();
+        let session =
+            session_from_snapshot("legacy-plan".to_string(), loaded.thread, loaded.messages);
+
+        let projection = plan_role::project_current_plan(
+            &session,
+            ProjectionLimits {
+                checkpoint_after_deltas: 10,
+                max_chars: 4_096,
+            },
+        )
+        .unwrap();
+        let checkpoint = projection.checkpoint.expect("checkpoint");
+
+        assert_eq!(projection.delta_count, 100);
+        assert_eq!(checkpoint.folded_deltas, 90);
+        assert_eq!(checkpoint.revision, 90);
+        assert_eq!(checkpoint.approved_version, 1);
+        assert_eq!(checkpoint.approved_at_ms, 7);
+        assert!(projection
+            .text
+            .starts_with("legacy base\n\nNon-goal: stay legacy."));
+        assert!(projection.text.ends_with("- legacy update 100"));
+        assert_eq!(plan_role::plan_delta_history(&session).len(), 100);
+    }
+
     #[tokio::test]
     async fn accepted_control_pending_plan_is_read_without_delivery() {
         let gcx = crate::global_context::tests::make_test_gcx().await;

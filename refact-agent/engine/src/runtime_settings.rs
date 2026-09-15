@@ -45,6 +45,10 @@ const AGENT_DIFF_MAX_OUTPUT_BYTES_DEFAULT: usize = 4_194_304;
 const PROCESS_SUBSCRIBE_PREVIEW_BYTES_DEFAULT: usize = 2_000;
 const REVIEW_DIFF_CHAR_CAP_DEFAULT: usize = 400_000;
 const REVIEW_MAX_DIFF_PATCH_BYTES_DEFAULT: usize = 4_194_304;
+const PLAN_CHECKPOINT_DELTA_THRESHOLD_DEFAULT: usize =
+    refact_chat_api::role_projection::DEFAULT_CHECKPOINT_DELTA_THRESHOLD;
+const PLAN_PROJECTION_MAX_CHARS_DEFAULT: usize =
+    refact_chat_api::role_projection::DEFAULT_PROJECTION_MAX_CHARS;
 
 pub use refact_work_core::CoordinationSettings;
 
@@ -298,6 +302,12 @@ pub struct TrajectoryRuntimeSettings {
     pub process_subscribe_preview_bytes: usize,
     pub review_diff_char_cap: usize,
     pub review_max_diff_patch_bytes: usize,
+    /// Deltas kept verbatim in a hidden plan/goal projection before older ones
+    /// fold into an approved-base checkpoint. Never touches what is on disk.
+    pub plan_checkpoint_delta_threshold: usize,
+    /// Upper bound on the projected hidden plan/goal text. The approved base is
+    /// always kept in full; only the delta region is bounded.
+    pub plan_projection_max_chars: usize,
     pub coordination: CoordinationSettings,
 }
 
@@ -353,6 +363,8 @@ impl Default for TrajectoryRuntimeSettings {
             process_subscribe_preview_bytes: PROCESS_SUBSCRIBE_PREVIEW_BYTES_DEFAULT,
             review_diff_char_cap: REVIEW_DIFF_CHAR_CAP_DEFAULT,
             review_max_diff_patch_bytes: REVIEW_MAX_DIFF_PATCH_BYTES_DEFAULT,
+            plan_checkpoint_delta_threshold: PLAN_CHECKPOINT_DELTA_THRESHOLD_DEFAULT,
+            plan_projection_max_chars: PLAN_PROJECTION_MAX_CHARS_DEFAULT,
             coordination: CoordinationSettings::default(),
         }
     }
@@ -732,7 +744,28 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
         4_096,
         268_435_456,
     )?;
+    validate_usize(
+        "plan_checkpoint_delta_threshold",
+        settings.plan_checkpoint_delta_threshold,
+        1,
+        10_000,
+    )?;
+    validate_usize(
+        "plan_projection_max_chars",
+        settings.plan_projection_max_chars,
+        1_024,
+        1_048_576,
+    )?;
     validate_coordination(&settings.coordination)
+}
+
+/// Live bounds for the deterministic hidden plan/goal projection.
+pub fn plan_projection_limits() -> refact_chat_api::role_projection::ProjectionLimits {
+    let settings = current();
+    refact_chat_api::role_projection::ProjectionLimits {
+        checkpoint_after_deltas: settings.plan_checkpoint_delta_threshold,
+        max_chars: settings.plan_projection_max_chars,
+    }
 }
 
 /// Range-check every coordination leaf against the published bounds table, then

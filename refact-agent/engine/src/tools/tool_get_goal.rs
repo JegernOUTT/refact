@@ -26,6 +26,7 @@ fn goal_value(
     session: &ChatSession,
     message: &ChatMessage,
     live: Option<&GoalSnapshot>,
+    include_history: bool,
 ) -> Result<Value, String> {
     let meta = message
         .extra
@@ -38,12 +39,15 @@ fn goal_value(
     let goal = crate::chat::goal_snapshot_from_messages(&session.messages, live)
         .ok_or("current goal projection unavailable")?;
     let latest = goal.attempts.last();
-    let content = goal_role::synthesize_current_goal(session)
-        .ok_or_else(|| "current goal could not be synthesized".to_string())?;
-    let delta_count = goal_role::goal_delta_events(session).len();
+    let projection =
+        goal_role::project_current_goal(session, crate::runtime_settings::plan_projection_limits())
+            .ok_or_else(|| "current goal could not be synthesized".to_string())?;
+    let content = projection.text;
+    let delta_count = projection.delta_count;
 
-    Ok(json!({
+    let mut value = json!({
         "content": content,
+        "checkpoint": projection.checkpoint,
         "status": goal.status,
         "active": goal.active,
         "version": version,
@@ -56,7 +60,16 @@ fn goal_value(
         "snoozed_until_ms": goal.snoozed_until_ms,
         "latest_verdict": latest.map(|attempt| &attempt.verdict),
         "gaps": latest.map(|attempt| attempt.gaps.as_slice()).unwrap_or_default(),
-    }))
+    });
+    if include_history {
+        value["history"] = Value::Array(
+            goal_role::goal_delta_history(session)
+                .into_iter()
+                .map(|(revision, note)| json!({"seq": revision, "content": note}))
+                .collect(),
+        );
+    }
+    Ok(value)
 }
 
 fn output_message(tool_call_id: &str, value: Value) -> Result<ContextEnum, String> {
@@ -83,10 +96,15 @@ impl Tool for ToolGetGoal {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Read the current goal installed on this chat. Returns merged goal content, status, version, delta count, budget counters, latest verifier verdict, and gaps.".to_string(),
+            description: "Read the current goal installed on this chat. Returns the bounded goal projection, checkpoint provenance, status, version, delta count, budget counters, latest verifier verdict, and gaps.".to_string(),
             input_schema: json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "include_history": {
+                        "type": "boolean",
+                        "description": "Return the complete append-only delta history instead of only the bounded projection.",
+                    }
+                },
                 "required": [],
             }),
             output_schema: None,
@@ -98,8 +116,12 @@ impl Tool for ToolGetGoal {
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
         tool_call_id: &String,
-        _args: &HashMap<String, Value>,
+        args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let include_history = args
+            .get("include_history")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let (sessions, chat_id) = {
             let ccx = ccx.lock().await;
             (ccx.app.chat.sessions.clone(), ccx.chat_id.clone())
@@ -114,7 +136,7 @@ impl Tool for ToolGetGoal {
         let live = session_arc.lock().await;
         let session = live.accepted_control_projection();
         let goal = match goal_role::current_base_goal(&session) {
-            Some(message) => goal_value(&session, message, live.goal.as_ref())?,
+            Some(message) => goal_value(&session, message, live.goal.as_ref(), include_history)?,
             None => Value::Null,
         };
         Ok((

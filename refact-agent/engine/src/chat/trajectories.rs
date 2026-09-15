@@ -18922,6 +18922,79 @@ mod tests {
         assert_eq!(rehydrated.event_seq, 0);
     }
 
+    /// Persisted goal status and authorization-to-autocontinue are separate:
+    /// the base goal message still says `active: true`, but a paused goal must
+    /// come back paused and must not re-arm pursuit on load.
+    #[tokio::test]
+    async fn loading_a_paused_goal_does_not_rearm_autonomous_pursuit() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        {
+            *app.workspace
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap() = vec![dir.path().to_path_buf()];
+        }
+
+        let mut session = ChatSession::new("goal-paused-restore".to_string());
+        session.thread.title = "Paused goal".to_string();
+        session.created_at = "2024-01-01T00:00:00Z".to_string();
+        session.install_goal("agent", "ship the card", true, GoalBudget::default());
+        session.goal_set_status_reason(GoalStatus::Paused, "goal_control");
+        assert!(!session.goal_can_pursue());
+
+        save_trajectory_snapshot(gcx.clone(), trajectory_snapshot_from_session(&session))
+            .await
+            .unwrap();
+        let loaded = load_trajectory_for_chat(gcx, "goal-paused-restore")
+            .await
+            .unwrap();
+
+        assert_eq!(loaded.goal.as_ref().unwrap().status, GoalStatus::Paused);
+        assert!(loaded.messages.iter().any(|message| {
+            message.role == "goal" && message.extra["goal"]["active"] == json!(true)
+        }));
+
+        let rehydrated = ChatSession::new_with_trajectory(
+            "goal-paused-restore".to_string(),
+            loaded.messages,
+            loaded.thread,
+            loaded.created_at,
+            loaded.wake_up_at,
+            loaded.waiting_for_card_ids,
+            loaded.goal,
+        );
+
+        assert_eq!(rehydrated.goal_status, Some(GoalStatus::Paused));
+        assert_eq!(rehydrated.runtime.goal_status, Some(GoalStatus::Paused));
+        assert!(!rehydrated.goal_can_pursue());
+        assert!(rehydrated.command_queue.is_empty());
+    }
+
+    /// A fresh load with no persisted projection must not resurrect pursuit
+    /// from the base message either.
+    #[test]
+    fn a_paused_goal_pinned_in_message_metadata_reloads_paused_without_a_prior() {
+        let mut session = ChatSession::new("goal-paused-meta".to_string());
+        session.install_goal("agent", "ship the card", true, GoalBudget::default());
+        let base = session
+            .messages
+            .iter_mut()
+            .find(|message| message.role == "goal")
+            .unwrap();
+        base.extra["goal"]["status"] = json!("paused");
+
+        let seeded = crate::chat::goal_snapshot_from_messages(&session.messages, None).unwrap();
+
+        assert_eq!(seeded.status, GoalStatus::Paused);
+        assert_eq!(
+            clamp_goal_snapshot_for_load(seeded).status,
+            GoalStatus::Paused
+        );
+    }
+
     #[tokio::test]
     async fn wake_up_at_is_none_in_trajectories_created_before_field_existed() {
         let dir = tempfile::tempdir().unwrap();

@@ -13,6 +13,7 @@ pub mod internal_roles;
 pub mod notification_event;
 pub mod plan_role;
 pub mod question;
+pub mod role_projection;
 pub mod tool_enrichment;
 
 pub use goal_ledger::{
