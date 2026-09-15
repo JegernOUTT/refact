@@ -192,10 +192,45 @@ pub struct QueuedWorkRecord {
 pub struct LeaseRecord {
     pub project: ProjectKey,
     pub lease_key: String,
+    /// Engine instance behind `owner_token`, so a stale holder can be looked up
+    /// in engine presence instead of being guessed at.
+    pub holder_instance: String,
     pub owner_token: String,
     pub fencing_generation: i64,
     pub acquired_at_ms: i64,
     pub expires_at_ms: i64,
+}
+
+impl LeaseRecord {
+    pub fn is_expired(&self, at_ms: i64) -> bool {
+        at_ms >= self.expires_at_ms
+    }
+
+    pub fn authority(&self) -> LeaseAuthority {
+        LeaseAuthority {
+            lease_key: self.lease_key.clone(),
+            owner_token: self.owner_token.clone(),
+            fencing_generation: self.fencing_generation,
+        }
+    }
+}
+
+/// What a writer presents to prove it still owns the work it is writing about.
+/// A write carrying a generation the lease no longer has is rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseAuthority {
+    pub lease_key: String,
+    pub owner_token: String,
+    pub fencing_generation: i64,
+}
+
+/// The outcome of an atomic acquisition attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseAcquisition {
+    Acquired(LeaseRecord),
+    /// Someone else's row is in the way. Expiry alone does not authorize taking
+    /// it: that is an explicit, presence-checked takeover.
+    Held(LeaseRecord),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

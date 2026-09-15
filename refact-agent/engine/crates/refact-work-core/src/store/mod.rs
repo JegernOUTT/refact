@@ -8,8 +8,8 @@ use crate::settings::{CoordinationSettings, SettingsError};
 use filesystem::FilesystemKind;
 use records::{
     AccessKind, ActivityObservationRecord, DeliveryOutboxRecord, DeliveryState,
-    EngineInstanceRecord, IntentState, LeaseRecord, PresenceMark, PruneReport, QueuedWorkRecord,
-    RunIntentRecord,
+    EngineInstanceRecord, IntentState, LeaseAcquisition, LeaseAuthority, LeaseRecord, PresenceMark,
+    PruneReport, QueuedWorkRecord, RunIntentRecord,
 };
 use rusqlite::{params, OptionalExtension};
 use std::fmt;
@@ -76,6 +76,22 @@ pub enum StoreError {
         expected: i64,
         found: i64,
     },
+    /// The presented owner token holds no such lease, so it has no authority.
+    LeaseNotHeld {
+        lease_key: String,
+    },
+    /// The lease exists and is still the caller's, but its term ran out.
+    LeaseExpired {
+        lease_key: String,
+        expires_at_ms: i64,
+        now_ms: i64,
+    },
+    /// The lease moved on to a newer generation: this writer was fenced out.
+    LeaseFenced {
+        lease_key: String,
+        presented: i64,
+        held: i64,
+    },
     Settings(SettingsError),
 }
 
@@ -120,6 +136,28 @@ impl fmt::Display for StoreError {
             StoreError::GenerationConflict { expected, found } => {
                 write!(f, "generation conflict: expected {expected}, found {found}")
             }
+            StoreError::LeaseNotHeld { lease_key } => write!(
+                f,
+                "lease `{lease_key}` is not held by this owner token; it carries no authority"
+            ),
+            StoreError::LeaseExpired {
+                lease_key,
+                expires_at_ms,
+                now_ms,
+            } => write!(
+                f,
+                "lease `{lease_key}` expired at {expires_at_ms} and it is now {now_ms}; \
+                 authority was lost and must be acquired again"
+            ),
+            StoreError::LeaseFenced {
+                lease_key,
+                presented,
+                held,
+            } => write!(
+                f,
+                "lease `{lease_key}` moved to generation {held}; a write stamped with \
+                 generation {presented} is fenced out and was rejected"
+            ),
             StoreError::Settings(err) => write!(f, "{err}"),
         }
     }
@@ -203,6 +241,28 @@ enum CasOutcome {
     Updated(Box<RunIntentRecord>),
     Missing,
     Conflict(i64),
+}
+
+impl CasOutcome {
+    fn landed(&self) -> bool {
+        matches!(self, CasOutcome::Updated(_))
+    }
+}
+
+/// A generation-fenced write: the lease is checked and the write applied in one
+/// transaction, so a takeover can never slip between the two.
+enum FencedOutcome {
+    Wrote(CasOutcome),
+    NotHeld,
+    Expired(i64),
+    Fenced(i64),
+}
+
+enum LeaseWrite {
+    Wrote(Box<LeaseRecord>),
+    NotHeld,
+    Expired(i64),
+    Fenced(i64),
 }
 
 pub struct CoordinationStore {
@@ -606,61 +666,104 @@ impl CoordinationStore {
             .call(move |conn| {
                 let tx =
                     conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                let current: Option<i64> = tx
+                let outcome = cas_run_intent(
+                    &tx,
+                    &scope,
+                    runtime,
+                    &work_id,
+                    attempt,
+                    expected_generation,
+                    next_state,
+                    updated_at_ms,
+                )?;
+                if outcome.landed() {
+                    tx.commit()?;
+                } else {
+                    tx.rollback()?;
+                }
+                Ok(outcome)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))?;
+        cas_result(outcome, run_label, expected_generation)
+    }
+
+    /// Apply a run-intent transition only while the presented lease still has
+    /// authority. A stale writer's update is rejected without touching the row.
+    pub async fn compare_and_set_run_intent_fenced(
+        &self,
+        access: &ProjectAccess,
+        authority: &LeaseAuthority,
+        now_at_ms: i64,
+        run: &RunKey,
+        expected_generation: i64,
+        next_state: IntentState,
+        updated_at_ms: i64,
+    ) -> Result<RunIntentRecord, StoreError> {
+        let scope = self.scope(access)?;
+        let runtime = run.work.runtime.as_str();
+        let work_id = run.work.id.clone();
+        let attempt = run.attempt as i64;
+        let run_label = run.to_string();
+        let lease_key = authority.lease_key.clone();
+        let presented = authority.fencing_generation;
+        let authority = authority.clone();
+        let outcome = self
+            .conn
+            .call(move |conn| {
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let held: Option<(String, i64, i64)> = tx
                     .query_row(
-                        "SELECT generation FROM run_intents WHERE project = ?1 AND runtime = ?2 \
-                         AND work_id = ?3 AND attempt = ?4",
-                        params![scope, runtime, work_id, attempt],
-                        |row| row.get(0),
+                        "SELECT owner_token, fencing_generation, expires_at_ms FROM leases \
+                         WHERE project = ?1 AND lease_key = ?2",
+                        params![scope, authority.lease_key],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .optional()?;
-                let generation = match current {
-                    Some(generation) => generation,
-                    None => {
-                        tx.rollback()?;
-                        return Ok(CasOutcome::Missing);
+                let outcome = match held {
+                    None => FencedOutcome::NotHeld,
+                    Some((owner_token, generation, expires_at_ms)) => {
+                        if generation != authority.fencing_generation {
+                            FencedOutcome::Fenced(generation)
+                        } else if owner_token != authority.owner_token {
+                            FencedOutcome::NotHeld
+                        } else if now_at_ms >= expires_at_ms {
+                            FencedOutcome::Expired(expires_at_ms)
+                        } else {
+                            FencedOutcome::Wrote(cas_run_intent(
+                                &tx,
+                                &scope,
+                                runtime,
+                                &work_id,
+                                attempt,
+                                expected_generation,
+                                next_state,
+                                updated_at_ms,
+                            )?)
+                        }
                     }
                 };
-                if generation != expected_generation {
-                    tx.rollback()?;
-                    return Ok(CasOutcome::Conflict(generation));
+                match &outcome {
+                    FencedOutcome::Wrote(cas) if cas.landed() => tx.commit()?,
+                    _ => tx.rollback()?,
                 }
-                let next_generation = generation + 1;
-                tx.execute(
-                    "UPDATE run_intents SET generation = ?5, state = ?6, updated_at_ms = ?7 \
-                     WHERE project = ?1 AND runtime = ?2 AND work_id = ?3 AND attempt = ?4",
-                    params![
-                        scope,
-                        runtime,
-                        work_id,
-                        attempt,
-                        next_generation,
-                        next_state.as_str(),
-                        updated_at_ms
-                    ],
-                )?;
-                tx.commit()?;
-                let runtime = RuntimeKind::parse(runtime)
-                    .ok_or_else(|| decode(format!("unknown runtime kind `{runtime}`")))?;
-                Ok(CasOutcome::Updated(Box::new(RunIntentRecord {
-                    project: ProjectKey::new(scope),
-                    run: RunKey::new(WorkKey::new(runtime, work_id), attempt as u64),
-                    generation: next_generation,
-                    state: next_state,
-                    updated_at_ms,
-                })))
+                Ok(outcome)
             })
             .await
             .map_err(|err| from_tokio(&self.path, err))?;
         match outcome {
-            CasOutcome::Updated(record) => Ok(*record),
-            CasOutcome::Missing => Err(StoreError::NotFound {
-                kind: "run intent",
-                id: run_label,
+            FencedOutcome::Wrote(cas) => cas_result(cas, run_label, expected_generation),
+            FencedOutcome::NotHeld => Err(StoreError::LeaseNotHeld { lease_key }),
+            FencedOutcome::Expired(expires_at_ms) => Err(StoreError::LeaseExpired {
+                lease_key,
+                expires_at_ms,
+                now_ms: now_at_ms,
             }),
-            CasOutcome::Conflict(found) => Err(StoreError::GenerationConflict {
-                expected: expected_generation,
-                found,
+            FencedOutcome::Fenced(held) => Err(StoreError::LeaseFenced {
+                lease_key,
+                presented,
+                held,
             }),
         }
     }
@@ -776,27 +879,228 @@ impl CoordinationStore {
         let record = record.clone();
         self.conn
             .call(move |conn| {
-                conn.execute(
-                    "INSERT INTO leases (project, lease_key, owner_token, fencing_generation, \
-                     acquired_at_ms, expires_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-                     ON CONFLICT(project, lease_key) DO UPDATE SET \
-                     owner_token = excluded.owner_token, \
-                     fencing_generation = excluded.fencing_generation, \
-                     acquired_at_ms = excluded.acquired_at_ms, \
-                     expires_at_ms = excluded.expires_at_ms",
-                    params![
-                        scope,
-                        record.lease_key,
-                        record.owner_token,
-                        record.fencing_generation,
-                        record.acquired_at_ms,
-                        record.expires_at_ms
-                    ],
-                )?;
+                conn.execute(LEASE_UPSERT_SQL, lease_params(&scope, &record))?;
                 Ok(())
             })
             .await
             .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// Acquire `lease_key` atomically: either this owner token holds it with a
+    /// definite generation afterwards, or someone else's row is reported back
+    /// untouched. An expired row belonging to another owner is *not* taken —
+    /// that requires [`CoordinationStore::take_over_lease`].
+    pub async fn try_acquire_lease(
+        &self,
+        access: &ProjectAccess,
+        lease_key: &str,
+        holder_instance: &str,
+        owner_token: &str,
+        now_at_ms: i64,
+        expires_at_ms: i64,
+    ) -> Result<LeaseAcquisition, StoreError> {
+        let scope = self.scope(access)?;
+        let candidate = LeaseRecord {
+            project: access.project().clone(),
+            lease_key: lease_key.to_string(),
+            holder_instance: holder_instance.to_string(),
+            owner_token: owner_token.to_string(),
+            fencing_generation: 1,
+            acquired_at_ms: now_at_ms,
+            expires_at_ms,
+        };
+        self.conn
+            .call(move |conn| {
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let held = tx
+                    .query_row(
+                        &lease_select("WHERE project = ?1 AND lease_key = ?2"),
+                        params![scope, candidate.lease_key],
+                        lease_from_row,
+                    )
+                    .optional()?;
+                let acquired = match held {
+                    Some(held) if held.owner_token != candidate.owner_token => {
+                        tx.rollback()?;
+                        return Ok(LeaseAcquisition::Held(held));
+                    }
+                    // The same owner re-acquiring after expiry starts a new term
+                    // of authority, so it is fenced like any other change.
+                    Some(held) => LeaseRecord {
+                        fencing_generation: held.fencing_generation
+                            + i64::from(held.is_expired(candidate.acquired_at_ms)),
+                        acquired_at_ms: if held.is_expired(candidate.acquired_at_ms) {
+                            candidate.acquired_at_ms
+                        } else {
+                            held.acquired_at_ms
+                        },
+                        ..candidate
+                    },
+                    None => candidate,
+                };
+                tx.execute(LEASE_UPSERT_SQL, lease_params(&scope, &acquired))?;
+                tx.commit()?;
+                Ok(LeaseAcquisition::Acquired(acquired))
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// Extend the term of a lease this owner still holds. The generation is
+    /// deliberately untouched: renewal fences nobody.
+    pub async fn renew_lease(
+        &self,
+        access: &ProjectAccess,
+        authority: &LeaseAuthority,
+        now_at_ms: i64,
+        expires_at_ms: i64,
+    ) -> Result<LeaseRecord, StoreError> {
+        self.write_lease_row(
+            access,
+            &authority.lease_key,
+            authority.fencing_generation,
+            Some(&authority.owner_token),
+            Some(now_at_ms),
+            move |held| LeaseRecord {
+                expires_at_ms,
+                ..held
+            },
+        )
+        .await
+    }
+
+    /// Take `lease_key` from the holder that `expected_generation` describes.
+    /// The generation is bumped, which is what fences the previous holder out.
+    pub async fn take_over_lease(
+        &self,
+        access: &ProjectAccess,
+        lease_key: &str,
+        expected_generation: i64,
+        holder_instance: &str,
+        owner_token: &str,
+        now_at_ms: i64,
+        expires_at_ms: i64,
+    ) -> Result<LeaseRecord, StoreError> {
+        let holder_instance = holder_instance.to_string();
+        let owner_token = owner_token.to_string();
+        self.write_lease_row(
+            access,
+            lease_key,
+            expected_generation,
+            None,
+            None,
+            move |held| LeaseRecord {
+                holder_instance,
+                owner_token,
+                fencing_generation: held.fencing_generation + 1,
+                acquired_at_ms: now_at_ms,
+                expires_at_ms,
+                ..held
+            },
+        )
+        .await
+    }
+
+    /// Release a lease this owner still holds at this generation. A fenced-out
+    /// holder releases nothing: the `false` says its row was already gone.
+    pub async fn release_lease(
+        &self,
+        access: &ProjectAccess,
+        authority: &LeaseAuthority,
+    ) -> Result<bool, StoreError> {
+        let scope = self.scope(access)?;
+        let authority = authority.clone();
+        self.conn
+            .call(move |conn| {
+                let affected = conn.execute(
+                    "DELETE FROM leases WHERE project = ?1 AND lease_key = ?2 \
+                     AND owner_token = ?3 AND fencing_generation = ?4",
+                    params![
+                        scope,
+                        authority.lease_key,
+                        authority.owner_token,
+                        authority.fencing_generation
+                    ],
+                )?;
+                Ok(affected > 0)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// One transaction: check the stored row against the presented generation,
+    /// then rewrite it. `expected_owner` additionally demands that this owner
+    /// token still holds the row, and `unexpired_at_ms` that its term is live.
+    async fn write_lease_row<F>(
+        &self,
+        access: &ProjectAccess,
+        lease_key: &str,
+        expected_generation: i64,
+        expected_owner: Option<&str>,
+        unexpired_at_ms: Option<i64>,
+        rewrite: F,
+    ) -> Result<LeaseRecord, StoreError>
+    where
+        F: FnOnce(LeaseRecord) -> LeaseRecord + Send + 'static,
+    {
+        let scope = self.scope(access)?;
+        let lease_key = lease_key.to_string();
+        let key = lease_key.clone();
+        let expected_owner = expected_owner.map(str::to_string);
+        let outcome = self
+            .conn
+            .call(move |conn| {
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let held = tx
+                    .query_row(
+                        &lease_select("WHERE project = ?1 AND lease_key = ?2"),
+                        params![scope, key],
+                        lease_from_row,
+                    )
+                    .optional()?;
+                let outcome = match held {
+                    None => LeaseWrite::NotHeld,
+                    Some(held) if held.fencing_generation != expected_generation => {
+                        LeaseWrite::Fenced(held.fencing_generation)
+                    }
+                    Some(held)
+                        if expected_owner.is_some_and(|expected| held.owner_token != expected) =>
+                    {
+                        LeaseWrite::NotHeld
+                    }
+                    Some(held) if unexpired_at_ms.is_some_and(|at_ms| held.is_expired(at_ms)) => {
+                        LeaseWrite::Expired(held.expires_at_ms)
+                    }
+                    Some(held) => {
+                        let written = rewrite(held);
+                        tx.execute(LEASE_UPSERT_SQL, lease_params(&scope, &written))?;
+                        LeaseWrite::Wrote(Box::new(written))
+                    }
+                };
+                match &outcome {
+                    LeaseWrite::Wrote(_) => tx.commit()?,
+                    _ => tx.rollback()?,
+                }
+                Ok(outcome)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))?;
+        match outcome {
+            LeaseWrite::Wrote(record) => Ok(*record),
+            LeaseWrite::NotHeld => Err(StoreError::LeaseNotHeld { lease_key }),
+            LeaseWrite::Expired(expires_at_ms) => Err(StoreError::LeaseExpired {
+                lease_key,
+                expires_at_ms,
+                now_ms: unexpired_at_ms.unwrap_or_default(),
+            }),
+            LeaseWrite::Fenced(held) => Err(StoreError::LeaseFenced {
+                lease_key,
+                presented: expected_generation,
+                held,
+            }),
+        }
     }
 
     pub async fn get_lease(
@@ -808,10 +1112,8 @@ impl CoordinationStore {
         let lease_key = lease_key.to_string();
         self.conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT project, lease_key, owner_token, fencing_generation, acquired_at_ms, \
-                     expires_at_ms FROM leases WHERE project = ?1 AND lease_key = ?2",
-                )?;
+                let mut stmt =
+                    conn.prepare(&lease_select("WHERE project = ?1 AND lease_key = ?2"))?;
                 let record = stmt
                     .query_row(params![scope, lease_key], lease_from_row)
                     .optional()?;
@@ -829,11 +1131,9 @@ impl CoordinationStore {
         let limit = self.settings.store_max_leases as i64;
         self.conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT project, lease_key, owner_token, fencing_generation, acquired_at_ms, \
-                     expires_at_ms FROM leases WHERE project = ?1 \
-                     ORDER BY expires_at_ms ASC, lease_key ASC LIMIT ?2",
-                )?;
+                let mut stmt = conn.prepare(&lease_select(
+                    "WHERE project = ?1 ORDER BY expires_at_ms ASC, lease_key ASC LIMIT ?2",
+                ))?;
                 let rows = stmt.query_map(params![scope, limit], lease_from_row)?;
                 let mut records = Vec::new();
                 for row in rows {
@@ -1394,15 +1694,114 @@ fn decode_engine_instance(
     })
 }
 
+const LEASE_COLUMNS: &str = "project, lease_key, holder_instance, owner_token, \
+                             fencing_generation, acquired_at_ms, expires_at_ms";
+
+const LEASE_UPSERT_SQL: &str = "INSERT INTO leases (project, lease_key, holder_instance, \
+     owner_token, fencing_generation, acquired_at_ms, expires_at_ms) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+     ON CONFLICT(project, lease_key) DO UPDATE SET \
+     holder_instance = excluded.holder_instance, owner_token = excluded.owner_token, \
+     fencing_generation = excluded.fencing_generation, \
+     acquired_at_ms = excluded.acquired_at_ms, expires_at_ms = excluded.expires_at_ms";
+
+fn lease_select(tail: &str) -> String {
+    format!("SELECT {LEASE_COLUMNS} FROM leases {tail}")
+}
+
+fn lease_params<'a>(
+    scope: &'a dyn rusqlite::ToSql,
+    record: &'a LeaseRecord,
+) -> [&'a dyn rusqlite::ToSql; 7] {
+    [
+        scope,
+        &record.lease_key,
+        &record.holder_instance,
+        &record.owner_token,
+        &record.fencing_generation,
+        &record.acquired_at_ms,
+        &record.expires_at_ms,
+    ]
+}
+
 fn lease_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LeaseRecord> {
     Ok(LeaseRecord {
         project: ProjectKey::new(row.get::<_, String>(0)?),
         lease_key: row.get(1)?,
-        owner_token: row.get(2)?,
-        fencing_generation: row.get(3)?,
-        acquired_at_ms: row.get(4)?,
-        expires_at_ms: row.get(5)?,
+        holder_instance: row.get(2)?,
+        owner_token: row.get(3)?,
+        fencing_generation: row.get(4)?,
+        acquired_at_ms: row.get(5)?,
+        expires_at_ms: row.get(6)?,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cas_run_intent(
+    tx: &rusqlite::Transaction<'_>,
+    scope: &str,
+    runtime: &str,
+    work_id: &str,
+    attempt: i64,
+    expected_generation: i64,
+    next_state: IntentState,
+    updated_at_ms: i64,
+) -> Result<CasOutcome, tokio_rusqlite::Error> {
+    let current: Option<i64> = tx
+        .query_row(
+            "SELECT generation FROM run_intents WHERE project = ?1 AND runtime = ?2 \
+             AND work_id = ?3 AND attempt = ?4",
+            params![scope, runtime, work_id, attempt],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(generation) = current else {
+        return Ok(CasOutcome::Missing);
+    };
+    if generation != expected_generation {
+        return Ok(CasOutcome::Conflict(generation));
+    }
+    let next_generation = generation + 1;
+    tx.execute(
+        "UPDATE run_intents SET generation = ?5, state = ?6, updated_at_ms = ?7 \
+         WHERE project = ?1 AND runtime = ?2 AND work_id = ?3 AND attempt = ?4",
+        params![
+            scope,
+            runtime,
+            work_id,
+            attempt,
+            next_generation,
+            next_state.as_str(),
+            updated_at_ms
+        ],
+    )?;
+    let runtime = RuntimeKind::parse(runtime)
+        .ok_or_else(|| decode(format!("unknown runtime kind `{runtime}`")))?;
+    Ok(CasOutcome::Updated(Box::new(RunIntentRecord {
+        project: ProjectKey::new(scope.to_string()),
+        run: RunKey::new(WorkKey::new(runtime, work_id.to_string()), attempt as u64),
+        generation: next_generation,
+        state: next_state,
+        updated_at_ms,
+    })))
+}
+
+fn cas_result(
+    outcome: CasOutcome,
+    run_label: String,
+    expected_generation: i64,
+) -> Result<RunIntentRecord, StoreError> {
+    match outcome {
+        CasOutcome::Updated(record) => Ok(*record),
+        CasOutcome::Missing => Err(StoreError::NotFound {
+            kind: "run intent",
+            id: run_label,
+        }),
+        CasOutcome::Conflict(found) => Err(StoreError::GenerationConflict {
+            expected: expected_generation,
+            found,
+        }),
+    }
 }
 
 type RunIntentColumns = (String, String, String, i64, i64, String, i64);

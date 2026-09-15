@@ -4,8 +4,8 @@ use refact_work_core::settings::CoordinationSettings;
 use refact_work_core::store::filesystem::{classify_mounts, FilesystemKind};
 use refact_work_core::store::records::{
     AccessKind, ActivityObservationRecord, DeliveryOutboxRecord, DeliveryState,
-    EngineInstanceRecord, IntentState, LeaseRecord, PresenceMark, QueuedWorkRecord,
-    RunIntentRecord,
+    EngineInstanceRecord, IntentState, LeaseAcquisition, LeaseRecord, PresenceMark,
+    QueuedWorkRecord, RunIntentRecord,
 };
 use refact_work_core::store::schema;
 use refact_work_core::store::{CoordinationStore, StoreError};
@@ -60,6 +60,7 @@ fn lease(project: &str, lease_key: &str) -> LeaseRecord {
     LeaseRecord {
         project: ProjectKey::new(project),
         lease_key: lease_key.to_string(),
+        holder_instance: format!("engine-{project}"),
         owner_token: format!("owner-{project}"),
         fencing_generation: 7,
         acquired_at_ms: 1_700_000_030_000,
@@ -158,7 +159,11 @@ async fn older_schema_migrates_forward_and_keeps_existing_rows() {
     let access = store.authorize(ProjectKey::new("alpha"));
     assert_eq!(
         store.get_lease(&access, "build").await.unwrap().unwrap(),
-        lease("alpha", "build")
+        LeaseRecord {
+            holder_instance: String::new(),
+            ..lease("alpha", "build")
+        },
+        "a row written before holders were recorded migrates with an empty holder"
     );
     let observed = observation("alpha", "obs-1", 1_700_000_050_000);
     store
@@ -514,6 +519,121 @@ async fn every_record_type_round_trips_all_fields() {
         .unwrap());
     assert!(store
         .delete_engine_instance(&access, "engine-1")
+        .await
+        .unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_lease_acquirers_produce_exactly_one_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("coordination.sqlite");
+    let one = open(&path).await;
+    let two = open(&path).await;
+    let access_one = one.authorize(ProjectKey::new("alpha"));
+    let access_two = two.authorize(ProjectKey::new("alpha"));
+
+    let (first, second) = tokio::join!(
+        one.try_acquire_lease(&access_one, "build", "engine-1", "token-1", 100, 1_100),
+        two.try_acquire_lease(&access_two, "build", "engine-2", "token-2", 100, 1_100),
+    );
+    let acquired = [first.unwrap(), second.unwrap()];
+    let winners = acquired
+        .iter()
+        .filter(|outcome| matches!(outcome, LeaseAcquisition::Acquired(_)))
+        .count();
+
+    assert_eq!(winners, 1, "exactly one acquirer may own the lease");
+    let held = one.get_lease(&access_one, "build").await.unwrap().unwrap();
+    assert_eq!(held.fencing_generation, 1);
+    for outcome in &acquired {
+        match outcome {
+            LeaseAcquisition::Acquired(record) | LeaseAcquisition::Held(record) => {
+                assert_eq!(record, &held)
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_fenced_write_from_a_replaced_holder_never_lands() {
+    let store = CoordinationStore::open_in_memory(&settings())
+        .await
+        .unwrap();
+    let access = store.authorize(ProjectKey::new("alpha"));
+    let run = RunKey::new(WorkKey::trajectory("run-1"), 1);
+    store
+        .put_run_intent(&access, &run_intent("alpha", "run-1", 0))
+        .await
+        .unwrap();
+    let LeaseAcquisition::Acquired(old) = store
+        .try_acquire_lease(&access, "run-1", "engine-1", "token-1", 100, 1_100)
+        .await
+        .unwrap()
+    else {
+        panic!("a free lease must be acquirable");
+    };
+    let renewed = store
+        .renew_lease(&access, &old.authority(), 200, 2_100)
+        .await
+        .unwrap();
+    assert_eq!(renewed.fencing_generation, old.fencing_generation);
+
+    let taken = store
+        .take_over_lease(
+            &access,
+            "run-1",
+            old.fencing_generation,
+            "engine-2",
+            "token-2",
+            3_000,
+            4_000,
+        )
+        .await
+        .unwrap();
+    let stale = store
+        .compare_and_set_run_intent_fenced(
+            &access,
+            &old.authority(),
+            3_100,
+            &run,
+            0,
+            IntentState::Dispatched,
+            3_100,
+        )
+        .await
+        .unwrap_err();
+    let fresh = store
+        .compare_and_set_run_intent_fenced(
+            &access,
+            &taken.authority(),
+            3_100,
+            &run,
+            0,
+            IntentState::Acknowledged,
+            3_100,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(taken.fencing_generation, old.fencing_generation + 1);
+    assert!(
+        matches!(
+            stale,
+            StoreError::LeaseFenced {
+                presented: 1,
+                held: 2,
+                ..
+            }
+        ),
+        "got {stale}"
+    );
+    assert_eq!(fresh.state, IntentState::Acknowledged);
+    assert!(!store
+        .release_lease(&access, &old.authority())
+        .await
+        .unwrap());
+    assert!(store
+        .release_lease(&access, &taken.authority())
         .await
         .unwrap());
 }

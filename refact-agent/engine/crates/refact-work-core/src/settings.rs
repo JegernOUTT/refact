@@ -123,6 +123,14 @@ pub struct CoordinationSettings {
     /// After this long without a heartbeat another engine reads as
     /// `unreachable`; it is never read as dead on a stale heartbeat alone.
     pub presence_stale_after_ms: u64,
+    /// How long an acquired lease stays authoritative without renewal.
+    pub lease_ttl_ms: u64,
+    /// How often the owner refreshes its lease. Renewal never changes the
+    /// fencing generation.
+    pub lease_renew_interval_ms: u64,
+    /// How long a lease must already be expired before an explicit takeover is
+    /// allowed at all. Engine presence still has to say the holder is gone.
+    pub lease_takeover_grace_ms: u64,
     pub store_max_engine_instances: usize,
     pub store_max_run_intents: usize,
     pub store_max_queued_work: usize,
@@ -228,6 +236,9 @@ impl Default for CoordinationSettings {
             store_allow_non_local_filesystem: false,
             presence_heartbeat_interval_ms: 15_000,
             presence_stale_after_ms: 120_000,
+            lease_ttl_ms: 120_000,
+            lease_renew_interval_ms: 30_000,
+            lease_takeover_grace_ms: 60_000,
             store_max_engine_instances: 512,
             store_max_run_intents: 65_536,
             store_max_queued_work: 65_536,
@@ -546,6 +557,20 @@ impl CoordinationSettings {
             "outbox_prune_interval_secs",
             self.outbox_prune_interval_secs,
             1,
+        );
+        at_least(&mut v, "lease_ttl_ms", self.lease_ttl_ms, 1);
+        at_least(
+            &mut v,
+            "lease_renew_interval_ms",
+            self.lease_renew_interval_ms,
+            1,
+        );
+        not_greater(
+            &mut v,
+            "lease_renew_interval_ms",
+            self.lease_renew_interval_ms,
+            "lease_ttl_ms",
+            self.lease_ttl_ms,
         );
         at_least(
             &mut v,
@@ -956,6 +981,28 @@ mod tests {
             |settings: &mut CoordinationSettings| settings.presence_stale_after_ms = 0,
             |settings: &mut CoordinationSettings| {
                 settings.presence_heartbeat_interval_ms = settings.presence_stale_after_ms + 1
+            },
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn lease_bounds_default_generous_and_reject_invalid_values() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(settings.lease_ttl_ms >= 60_000);
+        assert!(settings.lease_renew_interval_ms <= settings.lease_ttl_ms / 2);
+        let mut immediate = CoordinationSettings::default();
+        immediate.lease_takeover_grace_ms = 0;
+        immediate.validate().unwrap();
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.lease_ttl_ms = 0,
+            |settings: &mut CoordinationSettings| settings.lease_renew_interval_ms = 0,
+            |settings: &mut CoordinationSettings| {
+                settings.lease_renew_interval_ms = settings.lease_ttl_ms + 1
             },
         ] {
             let mut settings = CoordinationSettings::default();

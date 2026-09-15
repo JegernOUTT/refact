@@ -3,6 +3,7 @@ pub const MIGRATIONS: &[&str] = &[
     V2_ACTIVITY_OBSERVATIONS,
     V3_ENGINE_PRESENCE_MARK,
     V4_ACTIVITY_PROVENANCE,
+    V5_LEASE_HOLDER_INSTANCE,
 ];
 
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -107,4 +108,8 @@ ALTER TABLE activity_observations ADD COLUMN checkout TEXT;
 UPDATE activity_observations SET file_key = path WHERE file_key = '';
 CREATE INDEX idx_activity_observations_file_key
     ON activity_observations (project, file_key, access, observed_at_ms);
+";
+
+const V5_LEASE_HOLDER_INSTANCE: &str = "
+ALTER TABLE leases ADD COLUMN holder_instance TEXT NOT NULL DEFAULT '';
 ";
