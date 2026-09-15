@@ -1,9 +1,13 @@
-//! Bridges coordination settings onto the provider pressure controller.
+//! Bridges coordination settings onto the provider pressure controller, and is
+//! the seam where admission and retry decisions become measurable.
 
 use refact_providers::pressure::{
-    install_pressure_registry, uninstall_pressure_registry, PressureConfig,
+    install_pressure_registry, pressure_registry, uninstall_pressure_registry, AdmissionRefusal,
+    FailureReport, Permit, PressureConfig, RequestPriority, RetryDecision,
 };
 use refact_work_core::CoordinationSettings;
+
+use crate::coordination::metrics::{self, Decision, Explanation};
 
 fn counter(field: &str, value: usize) -> Result<u32, String> {
     u32::try_from(value)
@@ -61,6 +65,117 @@ pub fn install_provider_pressure(settings: &CoordinationSettings) -> Result<(), 
         return Ok(());
     }
     install_pressure_registry(pressure_config(settings)?).map(|_| ())
+}
+
+/// Ask the controller for a slot and record what it decided. A deferral names
+/// the bucket's own numbers and the rule that refused it; an admission samples
+/// the permit counts the controller already tracks.
+pub fn admit(bucket: &str, priority: RequestPriority) -> Option<Result<Permit, AdmissionRefusal>> {
+    let registry = pressure_registry()?;
+    let decided = registry.try_admit(bucket, priority);
+    let priority_label = match priority {
+        RequestPriority::Interactive => "interactive",
+        RequestPriority::Background => "background",
+    };
+    match &decided {
+        Ok(_) => metrics::count(
+            metrics::PERMITS,
+            vec![
+                ("bucket", bucket.to_string()),
+                ("kind", "granted".to_string()),
+            ],
+        ),
+        Err(refusal) => {
+            let (rule, reason) = match refusal {
+                AdmissionRefusal::CoolingDown { reason, until_ms } => (
+                    "provider_pressure.breaker_cooling_down",
+                    format!("{reason} until {until_ms}"),
+                ),
+                AdmissionRefusal::AtCapacity { limit, in_flight } => (
+                    "provider_pressure.bucket_at_capacity",
+                    format!("{in_flight} in flight of {limit}"),
+                ),
+                AdmissionRefusal::BackgroundReserved {
+                    background_limit,
+                    background_in_flight,
+                } => (
+                    "provider_pressure.interactive_slots_reserved",
+                    format!(
+                        "{background_in_flight} background in flight of {background_limit}"
+                    ),
+                ),
+            };
+            metrics::count(
+                metrics::PERMITS,
+                vec![
+                    ("bucket", bucket.to_string()),
+                    ("kind", "deferred".to_string()),
+                ],
+            );
+            metrics::explain(Explanation::new(
+                Decision::BackpressureDeferral,
+                "deferred",
+                rule,
+                vec![
+                    ("reason".to_string(), reason),
+                    ("bucket".to_string(), bucket.to_string()),
+                    ("priority".to_string(), priority_label.to_string()),
+                ],
+            ));
+        }
+    }
+    metrics::sample_provider_pressure();
+    Some(decided)
+}
+
+/// Ask the controller whether to retry and record the rule behind the answer.
+pub fn retry_decision(
+    bucket: &str,
+    report: &FailureReport,
+    completed_attempts: u32,
+) -> Option<RetryDecision> {
+    let registry = pressure_registry()?;
+    let decided = registry.retry_decision(report, completed_attempts);
+    let (outcome, rule, reason) = match &decided {
+        RetryDecision::Retry {
+            class,
+            attempt,
+            delay_ms,
+            honoured_retry_after,
+        } => (
+            "retry",
+            match honoured_retry_after {
+                true => "provider_pressure.honoured_retry_after",
+                false => "provider_pressure.retryable_class_backoff",
+            },
+            format!(
+                "attempt {attempt} of class {} waits {delay_ms}ms",
+                class.as_str()
+            ),
+        ),
+        RetryDecision::GiveUp {
+            class,
+            attempts,
+            cause,
+        } => (
+            "give_up",
+            match class.retryable() {
+                true => "provider_pressure.retry_attempts_exhausted",
+                false => "provider_pressure.class_not_retryable",
+            },
+            format!("{} after {attempts} attempts: {cause}", class.as_str()),
+        ),
+    };
+    metrics::explain(Explanation::new(
+        Decision::Retry,
+        outcome,
+        rule,
+        vec![
+            ("reason".to_string(), reason),
+            ("bucket".to_string(), bucket.to_string()),
+        ],
+    ));
+    Some(decided)
 }
 
 #[cfg(test)]

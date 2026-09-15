@@ -268,6 +268,10 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("no_progress_repeat_threshold", 2, 100_000),
     coordination_integer("no_progress_unchanged_turns", 2, 100_000),
     coordination_integer("no_progress_window_turns", 2, 100_000),
+    coordination_bool("metrics_enabled"),
+    coordination_integer("metrics_max_series", 1, 1_000_000),
+    coordination_integer("metrics_max_explanations", 1, 1_000_000),
+    coordination_integer("metrics_max_label_chars", 8, 4_096),
 ];
 
 pub fn coordination_field_bounds() -> &'static [CoordinationFieldBound] {

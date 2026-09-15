@@ -261,6 +261,7 @@ pub fn reconstruct(events: &[CausalEventRecord], root: &str) -> CausalTrace {
     let Some(start) = events.iter().find(|event| event.event_id == root) else {
         trace.complete = false;
         trace.gaps.push(root.to_string());
+        super::metrics::record_trace_completeness(false);
         return trace;
     };
     let mut seen: HashSet<String> = HashSet::new();
@@ -294,6 +295,7 @@ pub fn reconstruct(events: &[CausalEventRecord], root: &str) -> CausalTrace {
             .cmp(&left.seq)
             .then(right.event_id.cmp(&left.event_id))
     });
+    super::metrics::record_trace_completeness(trace.complete);
     trace
 }
 

@@ -168,16 +168,35 @@ impl MergeGate {
         loop {
             match self.leases.acquire(&lease_key, now_ms()).await {
                 Ok(holder) => {
+                    let waited_ms = now_ms().saturating_sub(started_at_ms).max(0);
+                    super::metrics::record_queue_latency("merge_lease_granted", waited_ms);
                     return Ok(MergeSlot {
                         leases: self.leases.clone(),
                         holder,
                         checkout: checkout.clone(),
-                        waited_ms: now_ms().saturating_sub(started_at_ms).max(0),
-                    })
+                        waited_ms,
+                    });
                 }
                 Err(LeaseError::Held(stale)) => {
                     let waited_ms = now_ms().saturating_sub(started_at_ms).max(0);
                     if waited_ms >= deadline_ms {
+                        super::metrics::record_queue_latency("merge_lease_refused", waited_ms);
+                        super::metrics::explain(super::metrics::Explanation::new(
+                            super::metrics::Decision::MergeRefusal,
+                            "refused",
+                            "merge_gate.lease_held_past_wait_deadline",
+                            vec![
+                                (
+                                    "reason".to_string(),
+                                    format!(
+                                        "merge lease held for {}ms, waited {}ms of {}ms",
+                                        stale.held_for_ms, waited_ms, deadline_ms
+                                    ),
+                                ),
+                                ("source".to_string(), stale.holder_instance.clone()),
+                                ("result".to_string(), "retryable".to_string()),
+                            ],
+                        ));
                         return Err(MergeGateError::Busy(Box::new(MergeBusy {
                             checkout: checkout.as_str().to_string(),
                             lease_key,
@@ -504,6 +523,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(coordination_metrics)]
     async fn a_merge_that_cannot_take_the_lease_fails_retryably_instead_of_blocking() {
         let project = Uuid::new_v4().to_string();
         let (holding_gate, _leases) = shared_gate(&project).await;
@@ -518,9 +538,28 @@ mod tests {
             },
         );
 
+        use crate::coordination::metrics as work_metrics;
+        work_metrics::recorder().reset();
         let started = std::time::Instant::now();
         let error = impatient.acquire(&checkout).await.unwrap_err();
         let elapsed = started.elapsed();
+
+        let explained = work_metrics::recorder().snapshot();
+        let refusals = explained.explanations_for(work_metrics::Decision::MergeRefusal);
+        assert_eq!(refusals.len(), 1, "the refusal was not explained");
+        assert_eq!(
+            refusals[0].rule,
+            "merge_gate.lease_held_past_wait_deadline",
+            "a merge refusal must name the rule that fired"
+        );
+        assert!(
+            refusals[0]
+                .inputs
+                .iter()
+                .any(|(name, value)| name == "reason" && value.contains("waited")),
+            "a merge refusal must name the inputs that produced it: {:?}",
+            refusals[0].inputs
+        );
 
         match error {
             MergeGateError::Busy(busy) => {

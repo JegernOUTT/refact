@@ -202,7 +202,7 @@ impl std::error::Error for LeaseError {}
 
 impl From<StoreError> for LeaseError {
     fn from(error: StoreError) -> LeaseError {
-        match error {
+        let rejected = match error {
             StoreError::LeaseNotHeld { lease_key } => LeaseError::NotHeld { lease_key },
             StoreError::LeaseExpired {
                 lease_key,
@@ -223,8 +223,51 @@ impl From<StoreError> for LeaseError {
                 held,
             },
             other => LeaseError::Store(other),
-        }
+        };
+        record_rejection(&rejected);
+        rejected
     }
+}
+
+/// A write the store refused. Fencing and expiry are the two ways authority is
+/// lost, and they stay apart: one is a stale generation, the other is a lease
+/// that ran out.
+fn record_rejection(error: &LeaseError) {
+    use super::metrics::{explain, record_stale_write_rejection, Decision, Explanation};
+    let (reason, rule, detail) = match error {
+        LeaseError::Fenced {
+            presented, held, ..
+        } => (
+            "fencing_generation",
+            "leases.fencing_generation_behind_holder",
+            format!("write carried generation {presented}, holder is at {held}"),
+        ),
+        LeaseError::Expired {
+            expires_at_ms,
+            at_ms,
+            ..
+        } => (
+            "lease_expired",
+            "leases.authority_expired",
+            format!("lease expired at {expires_at_ms}, now {at_ms}"),
+        ),
+        LeaseError::NotHeld { .. } => (
+            "not_held",
+            "leases.owner_token_does_not_hold_lease",
+            "the presented owner token does not hold this lease".to_string(),
+        ),
+        _ => return,
+    };
+    record_stale_write_rejection(reason);
+    explain(Explanation::new(
+        Decision::Denial,
+        "rejected",
+        rule,
+        vec![
+            ("reason".to_string(), detail),
+            ("result".to_string(), reason.to_string()),
+        ],
+    ));
 }
 
 /// Leases for one project, owned by one engine instance.
@@ -378,6 +421,11 @@ impl LeaseManager {
             reason: reason.to_string(),
             at_ms,
         };
+        let abandoned = match record.from.expired_for_ms > 0 {
+            true => "expired_holder_taken_over",
+            false => "live_holder_taken_over",
+        };
+        super::metrics::record_abandoned_claim(abandoned);
         journal_takeover(&record);
         Ok(Takeover {
             lease: LeaseHolder::from_record(taken),

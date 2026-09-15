@@ -692,6 +692,7 @@ pub fn evaluate_gates(specs: &[VerificationSpec], evidence: &[EvidenceRecord]) -
             .iter()
             .find(|record| record.spec_id == spec.spec_id && record.required);
         let Some(record) = record else {
+            crate::coordination::metrics::record_verdict(EvidenceVerdict::NotRun);
             outcome.blocks.push(GateBlock {
                 spec_id: spec.spec_id.clone(),
                 command: spec.command.clone(),
@@ -702,7 +703,9 @@ pub fn evaluate_gates(specs: &[VerificationSpec], evidence: &[EvidenceRecord]) -
             });
             continue;
         };
+        crate::coordination::metrics::record_evidence_cache(record.from_cache);
         if record.spec_revision != spec.revision {
+            crate::coordination::metrics::record_verdict(EvidenceVerdict::Superseded);
             outcome.blocks.push(GateBlock {
                 spec_id: spec.spec_id.clone(),
                 command: spec.command.clone(),
@@ -716,6 +719,7 @@ pub fn evaluate_gates(specs: &[VerificationSpec], evidence: &[EvidenceRecord]) -
             });
             continue;
         }
+        crate::coordination::metrics::record_verdict(record.verdict);
         match record.verdict {
             EvidenceVerdict::Passed => outcome.required_passed += 1,
             verdict => outcome.blocks.push(GateBlock {
@@ -803,11 +807,49 @@ pub struct CompletionDecision {
 
 /// What an agent reported about itself has no weight here: only gates decide.
 pub fn completion_decision(gates: &GateOutcome, reported_success: bool) -> CompletionDecision {
-    CompletionDecision {
+    let decision = CompletionDecision {
         allowed: gates.completion_allowed(),
         reported_success,
         reasons: gates.reasons(),
+    };
+    explain_completion(gates, &decision);
+    decision
+}
+
+/// The explanation behind a completion or a refusal: the gate tally that
+/// produced it, the first blocking verdict, and the rule that fired.
+fn explain_completion(gates: &GateOutcome, decision: &CompletionDecision) {
+    use crate::coordination::metrics::{explain, Decision, Explanation};
+    let mut inputs = vec![
+        (
+            "reason".to_string(),
+            format!(
+                "{} of {} required gates passed",
+                gates.required_passed, gates.required_total
+            ),
+        ),
+        (
+            "source".to_string(),
+            format!("agent reported success={}", decision.reported_success),
+        ),
+    ];
+    if let Some(block) = gates.blocks.first() {
+        inputs.push(("verdict".to_string(), block.verdict.label().to_string()));
+        inputs.push(("outcome".to_string(), block.reason.clone()));
     }
+    let (kind, outcome, rule) = match decision.allowed {
+        true => (
+            Decision::GoalCompletion,
+            "allowed",
+            "evidence.gates.all_required_passed",
+        ),
+        false => (
+            Decision::GoalRefusal,
+            "refused",
+            "evidence.gates.required_gate_blocks",
+        ),
+    };
+    explain(Explanation::new(kind, outcome, rule, inputs));
 }
 
 /// Specs the goal's criteria carry. `verify_hint` is prose for the judge and is

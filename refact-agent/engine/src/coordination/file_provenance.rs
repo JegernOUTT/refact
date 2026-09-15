@@ -326,6 +326,7 @@ pub async fn forget(file_key: Option<&str>) -> Result<usize, StoreError> {
 pub async fn last_writer(file_key: &str, actor: Option<&str>, since_ms: i64) -> WriterAttribution {
     flush().await;
     let Some(sink) = sink() else {
+        super::metrics::record_unknown_file_attribution("no_provenance_sink");
         return WriterAttribution::ExternalOrUnknown;
     };
     let found = sink
@@ -339,14 +340,21 @@ pub async fn last_writer(file_key: &str, actor: Option<&str>, since_ms: i64) -> 
         )
         .await;
     match found {
-        Ok(Some(record)) => WriterAttribution::Named {
-            actor: Some(record.work.id).filter(|id| !id.is_empty()),
-            tool: record.tool_call.unwrap_or_else(|| "an unnamed tool".into()),
-            instance_id: record.instance_id,
-            at_ms: record.observed_at_ms,
-        },
-        Ok(None) => WriterAttribution::ExternalOrUnknown,
+        Ok(Some(record)) => {
+            super::metrics::record_unknown_file_attribution("named");
+            WriterAttribution::Named {
+                actor: Some(record.work.id).filter(|id| !id.is_empty()),
+                tool: record.tool_call.unwrap_or_else(|| "an unnamed tool".into()),
+                instance_id: record.instance_id,
+                at_ms: record.observed_at_ms,
+            }
+        }
+        Ok(None) => {
+            super::metrics::record_unknown_file_attribution("external_or_unknown");
+            WriterAttribution::ExternalOrUnknown
+        }
         Err(error) => {
+            super::metrics::record_unknown_file_attribution("store_unavailable");
             super::outbox::note_durability_unavailable(sink.store.path(), error.to_string());
             WriterAttribution::ExternalOrUnknown
         }

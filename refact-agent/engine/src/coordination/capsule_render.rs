@@ -143,6 +143,7 @@ pub(super) fn render(
         body.push_str(&format!("{} permitted rows omitted.\n", rows.len() - shown));
     }
     body.push_str(footer);
+    super::metrics::record_context_payload("work_capsule", body.len() as i64);
     Some(RenderedCapsule {
         body,
         records,

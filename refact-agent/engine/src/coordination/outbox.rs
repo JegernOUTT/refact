@@ -166,13 +166,23 @@ impl DeliveryOutbox {
             return Ok(());
         };
         if record.state.is_terminal() || record.state == state {
+            let reason = match record.state == state {
+                true => "already_in_state",
+                false => "already_terminal",
+            };
+            super::metrics::record_delivery_duplicate(reason);
             return Ok(());
         }
         record.state = state;
         if bump_attempts {
             record.attempts = record.attempts.saturating_add(1);
         }
-        record.updated_at_ms = refact_work_core::now_ms();
+        let now_ms = refact_work_core::now_ms();
+        super::metrics::record_delivery_lag(
+            "transition",
+            now_ms.saturating_sub(record.created_at_ms).max(0),
+        );
+        record.updated_at_ms = now_ms;
         self.store.put_outbox_message(&self.access, &record).await
     }
 
@@ -200,11 +210,15 @@ impl DeliveryOutbox {
             .await?
         {
             match serde_json::from_str::<PendingDelivery>(&record.payload) {
-                Ok(delivery) => recovery.redeliver.push(RecoveredDelivery {
-                    recipient: record.recipient.clone(),
-                    delivery,
-                }),
+                Ok(delivery) => {
+                    super::metrics::record_recovery_decision("redeliver");
+                    recovery.redeliver.push(RecoveredDelivery {
+                        recipient: record.recipient.clone(),
+                        delivery,
+                    })
+                }
                 Err(error) => {
+                    super::metrics::record_recovery_decision("needs_inspection");
                     tracing::warn!(
                         message_id = %record.message_id,
                         %error,
@@ -225,9 +239,12 @@ impl DeliveryOutbox {
         retention_secs: u64,
     ) -> Result<usize, StoreError> {
         let window = i64::try_from(retention_secs.saturating_mul(1000)).unwrap_or(i64::MAX);
-        self.store
+        let pruned = self
+            .store
             .prune_settled_outbox_messages(&self.access, now_ms.saturating_sub(window))
-            .await
+            .await?;
+        super::metrics::record_delivery_expiry("retention_window", pruned as u64);
+        Ok(pruned)
     }
 }
 

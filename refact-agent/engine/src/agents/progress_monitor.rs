@@ -197,6 +197,59 @@ impl Default for RunActivity {
 }
 
 pub fn classify(activity: &RunActivity, thresholds: ProgressThresholds) -> ActivityClass {
+    let class = classify_activity(activity, thresholds);
+    record_classification(class, thresholds);
+    class
+}
+
+/// The classification, as a series, plus an explanation whenever the verdict is
+/// the one that pauses a run on its own.
+fn record_classification(class: ActivityClass, thresholds: ProgressThresholds) {
+    use crate::coordination::metrics::{count, explain, Decision, Explanation, DECISIONS};
+    count(
+        DECISIONS,
+        vec![
+            ("decision", "run_classified".to_string()),
+            ("outcome", class.reason().to_string()),
+        ],
+    );
+    let Some(signal) = (match class {
+        ActivityClass::NoMaterialProgress(signal) => Some(signal),
+        _ => None,
+    }) else {
+        return;
+    };
+    let evidence = match signal {
+        NoProgressSignal::RepeatedToolCall { repeats } => {
+            format!("the same tool call and result repeated {repeats} times")
+        }
+        NoProgressSignal::RepeatedOutput { repeats } => {
+            format!("the same reply repeated {repeats} times")
+        }
+        NoProgressSignal::UnchangedEvidence { turns } => {
+            format!("material output unchanged across {turns} turns")
+        }
+    };
+    explain(Explanation::new(
+        Decision::AutomaticPause,
+        class.reason(),
+        "progress_monitor.no_material_progress",
+        vec![
+            ("reason".to_string(), evidence),
+            (
+                "source".to_string(),
+                format!(
+                    "repeat_threshold={} unchanged_turns={} window_turns={}",
+                    thresholds.repeat_threshold,
+                    thresholds.unchanged_turns,
+                    thresholds.window_turns
+                ),
+            ),
+        ],
+    ));
+}
+
+fn classify_activity(activity: &RunActivity, thresholds: ProgressThresholds) -> ActivityClass {
     if let Some(kind) = waiting_kind(activity) {
         return ActivityClass::IntentionallyWaiting(kind);
     }

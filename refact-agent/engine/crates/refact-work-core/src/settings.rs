@@ -272,6 +272,15 @@ pub struct CoordinationSettings {
     pub no_progress_unchanged_turns: usize,
     /// Most recent turns examined for repetition.
     pub no_progress_window_turns: usize,
+    /// Whether structured metrics and the decision explanation log record at all.
+    pub metrics_enabled: bool,
+    /// Distinct label combinations retained. A new series past this cap is
+    /// folded into one overflow counter instead of growing without bound.
+    pub metrics_max_series: usize,
+    /// Automatic-decision explanations retained, newest kept.
+    pub metrics_max_explanations: usize,
+    /// Characters retained per exported label or explanation value.
+    pub metrics_max_label_chars: usize,
 }
 
 impl Default for CoordinationSettings {
@@ -425,6 +434,10 @@ impl Default for CoordinationSettings {
             no_progress_repeat_threshold: 3,
             no_progress_unchanged_turns: 12,
             no_progress_window_turns: 24,
+            metrics_enabled: true,
+            metrics_max_series: 4_096,
+            metrics_max_explanations: 2_048,
+            metrics_max_label_chars: 160,
         }
     }
 }
@@ -836,6 +849,19 @@ impl CoordinationSettings {
             "no_progress_window_turns",
             self.no_progress_window_turns as u64,
             2,
+        );
+        at_least(&mut v, "metrics_max_series", self.metrics_max_series as u64, 1);
+        at_least(
+            &mut v,
+            "metrics_max_explanations",
+            self.metrics_max_explanations as u64,
+            1,
+        );
+        at_least(
+            &mut v,
+            "metrics_max_label_chars",
+            self.metrics_max_label_chars as u64,
+            8,
         );
         not_greater(
             &mut v,
