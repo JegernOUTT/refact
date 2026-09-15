@@ -20,6 +20,10 @@ pub struct CoordinationSettings {
     pub max_resume_burst: usize,
     pub max_pending: usize,
     pub max_outstanding: usize,
+    /// Parked runs kept resident. Beyond this bound the least valuable parked
+    /// run is checkpointed and evicted, which is not cancellation: it keeps its
+    /// identity, queue age and accounting, and resumes from the checkpoint.
+    pub max_parked_residency: usize,
     #[serde(alias = "max_depth")]
     pub max_subchat_depth: usize,
     pub max_read_stamps: usize,
@@ -207,6 +211,7 @@ impl Default for CoordinationSettings {
             max_resume_burst: 4,
             max_pending: 1024,
             max_outstanding: 4096,
+            max_parked_residency: 256,
             max_subchat_depth: 5,
             max_read_stamps: 16384,
             max_write_records: 65536,
@@ -501,6 +506,19 @@ impl CoordinationSettings {
         }
         at_least(&mut v, "max_pending", self.max_pending as u64, 1);
         at_least(&mut v, "max_outstanding", self.max_outstanding as u64, 1);
+        at_least(
+            &mut v,
+            "max_parked_residency",
+            self.max_parked_residency as u64,
+            1,
+        );
+        not_greater(
+            &mut v,
+            "max_parked_residency",
+            self.max_parked_residency as u64,
+            "max_outstanding",
+            self.max_outstanding as u64,
+        );
         at_least(
             &mut v,
             "max_subchat_depth",
@@ -1021,6 +1039,24 @@ mod tests {
         let mut settings = CoordinationSettings::default();
         settings.agent_wait_default_ms = settings.agent_wait_max_ms + 1;
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn parked_residency_bound_defaults_usable_and_rejects_invalid_values() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(settings.max_parked_residency >= 1);
+        assert!(settings.max_parked_residency <= settings.max_outstanding);
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.max_parked_residency = 0,
+            |settings: &mut CoordinationSettings| {
+                settings.max_parked_residency = settings.max_outstanding + 1
+            },
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
     }
 
     #[test]

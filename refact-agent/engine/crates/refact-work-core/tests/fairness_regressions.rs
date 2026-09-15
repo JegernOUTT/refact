@@ -161,6 +161,88 @@ async fn newly_arriving_roots_do_not_cut_ahead_of_an_existing_root_forever() {
 }
 
 #[tokio::test]
+async fn a_root_that_never_stops_submitting_cannot_starve_another_root() {
+    let scheduler = scheduler();
+    let mut held = Some(
+        reserve(&scheduler, "seed", "heavy")
+            .acquire()
+            .await
+            .unwrap(),
+    );
+    let mut waits = BTreeMap::new();
+    let mut victim: Wait = Box::pin(reserve(&scheduler, "victim", "light").acquire());
+    pending(&mut victim).await;
+    waits.insert("victim".to_string(), victim);
+    let mut admitted = Vec::new();
+    for round in 0..8 {
+        let id = format!("heavy-{round}");
+        let mut wait: Wait = Box::pin(reserve(&scheduler, &id, "heavy").acquire());
+        pending(&mut wait).await;
+        waits.insert(id, wait);
+        held.take().unwrap().release();
+        let id = active(&scheduler);
+        held = Some(ready(waits.remove(&id).unwrap()).await);
+        admitted.push(id.clone());
+        if id == "victim" {
+            break;
+        }
+    }
+    let position = admitted
+        .iter()
+        .position(|id| id == "victim")
+        .unwrap_or_else(|| {
+            panic!("an endlessly submitting root starved another root: {admitted:?}")
+        });
+    // One eligible root spends one quantum per turn, so two eligible roots
+    // bound the wait at two admission opportunities, whatever the clock says.
+    assert!(position < 2, "{admitted:?}");
+    drop(waits);
+    drop(held);
+    assert_eq!(scheduler.snapshot().outstanding, 0);
+}
+
+#[tokio::test]
+async fn a_root_that_never_stops_submitting_fresh_work_cannot_starve_a_resume() {
+    let scheduler = scheduler();
+    let resumer = reserve(&scheduler, "resumer", "r")
+        .acquire()
+        .await
+        .unwrap()
+        .park()
+        .unwrap();
+    let mut held = Some(reserve(&scheduler, "seed", "r").acquire().await.unwrap());
+    let mut waits = BTreeMap::new();
+    let mut resume: Wait = Box::pin(resumer.acquire());
+    pending(&mut resume).await;
+    waits.insert("resumer".to_string(), resume);
+    let mut admitted = Vec::new();
+    for round in 0..8 {
+        let id = format!("fresh-{round}");
+        let mut wait: Wait = Box::pin(reserve(&scheduler, &id, "r").acquire());
+        pending(&mut wait).await;
+        waits.insert(id, wait);
+        held.take().unwrap().release();
+        let id = active(&scheduler);
+        held = Some(ready(waits.remove(&id).unwrap()).await);
+        admitted.push(id.clone());
+        if id == "resumer" {
+            break;
+        }
+    }
+    let position = admitted
+        .iter()
+        .position(|id| id == "resumer")
+        .unwrap_or_else(|| panic!("endless fresh work starved an accepted resume: {admitted:?}"));
+    assert!(
+        position < scheduler.settings().max_resume_burst + 1,
+        "{admitted:?}"
+    );
+    drop(waits);
+    drop(held);
+    assert_eq!(scheduler.snapshot().outstanding, 0);
+}
+
+#[tokio::test]
 async fn two_old_resumers_cannot_alternate_forever_ahead_of_another_resumer() {
     let scheduler = scheduler();
     let mut parked = Vec::new();

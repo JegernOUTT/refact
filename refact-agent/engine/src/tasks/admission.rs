@@ -591,16 +591,115 @@ mod tests {
         .await;
     }
 
-    async fn app_with_cap(cap: usize) -> AppState {
+    async fn app_with_settings(settings: CoordinationSettings) -> AppState {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let mut app = AppState::from_gcx(gcx).await;
-        app.work_scheduler = Arc::new(AdmissionScheduler::new(CoordinationSettings {
+        app.work_scheduler = Arc::new(AdmissionScheduler::new(settings));
+        app
+    }
+
+    async fn app_with_cap(cap: usize) -> AppState {
+        app_with_settings(CoordinationSettings {
             max_active_engine: cap,
             max_active_project: cap,
             max_active_root: cap,
             ..CoordinationSettings::default()
-        }));
-        app
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn refused_reservation_leaves_no_phantom_child_and_allocates_no_setup_task() {
+        let app = app_with_settings(CoordinationSettings {
+            max_active_engine: 1,
+            max_active_project: 1,
+            max_active_root: 1,
+            max_pending: 1,
+            max_outstanding: 8,
+            ..CoordinationSettings::default()
+        })
+        .await;
+        let owner = unique_id("owner");
+        let queued = unique_id("queued");
+        let refused = unique_id("refused");
+        reserve(&app, &owner, "proj", "root", 0).await.unwrap();
+        wait_for_permit(&owner).await.unwrap();
+        reserve(&app, &queued, "proj", "root", 0).await.unwrap();
+
+        let err = reserve(&app, &refused, "proj", "root", 0)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AdmissionError::QueueFull { .. }), "{err:?}");
+        assert!(!is_tracked(&refused).await);
+        assert!(matches!(
+            spawn_tracked(&refused, async {}).await,
+            Err(AdmissionError::Gone)
+        ));
+        assert!(!global().tasks().contains_key(&refused));
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 2);
+
+        end(&queued).await;
+        end(&owner).await;
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+    }
+
+    #[tokio::test]
+    async fn residency_eviction_checkpoints_a_parked_board_run_instead_of_cancelling_it() {
+        let app = app_with_settings(CoordinationSettings {
+            max_active_engine: 1,
+            max_active_project: 1,
+            max_active_root: 1,
+            max_parked_residency: 1,
+            ..CoordinationSettings::default()
+        })
+        .await;
+        let first = unique_id("first");
+        let second = unique_id("second");
+        let session = Arc::new(tokio::sync::Mutex::new(
+            crate::chat::types::ChatSession::new(first.clone()),
+        ));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(first.clone(), session.clone());
+        for id in [&first, &second] {
+            reserve(&app, id, "proj", "root", 0).await.unwrap();
+            wait_for_permit(id).await.unwrap();
+            app.agent_executions.get(id).unwrap().park().await.unwrap();
+        }
+
+        let snapshot = app.work_scheduler.snapshot();
+        assert_eq!((snapshot.parked, snapshot.evicted), (1, 1));
+        let evicted = snapshot
+            .tickets
+            .iter()
+            .find(|ticket| ticket.state == refact_work_core::TicketState::Evicted)
+            .expect("the run parked longest is checkpointed");
+        assert_eq!(evicted.run.work.id, first);
+        assert!(
+            is_tracked(&first).await,
+            "an evicted run is checkpointed, not cancelled"
+        );
+        let execution = app.agent_executions.get(&first).unwrap();
+        assert!(!execution.is_cancelled());
+        assert!(Arc::ptr_eq(
+            &app.chat.sessions.read().await[&first],
+            &session
+        ));
+
+        execution.resume().await.unwrap();
+        assert!(execution.holds_permit());
+        assert_eq!(app.work_scheduler.snapshot().evicted, 0);
+        assert!(Arc::ptr_eq(
+            &app.chat.sessions.read().await[&first],
+            &session
+        ));
+
+        drop(execution);
+        end(&first).await;
+        end(&second).await;
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
     }
 
     #[tokio::test]

@@ -98,7 +98,7 @@ pub fn capture(app: &AppState) -> WaitGraph {
         runs.push((
             ticket.run.clone(),
             RunFacts {
-                parked: ticket.state == TicketState::Parked,
+                parked: matches!(ticket.state, TicketState::Parked | TicketState::Evicted),
                 waiting_for_capacity: matches!(
                     ticket.state,
                     TicketState::Pending | TicketState::Reserved

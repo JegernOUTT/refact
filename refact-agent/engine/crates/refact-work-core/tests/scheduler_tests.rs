@@ -585,6 +585,54 @@ async fn outstanding_full_is_rejected_explicitly() {
 }
 
 #[tokio::test]
+async fn refused_admission_is_terminal_and_never_leaks_a_ticket_or_a_run_identity() {
+    let sched = AdmissionScheduler::new(CoordinationSettings {
+        max_pending: 1,
+        max_outstanding: 3,
+        ..settings(1, 1, 1)
+    });
+    let handle = sched.handle();
+    let owner = acquire_now(&sched, request(RuntimeKind::Trajectory, "owner", "p", "r")).await;
+    let queued_request = request(RuntimeKind::Trajectory, "queued", "p", "r");
+    let queued_run = queued_request.run.clone();
+    let queued = sched.reserve(queued_request).unwrap();
+
+    let refused = request(RuntimeKind::BackgroundAgent, "child", "p", "r");
+    let child_run = refused.run.clone();
+    let err = sched.reserve(refused).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AdmissionError::QueueFull {
+                pending: 1,
+                max_pending: 1
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(
+        !handle.is_tracked(&child_run),
+        "a refused child must not exist as a run its parent could wait on"
+    );
+    assert_eq!(sched.snapshot().outstanding, 2);
+
+    // Resume and cancellation are not creation, and must never be refused
+    // because the creation bound is full.
+    let parked = owner.park().expect("park");
+    let resumed = timeout(Duration::from_secs(1), parked.acquire())
+        .await
+        .expect("no timeout")
+        .expect("a resume is not new queue admission");
+    assert_eq!(resumed.run().work.id, "owner");
+    assert!(sched.cancel(&queued_run));
+    drop(queued);
+    resumed.release();
+    sched
+        .reserve(request(RuntimeKind::BackgroundAgent, "child", "p", "r"))
+        .expect("refusal is terminal for that attempt, not a permanent ban");
+}
+
+#[tokio::test]
 async fn depth_limit_and_disabled_scheduler_reject_reservations() {
     let sched = AdmissionScheduler::new(CoordinationSettings {
         max_subchat_depth: 2,
@@ -797,7 +845,7 @@ async fn snapshot_invariants_hold_under_mixed_churn() {
             assert!(*count <= snap.settings.max_active_root);
         }
         assert_eq!(
-            snap.active + snap.pending + snap.reserved + snap.parked,
+            snap.active + snap.pending + snap.reserved + snap.parked + snap.evicted,
             snap.outstanding
         );
         assert_eq!(snap.active, snap.active_by_runtime.values().sum::<usize>());

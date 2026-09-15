@@ -99,6 +99,7 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("max_resume_burst", 1, 1_024),
     coordination_integer("max_pending", 1, 1_000_000),
     coordination_integer("max_outstanding", 1, 4_000_000),
+    coordination_integer("max_parked_residency", 1, 4_000_000),
     coordination_integer("max_subchat_depth", 1, 64),
     coordination_integer("max_read_stamps", 64, 1_048_576),
     coordination_integer("max_write_records", 64, 4_194_304),

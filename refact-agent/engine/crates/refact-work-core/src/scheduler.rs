@@ -96,6 +96,10 @@ pub enum TicketState {
     Pending,
     Active,
     Parked,
+    /// A parked run demoted past `max_parked_residency`. The entry it keeps is
+    /// the checkpoint: identity, queue age, depth, scope and accounting stay
+    /// tracked and `acquire` resumes from it. Eviction itself discards nothing.
+    Evicted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +111,7 @@ pub struct TicketSnapshot {
     pub seq: u64,
     pub state: TicketState,
     pub park_count: u32,
+    pub evict_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +121,7 @@ pub struct SchedulerSnapshot {
     pub pending: usize,
     pub reserved: usize,
     pub parked: usize,
+    pub evicted: usize,
     pub outstanding: usize,
     pub active_by_project: BTreeMap<ProjectKey, usize>,
     pub active_by_root: BTreeMap<CheckoutKey, usize>,
@@ -129,8 +135,10 @@ struct Entry {
     depth: usize,
     seq: u64,
     ready_seq: u64,
+    parked_seq: u64,
     state: TicketState,
     park_count: u32,
+    evict_count: u32,
     cancel_requested: bool,
     waiter: Option<oneshot::Sender<Result<(), AdmissionError>>>,
 }
@@ -152,19 +160,48 @@ struct State {
 }
 
 impl State {
-    fn counts(&self) -> (usize, usize, usize) {
+    fn counts(&self) -> (usize, usize, usize, usize) {
         let mut pending = 0;
         let mut reserved = 0;
         let mut parked = 0;
+        let mut evicted = 0;
         for entry in self.entries.values() {
             match entry.state {
                 TicketState::Pending => pending += 1,
                 TicketState::Reserved => reserved += 1,
                 TicketState::Parked => parked += 1,
+                TicketState::Evicted => evicted += 1,
                 TicketState::Active => {}
             }
         }
-        (pending, reserved, parked)
+        (pending, reserved, parked, evicted)
+    }
+
+    /// A parked run holds identity and a reservation but no permit, so nothing
+    /// otherwise bounds how long it stays resident. Past the residency bound
+    /// the least valuable parked run — the one idle longest since its last
+    /// park — is checkpointed and evicted. Eviction never cancels: the entry,
+    /// its queue age and its accounting survive so `acquire` resumes it.
+    fn evict_parked_over_residency(&mut self) {
+        let mut parked: Vec<(u64, TicketId)> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.state == TicketState::Parked)
+            .map(|(id, entry)| (entry.parked_seq, *id))
+            .collect();
+        let over = parked
+            .len()
+            .saturating_sub(self.settings.max_parked_residency);
+        if over == 0 {
+            return;
+        }
+        parked.sort_unstable();
+        for (_, id) in parked.into_iter().take(over) {
+            if let Some(entry) = self.entries.get_mut(&id) {
+                entry.state = TicketState::Evicted;
+                entry.evict_count = entry.evict_count.saturating_add(1);
+            }
+        }
     }
 
     fn fits(&self, entry: &Entry) -> bool {
@@ -328,7 +365,7 @@ impl Inner {
                     return Ok(rx);
                 }
                 TicketState::Pending => (entry.seq, false),
-                TicketState::Reserved | TicketState::Parked => {
+                TicketState::Reserved | TicketState::Parked | TicketState::Evicted => {
                     entry.state = TicketState::Pending;
                     entry.ready_seq = ready_seq;
                     entry.waiter = Some(tx);
@@ -357,6 +394,8 @@ impl Inner {
 
     fn park(&self, id: TicketId) -> Result<(), AdmissionError> {
         let mut state = self.lock();
+        let parked_seq = state.next_seq;
+        state.next_seq += 1;
         let scope = match state.entries.get_mut(&id) {
             None => return Err(AdmissionError::Gone),
             Some(entry) => {
@@ -368,10 +407,12 @@ impl Inner {
                 }
                 entry.state = TicketState::Parked;
                 entry.park_count += 1;
+                entry.parked_seq = parked_seq;
                 entry.scope.clone()
             }
         };
         state.discharge(&scope);
+        state.evict_parked_over_residency();
         state.pump();
         Ok(())
     }
@@ -463,6 +504,9 @@ impl AdmissionScheduler {
             .map(|root| state.settings.root_quantum(root.as_str()))
             .unwrap_or(0);
         state.root_credit = state.root_credit.min(quantum);
+        // A lowered residency bound drains parked work into checkpoints; it
+        // never terminates anything, running or parked.
+        state.evict_parked_over_residency();
         state.pump();
         Ok(())
     }
@@ -488,9 +532,10 @@ impl AdmissionScheduler {
                 max_outstanding: state.settings.max_outstanding,
             });
         }
-        let (pending, reserved, _) = state.counts();
-        // Parked dependency chains are already accepted resident work, not new
-        // queue admission. max_outstanding bounds residency independently.
+        let (pending, reserved, _, _) = state.counts();
+        // Parked and checkpointed chains are already accepted resident work,
+        // not new queue admission. max_outstanding bounds total residency and
+        // max_parked_residency bounds the parked part of it independently.
         let queued = pending + reserved;
         if queued >= state.settings.max_pending {
             return Err(AdmissionError::QueueFull {
@@ -512,8 +557,10 @@ impl AdmissionScheduler {
                 depth: request.depth,
                 seq,
                 ready_seq: seq,
+                parked_seq: 0,
                 state: TicketState::Reserved,
                 park_count: 0,
+                evict_count: 0,
                 cancel_requested: false,
                 waiter: None,
             },
@@ -544,7 +591,7 @@ impl AdmissionScheduler {
 
     pub fn snapshot(&self) -> SchedulerSnapshot {
         let state = self.inner.lock();
-        let (pending, reserved, parked) = state.counts();
+        let (pending, reserved, parked, evicted) = state.counts();
         let mut tickets: Vec<TicketSnapshot> = state
             .entries
             .iter()
@@ -556,6 +603,7 @@ impl AdmissionScheduler {
                 seq: entry.seq,
                 state: entry.state,
                 park_count: entry.park_count,
+                evict_count: entry.evict_count,
             })
             .collect();
         tickets.sort_by_key(|t| t.seq);
@@ -571,6 +619,7 @@ impl AdmissionScheduler {
             pending,
             reserved,
             parked,
+            evicted,
             outstanding: state.entries.len(),
             active_by_project: state
                 .active_by_project

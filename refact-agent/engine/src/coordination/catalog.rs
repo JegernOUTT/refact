@@ -471,7 +471,8 @@ pub async fn build_catalog(
                 row.state = match ticket.state {
                     refact_work_core::TicketState::Reserved
                     | refact_work_core::TicketState::Pending => WorkStateTag::Queued,
-                    refact_work_core::TicketState::Parked => WorkStateTag::Parked,
+                    refact_work_core::TicketState::Parked
+                    | refact_work_core::TicketState::Evicted => WorkStateTag::Parked,
                     refact_work_core::TicketState::Active => WorkStateTag::Running,
                 };
             }
