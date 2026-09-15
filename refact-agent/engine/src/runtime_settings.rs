@@ -206,6 +206,9 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("provider_breaker_cooldown_ms", 1, 86_400_000),
     coordination_integer("provider_max_retry_after_ms", 1, 86_400_000),
     coordination_integer("provider_pressure_max_buckets", 1, 1_000_000),
+    coordination_integer("no_progress_repeat_threshold", 2, 100_000),
+    coordination_integer("no_progress_unchanged_turns", 2, 100_000),
+    coordination_integer("no_progress_window_turns", 2, 100_000),
 ];
 
 pub fn coordination_field_bounds() -> &'static [CoordinationFieldBound] {

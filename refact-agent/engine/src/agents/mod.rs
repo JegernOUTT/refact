@@ -9,6 +9,7 @@ pub mod lifecycle;
 pub mod monitor;
 pub mod path_scope;
 pub mod profile;
+pub mod progress_monitor;
 pub mod push;
 pub mod sandbox_contract;
 pub mod spawn;

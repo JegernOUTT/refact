@@ -182,6 +182,15 @@ pub struct CoordinationSettings {
     /// for longer than this.
     pub provider_max_retry_after_ms: u64,
     pub provider_pressure_max_buckets: usize,
+    /// Identical completed tool calls, or identical text-only replies, that
+    /// must recur inside the examined window before a run is reported as
+    /// repeating itself. Elapsed silence never substitutes for this evidence.
+    pub no_progress_repeat_threshold: usize,
+    /// Turns a run's material output must stay unchanged, while it is still
+    /// generating, before it is reported as producing nothing.
+    pub no_progress_unchanged_turns: usize,
+    /// Most recent turns examined for repetition.
+    pub no_progress_window_turns: usize,
 }
 
 impl Default for CoordinationSettings {
@@ -305,6 +314,9 @@ impl Default for CoordinationSettings {
             provider_breaker_cooldown_ms: 30_000,
             provider_max_retry_after_ms: 300_000,
             provider_pressure_max_buckets: 4_096,
+            no_progress_repeat_threshold: 3,
+            no_progress_unchanged_turns: 12,
+            no_progress_window_turns: 24,
         }
     }
 }
@@ -621,6 +633,38 @@ impl CoordinationSettings {
             "run_intent_retention_secs",
             self.run_intent_retention_secs,
             1,
+        );
+        at_least(
+            &mut v,
+            "no_progress_repeat_threshold",
+            self.no_progress_repeat_threshold as u64,
+            2,
+        );
+        at_least(
+            &mut v,
+            "no_progress_unchanged_turns",
+            self.no_progress_unchanged_turns as u64,
+            2,
+        );
+        at_least(
+            &mut v,
+            "no_progress_window_turns",
+            self.no_progress_window_turns as u64,
+            2,
+        );
+        not_greater(
+            &mut v,
+            "no_progress_repeat_threshold",
+            self.no_progress_repeat_threshold as u64,
+            "no_progress_window_turns",
+            self.no_progress_window_turns as u64,
+        );
+        not_greater(
+            &mut v,
+            "no_progress_unchanged_turns",
+            self.no_progress_unchanged_turns as u64,
+            "no_progress_window_turns",
+            self.no_progress_window_turns as u64,
         );
         at_least(&mut v, "lease_ttl_ms", self.lease_ttl_ms, 1);
         at_least(
@@ -1127,6 +1171,27 @@ mod tests {
             |settings: &mut CoordinationSettings| settings.store_max_leases = 0,
             |settings: &mut CoordinationSettings| settings.store_max_outbox_messages = 0,
             |settings: &mut CoordinationSettings| settings.store_max_activity_observations = 0,
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn no_progress_bounds_default_generous_and_reject_invalid_values() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(settings.no_progress_repeat_threshold >= 3);
+        assert!(settings.no_progress_unchanged_turns >= 8);
+        assert!(settings.no_progress_window_turns >= settings.no_progress_unchanged_turns);
+        assert!(settings.no_progress_window_turns >= settings.no_progress_repeat_threshold);
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.no_progress_repeat_threshold = 0,
+            |settings: &mut CoordinationSettings| settings.no_progress_repeat_threshold = 1,
+            |settings: &mut CoordinationSettings| settings.no_progress_unchanged_turns = 1,
+            |settings: &mut CoordinationSettings| settings.no_progress_window_turns = 1,
+            |settings: &mut CoordinationSettings| settings.no_progress_window_turns = 2,
         ] {
             let mut settings = CoordinationSettings::default();
             mutate(&mut settings);
