@@ -21,9 +21,9 @@ use refact_lsp::integrations::browser_models::{
     BrowserHttpRequest, BrowserLoadState, BrowserLocator, BrowserPdfOptions, BrowserPollMatcher,
     BrowserPseudoElement, BrowserScreenshotAnimations, BrowserScreenshotClip,
     BrowserScreenshotOptions, BrowserStep, BrowserTextMode, CdpTarget, ClockTicks, ClockTime,
-    ExecutionReport, FillStrategy, LocatorHandlerAction, LocatorRegex, NetworkReportMode,
-    PageContextMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind,
-    WebSocketFrameDisposition, WebSocketMessageAction, WebSocketRouteMode,
+    ExecutionReport, FieldKind, FillStrategy, LocatorHandlerAction, LocatorRegex,
+    NetworkReportMode, PageContextMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern,
+    WebSocketEventKind, WebSocketFrameDisposition, WebSocketMessageAction, WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::devices;
 use refact_lsp::refact_browser::{
@@ -92,6 +92,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "visual-states.html",
     "poll-state.html",
     "aria-shadow.html",
+    "aria-widgets.html",
 ];
 
 fn execute_steps(
@@ -3266,6 +3267,97 @@ async fn contenteditable_fill_updates_output() {
         .value
         .unwrap();
     assert_eq!(output, "editable text");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn fill_refuses_aria_widgets_and_retargets_labels() {
+    let Some(case) = BrowserCase::start("aria-widgets.html").await else {
+        return;
+    };
+
+    let spinbutton = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::Fill {
+            locator: BrowserLocator::css("#spin"),
+            text: "31".to_string(),
+            clear_first: true,
+            verify: true,
+        }],
+    );
+    assert!(
+        !spinbutton.ok,
+        "spinbutton fill must be refused: {spinbutton:?}"
+    );
+    assert_eq!(spinbutton.steps[0].field_kind, Some(FieldKind::Unknown));
+    assert_eq!(spinbutton.steps[0].retries, 0);
+    assert_eq!(spinbutton.steps[0].verified, None);
+    let refusal = spinbutton.steps[0].error.as_deref().unwrap();
+    assert!(refusal.contains("role=spinbutton"), "{refusal}");
+    assert!(
+        refusal.contains("not an <input>, <textarea> or [contenteditable] element"),
+        "{refusal}"
+    );
+
+    let untouched = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::GetAttribute {
+            locator: BrowserLocator::css("#spin"),
+            attribute: "aria-valuenow".to_string(),
+        }],
+    );
+    assert!(untouched.ok, "{untouched:?}");
+    assert_eq!(untouched.steps[0].data.as_ref().unwrap()["value"], "12");
+
+    let button = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::Fill {
+            locator: BrowserLocator::css("#go"),
+            text: "nope".to_string(),
+            clear_first: true,
+            verify: true,
+        }],
+    );
+    assert!(!button.ok, "button fill must be refused: {button:?}");
+    assert_eq!(button.steps[0].field_kind, Some(FieldKind::Unknown));
+    assert!(button.steps[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("not an <input>, <textarea> or [contenteditable] element"));
+
+    let editable = execute_fixture_steps(
+        &case.tab,
+        &[
+            BrowserStep::Fill {
+                locator: BrowserLocator::css("label[for=name]"),
+                text: "Ada".to_string(),
+                clear_first: true,
+                verify: true,
+            },
+            BrowserStep::InputValue {
+                locator: BrowserLocator::css("#name"),
+            },
+            BrowserStep::Fill {
+                locator: BrowserLocator::css("#note"),
+                text: "editable note".to_string(),
+                clear_first: true,
+                verify: true,
+            },
+        ],
+    );
+    assert!(
+        editable.ok,
+        "label/contenteditable fill failed: {editable:?}"
+    );
+    assert_eq!(editable.steps[0].field_kind, Some(FieldKind::TextInput));
+    assert_eq!(editable.steps[0].verified, Some(true));
+    assert_eq!(editable.steps[1].data.as_ref().unwrap()["value"], "Ada");
+    assert_eq!(
+        editable.steps[2].field_kind,
+        Some(FieldKind::ContentEditable)
+    );
+    assert_eq!(editable.steps[2].verified, Some(true));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
