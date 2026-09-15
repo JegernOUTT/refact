@@ -16,6 +16,7 @@ pub mod error;
 pub mod file_provenance;
 pub mod history;
 pub mod leases;
+pub mod merge_gate;
 pub mod outbox;
 pub mod paging;
 pub mod peer_authority;

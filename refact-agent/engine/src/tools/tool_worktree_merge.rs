@@ -49,10 +49,45 @@ mod tests {
             merge_commit: Some("abc123".to_string()),
             cleanup: None,
             conflict: None,
+            dirty_baseline: None,
             affected_references: Vec::new(),
             affected_reference_count: 0,
             warnings: vec!["stash cleanup needs inspection".to_string()],
         }
+    }
+
+    fn dirty_baseline_response() -> MergeWorktreeResponse {
+        MergeWorktreeResponse {
+            status: "dirty_baseline".to_string(),
+            merged: false,
+            merge_commit: None,
+            dirty_baseline: Some(crate::worktrees::types::DirtyBaseline {
+                branch: Some("main".to_string()),
+                files: vec!["M  src/lib.rs".to_string()],
+                files_truncated: false,
+                staged_count: 1,
+                unstaged_count: 0,
+                untracked_count: 0,
+            }),
+            warnings: Vec::new(),
+            ..merged_response_with_warning()
+        }
+    }
+
+    #[test]
+    fn dirty_target_refusal_names_the_files_and_the_acknowledged_option() {
+        let message = merge_response_message(&dirty_baseline_response());
+
+        assert!(
+            message.contains("Merge Refused: Dirty Target Checkout"),
+            "{message}"
+        );
+        assert!(message.contains("src/lib.rs"), "{message}");
+        assert!(
+            message.contains("acknowledge_dirty_baseline=true"),
+            "{message}"
+        );
+        assert!(!message.contains("Worktree Merged"), "{message}");
     }
 
     fn merged_response_with_cleanup_warning() -> MergeWorktreeResponse {
@@ -221,6 +256,29 @@ fn merge_response_message(response: &MergeWorktreeResponse) -> String {
         return message;
     }
 
+    if let Some(baseline) = response.dirty_baseline.as_ref() {
+        let files = baseline
+            .files
+            .iter()
+            .map(|file| format!("- {}", file))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut message = format!(
+            "# Merge Refused: Dirty Target Checkout\n\n**Worktree:** {}\n**Branch:** {} → {}\n**Target branch checked out:** {}\n**Staged/unstaged/untracked:** {}/{}/{}\n\n## Uncommitted Files{}\n{}\n\nNothing was merged and nothing was discarded. Commit or stash these changes, or retry with acknowledge_dirty_baseline=true to stash and restore them around the merge.",
+            response.id,
+            response.source_branch,
+            response.target_branch,
+            baseline.branch.as_deref().unwrap_or("detached HEAD"),
+            baseline.staged_count,
+            baseline.unstaged_count,
+            baseline.untracked_count,
+            if baseline.files_truncated { " (truncated)" } else { "" },
+            files
+        );
+        append_warnings(&mut message, &response_warnings(response));
+        return message;
+    }
+
     if response.status == "nothing_to_merge" {
         let mut message = format!(
             "# Nothing to Merge\n\n**Worktree:** {}\n**Branch:** {} → {}\n\nCleanup: {}.",
@@ -316,6 +374,7 @@ impl Tool for ToolWorktreeMerge {
                     ("commit_message", "string", "Optional commit message override. If omitted, Refact generates one from the diff."),
                     ("delete_after_merge", "boolean", "Delete the worktree and source branch after a successful merge or nothing-to-merge cleanup. Defaults to true."),
                     ("include_uncommitted", "boolean", "Auto-commit dirty worktree changes before merging. Defaults to true."),
+                    ("acknowledge_dirty_baseline", "boolean", "Merge even though the target checkout has uncommitted changes; they are stashed and restored around the merge. Defaults to false, which refuses the merge and reports the dirty files."),
                 ],
                 &[],
             ),
@@ -352,6 +411,7 @@ impl Tool for ToolWorktreeMerge {
         let strategy = strategy_arg(args)?;
         let delete_after_merge = bool_arg(args, "delete_after_merge", true)?;
         let include_uncommitted = bool_arg(args, "include_uncommitted", true)?;
+        let acknowledge_dirty_baseline = bool_arg(args, "acknowledge_dirty_baseline", false)?;
         let target_branch = string_arg(args, "target_branch")?;
 
         let parent_chat_id = ccx.lock().await.chat_id.clone();
@@ -391,6 +451,7 @@ impl Tool for ToolWorktreeMerge {
                     target_branch,
                     commit_message,
                     generate_commit_message: false,
+                    acknowledge_dirty_baseline,
                 },
             )
             .await?;

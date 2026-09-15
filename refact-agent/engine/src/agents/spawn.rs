@@ -2746,6 +2746,7 @@ async fn finalize_spawn_worktree(
                 target_branch: spawned.base_branch,
                 commit_message: Some(format!("subagent: {}", title)),
                 generate_commit_message: false,
+                acknowledge_dirty_baseline: false,
             },
         )
         .await;

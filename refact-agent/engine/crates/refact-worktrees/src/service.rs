@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::Utc;
 use sha2::{Digest, Sha256};
@@ -21,14 +21,28 @@ use crate::types::{
 const DEFAULT_MAX_PATCH_BYTES: usize = 200_000;
 
 static REGISTRY_WRITE_LOCK: OnceLock<AMutex<()>> = OnceLock::new();
-static MERGE_LOCK: OnceLock<AMutex<()>> = OnceLock::new();
+#[allow(clippy::type_complexity)]
+static MERGE_LOCKS: OnceLock<Mutex<HashMap<String, Arc<AMutex<()>>>>> = OnceLock::new();
 
 fn registry_write_lock() -> &'static AMutex<()> {
     REGISTRY_WRITE_LOCK.get_or_init(|| AMutex::new(()))
 }
 
-pub fn worktree_merge_lock() -> &'static AMutex<()> {
-    MERGE_LOCK.get_or_init(|| AMutex::new(()))
+/// One merge at a time per target checkout. Two merges into the same checkout
+/// queue behind each other; merges into different checkouts never wait on one
+/// another, because they write to different working trees.
+pub fn merge_lock_for(checkout: &Path) -> Arc<AMutex<()>> {
+    let key = dunce::canonicalize(checkout)
+        .unwrap_or_else(|_| checkout.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    MERGE_LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(key)
+        .or_insert_with(|| Arc::new(AMutex::new(())))
+        .clone()
 }
 
 #[derive(Debug, Clone)]
@@ -581,7 +595,8 @@ impl WorktreeService {
             if let Some(target_branch) = request.target_branch.as_deref() {
                 validate_branch_name(target_branch)?;
             }
-            let _merge_guard = worktree_merge_lock().lock().await;
+            let merge_lock = merge_lock_for(service.source_workspace_root());
+            let _merge_guard = merge_lock.lock().await;
             let _registry_guard = registry_write_lock().lock().await;
             let registry = service.load_registry_unlocked().await?;
             let blocking_service = service.clone();
@@ -640,6 +655,33 @@ impl WorktreeService {
         if !git::branch_exists(&record.meta.source_workspace_root, &target_branch)? {
             return Err(format!("Target branch '{}' not found", target_branch));
         }
+        let affected_references = record.references.clone();
+        let affected_reference_count = affected_references.len();
+        if !request.acknowledge_dirty_baseline {
+            if let Some(baseline) = git::dirty_baseline(&record.meta.source_workspace_root)? {
+                return Ok(MergeWorktreeResponse {
+                    id: id.to_string(),
+                    status: "dirty_baseline".to_string(),
+                    merged: false,
+                    strategy: request.strategy.as_str().to_string(),
+                    source_branch,
+                    target_branch,
+                    committed_uncommitted: None,
+                    merge_commit: None,
+                    cleanup: None,
+                    conflict: None,
+                    warnings: vec![format!(
+                        "Target workspace has {} uncommitted file(s) that were not merged; \
+                         commit or stash them, or retry with acknowledge_dirty_baseline=true \
+                         to stash and restore them around the merge",
+                        baseline.files.len()
+                    )],
+                    dirty_baseline: Some(baseline),
+                    affected_references,
+                    affected_reference_count,
+                });
+            }
+        }
         git::ensure_no_merge_in_progress(&record.meta.source_workspace_root, "Target workspace")?;
         git::ensure_dirty_worktree_on_branch(
             &record.meta.source_workspace_root,
@@ -667,8 +709,6 @@ impl WorktreeService {
             &target_branch,
             &source_branch,
         )?;
-        let affected_references = record.references.clone();
-        let affected_reference_count = affected_references.len();
         if ahead == 0 {
             let cleanup = if request.delete_after_merge && source_branch != target_branch {
                 let removal =
@@ -689,6 +729,7 @@ impl WorktreeService {
                 merge_commit: None,
                 cleanup,
                 conflict: None,
+                dirty_baseline: None,
                 affected_references,
                 affected_reference_count,
                 warnings: Vec::new(),
@@ -714,6 +755,7 @@ impl WorktreeService {
                 merge_commit: None,
                 cleanup: None,
                 conflict: Some(conflict_state(conflicts, true, false)),
+                dirty_baseline: None,
                 affected_references,
                 affected_reference_count,
                 warnings: preflight_warnings,
@@ -808,6 +850,7 @@ impl WorktreeService {
                     merge_commit: None,
                     cleanup: None,
                     conflict: Some(conflict),
+                    dirty_baseline: None,
                     affected_references,
                     affected_reference_count,
                     warnings: cleanup_warnings,
@@ -888,6 +931,7 @@ impl WorktreeService {
                         merge_commit: None,
                         cleanup: None,
                         conflict: Some(conflict),
+                        dirty_baseline: None,
                         affected_references,
                         affected_reference_count,
                         warnings: cleanup_warnings,
@@ -918,6 +962,7 @@ impl WorktreeService {
             merge_commit,
             cleanup,
             conflict: None,
+            dirty_baseline: None,
             affected_references,
             affected_reference_count,
             warnings,
@@ -3467,6 +3512,7 @@ mod worktree_registry_tests {
                     delete_after_merge: false,
                     target_branch: Some("main".to_string()),
                     commit_message: Some("should not auto commit source".to_string()),
+                    acknowledge_dirty_baseline: true,
                     ..Default::default()
                 },
             )
@@ -3516,6 +3562,7 @@ mod worktree_registry_tests {
                     delete_after_merge: true,
                     target_branch: Some("main".to_string()),
                     commit_message: Some("should not cleanup".to_string()),
+                    acknowledge_dirty_baseline: true,
                     ..Default::default()
                 },
             )
@@ -3954,6 +4001,66 @@ mod worktree_registry_tests {
     }
 
     #[tokio::test]
+    async fn worktree_merge_refuses_an_unacknowledged_dirty_target_and_changes_survive() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/unacknowledged-dirty".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "agent.txt",
+            "agent change\n",
+            "agent change",
+        );
+        std::fs::write(source.join("file.txt"), "user edit\n").unwrap();
+        run_git(&source, &["add", "file.txt"]);
+        std::fs::write(source.join("target-notes.txt"), "dirty target\n").unwrap();
+
+        let refused = service
+            .merge_worktree(
+                &created.worktree.meta.id,
+                MergeWorktreeRequest {
+                    strategy: WorktreeMergeStrategy::Squash,
+                    delete_after_merge: true,
+                    target_branch: Some("main".to_string()),
+                    commit_message: Some("should be refused".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(refused.status, "dirty_baseline");
+        assert!(!refused.merged);
+        let baseline = refused.dirty_baseline.expect("dirty baseline reported");
+        assert_eq!(baseline.branch.as_deref(), Some("main"));
+        assert_eq!(baseline.staged_count, 1);
+        assert_eq!(baseline.untracked_count, 1);
+        assert_eq!(baseline.files.len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "user edit\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("target-notes.txt")).unwrap(),
+            "dirty target\n"
+        );
+        assert!(!source.join("agent.txt").exists());
+        assert!(run_git(&source, &["stash", "list"]).trim().is_empty());
+        assert!(created.worktree.meta.root.exists());
+    }
+
+    #[tokio::test]
     async fn worktree_merge_preserves_dirty_target_workspace_changes() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
@@ -3985,6 +4092,7 @@ mod worktree_registry_tests {
                     delete_after_merge: false,
                     target_branch: Some("main".to_string()),
                     commit_message: Some("dirty target merge".to_string()),
+                    acknowledge_dirty_baseline: true,
                     ..Default::default()
                 },
             )
@@ -4037,6 +4145,7 @@ mod worktree_registry_tests {
                     delete_after_merge: false,
                     target_branch: Some("main".to_string()),
                     commit_message: Some("dirty target merge without identity".to_string()),
+                    acknowledge_dirty_baseline: true,
                     ..Default::default()
                 },
             )
@@ -4091,6 +4200,7 @@ mod worktree_registry_tests {
                     delete_after_merge: false,
                     target_branch: Some("main".to_string()),
                     commit_message: Some("dirty target index merge".to_string()),
+                    acknowledge_dirty_baseline: true,
                     ..Default::default()
                 },
             )
@@ -4152,6 +4262,7 @@ mod worktree_registry_tests {
                     delete_after_merge: false,
                     target_branch: Some("main".to_string()),
                     commit_message: Some("dirty target cross branch".to_string()),
+                    acknowledge_dirty_baseline: true,
                     ..Default::default()
                 },
             )
@@ -4206,6 +4317,7 @@ mod worktree_registry_tests {
                     delete_after_merge: false,
                     target_branch: Some("main".to_string()),
                     commit_message: Some("dirty target detached".to_string()),
+                    acknowledge_dirty_baseline: true,
                     ..Default::default()
                 },
             )
@@ -4258,6 +4370,7 @@ mod worktree_registry_tests {
                     delete_after_merge: false,
                     target_branch: Some("main".to_string()),
                     commit_message: Some("dirty target conflict".to_string()),
+                    acknowledge_dirty_baseline: true,
                     ..Default::default()
                 },
             )
@@ -4310,6 +4423,7 @@ mod worktree_registry_tests {
                     delete_after_merge: false,
                     target_branch: Some("main".to_string()),
                     commit_message: Some("dirty target untracked conflict".to_string()),
+                    acknowledge_dirty_baseline: true,
                     ..Default::default()
                 },
             )

@@ -178,6 +178,8 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("lease_ttl_ms", 1, 86_400_000),
     coordination_integer("lease_renew_interval_ms", 1, 86_400_000),
     coordination_integer("lease_takeover_grace_ms", 0, 86_400_000),
+    coordination_integer("merge_lease_wait_ms", 1, 86_400_000),
+    coordination_integer("merge_lease_poll_interval_ms", 1, 3_600_000),
     coordination_integer("store_busy_timeout_ms", 1, 600_000),
     coordination_bool("store_allow_non_local_filesystem"),
     coordination_integer("store_max_engine_instances", 1, 100_000),

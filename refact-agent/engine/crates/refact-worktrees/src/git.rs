@@ -6,7 +6,7 @@ use std::process::Command;
 use git2::{DiffOptions, Repository, Signature, StashFlags, Status, StatusOptions, StatusShow};
 use uuid::Uuid;
 
-use crate::types::{WorktreeDiffFile, WorktreeDiffStats, WorktreeStatus};
+use crate::types::{DirtyBaseline, WorktreeDiffFile, WorktreeDiffStats, WorktreeStatus};
 
 pub struct WorktreeCreateResult {
     pub branch_was_created: bool,
@@ -769,6 +769,43 @@ pub fn ensure_clean_worktree(root: &Path, label: &str) -> Result<(), String> {
 
 pub fn has_porcelain_changes(root: &Path) -> Result<bool, String> {
     Ok(!run_git(root, &["status", "--porcelain"])?.trim().is_empty())
+}
+
+/// Files listed in a dirty baseline before the rest are counted only.
+pub const DIRTY_BASELINE_MAX_FILES: usize = 50;
+
+/// Uncommitted work standing in a checkout right now, or `None` when it is
+/// clean. Reads only; nothing is stashed, staged or reset here.
+pub fn dirty_baseline(root: &Path) -> Result<Option<DirtyBaseline>, String> {
+    let repo = discover_repo(root)?;
+    let porcelain = run_git(root, &["status", "--porcelain"])?;
+    let mut baseline = DirtyBaseline {
+        branch: current_branch(&repo),
+        ..DirtyBaseline::default()
+    };
+    for line in porcelain.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let staged = line.as_bytes()[0] as char;
+        let unstaged = line.as_bytes()[1] as char;
+        if staged == '?' {
+            baseline.untracked_count += 1;
+        } else {
+            if staged != ' ' {
+                baseline.staged_count += 1;
+            }
+            if unstaged != ' ' {
+                baseline.unstaged_count += 1;
+            }
+        }
+        if baseline.files.len() < DIRTY_BASELINE_MAX_FILES {
+            baseline.files.push(line[3..].to_string());
+        } else {
+            baseline.files_truncated = true;
+        }
+    }
+    Ok((!baseline.files.is_empty()).then_some(baseline))
 }
 
 pub fn ensure_dirty_worktree_on_branch(

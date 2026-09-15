@@ -131,6 +131,11 @@ pub struct CoordinationSettings {
     /// How long a lease must already be expired before an explicit takeover is
     /// allowed at all. Engine presence still has to say the holder is gone.
     pub lease_takeover_grace_ms: u64,
+    /// How long a merge waits for the target checkout's merge lease before it
+    /// fails as retryable. A merge never blocks indefinitely.
+    pub merge_lease_wait_ms: u64,
+    /// How often a waiting merge retries the checkout's merge lease.
+    pub merge_lease_poll_interval_ms: u64,
     pub store_max_engine_instances: usize,
     pub store_max_run_intents: usize,
     pub store_max_queued_work: usize,
@@ -239,6 +244,8 @@ impl Default for CoordinationSettings {
             lease_ttl_ms: 120_000,
             lease_renew_interval_ms: 30_000,
             lease_takeover_grace_ms: 60_000,
+            merge_lease_wait_ms: 300_000,
+            merge_lease_poll_interval_ms: 250,
             store_max_engine_instances: 512,
             store_max_run_intents: 65_536,
             store_max_queued_work: 65_536,
@@ -571,6 +578,20 @@ impl CoordinationSettings {
             self.lease_renew_interval_ms,
             "lease_ttl_ms",
             self.lease_ttl_ms,
+        );
+        at_least(&mut v, "merge_lease_wait_ms", self.merge_lease_wait_ms, 1);
+        at_least(
+            &mut v,
+            "merge_lease_poll_interval_ms",
+            self.merge_lease_poll_interval_ms,
+            1,
+        );
+        not_greater(
+            &mut v,
+            "merge_lease_poll_interval_ms",
+            self.merge_lease_poll_interval_ms,
+            "merge_lease_wait_ms",
+            self.merge_lease_wait_ms,
         );
         at_least(
             &mut v,
@@ -1003,6 +1024,25 @@ mod tests {
             |settings: &mut CoordinationSettings| settings.lease_renew_interval_ms = 0,
             |settings: &mut CoordinationSettings| {
                 settings.lease_renew_interval_ms = settings.lease_ttl_ms + 1
+            },
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn merge_lease_bounds_default_generous_and_reject_invalid_values() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(settings.merge_lease_wait_ms >= 60_000);
+        assert!(settings.merge_lease_poll_interval_ms <= settings.merge_lease_wait_ms);
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.merge_lease_wait_ms = 0,
+            |settings: &mut CoordinationSettings| settings.merge_lease_poll_interval_ms = 0,
+            |settings: &mut CoordinationSettings| {
+                settings.merge_lease_poll_interval_ms = settings.merge_lease_wait_ms + 1
             },
         ] {
             let mut settings = CoordinationSettings::default();

@@ -17,14 +17,14 @@ use crate::chat::verifier::{load_expected_card_state, outcome_is_infrastructure}
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tools::task_tool_helpers::require_bound_planner_task;
-use crate::worktrees::service::{worktree_merge_lock, WorktreeService};
+use crate::worktrees::service::{merge_lock_for, WorktreeService};
 use crate::worktrees::types::{
     MergeWorktreeRequest, MergeWorktreeResponse, WorktreeMergeStrategy, WorktreeRecordView,
     WorktreeReference,
 };
 
-fn git_merge_lock() -> &'static AMutex<()> {
-    worktree_merge_lock()
+fn git_merge_lock(workspace_root: &std::path::Path) -> Arc<AMutex<()>> {
+    merge_lock_for(workspace_root)
 }
 
 fn strategy_from_str(strategy: &str) -> Result<WorktreeMergeStrategy, String> {
@@ -874,6 +874,7 @@ async fn merge_registered_task_worktree(
                 target_branch: Some(target_branch),
                 commit_message,
                 generate_commit_message: false,
+                acknowledge_dirty_baseline: false,
             },
         )
         .await?;
@@ -1236,7 +1237,8 @@ Then call `merge_agent` again."#,
                     "cleanup skipped; dirty agent worktree preserved for inspection or restart_agent(mode=resume)",
                 );
             } else if agent_branch != base_branch {
-                let _guard = git_merge_lock().lock().await;
+                let merge_lock = git_merge_lock(workspace_root);
+                let _guard = merge_lock.lock().await;
                 worktree_removed = run_git_in(
                     workspace_root,
                     &["worktree", "remove", agent_worktree, "--force"],
@@ -1345,7 +1347,8 @@ Then call `merge_agent` again."#,
             None
         };
 
-        let _guard = git_merge_lock().lock().await;
+        let merge_lock = git_merge_lock(workspace_root);
+        let _guard = merge_lock.lock().await;
 
         run_git_in(workspace_root, &["checkout", base_branch])
             .await
@@ -1835,6 +1838,7 @@ mod worktree_merge_tool_tests {
             merge_commit: Some("abc123".to_string()),
             cleanup: None,
             conflict: None,
+            dirty_baseline: None,
             affected_references: Vec::new(),
             affected_reference_count: 0,
             warnings: vec!["stash cleanup needs inspection".to_string()],

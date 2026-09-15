@@ -219,6 +219,11 @@ pub struct MergeWorktreeRequest {
     pub commit_message: Option<String>,
     #[serde(default)]
     pub generate_commit_message: bool,
+    /// Uncommitted work in the target checkout refuses the merge unless the
+    /// caller acknowledges it here; the acknowledged path stashes and restores
+    /// it rather than discarding it.
+    #[serde(default)]
+    pub acknowledge_dirty_baseline: bool,
 }
 
 impl Default for MergeWorktreeRequest {
@@ -230,8 +235,22 @@ impl Default for MergeWorktreeRequest {
             target_branch: None,
             commit_message: None,
             generate_commit_message: false,
+            acknowledge_dirty_baseline: false,
         }
     }
+}
+
+/// Uncommitted work found in a target checkout before a merge touched it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DirtyBaseline {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub files_truncated: bool,
+    pub staged_count: usize,
+    pub unstaged_count: usize,
+    pub untracked_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -258,6 +277,8 @@ pub struct MergeWorktreeResponse {
     pub cleanup: Option<WorktreeRemovalResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<WorktreeConflictState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_baseline: Option<DirtyBaseline>,
     pub affected_references: Vec<WorktreeReference>,
     pub affected_reference_count: usize,
     pub warnings: Vec<String>,
