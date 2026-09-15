@@ -38,18 +38,20 @@ pub struct ToolCodeReview {
     pub config_path: String,
 }
 
+/// The review request, shared by both callers of [`run_review`]: the `review`
+/// tool and the goal path. Neither owns the pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ReviewArgs {
-    what_to_check: Option<String>,
-    files: Vec<String>,
-    base: Option<String>,
-    plan: Option<String>,
-    scope_mode: ScopeMode,
-    stages: Option<Vec<String>>,
-    depth: Option<ReviewDepth>,
-    parallel_depth: Option<usize>,
-    variants: Option<usize>,
-    browser_scenario: Option<String>,
+pub(crate) struct ReviewArgs {
+    pub what_to_check: Option<String>,
+    pub files: Vec<String>,
+    pub base: Option<String>,
+    pub plan: Option<String>,
+    pub scope_mode: ScopeMode,
+    pub stages: Option<Vec<String>>,
+    pub depth: Option<ReviewDepth>,
+    pub parallel_depth: Option<usize>,
+    pub variants: Option<usize>,
+    pub browser_scenario: Option<String>,
 }
 
 fn optional_string(args: &HashMap<String, Value>, key: &str) -> Option<String> {
@@ -583,8 +585,10 @@ fn review_refs(report: &ReviewReport, roots: &[PathBuf]) -> (Value, bool) {
     (Value::Array(references), false)
 }
 
+/// The one review pipeline. `ToolCodeReview::tool_execute` and the goal path
+/// both call this; there is no second implementation.
 #[allow(clippy::too_many_arguments)]
-async fn run_review(
+pub(crate) async fn run_review(
     gcx: Arc<GlobalContext>,
     ctx: StageCtx,
     cfg: ReviewConfig,

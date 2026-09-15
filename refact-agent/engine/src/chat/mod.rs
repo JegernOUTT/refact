@@ -13,6 +13,7 @@ mod generation;
 pub(crate) use generation::prepare_project_work_context;
 pub(crate) mod evidence;
 pub mod goal_monitor;
+pub mod goal_review;
 pub mod goal_role;
 pub mod goal_verifier;
 mod handlers;

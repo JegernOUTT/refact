@@ -51,6 +51,8 @@ const PLAN_PROJECTION_MAX_CHARS_DEFAULT: usize =
     refact_chat_api::role_projection::DEFAULT_PROJECTION_MAX_CHARS;
 const VERIFICATION_EVIDENCE_TIMEOUT_SECS_DEFAULT: u64 = 600;
 const VERIFICATION_EVIDENCE_OUTPUT_CAP_BYTES_DEFAULT: usize = 4_000;
+const GOAL_REVIEW_MAX_REPAIR_ATTEMPTS_DEFAULT: usize = 2;
+const GOAL_REVIEW_SPOT_CHECK_PERCENT_DEFAULT: usize = 0;
 
 pub use refact_work_core::CoordinationSettings;
 
@@ -323,6 +325,15 @@ pub struct TrajectoryRuntimeSettings {
     pub plan_projection_max_chars: usize,
     pub verification_evidence_timeout_secs: u64,
     pub verification_evidence_output_cap_bytes: usize,
+    /// Agentic review on the goal path costs real model calls, so it is off
+    /// unless an operator turns it on.
+    pub goal_review_enabled: bool,
+    /// How many repair rounds a goal may take on reviewer findings before the
+    /// outcome becomes an explicit escalation.
+    pub goal_review_max_repair_attempts: usize,
+    /// Share of children whose claimed-complete work a parent samples for
+    /// review. Zero disables sampling.
+    pub goal_review_spot_check_percent: usize,
     pub coordination: CoordinationSettings,
 }
 
@@ -382,6 +393,9 @@ impl Default for TrajectoryRuntimeSettings {
             plan_projection_max_chars: PLAN_PROJECTION_MAX_CHARS_DEFAULT,
             verification_evidence_timeout_secs: VERIFICATION_EVIDENCE_TIMEOUT_SECS_DEFAULT,
             verification_evidence_output_cap_bytes: VERIFICATION_EVIDENCE_OUTPUT_CAP_BYTES_DEFAULT,
+            goal_review_enabled: false,
+            goal_review_max_repair_attempts: GOAL_REVIEW_MAX_REPAIR_ATTEMPTS_DEFAULT,
+            goal_review_spot_check_percent: GOAL_REVIEW_SPOT_CHECK_PERCENT_DEFAULT,
             coordination: CoordinationSettings::default(),
         }
     }
@@ -784,6 +798,18 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
         settings.verification_evidence_output_cap_bytes,
         256,
         8_388_608,
+    )?;
+    validate_usize(
+        "goal_review_max_repair_attempts",
+        settings.goal_review_max_repair_attempts,
+        0,
+        20,
+    )?;
+    validate_usize(
+        "goal_review_spot_check_percent",
+        settings.goal_review_spot_check_percent,
+        0,
+        100,
     )?;
     validate_coordination(&settings.coordination)
 }

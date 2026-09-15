@@ -512,6 +512,9 @@ fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         live_usize("plan_projection_max_chars", 1_024, 1_048_576),
         live_usize("verification_evidence_timeout_secs", 10, 86_400),
         live_usize("verification_evidence_output_cap_bytes", 256, 8_388_608),
+        live_bool("goal_review_enabled"),
+        live_usize("goal_review_max_repair_attempts", 0, 20),
+        live_usize("goal_review_spot_check_percent", 0, 100),
     ];
     fields.extend(coordination_settings_fields(true));
     fields
@@ -835,7 +838,7 @@ mod tests {
         );
         assert_eq!(
             initial.fields.len(),
-            51 + crate::runtime_settings::coordination_field_bounds().len()
+            54 + crate::runtime_settings::coordination_field_bounds().len()
         );
         assert!(initial
             .fields

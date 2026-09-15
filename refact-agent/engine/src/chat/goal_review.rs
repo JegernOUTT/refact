@@ -1,0 +1,832 @@
+//! Agentic review as an evidence source for the goal path.
+//!
+//! The engine already owns one multi-stage review pipeline in
+//! `tools::tool_review::run_review`. This module adds a second *caller* — the
+//! goal path — and never a second pipeline. What comes back is a
+//! `ReviewReport`, which is turned into a typed `EvidenceRecord` that V-1's
+//! gates consume: a review is evidence the goal path weighs, never a verdict it
+//! obeys. `Inconclusive` and `Partial` are recorded as *unavailable* evidence
+//! and are therefore not a pass; only findings the pipeline could support as
+//! facts contribute to a blocking outcome, and repair rounds are bounded so a
+//! goal escalates explicitly instead of looping.
+
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::Mutex as AMutex;
+
+use crate::chat::evidence::{
+    evaluate_goal_gates, unexecuted_record, EvidenceDefaults, EvidenceRecord, EvidenceVerdict,
+    SpecAuthority, VerificationSpec,
+};
+use crate::chat::goal_verifier::GoalEvidence;
+use crate::chat::types::{ChatSession, TaskMeta};
+use crate::global_context::GlobalContext;
+use crate::tasks::types::VerificationOutcome;
+use crate::tools::review_agents::config::{load_review_config, ReviewConfig};
+use crate::tools::review_agents::runner::StageCtx;
+use crate::tools::review_types::{
+    ReviewFinding, ReviewOutcome, ReviewReport, ReviewSeverity, ScopeMode,
+};
+use crate::tools::tool_review::{run_review, ReviewArgs};
+use crate::worktrees::types::WorktreeMeta;
+
+pub const GOAL_REVIEW_SPEC_ID: &str = "goal_review";
+pub const GOAL_REVIEW_AUTHOR: &str = "chat.goal_review";
+
+/// A review is an agentic investigation, not a command. The spec carries prose
+/// on purpose: the evidence service refuses to turn an agent proposal that is
+/// prose into argv, so this record can never be executed by accident.
+pub const GOAL_REVIEW_COMMAND: &str = "review pipeline (agentic, not an executable command)";
+
+pub const GOAL_REVIEW_DISABLED: &str =
+    "goal review is off by default; enable goal_review_enabled to spend model calls on it";
+
+/// A reviewer running on another model slot is additional review. It is not a
+/// second opinion drawn from an independent source, and the record says so.
+const REVIEWER_DISCLAIMER: &str =
+    "a different model slot is additional review, not proof of independence";
+
+/// Below this severity a supported finding is reported but never blocks a goal.
+const BLOCKING_SEVERITY: ReviewSeverity = ReviewSeverity::High;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GoalReviewSettings {
+    pub enabled: bool,
+    pub max_repair_attempts: usize,
+    pub spot_check_percent: usize,
+}
+
+impl GoalReviewSettings {
+    pub fn from_settings() -> Self {
+        let settings = crate::runtime_settings::current();
+        Self {
+            enabled: settings.goal_review_enabled,
+            max_repair_attempts: settings.goal_review_max_repair_attempts,
+            spot_check_percent: settings.goal_review_spot_check_percent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GoalReviewRequest {
+    pub what_to_check: Option<String>,
+    pub plan: Option<String>,
+    pub base: Option<String>,
+    pub files: Vec<String>,
+}
+
+impl GoalReviewRequest {
+    fn into_review_args(self) -> ReviewArgs {
+        let scope_mode = if self.files.is_empty() && self.base.is_none() {
+            ScopeMode::Broad
+        } else {
+            ScopeMode::Strict
+        };
+        ReviewArgs {
+            what_to_check: self.what_to_check,
+            files: self.files,
+            base: self.base,
+            plan: self.plan,
+            scope_mode,
+            stages: None,
+            depth: None,
+            parallel_depth: None,
+            variants: None,
+            browser_scenario: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalReviewOutcome {
+    Skipped {
+        reason: String,
+    },
+    Unavailable {
+        reason: String,
+    },
+    Clean,
+    Repair {
+        attempt: usize,
+        remaining: usize,
+        findings: Vec<ReviewFinding>,
+    },
+    Escalated {
+        attempts: usize,
+        findings: Vec<ReviewFinding>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalReviewResult {
+    pub outcome: GoalReviewOutcome,
+    pub report: Option<ReviewReport>,
+    pub evidence: Option<(VerificationSpec, EvidenceRecord)>,
+}
+
+/// Findings that may stand in the way of a goal: facts only. A hypothesis — no
+/// reproduction and no verified evidence, or disputed as unsupported by the
+/// adversarial stage — is reported but never blocks.
+pub fn blocking_findings(report: &ReviewReport) -> Vec<ReviewFinding> {
+    report
+        .facts()
+        .into_iter()
+        .filter(|finding| finding.severity.rank() >= BLOCKING_SEVERITY.rank())
+        .cloned()
+        .collect()
+}
+
+/// The models that actually produced this review, in stage order.
+pub fn reviewer_models(report: &ReviewReport) -> Vec<String> {
+    let mut models: Vec<String> = Vec::new();
+    for stage in &report.stages {
+        if let Some(model) = stage.model.as_deref() {
+            if !model.is_empty() && !models.iter().any(|known| known == model) {
+                models.push(model.to_string());
+            }
+        }
+    }
+    models
+}
+
+fn reviewer_label(report: &ReviewReport) -> String {
+    let models = reviewer_models(report);
+    if models.is_empty() {
+        return format!("no reviewer model reported; {REVIEWER_DISCLAIMER}");
+    }
+    format!("reviewed by {}; {REVIEWER_DISCLAIMER}", models.join(", "))
+}
+
+/// How a review reads as evidence. A review that could not run is not a pass,
+/// and `Partial` is kept distinct from a clean `Reviewed`.
+pub fn review_verdict(report: &ReviewReport) -> (EvidenceVerdict, VerificationOutcome, String) {
+    let blocking = blocking_findings(report);
+    let label = reviewer_label(report);
+    if !blocking.is_empty() {
+        let titles = blocking
+            .iter()
+            .map(|finding| {
+                format!(
+                    "{} [{}] {}:{}",
+                    finding.id,
+                    finding.severity.as_str(),
+                    finding.file,
+                    finding.line_start
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return (
+            EvidenceVerdict::Failed,
+            VerificationOutcome::CommandFailed,
+            format!(
+                "review [{}] found {} supported finding(s): {titles} — {label}",
+                report.outcome.as_str(),
+                blocking.len()
+            ),
+        );
+    }
+    match report.outcome {
+        ReviewOutcome::Reviewed => (
+            EvidenceVerdict::Passed,
+            VerificationOutcome::Passed,
+            format!("review [reviewed] found no supported blocking findings — {label}"),
+        ),
+        ReviewOutcome::Partial => (
+            EvidenceVerdict::Unavailable,
+            VerificationOutcome::InfrastructureFailed,
+            format!(
+                "review [partial] completed {} of {} stage(s); the rest of the change was not reviewed, which is not a pass — {label}",
+                report.completed_stages(),
+                report.stages.len()
+            ),
+        ),
+        ReviewOutcome::Inconclusive => (
+            EvidenceVerdict::Unavailable,
+            VerificationOutcome::InfrastructureFailed,
+            format!(
+                "review [inconclusive] produced no stage result; nothing was checked, which is not a pass — {label}"
+            ),
+        ),
+    }
+}
+
+pub fn review_spec(defaults: &EvidenceDefaults) -> VerificationSpec {
+    VerificationSpec::propose(
+        GOAL_REVIEW_SPEC_ID,
+        GOAL_REVIEW_COMMAND,
+        SpecAuthority::AgentProposal {
+            agent: GOAL_REVIEW_AUTHOR.to_string(),
+        },
+        defaults,
+    )
+}
+
+pub fn review_evidence_record(report: &ReviewReport, spec: &VerificationSpec) -> EvidenceRecord {
+    let (verdict, outcome, reason) = review_verdict(report);
+    unexecuted_record(spec, verdict, outcome, reason)
+}
+
+/// Feed a review into the goal's evidence set and re-decide the gates from it.
+pub fn attach_review_evidence(
+    evidence: &mut GoalEvidence,
+    spec: VerificationSpec,
+    record: EvidenceRecord,
+) {
+    evidence.specs.push(spec);
+    evidence.records.push(record);
+    evidence.gates = evaluate_goal_gates(&evidence.specs, &evidence.records);
+}
+
+/// Bounded repair: at most `max_attempts` repair rounds, then an explicit
+/// escalation carrying the findings that are still outstanding.
+pub fn decide_repair(
+    report: &ReviewReport,
+    attempts_used: usize,
+    max_attempts: usize,
+) -> GoalReviewOutcome {
+    let findings = blocking_findings(report);
+    if findings.is_empty() {
+        return match report.outcome {
+            ReviewOutcome::Reviewed => GoalReviewOutcome::Clean,
+            _ => GoalReviewOutcome::Unavailable {
+                reason: review_verdict(report).2,
+            },
+        };
+    }
+    if attempts_used >= max_attempts {
+        return GoalReviewOutcome::Escalated {
+            attempts: attempts_used,
+            findings,
+        };
+    }
+    GoalReviewOutcome::Repair {
+        attempt: attempts_used + 1,
+        remaining: max_attempts - attempts_used - 1,
+        findings,
+    }
+}
+
+/// Whether a parent samples this child's claimed-complete work for review.
+pub fn spot_check_selected(percent: usize, roll: u64) -> bool {
+    percent > 0 && roll % 100 < percent as u64
+}
+
+pub fn spot_check_child(settings: &GoalReviewSettings) -> bool {
+    settings.enabled && spot_check_selected(settings.spot_check_percent, rand::random::<u64>())
+}
+
+#[async_trait]
+pub trait GoalReviewer: Send {
+    async fn review(&mut self, request: GoalReviewRequest) -> Result<ReviewReport, String>;
+}
+
+/// The goal path's review entry: obtain a report, record it as evidence, and
+/// decide whether a bounded repair round is still available.
+pub async fn review_goal_work<R: GoalReviewer>(
+    settings: &GoalReviewSettings,
+    reviewer: &mut R,
+    request: GoalReviewRequest,
+    attempts_used: usize,
+) -> GoalReviewResult {
+    if !settings.enabled {
+        return GoalReviewResult {
+            outcome: GoalReviewOutcome::Skipped {
+                reason: GOAL_REVIEW_DISABLED.to_string(),
+            },
+            report: None,
+            evidence: None,
+        };
+    }
+    let spec = review_spec(&EvidenceDefaults::from_settings());
+    match reviewer.review(request).await {
+        Ok(report) => {
+            let record = review_evidence_record(&report, &spec);
+            let outcome = decide_repair(&report, attempts_used, settings.max_repair_attempts);
+            GoalReviewResult {
+                outcome,
+                report: Some(report),
+                evidence: Some((spec, record)),
+            }
+        }
+        Err(error) => {
+            let reason = format!("review could not run: {error}");
+            let record = unexecuted_record(
+                &spec,
+                EvidenceVerdict::Unavailable,
+                VerificationOutcome::InfrastructureFailed,
+                reason.clone(),
+            );
+            GoalReviewResult {
+                outcome: GoalReviewOutcome::Unavailable { reason },
+                report: None,
+                evidence: Some((spec, record)),
+            }
+        }
+    }
+}
+
+/// The production reviewer: the same `run_review` the `review` tool calls, with
+/// no tool-call surface in between.
+pub struct PipelineReviewer {
+    gcx: Arc<GlobalContext>,
+    cfg: ReviewConfig,
+    ctx: StageCtx,
+    stage_events: UnboundedReceiver<serde_json::Value>,
+    pub metering: serde_json::Map<String, serde_json::Value>,
+}
+
+pub struct GoalReviewScope {
+    pub chat_id: String,
+    pub root_chat_id: String,
+    pub worktree: Option<WorktreeMeta>,
+    pub task_meta: Option<TaskMeta>,
+    pub abort_flag: Arc<AtomicBool>,
+}
+
+impl PipelineReviewer {
+    pub async fn new(gcx: Arc<GlobalContext>, scope: GoalReviewScope) -> Result<Self, String> {
+        let cfg = load_review_config(gcx.clone()).await?;
+        let review_id = format!("gr-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let (stage_tx, stage_events) = unbounded_channel();
+        let ctx = StageCtx {
+            tool_call_id: review_id.clone(),
+            review_id,
+            subchat_tx: Arc::new(AMutex::new(stage_tx)),
+            abort_flag: scope.abort_flag,
+            depth: 0,
+            task_meta: scope.task_meta,
+            worktree: scope.worktree,
+            chat_id: scope.chat_id,
+            root_chat_id: scope.root_chat_id,
+        };
+        Ok(Self {
+            gcx,
+            cfg,
+            ctx,
+            stage_events,
+            metering: serde_json::Map::new(),
+        })
+    }
+
+    pub fn drain_stage_events(&mut self) -> Vec<serde_json::Value> {
+        let mut events = Vec::new();
+        while let Ok(event) = self.stage_events.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+}
+
+#[async_trait]
+impl GoalReviewer for PipelineReviewer {
+    async fn review(&mut self, request: GoalReviewRequest) -> Result<ReviewReport, String> {
+        let report = run_review(
+            self.gcx.clone(),
+            self.ctx.clone(),
+            self.cfg.clone(),
+            request.into_review_args(),
+            &mut self.metering,
+        )
+        .await;
+        self.drain_stage_events();
+        report
+    }
+}
+
+/// Builds a reviewer from a live session. The session lock is taken only to
+/// snapshot the scope and is dropped before any model call is made, so a review
+/// never runs inside a held session lock.
+pub async fn reviewer_for_session(
+    gcx: Arc<GlobalContext>,
+    session_arc: &Arc<AMutex<ChatSession>>,
+) -> Result<PipelineReviewer, String> {
+    let scope = {
+        let session = session_arc.lock().await;
+        GoalReviewScope {
+            chat_id: session.chat_id.clone(),
+            root_chat_id: session
+                .thread
+                .root_chat_id
+                .clone()
+                .unwrap_or_else(|| session.chat_id.clone()),
+            worktree: session.thread.worktree.clone(),
+            task_meta: session.thread.task_meta.clone(),
+            abort_flag: session.abort_flag.clone(),
+        }
+    };
+    PipelineReviewer::new(gcx, scope).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::evidence::EvidenceService;
+    use crate::chat::verify_cmd::VerifyCommandPolicy;
+    use crate::tools::review_types::{Dispute, ReviewDiffSummary, ReviewScopeSummary, StageRun};
+
+    const REVIEWER_MODEL: &str = "reviewer-model-b";
+
+    fn defaults() -> EvidenceDefaults {
+        EvidenceDefaults {
+            timeout_secs: 60,
+            output_cap_bytes: 4_000,
+        }
+    }
+
+    fn fact(id: &str, severity: ReviewSeverity) -> ReviewFinding {
+        ReviewFinding {
+            id: id.to_string(),
+            stage: "diff".to_string(),
+            model: Some(REVIEWER_MODEL.to_string()),
+            title: "Error dropped".to_string(),
+            severity,
+            file: "src/lib.rs".to_string(),
+            line_start: 10,
+            line_end: 14,
+            claim: "The error arm returns success.".to_string(),
+            evidence: "return Ok(());".to_string(),
+            evidence_present: true,
+            reproduction: Some("cargo test -p thing".to_string()),
+            fix: Some("Propagate the error.".to_string()),
+            introduced_by_diff: true,
+            out_of_scope: false,
+            reported_by: vec!["diff".to_string()],
+            locations: vec![],
+            disputed: None,
+        }
+    }
+
+    fn hypothesis(id: &str, severity: ReviewSeverity) -> ReviewFinding {
+        let mut finding = fact(id, severity);
+        finding.reproduction = None;
+        finding.evidence_present = false;
+        finding
+    }
+
+    fn report(findings: Vec<ReviewFinding>, stages: Vec<StageRun>) -> ReviewReport {
+        let mut report = ReviewReport {
+            depth: "normal".to_string(),
+            outcome: ReviewOutcome::Inconclusive,
+            scope: ReviewScopeSummary::default(),
+            diff: ReviewDiffSummary::default(),
+            stages,
+            findings,
+            duration_ms: 1_000,
+            duplicates_merged: 0,
+            scratch_dir: None,
+        };
+        report.outcome = report.derive_outcome();
+        report
+    }
+
+    fn reviewed(findings: Vec<ReviewFinding>) -> ReviewReport {
+        report(
+            findings,
+            vec![
+                StageRun::ok("mechanical", Some(REVIEWER_MODEL.to_string()), 10),
+                StageRun::ok("spec", Some(REVIEWER_MODEL.to_string()), 20),
+            ],
+        )
+    }
+
+    fn inconclusive() -> ReviewReport {
+        report(
+            vec![],
+            vec![
+                StageRun::timed_out("mechanical", None, 10, "no activity for 360s"),
+                StageRun::failed("spec", None, 20, "output_contract"),
+            ],
+        )
+    }
+
+    fn partial() -> ReviewReport {
+        report(
+            vec![],
+            vec![
+                StageRun::ok("mechanical", Some(REVIEWER_MODEL.to_string()), 10),
+                StageRun::timed_out("spec", None, 20, "no activity for 360s"),
+            ],
+        )
+    }
+
+    struct FakeReviewer {
+        report: Result<ReviewReport, String>,
+        requests: Vec<GoalReviewRequest>,
+    }
+
+    #[async_trait]
+    impl GoalReviewer for FakeReviewer {
+        async fn review(&mut self, request: GoalReviewRequest) -> Result<ReviewReport, String> {
+            self.requests.push(request);
+            self.report.clone()
+        }
+    }
+
+    fn enabled_settings(max_repair_attempts: usize) -> GoalReviewSettings {
+        GoalReviewSettings {
+            enabled: true,
+            max_repair_attempts,
+            spot_check_percent: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_goal_path_obtains_a_review_report_without_a_tool_call() {
+        let mut reviewer = FakeReviewer {
+            report: Ok(reviewed(vec![])),
+            requests: Vec::new(),
+        };
+        let request = GoalReviewRequest {
+            what_to_check: Some("the goal's acceptance criteria".to_string()),
+            plan: Some("ship the feature".to_string()),
+            base: Some("main".to_string()),
+            files: vec!["src/lib.rs".to_string()],
+        };
+
+        let result = review_goal_work(&enabled_settings(2), &mut reviewer, request, 0).await;
+
+        assert_eq!(result.outcome, GoalReviewOutcome::Clean);
+        let report = result.report.expect("the goal path receives the report");
+        assert_eq!(report.outcome, ReviewOutcome::Reviewed);
+        assert_eq!(reviewer.requests.len(), 1);
+        assert_eq!(reviewer.requests[0].base.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn a_goal_review_request_reaches_the_one_pipeline_as_review_args() {
+        let args = GoalReviewRequest {
+            what_to_check: Some("focus".to_string()),
+            plan: Some("plan".to_string()),
+            base: Some("main".to_string()),
+            files: vec!["src/lib.rs".to_string()],
+        }
+        .into_review_args();
+
+        assert_eq!(args.scope_mode, ScopeMode::Strict);
+        assert_eq!(args.files, ["src/lib.rs"]);
+        assert_eq!(args.plan.as_deref(), Some("plan"));
+        assert_eq!(args.stages, None);
+        assert_eq!(args.depth, None);
+        assert_eq!(args.browser_scenario, None);
+
+        let broad = GoalReviewRequest::default().into_review_args();
+        assert_eq!(broad.scope_mode, ScopeMode::Broad);
+    }
+
+    #[test]
+    fn an_inconclusive_review_is_not_a_pass() {
+        let (verdict, outcome, reason) = review_verdict(&inconclusive());
+
+        assert_eq!(verdict, EvidenceVerdict::Unavailable);
+        assert!(!verdict.is_passed());
+        assert_eq!(outcome, VerificationOutcome::InfrastructureFailed);
+        assert!(reason.contains("inconclusive"), "{reason}");
+        assert!(reason.contains("not a pass"), "{reason}");
+
+        let mut evidence = GoalEvidence::default();
+        assert!(evidence.gates.judge_allowed());
+        let spec = review_spec(&defaults());
+        let record = review_evidence_record(&inconclusive(), &spec);
+        attach_review_evidence(&mut evidence, spec, record);
+
+        assert!(!evidence.gates.completion_allowed());
+        assert!(!evidence.gates.judge_allowed());
+        assert!(evidence.gates.blocks[0].verdict == EvidenceVerdict::Unavailable);
+    }
+
+    #[test]
+    fn a_partial_review_stays_distinct_from_a_clean_one() {
+        let (partial_verdict, _, partial_reason) = review_verdict(&partial());
+        let (clean_verdict, _, clean_reason) = review_verdict(&reviewed(vec![]));
+
+        assert_eq!(partial_verdict, EvidenceVerdict::Unavailable);
+        assert!(partial_reason.contains("[partial]"), "{partial_reason}");
+        assert!(
+            partial_reason.contains("1 of 2 stage(s)"),
+            "{partial_reason}"
+        );
+        assert_eq!(clean_verdict, EvidenceVerdict::Passed);
+        assert!(clean_reason.contains("[reviewed]"), "{clean_reason}");
+
+        let mut clean_evidence = GoalEvidence::default();
+        let spec = review_spec(&defaults());
+        let record = review_evidence_record(&reviewed(vec![]), &spec);
+        attach_review_evidence(&mut clean_evidence, spec, record);
+        assert!(clean_evidence.gates.judge_allowed());
+    }
+
+    #[test]
+    fn a_hypothesis_never_blocks_but_a_fact_can() {
+        let hypotheses = reviewed(vec![
+            hypothesis("rf-1", ReviewSeverity::Blocker),
+            hypothesis("rf-2", ReviewSeverity::High),
+        ]);
+        assert!(blocking_findings(&hypotheses).is_empty());
+        assert_eq!(review_verdict(&hypotheses).0, EvidenceVerdict::Passed);
+        assert_eq!(decide_repair(&hypotheses, 0, 2), GoalReviewOutcome::Clean);
+
+        let mut disputed = fact("rf-3", ReviewSeverity::Blocker);
+        disputed.disputed = Some(Dispute {
+            stage: "adversarial".to_string(),
+            reason: "guarded by an earlier check".to_string(),
+        });
+        let disputed = reviewed(vec![disputed]);
+        assert!(blocking_findings(&disputed).is_empty());
+        assert_eq!(review_verdict(&disputed).0, EvidenceVerdict::Passed);
+
+        let facts = reviewed(vec![
+            fact("rf-4", ReviewSeverity::Blocker),
+            fact("rf-5", ReviewSeverity::Note),
+        ]);
+        let blocking = blocking_findings(&facts);
+        assert_eq!(blocking.len(), 1);
+        assert_eq!(blocking[0].id, "rf-4");
+        let (verdict, outcome, reason) = review_verdict(&facts);
+        assert_eq!(verdict, EvidenceVerdict::Failed);
+        assert_eq!(outcome, VerificationOutcome::CommandFailed);
+        assert!(reason.contains("rf-4"), "{reason}");
+        assert!(!reason.contains("rf-5"), "{reason}");
+    }
+
+    #[test]
+    fn repair_attempts_stop_at_the_configured_maximum_and_escalate() {
+        let blocked = reviewed(vec![fact("rf-1", ReviewSeverity::Blocker)]);
+        let max_attempts = 2;
+
+        for attempts_used in 0..max_attempts {
+            assert_eq!(
+                decide_repair(&blocked, attempts_used, max_attempts),
+                GoalReviewOutcome::Repair {
+                    attempt: attempts_used + 1,
+                    remaining: max_attempts - attempts_used - 1,
+                    findings: blocking_findings(&blocked),
+                },
+                "attempt {attempts_used} must still be a repair round"
+            );
+        }
+
+        let escalated = decide_repair(&blocked, max_attempts, max_attempts);
+        match escalated {
+            GoalReviewOutcome::Escalated { attempts, findings } => {
+                assert_eq!(attempts, max_attempts);
+                assert_eq!(findings.len(), 1);
+                assert_eq!(findings[0].id, "rf-1");
+            }
+            other => panic!("expected an explicit escalation, got {other:?}"),
+        }
+        assert_eq!(
+            decide_repair(&blocked, 99, max_attempts),
+            GoalReviewOutcome::Escalated {
+                attempts: 99,
+                findings: blocking_findings(&blocked),
+            }
+        );
+        assert!(matches!(
+            decide_repair(&blocked, 0, 0),
+            GoalReviewOutcome::Escalated { .. }
+        ));
+    }
+
+    #[test]
+    fn the_evidence_record_labels_the_reviewer_model_and_claims_no_independence() {
+        let spec = review_spec(&defaults());
+        let record = review_evidence_record(&reviewed(vec![]), &spec);
+
+        assert_eq!(reviewer_models(&reviewed(vec![])), [REVIEWER_MODEL]);
+        assert!(
+            record.output_tail.contains(REVIEWER_MODEL),
+            "{}",
+            record.output_tail
+        );
+        assert!(
+            record.output_tail.contains("not proof of independence"),
+            "{}",
+            record.output_tail
+        );
+        assert!(
+            !record.output_tail.contains("independent"),
+            "a different model slot must never be labelled independent verification: {}",
+            record.output_tail
+        );
+        assert_eq!(record.spec_id, GOAL_REVIEW_SPEC_ID);
+        assert_eq!(record.exit_code, None);
+        assert_eq!(record.reason.as_deref(), Some(record.output_tail.as_str()));
+    }
+
+    #[tokio::test]
+    async fn the_review_spec_is_evidence_and_is_never_executed_as_a_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let spec = review_spec(&defaults());
+        assert!(!spec.is_accepted());
+        assert!(spec.argv.is_empty());
+        assert!(spec.required);
+
+        let rejection = spec
+            .clone()
+            .accept(&VerifyCommandPolicy::permissive(), "test")
+            .unwrap_err();
+
+        assert_eq!(rejection.verdict, EvidenceVerdict::Blocked);
+        assert!(rejection.reason.contains("prose"), "{}", rejection.reason);
+
+        let service = EvidenceService::new(
+            VerifyCommandPolicy::permissive(),
+            crate::chat::evidence::EvidenceContext {
+                worktree: temp.path().to_path_buf(),
+                commit: None,
+                content_revision: "chat@1".to_string(),
+            },
+        );
+        let mut runner = crate::chat::evidence::SystemEvidenceRunner {
+            gcx: crate::global_context::tests::make_test_gcx().await,
+        };
+        let blocked = service.accept_and_execute(spec, &mut runner).await;
+        assert_eq!(blocked.verdict, EvidenceVerdict::Blocked);
+    }
+
+    #[tokio::test]
+    async fn goal_review_is_off_by_default_and_spends_nothing() {
+        let settings = crate::runtime_settings::TrajectoryRuntimeSettings::default();
+        assert!(!settings.goal_review_enabled);
+        assert_eq!(settings.goal_review_spot_check_percent, 0);
+        assert_eq!(settings.goal_review_max_repair_attempts, 2);
+
+        let mut reviewer = FakeReviewer {
+            report: Ok(reviewed(vec![fact("rf-1", ReviewSeverity::Blocker)])),
+            requests: Vec::new(),
+        };
+        let off = GoalReviewSettings {
+            enabled: false,
+            max_repair_attempts: 2,
+            spot_check_percent: 100,
+        };
+
+        let result = review_goal_work(&off, &mut reviewer, GoalReviewRequest::default(), 0).await;
+
+        assert_eq!(
+            result.outcome,
+            GoalReviewOutcome::Skipped {
+                reason: GOAL_REVIEW_DISABLED.to_string()
+            }
+        );
+        assert!(result.report.is_none());
+        assert!(result.evidence.is_none());
+        assert!(
+            reviewer.requests.is_empty(),
+            "a disabled review must not spend a single model call"
+        );
+        assert!(!spot_check_child(&off));
+    }
+
+    #[tokio::test]
+    async fn a_review_that_could_not_run_is_unavailable_evidence_not_a_pass() {
+        let mut reviewer = FakeReviewer {
+            report: Err("no usable model configured for slot 'chat'".to_string()),
+            requests: Vec::new(),
+        };
+
+        let result = review_goal_work(
+            &enabled_settings(2),
+            &mut reviewer,
+            GoalReviewRequest::default(),
+            0,
+        )
+        .await;
+
+        match &result.outcome {
+            GoalReviewOutcome::Unavailable { reason } => {
+                assert!(reason.contains("no usable model"), "{reason}");
+            }
+            other => panic!("expected unavailable, got {other:?}"),
+        }
+        let (spec, record) = result.evidence.expect("a failed review is still recorded");
+        assert_eq!(record.verdict, EvidenceVerdict::Unavailable);
+        let mut evidence = GoalEvidence::default();
+        attach_review_evidence(&mut evidence, spec, record);
+        assert!(!evidence.gates.judge_allowed());
+    }
+
+    #[test]
+    fn spot_check_sampling_follows_the_configured_rate() {
+        assert!(!spot_check_selected(0, 0));
+        assert!(!spot_check_selected(0, 99));
+        assert!(spot_check_selected(100, 0));
+        assert!(spot_check_selected(100, 99));
+        assert_eq!(
+            (0..100u64)
+                .filter(|roll| spot_check_selected(25, *roll))
+                .count(),
+            25
+        );
+        assert_eq!(
+            (0..100u64)
+                .filter(|roll| spot_check_selected(1, *roll))
+                .count(),
+            1
+        );
+    }
+}
