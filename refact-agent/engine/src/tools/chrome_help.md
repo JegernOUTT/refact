@@ -142,9 +142,13 @@ fill, clear, select_option, check, uncheck.
 ## waits
 
 `wait_for_function` is the way to wait on arbitrary app state: it evaluates `expression` until the
-result is truthy, defaults to 100/250/500/1000ms poll intervals unless `polling_ms` fixes one, and
-with a `locator` re-resolves the element each retry and passes it as the first argument, so a
-re-rendered node is tolerated. A thrown expression fails immediately instead of retrying.
+result is truthy, defaults to 100/250/500/1000ms poll intervals unless `polling_ms` fixes one, and a
+thrown expression fails immediately instead of retrying.
+
+With a `locator`, write `expression` as a function — `el => el.textContent.includes('Ready')` —
+because only a function is handed the element, which the step re-resolves on every retry so a
+re-rendered node is tolerated; a plain expression is evaluated without the element being passed to
+it. Without a `locator` both a plain expression and a zero-argument function work.
 
 wait_for_popup, wait_for_selector, wait_for_navigation, wait_for_url, wait_for_text,
 wait_for_network_idle, wait_for_load_state, wait_for_element_hidden, wait_for_element_stable.
@@ -278,6 +282,13 @@ auto-dismiss except beforeunload, which is accepted.
 flow that opens one. `drop_files` delivers files to a drop target as if dragged from outside the
 page.
 
+Every `paths` entry of these three steps is checked before the batch runs, so a rejected path fails
+the call without the page being touched: the path must exist, resolve inside a workspace folder or
+the refact config directory, and pass the privacy rules. Give absolute paths, because a relative one
+resolves against the daemon's working directory. `drop_files` and `expect_file_chooser` take regular
+files only; a directory is accepted just by `set_input_files` against a `webkitdirectory` input, and
+it may not contain symbolic links.
+
 ## downloads
 
 `wait_for_download` waits for a download and takes an optional `save_as`; `cancel_download` cancels
@@ -399,6 +410,11 @@ Never fake these with eval or expect.
 an input, textarea, or select and fails on any other element. `all_texts` returns the text of every
 match with `mode` inner_text or text_content plus an optional `limit`, reporting the true total.
 `element_state` returns visible, enabled, editable, checked, and stable in one read.
+
+`styles` returns computed `property: value` lines, the first 50 followed by a `... (N more)` marker.
+`property_filter` is a case-sensitive substring test against each whole `property: value` line, so
+`color` also matches `background-color` and any value containing `color`; pass the exact property
+name plus a colon, such as `"color:"`, to narrow it.
 
 Other inspection: get_text, get_html, get_attribute, extract_links, extract_table, dom_snapshot,
 accessibility_snapshot, styles, tab_log.

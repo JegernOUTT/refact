@@ -105,6 +105,7 @@ docs/_build/
 
 # PyBuilder
 target/
+target-e2e/
 
 # Jupyter Notebook
 .ipynb_checkpoints

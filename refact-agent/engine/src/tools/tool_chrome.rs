@@ -1960,6 +1960,43 @@ mod tests {
     }
 
     #[test]
+    fn help_pins_the_wait_for_function_argument_shape() {
+        for phrase in [
+            "write `expression` as a function",
+            "only a function is handed the element",
+            "a plain expression is evaluated without the element being passed to",
+            "both a plain expression and a zero-argument function work",
+        ] {
+            assert!(CHROME_HELP.contains(phrase), "waits help lost {phrase:?}");
+        }
+    }
+
+    #[test]
+    fn help_pins_the_styles_property_filter_substring_semantics() {
+        for phrase in [
+            "the first 50 followed by a `... (N more)` marker",
+            "case-sensitive substring test against each whole `property: value` line",
+            "also matches `background-color`",
+        ] {
+            assert!(
+                CHROME_HELP.contains(phrase),
+                "readouts help lost {phrase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_pins_the_upload_path_policy() {
+        for phrase in [
+            "is checked before the batch runs",
+            "the refact config directory, and pass the privacy rules",
+            "take regular",
+        ] {
+            assert!(CHROME_HELP.contains(phrase), "uploads help lost {phrase:?}");
+        }
+    }
+
+    #[test]
     fn chrome_schema_offers_the_gallery_and_element_state_captures() {
         let schema = chrome_input_schema();
         let properties = schema
