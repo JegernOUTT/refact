@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -8,6 +9,11 @@ use uuid::Uuid;
 use crate::app_state::AppState;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ChatMeta, ChatUsage, SamplingParameters};
+use crate::chat::evidence::{
+    evaluate_goal_gates, measured_criterion_verdicts, specs_from_criteria, unexecuted_record,
+    EvidenceContext, EvidenceDefaults, EvidenceRecord, EvidenceService, EvidenceVerdict,
+    GateOutcome, SystemEvidenceRunner, VerificationSpec,
+};
 use crate::chat::internal_roles::{self, EventSubkind};
 use crate::chat::prepare::{prepare_chat_passthrough, ChatPrepareOptions, ToolChoice};
 use crate::chat::stream_core::{
@@ -15,9 +21,13 @@ use crate::chat::stream_core::{
     ABORT_ERROR_MESSAGE,
 };
 use crate::chat::types::*;
+use crate::chat::verifier_diff::git_head_commit;
+use crate::chat::verify_cmd::VerifyCommandPolicy;
 use crate::constants::CHAT_TOP_N;
+use crate::global_context::GlobalContext;
 use crate::llm::params::CacheControl;
 use crate::scratchpad_abstract::HasTokenizerAndEot;
+use crate::tasks::types::VerificationOutcome;
 use refact_tool_api::ToolDesc;
 
 const GOAL_VERIFIER_SOURCE: &str = "chat.goal_verifier";
@@ -36,6 +46,16 @@ pub struct GoalVerifierReply {
     pub verdict: GoalVerdict,
     pub verifier_reply: String,
     pub tokens: u64,
+    pub criteria_verdicts: Vec<CriterionVerdict>,
+}
+
+/// The executed half of goal verification: what the goal's criteria declared, what
+/// running them produced, and what the gates make of it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GoalEvidence {
+    pub specs: Vec<VerificationSpec>,
+    pub records: Vec<EvidenceRecord>,
+    pub gates: GateOutcome,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,7 +167,7 @@ pub async fn verify_goal_before_completion(
         }
     }
 
-    let reply = match run_goal_verifier(app, session_arc.clone()).await {
+    let reply = match run_goal_verification(app, session_arc.clone()).await {
         Ok(reply) => reply,
         Err(error) => {
             let aborted = {
@@ -392,6 +412,8 @@ pub fn parse_criteria_verdicts(answer: &str) -> Vec<CriterionVerdict> {
                 id: id.trim().trim_matches(['[', ']']).to_string(),
                 met,
                 note: note.trim_start_matches(['—', '-', ':', ' ']).to_string(),
+                source: VerdictSource::Judged,
+                evidence: None,
             })
         })
         .collect()
@@ -656,11 +678,163 @@ fn goal_verifier_reply_from_choice(choice: ChoiceFinal) -> GoalVerifierReply {
         .as_ref()
         .map(|usage| usage.total_tokens as u64)
         .unwrap_or(0);
+    let criteria_verdicts = parse_criteria_verdicts(&choice.content);
     GoalVerifierReply {
         verdict,
         verifier_reply: choice.content,
         tokens,
+        criteria_verdicts,
     }
+}
+
+/// Runs every executable contract the goal's criteria declare. A goal that declares
+/// none resolves to empty evidence, which allows the judge exactly as before.
+pub async fn resolve_goal_evidence(
+    gcx: Arc<GlobalContext>,
+    criteria: &[GoalCriterion],
+    author: &str,
+    worktree_root: Option<PathBuf>,
+    content_revision: String,
+) -> GoalEvidence {
+    let defaults = EvidenceDefaults::from_settings();
+    let specs = specs_from_criteria(criteria, author, &defaults);
+    if specs.is_empty() {
+        return GoalEvidence::default();
+    }
+    let root = match worktree_root {
+        Some(root) => Some(root),
+        None => crate::files_correction::get_project_dirs(gcx.clone())
+            .await
+            .into_iter()
+            .next(),
+    };
+    let Some(root) = root else {
+        let records = specs
+            .iter()
+            .map(|spec| {
+                unexecuted_record(
+                    spec,
+                    EvidenceVerdict::Unavailable,
+                    VerificationOutcome::InfrastructureFailed,
+                    "no execution root is available for this chat".to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let gates = evaluate_goal_gates(&specs, &records);
+        return GoalEvidence {
+            specs,
+            records,
+            gates,
+        };
+    };
+    let service = EvidenceService::new(
+        VerifyCommandPolicy::load(gcx.clone()).await,
+        EvidenceContext {
+            commit: git_head_commit(&root).await,
+            worktree: root,
+            content_revision,
+        },
+    );
+    let mut runner = SystemEvidenceRunner { gcx };
+    let records = service
+        .accept_and_execute_all(specs.clone(), &mut runner)
+        .await;
+    let gates = evaluate_goal_gates(&specs, &records);
+    GoalEvidence {
+        specs,
+        records,
+        gates,
+    }
+}
+
+/// Gate precedence, as a decision the caller cannot argue with: while a required gate
+/// blocks, the judge's opinion is discarded even when it was already produced.
+pub fn goal_verdict_from_evidence(
+    evidence: &GoalEvidence,
+    judged: Option<GoalVerifierReply>,
+) -> GoalVerifierReply {
+    let measured = measured_criterion_verdicts(&evidence.specs, &evidence.records);
+    match judged.filter(|_| evidence.gates.judge_allowed()) {
+        Some(mut reply) => {
+            reply.criteria_verdicts = merge_criteria_verdicts(measured, reply.criteria_verdicts);
+            reply
+        }
+        None => gate_blocked_reply(&evidence.gates, measured),
+    }
+}
+
+fn merge_criteria_verdicts(
+    measured: Vec<CriterionVerdict>,
+    judged: Vec<CriterionVerdict>,
+) -> Vec<CriterionVerdict> {
+    let mut merged = measured;
+    for verdict in judged {
+        if !merged.iter().any(|existing| existing.id == verdict.id) {
+            merged.push(verdict);
+        }
+    }
+    merged
+}
+
+fn gate_blocked_reply(
+    gates: &GateOutcome,
+    criteria_verdicts: Vec<CriterionVerdict>,
+) -> GoalVerifierReply {
+    let gaps = gates.reasons();
+    let mut verifier_reply = String::from("GOAL: UNMET");
+    for gap in &gaps {
+        verifier_reply.push_str(&format!("\n- {gap}"));
+    }
+    for verdict in &criteria_verdicts {
+        let state = if verdict.met { "MET" } else { "UNMET" };
+        verifier_reply.push_str(&format!(
+            "\nCRITERION {}: {} — {}",
+            verdict.id, state, verdict.note
+        ));
+    }
+    GoalVerifierReply {
+        verdict: GoalVerdict::Unmet(gaps),
+        verifier_reply,
+        tokens: 0,
+        criteria_verdicts,
+    }
+}
+
+/// Goal verification end to end: gates first, the semantic judge only afterwards.
+pub async fn run_goal_verification(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+) -> Result<GoalVerifierReply, String> {
+    let (criteria, worktree_root, author, content_revision) = {
+        let session = session_arc.lock().await;
+        (
+            session
+                .goal
+                .as_ref()
+                .map(|goal| goal.criteria.clone())
+                .unwrap_or_default(),
+            session
+                .thread
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.root.clone()),
+            session.chat_id.clone(),
+            format!("{}@{}", session.chat_id, session.trajectory_version),
+        )
+    };
+    let evidence = resolve_goal_evidence(
+        app.gcx.clone(),
+        &criteria,
+        &author,
+        worktree_root,
+        content_revision,
+    )
+    .await;
+    if !evidence.gates.judge_allowed() {
+        return Ok(goal_verdict_from_evidence(&evidence, None));
+    }
+    let judged = run_goal_verifier(app, session_arc).await?;
+    Ok(goal_verdict_from_evidence(&evidence, Some(judged)))
 }
 
 /// Applies a verifier verdict only when the parent chat history is still the
@@ -751,14 +925,13 @@ fn apply_goal_verdict_with_delivery(
             format!("Goal verification found gaps:\n{}", gaps.join("\n")),
         ),
     };
-    let criteria_verdicts = parse_criteria_verdicts(&reply.verifier_reply);
     session.goal_push_attempt(GoalAttempt {
         at_ms,
         trigger: trigger.to_string(),
         verdict: verdict_text,
         gaps: gaps.clone(),
         verifier_reply: reply.verifier_reply,
-        criteria_verdicts,
+        criteria_verdicts: reply.criteria_verdicts,
     });
     let mut payload = json!({"kind": event_kind, "at_ms": at_ms, "gaps": gaps});
     if event_kind == "verification_gaps" && rearm_candidate {
@@ -882,6 +1055,7 @@ mod tests {
                 verdict: GoalVerdict::Met,
                 verifier_reply: "GOAL: MET".to_string(),
                 tokens: 7,
+                criteria_verdicts: Vec::new(),
             },
             None,
         );
@@ -950,6 +1124,7 @@ mod tests {
                     verdict: GoalVerdict::Met,
                     verifier_reply: "GOAL: MET".into(),
                     tokens: 1,
+                    criteria_verdicts: Vec::new(),
                 },
                 None,
                 version,
@@ -1274,6 +1449,7 @@ mod tests {
                     verdict: GoalVerdict::Unmet(vec!["tests".into()]),
                     verifier_reply: "GOAL: UNMET".into(),
                     tokens: 1,
+                    criteria_verdicts: Vec::new(),
                 },
                 None,
                 version,
@@ -1317,6 +1493,7 @@ mod tests {
                 verdict: GoalVerdict::Met,
                 verifier_reply: "GOAL: MET".to_string(),
                 tokens: 11,
+                criteria_verdicts: Vec::new(),
             },
             None,
         );
@@ -1350,6 +1527,7 @@ mod tests {
                 verdict: GoalVerdict::Met,
                 verifier_reply: "GOAL: MET".to_string(),
                 tokens: 11,
+                criteria_verdicts: Vec::new(),
             },
             None,
         );
@@ -1372,6 +1550,7 @@ mod tests {
                 verdict: GoalVerdict::Unmet(vec!["missing test".to_string()]),
                 verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
                 tokens: 13,
+                criteria_verdicts: Vec::new(),
             },
             None,
         );
@@ -1404,6 +1583,7 @@ mod tests {
                 verdict: GoalVerdict::Unmet(vec!["missing test".to_string()]),
                 verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
                 tokens: 13,
+                criteria_verdicts: Vec::new(),
             },
             None,
         );
@@ -1429,6 +1609,7 @@ mod tests {
                 verdict: GoalVerdict::Unmet(vec!["missing".to_string()]),
                 verifier_reply: "GOAL: UNMET\n- missing".to_string(),
                 tokens: 5,
+                criteria_verdicts: Vec::new(),
             },
             None,
         );
@@ -1445,6 +1626,7 @@ mod tests {
                 verdict: GoalVerdict::Unmet(vec!["still missing".to_string()]),
                 verifier_reply: "GOAL: UNMET\n- still missing".to_string(),
                 tokens: 5,
+                criteria_verdicts: Vec::new(),
             },
             None,
         );
@@ -1516,6 +1698,7 @@ mod tests {
                 verdict: GoalVerdict::Unmet(vec!["missing".to_string()]),
                 verifier_reply: "GOAL: UNMET\n- missing".to_string(),
                 tokens: 5,
+                criteria_verdicts: Vec::new(),
             },
             Some(epoch),
         );
@@ -1550,11 +1733,13 @@ mod tests {
                 id: "C1".to_string(),
                 text: "tests pass".to_string(),
                 verify_hint: Some("cargo test".to_string()),
+                verify_command: None,
             },
             GoalCriterion {
                 id: "C2".to_string(),
                 text: "docs updated".to_string(),
                 verify_hint: None,
+                verify_command: None,
             },
         ];
 
@@ -1586,6 +1771,7 @@ mod tests {
                 verdict: GoalVerdict::Unmet(vec!["missing test".to_string()]),
                 verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
                 tokens: 13,
+                criteria_verdicts: Vec::new(),
             },
             None,
         );
@@ -1613,6 +1799,7 @@ mod tests {
                 verdict: GoalVerdict::Unmet(vec!["missing test".to_string()]),
                 verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
                 tokens: 13,
+                criteria_verdicts: Vec::new(),
             },
             None,
         );
@@ -1636,6 +1823,7 @@ mod tests {
                 verdict: GoalVerdict::Unmet(vec!["missing test".to_string()]),
                 verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
                 tokens: 13,
+                criteria_verdicts: Vec::new(),
             },
             None,
         );
@@ -1667,6 +1855,7 @@ mod tests {
                 verdict: GoalVerdict::Unmet(vec!["missing test".to_string()]),
                 verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
                 tokens: 13,
+                criteria_verdicts: Vec::new(),
             },
             None,
         );
@@ -1693,6 +1882,7 @@ mod tests {
                 verdict: GoalVerdict::Met,
                 verifier_reply: "GOAL: MET".to_string(),
                 tokens: 11,
+                criteria_verdicts: Vec::new(),
             },
             None,
         );
@@ -1719,6 +1909,7 @@ mod tests {
                     verdict: GoalVerdict::Unmet(vec![format!("missing test {idx}")]),
                     verifier_reply: "GOAL: UNMET\n- missing test".to_string(),
                     tokens: 0,
+                    criteria_verdicts: Vec::new(),
                 },
                 None,
             );
@@ -1771,5 +1962,347 @@ mod tests {
             GoalVerificationBegin::NoActiveGoal
         );
         assert!(!should_verify_goal_on_done(&session));
+    }
+
+    const EVIDENCE_AUTHOR: &str = "agent-1";
+
+    fn evidence_defaults() -> EvidenceDefaults {
+        EvidenceDefaults {
+            timeout_secs: 60,
+            output_cap_bytes: 4_000,
+        }
+    }
+
+    fn criterion(id: &str, command: Option<&str>, hint: Option<&str>) -> GoalCriterion {
+        GoalCriterion {
+            id: id.to_string(),
+            text: format!("{id} holds"),
+            verify_hint: hint.map(ToString::to_string),
+            verify_command: command.map(ToString::to_string),
+        }
+    }
+
+    fn goal_evidence(
+        criteria: &[GoalCriterion],
+        outcomes: &[(EvidenceVerdict, Option<i32>)],
+    ) -> GoalEvidence {
+        let specs = specs_from_criteria(criteria, EVIDENCE_AUTHOR, &evidence_defaults());
+        let records = specs
+            .iter()
+            .zip(outcomes)
+            .map(|(spec, (verdict, exit_code))| {
+                let mut record = unexecuted_record(
+                    spec,
+                    *verdict,
+                    VerificationOutcome::Unknown,
+                    format!("verdict {}", verdict.label()),
+                );
+                record.exit_code = *exit_code;
+                record
+            })
+            .collect::<Vec<_>>();
+        let gates = evaluate_goal_gates(&specs, &records);
+        GoalEvidence {
+            specs,
+            records,
+            gates,
+        }
+    }
+
+    fn judge_says(text: &str, verdict: GoalVerdict) -> GoalVerifierReply {
+        GoalVerifierReply {
+            verdict,
+            verifier_reply: text.to_string(),
+            tokens: 42,
+            criteria_verdicts: parse_criteria_verdicts(text),
+        }
+    }
+
+    fn session_with_criteria(criteria: Vec<GoalCriterion>) -> ChatSession {
+        let mut session = ChatSession::new("goal-gate-test".to_string());
+        session.install_goal_with_criteria(
+            "agent",
+            "ship feature\n- tests pass",
+            true,
+            GoalBudget::default(),
+            criteria,
+        );
+        session.set_runtime_state(SessionState::ExecutingTools, None);
+        session
+    }
+
+    fn unmet_gaps(reply: &GoalVerifierReply) -> Vec<String> {
+        match &reply.verdict {
+            GoalVerdict::Unmet(gaps) => gaps.clone(),
+            GoalVerdict::Met => panic!("expected an unmet verdict, got MET"),
+        }
+    }
+
+    fn verdict_for(reply: &GoalVerifierReply, id: &str) -> CriterionVerdict {
+        reply
+            .criteria_verdicts
+            .iter()
+            .find(|verdict| verdict.id == id)
+            .unwrap_or_else(|| panic!("no verdict for {id}"))
+            .clone()
+    }
+
+    #[test]
+    fn a_failing_required_gate_makes_the_goal_unmet_even_when_the_judge_says_met() {
+        let criteria = vec![criterion("C1", Some("cargo test --lib"), None)];
+        let evidence = goal_evidence(&criteria, &[(EvidenceVerdict::Failed, Some(1))]);
+        let judged = judge_says("GOAL: MET\nCRITERION C1: MET", GoalVerdict::Met);
+
+        assert!(
+            !evidence.gates.judge_allowed(),
+            "a failing required gate must keep the judge out of the decision"
+        );
+        let reply = goal_verdict_from_evidence(&evidence, Some(judged));
+
+        let gaps = unmet_gaps(&reply);
+        assert!(gaps[0].contains("cargo test --lib"), "{}", gaps[0]);
+        assert!(gaps[0].contains("exit code 1"), "{}", gaps[0]);
+        let verdict = verdict_for(&reply, "C1");
+        assert!(!verdict.met);
+        assert_eq!(verdict.source, VerdictSource::Measured);
+        assert_eq!(verdict.evidence.unwrap().exit_code, Some(1));
+
+        let mut session = session_with_criteria(criteria);
+        session.goal_set_status(GoalStatus::Verifying);
+        let outcome = apply_goal_verdict(&mut session, "finish", reply, None);
+
+        assert_eq!(outcome, GoalVerificationApplyOutcome::Rearmed);
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+        assert_ne!(session.goal_status, Some(GoalStatus::Completed));
+        let attempt = &session.goal.as_ref().unwrap().attempts[0];
+        assert_eq!(attempt.verdict, "unmet");
+        assert_eq!(attempt.criteria_verdicts[0].source, VerdictSource::Measured);
+    }
+
+    #[test]
+    fn a_required_criterion_whose_evidence_never_ran_blocks_completion() {
+        let criteria = vec![criterion("C1", Some("cargo test --lib"), None)];
+        let specs = specs_from_criteria(&criteria, EVIDENCE_AUTHOR, &evidence_defaults());
+        let gates = evaluate_goal_gates(&specs, &[]);
+        let evidence = GoalEvidence {
+            specs,
+            records: Vec::new(),
+            gates,
+        };
+
+        assert_eq!(evidence.gates.required_total, 1);
+        assert_eq!(evidence.gates.required_passed, 0);
+        assert_eq!(evidence.gates.blocks[0].verdict, EvidenceVerdict::NotRun);
+        assert!(!EvidenceVerdict::NotRun.is_passed());
+        assert!(!evidence.gates.judge_allowed());
+
+        let reply =
+            goal_verdict_from_evidence(&evidence, Some(judge_says("GOAL: MET", GoalVerdict::Met)));
+
+        assert!(unmet_gaps(&reply)[0].contains("never ran"));
+        assert!(
+            reply.criteria_verdicts.is_empty(),
+            "nothing measured and nothing judged may be reported as decided"
+        );
+    }
+
+    #[test]
+    fn blocked_and_unavailable_block_and_read_differently_from_failed() {
+        let criteria = vec![criterion("C1", Some("cargo test --lib"), None)];
+        for (verdict, exit_code, label) in [
+            (EvidenceVerdict::Blocked, None, "[blocked]"),
+            (EvidenceVerdict::Unavailable, None, "[unavailable]"),
+            (EvidenceVerdict::Failed, Some(2), "[failed]"),
+        ] {
+            let evidence = goal_evidence(&criteria, &[(verdict, exit_code)]);
+
+            assert!(!evidence.gates.completion_allowed(), "{verdict:?}");
+            assert!(!evidence.gates.judge_allowed(), "{verdict:?}");
+            let reply = goal_verdict_from_evidence(&evidence, None);
+            let gaps = unmet_gaps(&reply);
+            assert!(gaps[0].contains(label), "{verdict:?}: {}", gaps[0]);
+            assert!(!verdict_for(&reply, "C1").met, "{verdict:?}");
+        }
+        assert!(
+            goal_evidence(&criteria, &[(EvidenceVerdict::Passed, Some(0))])
+                .gates
+                .judge_allowed()
+        );
+    }
+
+    #[test]
+    fn evidence_decides_measured_criteria_and_the_judge_decides_the_rest() {
+        let criteria = vec![
+            criterion("C1", Some("cargo test --lib"), None),
+            criterion("C2", None, Some("read the docs")),
+        ];
+        let evidence = goal_evidence(&criteria, &[(EvidenceVerdict::Passed, Some(0))]);
+        assert!(evidence.gates.judge_allowed());
+
+        let reply = goal_verdict_from_evidence(
+            &evidence,
+            Some(judge_says(
+                "GOAL: UNMET\nCRITERION C1: UNMET — the model doubts it\nCRITERION C2: UNMET — docs missing",
+                GoalVerdict::Unmet(vec!["docs missing".to_string()]),
+            )),
+        );
+
+        let measured = verdict_for(&reply, "C1");
+        assert_eq!(measured.source, VerdictSource::Measured);
+        assert!(
+            measured.met,
+            "executed evidence outranks the model here too"
+        );
+        let reference = measured.evidence.unwrap();
+        assert_eq!(reference.spec_id, "criterion:C1");
+        assert_eq!(reference.command, "cargo test --lib");
+        assert_eq!(reference.exit_code, Some(0));
+        assert_eq!(reference.verdict, "passed");
+
+        let judged = verdict_for(&reply, "C2");
+        assert_eq!(judged.source, VerdictSource::Judged);
+        assert!(judged.evidence.is_none());
+        assert_eq!(judged.note, "docs missing");
+        assert_eq!(unmet_gaps(&reply), vec!["docs missing".to_string()]);
+    }
+
+    #[test]
+    fn a_verify_hint_is_never_turned_into_a_goal_gate() {
+        let hints = [
+            "make sure the tests pass",
+            "go through the migration list",
+            "Run the lifecycle suite",
+        ];
+        let criteria = hints
+            .iter()
+            .enumerate()
+            .map(|(index, hint)| criterion(&format!("C{index}"), None, Some(hint)))
+            .collect::<Vec<_>>();
+
+        let specs = specs_from_criteria(&criteria, EVIDENCE_AUTHOR, &evidence_defaults());
+        let prompt = goal_verification_message("ship it", &criteria)
+            .content
+            .content_text_only();
+
+        assert!(
+            specs.is_empty(),
+            "a hint is prose, never an executable spec"
+        );
+        for hint in hints {
+            assert!(prompt.contains(hint), "hints stay advisory for the judge");
+            let rejection = VerificationSpec::propose(
+                "criterion:C0",
+                hint,
+                crate::chat::evidence::SpecAuthority::AgentProposal {
+                    agent: EVIDENCE_AUTHOR.to_string(),
+                },
+                &evidence_defaults(),
+            )
+            .accept(&VerifyCommandPolicy::permissive(), "test")
+            .unwrap_err();
+            assert_eq!(rejection.verdict, EvidenceVerdict::Blocked);
+            assert!(rejection.reason.contains("prose"), "{}", rejection.reason);
+        }
+    }
+
+    #[test]
+    fn unmet_reasons_name_the_failing_command_and_its_exit_code() {
+        let criteria = vec![criterion("C1", Some("npm run lint"), None)];
+        let evidence = goal_evidence(&criteria, &[(EvidenceVerdict::Failed, Some(101))]);
+
+        let reply = goal_verdict_from_evidence(&evidence, None);
+
+        let gaps = unmet_gaps(&reply);
+        assert_eq!(gaps.len(), 1);
+        assert!(gaps[0].contains("npm run lint"), "{}", gaps[0]);
+        assert!(gaps[0].contains("exit code 101"), "{}", gaps[0]);
+        assert!(gaps[0].contains("[failed]"), "{}", gaps[0]);
+        assert!(reply.verifier_reply.contains("npm run lint exited 101"));
+    }
+
+    #[test]
+    fn a_goal_whose_criteria_declare_no_command_is_judged_exactly_as_before() {
+        let criteria = vec![
+            criterion("C1", None, Some("cargo test")),
+            criterion("C2", None, None),
+        ];
+        let evidence = goal_evidence(&criteria, &[]);
+
+        assert!(evidence.specs.is_empty());
+        assert!(evidence.records.is_empty());
+        assert!(evidence.gates.completion_allowed());
+        assert!(evidence.gates.judge_allowed());
+        assert!(evidence.gates.blocks.is_empty());
+
+        let reply = goal_verdict_from_evidence(
+            &evidence,
+            Some(judge_says(
+                "GOAL: MET\nCRITERION C1: MET\nCRITERION C2: MET",
+                GoalVerdict::Met,
+            )),
+        );
+
+        assert_eq!(reply.verdict, GoalVerdict::Met);
+        assert_eq!(reply.tokens, 42);
+        assert_eq!(reply.criteria_verdicts.len(), 2);
+        for verdict in &reply.criteria_verdicts {
+            assert_eq!(verdict.source, VerdictSource::Judged);
+            assert!(verdict.evidence.is_none());
+        }
+    }
+
+    #[test]
+    fn a_gate_verdict_is_still_discarded_when_the_goal_or_trajectory_moved_on() {
+        let criteria = vec![criterion("C1", Some("cargo test --lib"), None)];
+        let evidence = goal_evidence(&criteria, &[(EvidenceVerdict::Failed, Some(1))]);
+
+        let mut stale_epoch = session_with_criteria(criteria.clone());
+        stale_epoch.goal_set_status(GoalStatus::Verifying);
+        let epoch = stale_epoch.goal_ledger_last_seq();
+        let version = stale_epoch.trajectory_version;
+        stale_epoch.goal_set_status_reason(GoalStatus::Stopped, "goal_control");
+
+        assert_eq!(
+            apply_goal_verdict_guarded(
+                &mut stale_epoch,
+                "finish",
+                goal_verdict_from_evidence(&evidence, None),
+                Some(epoch),
+                version,
+            ),
+            GoalVerificationApplyOutcome::Superseded
+        );
+        assert!(stale_epoch.goal.as_ref().unwrap().attempts.is_empty());
+
+        let mut stale_version = session_with_criteria(criteria);
+        stale_version.goal_set_status(GoalStatus::Verifying);
+        let fork_version = stale_version.trajectory_version;
+        stale_version.increment_version();
+
+        assert_eq!(
+            apply_goal_verdict_guarded(
+                &mut stale_version,
+                "finish",
+                goal_verdict_from_evidence(&evidence, None),
+                None,
+                fork_version,
+            ),
+            GoalVerificationApplyOutcome::Superseded
+        );
+        assert!(stale_version.goal.as_ref().unwrap().attempts.is_empty());
+        assert_eq!(stale_version.goal_status, Some(GoalStatus::Active));
+    }
+
+    #[tokio::test]
+    async fn resolving_evidence_for_a_goal_without_commands_runs_nothing() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let criteria = vec![criterion("C1", None, Some("cargo test"))];
+
+        let evidence =
+            resolve_goal_evidence(gcx, &criteria, EVIDENCE_AUTHOR, None, "chat@1".to_string())
+                .await;
+
+        assert_eq!(evidence, GoalEvidence::default());
+        assert!(evidence.gates.judge_allowed());
     }
 }

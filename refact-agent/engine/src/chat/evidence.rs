@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::chat::types::{CriterionEvidence, CriterionVerdict, GoalCriterion, VerdictSource};
 use crate::chat::verify_cmd::{
     instruction_verification_commands, looks_like_command, parse_verification_argv,
     reported_verification_commands, VerifyCommandPolicy,
@@ -598,6 +599,7 @@ pub struct GateBlock {
     pub spec_id: String,
     pub command: String,
     pub verdict: EvidenceVerdict,
+    pub exit_code: Option<i32>,
     pub reason: String,
 }
 
@@ -645,6 +647,7 @@ pub fn evaluate_gates(specs: &[VerificationSpec], evidence: &[EvidenceRecord]) -
                 spec_id: spec.spec_id.clone(),
                 command: spec.command.clone(),
                 verdict: EvidenceVerdict::NotRun,
+                exit_code: None,
                 reason: format!("Verification command never ran: {}", spec.command),
             });
             continue;
@@ -654,6 +657,7 @@ pub fn evaluate_gates(specs: &[VerificationSpec], evidence: &[EvidenceRecord]) -
                 spec_id: spec.spec_id.clone(),
                 command: spec.command.clone(),
                 verdict: EvidenceVerdict::Superseded,
+                exit_code: record.exit_code,
                 reason: format!(
                     "Verification evidence superseded: {} was verified at revision {}, spec is at {}",
                     spec.command, record.spec_revision, spec.revision
@@ -667,7 +671,13 @@ pub fn evaluate_gates(specs: &[VerificationSpec], evidence: &[EvidenceRecord]) -
                 spec_id: spec.spec_id.clone(),
                 command: spec.command.clone(),
                 verdict,
-                reason: gate_reason(verdict, &spec.command, record.reason.as_deref()),
+                exit_code: record.exit_code,
+                reason: gate_reason(
+                    verdict,
+                    &spec.command,
+                    record.exit_code,
+                    record.reason.as_deref(),
+                ),
             }),
         }
     }
@@ -676,6 +686,7 @@ pub fn evaluate_gates(specs: &[VerificationSpec], evidence: &[EvidenceRecord]) -
             spec_id: String::new(),
             command: String::new(),
             verdict: EvidenceVerdict::NotRun,
+            exit_code: None,
             reason: "No verification commands found in card instructions or final report"
                 .to_string(),
         });
@@ -683,7 +694,12 @@ pub fn evaluate_gates(specs: &[VerificationSpec], evidence: &[EvidenceRecord]) -
     outcome
 }
 
-fn gate_reason(verdict: EvidenceVerdict, command: &str, detail: Option<&str>) -> String {
+fn gate_reason(
+    verdict: EvidenceVerdict,
+    command: &str,
+    exit_code: Option<i32>,
+    detail: Option<&str>,
+) -> String {
     let detail = detail.map(str::trim).filter(|detail| !detail.is_empty());
     let head = match verdict {
         EvidenceVerdict::Failed => format!("Verification command failed: {}", command),
@@ -697,9 +713,13 @@ fn gate_reason(verdict: EvidenceVerdict, command: &str, detail: Option<&str>) ->
         EvidenceVerdict::NotRun => format!("Verification command never ran: {}", command),
         EvidenceVerdict::Passed => format!("Verification command passed: {}", command),
     };
+    let exit = match exit_code {
+        Some(code) => format!(" (exit code {})", code),
+        None => " (no exit code)".to_string(),
+    };
     match detail {
-        Some(detail) => format!("{} [{}] — {}", head, verdict.label(), detail),
-        None => format!("{} [{}]", head, verdict.label()),
+        Some(detail) => format!("{}{} [{}] — {}", head, exit, verdict.label(), detail),
+        None => format!("{}{} [{}]", head, exit, verdict.label()),
     }
 }
 
@@ -716,6 +736,94 @@ pub fn completion_decision(gates: &GateOutcome, reported_success: bool) -> Compl
         allowed: gates.completion_allowed(),
         reported_success,
         reasons: gates.reasons(),
+    }
+}
+
+/// Specs the goal's criteria carry. `verify_hint` is prose for the judge and is
+/// deliberately not read here, so a hint can never become argv.
+pub fn specs_from_criteria(
+    criteria: &[GoalCriterion],
+    author: &str,
+    defaults: &EvidenceDefaults,
+) -> Vec<VerificationSpec> {
+    criteria
+        .iter()
+        .filter_map(|criterion| {
+            let command = criterion
+                .verify_command
+                .as_deref()
+                .map(str::trim)
+                .filter(|command| !command.is_empty())?;
+            let mut spec = VerificationSpec::propose(
+                format!("criterion:{}", criterion.id),
+                command,
+                SpecAuthority::AgentProposal {
+                    agent: author.to_string(),
+                },
+                defaults,
+            );
+            spec.criterion_ids = vec![criterion.id.clone()];
+            Some(spec)
+        })
+        .collect()
+}
+
+/// Gate evaluation for a goal. A goal that declares no executable contract keeps its
+/// previous semantics — the judge decides it — so declaring nothing never blocks a goal
+/// the way it blocks a card.
+pub fn evaluate_goal_gates(specs: &[VerificationSpec], evidence: &[EvidenceRecord]) -> GateOutcome {
+    if !specs.iter().any(|spec| spec.required) {
+        return GateOutcome::default();
+    }
+    evaluate_gates(specs, evidence)
+}
+
+/// Criterion verdicts that executed evidence decided. Everything absent from this list
+/// is left to the judge and stays labelled `judged`.
+pub fn measured_criterion_verdicts(
+    specs: &[VerificationSpec],
+    evidence: &[EvidenceRecord],
+) -> Vec<CriterionVerdict> {
+    let mut verdicts = Vec::new();
+    for record in evidence {
+        let Some(spec) = specs
+            .iter()
+            .find(|spec| spec.spec_id == record.spec_id && spec.revision == record.spec_revision)
+        else {
+            continue;
+        };
+        let reference = CriterionEvidence {
+            spec_id: record.spec_id.clone(),
+            command: record.command.clone(),
+            exit_code: record.exit_code,
+            verdict: record.verdict.label().to_string(),
+        };
+        for criterion_id in &spec.criterion_ids {
+            verdicts.push(CriterionVerdict {
+                id: criterion_id.clone(),
+                met: record.verdict.is_passed(),
+                note: evidence_note(record),
+                source: VerdictSource::Measured,
+                evidence: Some(reference.clone()),
+            });
+        }
+    }
+    verdicts
+}
+
+pub fn evidence_note(record: &EvidenceRecord) -> String {
+    match record.exit_code {
+        Some(code) => format!(
+            "{} exited {} [{}]",
+            record.command,
+            code,
+            record.verdict.label()
+        ),
+        None => format!(
+            "{} produced no exit code [{}]",
+            record.command,
+            record.verdict.label()
+        ),
     }
 }
 
@@ -1138,6 +1246,7 @@ mod tests {
                 id: format!("C{index}"),
                 text: "criterion".to_string(),
                 verify_hint: Some(hint.to_string()),
+                verify_command: None,
             })
             .collect();
         let prompt = crate::chat::goal_verifier::goal_verification_message("goal", &criteria);

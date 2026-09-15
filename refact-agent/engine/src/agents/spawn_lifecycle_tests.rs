@@ -781,6 +781,7 @@ async fn goal_seed_and_projection_survive_trajectory_reload() {
             id: "C1".to_string(),
             text: "All paths are covered".to_string(),
             verify_hint: Some("Run the lifecycle suite".to_string()),
+            verify_command: None,
         }],
         budget: Some(GoalBudget {
             max_turns: Some(3),

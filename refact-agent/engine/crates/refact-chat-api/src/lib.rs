@@ -332,8 +332,43 @@ pub struct GoalAttempt {
 pub struct GoalCriterion {
     pub id: String,
     pub text: String,
+    /// Prose for the semantic judge. Never executed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_hint: Option<String>,
+    /// An executable contract proposal. Runs only after acceptance under policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_command: Option<String>,
+}
+
+/// Whether a criterion was decided by executed evidence or by semantic judgement.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerdictSource {
+    #[default]
+    Judged,
+    Measured,
+}
+
+impl VerdictSource {
+    pub fn is_measured(self) -> bool {
+        matches!(self, VerdictSource::Measured)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            VerdictSource::Judged => "judged",
+            VerdictSource::Measured => "measured",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct CriterionEvidence {
+    pub spec_id: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub verdict: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -342,6 +377,10 @@ pub struct CriterionVerdict {
     pub met: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    #[serde(default)]
+    pub source: VerdictSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<CriterionEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1246,6 +1285,69 @@ pub struct ActiveCommandContext {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_criterion_verdict_without_a_source_reads_as_judged() {
+        let verdict: CriterionVerdict =
+            serde_json::from_value(json!({"id": "C1", "met": true})).unwrap();
+
+        assert_eq!(verdict.source, VerdictSource::Judged);
+        assert!(!verdict.source.is_measured());
+        assert!(verdict.evidence.is_none());
+        assert_eq!(CriterionVerdict::default().source, VerdictSource::Judged);
+    }
+
+    #[test]
+    fn a_measured_criterion_verdict_carries_its_evidence_round_trip() {
+        let verdict = CriterionVerdict {
+            id: "C1".to_string(),
+            met: false,
+            note: "cargo test --lib exited 1 [failed]".to_string(),
+            source: VerdictSource::Measured,
+            evidence: Some(CriterionEvidence {
+                spec_id: "criterion:C1".to_string(),
+                command: "cargo test --lib".to_string(),
+                exit_code: Some(1),
+                verdict: "failed".to_string(),
+            }),
+        };
+
+        let encoded = serde_json::to_value(&verdict).unwrap();
+
+        assert_eq!(encoded["source"], json!("measured"));
+        assert_eq!(encoded["evidence"]["exit_code"], json!(1));
+        assert_eq!(
+            serde_json::from_value::<CriterionVerdict>(encoded).unwrap(),
+            verdict
+        );
+        assert_eq!(VerdictSource::Measured.label(), "measured");
+        assert_eq!(VerdictSource::Judged.label(), "judged");
+    }
+
+    #[test]
+    fn a_criterion_keeps_prose_hints_and_executable_commands_apart() {
+        let criterion: GoalCriterion = serde_json::from_value(json!({
+            "id": "C1",
+            "text": "tests pass",
+            "verify_hint": "make sure the tests pass",
+            "verify_command": "cargo test --lib",
+        }))
+        .unwrap();
+
+        assert_eq!(
+            criterion.verify_hint.as_deref(),
+            Some("make sure the tests pass")
+        );
+        assert_eq!(
+            criterion.verify_command.as_deref(),
+            Some("cargo test --lib")
+        );
+
+        let hint_only: GoalCriterion =
+            serde_json::from_value(json!({"id": "C2", "text": "docs", "verify_hint": "read them"}))
+                .unwrap();
+        assert!(hint_only.verify_command.is_none());
+    }
 
     fn background_agent_summary() -> BackgroundAgentSummary {
         BackgroundAgentSummary {

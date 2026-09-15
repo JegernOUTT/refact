@@ -1873,6 +1873,7 @@ async fn spawn_seed_installs_hidden_plan_goal_and_caps_steps() {
             id: "C1".to_string(),
             text: "Criterion".to_string(),
             verify_hint: None,
+            verify_command: None,
         }],
         budget: Some(crate::chat::types::GoalBudget {
             max_turns: Some(2),

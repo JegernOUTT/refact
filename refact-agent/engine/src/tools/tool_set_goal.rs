@@ -44,7 +44,8 @@ impl Tool for ToolSetGoal {
                             "properties": {
                                 "id": {"type": "string", "description": "Short stable id, e.g. C1."},
                                 "text": {"type": "string", "description": "The criterion itself."},
-                                "verify_hint": {"type": "string", "description": "Optional hint on how to verify it."}
+                                "verify_hint": {"type": "string", "description": "Optional prose hint for the judge. Never executed."},
+                                "verify_command": {"type": "string", "description": "Optional command that decides this criterion by execution. Runs only after policy acceptance; a failing or unrun command blocks goal completion."}
                             },
                             "required": ["id", "text"]
                         }

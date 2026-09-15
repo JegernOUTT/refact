@@ -5509,6 +5509,7 @@ mod tests {
                     id: "C1".to_string(),
                     text: "tests pass".to_string(),
                     verify_hint: None,
+                    verify_command: None,
                 }],
             );
 

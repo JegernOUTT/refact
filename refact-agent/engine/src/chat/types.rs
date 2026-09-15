@@ -15,12 +15,12 @@ pub use refact_chat_api::chat_local_types::{
 pub use refact_chat_api::{
     delivery_id_of_message, ActiveCommandContext, BackgroundAgentSummary, BrowserMeta, CausalStamp,
     BrowserSnapshot, BrowserTabInfo, BuddyThreadMeta, ChatCommand, ChatEvent, CommandRequest,
-    CompressionPhase, CompressionReason, CriterionVerdict, DeliveryOutcome, DeliveryStatus,
-    DeliveryStatusRecord, DeltaOp, DiffBox, EventEnvelope, GoalAttempt, GoalBudget, GoalCriterion,
-    GoalEvent, GoalLedgerEntry, GoalLedgerOp, GoalProgress, GoalSnapshot, GoalStatus, PauseReason,
-    PendingDelivery, PushMode, QueuedItem, RuntimeState, SessionState, TaskMeta, ThreadParams,
-    TimelineEntry, ToolDecisionItem, WindowBounds, WorktreeMeta, CLIENT_MESSAGE_ID_EXTRA_KEY,
-    DELIVERY_COMMAND_TYPE, DELIVERY_EXTRA_KEY,
+    CompressionPhase, CompressionReason, CriterionEvidence, CriterionVerdict, DeliveryOutcome,
+    DeliveryStatus, DeliveryStatusRecord, DeltaOp, DiffBox, EventEnvelope, GoalAttempt, GoalBudget,
+    GoalCriterion, GoalEvent, GoalLedgerEntry, GoalLedgerOp, GoalProgress, GoalSnapshot,
+    GoalStatus, PauseReason, PendingDelivery, PushMode, QueuedItem, RuntimeState, SessionState,
+    TaskMeta, ThreadParams, TimelineEntry, ToolDecisionItem, VerdictSource, WindowBounds,
+    WorktreeMeta, CLIENT_MESSAGE_ID_EXTRA_KEY, DELIVERY_COMMAND_TYPE, DELIVERY_EXTRA_KEY,
 };
 
 fn epoch_ms_now() -> u64 {

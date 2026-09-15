@@ -8,8 +8,8 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::goal_verifier::{
-    apply_goal_verdict_guarded_with_delivery, begin_goal_verification_if_needed, run_goal_verifier,
-    GoalVerificationApplyOutcome, GoalVerificationBegin, GoalVerdict,
+    apply_goal_verdict_guarded_with_delivery, begin_goal_verification_if_needed,
+    run_goal_verification, GoalVerificationApplyOutcome, GoalVerificationBegin, GoalVerdict,
 };
 use crate::chat::types::{ChatSession, PushMode};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
@@ -94,7 +94,7 @@ impl Tool for ToolValidateGoal {
             }
         }
 
-        let reply = match run_goal_verifier(app, session_arc.clone()).await {
+        let reply = match run_goal_verification(app, session_arc.clone()).await {
             Ok(reply) => reply,
             Err(error) => {
                 reset_after_verifier_error_with_delivery(
@@ -574,6 +574,7 @@ mod tests {
             verdict: GoalVerdict::Met,
             verifier_reply: "GOAL: MET".to_string(),
             tokens: 11,
+            criteria_verdicts: Vec::new(),
         };
         let verdict = reply.verdict.clone();
         let verifier_reply = reply.verifier_reply.clone();
@@ -609,6 +610,7 @@ mod tests {
             verdict: GoalVerdict::Unmet(vec!["missing tests".to_string(), "docs".to_string()]),
             verifier_reply: "GOAL: UNMET\n- missing tests\n- docs".to_string(),
             tokens: 13,
+            criteria_verdicts: Vec::new(),
         };
         let verdict = reply.verdict.clone();
         let verifier_reply = reply.verifier_reply.clone();
