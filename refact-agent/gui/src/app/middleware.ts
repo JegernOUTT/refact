@@ -75,6 +75,7 @@ import { pathApi } from "../services/refact/path";
 import { pingApi } from "../services/refact/ping";
 import {
   clearError,
+  getErrorSource,
   setError,
   setIsAuthError,
 } from "../features/Errors/errorsSlice";
@@ -1026,7 +1027,7 @@ startListening({
           ? action.payload.data.detail
           : `fetching caps from lsp`;
 
-      listenerApi.dispatch(setError(message));
+      listenerApi.dispatch(setError({ message, source: "caps_providers" }));
       listenerApi.dispatch(setIsAuthError(isAuthError));
     }
     if (
@@ -1158,7 +1159,11 @@ startListening({
           ? (payload.data as { detail: string }).detail
           : `provider update error.`;
 
-      listenerApi.dispatch(setError(message));
+      listenerApi.dispatch(
+        providersApi.endpoints.getConfiguredProviders.matchRejected(action)
+          ? setError({ message, source: "caps_providers" })
+          : setError(message),
+      );
       listenerApi.dispatch(setIsAuthError(isAuthError));
     }
     if (
@@ -1188,6 +1193,25 @@ startListening({
     listenerApi.dispatch(clearError());
     listenerApi.dispatch(capsApi.util.resetApiState());
     listenerApi.dispatch(modelsApi.util.resetApiState());
+  },
+});
+
+startListening({
+  matcher: isAnyOf(
+    capsApi.endpoints.getCaps.matchFulfilled,
+    providersApi.endpoints.getConfiguredProviders.matchFulfilled,
+  ),
+  effect: (_action, listenerApi) => {
+    const state = listenerApi.getState();
+    if (getErrorSource(state) !== "caps_providers") return;
+    if (capsApi.endpoints.getCaps.select(undefined)(state).isError) return;
+    if (
+      providersApi.endpoints.getConfiguredProviders.select(undefined)(state)
+        .isError
+    ) {
+      return;
+    }
+    listenerApi.dispatch(clearError());
   },
 });
 

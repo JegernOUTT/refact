@@ -100,7 +100,10 @@ import { stripUnfilledPlaceholders } from "../ComboBox/argumentPlaceholders";
 import { useCommandCompletionAndPreviewFiles } from "./useCommandCompletionAndPreviewFiles";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
-import { clearError, getErrorMessage } from "../../features/Errors/errorsSlice";
+import {
+  clearError,
+  getRouteErrorMessage,
+} from "../../features/Errors/errorsSlice";
 import { useAttachedFiles, useCheckboxes } from "./useCheckBoxes";
 import { useInputValue } from "./useInputValue";
 import {
@@ -174,7 +177,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const config = useConfig();
   const host = useAppSelector(selectHost);
   const { queryPathThenOpenFile } = useEventsBusForIDE();
-  const globalError = useAppSelector(getErrorMessage);
+  const globalError = useAppSelector(getRouteErrorMessage);
   const chatError = useAppSelector((state) =>
     selectChatErrorById(state, chatId),
   );

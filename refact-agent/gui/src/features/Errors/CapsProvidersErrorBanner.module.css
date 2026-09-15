@@ -1,0 +1,17 @@
+.region {
+  position: fixed;
+  bottom: var(--rf-space-4);
+  left: 50%;
+  z-index: var(--rf-z-overlay);
+  display: flex;
+  width: min(420px, calc(100vw - 2 * var(--rf-space-4)));
+  justify-content: center;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.banner {
+  width: 100%;
+  box-shadow: var(--rf-elev-overlay);
+  pointer-events: auto;
+}
