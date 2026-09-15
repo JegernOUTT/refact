@@ -1,8 +1,13 @@
 .list {
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+
+  --rf-scrollbar-size: var(--rf-space-1);
+  --rf-scrollbar-thumb-idle: var(--rf-border-strong);
+
   position: relative;
   display: grid;
   box-sizing: border-box;
-  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-columns: minmax(max-content, 1fr);
   grid-auto-flow: column;
   width: 100%;
   max-width: 100%;
@@ -10,6 +15,7 @@
   padding: var(--rf-space-1);
   overflow: auto hidden;
   overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
   background: var(--rf-surface-glass);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
@@ -33,6 +39,12 @@
   transform: translateX(calc(var(--rf-tabs-index, 0) * 100%));
 }
 
+.list[data-tabs-measured="true"] .indicator {
+  left: var(--rf-tabs-indicator-left);
+  width: var(--rf-tabs-indicator-width);
+  transform: none;
+}
+
 .trigger {
   position: relative;
   z-index: 1;
@@ -40,6 +52,7 @@
   min-height: var(--rf-control-h);
   padding: 0 var(--rf-space-3);
   overflow: hidden;
+  scroll-snap-align: start;
   color: var(--rf-color-muted);
   background: transparent;
   border: 0;
@@ -103,7 +116,10 @@
 
 @media (prefers-reduced-motion: no-preference) {
   .indicator {
-    transition: transform var(--rf-dur-med) var(--rf-ease-standard);
-    will-change: transform;
+    transition:
+      left var(--rf-dur-med) var(--rf-ease-standard),
+      width var(--rf-dur-med) var(--rf-ease-standard),
+      transform var(--rf-dur-med) var(--rf-ease-standard);
+    will-change: left, width, transform;
   }
 }
