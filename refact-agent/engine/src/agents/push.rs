@@ -35,9 +35,21 @@ fn cap_file_list(files: &[String], max: usize) -> Vec<String> {
 
 fn deliverable_note(status: &DeliverableStatus) -> String {
     if status.met {
+        if status.met_after_correction() {
+            return format!(
+                "{} check passed after {} correction attempt(s)",
+                status.check, status.corrections_used
+            );
+        }
         return format!("{} check passed", status.check);
     }
     let mut parts: Vec<String> = Vec::new();
+    if let Some(omission) = status.omission.as_ref() {
+        parts.push(format!(
+            "omitted for context headroom ({} of {} tokens available); full output at {}",
+            omission.available_tokens, omission.required_tokens, omission.reference
+        ));
+    }
     if !status.missing_sections.is_empty() {
         parts.push(format!(
             "missing sections: {}",
@@ -49,6 +61,12 @@ fn deliverable_note(status: &DeliverableStatus) -> String {
     }
     if status.evidence_missing {
         parts.push("no evidence reported".to_string());
+    }
+    if status.corrections_exhausted {
+        parts.push(format!(
+            "still unmet after {} correction attempt(s)",
+            status.corrections_used
+        ));
     }
     if parts.is_empty() {
         format!("{} check failed", status.check)

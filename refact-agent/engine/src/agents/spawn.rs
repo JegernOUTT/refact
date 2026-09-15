@@ -28,6 +28,9 @@ use crate::worktrees::types::{
 };
 
 const MAX_DIFF_SUMMARY_PATHSPECS: usize = 100;
+/// Steps one deliverable correction may spend. A correction reposts a final
+/// message, it does not resume the task.
+const CORRECTION_MAX_STEPS: usize = 4;
 
 #[cfg(test)]
 type TestRunner = Arc<
@@ -1980,6 +1983,7 @@ pub(super) async fn resume_agent_inner(
             }
             let progress_task = install_agent_progress(&app, &agent_id, &mut config, used_steps);
             let worktree = config.worktree.clone();
+            let run_config = config.clone();
             let baseline = collect_worktree_dirty_files(worktree.as_ref()).await;
             let result = match app
                 .agents
@@ -2009,10 +2013,16 @@ pub(super) async fn resume_agent_inner(
                         .mark_cancelled(&agent_id, Some("Aborted".into()))
                         .await
                 }
-                Ok(result) => {
-                    let result_summary = final_assistant_text(&result.messages);
-                    let deliverable_status =
-                        deliverable_status_for(&app, &agent_id, &result_summary).await;
+                Ok(mut result) => {
+                    let mut result_summary = final_assistant_text(&result.messages);
+                    let deliverable_status = deliverable_status_with_corrections(
+                        &app,
+                        &agent_id,
+                        &run_config,
+                        &mut result,
+                        &mut result_summary,
+                    )
+                    .await;
                     let handoff = handoff_report_for(&app, &agent_id, &result_summary).await;
                     app.agents
                         .mark_completed(
@@ -2438,6 +2448,7 @@ async fn run_spawned_agent(
         .or(req.parent_worktree.as_ref());
     let dirty_baseline = collect_worktree_dirty_files(scope_worktree).await;
 
+    let run_config = config.clone();
     let result = if abort_flag.load(Ordering::Relaxed) || launch_stopping(&app) {
         Err("Aborted before execution".into())
     } else {
@@ -2450,9 +2461,16 @@ async fn run_spawned_agent(
                 .mark_cancelled(&agent_id, Some("Aborted".into()))
                 .await
         }
-        Ok(result) => {
-            let result_summary = final_assistant_text(&result.messages);
-            let deliverable_status = deliverable_status_for(&app, &agent_id, &result_summary).await;
+        Ok(mut result) => {
+            let mut result_summary = final_assistant_text(&result.messages);
+            let deliverable_status = deliverable_status_with_corrections(
+                &app,
+                &agent_id,
+                &run_config,
+                &mut result,
+                &mut result_summary,
+            )
+            .await;
             let handoff = handoff_report_for(&app, &agent_id, &result_summary).await;
             let (edited_files, diff_summary, conflict_summary) =
                 collect_workspace_changes(scope_worktree, &dirty_baseline, &req.target_files).await;
@@ -3140,13 +3158,89 @@ fn final_assistant_text(messages: &[ChatMessage]) -> String {
         .unwrap_or_else(|| NO_TEXT_RESULT_SUMMARY.to_string())
 }
 
-async fn deliverable_status_for(
+fn correction_policy() -> refact_chat_api::CorrectionPolicy {
+    let coordination = crate::runtime_settings::current().coordination;
+    refact_chat_api::CorrectionPolicy {
+        max_attempts: coordination.deliverable_max_corrections as u32,
+        result_budget_tokens: coordination.deliverable_result_budget_tokens,
+    }
+}
+
+/// What is actually left to write a deliverable into: the unused context, capped
+/// by the most the model may emit in one answer.
+fn result_headroom(
+    config: &crate::subchat::SubchatConfig,
+    messages: &[ChatMessage],
+    reference: &str,
+) -> refact_chat_api::ResultHeadroom {
+    let used: usize = messages
+        .iter()
+        .map(|message| {
+            refact_codewiki::token_budget::estimate_tokens(&message.content.content_text_only())
+        })
+        .sum();
+    let remaining = config.n_ctx.saturating_sub(used);
+    refact_chat_api::ResultHeadroom {
+        available_tokens: if config.max_new_tokens > 0 {
+            remaining.min(config.max_new_tokens)
+        } else {
+            remaining
+        },
+        reference: reference.to_string(),
+    }
+}
+
+/// Evaluates the deliverable contract and, while it is unmet, asks the child to
+/// fix exactly the named elements — at most `deliverable_max_corrections` times.
+/// Runs after the child's subchat returned, so no session lock is held, and under
+/// the admission permit the launch already owns rather than a fresh reservation.
+async fn deliverable_status_with_corrections(
     app: &AppState,
     agent_id: &str,
-    final_text: &str,
+    config: &crate::subchat::SubchatConfig,
+    result: &mut SubchatResult,
+    result_summary: &mut String,
 ) -> Option<refact_chat_api::DeliverableStatus> {
     let contract = app.agents.get_any(agent_id).await.ok()?.deliverable?;
-    Some(contract.evaluate(final_text))
+    let policy = correction_policy();
+    let reference = config
+        .chat_id
+        .clone()
+        .unwrap_or_else(|| agent_id.to_string());
+    let mut status = contract.evaluate(result_summary);
+    loop {
+        let headroom = result_headroom(config, &result.messages, &reference);
+        let (next, request) =
+            refact_chat_api::plan_correction(&contract, status, &policy, &headroom);
+        status = next;
+        let Some(request) = request else { break };
+        let aborted = config
+            .abort_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed));
+        if aborted || launch_stopping(app) {
+            status.corrections_exhausted = true;
+            break;
+        }
+        let mut messages = result.messages.clone();
+        messages.push(ChatMessage::new("user".to_string(), request.prompt));
+        let mut correction_config = config.clone();
+        correction_config.max_steps = config.max_steps.min(CORRECTION_MAX_STEPS);
+        match run_background_subchat(app.gcx.clone(), messages, correction_config).await {
+            Ok(corrected) if !corrected.aborted => {
+                *result_summary = final_assistant_text(&corrected.messages);
+                status = contract
+                    .evaluate(result_summary)
+                    .after_correction(request.attempt);
+                result.messages = corrected.messages;
+            }
+            _ => {
+                status.corrections_exhausted = true;
+                break;
+            }
+        }
+    }
+    Some(status)
 }
 
 /// Reads the child's optional handoff-sufficiency declaration and filters every

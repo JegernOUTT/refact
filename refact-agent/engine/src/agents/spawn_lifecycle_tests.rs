@@ -444,6 +444,79 @@ async fn spawned_subchat_approval_defaults_never_exceed_parent_authority() {
     }
 }
 
+#[serial(test_runner, runtime_settings)]
+#[tokio::test]
+async fn deliverable_contract_unmet_spends_one_bounded_correction_then_reports_unmet() {
+    crate::runtime_settings::reset_for_test();
+    let mut settings = crate::runtime_settings::TrajectoryRuntimeSettings::default();
+    settings.coordination.deliverable_result_budget_tokens = 64;
+    crate::runtime_settings::install_live(&settings);
+
+    let runs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let observed = runs.clone();
+    let _runner =
+        crate::agents::spawn::install_test_runner(Arc::new(move |_gcx, messages, config| {
+            let runs = runs.clone();
+            Box::pin(async move {
+                runs.lock().await.push(
+                    messages
+                        .last()
+                        .map(|message| message.content.content_text_only())
+                        .unwrap_or_default(),
+                );
+                let mut messages = messages;
+                messages.push(ChatMessage::new(
+                    "assistant".to_string(),
+                    "# Findings\nnothing yet\n".to_string(),
+                ));
+                Ok(SubchatResult {
+                    messages,
+                    metering: serde_json::Map::new(),
+                    chat_id: config.chat_id,
+                    aborted: false,
+                })
+            })
+        }));
+
+    let fixture = repo_fixture().await;
+    let mut request = spawn_request("parent-deliverable", BgAgentKind::Subagent);
+    request.deliverable = Some(refact_chat_api::DeliverableContract {
+        required_sections: vec!["Findings".into(), "Changes".into()],
+        output_schema: None,
+        evidence_required: true,
+    });
+
+    let completed = await_completion(
+        crate::agents::spawn::spawn_background_agent(fixture.app.clone(), request)
+            .await
+            .expect("spawn deliverable agent"),
+    )
+    .await;
+
+    let status = completed
+        .deliverable_status
+        .expect("deliverable status recorded");
+    assert!(!status.met);
+    assert_eq!(status.corrections_used, 1);
+    assert!(status.corrections_exhausted);
+    assert!(status.omission.is_none());
+    assert_eq!(status.missing_sections, vec!["Changes"]);
+    assert!(status.evidence_missing);
+
+    let runs = observed.lock().await;
+    assert_eq!(runs.len(), 2, "exactly one bounded correction attempt");
+    assert!(
+        runs[1].contains("Deliverable correction 1 of 1"),
+        "{}",
+        runs[1]
+    );
+    assert!(runs[1].contains("`# Changes`"), "{}", runs[1]);
+    assert!(runs[1].contains("`# Evidence`"), "{}", runs[1]);
+    assert!(!runs[1].contains("`# Findings`"), "{}", runs[1]);
+    drop(runs);
+    crate::runtime_settings::reset_for_test();
+}
+
 #[serial(test_runner)]
 #[tokio::test]
 async fn isolated_auto_merge_merges_changes_and_cleans_worktree() {

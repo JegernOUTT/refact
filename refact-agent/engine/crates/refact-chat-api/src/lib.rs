@@ -38,7 +38,10 @@ pub use question::{
     AskQuestion, QuestionContract, QuestionError, QuestionKind, QuestionLimits, QuestionRegistry,
     QuestionSettlement, QuestionState, QUESTION_MAX_EXPIRY_SECS,
 };
-pub use deliverable::{DeliverableContract, DeliverableStatus, DELIVERABLE_CHECK_STRUCTURAL};
+pub use deliverable::{
+    plan_correction, CorrectionPolicy, CorrectionRequest, DeliverableContract, DeliverableOmission,
+    DeliverableStatus, ResultHeadroom, DELIVERABLE_CHECK_STRUCTURAL,
+};
 pub use handoff::{
     HandoffCategorySignal, HandoffFinding, HandoffGap, HandoffGapCategory, HandoffLimits,
     HandoffMetric, HandoffReport, HandoffSufficiency, HANDOFF_BLOCK_TAG,

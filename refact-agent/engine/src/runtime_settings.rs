@@ -209,6 +209,8 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("handoff_metric_max_records", 1, 1_000_000),
     coordination_integer("handoff_finding_min_samples", 1, 100_000),
     coordination_integer("handoff_finding_retention_ms", 1, 31_536_000_000),
+    coordination_integer("deliverable_max_corrections", 0, 16),
+    coordination_integer("deliverable_result_budget_tokens", 0, 1_000_000),
     coordination_bool("strict_path_scope_default"),
     coordination_integer("max_path_scope_entries", 1, 100_000),
     coordination_integer("agent_closed_retained_max", 1, 100_000),

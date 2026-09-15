@@ -134,6 +134,12 @@ pub struct CoordinationSettings {
     pub handoff_finding_min_samples: usize,
     /// Age of the newest-first finished children a handoff finding may count.
     pub handoff_finding_retention_ms: u64,
+    /// Correction attempts a child gets when its final message misses the
+    /// declared deliverable contract. `0` reports the miss without re-asking.
+    pub deliverable_max_corrections: usize,
+    /// Context tokens that must remain free to hold a full deliverable. Below
+    /// it the contract reports a recoverable omission instead of truncating.
+    pub deliverable_result_budget_tokens: usize,
     /// Upgrades a declared-intent `reject` path scope to canonical enforcement.
     pub strict_path_scope_default: bool,
     pub max_path_scope_entries: usize,
@@ -361,6 +367,8 @@ impl Default for CoordinationSettings {
             handoff_metric_max_records: 512,
             handoff_finding_min_samples: 5,
             handoff_finding_retention_ms: 7 * 24 * 60 * 60 * 1_000,
+            deliverable_max_corrections: 1,
+            deliverable_result_budget_tokens: 1_024,
             strict_path_scope_default: false,
             max_path_scope_entries: 256,
             agent_closed_retained_max: 64,

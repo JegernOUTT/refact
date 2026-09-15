@@ -3,6 +3,8 @@ use serde_json::Value;
 
 pub const DELIVERABLE_CHECK_STRUCTURAL: &str = "structural";
 const MAX_SCHEMA_DEPTH: usize = 16;
+const RESULT_BASE_TOKENS: usize = 64;
+const RESULT_SECTION_TOKENS: usize = 64;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliverableContract {
@@ -12,6 +14,17 @@ pub struct DeliverableContract {
     pub output_schema: Option<Value>,
     #[serde(default)]
     pub evidence_required: bool,
+}
+
+/// What the child could not be asked to produce, and where the full artifact is
+/// still reachable. Emitted instead of a truncated section, never alongside a
+/// met contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliverableOmission {
+    pub reason: String,
+    pub reference: String,
+    pub required_tokens: usize,
+    pub available_tokens: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +37,112 @@ pub struct DeliverableStatus {
     pub schema_error: Option<String>,
     #[serde(default)]
     pub evidence_missing: bool,
+    /// Correction attempts the child actually consumed. A contract met with a
+    /// non-zero count was not met first try.
+    #[serde(default)]
+    pub corrections_used: u32,
+    /// Every permitted correction was spent and the contract is still unmet.
+    #[serde(default)]
+    pub corrections_exhausted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omission: Option<DeliverableOmission>,
+}
+
+/// Settings-derived bound on correction work. `max_attempts == 0` keeps the
+/// pre-correction behaviour exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorrectionPolicy {
+    pub max_attempts: u32,
+    pub result_budget_tokens: usize,
+}
+
+impl Default for CorrectionPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 1,
+            result_budget_tokens: 1024,
+        }
+    }
+}
+
+impl CorrectionPolicy {
+    pub fn disabled() -> Self {
+        Self {
+            max_attempts: 0,
+            result_budget_tokens: 0,
+        }
+    }
+}
+
+/// Per-run context facts: what is left to write the deliverable into, and the
+/// recoverable pointer to the child's full output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultHeadroom {
+    pub available_tokens: usize,
+    pub reference: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrectionRequest {
+    pub attempt: u32,
+    pub prompt: String,
+}
+
+impl DeliverableStatus {
+    pub fn met_after_correction(&self) -> bool {
+        self.met && self.corrections_used > 0
+    }
+
+    pub fn after_correction(mut self, attempt: u32) -> Self {
+        self.corrections_used = attempt;
+        self
+    }
+}
+
+/// The single decision point for correction retries. Pure: the caller performs
+/// the model call and folds the re-evaluated status back in through
+/// [`DeliverableStatus::after_correction`].
+///
+/// `corrections_used` strictly increases on every returned request, so a caller
+/// looping until `None` terminates in at most `policy.max_attempts` rounds.
+pub fn plan_correction(
+    contract: &DeliverableContract,
+    status: DeliverableStatus,
+    policy: &CorrectionPolicy,
+    headroom: &ResultHeadroom,
+) -> (DeliverableStatus, Option<CorrectionRequest>) {
+    if policy.max_attempts == 0 {
+        return (status, None);
+    }
+    let required = contract
+        .estimated_result_tokens()
+        .max(policy.result_budget_tokens);
+    if headroom.available_tokens < required {
+        let mut status = status;
+        status.met = false;
+        status.omission = Some(DeliverableOmission {
+            reason: format!(
+                "remaining context holds {} tokens and the declared deliverable needs {required}; \
+                 the full deliverable was left unrequested rather than truncated",
+                headroom.available_tokens
+            ),
+            reference: headroom.reference.clone(),
+            required_tokens: required,
+            available_tokens: headroom.available_tokens,
+        });
+        return (status, None);
+    }
+    if status.met {
+        return (status, None);
+    }
+    if status.corrections_used >= policy.max_attempts {
+        let mut status = status;
+        status.corrections_exhausted = true;
+        return (status, None);
+    }
+    let attempt = status.corrections_used + 1;
+    let prompt = contract.correction_prompt(&status, attempt, policy.max_attempts);
+    (status, Some(CorrectionRequest { attempt, prompt }))
 }
 
 impl DeliverableContract {
@@ -121,7 +240,66 @@ impl DeliverableContract {
             missing_sections,
             schema_error,
             evidence_missing,
+            corrections_used: 0,
+            corrections_exhausted: false,
+            omission: None,
         }
+    }
+
+    /// Lower bound on the tokens a complete answer to this contract occupies.
+    /// Deliberately coarse: it decides whether to ask at all, not how to write.
+    pub fn estimated_result_tokens(&self) -> usize {
+        let mut tokens = RESULT_BASE_TOKENS + self.required_sections.len() * RESULT_SECTION_TOKENS;
+        if let Some(schema) = &self.output_schema {
+            let bytes = serde_json::to_vec(schema)
+                .map(|bytes| bytes.len())
+                .unwrap_or(0);
+            tokens += RESULT_SECTION_TOKENS + bytes / 4;
+        }
+        if self.evidence_required {
+            tokens += RESULT_SECTION_TOKENS;
+        }
+        tokens
+    }
+
+    /// Names every element the previous message missed. Never an open-ended
+    /// "try again".
+    pub fn correction_prompt(
+        &self,
+        status: &DeliverableStatus,
+        attempt: u32,
+        max_attempts: u32,
+    ) -> String {
+        let mut lines = vec![format!(
+            "# Deliverable correction {attempt} of {max_attempts}"
+        )];
+        lines.push(
+            "Your previous final message did not satisfy the declared deliverable contract. Fix \
+             exactly the elements listed below and post the complete final message again."
+                .into(),
+        );
+        for section in &status.missing_sections {
+            lines.push(format!(
+                "- Missing required section `# {}`: add the heading followed by substantive content.",
+                section.trim()
+            ));
+        }
+        if let Some(error) = status.schema_error.as_ref() {
+            lines.push(format!("- JSON block rejected: {error}"));
+        }
+        if status.evidence_missing {
+            lines.push(
+                "- Missing `# Evidence`: cite the exact commands, tool results, or files backing \
+                 each claim."
+                    .into(),
+            );
+        }
+        lines.push(format!(
+            "At most {max_attempts} correction attempts are allowed; after that the contract is \
+             reported unmet. Satisfying this structural check means the output is well-formed, not \
+             that the work is correct."
+        ));
+        lines.join("\n")
     }
 }
 
@@ -413,5 +591,157 @@ mod tests {
         );
         let legacy: DeliverableContract = serde_json::from_str("{}").unwrap();
         assert!(legacy.is_empty());
+    }
+
+    const UNMET: &str = "# Findings\nx\n";
+    const SATISFIED: &str = "# Findings\nx\n# Changes\ny\n```json\n{\"status\":\"done\",\"files\":[\"a.rs\"],\"count\":2}\n```\n# Evidence\ncargo test exit 0\n";
+
+    fn ample() -> usize {
+        contract().estimated_result_tokens() + 4096
+    }
+
+    fn drive(
+        policy: &CorrectionPolicy,
+        headroom_tokens: usize,
+        first: &str,
+        mut child: impl FnMut(u32) -> String,
+    ) -> (DeliverableStatus, Vec<String>) {
+        let contract = contract();
+        let mut prompts = Vec::new();
+        let mut status = contract.evaluate(first);
+        loop {
+            let headroom = ResultHeadroom {
+                available_tokens: headroom_tokens,
+                reference: "child-chat-1".into(),
+            };
+            let (next, request) = plan_correction(&contract, status, policy, &headroom);
+            status = next;
+            let Some(request) = request else { break };
+            prompts.push(request.prompt.clone());
+            status = contract
+                .evaluate(&child(request.attempt))
+                .after_correction(request.attempt);
+        }
+        (status, prompts)
+    }
+
+    #[test]
+    fn an_unmet_contract_spends_exactly_one_correction_then_reports_unmet() {
+        let (status, prompts) = drive(&CorrectionPolicy::default(), ample(), UNMET, |_| {
+            UNMET.to_string()
+        });
+        assert_eq!(prompts.len(), 1);
+        assert!(!status.met);
+        assert_eq!(status.corrections_used, 1);
+        assert!(status.corrections_exhausted);
+        assert!(status.omission.is_none());
+        assert!(!status.met_after_correction());
+    }
+
+    #[test]
+    fn a_correction_prompt_names_every_unmet_element() {
+        let (_, prompts) = drive(&CorrectionPolicy::default(), ample(), UNMET, |_| {
+            UNMET.to_string()
+        });
+        let prompt = &prompts[0];
+        assert!(prompt.contains("correction 1 of 1"), "{prompt}");
+        assert!(prompt.contains("`# Changes`"), "{prompt}");
+        assert!(prompt.contains("no ```json block"), "{prompt}");
+        assert!(prompt.contains("`# Evidence`"), "{prompt}");
+        assert!(!prompt.contains("`# Findings`"), "{prompt}");
+        assert!(prompt.contains("not that the work is correct"), "{prompt}");
+    }
+
+    #[test]
+    fn a_contract_met_on_the_second_attempt_is_recorded_as_met_after_correction() {
+        let (status, prompts) = drive(&CorrectionPolicy::default(), ample(), UNMET, |_| {
+            SATISFIED.to_string()
+        });
+        assert_eq!(prompts.len(), 1);
+        assert!(status.met);
+        assert_eq!(status.corrections_used, 1);
+        assert!(status.met_after_correction());
+        assert!(!status.corrections_exhausted);
+        let first_try = contract().evaluate(SATISFIED);
+        assert!(first_try.met);
+        assert!(!first_try.met_after_correction());
+    }
+
+    #[test]
+    fn zero_configured_attempts_reproduce_the_uncorrected_status() {
+        for text in [UNMET, SATISFIED] {
+            let (status, prompts) = drive(&CorrectionPolicy::disabled(), 0, text, |_| {
+                panic!("a disabled policy must never call the child again")
+            });
+            assert!(prompts.is_empty());
+            assert_eq!(status, contract().evaluate(text));
+        }
+    }
+
+    #[test]
+    fn insufficient_headroom_reports_a_recoverable_omission_instead_of_a_met_section() {
+        let required = contract()
+            .estimated_result_tokens()
+            .max(CorrectionPolicy::default().result_budget_tokens);
+        let (status, prompts) = drive(
+            &CorrectionPolicy::default(),
+            required - 1,
+            SATISFIED,
+            |_| panic!("no correction can be requested without headroom for the answer"),
+        );
+        assert!(prompts.is_empty());
+        assert!(
+            !status.met,
+            "a truncated deliverable must never present as met"
+        );
+        let omission = status.omission.expect("recoverable omission reference");
+        assert_eq!(omission.reference, "child-chat-1");
+        assert_eq!(omission.required_tokens, required);
+        assert_eq!(omission.available_tokens, required - 1);
+        assert!(omission.reason.contains("rather than truncated"));
+    }
+
+    #[test]
+    fn a_child_that_never_satisfies_the_contract_stops_at_the_configured_bound() {
+        let policy = CorrectionPolicy {
+            max_attempts: 3,
+            ..CorrectionPolicy::default()
+        };
+        let calls = std::cell::Cell::new(0u32);
+        let (status, prompts) = drive(&policy, ample(), UNMET, |attempt| {
+            calls.set(calls.get() + 1);
+            assert_eq!(attempt, calls.get());
+            UNMET.to_string()
+        });
+        assert_eq!(calls.get(), 3);
+        assert_eq!(prompts.len(), 3);
+        assert_eq!(status.corrections_used, 3);
+        assert!(!status.met);
+        assert!(status.corrections_exhausted);
+        assert!(prompts[0].contains("correction 1 of 3"));
+        assert!(prompts[2].contains("correction 3 of 3"));
+    }
+
+    #[test]
+    fn a_status_carrying_corrections_round_trips_through_json() {
+        let mut status = contract().evaluate(UNMET);
+        status.corrections_used = 2;
+        status.corrections_exhausted = true;
+        status.omission = Some(DeliverableOmission {
+            reason: "no room".into(),
+            reference: "child-chat-9".into(),
+            required_tokens: 1024,
+            available_tokens: 12,
+        });
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            serde_json::from_value::<DeliverableStatus>(value).unwrap(),
+            status
+        );
+        let legacy: DeliverableStatus =
+            serde_json::from_str(r#"{"check":"structural","met":true}"#).unwrap();
+        assert_eq!(legacy.corrections_used, 0);
+        assert!(!legacy.corrections_exhausted);
+        assert!(legacy.omission.is_none());
     }
 }
