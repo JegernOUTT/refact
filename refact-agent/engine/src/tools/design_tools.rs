@@ -2013,9 +2013,26 @@ pub fn baseline_meta_path(baseline: &Path) -> PathBuf {
     baseline.with_file_name(name)
 }
 
-async fn read_baseline_meta(path: &Path) -> Option<BaselineMeta> {
-    let raw = tokio::fs::read_to_string(path).await.ok()?;
-    serde_json::from_str(&raw).ok()
+fn baseline_meta_unreadable(path: &Path, error: impl std::fmt::Display) -> String {
+    format!(
+        "baseline metadata {} could not be parsed: {error}; fix or delete it, or re-baseline \
+         with update_baseline: true",
+        path.display()
+    )
+}
+
+/// A sidecar that exists but cannot be read pins no geometry, so it is reported instead of
+/// being reduced to "no sidecar" — the latter sends the caller after a legacy baseline that
+/// is not the actual problem.
+async fn read_baseline_meta(path: &Path) -> Result<Option<BaselineMeta>, String> {
+    let raw = match tokio::fs::read_to_string(path).await {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(baseline_meta_unreadable(path, error)),
+    };
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|error| baseline_meta_unreadable(path, error))
 }
 
 pub fn resolve_capture_viewport(
@@ -2801,7 +2818,14 @@ impl Tool for ToolVisualDiff {
         let root = project_root(&app.gcx, execution_scope.as_ref())?;
         let baseline = baseline_path(&root, &args.baseline)?;
         let meta_path = baseline_meta_path(&baseline);
-        let recorded = read_baseline_meta(&meta_path).await;
+        let recorded = match read_baseline_meta(&meta_path).await {
+            Ok(recorded) => recorded,
+            Err(error) if args.update_baseline => {
+                tracing::warn!(%error, "overwriting an unreadable visual baseline sidecar");
+                None
+            }
+            Err(error) => return Err(error),
+        };
         if !baseline.exists() && !args.update_baseline {
             return Err(format!(
                 "Baseline `{}` does not exist; pass update_baseline: true to create it",
@@ -2862,7 +2886,9 @@ impl Tool for ToolVisualDiff {
             )
             .await
             .map_err(|error| format!("failed to write baseline metadata: {error}"))?;
-            let spilled = spill_artifact(&current, &runtime.artifacts_dir, "visual-diff-baseline")?;
+            let attached = artifact_from_bytes(current_bytes.clone(), "image/png", &policy)?;
+            let spilled =
+                spill_artifact(&attached, &runtime.artifacts_dir, "visual-diff-baseline")?;
             runtime.touch();
             return tool_image_message(
                 tool_call_id,
@@ -2879,7 +2905,7 @@ impl Tool for ToolVisualDiff {
                     json!({"baseline":baseline,"baseline_meta_path":meta_path,"baseline_updated":true,"changed_pixels":0,"changed_percent":0.0,"regions":[],"capture":capture,"artifact":spilled}),
                 )
                 .to_text(),
-                &current,
+                &attached,
             );
         }
         let baseline_bytes = tokio::fs::read(&baseline)
@@ -4104,6 +4130,75 @@ mod tests {
             description.input_schema["properties"]["viewport"]["required"],
             json!(["width", "height"])
         );
+    }
+
+    #[test]
+    fn updating_a_baseline_attaches_a_policy_processed_capture_not_the_lossless_file() {
+        let capture =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(4000, 3000, Rgba([9, 40, 90, 255])));
+        let current_bytes = encode_png(&capture).unwrap();
+
+        let policy = ImagePolicy::default();
+        let attached = artifact_from_bytes(current_bytes.clone(), "image/png", &policy).unwrap();
+        assert_eq!(attached.mime, "image/png");
+        assert_eq!(
+            (attached.width, attached.height),
+            (1568, 1176),
+            "the image handed to the model goes through resize_to_policy"
+        );
+        assert!(
+            attached.width.max(attached.height) <= policy.preferred_side,
+            "{}x{} exceeds the model policy",
+            attached.width,
+            attached.height
+        );
+
+        assert_eq!(
+            image::load_from_memory(&current_bytes)
+                .unwrap()
+                .dimensions(),
+            (4000, 3000),
+            "the bytes written to the baseline file stay lossless at native geometry"
+        );
+        assert_eq!(
+            artifact_from_bytes(current_bytes, "image/png", &ImagePolicy::lossless_native())
+                .unwrap()
+                .width,
+            4000
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_baseline_sidecar_is_reported_instead_of_passing_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let missing = dir.path().join("home.png.meta.json");
+        assert_eq!(read_baseline_meta(&missing).await.unwrap(), None);
+
+        let valid = dir.path().join("valid.png.meta.json");
+        tokio::fs::write(&valid, serde_json::to_vec_pretty(&meta(800, 600)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            read_baseline_meta(&valid).await.unwrap(),
+            Some(meta(800, 600))
+        );
+
+        for (name, body) in [
+            ("garbage.png.meta.json", "{not json"),
+            ("truncated.png.meta.json", "{\"viewport\":{\"width\":800}}"),
+        ] {
+            let path = dir.path().join(name);
+            tokio::fs::write(&path, body).await.unwrap();
+            let error = read_baseline_meta(&path).await.unwrap_err();
+            assert!(error.contains("could not be parsed"), "{error}");
+            assert!(error.contains(name), "{error}");
+            assert!(error.contains("update_baseline: true"), "{error}");
+            assert!(
+                !error.contains("no metadata sidecar found"),
+                "a sidecar that exists must never be reported as absent: {error}"
+            );
+        }
     }
 
     #[tokio::test]
