@@ -85,6 +85,7 @@ import { InternalLinkProvider } from "../contexts/InternalLinkContext";
 import { parseRefactLink } from "../contexts/internalLinkUtils";
 import { ProcessCompletedToasts } from "./Notifications";
 import { CapsProvidersErrorBanner } from "./Errors/CapsProvidersErrorBanner";
+import { getIsAuthError } from "./Errors/errorsSlice";
 import { MCPInteractionCenter } from "../components/MCPInteractionCenter";
 import { hasUsableEngineEndpoint } from "../services/refact/apiUrl";
 import { isPointerDragHost } from "./ChatPanes/pointerDrag";
@@ -133,6 +134,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
   );
   const backendStatus = useAppSelector(selectBackendStatus);
   const backendLastOkAt = useAppSelector(selectBackendLastOkAt);
+  const isAuthError = useAppSelector(getIsAuthError);
   const providerBootstrap = useProviderBootstrapState();
   useEventBusForWeb();
   useEventBusForApp();
@@ -360,6 +362,10 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
       return;
     }
 
+    const bannerOwnsRecovery =
+      providerBootstrap.status === "provider_error" && !isAuthError;
+    if (bannerOwnsRecovery) return;
+
     const timeoutId = setTimeout(() => {
       dispatch(popBackTo({ name: "login page" }));
     }, APP_ACCESS_LOSS_GRACE_MS);
@@ -369,6 +375,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
     canAccessApp,
     providerBootstrap.status,
     desiredPage.name,
+    isAuthError,
     isLoggedIn,
     dispatch,
   ]);
