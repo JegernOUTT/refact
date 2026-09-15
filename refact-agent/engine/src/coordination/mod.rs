@@ -23,6 +23,7 @@ pub mod peer_authority;
 pub mod presence;
 pub mod privacy_guard;
 pub mod provenance;
+pub mod reconcile;
 pub mod roots;
 pub mod scope;
 pub mod service;

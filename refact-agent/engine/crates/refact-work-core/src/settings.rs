@@ -147,6 +147,10 @@ pub struct CoordinationSettings {
     pub outbox_retention_secs: u64,
     /// How often the durable outbox prunes settled messages.
     pub outbox_prune_interval_secs: u64,
+    /// How long a run intent that reached a terminal outcome is kept before
+    /// reconciliation prunes it. A run whose outcome is unknown is never
+    /// pruned by age, however old it is.
+    pub run_intent_retention_secs: u64,
 }
 
 impl Default for CoordinationSettings {
@@ -254,6 +258,7 @@ impl Default for CoordinationSettings {
             store_max_activity_observations: 262_144,
             outbox_retention_secs: 604_800,
             outbox_prune_interval_secs: 3_600,
+            run_intent_retention_secs: 604_800,
         }
     }
 }
@@ -563,6 +568,12 @@ impl CoordinationSettings {
             &mut v,
             "outbox_prune_interval_secs",
             self.outbox_prune_interval_secs,
+            1,
+        );
+        at_least(
+            &mut v,
+            "run_intent_retention_secs",
+            self.run_intent_retention_secs,
             1,
         );
         at_least(&mut v, "lease_ttl_ms", self.lease_ttl_ms, 1);
@@ -974,7 +985,9 @@ mod tests {
         assert!(settings.store_max_activity_observations >= 1024);
         assert!(settings.outbox_retention_secs >= 86_400);
         assert!(settings.outbox_prune_interval_secs >= 1);
+        assert!(settings.run_intent_retention_secs >= 86_400);
         for mutate in [
+            |settings: &mut CoordinationSettings| settings.run_intent_retention_secs = 0,
             |settings: &mut CoordinationSettings| settings.outbox_retention_secs = 0,
             |settings: &mut CoordinationSettings| settings.outbox_prune_interval_secs = 0,
             |settings: &mut CoordinationSettings| settings.store_busy_timeout_ms = 0,

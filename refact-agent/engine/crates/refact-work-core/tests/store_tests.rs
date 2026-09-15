@@ -907,3 +907,126 @@ async fn concurrent_first_opens_of_one_store_all_succeed() {
         }
     }
 }
+
+#[tokio::test]
+async fn a_replayed_launch_intent_never_rewinds_a_run_that_already_moved_on() {
+    let store = CoordinationStore::open_in_memory(&settings())
+        .await
+        .unwrap();
+    let access = store.authorize(ProjectKey::new("alpha"));
+    let run = RunKey::new(WorkKey::background_agent("launching"), 1);
+    let LeaseAcquisition::Acquired(holder) = store
+        .try_acquire_lease(&access, "run-1", "engine-1", "token-1", 100, 5_000)
+        .await
+        .unwrap()
+    else {
+        panic!("a free lease must be acquirable");
+    };
+
+    let persisted = store
+        .insert_run_intent_fenced(&access, &holder.authority(), 200, &run, 200)
+        .await
+        .unwrap();
+    let dispatched = store
+        .compare_and_set_run_intent_fenced(
+            &access,
+            &holder.authority(),
+            300,
+            &run,
+            persisted.generation,
+            IntentState::Dispatched,
+            300,
+        )
+        .await
+        .unwrap();
+    let replayed = store
+        .insert_run_intent_fenced(&access, &holder.authority(), 400, &run, 400)
+        .await
+        .unwrap();
+
+    assert_eq!(persisted.state, IntentState::Persisted);
+    assert_eq!(persisted.generation, 0);
+    assert_eq!(dispatched.state, IntentState::Dispatched);
+    assert_eq!(
+        replayed, dispatched,
+        "replaying the first boundary must report the run as it stands, never reset it"
+    );
+
+    let taken = store
+        .take_over_lease(
+            &access,
+            "run-1",
+            holder.fencing_generation,
+            "engine-2",
+            "token-2",
+            6_000,
+            9_000,
+        )
+        .await
+        .unwrap();
+    let fenced = store
+        .insert_run_intent_fenced(&access, &holder.authority(), 6_100, &run, 6_100)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        fenced,
+        StoreError::LeaseFenced {
+            lease_key: "run-1".to_string(),
+            presented: holder.fencing_generation,
+            held: taken.fencing_generation,
+        },
+        "a replaced owner cannot record a launch boundary either"
+    );
+    assert_eq!(
+        store.get_run_intent(&access, &run).await.unwrap(),
+        Some(dispatched)
+    );
+}
+
+#[tokio::test]
+async fn retention_prunes_settled_run_intents_and_never_unknown_outcomes() {
+    let store = CoordinationStore::open_in_memory(&settings())
+        .await
+        .unwrap();
+    let access = store.authorize(ProjectKey::new("alpha"));
+    for (work_id, state, updated_at_ms) in [
+        ("settled-old", IntentState::Terminal, 1_000),
+        ("settled-recent", IntentState::Terminal, 9_000),
+        ("unknown-old", IntentState::Dispatched, 1_000),
+        ("acknowledged-old", IntentState::Acknowledged, 1_000),
+    ] {
+        store
+            .put_run_intent(
+                &access,
+                &RunIntentRecord {
+                    state,
+                    updated_at_ms,
+                    ..run_intent("alpha", work_id, 0)
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        store
+            .prune_settled_run_intents(&access, 5_000)
+            .await
+            .unwrap(),
+        1
+    );
+    let surviving: Vec<String> = store
+        .list_run_intents(&access)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| record.run.work.id)
+        .collect();
+    assert!(!surviving.contains(&"settled-old".to_string()));
+    for kept in ["settled-recent", "unknown-old", "acknowledged-old"] {
+        assert!(
+            surviving.contains(&kept.to_string()),
+            "{kept} must survive retention: {surviving:?}"
+        );
+    }
+}
