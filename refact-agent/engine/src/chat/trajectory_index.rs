@@ -906,6 +906,10 @@ impl TrajectoryIndexEntryLocations {
         self.dirs_by_id.get(id).cloned().unwrap_or_default()
     }
 
+    fn directory_is_synced(&self, dir: &Path) -> bool {
+        self.ids_by_dir.get(dir).is_some_and(|ids| ids.synced)
+    }
+
     fn directory_has_displayable_entries(
         &self,
         dir: &Path,
@@ -1151,6 +1155,27 @@ impl TrajectoryIndexCoordinator {
     /// registered with this coordinator, without listing anything.
     pub fn entry_dirs_for_id(&self, chat_id: &str) -> Vec<PathBuf> {
         self.entry_locations_mut().dirs_for_id(chat_id)
+    }
+
+    /// The subset of `dirs` whose id map cannot answer for the whole directory, i.e. the ones the
+    /// coordinator has never fully listed (or has since evicted). For every other directory
+    /// `find_entries_by_id` already consulted a complete id map, so a miss there is an answer and
+    /// re-listing the directory could only repeat it.
+    ///
+    /// Deliberately keyed on `synced` alone and not on the generation TTL that
+    /// `directory_has_displayable_entries` also demands. Skipping a listing here cannot hide a
+    /// chat: callers still stat `<dir>/<chat_id>.json` in every directory, which is what actually
+    /// resolves a file that appeared after the last listing. Skipping a listing *there* would
+    /// stop the sidebar rendering that chat at all, hence the stricter rule. T-13's invariant is
+    /// unchanged either way: a directory that was never listed never answers for itself.
+    pub fn unsynced_directories(&self, dirs: &[PathBuf]) -> Vec<PathBuf> {
+        dirs.iter()
+            .filter(|dir| {
+                let key = self.canonical_directory_key(dir);
+                !self.entry_locations_mut().directory_is_synced(&key)
+            })
+            .cloned()
+            .collect()
     }
 
     /// Resolves one chat id straight to its directories instead of sweeping every known

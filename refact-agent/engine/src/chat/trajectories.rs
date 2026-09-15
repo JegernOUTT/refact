@@ -2046,6 +2046,13 @@ async fn indexed_candidate_paths_by_id(
     paths
 }
 
+async fn unsynced_trajectory_dirs(gcx: &Arc<GlobalContext>, dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let app = AppState::from_gcx(gcx.clone()).await;
+    app.chat
+        .trajectory_index_coordinator
+        .unsynced_directories(dirs)
+}
+
 async fn normal_trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -2214,15 +2221,31 @@ async fn find_trajectory_file(
         return Some(found);
     }
     let mut candidates = Vec::new();
+    // The id-map probe above is a replacement for sweeping every directory, not an extra attempt
+    // before one: for a directory the coordinator has fully listed, the probe already asked a
+    // complete index and came back empty. Only directories it has never listed still owe us an
+    // answer, so those are the only ones worth a listing here.
+    let task_dirs = list_task_trajectory_dirs(&gcx).await;
+    let mut all_dirs = get_all_trajectories_dirs(gcx.clone()).await;
+    all_dirs.extend(task_dirs.iter().cloned());
+    let unsynced = unsynced_trajectory_dirs(&gcx, &all_dirs).await;
     let indexed = indexed_candidate_paths_in_dirs(
         &gcx,
-        &list_trajectory_dirs(&gcx).await,
+        &unsynced,
         chat_id,
         trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
     )
     .await;
     extend_unique_paths(&mut candidates, &mut seen, indexed);
-    let task_scoped = trajectory_candidate_paths(gcx.clone(), chat_id).await;
+    // `trajectory_candidate_paths` would re-derive the normal candidates computed above, and
+    // `seen` already discards every one of them. Probing the task directories is the only part
+    // that can still contribute, and it is what resolves a file created since the last listing.
+    let mut task_scoped = Vec::new();
+    for dir in &task_dirs {
+        if let Some(path) = safe_trajectory_file_in_dir(dir, chat_id).await {
+            task_scoped.push(path);
+        }
+    }
     extend_unique_paths(&mut candidates, &mut seen, task_scoped);
     if let Some(found) = first_valid_trajectory_candidate(candidates, chat_id).await {
         return Some(found);
@@ -6154,27 +6177,20 @@ async fn refresh_trajectory_index_entry_for_path(
     .await
 }
 
+/// Drops index entries for one chat id whose backing file no longer matches. The work is scoped
+/// to that id, so it costs one id-map lookup plus a listing of each directory that actually
+/// indexes it — normally zero or one.
+///
+/// It used to resolve the chat first and sweep every trajectory directory when that missed, which
+/// is the common case here: this runs precisely when a file just disappeared. A directory the id
+/// map does not mention cannot be holding an entry the coordinator would return, and listing it
+/// would reconcile the entry away regardless, so sweeping bought nothing per watcher event.
 async fn remove_stale_trajectory_index_entries(gcx: Arc<GlobalContext>, chat_id: &str) {
     let app = AppState::from_gcx(gcx.clone()).await;
-    let dirs = match find_trajectory_file(gcx.clone(), chat_id).await {
-        Some(candidate) => index_dir_for_trajectory_file(gcx.clone(), &candidate.path)
-            .await
-            .map(|dir| vec![dir])
-            .unwrap_or_else(|| Vec::new()),
-        None => Vec::new(),
-    };
-    let dirs = if dirs.is_empty() {
-        app.chat
-            .trajectory_index_coordinator
-            .entry_dirs_for_id(chat_id)
-    } else {
-        dirs
-    };
-    let dirs = if dirs.is_empty() {
-        list_trajectory_dirs(&gcx).await
-    } else {
-        dirs
-    };
+    let dirs = app
+        .chat
+        .trajectory_index_coordinator
+        .entry_dirs_for_id(chat_id);
     for dir in dirs {
         let entries = match trajectory_index::list_trajectory_entries_with_rollout_shared_for(
             &app.chat.trajectory_index_coordinator,
@@ -11744,6 +11760,230 @@ mod tests {
         assert!(root_entries.iter().all(|entry| entry.id != stale_id));
         assert_eq!(task_entries.len(), 1);
         assert_eq!(task_entries[0].id, fresh_id);
+    }
+
+    fn listing_calls_for(
+        app: &AppState,
+        caller: trajectory_index::TrajectoryIndexListingCaller,
+    ) -> u64 {
+        app.chat
+            .trajectory_index_coordinator
+            .listing_counters_for_test()
+            .calls_by_caller
+            .iter()
+            .find(|(name, _)| *name == caller.as_str())
+            .map(|(_, calls)| *calls)
+            .unwrap_or(0)
+    }
+
+    async fn seed_agent_task_dirs(workspace: &Path, count: usize) -> Vec<PathBuf> {
+        let mut dirs = Vec::with_capacity(count);
+        for number in 0..count {
+            let dir = workspace
+                .join(".refact")
+                .join("tasks")
+                .join(format!("task-{number}"))
+                .join("trajectories")
+                .join("agents");
+            let id = format!("agent-chat-{number}");
+            write_trajectory_file(
+                &dir.join(format!("{id}.json")),
+                &id,
+                "Agent",
+                "2024-01-01T00:00:01Z",
+            )
+            .await;
+            dirs.push(dir);
+        }
+        dirs
+    }
+
+    async fn sync_every_trajectory_dir(gcx: &Arc<GlobalContext>, app: &AppState) -> Vec<PathBuf> {
+        let dirs = list_trajectory_dirs(gcx).await;
+        for dir in &dirs {
+            trajectory_index::list_trajectory_entries_with_rollout_shared_for(
+                &app.chat.trajectory_index_coordinator,
+                dir,
+                None,
+                trajectory_index::TrajectoryIndexListingCaller::Sidebar,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(app
+            .chat
+            .trajectory_index_coordinator
+            .unsynced_directories(&dirs)
+            .is_empty());
+        dirs
+    }
+
+    #[tokio::test]
+    async fn chat_path_lookup_does_not_sweep_when_map_is_authoritative() {
+        const TASK_DIR_COUNT: usize = 12;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+        write_trajectory_file(
+            &workspace
+                .path()
+                .join(".refact")
+                .join("trajectories")
+                .join("root-chat.json"),
+            "root-chat",
+            "Root",
+            "2024-01-01T00:00:01Z",
+        )
+        .await;
+        seed_agent_task_dirs(workspace.path(), TASK_DIR_COUNT).await;
+
+        let dirs = sync_every_trajectory_dir(&gcx, &app).await;
+        assert!(dirs.len() > TASK_DIR_COUNT);
+        let normal_dirs = get_all_trajectories_dirs(gcx.clone()).await.len() as u64;
+
+        let before = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        );
+        assert!(find_trajectory_path(gcx.clone(), "chat-that-never-existed")
+            .await
+            .is_none());
+        let swept = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        ) - before;
+
+        assert_eq!(
+            swept, normal_dirs,
+            "a miss against a fully synced map must cost the normal-dir probes only"
+        );
+        assert!(
+            swept < TASK_DIR_COUNT as u64,
+            "the cost must not grow with the number of trajectory directories"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_path_lookup_still_finds_chat_in_unsynced_dir() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+        write_trajectory_file(
+            &workspace
+                .path()
+                .join(".refact")
+                .join("trajectories")
+                .join("root-chat.json"),
+            "root-chat",
+            "Root",
+            "2024-01-01T00:00:01Z",
+        )
+        .await;
+        let chat_id = "unsynced-agent-chat";
+        let task_dir = workspace
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-1")
+            .join("trajectories")
+            .join("agents");
+        let expected = task_dir.join(format!("{chat_id}.json"));
+        write_trajectory_file(&expected, chat_id, "Agent", "2024-01-01T00:00:01Z").await;
+
+        let dirs = list_trajectory_dirs(&gcx).await;
+        assert!(!app
+            .chat
+            .trajectory_index_coordinator
+            .unsynced_directories(&dirs)
+            .is_empty());
+        let normal_dirs = get_all_trajectories_dirs(gcx.clone()).await.len() as u64;
+        let before = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        );
+
+        let found = find_trajectory_path(gcx.clone(), chat_id)
+            .await
+            .expect("an unsynced directory must still be searched");
+        let swept = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        ) - before;
+
+        assert_eq!(
+            tokio::fs::canonicalize(&found).await.unwrap(),
+            tokio::fs::canonicalize(&expected).await.unwrap()
+        );
+        assert!(
+            swept > normal_dirs,
+            "the directory the map cannot answer for must still be listed"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_entry_cleanup_is_o1_per_chat_id() {
+        const TASK_DIR_COUNT: usize = 12;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+        let root_dir = workspace.path().join(".refact").join("trajectories");
+        let stale_id = "o1-cleanup-stale-chat";
+        let stale_path = root_dir.join(format!("{stale_id}.json"));
+        write_trajectory_file(&stale_path, stale_id, "Stale", "2024-01-01T00:00:01Z").await;
+        seed_agent_task_dirs(workspace.path(), TASK_DIR_COUNT).await;
+
+        let dirs = sync_every_trajectory_dir(&gcx, &app).await;
+        assert!(dirs.len() > TASK_DIR_COUNT);
+        tokio::fs::remove_file(&stale_path).await.unwrap();
+
+        let cleanup_before = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::StaleEntryCleanup,
+        );
+        let lookup_before = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        );
+        remove_stale_trajectory_index_entries(gcx.clone(), stale_id).await;
+        let cleanup_listings = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::StaleEntryCleanup,
+        ) - cleanup_before;
+
+        assert_eq!(
+            cleanup_listings, 1,
+            "cleanup must only visit the directory that indexes the chat"
+        );
+        assert_eq!(
+            listing_calls_for(
+                &app,
+                trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+            ),
+            lookup_before,
+            "cleanup must not resolve the chat through a path-lookup sweep"
+        );
+        let entries = trajectory_index::list_trajectory_entries_with_rollout_shared_for(
+            &app.chat.trajectory_index_coordinator,
+            &root_dir,
+            None,
+            trajectory_index::TrajectoryIndexListingCaller::StaleEntryCleanup,
+        )
+        .await
+        .unwrap();
+        assert!(entries.iter().all(|entry| entry.id != stale_id));
+
+        let cleanup_before = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::StaleEntryCleanup,
+        );
+        remove_stale_trajectory_index_entries(gcx.clone(), "chat-the-map-never-saw").await;
+        assert_eq!(
+            listing_calls_for(
+                &app,
+                trajectory_index::TrajectoryIndexListingCaller::StaleEntryCleanup,
+            ),
+            cleanup_before,
+            "an id the map does not know must cost no listings at all"
+        );
     }
 
     // Clears the process-wide metadata cache, so it must not run beside the tests that read it.
