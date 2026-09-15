@@ -21,6 +21,12 @@ pub const MAX_MIGRATION_BATCH: usize = 128;
 /// files the migration never edits or deletes.
 pub const LEGACY_RECEIPT_NAMESPACE: &str = "legacy_receipt";
 pub const LEGACY_ACTIVITY_NAMESPACE: &str = "legacy_activity";
+/// Maps a rendered title to the subject that already owns it, so two findings a
+/// user reads as identical converge on one work item instead of racing to create
+/// their own. Claims are create-only: an existing claim is never rewritten.
+pub const LEGACY_TITLE_CLAIM_NAMESPACE: &str = "legacy_title_claim";
+/// A work title is a headline, not a message body.
+pub const MAX_WORK_TITLE_CHARS: usize = 120;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct MigrationProgress {
@@ -167,6 +173,190 @@ impl LegacyReceiptRecord {
     }
 }
 
+/// Claims a rendered title for the subject that first imported it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyTitleClaim {
+    pub resource_id: String,
+}
+
+/// Legacy summaries carry a headline, a body and sometimes persona speech in one
+/// string. Keep the headline; the body is preserved separately.
+fn sanitize_title(summary: &str) -> String {
+    let headline = summary
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let title = plain_line(headline);
+    if title.chars().count() <= MAX_WORK_TITLE_CHARS {
+        return title;
+    }
+    let kept: String = title.chars().take(MAX_WORK_TITLE_CHARS - 1).collect();
+    format!("{}\u{2026}", kept.trim_end())
+}
+
+/// Titles and bodies are rendered as markdown to the user. Bracket characters are
+/// the visible signature of a serialized payload, so they never survive import.
+fn plain_line(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '{' | '}' | '[' | ']' => ' ',
+            other => other,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn plain_text(value: &str) -> String {
+    value
+        .lines()
+        .map(plain_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// A legacy action is reference material. Describe what it proposed in the user's
+/// language; the machine payload stays in the legacy file it came from.
+fn describe_action(action: &BuddyAction) -> Option<String> {
+    let described = match action {
+        BuddyAction::OpenPage { .. } => "Open a Buddy page".to_string(),
+        BuddyAction::LaunchInvestigationChat { .. } => "Start an investigation chat".to_string(),
+        BuddyAction::DraftSkill { label, .. } => format!("Draft a skill: {}", plain_line(label)),
+        BuddyAction::DraftCommand { label, .. } => {
+            format!("Draft a command: {}", plain_line(label))
+        }
+        BuddyAction::DraftDelegate { label, .. } => {
+            format!("Draft a subagent: {}", plain_line(label))
+        }
+        BuddyAction::DraftMode { label, .. } => format!("Draft a mode: {}", plain_line(label)),
+        BuddyAction::DraftAgentsMdPatch { .. } => "Draft a change to AGENTS.md".to_string(),
+        BuddyAction::DraftDefaultsChange { .. } => "Draft a change to the defaults".to_string(),
+        BuddyAction::DraftCustomizationChange { id, .. } => {
+            format!("Draft a customization change: {}", plain_line(id))
+        }
+        BuddyAction::OfferMarketplaceInstall { item_id, .. } => {
+            format!("Offer to install {}", plain_line(item_id))
+        }
+        BuddyAction::CreatePulseReport { .. } => "Write a pulse report".to_string(),
+        BuddyAction::ApplyMemoryBatch { count_hint, .. } => {
+            format!("Tidy {count_hint} memory entries")
+        }
+        BuddyAction::ApplyConfigPatch { target_path, .. } => {
+            format!("Patch {}", plain_line(target_path))
+        }
+        BuddyAction::AcceptQuest { .. } => "Accept a quest".to_string(),
+        BuddyAction::OpenBuddyConversation { .. } => "Open a Buddy conversation".to_string(),
+        BuddyAction::Dismiss => "dismiss it".to_string(),
+    };
+    (!described.trim().is_empty()).then_some(described)
+}
+
+fn opportunity_body(opportunity: &BuddyOpportunity) -> String {
+    let summary = plain_text(&opportunity.summary);
+    let mut suggestions: Vec<String> = opportunity
+        .proposed_actions
+        .iter()
+        .filter_map(describe_action)
+        .collect();
+    suggestions.dedup();
+    if suggestions.is_empty() {
+        return summary;
+    }
+    let rendered = suggestions
+        .iter()
+        .map(|suggestion| format!("- {suggestion}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{summary}\n\nThe earlier Buddy suggested:\n{rendered}")
+}
+
+/// A legacy status is the user's own last answer, so it still decides the state.
+/// Quests and run findings are streams to watch, not questions owed an answer;
+/// importing them as attention is what made eight of eleven items shout.
+fn imported_state(opportunity: &BuddyOpportunity) -> WorkItemState {
+    match opportunity.status {
+        // Hiding or expiring a card never proves the underlying work cancelled.
+        OpportunityStatus::Dismissed | OpportunityStatus::Expired | OpportunityStatus::Accepted => {
+            WorkItemState::Watching
+        }
+        // A legacy Completed flag is not independently verified completion evidence.
+        OpportunityStatus::Completed => WorkItemState::Delivered,
+        OpportunityStatus::New | OpportunityStatus::Shown => match opportunity.kind {
+            BuddyOpportunityKind::Quest | BuddyOpportunityKind::JobFinding => {
+                WorkItemState::Watching
+            }
+            _ => WorkItemState::NeedsAttention,
+        },
+    }
+}
+
+/// Resolve which subject owns this rendered title. The first importer wins and
+/// keeps whatever identity the producer scheme already gave it, so an existing
+/// row is adopted rather than orphaned by a second one.
+fn claim_title_subject(
+    store: &mut OperatorStore,
+    title: &str,
+    producer_id: &str,
+    created_at: &str,
+) -> Result<String, OperatorStoreError> {
+    let claim_id = legacy_document_id(
+        LEGACY_TITLE_CLAIM_NAMESPACE,
+        &stable_hash(&[&title.to_lowercase()]),
+    );
+    if let Some(claim) = store
+        .get_document::<LegacyDocument<LegacyTitleClaim>>(LEGACY_TITLE_CLAIM_NAMESPACE, &claim_id)?
+    {
+        return Ok(claim.value.value.resource_id);
+    }
+    let document = LegacyDocument {
+        schema_version: OPERATOR_SCHEMA_VERSION_V1,
+        project: store.identity().clone(),
+        source: "legacy_opportunity_title".into(),
+        imported_at: created_at.into(),
+        value: LegacyTitleClaim {
+            resource_id: producer_id.to_string(),
+        },
+    };
+    store.put_document(LEGACY_TITLE_CLAIM_NAMESPACE, &claim_id, &document, None)?;
+    Ok(producer_id.to_string())
+}
+
+/// Retire a row that a title claim has superseded. Only a row the user has not
+/// engaged with is retired, and nothing is deleted: the artifact, its revisions
+/// and its outcomes all stay readable.
+fn retire_superseded_row(
+    store: &mut OperatorStore,
+    producer_id: &str,
+) -> Result<(), OperatorStoreError> {
+    let subject = SubjectKey::new(
+        store.identity(),
+        "legacy_opportunity",
+        producer_id,
+        "legacy-import-v1",
+        "1",
+    )
+    .map_err(|_| OperatorStoreError::Conflict("legacy source identity missing"))?;
+    let Some(superseded) = store.get_work_item(&subject.work_item_id())? else {
+        return Ok(());
+    };
+    if !matches!(
+        superseded.value.state,
+        WorkItemState::NeedsAttention | WorkItemState::Watching
+    ) {
+        return Ok(());
+    }
+    let mut retired = superseded.value.clone();
+    retired.state = WorkItemState::Cancelled;
+    store.upsert_work_item(&retired, Some(superseded.revision))?;
+    Ok(())
+}
+
 /// Run only from the owning service after checking OperatorFeatures.storage.
 /// An unchanged retry never rewrites work/read/snooze. Material source changes append revisions.
 /// Each record commits atomically; failure leaves the old source and prior commits intact.
@@ -191,7 +381,7 @@ pub fn migrate_batch(
             worker,
             "legacy_draft",
             &draft.id,
-            &draft.title,
+            &sanitize_title(&draft.title),
             &body,
             &draft.created_at.to_rfc3339(),
             WorkItemState::NeedsAttention,
@@ -199,20 +389,10 @@ pub fn migrate_batch(
         progress.record(imported);
     }
     for opportunity in opportunities {
-        // A legacy Completed flag is not independently verified completion evidence.
-        let state = match opportunity.status {
-            // Hiding or expiring a card never proves the underlying work cancelled.
-            OpportunityStatus::Dismissed
-            | OpportunityStatus::Expired
-            | OpportunityStatus::Accepted => WorkItemState::Watching,
-            OpportunityStatus::Completed => WorkItemState::Delivered,
-            OpportunityStatus::New | OpportunityStatus::Shown => WorkItemState::NeedsAttention,
-        };
-        let actions = serde_json::to_string_pretty(&opportunity.proposed_actions)?;
-        let body = format!(
-            "{}\n\nLegacy proposed actions (reference only; not execution authority):\n{}",
-            opportunity.summary, actions
-        );
+        let state = imported_state(opportunity);
+        let title = sanitize_title(&opportunity.summary);
+        let body = opportunity_body(opportunity);
+        let created_at = opportunity.created_at.to_rfc3339();
         let linked_draft = opportunity
             .proposed_actions
             .iter()
@@ -230,27 +410,33 @@ pub fn migrate_batch(
                 super::work_items::stable_hash(&[&opportunity.cooldown_key])
             )
         };
-        let (kind, id) = linked_draft
-            .map(|id| ("legacy_draft", id))
-            .unwrap_or(("legacy_opportunity", producer_id.as_str()));
-        if linked_draft.is_some() {
-            let subject = SubjectKey::new(store.identity(), kind, id, "legacy-import-v1", "1")
+        let (kind, id) = match linked_draft {
+            Some(draft_id) => {
+                let subject = SubjectKey::new(
+                    store.identity(),
+                    "legacy_draft",
+                    draft_id,
+                    "legacy-import-v1",
+                    "1",
+                )
                 .map_err(|_| OperatorStoreError::Conflict("legacy source identity missing"))?;
-            if store.get_work_item(&subject.work_item_id())?.is_some() {
-                progress.already_imported += 1;
-                continue;
+                if store.get_work_item(&subject.work_item_id())?.is_some() {
+                    progress.already_imported += 1;
+                    continue;
+                }
+                ("legacy_draft", draft_id.to_string())
             }
-        }
-        let imported = import_record(
-            store,
-            worker,
-            kind,
-            id,
-            &opportunity.summary,
-            &body,
-            &opportunity.created_at.to_rfc3339(),
-            state,
-        )?;
+            // A recurring finding re-emitted under a fresh cooldown key is the same
+            // reading to the user, so it folds into a revision instead of a new card.
+            None => {
+                let owner = claim_title_subject(store, &title, &producer_id, &created_at)?;
+                if owner != producer_id {
+                    retire_superseded_row(store, &producer_id)?;
+                }
+                ("legacy_opportunity", owner)
+            }
+        };
+        let imported = import_record(store, worker, kind, &id, &title, &body, &created_at, state)?;
         progress.record(imported);
     }
     Ok(progress)
@@ -642,14 +828,21 @@ fn import_record(
         subject,
         source_run_ids: vec![outcome.run_id.clone()],
         title,
-        conclusion: "Imported legacy proposal; no verified effects claimed.".into(),
+        conclusion: "Saved from an earlier Buddy. Nothing here has been checked or run.".into(),
         delta: String::new(),
         body,
-        uncertainty: Some("Legacy content is untrusted reference material, not action authorization. Editor expiry does not resolve this proposal.".into()),
+        // The untrusted fact itself lives on provenance below, which the UI can badge.
+        uncertainty: Some("Kept for reference only — Buddy cannot act on it.".into()),
         proposed_action_ids: vec![],
         evidence: vec![],
-    }.materialize(std::slice::from_ref(&outcome), current_artifact.as_ref().map(|record| &record.value))
-        .map_err(|_| OperatorStoreError::Conflict("legacy artifact failed bounded content validation"))?;
+    }
+    .materialize(
+        std::slice::from_ref(&outcome),
+        current_artifact.as_ref().map(|record| &record.value),
+    )
+    .map_err(|_| {
+        OperatorStoreError::Conflict("legacy artifact failed bounded content validation")
+    })?;
     let ArtifactMaterialization::Revision(mut artifact) = artifact else {
         return Err(OperatorStoreError::Conflict(
             "initial legacy artifact unexpectedly folded",
@@ -839,6 +1032,270 @@ mod migration_regressions {
             1
         );
         assert_eq!(store.list_work_items(None, 10).unwrap().entries.len(), 1);
+    }
+
+    fn opportunity_with(
+        kind: &str,
+        summary: &str,
+        cooldown: &str,
+        status: &str,
+        actions: serde_json::Value,
+    ) -> BuddyOpportunity {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("card-{}", stable_hash(&[summary, cooldown])), "kind": kind,
+            "summary": summary, "priority": "normal", "confidence": 0.5,
+            "fact_keys": [], "cooldown_key": cooldown, "cooldown_secs": 0,
+            "status": status, "proposed_actions": actions,
+            "humor": null, "humor_allowed": false, "related": {},
+            "created_at": "2026-01-01T00:00:00Z", "expires_at": "2026-01-02T00:00:00Z", "resolved_at": null
+        })).unwrap()
+    }
+
+    fn only_artifact(store: &OperatorStore) -> refact_buddy_core::operator_types::ArtifactRevision {
+        let work = store.list_work_items(None, 10).unwrap().entries.remove(0);
+        store
+            .get_artifact_revision(work.value.current_artifact_id.as_ref().unwrap(), None)
+            .unwrap()
+            .unwrap()
+            .value
+    }
+
+    #[test]
+    fn imported_body_describes_actions_instead_of_dumping_json() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let input = opportunity_with(
+            "config_drift",
+            "Review the agent instructions",
+            "config:drift",
+            "new",
+            serde_json::json!([
+                {"kind": "apply_config_patch", "draft_id": "", "target_path": "AGENTS.md"},
+                {"kind": "apply_memory_batch", "batch_key": "memory_ops:batch:orphan", "count_hint": 97},
+                {"kind": "dismiss"}
+            ]),
+        );
+        migrate_batch(&mut store, &worker(), &[input], &[]).unwrap();
+        let artifact = only_artifact(&store);
+        for fragment in ['{', '}', '[', ']'] {
+            assert!(
+                !artifact.body.contains(fragment),
+                "body still carries a serialized payload: {}",
+                artifact.body
+            );
+        }
+        assert!(!artifact.body.contains("\"kind\""));
+        assert!(artifact.body.contains("- Patch AGENTS.md"));
+        assert!(artifact.body.contains("- Tidy 97 memory entries"));
+    }
+
+    #[test]
+    fn persona_speech_below_the_headline_never_reaches_the_title() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let input = opportunity_with(
+            "quest",
+            "Warm up this workspace\n\nsunny starter: I am on the trail now.",
+            "quest:warmup",
+            "new",
+            serde_json::json!([]),
+        );
+        migrate_batch(&mut store, &worker(), &[input], &[]).unwrap();
+        let work = store.list_work_items(None, 10).unwrap().entries.remove(0);
+        assert_eq!(work.value.title, "Warm up this workspace");
+        assert!(!work.value.title.contains('\n'));
+        assert!(!work.value.title.contains("sunny starter"));
+        // Nothing is dropped: the remainder still reads in the body.
+        assert!(only_artifact(&store)
+            .body
+            .contains("I am on the trail now."));
+    }
+
+    #[test]
+    fn an_overlong_summary_is_bounded_to_a_headline() {
+        let long = format!("Knowledge base needs attention {}", "x".repeat(400));
+        let title = sanitize_title(&long);
+        assert_eq!(title.chars().count(), MAX_WORK_TITLE_CHARS);
+        assert!(title.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn findings_that_render_the_same_title_fold_into_one_work_item() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        // One rendered title, three garden classes, three cooldown keys.
+        let summary = "Knowledge base needs attention: 97 lifecycle candidate(s)";
+        for class in ["orphan", "conflict", "duplicate"] {
+            let input = opportunity_with(
+                "memory_garden",
+                summary,
+                &format!("memory:garden:{class}"),
+                "new",
+                serde_json::json!([{"kind": "create_pulse_report", "scope": "memory"}]),
+            );
+            let mut input = input;
+            input.summary = format!("{summary}\n\nSignal class: {class}");
+            migrate_batch(&mut store, &worker(), &[input], &[]).unwrap();
+        }
+        let items = store.list_work_items(None, 20).unwrap().entries;
+        assert_eq!(items.len(), 1, "duplicate titles did not fold");
+        let artifact_id = items[0].value.current_artifact_id.clone().unwrap();
+        assert_eq!(items[0].value.current_artifact_revision, Some(3));
+        let revisions = store
+            .list_artifact_revisions(&artifact_id, None, 20)
+            .unwrap();
+        assert_eq!(revisions.entries.len(), 3);
+        // Earlier evidence is preserved, not overwritten.
+        assert!(revisions.entries[0].value.body.contains("orphan"));
+        assert!(revisions.entries[2].value.body.contains("duplicate"));
+        assert_eq!(
+            store
+                .list_work_outcomes(&items[0].value.id, None, 20)
+                .unwrap()
+                .entries
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn a_superseded_row_is_retired_without_losing_its_history() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let first = opportunity_with(
+            "memory_garden",
+            "Knowledge base needs attention",
+            "memory:garden:orphan",
+            "new",
+            serde_json::json!([]),
+        );
+        // A pre-fix row: same producer, a title nothing else claims yet.
+        let older = opportunity_with(
+            "memory_garden",
+            "Knowledge base needs a look",
+            "memory:garden:conflict",
+            "new",
+            serde_json::json!([]),
+        );
+        migrate_batch(&mut store, &worker(), &[first, older.clone()], &[]).unwrap();
+        assert_eq!(store.list_work_items(None, 20).unwrap().entries.len(), 2);
+        let superseded_id = store
+            .list_work_items(None, 20)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|item| item.value.title == "Knowledge base needs a look")
+            .unwrap()
+            .value
+            .id;
+        let mut renamed = older;
+        renamed.summary = "Knowledge base needs attention".into();
+        migrate_batch(&mut store, &worker(), &[renamed], &[]).unwrap();
+        let retired = store.get_work_item(&superseded_id).unwrap().unwrap();
+        assert_eq!(retired.value.state, WorkItemState::Cancelled);
+        // Retiring is a state change, never a delete.
+        assert!(store
+            .get_artifact_revision(retired.value.current_artifact_id.as_ref().unwrap(), Some(1))
+            .unwrap()
+            .is_some());
+        assert_eq!(store.list_work_items(None, 20).unwrap().entries.len(), 2);
+    }
+
+    #[test]
+    fn work_the_user_engaged_with_is_never_retired() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let claimed = opportunity_with(
+            "memory_garden",
+            "Knowledge base needs attention",
+            "memory:garden:orphan",
+            "new",
+            serde_json::json!([]),
+        );
+        let engaged = opportunity_with(
+            "memory_garden",
+            "Knowledge base needs a look",
+            "memory:garden:conflict",
+            "new",
+            serde_json::json!([]),
+        );
+        migrate_batch(&mut store, &worker(), &[claimed, engaged.clone()], &[]).unwrap();
+        let mut working = store
+            .list_work_items(None, 20)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|item| item.value.title == "Knowledge base needs a look")
+            .unwrap();
+        working.value.state = WorkItemState::Working;
+        store
+            .upsert_work_item(&working.value, Some(working.revision))
+            .unwrap();
+        let mut renamed = engaged;
+        renamed.summary = "Knowledge base needs attention".into();
+        migrate_batch(&mut store, &worker(), &[renamed], &[]).unwrap();
+        assert_eq!(
+            store
+                .get_work_item(&working.value.id)
+                .unwrap()
+                .unwrap()
+                .value
+                .state,
+            WorkItemState::Working
+        );
+    }
+
+    #[test]
+    fn quests_and_run_findings_are_watched_rather_than_shouting() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let inputs = [
+            opportunity_with(
+                "quest",
+                "Give Pixel a play break",
+                "quest:pet",
+                "new",
+                serde_json::json!([]),
+            ),
+            opportunity_with(
+                "job_finding",
+                "Error Detective",
+                "job:detective",
+                "new",
+                serde_json::json!([]),
+            ),
+            opportunity_with(
+                "git_hygiene",
+                "5681 uncommitted files",
+                "git:uncommitted",
+                "new",
+                serde_json::json!([]),
+            ),
+        ];
+        migrate_batch(&mut store, &worker(), &inputs, &[]).unwrap();
+        let states: Vec<_> = store
+            .list_work_items(None, 20)
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|item| (item.value.title, item.value.state))
+            .collect();
+        assert!(states.contains(&("Give Pixel a play break".into(), WorkItemState::Watching)));
+        assert!(states.contains(&("Error Detective".into(), WorkItemState::Watching)));
+        assert!(states.contains(&(
+            "5681 uncommitted files".into(),
+            WorkItemState::NeedsAttention
+        )));
+    }
+
+    #[test]
+    fn imported_legacy_content_stays_marked_untrusted() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        migrate_batch(&mut store, &worker(), &[opportunity(7)], &[]).unwrap();
+        let artifact = only_artifact(&store);
+        assert!(artifact.provenance.contains_untrusted_source);
+        assert!(artifact.proposed_action_ids.is_empty());
     }
 
     #[test]
