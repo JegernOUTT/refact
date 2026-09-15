@@ -281,6 +281,15 @@ pub struct CoordinationSettings {
     pub metrics_max_explanations: usize,
     /// Characters retained per exported label or explanation value.
     pub metrics_max_label_chars: usize,
+    /// Whether model-authored orchestration code may run at all. Off by
+    /// default, and inert everywhere no OS sandbox can confine the worker.
+    pub code_mode_enabled: bool,
+    /// Wall clock a single confined orchestration worker may occupy.
+    pub code_mode_timeout_ms: u64,
+    /// Host calls one orchestration run may emit.
+    pub code_mode_max_host_calls: usize,
+    /// Bytes of data that may travel through those host calls.
+    pub code_mode_max_intermediate_bytes: usize,
 }
 
 impl Default for CoordinationSettings {
@@ -438,6 +447,10 @@ impl Default for CoordinationSettings {
             metrics_max_series: 4_096,
             metrics_max_explanations: 2_048,
             metrics_max_label_chars: 160,
+            code_mode_enabled: false,
+            code_mode_timeout_ms: 30_000,
+            code_mode_max_host_calls: 64,
+            code_mode_max_intermediate_bytes: 262_144,
         }
     }
 }
@@ -850,7 +863,12 @@ impl CoordinationSettings {
             self.no_progress_window_turns as u64,
             2,
         );
-        at_least(&mut v, "metrics_max_series", self.metrics_max_series as u64, 1);
+        at_least(
+            &mut v,
+            "metrics_max_series",
+            self.metrics_max_series as u64,
+            1,
+        );
         at_least(
             &mut v,
             "metrics_max_explanations",
@@ -876,6 +894,24 @@ impl CoordinationSettings {
             self.no_progress_unchanged_turns as u64,
             "no_progress_window_turns",
             self.no_progress_window_turns as u64,
+        );
+        at_least(
+            &mut v,
+            "code_mode_timeout_ms",
+            self.code_mode_timeout_ms,
+            1_000,
+        );
+        at_least(
+            &mut v,
+            "code_mode_max_host_calls",
+            self.code_mode_max_host_calls as u64,
+            1,
+        );
+        at_least(
+            &mut v,
+            "code_mode_max_intermediate_bytes",
+            self.code_mode_max_intermediate_bytes as u64,
+            1_024,
         );
         at_least(&mut v, "lease_ttl_ms", self.lease_ttl_ms, 1);
         at_least(

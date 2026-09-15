@@ -37,17 +37,8 @@ use sha2::{Digest, Sha256};
 /// Label names safe to export. A label outside this set is dropped rather than
 /// guessed at, because an arbitrary key is how an environment value escapes.
 pub const ALLOWED_LABELS: &[&str] = &[
-    "bucket",
-    "class",
-    "decision",
-    "kind",
-    "outcome",
-    "priority",
-    "reason",
-    "result",
-    "source",
-    "state",
-    "verdict",
+    "bucket", "class", "decision", "kind", "outcome", "priority", "reason", "result", "source",
+    "state", "verdict",
 ];
 
 pub const EVIDENCE_VERDICTS: &str = "evidence_verdicts";
@@ -371,7 +362,12 @@ const SELF_SERIES: &[&str] = &[SERIES_DROPPED, LABELS_DROPPED, EXPLANATIONS_DROP
 fn seeded_series() -> BTreeMap<SeriesKey, Sample> {
     SELF_SERIES
         .iter()
-        .map(|name| (SeriesKey::new(name, Vec::new()), Sample::Counter { value: 0 }))
+        .map(|name| {
+            (
+                SeriesKey::new(name, Vec::new()),
+                Sample::Counter { value: 0 },
+            )
+        })
         .collect()
 }
 
@@ -400,7 +396,11 @@ impl MetricsRecorder {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if dropped > 0 {
-            bump(&mut series, SeriesKey::new(LABELS_DROPPED, Vec::new()), dropped as u64);
+            bump(
+                &mut series,
+                SeriesKey::new(LABELS_DROPPED, Vec::new()),
+                dropped as u64,
+            );
         }
         if !series.contains_key(&key) && series.len() >= caps.max_series {
             bump(&mut series, SeriesKey::new(SERIES_DROPPED, Vec::new()), 1);
@@ -649,7 +649,11 @@ pub fn record_delivery_duplicate(reason: &str) {
 
 pub fn record_delivery_expiry(reason: &str, expired: u64) {
     if expired > 0 && caps().enabled {
-        recorder().increment(DELIVERY_EXPIRY, vec![label("reason", reason.to_string())], expired);
+        recorder().increment(
+            DELIVERY_EXPIRY,
+            vec![label("reason", reason.to_string())],
+            expired,
+        );
     }
 }
 
@@ -956,7 +960,11 @@ mod tests {
     fn observations_keep_count_sum_and_extremes() {
         let recorder = MetricsRecorder::new();
         for value in [10, 250, 90] {
-            recorder.observe(QUEUE_LATENCY_MS, vec![("state", "queued".to_string())], value);
+            recorder.observe(
+                QUEUE_LATENCY_MS,
+                vec![("state", "queued".to_string())],
+                value,
+            );
         }
         let snapshot = recorder.snapshot();
         let sample = snapshot
@@ -993,7 +1001,12 @@ mod tests {
             output_cap_bytes: 4096,
         };
         let propose = |id: &str| {
-            VerificationSpec::propose(id, "cargo test --lib", SpecAuthority::CardInstructions, &defaults)
+            VerificationSpec::propose(
+                id,
+                "cargo test --lib",
+                SpecAuthority::CardInstructions,
+                &defaults,
+            )
         };
         let mut specs = Vec::new();
         let mut evidence = Vec::new();

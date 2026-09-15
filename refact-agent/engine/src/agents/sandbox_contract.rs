@@ -57,6 +57,39 @@ fn enforcement_name(enforcement: refact_sandbox::Enforcement) -> &'static str {
     }
 }
 
+/// Why OS confinement cannot be applied here at all, independent of what any
+/// particular run asked for. `None` means a child that asks to be confined
+/// really would be. This is the single place that answers the question, so a
+/// caller that refuses rather than degrades does not invent a second one.
+pub fn confinement_unavailable_reason(
+    terminal_mode: TerminalSecurityMode,
+    status: refact_sandbox::SandboxStatus,
+) -> Option<String> {
+    let provider = status.provider;
+    let enforcement = enforcement_name(status.enforcement);
+    if status.enforcement == refact_sandbox::Enforcement::Unusable {
+        return Some(format!(
+            "no usable sandbox provider is available ({provider}: {enforcement})"
+        ));
+    }
+    match terminal_mode {
+        TerminalSecurityMode::Off
+        | TerminalSecurityMode::Audit
+        | TerminalSecurityMode::ApprovalOnly => Some(format!(
+            "terminal security mode `{}` never confines execution",
+            terminal_mode_name(terminal_mode)
+        )),
+        TerminalSecurityMode::SandboxPreferred
+            if status.enforcement != refact_sandbox::Enforcement::Full =>
+        {
+            Some(format!(
+                "terminal security mode `sandbox_preferred` runs unconfined without full enforcement ({provider}: {enforcement})"
+            ))
+        }
+        TerminalSecurityMode::SandboxPreferred | TerminalSecurityMode::SandboxRequired => None,
+    }
+}
+
 /// `effective` is the sandbox level the child's own chat mode would produce; a
 /// request for something stricter than that is not enforceable either, because
 /// nothing narrows the level per run.
@@ -70,35 +103,13 @@ pub fn preflight(
         return Ok(());
     };
     let asked = mode_name(&requested);
-    let provider = status.provider;
-    let enforcement = enforcement_name(status.enforcement);
     let refuse = |reason: String| {
         Err(format!(
             "launch refused before dispatch: sandbox `{asked}` cannot be enforced here — {reason}. The child was not started; it would otherwise have run unsandboxed."
         ))
     };
-    if status.enforcement == refact_sandbox::Enforcement::Unusable {
-        return refuse(format!(
-            "no usable sandbox provider is available ({provider}: {enforcement})"
-        ));
-    }
-    match terminal_mode {
-        TerminalSecurityMode::Off
-        | TerminalSecurityMode::Audit
-        | TerminalSecurityMode::ApprovalOnly => {
-            return refuse(format!(
-                "terminal security mode `{}` never confines execution",
-                terminal_mode_name(terminal_mode)
-            ));
-        }
-        TerminalSecurityMode::SandboxPreferred
-            if status.enforcement != refact_sandbox::Enforcement::Full =>
-        {
-            return refuse(format!(
-                "terminal security mode `sandbox_preferred` runs unconfined without full enforcement ({provider}: {enforcement})"
-            ));
-        }
-        TerminalSecurityMode::SandboxPreferred | TerminalSecurityMode::SandboxRequired => {}
+    if let Some(reason) = confinement_unavailable_reason(terminal_mode, status) {
+        return refuse(reason);
     }
     if rank(&requested) < rank(&effective) {
         return refuse(format!(

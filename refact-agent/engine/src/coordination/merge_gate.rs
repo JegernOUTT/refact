@@ -548,8 +548,7 @@ mod tests {
         let refusals = explained.explanations_for(work_metrics::Decision::MergeRefusal);
         assert_eq!(refusals.len(), 1, "the refusal was not explained");
         assert_eq!(
-            refusals[0].rule,
-            "merge_gate.lease_held_past_wait_deadline",
+            refusals[0].rule, "merge_gate.lease_held_past_wait_deadline",
             "a merge refusal must name the rule that fired"
         );
         assert!(

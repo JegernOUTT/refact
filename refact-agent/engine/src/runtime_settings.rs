@@ -272,6 +272,10 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("metrics_max_series", 1, 1_000_000),
     coordination_integer("metrics_max_explanations", 1, 1_000_000),
     coordination_integer("metrics_max_label_chars", 8, 4_096),
+    coordination_bool("code_mode_enabled"),
+    coordination_integer("code_mode_timeout_ms", 1_000, 3_600_000),
+    coordination_integer("code_mode_max_host_calls", 1, 10_000),
+    coordination_integer("code_mode_max_intermediate_bytes", 1_024, 67_108_864),
 ];
 
 pub fn coordination_field_bounds() -> &'static [CoordinationFieldBound] {

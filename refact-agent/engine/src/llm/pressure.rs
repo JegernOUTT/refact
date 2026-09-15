@@ -100,9 +100,7 @@ pub fn admit(bucket: &str, priority: RequestPriority) -> Option<Result<Permit, A
                     background_in_flight,
                 } => (
                     "provider_pressure.interactive_slots_reserved",
-                    format!(
-                        "{background_in_flight} background in flight of {background_limit}"
-                    ),
+                    format!("{background_in_flight} background in flight of {background_limit}"),
                 ),
             };
             metrics::count(
