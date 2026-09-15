@@ -671,6 +671,104 @@ impl DisagreementRecord {
     }
 }
 
+/// Which boundary produced a causal event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CausalKind {
+    Delivery,
+    Spawn,
+    Completion,
+    Question,
+    Evidence,
+    Decision,
+}
+
+impl CausalKind {
+    pub const ALL: [CausalKind; 6] = [
+        CausalKind::Delivery,
+        CausalKind::Spawn,
+        CausalKind::Completion,
+        CausalKind::Question,
+        CausalKind::Evidence,
+        CausalKind::Decision,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CausalKind::Delivery => "delivery",
+            CausalKind::Spawn => "spawn",
+            CausalKind::Completion => "completion",
+            CausalKind::Question => "question",
+            CausalKind::Evidence => "evidence",
+            CausalKind::Decision => "decision",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<CausalKind> {
+        CausalKind::ALL.into_iter().find(|k| k.as_str() == raw)
+    }
+}
+
+/// One cause of one event. `Unknown` is what a producer records when it does
+/// not know what caused the event; a parent is never guessed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CausalCause {
+    Event(String),
+    Unknown,
+}
+
+impl CausalCause {
+    pub fn event_id(&self) -> Option<&str> {
+        match self {
+            CausalCause::Event(id) => Some(id.as_str()),
+            CausalCause::Unknown => None,
+        }
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, CausalCause::Unknown)
+    }
+}
+
+/// One node of the causal DAG: what happened, where, and which events caused
+/// it. Causality is a DAG — an event may carry several causes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CausalEventRecord {
+    pub project: ProjectKey,
+    pub event_id: String,
+    /// Monotonic within one recorder, so events written in the same
+    /// millisecond still have a total order.
+    pub seq: i64,
+    pub kind: CausalKind,
+    pub work: WorkKey,
+    /// Chat or agent the event happened in.
+    pub scope: String,
+    /// Empty on a record written before causality existed, which reads as a
+    /// single unknown cause rather than as an uncaused event.
+    #[serde(default)]
+    pub causes: Vec<CausalCause>,
+    pub recorded_at_ms: i64,
+    /// Paths this event touched, kept only so a model-facing surface can be
+    /// filtered against the destination privacy policy.
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+impl CausalEventRecord {
+    pub fn causes_or_unknown(&self) -> Vec<CausalCause> {
+        if self.causes.is_empty() {
+            vec![CausalCause::Unknown]
+        } else {
+            self.causes.clone()
+        }
+    }
+
+    pub fn has_unknown_cause(&self) -> bool {
+        self.causes.is_empty() || self.causes.iter().any(CausalCause::is_unknown)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PruneReport {
     pub engine_instances: usize,
@@ -681,6 +779,7 @@ pub struct PruneReport {
     pub activity_observations: usize,
     pub decomposition_outcomes: usize,
     pub disagreements: usize,
+    pub causal_events: usize,
 }
 
 impl PruneReport {
@@ -693,5 +792,6 @@ impl PruneReport {
             + self.activity_observations
             + self.decomposition_outcomes
             + self.disagreements
+            + self.causal_events
     }
 }

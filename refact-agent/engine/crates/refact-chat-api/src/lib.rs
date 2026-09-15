@@ -45,7 +45,7 @@ pub use tool_enrichment::{
 };
 pub use refact_core::buddy_meta::BuddyThreadMeta;
 pub use refact_core::chat_types::{
-    delivery_id_of_message, ChatMessage, ContextFile, DeliveryOutcome, DeliveryStatus,
+    delivery_id_of_message, CausalStamp, ChatMessage, ContextFile, DeliveryOutcome, DeliveryStatus,
     DeliveryStatusRecord, PeerMailStamp, PendingDelivery, PushMode, DELIVERY_EXTRA_KEY,
 };
 pub use refact_core::worktree_meta::WorktreeMeta;

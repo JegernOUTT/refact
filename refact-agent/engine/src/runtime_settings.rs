@@ -222,6 +222,7 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("disagreement_max_open", 1, 100_000),
     coordination_integer("disagreement_retention_ms", 1, 31_536_000_000),
     coordination_bool("disagreement_blocks_completion"),
+    coordination_integer("store_max_causal_events", 1, 4_000_000),
     coordination_integer("decomposition_min_samples", 1, 100_000),
     coordination_integer("outbox_retention_secs", 1, 31_536_000),
     coordination_integer("outbox_prune_interval_secs", 1, 86_400),

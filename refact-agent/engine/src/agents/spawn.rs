@@ -436,6 +436,7 @@ pub async fn spawn_background_agent(
     let project_root = validate_launch_request(&app, &req).await?;
     let child_uuid = Uuid::new_v4();
     let child_chat_id = format!("subchat-{}", child_uuid);
+    crate::coordination::causal::record_spawn(&app, &req.parent_chat_id, &child_chat_id).await;
     let (prepared, launch_payload) =
         prepare_launch(&app, &req, &child_chat_id, project_root.clone()).await?;
     let launch_digest = launch_digest(&launch_payload);
@@ -2913,6 +2914,14 @@ fn format_notice_files(files: &[String]) -> String {
 
 pub async fn emit_background_agent_update(app: AppState, record: &BackgroundAgent) {
     crate::coordination::decomposition::observe_agent_outcome(&app, record).await;
+    if record.status.is_terminal() {
+        crate::coordination::causal::record_completion(
+            &app,
+            &record.agent_id,
+            record.child_chat_id.as_deref(),
+        )
+        .await;
+    }
     let mut destinations = vec![record.parent_chat_id.clone()];
     if let Some(root_chat_id) = record.parent_root_chat_id.as_ref() {
         if root_chat_id != &record.parent_chat_id {

@@ -171,6 +171,10 @@ pub struct CoordinationSettings {
     /// Dissent is a signal, not automatically a blocker, so this is off unless
     /// a project asks for it.
     pub disagreement_blocks_completion: bool,
+    /// Causal events retained, both in the in-memory recorder and in the
+    /// store. Beyond it the oldest events are evicted and any trace that
+    /// needed them reports itself incomplete rather than guessing.
+    pub store_max_causal_events: usize,
     /// Comparable runs a cohort needs before the decomposition advisor reports
     /// a figure at all. Below it the advisor refuses rather than averaging a
     /// handful of runs into something that reads like a law.
@@ -339,6 +343,7 @@ impl Default for CoordinationSettings {
             disagreement_max_open: 64,
             disagreement_retention_ms: 30 * 24 * 60 * 60 * 1_000,
             disagreement_blocks_completion: false,
+            store_max_causal_events: 16_384,
             decomposition_min_samples: 5,
             outbox_retention_secs: 604_800,
             outbox_prune_interval_secs: 3_600,
@@ -665,6 +670,7 @@ impl CoordinationSettings {
             ),
             ("store_max_disagreements", self.store_max_disagreements),
             ("disagreement_max_open", self.disagreement_max_open),
+            ("store_max_causal_events", self.store_max_causal_events),
             ("decomposition_min_samples", self.decomposition_min_samples),
         ] {
             at_least(&mut v, field, value as u64, 1);

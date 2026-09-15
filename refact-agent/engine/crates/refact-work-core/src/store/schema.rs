@@ -6,6 +6,7 @@ pub const MIGRATIONS: &[&str] = &[
     V5_LEASE_HOLDER_INSTANCE,
     V6_DECOMPOSITION_OUTCOMES,
     V7_DISAGREEMENTS,
+    V8_CAUSAL_EVENTS,
 ];
 
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -159,4 +160,24 @@ CREATE INDEX idx_disagreements_status
     ON disagreements (project, status, updated_at_ms);
 CREATE INDEX idx_disagreements_time
     ON disagreements (project, updated_at_ms);
+";
+
+const V8_CAUSAL_EVENTS: &str = "
+CREATE TABLE causal_events (
+    project TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    runtime TEXT NOT NULL,
+    work_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    causes TEXT NOT NULL,
+    recorded_at_ms INTEGER NOT NULL,
+    paths TEXT NOT NULL,
+    PRIMARY KEY (project, event_id)
+) WITHOUT ROWID;
+CREATE INDEX idx_causal_events_time
+    ON causal_events (project, recorded_at_ms);
+CREATE INDEX idx_causal_events_scope
+    ON causal_events (project, scope, recorded_at_ms);
 ";

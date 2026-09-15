@@ -1372,6 +1372,25 @@ pub struct PeerMailStamp {
     pub recipient_root: String,
 }
 
+/// Why this delivery exists: the causal event it is recorded as, and the events
+/// that caused it. An envelope without a stamp, and a stamp with no
+/// `caused_by`, both read as an unknown cause — never as an uncaused event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CausalStamp {
+    pub event_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caused_by: Vec<String>,
+}
+
+impl CausalStamp {
+    pub fn new(event_id: impl Into<String>, caused_by: Vec<String>) -> Self {
+        Self {
+            event_id: event_id.into(),
+            caused_by,
+        }
+    }
+}
+
 /// A batch of messages waiting to be appended to a chat at a boundary chosen by
 /// `push`. `id` is stable across the pending queue, SSE, and the delivered
 /// messages (stamped into `extra.delivery`), so dedupe works after a restart.
@@ -1406,6 +1425,10 @@ pub struct PendingDelivery {
     /// inside one agent tree, which needs no peer authority at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_mail: Option<PeerMailStamp>,
+    /// Causal identity of this delivery. Absent on every envelope written
+    /// before causality existed, which reads as an unknown cause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causal: Option<CausalStamp>,
 }
 
 /// Narrow equality: compares metadata directly and messages by their JSON
@@ -1417,6 +1440,7 @@ impl PartialEq for PendingDelivery {
             && self.expires_at_ms == other.expires_at_ms
             && self.supersede_key == other.supersede_key
             && self.peer_mail == other.peer_mail
+            && self.causal == other.causal
             && self.id == other.id
             && self.push == other.push
             && self.source == other.source
@@ -1477,6 +1501,7 @@ impl PendingDelivery {
             expires_at_ms: None,
             supersede_key: None,
             peer_mail: None,
+            causal: None,
             thread_patch: None,
             after_tool_call_id: None,
         }

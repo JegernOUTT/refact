@@ -89,6 +89,7 @@ pub async fn deliver_to_chat(
     let source_root = crate::coordination::scope::session_source_root(&*session_arc.lock().await);
     let project = outbox::project_key_for_root(&app, source_root).await;
     let delivery_id = delivery.id.clone();
+    let causal_event = crate::coordination::causal::delivery_event(chat_id, &delivery);
     let outbox = match outbox::outbox_for(&app, project).await {
         Some(outbox) if outbox.accept_for_dispatch(chat_id, &delivery).await => Some(outbox),
         _ => None,
@@ -134,6 +135,9 @@ pub async fn deliver_to_chat(
         }
     };
     record_outbox_status(outbox.as_ref(), &delivery_id, status).await;
+    // Causality is recorded after the delivery is already accepted, so a
+    // recorder that cannot write costs the trace, never the message.
+    crate::coordination::causal::record(&app, causal_event).await;
 
     try_save_trajectory_with_intent(
         app.clone(),
@@ -369,6 +373,76 @@ mod tests {
             assert_eq!(saved.messages.len(), usize::from(!queued));
             assert!(!session.lock().await.trajectory_dirty);
         }
+    }
+
+    #[tokio::test]
+    async fn delivery_records_causality_without_changing_delivery_semantics() {
+        use crate::chat::types::CausalStamp;
+        use crate::coordination::causal;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            workspace.path().join("cache"),
+            config.path().to_path_buf(),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx).await;
+        let chat_id = format!("causal-delivery-{}", uuid::Uuid::new_v4());
+        let session = Arc::new(AMutex::new(ChatSession::new(chat_id.clone())));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.clone(), session.clone());
+
+        let mut first = PendingDelivery::with_id(
+            format!("{chat_id}-one"),
+            vec![ChatMessage::new("user".into(), "cause".into())],
+            PushMode::Append,
+            "test",
+            false,
+        );
+        first.causal = Some(CausalStamp::new(format!("delivery:{chat_id}:one"), vec![]));
+        assert_eq!(
+            deliver_to_chat(app.clone(), &chat_id, first).await.unwrap(),
+            DeliveryOutcome::Delivered,
+            "recording causality must not change a delivery outcome"
+        );
+
+        let mut second = PendingDelivery::with_id(
+            format!("{chat_id}-two"),
+            vec![ChatMessage::new("user".into(), "effect".into())],
+            PushMode::Append,
+            "test",
+            false,
+        );
+        second.causal = Some(CausalStamp::new(
+            format!("delivery:{chat_id}:two"),
+            vec![format!("delivery:{chat_id}:one")],
+        ));
+        assert_eq!(
+            deliver_to_chat(app.clone(), &chat_id, second)
+                .await
+                .unwrap(),
+            DeliveryOutcome::Delivered
+        );
+        assert_eq!(session.lock().await.messages.len(), 2);
+
+        let trace = causal::recorder().trace(&format!("delivery:{chat_id}:two"));
+        let ids: Vec<String> = trace
+            .events
+            .iter()
+            .map(|event| event.event_id.clone())
+            .collect();
+        assert!(ids.contains(&format!("delivery:{chat_id}:one")));
+        assert!(ids.contains(&format!("delivery:{chat_id}:two")));
+        assert!(
+            !trace.complete,
+            "the first delivery's own cause is unknown, and that gap is reported"
+        );
     }
 
     #[tokio::test]

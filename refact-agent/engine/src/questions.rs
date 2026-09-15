@@ -126,6 +126,7 @@ pub async fn ask_and_wait(
         .questions()
         .ask(request, now)
         .map_err(|error| error.to_string())?;
+    crate::coordination::causal::record_question(app, waiter_chat_id, &question.id).await;
     let questions = app.questions().clone();
     let id = question.id.clone();
     let settled = park_and_wait(app, waiter_chat_id, abort, async move {

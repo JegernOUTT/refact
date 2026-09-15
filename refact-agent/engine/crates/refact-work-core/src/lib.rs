@@ -24,10 +24,11 @@ pub use settings::{
 pub use store::filesystem::{classify_mounts, classify_path, FilesystemKind};
 pub use store::records::{
     now_ms, AccessKind, ActivityObservationRecord, Adjudication, AdjudicationRefusal,
-    AdjudicationVerdict, DecompositionOutcomeRecord, DeliveryOutboxRecord, DeliveryState,
-    DisagreementPosition, DisagreementRecord, DisagreementStatus, EngineInstanceRecord,
-    EvidenceKind, EvidenceRef, FilingRefusal, IntentState, LeaseAcquisition, LeaseAuthority,
-    LeaseRecord, PruneReport, QueuedWorkRecord, RunIntentRecord,
+    AdjudicationVerdict, CausalCause, CausalEventRecord, CausalKind, DecompositionOutcomeRecord,
+    DeliveryOutboxRecord, DeliveryState, DisagreementPosition, DisagreementRecord,
+    DisagreementStatus, EngineInstanceRecord, EvidenceKind, EvidenceRef, FilingRefusal,
+    IntentState, LeaseAcquisition, LeaseAuthority, LeaseRecord, PruneReport, QueuedWorkRecord,
+    RunIntentRecord,
 };
 pub use store::schema::SCHEMA_VERSION;
 pub use store::{

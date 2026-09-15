@@ -11,6 +11,7 @@ mod capsule_render;
 #[cfg(test)]
 mod capsule_tests;
 pub mod catalog;
+pub mod causal;
 pub mod deadlock;
 pub mod decomposition;
 pub mod disagreement;

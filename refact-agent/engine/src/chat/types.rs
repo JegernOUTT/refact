@@ -13,7 +13,7 @@ pub use refact_chat_api::chat_local_types::{
     PendingSkillDeactivation, TrajectorySourceIdentity,
 };
 pub use refact_chat_api::{
-    delivery_id_of_message, ActiveCommandContext, BackgroundAgentSummary, BrowserMeta,
+    delivery_id_of_message, ActiveCommandContext, BackgroundAgentSummary, BrowserMeta, CausalStamp,
     BrowserSnapshot, BrowserTabInfo, BuddyThreadMeta, ChatCommand, ChatEvent, CommandRequest,
     CompressionPhase, CompressionReason, CriterionVerdict, DeliveryOutcome, DeliveryStatus,
     DeliveryStatusRecord, DeltaOp, DiffBox, EventEnvelope, GoalAttempt, GoalBudget, GoalCriterion,

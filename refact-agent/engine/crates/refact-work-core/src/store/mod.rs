@@ -7,10 +7,10 @@ use crate::identity::{CheckoutKey, ProjectKey, RunKey, RuntimeKind, WorkKey};
 use crate::settings::{CoordinationSettings, SettingsError};
 use filesystem::FilesystemKind;
 use records::{
-    AccessKind, ActivityObservationRecord, DecompositionOutcomeRecord, DeliveryOutboxRecord,
-    DeliveryState, DisagreementRecord, DisagreementStatus, EngineInstanceRecord, IntentState,
-    LeaseAcquisition, LeaseAuthority, LeaseRecord, PresenceMark, PruneReport, QueuedWorkRecord,
-    RunIntentRecord,
+    AccessKind, ActivityObservationRecord, CausalCause, CausalEventRecord, CausalKind,
+    DecompositionOutcomeRecord, DeliveryOutboxRecord, DeliveryState, DisagreementRecord,
+    DisagreementStatus, EngineInstanceRecord, IntentState, LeaseAcquisition, LeaseAuthority,
+    LeaseRecord, PresenceMark, PruneReport, QueuedWorkRecord, RunIntentRecord,
 };
 use rusqlite::{params, OptionalExtension};
 use std::fmt;
@@ -33,6 +33,8 @@ const DECOMPOSITION_COLUMNS: &str = "project, record_id, runtime, work_id, work_
 
 const DISAGREEMENT_COLUMNS: &str = "project, record_id, claim, subject, status, positions, \
      adjudication, open_reason, filed_at_ms, updated_at_ms";
+const CAUSAL_COLUMNS: &str = "project, event_id, seq, kind, runtime, work_id, scope, causes, \
+     recorded_at_ms, paths";
 
 static NEXT_STORE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -1808,6 +1810,49 @@ impl CoordinationStore {
             .map_err(|err| from_tokio(&self.path, err))
     }
 
+    /// Persist one causal event. Replaying the same `event_id` overwrites it,
+    /// so a repeated recording can never duplicate a node of the DAG.
+    pub async fn put_causal_event(
+        &self,
+        access: &ProjectAccess,
+        record: &CausalEventRecord,
+    ) -> Result<(), StoreError> {
+        let scope = self.scope_for(access, &record.project)?;
+        let record = record.clone();
+        let causes = serde_json::to_string(&record.causes)
+            .map_err(|err| StoreError::Decode(err.to_string()))?;
+        let paths = serde_json::to_string(&record.paths)
+            .map_err(|err| StoreError::Decode(err.to_string()))?;
+        self.conn
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO causal_events (project, event_id, seq, kind, runtime, work_id, \
+                     scope, causes, recorded_at_ms, paths) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+                     ON CONFLICT(project, event_id) DO UPDATE SET seq = excluded.seq, \
+                     kind = excluded.kind, runtime = excluded.runtime, \
+                     work_id = excluded.work_id, scope = excluded.scope, \
+                     causes = excluded.causes, recorded_at_ms = excluded.recorded_at_ms, \
+                     paths = excluded.paths",
+                    params![
+                        scope,
+                        record.event_id,
+                        record.seq,
+                        record.kind.as_str(),
+                        record.work.runtime.as_str(),
+                        record.work.id,
+                        record.scope,
+                        causes,
+                        record.recorded_at_ms,
+                        paths
+                    ],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
     /// Write back how a disagreement was settled.
     ///
     /// Only the outcome columns are set. `claim`, `subject` and `positions`
@@ -1897,6 +1942,31 @@ impl CoordinationStore {
             .map_err(|err| from_tokio(&self.path, err))
     }
 
+    /// Recorded causal events of this project, newest first and bounded by
+    /// `store_max_causal_events`.
+    pub async fn list_causal_events(
+        &self,
+        access: &ProjectAccess,
+    ) -> Result<Vec<CausalEventRecord>, StoreError> {
+        let scope = self.scope(access)?;
+        let limit = self.settings.store_max_causal_events as i64;
+        self.conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {CAUSAL_COLUMNS} FROM causal_events WHERE project = ?1 \
+                     ORDER BY recorded_at_ms DESC, seq DESC, event_id DESC LIMIT ?2"
+                ))?;
+                let rows = stmt.query_map(params![scope, limit], causal_columns)?;
+                let mut records = Vec::new();
+                for row in rows {
+                    records.push(decode_causal(row?)?);
+                }
+                Ok(records)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
     /// Delete settled disagreements last touched before `cutoff_ms`. An open
     /// record is never dropped by age: unresolved dissent is still signal.
     pub async fn expire_disagreements(
@@ -1918,13 +1988,36 @@ impl CoordinationStore {
             .map_err(|err| from_tokio(&self.path, err))
     }
 
+    /// Keep the newest `max_records` causal events and delete the rest. The
+    /// order is total, so the same overflow always evicts the same rows.
+    pub async fn prune_causal_events(
+        &self,
+        access: &ProjectAccess,
+        max_records: usize,
+    ) -> Result<usize, StoreError> {
+        let scope = self.scope(access)?;
+        let limit = max_records as i64;
+        self.conn
+            .call(move |conn| {
+                let removed = conn.execute(
+                    "DELETE FROM causal_events WHERE project = ?1 AND event_id IN \
+                     (SELECT event_id FROM causal_events WHERE project = ?1 \
+                     ORDER BY recorded_at_ms DESC, seq DESC, event_id DESC LIMIT -1 OFFSET ?2)",
+                    params![scope, limit],
+                )?;
+                Ok(removed)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
     pub async fn prune(&self, access: &ProjectAccess) -> Result<PruneReport, StoreError> {
         let scope = self.scope(access)?;
         let settings = self.settings.clone();
         self.conn
             .call(move |conn| {
                 let settled = format!("AND state IN ({})", sql_terminal_delivery_states());
-                let specs: [(&str, &[&str], &str, i64, &str); 8] = [
+                let specs: [(&str, &[&str], &str, i64, &str); 9] = [
                     (
                         "engine_instances",
                         &["instance_id"],
@@ -1981,6 +2074,13 @@ impl CoordinationStore {
                         settings.store_max_disagreements as i64,
                         "",
                     ),
+                    (
+                        "causal_events",
+                        &["event_id"],
+                        "recorded_at_ms",
+                        settings.store_max_causal_events as i64,
+                        "",
+                    ),
                 ];
                 let mut report = PruneReport::default();
                 let tx =
@@ -2006,7 +2106,8 @@ impl CoordinationStore {
                         "delivery_outbox" => report.delivery_outbox = removed,
                         "activity_observations" => report.activity_observations = removed,
                         "decomposition_outcomes" => report.decomposition_outcomes = removed,
-                        _ => report.disagreements = removed,
+                        "disagreements" => report.disagreements = removed,
+                        _ => report.causal_events = removed,
                     }
                 }
                 tx.commit()?;
@@ -2540,6 +2641,64 @@ fn decode_decomposition(
         tool_calls: columns.tool_calls,
         succeeded: columns.succeeded != 0,
         reworked: columns.reworked != 0,
+        recorded_at_ms: columns.recorded_at_ms,
+        paths,
+    })
+}
+
+struct CausalColumns {
+    project: String,
+    event_id: String,
+    seq: i64,
+    kind: String,
+    runtime: String,
+    work_id: String,
+    scope: String,
+    causes: String,
+    recorded_at_ms: i64,
+    paths: String,
+}
+
+fn causal_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<CausalColumns> {
+    Ok(CausalColumns {
+        project: row.get(0)?,
+        event_id: row.get(1)?,
+        seq: row.get(2)?,
+        kind: row.get(3)?,
+        runtime: row.get(4)?,
+        work_id: row.get(5)?,
+        scope: row.get(6)?,
+        causes: row.get(7)?,
+        recorded_at_ms: row.get(8)?,
+        paths: row.get(9)?,
+    })
+}
+
+fn decode_causal(columns: CausalColumns) -> Result<CausalEventRecord, tokio_rusqlite::Error> {
+    let runtime = RuntimeKind::parse(&columns.runtime).ok_or_else(|| {
+        decode(format!(
+            "unknown runtime kind `{}` in causal_events",
+            columns.runtime
+        ))
+    })?;
+    let kind = CausalKind::parse(&columns.kind).ok_or_else(|| {
+        decode(format!(
+            "unknown causal kind `{}` in causal_events",
+            columns.kind
+        ))
+    })?;
+    let causes: Vec<CausalCause> = serde_json::from_str(&columns.causes)
+        .map_err(|err| decode(format!("unreadable causes in causal_events: {err}")))?;
+    let paths: Vec<String> = serde_json::from_str(&columns.paths)
+        .map_err(|err| decode(format!("unreadable paths in causal_events: {err}")))?;
+    Ok(CausalEventRecord {
+        project: ProjectKey::new(columns.project),
+        event_id: columns.event_id,
+        seq: columns.seq,
+        kind,
+        work: WorkKey::new(runtime, columns.work_id),
+        scope: columns.scope,
+        causes,
         recorded_at_ms: columns.recorded_at_ms,
         paths,
     })
