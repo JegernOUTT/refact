@@ -4,6 +4,8 @@ pub mod board_lock;
 pub mod comments;
 pub mod events;
 pub mod index;
+pub mod overlap;
+pub mod overlap_order;
 pub mod storage;
 pub mod types;
 pub mod waves;

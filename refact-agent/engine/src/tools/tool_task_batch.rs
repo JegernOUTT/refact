@@ -12,7 +12,11 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, TaskBoard};
-use crate::tasks::waves::{plan_schedule, Lane, LaneKind, LaneOutcome, LaneStage, Wave, WaveLimits};
+use crate::tasks::overlap_order::WaveOrder;
+use crate::tasks::waves::{
+    plan_schedule, plan_schedule_with_overlap, Lane, LaneKind, LaneOutcome, LaneStage, Wave,
+    WaveLimits, WaveSchedule,
+};
 use crate::tools::tool_task_board::ToolTaskBoardCreateCard;
 use crate::tools::tool_task_mark_card::{ToolTaskMarkCardDone, ToolTaskMarkCardFailed};
 use crate::tools::tool_task_merge_agent::ToolTaskMergeAgent;
@@ -232,6 +236,8 @@ struct ScheduledSpawnBatchResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     admitted_wave: Option<usize>,
     lanes: Vec<LaneOutcome>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    overlap_order: Vec<WaveOrder>,
     results: Vec<SpawnBatchResult>,
 }
 
@@ -424,6 +430,37 @@ fn wave_limits() -> WaveLimits {
         max_wave_width: settings.max_wave_width,
         max_pipeline_depth: settings.max_pipeline_depth,
     }
+}
+
+/// Batch indices to submit, in the order the schedule wants them submitted.
+///
+/// One batch is spawned at a time, so two cards known to touch the same file
+/// never enter the batch together. A schedule that ranked nothing yields a
+/// single batch, which is exactly the unordered behaviour.
+fn submission_batches(
+    parsed: &[Result<SpawnBatchItem, String>],
+    eligible: &[usize],
+    schedule: Option<&WaveSchedule>,
+) -> Vec<Vec<usize>> {
+    let groups = match schedule.map(WaveSchedule::submission_groups) {
+        Some(groups) if groups.len() > 1 => groups,
+        _ => return vec![eligible.to_vec()],
+    };
+    groups
+        .iter()
+        .map(|group| {
+            eligible
+                .iter()
+                .copied()
+                .filter(|idx| {
+                    parsed[*idx]
+                        .as_ref()
+                        .is_ok_and(|item| group.contains(&item.card_id))
+                })
+                .collect::<Vec<usize>>()
+        })
+        .filter(|group| !group.is_empty())
+        .collect()
 }
 
 fn reconcile_schedule_with_cards(
@@ -969,7 +1006,16 @@ impl Tool for ToolSpawnAgentsBatch {
             None => None,
             Some(lanes) => {
                 reconcile_schedule_with_cards(&lanes, &parsed)?;
-                Some(plan_schedule(&board, &lanes, &wave_limits())?)
+                let overlap = match crate::tasks::overlap::overlap_ordering_enabled() {
+                    true => Some(crate::tasks::overlap::overlap_inputs(gcx.clone(), &board).await),
+                    false => None,
+                };
+                Some(plan_schedule_with_overlap(
+                    &board,
+                    &lanes,
+                    &wave_limits(),
+                    overlap.as_ref(),
+                )?)
             }
         };
         let selected: Option<HashSet<String>> = schedule
@@ -994,75 +1040,79 @@ impl Tool for ToolSpawnAgentsBatch {
                 )
             })
             .collect();
-        let mut joins = JoinSet::new();
+        let eligible: Vec<usize> = (0..parsed.len())
+            .filter(|idx| validation_errors[*idx].is_none())
+            .filter(|idx| {
+                parsed[*idx]
+                    .as_ref()
+                    .is_ok_and(|item| is_selected(&item.card_id))
+            })
+            .collect();
         let mut dispatched: Vec<usize> = Vec::new();
 
-        for (idx, item) in parsed.iter().enumerate() {
-            if validation_errors[idx].is_some() {
-                continue;
-            }
-            if !item.as_ref().is_ok_and(|item| is_selected(&item.card_id)) {
-                continue;
-            }
-            let item = item.as_ref().map_err(|e| e.clone())?.clone();
-            dispatched.push(idx);
-            let ccx_clone = ccx.clone();
-            let gcx_clone = gcx.clone();
-            let task_id_clone = task_id.clone();
-            let call_id = format!("{}:{}", tool_call_id, item.card_id);
-            joins.spawn(async move {
-                let mut tool = ToolTaskSpawnAgent::new();
-                let card_id = item.card_id.clone();
-                let single_args = spawn_args(&task_id_clone, &item);
-                let result = tool.tool_execute(ccx_clone, &call_id, &single_args).await;
-                match result {
-                    Ok(_) => {
-                        let agent_chat_id = storage::load_board(gcx_clone, &task_id_clone)
-                            .await
-                            .ok()
-                            .and_then(|board| {
-                                board
-                                    .get_card(&card_id)
-                                    .and_then(|card| card.agent_chat_id.clone())
-                            });
-                        (
+        for group in submission_batches(&parsed, &eligible, schedule.as_ref()) {
+            let mut joins = JoinSet::new();
+            for idx in group {
+                let item = parsed[idx].as_ref().map_err(|e| e.clone())?.clone();
+                dispatched.push(idx);
+                let ccx_clone = ccx.clone();
+                let gcx_clone = gcx.clone();
+                let task_id_clone = task_id.clone();
+                let call_id = format!("{}:{}", tool_call_id, item.card_id);
+                joins.spawn(async move {
+                    let mut tool = ToolTaskSpawnAgent::new();
+                    let card_id = item.card_id.clone();
+                    let single_args = spawn_args(&task_id_clone, &item);
+                    let result = tool.tool_execute(ccx_clone, &call_id, &single_args).await;
+                    match result {
+                        Ok(_) => {
+                            let agent_chat_id = storage::load_board(gcx_clone, &task_id_clone)
+                                .await
+                                .ok()
+                                .and_then(|board| {
+                                    board
+                                        .get_card(&card_id)
+                                        .and_then(|card| card.agent_chat_id.clone())
+                                });
+                            (
+                                idx,
+                                SpawnBatchResult {
+                                    card_id,
+                                    agent_chat_id,
+                                    success: true,
+                                    error: None,
+                                },
+                            )
+                        }
+                        Err(error) => (
                             idx,
                             SpawnBatchResult {
                                 card_id,
-                                agent_chat_id,
-                                success: true,
-                                error: None,
+                                agent_chat_id: None,
+                                success: false,
+                                error: Some(error),
                             },
-                        )
+                        ),
                     }
-                    Err(error) => (
-                        idx,
-                        SpawnBatchResult {
-                            card_id,
+                });
+            }
+
+            while let Some(joined) = joins.join_next().await {
+                match joined {
+                    Ok((idx, result)) => results[idx] = Some(result),
+                    Err(error) => {
+                        let idx = dispatched
+                            .iter()
+                            .copied()
+                            .find(|idx| results[*idx].is_none())
+                            .unwrap_or(0);
+                        results[idx] = Some(SpawnBatchResult {
+                            card_id: item_name(&raw_items[idx], idx),
                             agent_chat_id: None,
                             success: false,
-                            error: Some(error),
-                        },
-                    ),
-                }
-            });
-        }
-
-        while let Some(joined) = joins.join_next().await {
-            match joined {
-                Ok((idx, result)) => results[idx] = Some(result),
-                Err(error) => {
-                    let idx = dispatched
-                        .iter()
-                        .copied()
-                        .find(|idx| results[*idx].is_none())
-                        .unwrap_or(0);
-                    results[idx] = Some(SpawnBatchResult {
-                        card_id: item_name(&raw_items[idx], idx),
-                        agent_chat_id: None,
-                        success: false,
-                        error: Some(format!("spawn task failed: {}", error)),
-                    });
+                            error: Some(format!("spawn task failed: {}", error)),
+                        });
+                    }
                 }
             }
         }
@@ -1076,6 +1126,7 @@ impl Tool for ToolSpawnAgentsBatch {
                     waves: schedule.waves,
                     admitted_wave: schedule.admitted_wave,
                     lanes: schedule.lanes,
+                    overlap_order: schedule.overlap_order,
                     results,
                 },
             ),
@@ -2084,6 +2135,124 @@ The agent's work has been successfully merged back to the target branch.
             "schedule must stay optional for existing callers"
         );
         assert!(lane["properties"]["stages"]["items"]["properties"]["agent_id"].is_object());
+    }
+
+    fn overlap_schedule(
+        board: &TaskBoard,
+        card_ids: &[&str],
+        files: &[(&str, &str)],
+    ) -> WaveSchedule {
+        let lanes = vec![Lane {
+            name: "roots".to_string(),
+            kind: LaneKind::Parallel,
+            stages: card_ids
+                .iter()
+                .map(|card_id| LaneStage {
+                    card_id: card_id.to_string(),
+                    agent_id: None,
+                    optional: false,
+                })
+                .collect(),
+            optional: false,
+        }];
+        let mut inputs = crate::tasks::overlap_order::OverlapInputs::new();
+        for (card_id, file) in files {
+            inputs.declare(card_id, [file.to_string()]);
+        }
+        plan_schedule_with_overlap(board, &lanes, &wave_limits(), Some(&inputs)).unwrap()
+    }
+
+    fn spawn_items(card_ids: &[&str]) -> Vec<Result<SpawnBatchItem, String>> {
+        card_ids
+            .iter()
+            .map(|card_id| parse_spawn_item(&json!({ "card_id": card_id })))
+            .collect()
+    }
+
+    #[test]
+    fn spawn_agents_batch_submits_colliding_cards_in_separate_batches() {
+        let board = TaskBoard {
+            cards: vec![
+                card("T-1", "planned", vec![]),
+                card("T-2", "planned", vec![]),
+                card("T-3", "planned", vec![]),
+            ],
+            ..Default::default()
+        };
+        let schedule = overlap_schedule(
+            &board,
+            &["T-1", "T-2", "T-3"],
+            &[
+                ("T-1", "/repo/src/lib.rs"),
+                ("T-2", "/repo/src/other.rs"),
+                ("T-3", "/repo/src/lib.rs"),
+            ],
+        );
+        let parsed = spawn_items(&["T-1", "T-2", "T-3"]);
+
+        let batches = submission_batches(&parsed, &[0, 1, 2], Some(&schedule));
+
+        assert_eq!(
+            batches,
+            vec![vec![0, 1], vec![2]],
+            "T-3 collides with T-1 and must not be spawned alongside it"
+        );
+        assert_eq!(
+            batches.iter().flatten().count(),
+            3,
+            "every eligible card is still submitted"
+        );
+    }
+
+    #[test]
+    fn spawn_agents_batch_submits_everything_at_once_without_overlap_ordering() {
+        let parsed = spawn_items(&["T-1", "T-2", "T-3"]);
+
+        let batches = submission_batches(&parsed, &[0, 1, 2], None);
+
+        assert_eq!(batches, vec![vec![0, 1, 2]]);
+    }
+
+    #[test]
+    fn spawn_agents_batch_overlap_ordering_never_drops_an_eligible_card() {
+        let board = TaskBoard {
+            cards: vec![
+                card("T-1", "planned", vec![]),
+                card("T-2", "planned", vec![]),
+                card("T-3", "planned", vec![]),
+            ],
+            ..Default::default()
+        };
+        let clique = overlap_schedule(
+            &board,
+            &["T-1", "T-2", "T-3"],
+            &[
+                ("T-1", "/repo/src/shared.rs"),
+                ("T-2", "/repo/src/shared.rs"),
+                ("T-3", "/repo/src/shared.rs"),
+            ],
+        );
+        let parsed = spawn_items(&["T-1", "T-2", "T-3"]);
+
+        let batches = submission_batches(&parsed, &[0, 1, 2], Some(&clique));
+
+        assert_eq!(batches, vec![vec![0], vec![1], vec![2]]);
+        assert_eq!(
+            clique.dispatch,
+            vec!["T-1".to_string(), "T-2".to_string(), "T-3".to_string()],
+            "a total collision still dispatches every card"
+        );
+    }
+
+    #[test]
+    fn overlap_ordering_is_enabled_by_default_and_readable_from_settings() {
+        let settings = refact_work_core::CoordinationSettings::default();
+
+        assert!(settings.overlap_ordering_enabled);
+        assert_eq!(
+            crate::tasks::overlap::overlap_ordering_enabled(),
+            refact_work_core::coordination_settings().overlap_ordering_enabled
+        );
     }
 
     #[test]

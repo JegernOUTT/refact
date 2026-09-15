@@ -111,6 +111,10 @@ pub struct CoordinationSettings {
     /// Stages one pipeline lane may declare. A deeper lane is refused, because
     /// the depth is declared by the caller rather than derived from the DAG.
     pub max_pipeline_depth: usize,
+    /// Sequence cards that are known to touch the same files inside their wave.
+    /// Ordering only: turning this off restores plain lane order and can never
+    /// change which cards a wave submits.
+    pub overlap_ordering_enabled: bool,
     pub agent_wait_default_ms: u64,
     pub agent_wait_max_ms: u64,
     pub agent_wait_max_agents: usize,
@@ -368,6 +372,7 @@ impl Default for CoordinationSettings {
             board_allow_self_review: false,
             max_wave_width: 8,
             max_pipeline_depth: 16,
+            overlap_ordering_enabled: true,
             agent_wait_default_ms: 60_000,
             agent_wait_max_ms: 30 * 60 * 1000,
             agent_wait_max_agents: 128,

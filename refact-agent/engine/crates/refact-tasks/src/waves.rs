@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
+use crate::overlap_order::{order_wave, OverlapInputs, WaveOrder};
 use crate::types::TaskBoard;
 
 pub fn is_terminal_column(column: &str) -> bool {
@@ -214,6 +215,10 @@ pub struct StageOutcome {
     pub position: usize,
     pub wave: usize,
     pub decision: StageDecision,
+    /// Submission rank inside this stage's wave. Absent when overlap ordering
+    /// contributed nothing, in which case the wave keeps its lane order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_rank: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,6 +246,45 @@ pub struct WaveSchedule {
     pub admitted_wave: Option<usize>,
     pub lanes: Vec<LaneOutcome>,
     pub dispatch: Vec<String>,
+    /// One entry per wave that has something to submit, present only when
+    /// overlap ordering ran. Empty means the wave kept its lane order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlap_order: Vec<WaveOrder>,
+}
+
+impl WaveSchedule {
+    /// `dispatch`, cut into groups that may be submitted together.
+    ///
+    /// Cards in one group have no overlap known to this schedule. Groups are
+    /// submitted one after another, which is the whole effect of ordering:
+    /// nothing is withheld, only sequenced. Without ordering there is exactly
+    /// one group, so a caller that honours groups behaves as it did before.
+    pub fn submission_groups(&self) -> Vec<Vec<String>> {
+        let ranks: HashMap<&str, (usize, usize)> = self
+            .lanes
+            .iter()
+            .flat_map(|lane| lane.stages.iter())
+            .filter_map(|stage| {
+                stage
+                    .serial_rank
+                    .map(|rank| (stage.card_id.as_str(), (stage.wave, rank)))
+            })
+            .collect();
+        let mut groups: Vec<Vec<String>> = Vec::new();
+        let mut current: Option<(usize, usize)> = None;
+        for card_id in &self.dispatch {
+            let key = ranks.get(card_id.as_str()).copied();
+            match (key, groups.last_mut()) {
+                (Some(key), Some(group)) if current == Some(key) => group.push(card_id.clone()),
+                (None, Some(group)) if current.is_none() => group.push(card_id.clone()),
+                _ => {
+                    current = key;
+                    groups.push(vec![card_id.clone()]);
+                }
+            }
+        }
+        groups
+    }
 }
 
 struct WaveGate {
@@ -332,6 +376,21 @@ pub fn plan_schedule(
     lanes: &[Lane],
     limits: &WaveLimits,
 ) -> Result<WaveSchedule, String> {
+    plan_schedule_with_overlap(board, lanes, limits, None)
+}
+
+/// The same schedule, with cards that are known to touch the same files
+/// sequenced inside their wave.
+///
+/// Overlap can only reorder. It never changes which stages were decided
+/// `Dispatch`, never reaches across waves, and `None` reproduces
+/// `plan_schedule` exactly.
+pub fn plan_schedule_with_overlap(
+    board: &TaskBoard,
+    lanes: &[Lane],
+    limits: &WaveLimits,
+    overlap: Option<&OverlapInputs>,
+) -> Result<WaveSchedule, String> {
     let waves = derive_waves(board)?;
     validate_lanes(board, lanes, limits)?;
 
@@ -373,6 +432,7 @@ pub fn plan_schedule(
                 position,
                 wave,
                 decision,
+                serial_rank: None,
             });
         }
         outcomes.push(LaneOutcome {
@@ -385,24 +445,33 @@ pub fn plan_schedule(
         });
     }
 
-    throttle_wave_width(&mut outcomes, limits.max_wave_width);
+    let overlap_order = overlap
+        .filter(|inputs| !inputs.is_empty())
+        .map(|inputs| order_dispatch_by_wave(&outcomes, inputs))
+        .unwrap_or_default();
+    let ranks = stamp_ranks(&mut outcomes, &overlap_order);
+    let order = dispatch_order(&outcomes, ranks.as_ref());
+    throttle_wave_width(&mut outcomes, &order, limits.max_wave_width);
 
-    let mut dispatch = Vec::new();
+    let dispatch: Vec<String> = order
+        .iter()
+        .filter(|(lane_index, stage_index)| {
+            outcomes[*lane_index].stages[*stage_index].decision == StageDecision::Dispatch
+        })
+        .map(|(lane_index, stage_index)| outcomes[*lane_index].stages[*stage_index].card_id.clone())
+        .collect();
     for outcome in &mut outcomes {
-        let dispatched: Vec<String> = outcome
+        if outcome
             .stages
             .iter()
-            .filter(|stage| stage.decision == StageDecision::Dispatch)
-            .map(|stage| stage.card_id.clone())
-            .collect();
-        if dispatched.is_empty() {
-            outcome.status = LaneStatus::NotRun;
-            outcome.reason = Some(lane_not_run_reason(outcome));
-        } else {
+            .any(|stage| stage.decision == StageDecision::Dispatch)
+        {
             outcome.status = LaneStatus::Dispatched;
             outcome.reason = None;
+        } else {
+            outcome.status = LaneStatus::NotRun;
+            outcome.reason = Some(lane_not_run_reason(outcome));
         }
-        dispatch.extend(dispatched);
     }
 
     let admitted_wave = gate
@@ -413,7 +482,79 @@ pub fn plan_schedule(
         waves,
         lanes: outcomes,
         dispatch,
+        overlap_order,
     })
+}
+
+/// Rank each wave's submittable cards on its own. Ordering inside a wave can
+/// never move a card past a wave boundary.
+fn order_dispatch_by_wave(outcomes: &[LaneOutcome], inputs: &OverlapInputs) -> Vec<WaveOrder> {
+    let mut by_wave: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    for outcome in outcomes {
+        for stage in &outcome.stages {
+            if stage.decision == StageDecision::Dispatch {
+                by_wave
+                    .entry(stage.wave)
+                    .or_default()
+                    .push(stage.card_id.clone());
+            }
+        }
+    }
+    by_wave
+        .into_iter()
+        .map(|(wave, card_ids)| order_wave(wave, &card_ids, inputs))
+        .collect()
+}
+
+/// Record the ranks on the stages they belong to. Returns `None` when nothing
+/// was ranked, which is what keeps an unordered schedule in lane order.
+fn stamp_ranks(
+    outcomes: &mut [LaneOutcome],
+    overlap_order: &[WaveOrder],
+) -> Option<BTreeMap<String, usize>> {
+    if overlap_order.is_empty() {
+        return None;
+    }
+    let ranks: BTreeMap<String, usize> = overlap_order
+        .iter()
+        .flat_map(|order| order.ranks())
+        .collect();
+    for outcome in outcomes.iter_mut() {
+        for stage in outcome.stages.iter_mut() {
+            stage.serial_rank = ranks.get(&stage.card_id).copied();
+        }
+    }
+    Some(ranks)
+}
+
+/// The submission order of everything decided `Dispatch`.
+///
+/// Without ranks this is lane order, exactly as the schedule declared it. With
+/// ranks it is wave, then rank, then lane order — a permutation of the same
+/// set, never a smaller one.
+fn dispatch_order(
+    outcomes: &[LaneOutcome],
+    ranks: Option<&BTreeMap<String, usize>>,
+) -> Vec<(usize, usize)> {
+    let mut order: Vec<(usize, usize)> = Vec::new();
+    for (lane_index, outcome) in outcomes.iter().enumerate() {
+        for (stage_index, stage) in outcome.stages.iter().enumerate() {
+            if stage.decision == StageDecision::Dispatch {
+                order.push((lane_index, stage_index));
+            }
+        }
+    }
+    let Some(ranks) = ranks else {
+        return order;
+    };
+    order.sort_by_key(|(lane_index, stage_index)| {
+        let stage = &outcomes[*lane_index].stages[*stage_index];
+        (
+            stage.wave,
+            ranks.get(&stage.card_id).copied().unwrap_or_default(),
+        )
+    });
+    order
 }
 
 fn decide_stage(
@@ -505,23 +646,17 @@ fn terminal_or_dispatch(board: &TaskBoard, lane: &Lane, position: usize) -> Stag
     StageDecision::Dispatch
 }
 
-fn throttle_wave_width(outcomes: &mut [LaneOutcome], max_wave_width: usize) {
-    let mut admitted = 0usize;
-    for outcome in outcomes.iter_mut() {
-        for stage in outcome.stages.iter_mut() {
-            if stage.decision != StageDecision::Dispatch {
-                continue;
-            }
-            if admitted < max_wave_width {
-                admitted += 1;
-            } else {
-                stage.decision = StageDecision::NotRun {
-                    reason: format!(
-                        "wave width limit of {max_wave_width} card(s) per submission was reached"
-                    ),
-                };
-            }
-        }
+fn throttle_wave_width(
+    outcomes: &mut [LaneOutcome],
+    order: &[(usize, usize)],
+    max_wave_width: usize,
+) {
+    for (lane_index, stage_index) in order.iter().skip(max_wave_width) {
+        outcomes[*lane_index].stages[*stage_index].decision = StageDecision::NotRun {
+            reason: format!(
+                "wave width limit of {max_wave_width} card(s) per submission was reached"
+            ),
+        };
     }
 }
 
@@ -538,6 +673,7 @@ fn lane_not_run_reason(outcome: &LaneOutcome) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::overlap_order::OverlapSource;
     use crate::types::BoardCard;
 
     fn card(id: &str, column: &str, depends_on: &[&str]) -> BoardCard {
@@ -994,6 +1130,334 @@ mod tests {
         let error = plan_schedule(&board, &lanes, &limits()).unwrap_err();
 
         assert!(error.contains("unknown card T-9"), "{error}");
+    }
+
+    fn overlapping(pairs: &[(&str, &[&str])]) -> OverlapInputs {
+        let mut inputs = OverlapInputs::new();
+        for (card_id, files) in pairs {
+            inputs.declare(card_id, files.iter().map(|file| file.to_string()));
+        }
+        inputs
+    }
+
+    #[test]
+    fn overlap_order_serialises_two_cards_declaring_the_same_path() {
+        let board = board(vec![
+            card("T-1", "planned", &[]),
+            card("T-2", "planned", &[]),
+            card("T-3", "planned", &[]),
+        ]);
+        let lanes = vec![parallel_lane("roots", &["T-1", "T-2", "T-3"])];
+        let inputs = overlapping(&[
+            ("T-1", &["/repo/src/lib.rs"]),
+            ("T-2", &["/repo/src/other.rs"]),
+            ("T-3", &["/repo/src/lib.rs"]),
+        ]);
+
+        let schedule =
+            plan_schedule_with_overlap(&board, &lanes, &limits(), Some(&inputs)).unwrap();
+
+        assert_eq!(
+            schedule.dispatch,
+            vec!["T-1".to_string(), "T-2".to_string(), "T-3".to_string()],
+            "the colliding card is submitted after, not instead of, its peer"
+        );
+        let ranks: Vec<Option<usize>> = schedule.lanes[0]
+            .stages
+            .iter()
+            .map(|stage| stage.serial_rank)
+            .collect();
+        assert_eq!(ranks, vec![Some(0), Some(0), Some(1)]);
+        assert_eq!(
+            schedule.submission_groups(),
+            vec![
+                vec!["T-1".to_string(), "T-2".to_string()],
+                vec!["T-3".to_string()]
+            ],
+            "cards that collide must not enter one submission group"
+        );
+    }
+
+    #[test]
+    fn overlap_order_never_gates_a_pathological_overlap_graph() {
+        let board = board(vec![
+            card("T-1", "planned", &[]),
+            card("T-2", "planned", &[]),
+            card("T-3", "planned", &[]),
+            card("T-4", "planned", &[]),
+            card("T-5", "planned", &[]),
+        ]);
+        let lanes = vec![parallel_lane("roots", &["T-1", "T-2", "T-3", "T-4", "T-5"])];
+        let everything: &[&str] = &["/repo/src/shared.rs"];
+        let inputs = overlapping(&[
+            ("T-1", everything),
+            ("T-2", everything),
+            ("T-3", everything),
+            ("T-4", everything),
+            ("T-5", everything),
+        ]);
+
+        let unordered = plan_schedule(&board, &lanes, &limits()).unwrap();
+        let ordered = plan_schedule_with_overlap(&board, &lanes, &limits(), Some(&inputs)).unwrap();
+
+        assert_eq!(
+            ordered.dispatch, unordered.dispatch,
+            "a clique must dispatch exactly what it would have without ordering"
+        );
+        assert_eq!(ordered.dispatch.len(), 5, "no card is starved");
+        assert!(
+            ordered
+                .lanes
+                .iter()
+                .flat_map(|lane| lane.stages.iter())
+                .all(|stage| stage.decision == StageDecision::Dispatch),
+            "ordering must not turn a dispatch into a refusal"
+        );
+        assert_eq!(ordered.admitted_wave, unordered.admitted_wave);
+        assert_eq!(
+            ordered.submission_groups().len(),
+            5,
+            "a clique is fully serialised, and every group still runs"
+        );
+        assert_eq!(
+            ordered
+                .submission_groups()
+                .into_iter()
+                .flatten()
+                .collect::<Vec<String>>(),
+            ordered.dispatch,
+            "the groups partition the dispatch set exactly"
+        );
+    }
+
+    #[test]
+    fn overlap_order_is_deterministic_across_repeated_runs() {
+        let board = planned_fixture();
+        let lanes = vec![parallel_lane("roots", &["T-1", "T-2"])];
+        let inputs = overlapping(&[
+            ("T-1", &["/repo/a.rs", "/repo/b.rs"]),
+            ("T-2", &["/repo/b.rs"]),
+        ]);
+
+        let first = plan_schedule_with_overlap(&board, &lanes, &limits(), Some(&inputs)).unwrap();
+        for _ in 0..16 {
+            let again =
+                plan_schedule_with_overlap(&board, &lanes, &limits(), Some(&inputs)).unwrap();
+            assert_eq!(again, first);
+            assert_eq!(
+                serde_json::to_string(&again).unwrap(),
+                serde_json::to_string(&first).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn overlap_order_keeps_declared_and_observed_apart_in_the_record() {
+        let board = board(vec![
+            card("T-1", "planned", &[]),
+            card("T-2", "planned", &[]),
+        ]);
+        let lanes = vec![parallel_lane("roots", &["T-1", "T-2"])];
+        let mut inputs = overlapping(&[("T-1", &["/repo/a.rs"]), ("T-2", &["/repo/a.rs"])]);
+        inputs.observe("T-1", ["/repo/b.rs".to_string()]);
+        inputs.observe("T-2", ["/repo/b.rs".to_string()]);
+
+        let schedule =
+            plan_schedule_with_overlap(&board, &lanes, &limits(), Some(&inputs)).unwrap();
+        let order = &schedule.overlap_order[0];
+        let later = order
+            .cards
+            .iter()
+            .find(|entry| entry.card_id == "T-2")
+            .unwrap();
+
+        assert_eq!(order.wave, 0);
+        assert_eq!(
+            later
+                .overlaps
+                .iter()
+                .map(|edge| (edge.source, edge.files.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (OverlapSource::Declared, vec!["/repo/a.rs".to_string()]),
+                (OverlapSource::Observed, vec!["/repo/b.rs".to_string()]),
+            ]
+        );
+        assert!(order.note.contains("not permission or a guarantee"));
+    }
+
+    #[test]
+    fn overlap_order_disabled_reproduces_the_unordered_schedule_byte_for_byte() {
+        let board = fixture_dag(&[
+            ("T-1", "planned"),
+            ("T-2", "planned"),
+            ("T-3", "planned"),
+            ("T-4", "planned"),
+            ("T-5", "planned"),
+        ]);
+        let lanes = vec![
+            parallel_lane("roots", &["T-1", "T-2"]),
+            Lane {
+                name: "chain".to_string(),
+                kind: LaneKind::Sequential,
+                stages: vec![stage("T-3", None), stage("T-4", None)],
+                optional: false,
+            },
+            Lane {
+                name: "tail".to_string(),
+                kind: LaneKind::Parallel,
+                stages: vec![stage("T-5", None)],
+                optional: true,
+            },
+        ];
+
+        let legacy = plan_schedule(&board, &lanes, &limits()).unwrap();
+        let disabled = plan_schedule_with_overlap(&board, &lanes, &limits(), None).unwrap();
+
+        assert_eq!(disabled, legacy);
+        assert_eq!(
+            serde_json::to_string(&disabled).unwrap(),
+            serde_json::to_string(&legacy).unwrap()
+        );
+        assert!(disabled.overlap_order.is_empty());
+        assert!(
+            !serde_json::to_string(&disabled)
+                .unwrap()
+                .contains("serial_rank"),
+            "an unordered schedule must not grow a field"
+        );
+        assert_eq!(
+            disabled.submission_groups(),
+            vec![disabled.dispatch.clone()]
+        );
+    }
+
+    #[test]
+    fn overlap_order_with_nothing_known_is_indistinguishable_from_no_ordering() {
+        let board = fixture_dag(&[
+            ("T-1", "planned"),
+            ("T-2", "planned"),
+            ("T-3", "planned"),
+            ("T-4", "planned"),
+            ("T-5", "planned"),
+        ]);
+        let lanes = vec![
+            parallel_lane("roots", &["T-1", "T-2"]),
+            parallel_lane("rest", &["T-3", "T-4", "T-5"]),
+        ];
+        let nothing = OverlapInputs::new();
+
+        let legacy = plan_schedule(&board, &lanes, &limits()).unwrap();
+        let ordered =
+            plan_schedule_with_overlap(&board, &lanes, &limits(), Some(&nothing)).unwrap();
+
+        assert!(nothing.is_empty());
+        assert_eq!(
+            serde_json::to_string(&ordered).unwrap(),
+            serde_json::to_string(&legacy).unwrap(),
+            "unavailable overlap information must not perturb the wave"
+        );
+    }
+
+    #[test]
+    fn overlap_order_does_not_reorder_across_waves() {
+        let board = fixture_dag(&[
+            ("T-1", "done"),
+            ("T-2", "done"),
+            ("T-3", "planned"),
+            ("T-4", "planned"),
+            ("T-5", "planned"),
+        ]);
+        let lanes = vec![
+            Lane {
+                name: "late".to_string(),
+                kind: LaneKind::Parallel,
+                stages: vec![stage("T-5", None)],
+                optional: true,
+            },
+            parallel_lane("now", &["T-3", "T-4"]),
+        ];
+        let inputs = overlapping(&[
+            ("T-3", &["/repo/shared.rs"]),
+            ("T-4", &["/repo/shared.rs"]),
+            ("T-5", &["/repo/shared.rs"]),
+        ]);
+
+        let schedule =
+            plan_schedule_with_overlap(&board, &lanes, &limits(), Some(&inputs)).unwrap();
+
+        assert_eq!(
+            schedule.dispatch,
+            vec!["T-3".to_string(), "T-4".to_string()],
+            "a later wave stays later; ordering only acts inside a wave"
+        );
+        assert_eq!(schedule.overlap_order.len(), 1);
+        assert_eq!(schedule.overlap_order[0].wave, 1);
+    }
+
+    #[test]
+    fn overlap_order_decides_which_cards_the_width_limit_throttles() {
+        let board = board(vec![
+            card("T-1", "planned", &[]),
+            card("T-2", "planned", &[]),
+            card("T-3", "planned", &[]),
+        ]);
+        let lanes = vec![parallel_lane("roots", &["T-1", "T-2", "T-3"])];
+        let inputs = overlapping(&[
+            ("T-1", &["/repo/shared.rs"]),
+            ("T-2", &["/repo/shared.rs"]),
+            ("T-3", &["/repo/other.rs"]),
+        ]);
+        let narrow = WaveLimits {
+            max_wave_width: 2,
+            max_pipeline_depth: 16,
+        };
+
+        let schedule = plan_schedule_with_overlap(&board, &lanes, &narrow, Some(&inputs)).unwrap();
+
+        assert_eq!(
+            schedule.dispatch,
+            vec!["T-1".to_string(), "T-3".to_string()],
+            "the throttle keeps the two cards that do not collide"
+        );
+        assert_eq!(
+            schedule.lanes[0].stages[1].decision,
+            StageDecision::NotRun {
+                reason: "wave width limit of 2 card(s) per submission was reached".to_string(),
+            },
+            "the deferral is the pre-existing width throttle, not a new refusal"
+        );
+    }
+
+    #[test]
+    fn overlap_order_ignores_a_card_the_wave_did_not_admit() {
+        let board = fixture_dag(&[
+            ("T-1", "planned"),
+            ("T-2", "planned"),
+            ("T-3", "planned"),
+            ("T-4", "planned"),
+            ("T-5", "planned"),
+        ]);
+        let lanes = vec![parallel_lane("roots", &["T-1", "T-2"]), {
+            let mut lane = parallel_lane("later", &["T-5"]);
+            lane.optional = true;
+            lane
+        }];
+        let inputs = overlapping(&[("T-1", &["/repo/shared.rs"]), ("T-5", &["/repo/shared.rs"])]);
+
+        let schedule =
+            plan_schedule_with_overlap(&board, &lanes, &limits(), Some(&inputs)).unwrap();
+
+        assert_eq!(
+            schedule.overlap_order[0]
+                .cards
+                .iter()
+                .map(|entry| entry.card_id.clone())
+                .collect::<Vec<String>>(),
+            vec!["T-1".to_string(), "T-2".to_string()],
+            "an undispatched card is not ranked and cannot delay one that is"
+        );
+        assert_eq!(schedule.lanes[1].stages[0].serial_rank, None);
     }
 
     #[test]
