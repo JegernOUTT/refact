@@ -58,6 +58,7 @@ fn goal_value(
         "cost_used_cents": goal.progress.cost_used_cents,
         "budget": goal.budget,
         "snoozed_until_ms": goal.snoozed_until_ms,
+        "wait": goal.wait,
         "latest_verdict": latest.map(|attempt| &attempt.verdict),
         "gaps": latest.map(|attempt| attempt.gaps.as_slice()).unwrap_or_default(),
     });

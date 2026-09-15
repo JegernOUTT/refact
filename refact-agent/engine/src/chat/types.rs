@@ -18,9 +18,10 @@ pub use refact_chat_api::{
     CompressionPhase, CompressionReason, CriterionEvidence, CriterionVerdict, DeliveryOutcome,
     DeliveryStatus, DeliveryStatusRecord, DeltaOp, DiffBox, EventEnvelope, GoalAttempt, GoalBudget,
     GoalCriterion, GoalEvent, GoalLedgerEntry, GoalLedgerOp, GoalProgress, GoalSnapshot,
-    GoalStatus, PauseReason, PendingDelivery, PushMode, QueuedItem, RuntimeState, SessionState,
-    TaskMeta, ThreadParams, TimelineEntry, ToolDecisionItem, VerdictSource, WindowBounds,
-    WorktreeMeta, CLIENT_MESSAGE_ID_EXTRA_KEY, DELIVERY_COMMAND_TYPE, DELIVERY_EXTRA_KEY,
+    GoalStatus, GoalWait, GoalWaitResume, GoalWaitSubject, PauseReason, PendingDelivery, PushMode,
+    QueuedItem, RuntimeState, SessionState, TaskMeta, ThreadParams, TimelineEntry,
+    ToolDecisionItem, VerdictSource, WindowBounds, WorktreeMeta, CLIENT_MESSAGE_ID_EXTRA_KEY,
+    DELIVERY_COMMAND_TYPE, DELIVERY_EXTRA_KEY,
 };
 
 fn epoch_ms_now() -> u64 {
@@ -172,6 +173,7 @@ impl GoalSnapshotBudgetExt for GoalSnapshot {
     fn goal_reset_no_progress(&mut self) {
         self.progress.no_progress_turns = 0;
         self.snoozed_until_ms = None;
+        self.wait = None;
         if matches!(
             self.status,
             GoalStatus::BudgetExhausted | GoalStatus::NoProgress
@@ -391,6 +393,7 @@ pub struct ChatSession {
     pub goal_ledger: Vec<GoalLedgerEntry>,
     pub goal_turn_evidence: bool,
     pub goal_verification_blocked_until_ms: Option<u64>,
+    pub goal_verification_generation: u64,
 }
 
 #[derive(Default)]

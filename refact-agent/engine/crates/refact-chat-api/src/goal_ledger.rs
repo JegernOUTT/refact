@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::sub_goal::{SubGoalDeclaration, SubGoalGraph, SubGoalOwner, SubGoalReport};
-use crate::{GoalAttempt, GoalBudget, GoalCriterion, GoalEvent, GoalProgress, GoalSnapshot, GoalStatus};
+use crate::{
+    GoalAttempt, GoalBudget, GoalCriterion, GoalEvent, GoalProgress, GoalSnapshot, GoalStatus,
+    GoalWait,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "op")]
@@ -49,6 +52,10 @@ pub enum GoalLedgerOp {
     SnoozeSet {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         until_ms: Option<u64>,
+    },
+    WaitSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait: Option<GoalWait>,
     },
     TransferredOut {
         target_chat_id: String,
@@ -147,6 +154,7 @@ pub struct GoalLedgerState {
     pub events: Vec<GoalEvent>,
     pub criteria: Vec<GoalCriterion>,
     pub snoozed_until_ms: Option<u64>,
+    pub wait: Option<GoalWait>,
     pub stop_reason: Option<String>,
     pub transferred_from: Option<String>,
     pub transferred_to: Option<String>,
@@ -170,6 +178,7 @@ impl GoalLedgerState {
             events: Vec::new(),
             criteria,
             snoozed_until_ms: None,
+            wait: None,
             stop_reason: None,
             transferred_from: None,
             transferred_to: None,
@@ -185,6 +194,7 @@ impl GoalLedgerState {
         snapshot.attempts = self.attempts.clone();
         snapshot.criteria = self.criteria.clone();
         snapshot.snoozed_until_ms = self.snoozed_until_ms;
+        snapshot.wait = self.wait.clone();
         snapshot.stop_reason = self.stop_reason.clone();
         if self.transferred_from.is_some() {
             snapshot.transferred_from = self.transferred_from.clone();
@@ -279,6 +289,7 @@ fn apply_op(state: &mut GoalLedgerState, op: &GoalLedgerOp, at_ms: u64) {
         GoalLedgerOp::ProgressReset { .. } => {
             state.progress.no_progress_turns = 0;
             state.snoozed_until_ms = None;
+            state.wait = None;
             if matches!(
                 state.status,
                 GoalStatus::BudgetExhausted | GoalStatus::NoProgress
@@ -301,6 +312,9 @@ fn apply_op(state: &mut GoalLedgerState, op: &GoalLedgerOp, at_ms: u64) {
         }
         GoalLedgerOp::SnoozeSet { until_ms } => {
             state.snoozed_until_ms = *until_ms;
+        }
+        GoalLedgerOp::WaitSet { wait } => {
+            state.wait = wait.clone();
         }
         GoalLedgerOp::TransferredOut { target_chat_id } => {
             state.active = false;

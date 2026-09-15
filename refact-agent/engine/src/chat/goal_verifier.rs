@@ -39,6 +39,37 @@ const GOAL_VERIFIER_BLOCKED_BACKOFF_MS: u64 = 300_000;
 pub enum GoalVerdict {
     Met,
     Unmet(Vec<String>),
+    /// Blocked on a named subject rather than on work. Carries what settles it,
+    /// so waiting can never be confused with being stuck.
+    Wait(GoalWait),
+}
+
+/// What an in-flight verification job forked from. A verdict is applied only
+/// while all three still hold: the goal status epoch, the trajectory the judge
+/// read, and the generation pause/snooze/cancellation bump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GoalVerificationFork {
+    pub epoch: Option<u64>,
+    pub trajectory_version: u64,
+    pub generation: u64,
+}
+
+impl GoalVerificationFork {
+    pub fn capture(session: &ChatSession) -> Self {
+        Self {
+            epoch: Some(session.goal_ledger_last_seq()),
+            trajectory_version: session.trajectory_version,
+            generation: session.goal_verification_generation(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn at(session: &ChatSession, epoch: Option<u64>) -> Self {
+        Self {
+            epoch,
+            ..Self::capture(session)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +102,7 @@ pub enum GoalVerificationApplyOutcome {
     Rearmed,
     Continued,
     Stalled,
+    Waiting,
     Superseded,
     NoGoal,
 }
@@ -80,6 +112,7 @@ pub enum GoalCompletionGateOutcome {
     Passthrough,
     Finalized,
     Rearmed,
+    Waiting,
     BudgetExhausted(GoalStatus),
     VerificationUnavailable,
     VerificationStalled,
@@ -131,7 +164,7 @@ pub async fn verify_goal_before_completion(
     session_arc: Arc<AMutex<ChatSession>>,
     trigger: &str,
 ) -> GoalCompletionGateOutcome {
-    let (begin, epoch, fork_trajectory_version) = {
+    let (begin, fork) = {
         let mut session = session_arc.lock().await;
         let now_ms = epoch_ms_now();
         if session
@@ -142,11 +175,8 @@ pub async fn verify_goal_before_completion(
             return GoalCompletionGateOutcome::VerificationUnavailable;
         }
         let begin = begin_goal_verification_if_needed(&mut session);
-        (
-            begin,
-            session.goal_ledger_last_seq(),
-            session.trajectory_version,
-        )
+        let fork = GoalVerificationFork::capture(&session);
+        (begin, fork)
     };
     match begin {
         GoalVerificationBegin::Started => {}
@@ -167,7 +197,7 @@ pub async fn verify_goal_before_completion(
         }
     }
 
-    let reply = match run_goal_verification(app, session_arc.clone()).await {
+    let reply = match run_goal_verification(app.clone(), session_arc.clone()).await {
         Ok(reply) => reply,
         Err(error) => {
             let aborted = {
@@ -192,18 +222,19 @@ pub async fn verify_goal_before_completion(
         }
     }
 
-    let mut session = session_arc.lock().await;
-    match apply_goal_verdict_guarded(
-        &mut session,
-        trigger,
-        reply,
-        Some(epoch),
-        fork_trajectory_version,
-    ) {
+    let outcome = {
+        let mut session = session_arc.lock().await;
+        apply_goal_verdict_guarded(&mut session, trigger, reply, fork)
+    };
+    if outcome == GoalVerificationApplyOutcome::Waiting {
+        crate::chat::goal_wait::begin_goal_wait_park(app, session_arc).await;
+    }
+    match outcome {
         GoalVerificationApplyOutcome::Finalized => GoalCompletionGateOutcome::Finalized,
         GoalVerificationApplyOutcome::Rearmed => GoalCompletionGateOutcome::Rearmed,
         GoalVerificationApplyOutcome::Continued => GoalCompletionGateOutcome::Rearmed,
         GoalVerificationApplyOutcome::Stalled => GoalCompletionGateOutcome::VerificationStalled,
+        GoalVerificationApplyOutcome::Waiting => GoalCompletionGateOutcome::Waiting,
         GoalVerificationApplyOutcome::Superseded => GoalCompletionGateOutcome::Rearmed,
         GoalVerificationApplyOutcome::NoGoal => GoalCompletionGateOutcome::Passthrough,
     }
@@ -333,7 +364,7 @@ pub fn goal_verification_message(goal_text: &str, criteria: &[GoalCriterion]) ->
         message_id: Uuid::new_v4().to_string(),
         role: "user".to_string(),
         content: ChatContent::SimpleText(format!(
-            "[goal verification]\n\nSynthesized goal:\n{goal_text}\n\nAcceptance criteria:\nUse every explicit criterion in the synthesized goal above.{criteria_block}\n\nJudge ONLY whether the work so far FULLY satisfies the goal and every criterion. Respond EXACTLY: first line `GOAL: MET` or `GOAL: UNMET`; if UNMET, a bullet list of unmet requirements; call NO tools."
+            "[goal verification]\n\nSynthesized goal:\n{goal_text}\n\nAcceptance criteria:\nUse every explicit criterion in the synthesized goal above.{criteria_block}\n\nJudge ONLY whether the work so far FULLY satisfies the goal and every criterion. Respond EXACTLY: first line `GOAL: MET` or `GOAL: UNMET`; if UNMET, a bullet list of unmet requirements; call NO tools.\n\nIf the remaining work is blocked on something that settles on its own, answer instead `GOAL: WAIT process:<id>` / `agent:<id>` / `event:<name>` / `deadline:<epoch_ms>`, optionally followed by ` until <epoch_ms>`. A bare `GOAL: WAIT` is not accepted."
         )),
         extra: serde_json::Map::from_iter([(
             "goal_verification".to_string(),
@@ -356,6 +387,9 @@ pub fn parse_goal_verdict(answer: &str, tool_called: bool) -> GoalVerdict {
     };
     if first.eq_ignore_ascii_case("GOAL: MET") {
         return GoalVerdict::Met;
+    }
+    if let Some(wait) = parse_goal_wait(first) {
+        return GoalVerdict::Wait(wait);
     }
     if first.eq_ignore_ascii_case("GOAL: UNMET") {
         let criteria_verdicts = parse_criteria_verdicts(answer);
@@ -392,6 +426,44 @@ pub fn parse_goal_verdict(answer: &str, tool_called: bool) -> GoalVerdict {
 
 fn inconclusive_verdict() -> GoalVerdict {
     GoalVerdict::Unmet(vec![INCONCLUSIVE_GAP.to_string()])
+}
+
+fn strip_prefix_ignore_case<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = line.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &line[prefix.len()..])
+}
+
+/// `GOAL: WAIT <kind>:<id> [until <epoch_ms>]`. A wait with no typed subject is
+/// rejected here so it falls through to an inconclusive verdict — "waiting" on
+/// nothing is indistinguishable from being stuck.
+pub fn parse_goal_wait(line: &str) -> Option<GoalWait> {
+    let rest = strip_prefix_ignore_case(line.trim(), "GOAL: WAIT")?.trim();
+    let (token, deadline_ms) = match rest.split_once(" until ") {
+        Some((token, until)) => (token.trim(), until.trim().parse::<u64>().ok()),
+        None => (rest, None),
+    };
+    let (kind, value) = token.split_once(':')?;
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let subject = match kind.trim().to_ascii_lowercase().as_str() {
+        "process" => GoalWaitSubject::Process {
+            process_id: value.to_string(),
+        },
+        "agent" | "child" => GoalWaitSubject::Child {
+            agent_id: value.to_string(),
+        },
+        "event" => GoalWaitSubject::Event {
+            name: value.to_string(),
+        },
+        "deadline" => GoalWaitSubject::Deadline {
+            until_ms: value.parse().ok()?,
+        },
+        _ => return None,
+    };
+    Some(GoalWait::new(subject, deadline_ms))
 }
 
 pub fn parse_criteria_verdicts(answer: &str) -> Vec<CriterionVerdict> {
@@ -884,36 +956,29 @@ pub fn apply_goal_verdict_guarded(
     session: &mut ChatSession,
     trigger: &str,
     reply: GoalVerifierReply,
-    epoch: Option<u64>,
-    fork_trajectory_version: u64,
+    fork: GoalVerificationFork,
 ) -> GoalVerificationApplyOutcome {
-    apply_goal_verdict_guarded_with_delivery(
-        session,
-        trigger,
-        reply,
-        epoch,
-        fork_trajectory_version,
-        PushMode::Append,
-        None,
-    )
+    apply_goal_verdict_guarded_with_delivery(session, trigger, reply, fork, PushMode::Append, None)
 }
 
 pub fn apply_goal_verdict_guarded_with_delivery(
     session: &mut ChatSession,
     trigger: &str,
     reply: GoalVerifierReply,
-    epoch: Option<u64>,
-    fork_trajectory_version: u64,
+    fork: GoalVerificationFork,
     push: PushMode,
     tool_call_id: Option<&str>,
 ) -> GoalVerificationApplyOutcome {
-    if session.goal.is_some() && session.trajectory_version != fork_trajectory_version {
+    let superseded = session.goal.is_some()
+        && (session.trajectory_version != fork.trajectory_version
+            || session.goal_verification_generation() != fork.generation);
+    if superseded {
         if session.goal_status == Some(GoalStatus::Verifying) {
             session.goal_set_status(GoalStatus::Active);
         }
         return GoalVerificationApplyOutcome::Superseded;
     }
-    apply_goal_verdict_with_delivery(session, trigger, reply, epoch, push, tool_call_id)
+    apply_goal_verdict_with_delivery(session, trigger, reply, fork.epoch, push, tool_call_id)
 }
 
 pub fn apply_goal_verdict(
@@ -962,6 +1027,15 @@ fn apply_goal_verdict_with_delivery(
             "verification_gaps".to_string(),
             format!("Goal verification found gaps:\n{}", gaps.join("\n")),
         ),
+        GoalVerdict::Wait(wait) => (
+            "wait".to_string(),
+            Vec::new(),
+            "waiting".to_string(),
+            format!(
+                "Goal pursuit waiting on {}; no goal rounds until it settles.",
+                wait.subject.label()
+            ),
+        ),
     };
     session.goal_push_attempt(GoalAttempt {
         at_ms,
@@ -982,6 +1056,20 @@ fn apply_goal_verdict_with_delivery(
         event_text,
     );
     let outcome = match reply.verdict {
+        GoalVerdict::Wait(wait) => {
+            if let Some(status) = held_status {
+                session.goal_set_status(status);
+                session.set_runtime_state(SessionState::Idle, None);
+                GoalVerificationApplyOutcome::Continued
+            } else {
+                session.goal_set_status(GoalStatus::Active);
+                session.goal_begin_wait(wait, at_ms);
+                if trigger != "validate_goal" {
+                    session.set_runtime_state(SessionState::Idle, None);
+                }
+                GoalVerificationApplyOutcome::Waiting
+            }
+        }
         GoalVerdict::Met => {
             session.goal_set_status(GoalStatus::Completed);
             if trigger != "validate_goal" {
@@ -1154,7 +1242,7 @@ mod tests {
                 ..Default::default()
             });
             session.goal_set_status(GoalStatus::Verifying);
-            let version = session.trajectory_version;
+            let fork = GoalVerificationFork::at(&session, None);
             let outcome = apply_goal_verdict_guarded_with_delivery(
                 &mut session,
                 "validate_goal",
@@ -1164,8 +1252,7 @@ mod tests {
                     tokens: 1,
                     criteria_verdicts: Vec::new(),
                 },
-                None,
-                version,
+                fork,
                 push,
                 Some("validate"),
             );
@@ -1262,6 +1349,144 @@ mod tests {
             parse_goal_verdict("maybe", false),
             GoalVerdict::Unmet(vec![INCONCLUSIVE_GAP.to_string()])
         );
+    }
+
+    /// A wait carries its subject or it is not a wait. Every accepted form names
+    /// something that can settle; the bare form is refused.
+    #[test]
+    fn a_wait_verdict_must_name_a_typed_subject() {
+        let cases = [
+            (
+                "GOAL: WAIT process:proc-7",
+                GoalWaitSubject::Process {
+                    process_id: "proc-7".to_string(),
+                },
+                None,
+            ),
+            (
+                "GOAL: WAIT agent:bgagent-3",
+                GoalWaitSubject::Child {
+                    agent_id: "bgagent-3".to_string(),
+                },
+                None,
+            ),
+            (
+                "GOAL: WAIT event:ci-run-42 until 1730000000000",
+                GoalWaitSubject::Event {
+                    name: "ci-run-42".to_string(),
+                },
+                Some(1_730_000_000_000),
+            ),
+            (
+                "GOAL: WAIT deadline:1730000000000",
+                GoalWaitSubject::Deadline {
+                    until_ms: 1_730_000_000_000,
+                },
+                Some(1_730_000_000_000),
+            ),
+        ];
+        for (answer, subject, deadline_ms) in cases {
+            let verdict = parse_goal_verdict(answer, false);
+            let GoalVerdict::Wait(wait) = verdict else {
+                panic!("{answer} did not parse as a wait: {verdict:?}");
+            };
+            assert_eq!(wait.subject, subject, "{answer}");
+            assert_eq!(wait.deadline_ms, deadline_ms, "{answer}");
+        }
+
+        for untyped in [
+            "GOAL: WAIT",
+            "GOAL: WAIT ",
+            "GOAL: WAIT for the build",
+            "GOAL: WAIT process:",
+            "GOAL: WAIT unicorn:7",
+        ] {
+            assert_eq!(
+                parse_goal_verdict(untyped, false),
+                GoalVerdict::Unmet(vec![INCONCLUSIVE_GAP.to_string()]),
+                "{untyped} must not become a wait"
+            );
+        }
+
+        assert_eq!(
+            parse_goal_verdict("GOAL: WAIT process:proc-7", true),
+            GoalVerdict::Unmet(vec![INCONCLUSIVE_GAP.to_string()]),
+            "a verifier that called a tool is inconclusive, never waiting"
+        );
+    }
+
+    /// Applying a wait parks the goal instead of finishing or failing it: no
+    /// completion, no no-progress turn, and the subject is recorded.
+    #[test]
+    fn a_wait_verdict_parks_the_goal_without_completing_or_stalling_it() {
+        let mut session = session_with_goal();
+        session.goal_set_status(GoalStatus::Verifying);
+        let wait = GoalWait::new(
+            GoalWaitSubject::Process {
+                process_id: "proc-7".to_string(),
+            },
+            Some(99_000),
+        );
+
+        let outcome = apply_goal_verdict(
+            &mut session,
+            "finish",
+            GoalVerifierReply {
+                verdict: GoalVerdict::Wait(wait),
+                verifier_reply: "GOAL: WAIT process:proc-7".to_string(),
+                tokens: 3,
+                criteria_verdicts: Vec::new(),
+            },
+            None,
+        );
+
+        assert_eq!(outcome, GoalVerificationApplyOutcome::Waiting);
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+        assert_ne!(session.goal_status, Some(GoalStatus::Completed));
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        let goal = session.goal.as_ref().unwrap();
+        assert_eq!(goal.progress.no_progress_turns, 0);
+        assert_eq!(goal.attempts[0].verdict, "wait");
+        assert_eq!(goal.wait.as_ref().unwrap().deadline_ms, Some(99_000));
+        assert!(goal.wait.as_ref().unwrap().since_ms > 0);
+        assert!(session.command_queue.is_empty());
+        assert!(
+            session.delivery_wake_sources.is_empty(),
+            "a wait must not wake the chat back up"
+        );
+        assert_eq!(
+            session.messages.last().unwrap().extra["event"]["payload"]["kind"],
+            json!("waiting")
+        );
+    }
+
+    /// A held goal is not overridden by a wait: the user's pause wins.
+    #[test]
+    fn a_wait_verdict_never_overrides_a_paused_goal() {
+        let mut session = session_with_goal();
+        session.goal_set_status(GoalStatus::Verifying);
+        session.goal_set_status(GoalStatus::Paused);
+
+        let outcome = apply_goal_verdict(
+            &mut session,
+            "finish",
+            GoalVerifierReply {
+                verdict: GoalVerdict::Wait(GoalWait::new(
+                    GoalWaitSubject::Event {
+                        name: "ci".to_string(),
+                    },
+                    None,
+                )),
+                verifier_reply: "GOAL: WAIT event:ci".to_string(),
+                tokens: 3,
+                criteria_verdicts: Vec::new(),
+            },
+            None,
+        );
+
+        assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);
+        assert_eq!(session.goal_status, Some(GoalStatus::Paused));
+        assert!(session.goal_wait().is_none());
     }
 
     #[test]
@@ -1479,7 +1704,7 @@ mod tests {
                 }]),
                 ..Default::default()
             });
-            let version = session.trajectory_version;
+            let fork = GoalVerificationFork::at(&session, None);
             let outcome = apply_goal_verdict_guarded_with_delivery(
                 &mut session,
                 "validate_goal",
@@ -1489,8 +1714,7 @@ mod tests {
                     tokens: 1,
                     criteria_verdicts: Vec::new(),
                 },
-                None,
-                version,
+                fork,
                 push,
                 Some("validate"),
             );
@@ -2072,7 +2296,7 @@ mod tests {
     fn unmet_gaps(reply: &GoalVerifierReply) -> Vec<String> {
         match &reply.verdict {
             GoalVerdict::Unmet(gaps) => gaps.clone(),
-            GoalVerdict::Met => panic!("expected an unmet verdict, got MET"),
+            other => panic!("expected an unmet verdict, got {other:?}"),
         }
     }
 
@@ -2296,8 +2520,7 @@ mod tests {
 
         let mut stale_epoch = session_with_criteria(criteria.clone());
         stale_epoch.goal_set_status(GoalStatus::Verifying);
-        let epoch = stale_epoch.goal_ledger_last_seq();
-        let version = stale_epoch.trajectory_version;
+        let fork = GoalVerificationFork::capture(&stale_epoch);
         stale_epoch.goal_set_status_reason(GoalStatus::Stopped, "goal_control");
 
         assert_eq!(
@@ -2305,8 +2528,7 @@ mod tests {
                 &mut stale_epoch,
                 "finish",
                 goal_verdict_from_evidence(&evidence, None),
-                Some(epoch),
-                version,
+                fork,
             ),
             GoalVerificationApplyOutcome::Superseded
         );
@@ -2314,7 +2536,7 @@ mod tests {
 
         let mut stale_version = session_with_criteria(criteria);
         stale_version.goal_set_status(GoalStatus::Verifying);
-        let fork_version = stale_version.trajectory_version;
+        let fork = GoalVerificationFork::at(&stale_version, None);
         stale_version.increment_version();
 
         assert_eq!(
@@ -2322,8 +2544,7 @@ mod tests {
                 &mut stale_version,
                 "finish",
                 goal_verdict_from_evidence(&evidence, None),
-                None,
-                fork_version,
+                fork,
             ),
             GoalVerificationApplyOutcome::Superseded
         );

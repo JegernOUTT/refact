@@ -397,6 +397,83 @@ pub struct GoalEvent {
     pub text: String,
 }
 
+/// What a waiting goal is waiting on. A wait without one of these is
+/// indistinguishable from being stuck, so there is no untyped variant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum GoalWaitSubject {
+    Process { process_id: String },
+    Child { agent_id: String },
+    Event { name: String },
+    Deadline { until_ms: u64 },
+}
+
+impl GoalWaitSubject {
+    pub fn label(&self) -> String {
+        match self {
+            GoalWaitSubject::Process { process_id } => format!("process {process_id}"),
+            GoalWaitSubject::Child { agent_id } => format!("child run {agent_id}"),
+            GoalWaitSubject::Event { name } => format!("event {name}"),
+            GoalWaitSubject::Deadline { until_ms } => format!("deadline {until_ms}"),
+        }
+    }
+
+    pub fn own_deadline_ms(&self) -> Option<u64> {
+        match self {
+            GoalWaitSubject::Deadline { until_ms } => Some(*until_ms),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalWait {
+    pub subject: GoalWaitSubject,
+    #[serde(default)]
+    pub since_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
+}
+
+impl GoalWait {
+    pub fn new(subject: GoalWaitSubject, deadline_ms: Option<u64>) -> Self {
+        let deadline_ms = deadline_ms.or_else(|| subject.own_deadline_ms());
+        Self {
+            subject,
+            since_ms: 0,
+            deadline_ms,
+        }
+    }
+
+    /// A deadline is a wait, never a pass: expiry is reported as its own
+    /// outcome naming the subject.
+    pub fn expired_at(&self, now_ms: u64) -> bool {
+        self.deadline_ms.is_some_and(|until_ms| now_ms >= until_ms)
+    }
+
+    pub fn matches(&self, subject: &GoalWaitSubject) -> bool {
+        &self.subject == subject
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalWaitResume {
+    Settled,
+    Expired,
+    Cancelled,
+}
+
+impl GoalWaitResume {
+    pub fn label(self) -> &'static str {
+        match self {
+            GoalWaitResume::Settled => "settled",
+            GoalWaitResume::Expired => "expired",
+            GoalWaitResume::Cancelled => "cancelled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct GoalSnapshot {
     pub content: String,
@@ -411,6 +488,8 @@ pub struct GoalSnapshot {
     pub criteria: Vec<GoalCriterion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snoozed_until_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<GoalWait>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
     pub transferred_from: Option<String>,
@@ -1440,11 +1519,62 @@ mod tests {
             }],
             criteria: Vec::new(),
             snoozed_until_ms: None,
+            wait: None,
             stop_reason: None,
             transferred_from: Some("source-chat".to_string()),
             transferred_to: Some("target-chat".to_string()),
             sub_goals: sub_goal::SubGoalGraph::default(),
         }
+    }
+
+    /// A wait is persisted state: every subject must survive the round trip with
+    /// its identity intact, or a reloaded chat cannot tell what it waits on.
+    #[test]
+    fn a_goal_wait_round_trips_with_its_typed_subject() {
+        let subjects = [
+            GoalWaitSubject::Process {
+                process_id: "proc-7".to_string(),
+            },
+            GoalWaitSubject::Child {
+                agent_id: "bgagent-3".to_string(),
+            },
+            GoalWaitSubject::Event {
+                name: "ci-run-42".to_string(),
+            },
+            GoalWaitSubject::Deadline {
+                until_ms: 1_730_000_000_000,
+            },
+        ];
+        for subject in subjects {
+            let mut goal = goal_snapshot();
+            goal.wait = Some(GoalWait::new(subject.clone(), None));
+            let restored: GoalSnapshot =
+                serde_json::from_str(&serde_json::to_string(&goal).unwrap()).unwrap();
+            assert_eq!(restored.wait.as_ref().unwrap().subject, subject);
+            assert_eq!(restored, goal);
+        }
+
+        let deadline_only = GoalWait::new(GoalWaitSubject::Deadline { until_ms: 5_000 }, None);
+        assert_eq!(deadline_only.deadline_ms, Some(5_000));
+        assert!(!deadline_only.expired_at(4_999));
+        assert!(deadline_only.expired_at(5_000));
+
+        let unbounded = GoalWait::new(
+            GoalWaitSubject::Event {
+                name: "ci".to_string(),
+            },
+            None,
+        );
+        assert!(!unbounded.expired_at(u64::MAX));
+    }
+
+    /// A goal with no wait serializes exactly as before.
+    #[test]
+    fn a_goal_without_a_wait_keeps_the_field_off_the_wire() {
+        let goal = goal_snapshot();
+        assert!(goal.wait.is_none());
+        let wire = serde_json::to_value(&goal).unwrap();
+        assert!(wire.get("wait").is_none());
     }
 
     #[test]

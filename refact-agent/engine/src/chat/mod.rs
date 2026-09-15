@@ -17,6 +17,7 @@ pub mod goal_monitor;
 pub mod goal_review;
 pub mod goal_role;
 pub mod goal_verifier;
+pub mod goal_wait;
 mod handlers;
 pub mod history_limit;
 pub mod internal_roles;

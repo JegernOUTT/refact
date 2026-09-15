@@ -222,6 +222,15 @@ pub async fn push_completion_to_parent(
             return Err(error);
         }
     }
+    crate::chat::goal_wait::settle_goal_wait(
+        app,
+        &record.parent_chat_id,
+        &refact_chat_api::GoalWaitSubject::Child {
+            agent_id: record.agent_id.clone(),
+        },
+        refact_chat_api::GoalWaitResume::Settled,
+    )
+    .await;
     Ok(())
 }
 

@@ -311,6 +311,7 @@ pub(crate) fn goal_snapshot_from_messages(
             })
             .unwrap_or_default(),
         snoozed_until_ms: prior.and_then(|goal| goal.snoozed_until_ms),
+        wait: prior.and_then(|goal| goal.wait.clone()),
         stop_reason: prior.and_then(|goal| goal.stop_reason.clone()),
         transferred_from: prior
             .and_then(|goal| goal.transferred_from.clone())
@@ -509,6 +510,7 @@ impl ChatSession {
             goal_ledger: Vec::new(),
             goal_turn_evidence: false,
             goal_verification_blocked_until_ms: None,
+            goal_verification_generation: 0,
         }
     }
 
@@ -644,6 +646,7 @@ impl ChatSession {
             goal_ledger: Vec::new(),
             goal_turn_evidence: false,
             goal_verification_blocked_until_ms: None,
+            goal_verification_generation: 0,
         }
     }
 
@@ -845,6 +848,7 @@ impl ChatSession {
             goal.progress.no_progress_turns,
             goal.status,
             goal.snoozed_until_ms,
+            goal.wait.is_some(),
         );
         goal.goal_reset_no_progress();
         if before
@@ -852,6 +856,7 @@ impl ChatSession {
                 goal.progress.no_progress_turns,
                 goal.status,
                 goal.snoozed_until_ms,
+                goal.wait.is_some(),
             )
         {
             return false;
@@ -976,6 +981,59 @@ impl ChatSession {
         true
     }
 
+    /// Park the goal on a typed subject. Replacing a live wait is refused: the
+    /// existing wait keeps its identity so the settle path stays single-shot.
+    pub fn goal_begin_wait(&mut self, mut wait: GoalWait, at_ms: u64) -> bool {
+        let Some(goal) = self.goal.as_mut() else {
+            return false;
+        };
+        if goal.wait.is_some() {
+            return false;
+        }
+        wait.since_ms = at_ms;
+        goal.wait = Some(wait.clone());
+        self.goal_ledger_append_at(GoalLedgerOp::WaitSet { wait: Some(wait) }, at_ms);
+        self.mark_persisted_runtime_changed();
+        self.emit_goal_status();
+        true
+    }
+
+    /// Settle the wait exactly once. Racing wake sources — a process exit and a
+    /// deadline, say — call this concurrently and only the first gets the wait
+    /// back, so the goal resumes once.
+    pub fn goal_settle_wait(
+        &mut self,
+        subject: Option<&GoalWaitSubject>,
+        at_ms: u64,
+    ) -> Option<GoalWait> {
+        let goal = self.goal.as_mut()?;
+        let waiting = goal.wait.as_ref()?;
+        if subject.is_some_and(|subject| !waiting.matches(subject)) {
+            return None;
+        }
+        let settled = goal.wait.take();
+        self.goal_ledger_append_at(GoalLedgerOp::WaitSet { wait: None }, at_ms);
+        self.mark_persisted_runtime_changed();
+        self.emit_goal_status();
+        settled
+    }
+
+    pub fn goal_wait(&self) -> Option<&GoalWait> {
+        self.goal.as_ref().and_then(|goal| goal.wait.as_ref())
+    }
+
+    /// The generation an in-flight verification job forked from. Pause, snooze
+    /// and cancellation bump it so a verdict computed before the control landed
+    /// is discarded instead of finalizing a goal the user just held.
+    pub fn goal_verification_generation(&self) -> u64 {
+        self.goal_verification_generation
+    }
+
+    pub fn supersede_goal_verification(&mut self) -> u64 {
+        self.goal_verification_generation = self.goal_verification_generation.saturating_add(1);
+        self.goal_verification_generation
+    }
+
     pub(crate) fn goal_ledger_append(&mut self, op: GoalLedgerOp) -> u64 {
         self.goal_ledger_append_at(op, epoch_ms_now())
     }
@@ -1011,6 +1069,7 @@ impl ChatSession {
     }
 
     pub fn purge_goal_generated_wakes(&mut self) -> usize {
+        self.supersede_goal_verification();
         self.delivery_wake_sources.remove("goal");
         let mut suppressed = 0;
         for delivery in self
@@ -4907,6 +4966,7 @@ mod tests {
                 events: Vec::new(),
                 criteria: Vec::new(),
                 snoozed_until_ms: None,
+                wait: None,
                 stop_reason: None,
                 transferred_from: None,
                 transferred_to: None,
@@ -6060,6 +6120,7 @@ mod tests {
             events: Vec::new(),
             criteria: Vec::new(),
             snoozed_until_ms: None,
+            wait: None,
             stop_reason: None,
             transferred_from: None,
             transferred_to: None,

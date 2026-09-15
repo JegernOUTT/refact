@@ -1051,6 +1051,7 @@ fn goal_snapshot_for_transfer(
             .or_else(|| goal_meta_value(meta, "criteria"))
             .unwrap_or_default(),
         snoozed_until_ms: existing.and_then(|goal| goal.snoozed_until_ms),
+        wait: existing.and_then(|goal| goal.wait.clone()),
         stop_reason: existing.and_then(|goal| goal.stop_reason.clone()),
         transferred_from: existing
             .and_then(|goal| goal.transferred_from.clone())

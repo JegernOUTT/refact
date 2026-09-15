@@ -110,7 +110,22 @@ pub(crate) async fn deliver_process_completion(
     event: &ProcessCompletionEvent,
 ) -> Result<DeliveryOutcome, String> {
     let chat_id = event.chat_id.clone();
-    crate::chat::delivery::deliver_to_chat(app, &chat_id, process_completion_delivery(event)).await
+    let outcome = crate::chat::delivery::deliver_to_chat(
+        app.clone(),
+        &chat_id,
+        process_completion_delivery(event),
+    )
+    .await;
+    crate::chat::goal_wait::settle_goal_wait(
+        app,
+        &chat_id,
+        &refact_chat_api::GoalWaitSubject::Process {
+            process_id: event.process_id.to_string(),
+        },
+        refact_chat_api::GoalWaitResume::Settled,
+    )
+    .await;
+    outcome
 }
 
 pub(crate) fn process_completion_delivery(event: &ProcessCompletionEvent) -> PendingDelivery {

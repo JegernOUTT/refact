@@ -353,6 +353,84 @@ mod tests {
         assert!(session.delivery_wake_sources.contains("external"));
     }
 
+    fn met_reply() -> crate::chat::goal_verifier::GoalVerifierReply {
+        crate::chat::goal_verifier::GoalVerifierReply {
+            verdict: crate::chat::goal_verifier::GoalVerdict::Met,
+            verifier_reply: "GOAL: MET".to_string(),
+            tokens: 7,
+            criteria_verdicts: Vec::new(),
+        }
+    }
+
+    /// Pause, snooze and cancellation purge queued nudges *and* supersede a
+    /// verification job that forked before they landed. A snooze changes no goal
+    /// status, so without the generation guard its in-flight verdict would still
+    /// complete a goal the user just held.
+    #[test]
+    fn a_control_supersedes_a_verification_job_that_forked_before_it() {
+        for control in ["pause", "snooze", "cancel"] {
+            let mut session = session_with_goal();
+            session.goal_set_status(GoalStatus::Verifying);
+            let fork = crate::chat::goal_verifier::GoalVerificationFork::capture(&session);
+
+            session.purge_goal_generated_wakes();
+            match control {
+                "pause" => {
+                    session.goal_set_status_reason(GoalStatus::Paused, "pause_goal");
+                }
+                "snooze" => {
+                    session.goal_set_snooze(Some(99_000));
+                }
+                _ => {
+                    session.goal_set_status_reason(GoalStatus::Stopped, "goal_control");
+                }
+            }
+
+            let outcome = crate::chat::goal_verifier::apply_goal_verdict_guarded(
+                &mut session,
+                "finish",
+                met_reply(),
+                fork,
+            );
+
+            assert_eq!(
+                outcome,
+                crate::chat::goal_verifier::GoalVerificationApplyOutcome::Superseded,
+                "{control} left an in-flight verification job live"
+            );
+            assert_ne!(
+                session.goal_status,
+                Some(GoalStatus::Completed),
+                "{control}"
+            );
+            assert!(
+                session.goal.as_ref().unwrap().attempts.is_empty(),
+                "{control}"
+            );
+        }
+    }
+
+    /// Negative control: with no control in between, the same fork still applies.
+    #[test]
+    fn an_untouched_verification_job_still_applies_its_verdict() {
+        let mut session = session_with_goal();
+        session.goal_set_status(GoalStatus::Verifying);
+        let fork = crate::chat::goal_verifier::GoalVerificationFork::capture(&session);
+
+        let outcome = crate::chat::goal_verifier::apply_goal_verdict_guarded(
+            &mut session,
+            "finish",
+            met_reply(),
+            fork,
+        );
+
+        assert_eq!(
+            outcome,
+            crate::chat::goal_verifier::GoalVerificationApplyOutcome::Finalized
+        );
+        assert_eq!(session.goal_status, Some(GoalStatus::Completed));
+    }
+
     #[test]
     fn purge_removes_goal_generated_regenerates_only() {
         let mut session = session_with_goal();

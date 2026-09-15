@@ -18392,6 +18392,7 @@ mod tests {
             goal_stopped_by_abort: false,
             goal_ledger: Vec::new(),
             goal_turn_evidence: false,
+            goal_verification_generation: 0,
             goal_verification_blocked_until_ms: None,
         };
 
@@ -18519,6 +18520,7 @@ mod tests {
             goal_stopped_by_abort: false,
             goal_ledger: Vec::new(),
             goal_turn_evidence: false,
+            goal_verification_generation: 0,
             goal_verification_blocked_until_ms: None,
         };
 
@@ -18735,6 +18737,7 @@ mod tests {
             events: Vec::new(),
             criteria: Vec::new(),
             snoozed_until_ms: None,
+            wait: None,
             stop_reason: None,
             transferred_from: None,
             transferred_to: None,
@@ -18760,6 +18763,7 @@ mod tests {
             events: Vec::new(),
             criteria: Vec::new(),
             snoozed_until_ms: None,
+            wait: None,
             stop_reason: None,
             transferred_from: None,
             transferred_to: None,
@@ -18781,6 +18785,7 @@ mod tests {
             events: Vec::new(),
             criteria: Vec::new(),
             snoozed_until_ms: None,
+            wait: None,
             stop_reason: None,
             transferred_from: None,
             transferred_to: None,
@@ -18805,6 +18810,7 @@ mod tests {
             events: Vec::new(),
             criteria: Vec::new(),
             snoozed_until_ms: None,
+            wait: None,
             stop_reason: None,
             transferred_from: None,
             transferred_to: None,
@@ -18836,6 +18842,7 @@ mod tests {
             events: Vec::new(),
             criteria: Vec::new(),
             snoozed_until_ms: None,
+            wait: None,
             stop_reason: None,
             transferred_from: None,
             transferred_to: None,

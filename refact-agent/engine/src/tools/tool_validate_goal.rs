@@ -9,7 +9,8 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::goal_verifier::{
     apply_goal_verdict_guarded_with_delivery, begin_goal_verification_if_needed,
-    run_goal_verification, GoalVerificationApplyOutcome, GoalVerificationBegin, GoalVerdict,
+    run_goal_verification, GoalVerificationApplyOutcome, GoalVerificationBegin,
+    GoalVerificationFork, GoalVerdict,
 };
 use crate::chat::types::{ChatSession, PushMode};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
@@ -75,14 +76,11 @@ impl Tool for ToolValidateGoal {
             None => return Err(format!("chat session `{chat_id}` not found")),
         };
 
-        let (begin, epoch, fork_trajectory_version) = {
+        let (begin, fork) = {
             let mut session = session_arc.lock().await;
             let begin = begin_validate_goal(&mut session);
-            (
-                begin,
-                session.goal_ledger_last_seq(),
-                session.trajectory_version,
-            )
+            let fork = GoalVerificationFork::capture(&session);
+            (begin, fork)
         };
         match begin {
             GoalVerificationBegin::Started => {}
@@ -94,7 +92,7 @@ impl Tool for ToolValidateGoal {
             }
         }
 
-        let reply = match run_goal_verification(app, session_arc.clone()).await {
+        let reply = match run_goal_verification(app.clone(), session_arc.clone()).await {
             Ok(reply) => reply,
             Err(error) => {
                 reset_after_verifier_error_with_delivery(
@@ -119,12 +117,14 @@ impl Tool for ToolValidateGoal {
                 &mut session,
                 "validate_goal",
                 reply,
-                Some(epoch),
-                fork_trajectory_version,
+                fork,
                 push,
                 Some(tool_call_id),
             )
         };
+        if outcome == GoalVerificationApplyOutcome::Waiting {
+            crate::chat::goal_wait::begin_goal_wait_park(app, session_arc).await;
+        }
         let content = validation_content(outcome, &verdict, &verifier_reply);
         let extra = validation_extra(outcome, &verdict);
         tool_message_with_extra(tool_call_id, content, extra)
@@ -172,12 +172,19 @@ fn validation_content(
         GoalVerificationApplyOutcome::Superseded => {
             "Goal state changed during validation; verdict discarded.".to_string()
         }
+        GoalVerificationApplyOutcome::Waiting => match verdict {
+            GoalVerdict::Wait(wait) => format!(
+                "GOAL WAITING on {} — pursuit is parked until it settles; no goal rounds run meanwhile.",
+                wait.subject.label()
+            ),
+            _ => "GOAL WAITING — pursuit is parked until the awaited subject settles.".to_string(),
+        },
         GoalVerificationApplyOutcome::Rearmed
         | GoalVerificationApplyOutcome::Continued
         | GoalVerificationApplyOutcome::Stalled => {
             let gaps = match verdict {
                 GoalVerdict::Unmet(gaps) => gaps.as_slice(),
-                GoalVerdict::Met => &[],
+                GoalVerdict::Met | GoalVerdict::Wait(_) => &[],
             };
             format!(
                 "GOAL NOT YET MET — remaining gaps:\n{}\n\n{}",
@@ -195,6 +202,7 @@ fn validation_extra(
 ) -> Map<String, Value> {
     let marker = match (outcome, verdict) {
         (GoalVerificationApplyOutcome::Finalized, GoalVerdict::Met) => Some("met"),
+        (GoalVerificationApplyOutcome::Waiting, GoalVerdict::Wait(_)) => Some("wait"),
         (
             GoalVerificationApplyOutcome::Rearmed
             | GoalVerificationApplyOutcome::Continued

@@ -64,6 +64,7 @@ pub enum GoalNudgeSkip {
     InactiveGoal,
     NonActiveGoalStatus,
     Snoozed,
+    Waiting,
     Cooldown,
     Aborted,
     Closed,
@@ -81,6 +82,7 @@ pub enum GoalNudgeSkip {
 pub enum GoalNudgeOutcome {
     Nudged(GoalNudgeReason),
     BudgetExhausted(GoalStatus),
+    WaitExpired,
     Skipped(GoalNudgeSkip),
 }
 
@@ -88,12 +90,20 @@ impl GoalNudgeOutcome {
     fn changed(self) -> bool {
         matches!(
             self,
-            GoalNudgeOutcome::Nudged(_) | GoalNudgeOutcome::BudgetExhausted(_)
+            GoalNudgeOutcome::Nudged(_)
+                | GoalNudgeOutcome::BudgetExhausted(_)
+                | GoalNudgeOutcome::WaitExpired
         )
     }
 
     fn nudged(self) -> bool {
         matches!(self, GoalNudgeOutcome::Nudged(_))
+    }
+
+    /// Both a nudge and a wait that just expired have queued a wake delivery the
+    /// command processor has to pick up.
+    fn wakes_queue(self) -> bool {
+        self.nudged() || matches!(self, GoalNudgeOutcome::WaitExpired)
     }
 
     fn should_persist(self) -> bool {
@@ -213,7 +223,7 @@ pub async fn dispatch_goal_nudge(
             GoalNudgeConfig::default(),
             execution,
         );
-        let processor_flag = if outcome.nudged() {
+        let processor_flag = if outcome.wakes_queue() {
             session.queue_notify.notify_one();
             Some(session.queue_processor_running.clone())
         } else {
@@ -283,6 +293,11 @@ pub fn try_apply_goal_nudge(
         .is_some_and(|until_ms| now_ms < until_ms)
     {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Snoozed);
+    }
+    match goal.wait.as_ref().map(|wait| wait.expired_at(now_ms)) {
+        Some(false) => return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Waiting),
+        Some(true) => return expire_goal_wait(session, now_ms),
+        None => {}
     }
     if session.abort_flag.load(Ordering::SeqCst)
         || session.user_interrupt_flag.load(Ordering::SeqCst)
@@ -360,6 +375,21 @@ pub fn try_apply_goal_nudge(
     }
     session.goal_record_nudge(now_ms);
     GoalNudgeOutcome::Nudged(reason)
+}
+
+/// An expired deadline is never a pass. The wait ends with an explicit expired
+/// outcome naming its subject, and the goal is only then eligible for nudges
+/// again.
+fn expire_goal_wait(session: &mut ChatSession, now_ms: u64) -> GoalNudgeOutcome {
+    match crate::chat::goal_wait::settle_goal_wait_in_session(
+        session,
+        None,
+        GoalWaitResume::Expired,
+        now_ms,
+    ) {
+        Some(_) => GoalNudgeOutcome::WaitExpired,
+        None => GoalNudgeOutcome::Skipped(GoalNudgeSkip::Waiting),
+    }
 }
 
 fn waiting_for_user_or_ide(session: &ChatSession) -> bool {
@@ -916,6 +946,55 @@ mod tests {
         }
     }
 
+    /// The scheduler's own view of this run's permit. Counted per run, not by
+    /// the global active total, so a parallel test holding a permit elsewhere
+    /// cannot decide this assertion.
+    fn active_permits_for(app: &AppState, chat_id: &str) -> usize {
+        let run = refact_work_core::RunKey::new(
+            refact_work_core::WorkKey::trajectory(chat_id.to_string()),
+            1,
+        );
+        app.work_scheduler
+            .snapshot()
+            .tickets
+            .iter()
+            .filter(|ticket| {
+                ticket.run == run && ticket.state == refact_work_core::TicketState::Active
+            })
+            .count()
+    }
+
+    /// Waiting must not occupy capacity: the wait hands the permit back through
+    /// the scheduler's park path and holds none for as long as it waits.
+    #[tokio::test]
+    async fn a_waiting_goal_holds_no_execution_permit() {
+        let (app, _workspace) = goal_app().await;
+        let chat_id = unique_chat_id("wait-permit");
+        let session = stalled_goal_session(&app, &chat_id).await;
+        let execution = admitted_execution(&app, &chat_id).await;
+        assert_eq!(execution.state(), ExecutionState::Running);
+        assert_eq!(active_permits_for(&app, &chat_id), 1);
+
+        {
+            let mut session = session.lock().await;
+            assert!(session.goal_begin_wait(wait_on("proc-7", None), 1_000));
+        }
+        crate::chat::goal_wait::begin_goal_wait_park(app.clone(), session.clone()).await;
+
+        assert_eq!(execution.state(), ExecutionState::Parked);
+        assert_eq!(active_permits_for(&app, &chat_id), 0);
+        for _ in 0..3 {
+            assert_eq!(
+                monitor_tick(&app, &session).await,
+                GoalNudgeOutcome::Skipped(GoalNudgeSkip::Waiting)
+            );
+            assert_eq!(active_permits_for(&app, &chat_id), 0);
+        }
+
+        crate::tasks::admission::end(&chat_id).await;
+        app.agent_executions.shutdown().await;
+    }
+
     /// A goal the user paused must stay paused; nothing here may resume it.
     #[tokio::test]
     async fn goal_monitor_leaves_a_paused_goal_paused_while_parked() {
@@ -1453,6 +1532,151 @@ mod tests {
             apply_monitor(&mut session, 20_000, now),
             GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
         );
+    }
+
+    fn wait_on(process_id: &str, deadline_ms: Option<u64>) -> GoalWait {
+        GoalWait::new(
+            GoalWaitSubject::Process {
+                process_id: process_id.to_string(),
+            },
+            deadline_ms,
+        )
+    }
+
+    fn goal_pursuit_event_count(session: &ChatSession, kind: &str) -> usize {
+        session
+            .messages
+            .iter()
+            .chain(
+                session
+                    .pending_deliveries
+                    .iter()
+                    .flat_map(|delivery| delivery.messages.iter()),
+            )
+            .filter(|message| {
+                message.role == "event" && event_payload(message).get("kind") == Some(&json!(kind))
+            })
+            .count()
+    }
+
+    /// A goal that declared what it waits on costs nothing while it waits: over
+    /// repeated monitor ticks it produces no nudge, so nothing ever reaches a
+    /// model. The nudge count is the model-call count on this path — a nudge is
+    /// the only thing here that queues work for the provider.
+    #[test]
+    fn goal_monitor_never_nudges_a_goal_that_is_waiting_on_a_subject() {
+        let (mut session, now) = old_idle_session();
+        assert!(session.goal_begin_wait(wait_on("proc-7", None), 1_000));
+
+        let mut now_ms = 10_000u64;
+        for tick in 0..10 {
+            assert_eq!(
+                apply_monitor(&mut session, now_ms, now + Duration::from_secs(tick * 30)),
+                GoalNudgeOutcome::Skipped(GoalNudgeSkip::Waiting),
+                "tick {tick} nudged a waiting goal"
+            );
+            now_ms += 600_000;
+        }
+
+        assert_eq!(nudge_event_count(&session), 0);
+        assert_eq!(goal_pursuit_event_count(&session, "nudge"), 0);
+        assert!(session.command_queue.is_empty());
+        assert!(session.delivery_wake_sources.is_empty());
+        assert_eq!(session.goal.as_ref().unwrap().progress.no_progress_turns, 0);
+        assert_eq!(session.goal.as_ref().unwrap().progress.turns_used, 0);
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+    }
+
+    /// The settled subject wakes the goal, and only then does nudging resume.
+    #[test]
+    fn a_settled_wait_lets_the_goal_be_nudged_again() {
+        let (mut session, now) = old_idle_session();
+        assert!(session.goal_begin_wait(wait_on("proc-7", None), 1_000));
+        assert_eq!(
+            apply_monitor(&mut session, 10_000, now),
+            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Waiting)
+        );
+
+        assert!(crate::chat::goal_wait::settle_goal_wait_in_session(
+            &mut session,
+            Some(&GoalWaitSubject::Process {
+                process_id: "proc-7".to_string()
+            }),
+            GoalWaitResume::Settled,
+            11_000,
+        )
+        .is_some());
+        session.command_queue.clear();
+        session.delivery_wake_sources.clear();
+        session.pending_deliveries.clear();
+        session.last_activity = now - Duration::from_secs(10);
+
+        assert_eq!(
+            apply_monitor(&mut session, 20_000, now),
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
+        );
+    }
+
+    /// An expired deadline is an outcome of its own. It names the subject and it
+    /// is never allowed to read as a pass.
+    #[test]
+    fn an_expired_wait_deadline_is_reported_expired_and_never_met() {
+        let (mut session, now) = old_idle_session();
+        assert!(session.goal_begin_wait(wait_on("proc-7", Some(15_000)), 1_000));
+
+        assert_eq!(
+            apply_monitor(&mut session, 14_999, now),
+            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Waiting)
+        );
+        assert_eq!(
+            apply_monitor(&mut session, 15_000, now),
+            GoalNudgeOutcome::WaitExpired
+        );
+
+        assert!(session.goal_wait().is_none());
+        assert_ne!(session.goal_status, Some(GoalStatus::Completed));
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+        assert_eq!(goal_pursuit_event_count(&session, "wait_expired"), 1);
+        let expired = session
+            .messages
+            .iter()
+            .chain(
+                session
+                    .pending_deliveries
+                    .iter()
+                    .flat_map(|delivery| delivery.messages.iter()),
+            )
+            .find(|message| {
+                message.role == "event"
+                    && event_payload(message).get("kind") == Some(&json!("wait_expired"))
+            })
+            .unwrap();
+        assert_eq!(event_payload(expired)["subject"], json!("process proc-7"));
+        assert!(expired
+            .content
+            .content_text_only()
+            .contains("did not settle before its deadline"));
+    }
+
+    /// The expiry sweep and an external settle can land together. Only one of
+    /// them may resume the goal.
+    #[test]
+    fn a_deadline_racing_a_settled_subject_resumes_the_goal_once() {
+        let (mut session, now) = old_idle_session();
+        assert!(session.goal_begin_wait(wait_on("proc-7", Some(15_000)), 1_000));
+
+        assert!(crate::chat::goal_wait::settle_goal_wait_in_session(
+            &mut session,
+            None,
+            GoalWaitResume::Settled,
+            15_000,
+        )
+        .is_some());
+        let expiry = apply_monitor(&mut session, 15_000, now);
+
+        assert_ne!(expiry, GoalNudgeOutcome::WaitExpired);
+        assert_eq!(goal_pursuit_event_count(&session, "wait_settled"), 1);
+        assert_eq!(goal_pursuit_event_count(&session, "wait_expired"), 0);
     }
 
     #[test]

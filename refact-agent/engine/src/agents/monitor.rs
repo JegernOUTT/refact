@@ -141,6 +141,7 @@ async fn observe_run(
         let session = session.lock().await;
         activity.session_state = session.runtime.state;
         activity.session_error = session.runtime.error.clone();
+        activity.goal_waiting = session.goal_wait().is_some();
         (
             turns_from_messages(&session.messages, thresholds.window_turns),
             turn_count(&session.messages),

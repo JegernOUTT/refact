@@ -30,6 +30,9 @@ pub enum WaitingKind {
     Queued,
     Suspending,
     AwaitingApproval,
+    /// The run's goal is parked on a typed subject and will wake when it
+    /// settles. Declared waiting, never a stall.
+    GoalWait,
 }
 
 /// The content evidence a no-material-progress verdict rests on.
@@ -67,6 +70,7 @@ impl ActivityClass {
             ActivityClass::IntentionallyWaiting(WaitingKind::AwaitingApproval) => {
                 "waiting_approval"
             }
+            ActivityClass::IntentionallyWaiting(WaitingKind::GoalWait) => "waiting_goal_subject",
             ActivityClass::ProviderFailure(_) => "provider_failure",
             ActivityClass::NoMaterialProgress(NoProgressSignal::RepeatedToolCall { .. }) => {
                 "no_progress_repeated_tool_call"
@@ -166,6 +170,8 @@ pub struct RunActivity {
     pub session_state: SessionState,
     pub session_error: Option<String>,
     pub tool_call_in_flight: bool,
+    /// The run's goal is parked on a typed wait subject.
+    pub goal_waiting: bool,
     pub quiet_for: Duration,
     /// Recent turns, oldest first.
     pub turns: Vec<TurnEvidence>,
@@ -182,6 +188,7 @@ impl Default for RunActivity {
             session_state: SessionState::Idle,
             session_error: None,
             tool_call_in_flight: false,
+            goal_waiting: false,
             quiet_for: Duration::ZERO,
             turns: Vec::new(),
             turns_since_evidence_changed: None,
@@ -214,6 +221,9 @@ pub fn classify(activity: &RunActivity, thresholds: ProgressThresholds) -> Activ
 }
 
 fn waiting_kind(activity: &RunActivity) -> Option<WaitingKind> {
+    if activity.goal_waiting {
+        return Some(WaitingKind::GoalWait);
+    }
     match activity.status {
         BgAgentStatus::WaitingForApproval => return Some(WaitingKind::AwaitingApproval),
         BgAgentStatus::Queued => return Some(WaitingKind::Queued),
@@ -488,6 +498,51 @@ mod tests {
         }
     }
 
+    /// A goal parked on a named subject is waiting on purpose. Even a run that
+    /// otherwise looks like a loop must not be called stalled while it waits.
+    #[test]
+    fn a_goal_waiting_on_a_subject_is_intentional_waiting_not_a_stall() {
+        let activity = RunActivity {
+            goal_waiting: true,
+            session_state: SessionState::Generating,
+            quiet_for: quiet(9_000),
+            turns: vec![
+                tool_turn("cat", "{}", Some("same")),
+                tool_turn("cat", "{}", Some("same")),
+                tool_turn("cat", "{}", Some("same")),
+            ],
+            turns_since_evidence_changed: Some(99),
+            ..Default::default()
+        };
+
+        let class = classify(&activity, thresholds());
+
+        assert_eq!(
+            class,
+            ActivityClass::IntentionallyWaiting(WaitingKind::GoalWait)
+        );
+        assert_eq!(class.reason(), "waiting_goal_subject");
+        assert!(!class.is_no_progress_verdict());
+        assert!(class.progress_note().is_none());
+    }
+
+    /// Negative control: the same evidence without a declared wait is a stall.
+    #[test]
+    fn the_same_run_without_a_declared_wait_is_still_flagged() {
+        let activity = RunActivity {
+            goal_waiting: false,
+            session_state: SessionState::Generating,
+            turns: vec![
+                tool_turn("cat", "{}", Some("same")),
+                tool_turn("cat", "{}", Some("same")),
+                tool_turn("cat", "{}", Some("same")),
+            ],
+            ..Default::default()
+        };
+
+        assert!(classify(&activity, thresholds()).is_no_progress_verdict());
+    }
+
     /// A provider that will not answer is a provider problem. Calling the run
     /// stalled would point at the wrong thing.
     #[test]
@@ -699,6 +754,7 @@ mod tests {
             ActivityClass::IntentionallyWaiting(WaitingKind::Queued),
             ActivityClass::IntentionallyWaiting(WaitingKind::Suspending),
             ActivityClass::IntentionallyWaiting(WaitingKind::AwaitingApproval),
+            ActivityClass::IntentionallyWaiting(WaitingKind::GoalWait),
             ActivityClass::ProviderFailure(UserErrorCategory::NetworkFailure),
             ActivityClass::NoMaterialProgress(NoProgressSignal::RepeatedToolCall { repeats: 3 }),
             ActivityClass::NoMaterialProgress(NoProgressSignal::RepeatedOutput { repeats: 3 }),

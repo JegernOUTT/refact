@@ -3024,7 +3024,7 @@ pub(crate) async fn handle_tool_decisions(
                     session.set_runtime_state(SessionState::Completed, None);
                 }
                 GoalCompletionGateOutcome::Finalized => {}
-                GoalCompletionGateOutcome::Rearmed => {
+                GoalCompletionGateOutcome::Rearmed | GoalCompletionGateOutcome::Waiting => {
                     maybe_save_trajectory_with_intent(
                         app.clone(),
                         session_arc.clone(),
