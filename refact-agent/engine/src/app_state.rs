@@ -1353,10 +1353,6 @@ impl ToolRegistry for AppToolRegistry {
             context_files,
         }))
     }
-
-    async fn load_task_memories(&self, task_id: &str) -> Result<Vec<(PathBuf, String)>, String> {
-        crate::tools::tool_task_memory::load_task_memories(self.gcx.clone(), task_id).await
-    }
 }
 
 pub struct AppBuddyEventSink {

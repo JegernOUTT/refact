@@ -1,5 +1,4 @@
 use std::any::Any;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -274,7 +273,6 @@ pub trait ToolRegistry: Send + Sync {
         self.execute_tool_with_catalog(ccx, catalog, mode, model_id, tool_call_id, tool_name, args)
             .await
     }
-    async fn load_task_memories(&self, task_id: &str) -> Result<Vec<(PathBuf, String)>, String>;
 }
 
 #[derive(Clone)]

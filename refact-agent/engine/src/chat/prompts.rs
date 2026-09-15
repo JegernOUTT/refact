@@ -865,6 +865,20 @@ mod tests {
         }
     }
 
+    fn agent_task_meta(
+        task_id: &str,
+        agent_id: &str,
+        card_id: Option<&str>,
+    ) -> crate::chat::types::TaskMeta {
+        crate::chat::types::TaskMeta {
+            task_id: task_id.to_string(),
+            role: "agents".to_string(),
+            agent_id: Some(agent_id.to_string()),
+            card_id: card_id.map(|id| id.to_string()),
+            planner_chat_id: None,
+        }
+    }
+
     fn board_card(id: &str, column: &str, depends_on: Vec<&str>) -> BoardCard {
         let now = chrono::Utc::now().to_rfc3339();
         BoardCard {
@@ -1369,6 +1383,170 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_memory_injection_hides_another_agents_private_memory() {
+        let task_id = "task-memory-agent-private";
+        let (_temp, app, task_dir) = task_memory_test_app(task_id).await;
+        write_task_memory(
+            &task_dir,
+            "shared.md",
+            "namespace: task\nkind: decision",
+            "SHARED_MEMORY",
+        )
+        .await;
+        write_task_memory(
+            &task_dir,
+            "private.md",
+            "namespace: agent:A-1\nkind: decision\ntitle: AGENT_ONE_SECRET_TITLE",
+            "PRIVATE_MEMORY",
+        )
+        .await;
+
+        let meta = agent_task_meta(task_id, "A-2", Some("T-1"));
+        let files = injected_task_memory_files(&app, task_id, Some(&meta)).await;
+        let content = combined_task_memory_content(&files);
+
+        assert!(content.contains("SHARED_MEMORY"));
+        assert!(!content.contains("PRIVATE_MEMORY"));
+    }
+
+    #[tokio::test]
+    async fn task_memory_injection_pinned_agent_memory_stays_private() {
+        let task_id = "task-memory-agent-pinned-private";
+        let (_temp, app, task_dir) = task_memory_test_app(task_id).await;
+        write_task_memory(
+            &task_dir,
+            "pinned-private.md",
+            "namespace: agent:A-1\nkind: decision\npinned: true\ntitle: AGENT_ONE_SECRET_TITLE",
+            "PINNED_PRIVATE_MEMORY",
+        )
+        .await;
+        write_task_memory(&task_dir, "task.md", "namespace: task", "TASK_MEMORY").await;
+
+        let agent_meta = agent_task_meta(task_id, "A-2", Some("T-1"));
+        let agent_content = combined_task_memory_content(
+            &injected_task_memory_files(&app, task_id, Some(&agent_meta)).await,
+        );
+        assert!(agent_content.contains("TASK_MEMORY"));
+        assert!(!agent_content.contains("PINNED_PRIVATE_MEMORY"));
+
+        let planner_meta = task_meta(task_id, "planner", None);
+        let planner_content = combined_task_memory_content(
+            &injected_task_memory_files(&app, task_id, Some(&planner_meta)).await,
+        );
+        assert!(!planner_content.contains("PINNED_PRIVATE_MEMORY"));
+    }
+
+    #[tokio::test]
+    async fn task_memory_injection_keeps_own_agent_private_memory() {
+        let task_id = "task-memory-agent-owner";
+        let (_temp, app, task_dir) = task_memory_test_app(task_id).await;
+        write_task_memory(
+            &task_dir,
+            "private.md",
+            "namespace: agent:A-1\nkind: decision\npinned: true",
+            "OWN_PRIVATE_MEMORY",
+        )
+        .await;
+
+        let meta = agent_task_meta(task_id, "A-1", Some("T-1"));
+        let files = injected_task_memory_files(&app, task_id, Some(&meta)).await;
+        let content = combined_task_memory_content(&files);
+
+        assert!(content.contains("OWN_PRIVATE_MEMORY"));
+    }
+
+    #[tokio::test]
+    async fn task_memory_injection_denied_memory_leaves_no_count_or_marker() {
+        let task_id = "task-memory-agent-no-trace";
+        let (_temp, app, task_dir) = task_memory_test_app(task_id).await;
+        write_task_memory(&task_dir, "task.md", "namespace: task", "TASK_MEMORY").await;
+        write_task_memory(
+            &task_dir,
+            "private.md",
+            "namespace: agent:A-1\nkind: decision\ntitle: AGENT_ONE_SECRET_TITLE",
+            "PRIVATE_MEMORY",
+        )
+        .await;
+
+        let meta = agent_task_meta(task_id, "A-2", Some("T-1"));
+        let files = injected_task_memory_files(&app, task_id, Some(&meta)).await;
+        let content = combined_task_memory_content(&files);
+
+        assert!(content.contains(
+            "Showing 1 of 1 memories (0 archived/superseded skipped, 0 dropped over budget)."
+        ));
+        assert!(!content.contains("AGENT_ONE_SECRET_TITLE"));
+        assert!(!content.contains("outside scope skipped"));
+        assert!(files
+            .iter()
+            .all(|file| !file.file_name.contains("private.md")));
+    }
+
+    #[tokio::test]
+    async fn task_memory_injection_carries_provenance_and_trust_label() {
+        let task_id = "task-memory-provenance";
+        let (_temp, app, task_dir) = task_memory_test_app(task_id).await;
+        write_task_memory(
+            &task_dir,
+            "decision.md",
+            "namespace: task\nkind: decision\nrole: agents\nagent_id: A-1\nrun_id: chat-a1\ncreated_at: 2026-05-22T00:00:00Z",
+            "DECISION_MEMORY",
+        )
+        .await;
+
+        let meta = task_meta(task_id, "planner", None);
+        let files = injected_task_memory_files(&app, task_id, Some(&meta)).await;
+        let content = combined_task_memory_content(&files);
+
+        assert!(content.contains(
+            "writer: agents | agent: A-1 | at: 2026-05-22T00:00:00Z | run: chat-a1 | trust: untrusted-historical"
+        ));
+        assert!(content.contains(crate::tools::tool_task_memory::MEMORY_TRUST_NOTE));
+    }
+
+    #[tokio::test]
+    async fn task_memory_injection_supervisor_override_is_explicit_and_audited() {
+        let task_id = "task-memory-agent-override";
+        let (temp, app, task_dir) = task_memory_test_app(task_id).await;
+        write_task_memory(&task_dir, "task.md", "namespace: task", "TASK_MEMORY").await;
+        write_task_memory(
+            &task_dir,
+            "private.md",
+            "namespace: agent:A-1\nkind: decision",
+            "PRIVATE_MEMORY",
+        )
+        .await;
+
+        let planner_meta = task_meta(task_id, "planner", None);
+        let without_override = combined_task_memory_content(
+            &injected_task_memory_files(&app, task_id, Some(&planner_meta)).await,
+        );
+        assert!(without_override.contains("TASK_MEMORY"));
+        assert!(!without_override.contains("PRIVATE_MEMORY"));
+
+        let refact_dir = temp.path().join(".refact");
+        tokio::fs::create_dir_all(&refact_dir).await.unwrap();
+        tokio::fs::write(
+            refact_dir.join("coordination.yaml"),
+            "memory_supervisor_override: true\n",
+        )
+        .await
+        .unwrap();
+
+        let with_override = combined_task_memory_content(
+            &injected_task_memory_files(&app, task_id, Some(&planner_meta)).await,
+        );
+        assert!(with_override.contains("PRIVATE_MEMORY"));
+
+        let audit = tokio::fs::read_to_string(task_dir.join(".mem_access_audit.jsonl"))
+            .await
+            .unwrap();
+        assert!(audit.contains("supervisor_override"));
+        assert!(audit.contains("task_context_injection"));
+        assert!(audit.contains("agent:A-1"));
+    }
+
+    #[tokio::test]
     async fn task_briefing_small_content_skips_briefing() {
         let _guard = reset_task_briefing_tests().await;
         let task_id = "task-briefing-small";
@@ -1864,6 +2042,7 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
 
 const TASK_MEMORIES_CONTEXT_MARKER: &str = "task_memories_context";
 const TASK_BRIEFING_CONTEXT_MARKER: &str = "task_briefing";
+const TASK_CONTEXT_INJECTION_SURFACE: &str = "task_context_injection";
 const MAX_TASK_MEMORY_CONTENT_SIZE: usize = 3000;
 const MAX_TASK_MEMORIES_TOTAL_SIZE: usize = 25_000;
 const MIN_TASK_BRIEFING_SOURCE_SIZE: usize = 2_000;
@@ -2134,9 +2313,14 @@ fn include_task_memory_bucket(
         }
         *total_size += content_size;
         *included_count += 1;
+        let content = format!(
+            "{}\n{}",
+            crate::tools::tool_task_memory::memory_provenance_line(&memory.frontmatter),
+            truncated_content
+        );
         entries.push(TaskContextEntry {
             path: memory.path,
-            content: truncated_content,
+            content,
             kind: TaskContextEntryKind::Memory,
             updated_at: memory.updated_at,
             fingerprint_content: memory.content,
@@ -2234,7 +2418,16 @@ async fn build_task_context_injection_plan(
     task_id: &str,
     task_meta: Option<&crate::chat::types::TaskMeta>,
 ) -> Result<Option<TaskContextInjectionPlan>, String> {
-    let memories = app.tool_registry.load_task_memories(task_id).await?;
+    let access =
+        crate::tools::tool_task_memory::memory_access_context(app.gcx.clone(), task_meta, task_id)
+            .await;
+    let memories = crate::tools::tool_task_memory::load_task_memories(
+        app.gcx.clone(),
+        task_id,
+        &access,
+        TASK_CONTEXT_INJECTION_SURFACE,
+    )
+    .await?;
     let pinned_documents = load_pinned_task_documents(app, task_id).await?;
     if memories.is_empty() && pinned_documents.is_empty() {
         return Ok(None);
@@ -2350,7 +2543,8 @@ async fn build_task_context_injection_plan(
     entries.extend(pinned_documents);
 
     let mut footer = format!(
-        "Showing {} of {} memories ({} archived/superseded skipped, {} dropped over budget). Search more with task_mem_search().",
+        "{}\nShowing {} of {} memories ({} archived/superseded skipped, {} dropped over budget). Search more with task_mem_search().",
+        crate::tools::tool_task_memory::MEMORY_TRUST_NOTE,
         included_count,
         memories.len(),
         archived_skipped,
