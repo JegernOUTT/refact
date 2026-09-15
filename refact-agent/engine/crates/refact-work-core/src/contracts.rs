@@ -15,6 +15,34 @@ pub enum WorkPhase {
 }
 
 impl WorkPhase {
+    pub const ALL: [WorkPhase; 8] = [
+        WorkPhase::Queued,
+        WorkPhase::Admitted,
+        WorkPhase::Running,
+        WorkPhase::Parked,
+        WorkPhase::Waiting,
+        WorkPhase::Finished,
+        WorkPhase::Failed,
+        WorkPhase::Cancelled,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkPhase::Queued => "queued",
+            WorkPhase::Admitted => "admitted",
+            WorkPhase::Running => "running",
+            WorkPhase::Parked => "parked",
+            WorkPhase::Waiting => "waiting",
+            WorkPhase::Finished => "finished",
+            WorkPhase::Failed => "failed",
+            WorkPhase::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<WorkPhase> {
+        WorkPhase::ALL.into_iter().find(|p| p.as_str() == raw)
+    }
+
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
@@ -37,6 +65,28 @@ pub enum WorkOrigin {
     Subchat,
     Scheduler,
     External,
+}
+
+impl WorkOrigin {
+    pub const ALL: [WorkOrigin; 4] = [
+        WorkOrigin::User,
+        WorkOrigin::Subchat,
+        WorkOrigin::Scheduler,
+        WorkOrigin::External,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkOrigin::User => "user",
+            WorkOrigin::Subchat => "subchat",
+            WorkOrigin::Scheduler => "scheduler",
+            WorkOrigin::External => "external",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<WorkOrigin> {
+        WorkOrigin::ALL.into_iter().find(|o| o.as_str() == raw)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

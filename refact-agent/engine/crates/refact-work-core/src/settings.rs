@@ -107,6 +107,19 @@ pub struct CoordinationSettings {
     pub max_path_scope_entries: usize,
     /// Prior-run outcomes retained on a closed or continued child record.
     pub agent_closed_retained_max: usize,
+    /// Milliseconds a coordination-store connection waits for a competing
+    /// writer before reporting the database as busy.
+    pub store_busy_timeout_ms: u64,
+    /// The coordination store refuses to open on a detected network
+    /// filesystem, where WAL locking is not dependable. Setting this accepts
+    /// that risk and downgrades the refusal to a reported warning.
+    pub store_allow_non_local_filesystem: bool,
+    pub store_max_engine_instances: usize,
+    pub store_max_run_intents: usize,
+    pub store_max_queued_work: usize,
+    pub store_max_leases: usize,
+    pub store_max_outbox_messages: usize,
+    pub store_max_activity_observations: usize,
 }
 
 impl Default for CoordinationSettings {
@@ -196,6 +209,14 @@ impl Default for CoordinationSettings {
             strict_path_scope_default: false,
             max_path_scope_entries: 256,
             agent_closed_retained_max: 64,
+            store_busy_timeout_ms: 5_000,
+            store_allow_non_local_filesystem: false,
+            store_max_engine_instances: 512,
+            store_max_run_intents: 65_536,
+            store_max_queued_work: 65_536,
+            store_max_leases: 16_384,
+            store_max_outbox_messages: 65_536,
+            store_max_activity_observations: 262_144,
         }
     }
 }
@@ -449,9 +470,27 @@ impl CoordinationSettings {
             ("board_claim_key_max_len", self.board_claim_key_max_len),
             ("agent_wait_max_agents", self.agent_wait_max_agents),
             ("agent_closed_retained_max", self.agent_closed_retained_max),
+            (
+                "store_max_engine_instances",
+                self.store_max_engine_instances,
+            ),
+            ("store_max_run_intents", self.store_max_run_intents),
+            ("store_max_queued_work", self.store_max_queued_work),
+            ("store_max_leases", self.store_max_leases),
+            ("store_max_outbox_messages", self.store_max_outbox_messages),
+            (
+                "store_max_activity_observations",
+                self.store_max_activity_observations,
+            ),
         ] {
             at_least(&mut v, field, value as u64, 1);
         }
+        at_least(
+            &mut v,
+            "store_busy_timeout_ms",
+            self.store_busy_timeout_ms,
+            1,
+        );
         at_least(
             &mut v,
             "subagent_max_steps",
@@ -812,6 +851,33 @@ mod tests {
             |settings: &mut CoordinationSettings| settings.handoff_report_max_entries = 0,
             |settings: &mut CoordinationSettings| settings.handoff_report_max_chars = 0,
             |settings: &mut CoordinationSettings| settings.handoff_metric_max_records = 0,
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn store_bounds_default_generous_and_reject_zero() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(!settings.store_allow_non_local_filesystem);
+        assert!(settings.store_busy_timeout_ms >= 1_000);
+        assert!(settings.store_max_engine_instances >= 1);
+        assert!(settings.store_max_run_intents >= 1024);
+        assert!(settings.store_max_queued_work >= 1024);
+        assert!(settings.store_max_leases >= 1024);
+        assert!(settings.store_max_outbox_messages >= 1024);
+        assert!(settings.store_max_activity_observations >= 1024);
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.store_busy_timeout_ms = 0,
+            |settings: &mut CoordinationSettings| settings.store_max_engine_instances = 0,
+            |settings: &mut CoordinationSettings| settings.store_max_run_intents = 0,
+            |settings: &mut CoordinationSettings| settings.store_max_queued_work = 0,
+            |settings: &mut CoordinationSettings| settings.store_max_leases = 0,
+            |settings: &mut CoordinationSettings| settings.store_max_outbox_messages = 0,
+            |settings: &mut CoordinationSettings| settings.store_max_activity_observations = 0,
         ] {
             let mut settings = CoordinationSettings::default();
             mutate(&mut settings);

@@ -17,6 +17,10 @@ impl RuntimeKind {
             RuntimeKind::BackgroundAgent => "background_agent",
         }
     }
+
+    pub fn parse(raw: &str) -> Option<RuntimeKind> {
+        RuntimeKind::ALL.into_iter().find(|k| k.as_str() == raw)
+    }
 }
 
 impl fmt::Display for RuntimeKind {

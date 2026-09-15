@@ -4849,9 +4849,12 @@ dependencies = [
 name = "refact-work-core"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-rusqlite",
 ]
 
 [[package]]
