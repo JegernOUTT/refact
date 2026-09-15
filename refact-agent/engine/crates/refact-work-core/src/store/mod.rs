@@ -20,6 +20,10 @@ use tokio_rusqlite::Connection;
 
 const MEMORY_PATH: &str = ":memory:";
 
+const ACTIVITY_COLUMNS: &str = "project, record_id, runtime, work_id, path, access, \
+     content_hash, observed_at_ms, file_key, file_alias, instance_id, tool_call, \
+     content_hash_before, checkout";
+
 static NEXT_STORE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub fn default_store_path(cache_dir: &Path) -> PathBuf {
@@ -1028,12 +1032,17 @@ impl CoordinationStore {
             .call(move |conn| {
                 conn.execute(
                     "INSERT INTO activity_observations (project, record_id, runtime, work_id, \
-                     path, access, content_hash, observed_at_ms) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                     path, access, content_hash, observed_at_ms, file_key, file_alias, \
+                     instance_id, tool_call, content_hash_before, checkout) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
                      ON CONFLICT(project, record_id) DO UPDATE SET runtime = excluded.runtime, \
                      work_id = excluded.work_id, path = excluded.path, \
                      access = excluded.access, content_hash = excluded.content_hash, \
-                     observed_at_ms = excluded.observed_at_ms",
+                     observed_at_ms = excluded.observed_at_ms, file_key = excluded.file_key, \
+                     file_alias = excluded.file_alias, instance_id = excluded.instance_id, \
+                     tool_call = excluded.tool_call, \
+                     content_hash_before = excluded.content_hash_before, \
+                     checkout = excluded.checkout",
                     params![
                         scope,
                         record.record_id,
@@ -1042,7 +1051,13 @@ impl CoordinationStore {
                         record.path,
                         record.access.as_str(),
                         record.content_hash,
-                        record.observed_at_ms
+                        record.observed_at_ms,
+                        record.file_key,
+                        record.file_alias,
+                        record.instance_id,
+                        record.tool_call,
+                        record.content_hash_before,
+                        record.checkout
                     ],
                 )?;
                 Ok(())
@@ -1060,11 +1075,10 @@ impl CoordinationStore {
         let record_id = record_id.to_string();
         self.conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT project, record_id, runtime, work_id, path, access, content_hash, \
-                     observed_at_ms FROM activity_observations \
-                     WHERE project = ?1 AND record_id = ?2",
-                )?;
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {ACTIVITY_COLUMNS} FROM activity_observations \
+                     WHERE project = ?1 AND record_id = ?2"
+                ))?;
                 let row = stmt
                     .query_row(params![scope, record_id], activity_columns)
                     .optional()?;
@@ -1085,17 +1099,53 @@ impl CoordinationStore {
         let limit = self.settings.store_max_activity_observations as i64;
         self.conn
             .call(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT project, record_id, runtime, work_id, path, access, content_hash, \
-                     observed_at_ms FROM activity_observations WHERE project = ?1 \
-                     ORDER BY observed_at_ms DESC, record_id ASC LIMIT ?2",
-                )?;
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {ACTIVITY_COLUMNS} FROM activity_observations WHERE project = ?1 \
+                     ORDER BY observed_at_ms DESC, record_id ASC LIMIT ?2"
+                ))?;
                 let rows = stmt.query_map(params![scope, limit], activity_columns)?;
                 let mut records = Vec::new();
                 for row in rows {
                     records.push(decode_activity(row?)?);
                 }
                 Ok(records)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// The most recent observation of one logical file, newest first with
+    /// `record_id` breaking a timestamp tie so the answer is deterministic.
+    /// `None` means nothing was recorded — never a guess at who wrote it.
+    pub async fn last_activity_for_file(
+        &self,
+        access: &ProjectAccess,
+        file_key: &str,
+        kind: AccessKind,
+        since_ms: i64,
+        excluding_work_id: Option<&str>,
+    ) -> Result<Option<ActivityObservationRecord>, StoreError> {
+        let scope = self.scope(access)?;
+        let file_key = file_key.to_string();
+        let excluding_work_id = excluding_work_id.map(str::to_string);
+        self.conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {ACTIVITY_COLUMNS} FROM activity_observations \
+                     WHERE project = ?1 AND file_key = ?2 AND access = ?3 AND observed_at_ms >= ?4 \
+                     AND (?5 IS NULL OR work_id <> ?5) \
+                     ORDER BY observed_at_ms DESC, record_id DESC LIMIT 1"
+                ))?;
+                let row = stmt
+                    .query_row(
+                        params![scope, file_key, kind.as_str(), since_ms, excluding_work_id],
+                        activity_columns,
+                    )
+                    .optional()?;
+                match row {
+                    Some(row) => Ok(Some(decode_activity(row)?)),
+                    None => Ok(None),
+                }
             })
             .await
             .map_err(|err| from_tokio(&self.path, err))
@@ -1115,6 +1165,57 @@ impl CoordinationStore {
                     params![scope, record_id],
                 )?;
                 Ok(affected > 0)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// Deletion control: drop every observation of one logical file, or of the
+    /// whole authorized project when `file_key` is `None`.
+    pub async fn delete_activity_observations(
+        &self,
+        access: &ProjectAccess,
+        file_key: Option<&str>,
+    ) -> Result<usize, StoreError> {
+        let scope = self.scope(access)?;
+        let file_key = file_key.map(str::to_string);
+        self.conn
+            .call(move |conn| {
+                let removed = match file_key {
+                    Some(file_key) => conn.execute(
+                        "DELETE FROM activity_observations WHERE project = ?1 AND file_key = ?2",
+                        params![scope, file_key],
+                    )?,
+                    None => conn.execute(
+                        "DELETE FROM activity_observations WHERE project = ?1",
+                        params![scope],
+                    )?,
+                };
+                Ok(removed)
+            })
+            .await
+            .map_err(|err| from_tokio(&self.path, err))
+    }
+
+    /// Keep the newest `max_records` observations of this project and delete
+    /// the rest. The order is total — `observed_at_ms` then `record_id` — so
+    /// the same overflow always evicts the same rows.
+    pub async fn prune_activity_observations(
+        &self,
+        access: &ProjectAccess,
+        max_records: usize,
+    ) -> Result<usize, StoreError> {
+        let scope = self.scope(access)?;
+        let limit = max_records as i64;
+        self.conn
+            .call(move |conn| {
+                let removed = conn.execute(
+                    "DELETE FROM activity_observations WHERE project = ?1 AND record_id IN \
+                     (SELECT record_id FROM activity_observations WHERE project = ?1 \
+                     ORDER BY observed_at_ms DESC, record_id DESC LIMIT -1 OFFSET ?2)",
+                    params![scope, limit],
+                )?;
+                Ok(removed)
             })
             .await
             .map_err(|err| from_tokio(&self.path, err))
@@ -1404,52 +1505,70 @@ fn decode_outbox(columns: OutboxColumns) -> Result<DeliveryOutboxRecord, tokio_r
     })
 }
 
-type ActivityColumns = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    i64,
-);
+struct ActivityColumns {
+    project: String,
+    record_id: String,
+    runtime: String,
+    work_id: String,
+    path: String,
+    access: String,
+    content_hash: Option<String>,
+    observed_at_ms: i64,
+    file_key: String,
+    file_alias: Option<String>,
+    instance_id: String,
+    tool_call: Option<String>,
+    content_hash_before: Option<String>,
+    checkout: Option<String>,
+}
 
 fn activity_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActivityColumns> {
-    Ok((
-        row.get(0)?,
-        row.get(1)?,
-        row.get(2)?,
-        row.get(3)?,
-        row.get(4)?,
-        row.get(5)?,
-        row.get(6)?,
-        row.get(7)?,
-    ))
+    Ok(ActivityColumns {
+        project: row.get(0)?,
+        record_id: row.get(1)?,
+        runtime: row.get(2)?,
+        work_id: row.get(3)?,
+        path: row.get(4)?,
+        access: row.get(5)?,
+        content_hash: row.get(6)?,
+        observed_at_ms: row.get(7)?,
+        file_key: row.get(8)?,
+        file_alias: row.get(9)?,
+        instance_id: row.get(10)?,
+        tool_call: row.get(11)?,
+        content_hash_before: row.get(12)?,
+        checkout: row.get(13)?,
+    })
 }
 
 fn decode_activity(
     columns: ActivityColumns,
 ) -> Result<ActivityObservationRecord, tokio_rusqlite::Error> {
-    let (project, record_id, runtime, work_id, path, access, content_hash, observed_at_ms) =
-        columns;
-    let runtime = RuntimeKind::parse(&runtime).ok_or_else(|| {
+    let runtime = RuntimeKind::parse(&columns.runtime).ok_or_else(|| {
         decode(format!(
-            "unknown runtime kind `{runtime}` in activity_observations"
+            "unknown runtime kind `{}` in activity_observations",
+            columns.runtime
         ))
     })?;
-    let access = AccessKind::parse(&access).ok_or_else(|| {
+    let access = AccessKind::parse(&columns.access).ok_or_else(|| {
         decode(format!(
-            "unknown access kind `{access}` in activity_observations"
+            "unknown access kind `{}` in activity_observations",
+            columns.access
         ))
     })?;
     Ok(ActivityObservationRecord {
-        project: ProjectKey::new(project),
-        record_id,
-        work: WorkKey::new(runtime, work_id),
-        path,
+        project: ProjectKey::new(columns.project),
+        record_id: columns.record_id,
+        work: WorkKey::new(runtime, columns.work_id),
+        path: columns.path,
         access,
-        content_hash,
-        observed_at_ms,
+        content_hash: columns.content_hash,
+        observed_at_ms: columns.observed_at_ms,
+        file_key: columns.file_key,
+        file_alias: columns.file_alias,
+        instance_id: columns.instance_id,
+        tool_call: columns.tool_call,
+        content_hash_before: columns.content_hash_before,
+        checkout: columns.checkout,
     })
 }

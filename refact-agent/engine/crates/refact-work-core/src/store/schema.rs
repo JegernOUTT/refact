@@ -2,6 +2,7 @@ pub const MIGRATIONS: &[&str] = &[
     V1_COORDINATION_CORE,
     V2_ACTIVITY_OBSERVATIONS,
     V3_ENGINE_PRESENCE_MARK,
+    V4_ACTIVITY_PROVENANCE,
 ];
 
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -94,4 +95,16 @@ CREATE INDEX idx_activity_observations_time
 
 const V3_ENGINE_PRESENCE_MARK: &str = "
 ALTER TABLE engine_instances ADD COLUMN presence_mark TEXT NOT NULL DEFAULT 'idle';
+";
+
+const V4_ACTIVITY_PROVENANCE: &str = "
+ALTER TABLE activity_observations ADD COLUMN file_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE activity_observations ADD COLUMN file_alias TEXT;
+ALTER TABLE activity_observations ADD COLUMN instance_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE activity_observations ADD COLUMN tool_call TEXT;
+ALTER TABLE activity_observations ADD COLUMN content_hash_before TEXT;
+ALTER TABLE activity_observations ADD COLUMN checkout TEXT;
+UPDATE activity_observations SET file_key = path WHERE file_key = '';
+CREATE INDEX idx_activity_observations_file_key
+    ON activity_observations (project, file_key, access, observed_at_ms);
 ";

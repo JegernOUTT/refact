@@ -50,6 +50,11 @@ pub struct Inspection {
     pub integration_overlaps: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_graph: Option<super::deadlock::WaitGraphView>,
+    /// Persisted last reader and last writer of each selected file, after
+    /// destination-model filtering. Absent means nothing was recorded, not
+    /// that the file is free.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_provenance: Vec<super::file_provenance::ProvenanceEntry>,
     #[serde(flatten)]
     pub page: WorkOverview,
 }
@@ -445,11 +450,21 @@ pub async fn inspect(
         .filter(|row| advisory.contains(&row.key))
         .map(|row| row.key.to_string())
         .collect();
+    let file_keys: Vec<String> = paths
+        .iter()
+        .map(|path| crate::file_activity::resolve_key(path).0)
+        .collect();
+    let file_provenance = super::file_provenance::clear_for_model(
+        &app.gcx,
+        caller.model.as_ref(),
+        super::file_provenance::entries_for_files(&file_keys).await,
+    )?;
     Ok(Inspection {
         selector: request.selector,
         row,
         integration_overlaps,
         wait_graph,
+        file_provenance,
         page,
     })
 }

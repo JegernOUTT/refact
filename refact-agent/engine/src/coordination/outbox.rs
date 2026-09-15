@@ -249,7 +249,7 @@ static STORES: OnceLock<AMutex<HashMap<PathBuf, StoreCell>>> = OnceLock::new();
 
 /// One store per path per process. The registry lock is released before the
 /// open, so no lock is ever held across store I/O.
-async fn store_for_path(
+pub(super) async fn store_for_path(
     path: &Path,
     settings: &CoordinationSettings,
 ) -> Result<Arc<CoordinationStore>, StoreError> {

@@ -139,6 +139,34 @@ pub async fn list(
     ))
 }
 
+/// Deletion control for recorded file provenance: forget one authorized path,
+/// or everything this project recorded when no path is given.
+pub async fn forget_provenance(
+    State(app): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    query: ExtractedQuery,
+) -> Result<Json<serde_json::Value>, WorkError> {
+    authorize(&app, &headers, peer.map(|p| p.0))?;
+    let Query(query) = query.map_err(|_| WorkError::invalid("invalid Work query"))?;
+    if query.states.is_some() || query.scope.is_some() || query.cursor.is_some() {
+        return Err(WorkError::invalid(
+            "forgetting provenance only accepts chat_id and path",
+        ));
+    }
+    let caller = caller(&app, &query).await?;
+    let file_key = match &query.path {
+        Some(path) => {
+            Some(crate::file_activity::resolve_key(&scope::resolve_path(path, &caller)?).0)
+        }
+        None => None,
+    };
+    let removed = crate::coordination::file_provenance::forget(file_key.as_deref())
+        .await
+        .map_err(|_| WorkError::unavailable())?;
+    Ok(Json(serde_json::json!({ "removed": removed })))
+}
+
 /// Read-only view of who is waiting on whom, filtered to the runs this caller
 /// may already see.
 pub async fn wait_graph(

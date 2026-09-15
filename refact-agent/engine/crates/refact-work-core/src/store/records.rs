@@ -219,6 +219,15 @@ pub struct ActivityObservationRecord {
     pub access: AccessKind,
     pub content_hash: Option<String>,
     pub observed_at_ms: i64,
+    /// Logical file identity: the first canonical path observed for this
+    /// physical file, so every spelling and hard link collapses onto one key.
+    pub file_key: String,
+    /// Physical file identity when the platform exposes one.
+    pub file_alias: Option<String>,
+    pub instance_id: String,
+    pub tool_call: Option<String>,
+    pub content_hash_before: Option<String>,
+    pub checkout: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

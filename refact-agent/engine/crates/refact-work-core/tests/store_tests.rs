@@ -89,6 +89,12 @@ fn observation(project: &str, record_id: &str, observed_at_ms: i64) -> ActivityO
         access: AccessKind::Write,
         content_hash: Some(format!("hash-{record_id}")),
         observed_at_ms,
+        file_key: format!("/{project}/src/{record_id}.rs"),
+        file_alias: Some(format!("id:66:{record_id}")),
+        instance_id: format!("engine-{project}"),
+        tool_call: Some("patch".to_string()),
+        content_hash_before: Some(format!("before-{record_id}")),
+        checkout: Some(format!("/{project}")),
     }
 }
 
@@ -546,6 +552,102 @@ async fn prune_enforces_retention_per_project() {
         store.list_activity_observations(&beta).await.unwrap().len(),
         2
     );
+}
+
+#[tokio::test]
+async fn file_provenance_lookup_deletion_and_eviction_stay_project_scoped() {
+    let store = CoordinationStore::open_in_memory(&settings())
+        .await
+        .unwrap();
+    let alpha = store.authorize(ProjectKey::new("alpha"));
+    let beta = store.authorize(ProjectKey::new("beta"));
+    let key = "/alpha/src/obs-1.rs";
+
+    for project in ["alpha", "beta"] {
+        let access = if project == "alpha" { &alpha } else { &beta };
+        let mut record = observation(project, "obs-1", 1_700_000_050_000);
+        record.file_key = key.to_string();
+        store
+            .put_activity_observation(access, &record)
+            .await
+            .unwrap();
+    }
+    let mut older = observation("alpha", "obs-0", 1_700_000_040_000);
+    older.file_key = key.to_string();
+    store
+        .put_activity_observation(&alpha, &older)
+        .await
+        .unwrap();
+
+    let found = store
+        .last_activity_for_file(&alpha, key, AccessKind::Write, 0, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.record_id, "obs-1");
+    assert_eq!(found.instance_id, "engine-alpha");
+    assert_eq!(found.content_hash_before.as_deref(), Some("before-obs-1"));
+    assert!(store
+        .last_activity_for_file(&alpha, key, AccessKind::Write, 0, Some("traj-1"))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .last_activity_for_file(&alpha, key, AccessKind::Read, 0, None)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .last_activity_for_file(&alpha, key, AccessKind::Write, 1_700_000_050_001, None)
+        .await
+        .unwrap()
+        .is_none());
+
+    assert_eq!(
+        store.prune_activity_observations(&alpha, 1).await.unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_activity_observations(&alpha)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .delete_activity_observations(&alpha, Some(key))
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(store
+        .last_activity_for_file(&alpha, key, AccessKind::Write, 0, None)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store
+            .last_activity_for_file(&beta, key, AccessKind::Write, 0, None)
+            .await
+            .unwrap()
+            .unwrap()
+            .project,
+        ProjectKey::new("beta")
+    );
+    assert_eq!(
+        store
+            .delete_activity_observations(&beta, None)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(store
+        .list_activity_observations(&beta)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

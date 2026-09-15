@@ -107,6 +107,8 @@ pub async fn start_full_soak_background_tasks(gcx: Arc<GlobalContext>) -> Backgr
     let cache_maintenance_app = app_state.clone();
     let outbox_app = app_state.clone();
     let outbox_shutdown = gcx.shutdown_flag.clone();
+    let provenance_app = app_state.clone();
+    let provenance_shutdown = gcx.shutdown_flag.clone();
     let background_agent_monitor_shutdown = gcx.shutdown_flag.clone();
     let trajectory_index_coordinator = gcx.trajectory_index_coordinator.clone();
     let trajectory_index_shutdown = gcx.shutdown_flag.clone();
@@ -136,6 +138,12 @@ pub async fn start_full_soak_background_tasks(gcx: Arc<GlobalContext>) -> Backgr
             crate::coordination::outbox::outbox_recovery_background_task(
                 outbox_app,
                 outbox_shutdown,
+            ),
+        ),
+        tokio::spawn(
+            crate::coordination::file_provenance::file_provenance_background_task(
+                provenance_app,
+                provenance_shutdown,
             ),
         ),
         tokio::spawn(cache_maintenance_background_task(
@@ -173,6 +181,8 @@ pub async fn start_background_tasks(
     let cache_maintenance_app = app_state.clone();
     let outbox_app = app_state.clone();
     let outbox_shutdown = gcx.shutdown_flag.clone();
+    let provenance_app = app_state.clone();
+    let provenance_shutdown = gcx.shutdown_flag.clone();
     let background_agent_monitor_shutdown = gcx.shutdown_flag.clone();
     let trajectory_index_coordinator = gcx.trajectory_index_coordinator.clone();
     let trajectory_index_shutdown = gcx.shutdown_flag.clone();
@@ -220,6 +230,12 @@ pub async fn start_background_tasks(
             crate::coordination::outbox::outbox_recovery_background_task(
                 outbox_app,
                 outbox_shutdown,
+            ),
+        ),
+        tokio::spawn(
+            crate::coordination::file_provenance::file_provenance_background_task(
+                provenance_app,
+                provenance_shutdown,
             ),
         ),
         tokio::spawn(

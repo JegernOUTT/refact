@@ -725,6 +725,7 @@ pub struct WriteGuard {
     alias: Option<String>,
     path: PathBuf,
     tool: String,
+    digest_before: Option<String>,
     committed: bool,
     _locks: Arc<Vec<HeldLock>>,
 }
@@ -760,6 +761,19 @@ impl WriteGuard {
             at_ms,
         };
         let max_writes = settings().max_write_records.max(1);
+        crate::coordination::file_provenance::observe(
+            crate::coordination::file_provenance::ObservedActivity {
+                file_key: self.key.clone(),
+                file_alias: self.alias.clone(),
+                path: observation.path.clone(),
+                actor: self.actor.clone(),
+                tool: self.tool.clone(),
+                access: refact_work_core::AccessKind::Write,
+                digest_before: self.digest_before.clone(),
+                digest_after,
+                at_ms: at_ms as i64,
+            },
+        );
         write_registry(move |reg| {
             reg.writes.push(observation);
             while reg.writes.len() > max_writes {
@@ -787,8 +801,61 @@ fn last_other_writer(key: &str, actor: Option<&str>, since_ms: u64) -> Option<Wr
     })
 }
 
-fn attribution_hint(_key: &str, _actor: Option<&str>, _since_ms: u64) -> String {
-    " The writer is external or not authorized for disclosure in this result.".into()
+/// Names the other writer when this project actually recorded that write, and
+/// says so honestly when it did not. Durable provenance answers first, because
+/// it is the only source that can see another process; the process-local
+/// registry is the degraded answer when no store is available.
+async fn attribution_hint(key: &str, actor: Option<&str>, since_ms: u64) -> String {
+    let durable =
+        crate::coordination::file_provenance::last_writer(key, actor, since_ms as i64).await;
+    if durable.is_named() {
+        return crate::coordination::file_provenance::render(&durable);
+    }
+    match last_other_writer(key, actor, since_ms) {
+        Some(write) => crate::coordination::file_provenance::render(
+            &crate::coordination::file_provenance::WriterAttribution::Named {
+                actor: write.actor,
+                tool: write.tool,
+                instance_id: "this engine".to_string(),
+                at_ms: write.at_ms as i64,
+            },
+        ),
+        None => crate::coordination::file_provenance::EXTERNAL_OR_UNKNOWN.to_string(),
+    }
+}
+
+/// A write this chat may not make. A stale refusal is resolved separately
+/// because naming the other writer needs the store, and the store is never
+/// touched while the per-path validation runs.
+enum Refusal {
+    Message(String),
+    Stale {
+        path: PathBuf,
+        state: ActorState,
+        key: String,
+        actor: Option<String>,
+    },
+}
+
+impl From<String> for Refusal {
+    fn from(message: String) -> Refusal {
+        Refusal::Message(message)
+    }
+}
+
+async fn refusal_message(refusal: Refusal) -> String {
+    match refusal {
+        Refusal::Message(message) => message,
+        Refusal::Stale {
+            path,
+            state,
+            key,
+            actor,
+        } => {
+            let hint = attribution_hint(&key, actor.as_deref(), state.at_ms).await;
+            stale_message(&path, &state, &hint)
+        }
+    }
 }
 
 /// Acquires the cooperative lock for `path` and refuses the write when the
@@ -817,6 +884,9 @@ pub async fn begin_writes(
     for (path, _) in paths {
         crate::coordination::scope::canonical_candidate(path).map_err(|error| error.to_string())?;
     }
+    // Read-after-flush: everything already committed is durable before this
+    // write can be refused on the strength of who wrote the file last.
+    crate::coordination::file_provenance::flush().await;
     let deadline = Instant::now() + Duration::from_secs(cfg.lock_timeout_secs.max(1));
     let poll = Duration::from_millis(cfg.lock_poll_interval_ms.clamp(1, 5_000));
 
@@ -854,10 +924,14 @@ pub async fn begin_writes(
     };
 
     let locks = Arc::new(locks);
-    paths
-        .iter()
-        .map(|(path, intent)| validate_write(actor, path, *intent, tool, locks.clone(), &cfg))
-        .collect()
+    let mut guards = Vec::with_capacity(paths.len());
+    for (path, intent) in paths {
+        match validate_write(actor, path, *intent, tool, locks.clone(), &cfg) {
+            Ok(guard) => guards.push(guard),
+            Err(refusal) => return Err(refusal_message(refusal).await),
+        }
+    }
+    Ok(guards)
 }
 
 fn validate_write(
@@ -867,14 +941,19 @@ fn validate_write(
     tool: &str,
     locks: Arc<Vec<HeldLock>>,
     cfg: &refact_work_core::CoordinationSettings,
-) -> Result<WriteGuard, String> {
+) -> Result<WriteGuard, Refusal> {
     let (key, alias) = resolve_key(path);
+    let before = match intent {
+        WriteIntent::Tree => None,
+        _ => current_state(path).map_err(Refusal::Message)?,
+    };
     let guard = WriteGuard {
         actor: actor.map(|a| a.to_string()),
         key: key.clone(),
         alias,
         path: path.to_path_buf(),
         tool: tool.to_string(),
+        digest_before: before.as_ref().map(|(digest, _)| digest.clone()),
         committed: false,
         _locks: locks,
     };
@@ -885,7 +964,9 @@ fn validate_write(
 
     if matches!(intent, WriteIntent::Tree) {
         if path.exists() && !path.is_dir() {
-            return Err("directory transaction requires a directory".into());
+            return Err("directory transaction requires a directory"
+                .to_string()
+                .into());
         }
         let reads = read_registry(|registry| {
             registry
@@ -905,24 +986,25 @@ fn validate_write(
                     .cloned()
             });
             if let Some(observed) = observed {
-                if current_state(Path::new(&read.path))?
+                if current_state(Path::new(&read.path))
+                    .map_err(Refusal::Message)?
                     .as_ref()
                     .map(|(digest, _)| digest)
                     != Some(&observed.digest)
                 {
-                    return Err(stale_message(
-                        Path::new(&read.path),
-                        &observed,
-                        &read.key,
-                        actor,
-                    ));
+                    return Err(Refusal::Stale {
+                        path: PathBuf::from(&read.path),
+                        state: observed,
+                        key: read.key.clone(),
+                        actor: actor.map(str::to_string),
+                    });
                 }
             }
         }
         return Ok(guard);
     }
 
-    let current = current_state(path)?;
+    let current = before.clone();
     let observed = actor.and_then(|actor| {
         read_registry(|reg| {
             reg.actor_state
@@ -938,7 +1020,8 @@ fn validate_write(
                 return Err(format!(
                     "⚠️ {:?} already exists. 💡 cat() it first, then edit it instead of creating it.",
                     path
-                ));
+                )
+                .into());
             }
         }
         WriteIntent::Overwrite { authorized } => {
@@ -949,10 +1032,10 @@ fn validate_write(
                             return Err(format!(
                                 "⚠️ {:?} exists and would be replaced whole, but this chat has not read it. 💡 cat() the whole file first.",
                                 path
-                            ));
+                            ).into());
                         }
                         Some(state) if &state.digest != current_digest => {
-                            return Err(stale_message(path, state, &key, actor));
+                            return Err(stale_refusal(path, state, &key, actor));
                         }
                         Some(state) if !state.whole => {
                             let reason = state.partial_reason.clone().unwrap_or_else(|| {
@@ -961,7 +1044,7 @@ fn validate_write(
                             return Err(format!(
                                 "⚠️ {:?} was only read partially ({}). 💡 cat() the whole file before replacing it.",
                                 path, reason
-                            ));
+                            ).into());
                         }
                         Some(_) => {}
                     }
@@ -971,11 +1054,11 @@ fn validate_write(
         WriteIntent::Contextual | WriteIntent::Delete | WriteIntent::Rename => {
             if let (Some((current_digest, _)), Some(state)) = (&current, &observed) {
                 if &state.digest != current_digest {
-                    return Err(stale_message(path, state, &key, actor));
+                    return Err(stale_refusal(path, state, &key, actor));
                 }
             }
             if current.is_none() && !matches!(intent, WriteIntent::Contextual) {
-                return Err(format!("⚠️ {:?} does not exist.", path));
+                return Err(format!("⚠️ {:?} does not exist.", path).into());
             }
         }
     }
@@ -983,14 +1066,23 @@ fn validate_write(
     Ok(guard)
 }
 
-fn stale_message(path: &Path, state: &ActorState, key: &str, actor: Option<&str>) -> String {
+fn stale_refusal(path: &Path, state: &ActorState, key: &str, actor: Option<&str>) -> Refusal {
+    Refusal::Stale {
+        path: path.to_path_buf(),
+        state: state.clone(),
+        key: key.to_string(),
+        actor: actor.map(str::to_string),
+    }
+}
+
+fn stale_message(path: &Path, state: &ActorState, attribution: &str) -> String {
     let seen = if state.from_write { "wrote" } else { "read" };
     format!(
         "⚠️ {:?} changed on disk since this chat last {} it (seen {}, now different).{} 💡 cat() the file again and redo the edit against the current content.",
         path,
         seen,
         short_digest(&state.digest),
-        attribution_hint(key, actor, state.at_ms)
+        attribution
     )
 }
 
@@ -1026,6 +1118,19 @@ pub fn record_read(
     let max_reads = settings().max_read_stamps.max(1);
     let stored = observation.clone();
     let actor_owned = actor.map(|a| a.to_string());
+    crate::coordination::file_provenance::observe(
+        crate::coordination::file_provenance::ObservedActivity {
+            file_key: key.clone(),
+            file_alias: observation.alias.clone(),
+            path: observation.path.clone(),
+            actor: actor_owned.clone(),
+            tool: "read".to_string(),
+            access: refact_work_core::AccessKind::Read,
+            digest_before: None,
+            digest_after: Some(digest.clone()),
+            at_ms: at_ms as i64,
+        },
+    );
     write_registry(move |reg| {
         reg.reads.push(stored);
         while reg.reads.len() > max_reads {
@@ -1401,6 +1506,11 @@ mod tests {
         let id = std::env::var("REFACT_TEST_FILE_RACE_ID").unwrap();
         let root = PathBuf::from(root);
         let path = root.join("shared");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(install_race_provenance(&id));
         record_read(Some(&id), &path, "before", 1, 1, 1, None);
         std::fs::write(root.join(format!("ready-{id}")), "ready").unwrap();
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -1408,29 +1518,55 @@ mod tests {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));
         }
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
         let result = runtime.block_on(async {
-            let guard =
+            let mut guard =
                 begin_write(Some(&id), &path, WriteIntent::Contextual, "subprocess-test").await?;
             tokio::fs::write(&path, &id)
                 .await
                 .map_err(|error| error.to_string())?;
-            guard.commit(WriteKind::Modified, Some(&id));
+            guard.record_bytes(WriteKind::Modified, Some(id.as_bytes()));
+            // The record is durable before the cooperative lock is released,
+            // so the next writer can never be refused by an attribution this
+            // process has not persisted yet.
+            crate::coordination::file_provenance::flush().await;
+            drop(guard);
             Ok::<_, String>(())
         });
         std::fs::write(
             root.join(format!("result-{id}")),
-            if result.is_ok() { "won" } else { "stale" },
+            match result {
+                Ok(()) => "won".to_string(),
+                Err(error) => format!("stale:{error}"),
+            },
         )
         .unwrap();
     }
 
+    async fn install_race_provenance(id: &str) {
+        let Ok(store_path) = std::env::var("REFACT_TEST_FILE_RACE_STORE") else {
+            return;
+        };
+        let store = std::sync::Arc::new(
+            refact_work_core::CoordinationStore::open(
+                Path::new(&store_path),
+                &refact_work_core::CoordinationSettings::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        crate::coordination::file_provenance::install_sink(
+            store,
+            refact_work_core::ProjectKey::new("race"),
+            format!("engine-{id}"),
+            None,
+        );
+    }
+
+    #[serial_test::serial(file_provenance)]
     #[test]
     fn cooperating_processes_serialize_and_refuse_a_stale_visible_read() {
         let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("coordination.sqlite");
         std::fs::write(dir.path().join("shared"), "before").unwrap();
         let spawn = |id: &str| {
             std::process::Command::new(std::env::current_exe().unwrap())
@@ -1441,6 +1577,7 @@ mod tests {
                 ])
                 .env("REFACT_TEST_FILE_RACE_ROOT", dir.path())
                 .env("REFACT_TEST_FILE_RACE_ID", id)
+                .env("REFACT_TEST_FILE_RACE_STORE", &store_path)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn()
@@ -1465,7 +1602,131 @@ mod tests {
         let a = std::fs::read_to_string(dir.path().join("result-a")).unwrap();
         let b = std::fs::read_to_string(dir.path().join("result-b")).unwrap();
         assert_ne!(a, b);
-        assert!([a.as_str(), b.as_str()].contains(&"won"));
-        assert!([a.as_str(), b.as_str()].contains(&"stale"));
+        let (winner, refusal) = if a == "won" { ("a", b) } else { ("b", a) };
+        assert!(refusal.starts_with("stale:"));
+        assert!(
+            refusal.contains(&format!("written by {winner}")),
+            "a cross-process stale write must name the cooperating writer: {refusal}"
+        );
+
+        // A third process opens the store after both writers exited: the
+        // attribution has to survive the restart, by name.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let key = resolve_key(&dir.path().join("shared")).0;
+        let attribution = runtime.block_on(async {
+            crate::coordination::file_provenance::reset_for_tests();
+            let store = Arc::new(
+                refact_work_core::CoordinationStore::open(
+                    &store_path,
+                    &refact_work_core::CoordinationSettings::default(),
+                )
+                .await
+                .unwrap(),
+            );
+            crate::coordination::file_provenance::install_sink(
+                store,
+                refact_work_core::ProjectKey::new("race"),
+                "engine-observer",
+                None,
+            );
+            let attribution =
+                crate::coordination::file_provenance::last_writer(&key, Some("observer"), 0).await;
+            crate::coordination::file_provenance::reset_for_tests();
+            attribution
+        });
+        match attribution {
+            crate::coordination::file_provenance::WriterAttribution::Named {
+                actor,
+                tool,
+                instance_id,
+                ..
+            } => {
+                assert_eq!(actor.as_deref(), Some(winner));
+                assert_eq!(tool, "subprocess-test");
+                assert_eq!(instance_id, format!("engine-{winner}"));
+            }
+            other => panic!("attribution did not survive the restart: {other:?}"),
+        }
+    }
+
+    #[serial_test::serial(file_provenance)]
+    #[tokio::test]
+    async fn a_write_with_no_provenance_record_is_reported_as_external_or_unknown() {
+        crate::coordination::file_provenance::reset_for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edited-by-a-formatter");
+        std::fs::write(&path, "before").unwrap();
+        record_read(Some("external-case"), &path, "before", 1, 1, 1, None);
+        std::fs::write(&path, "reformatted").unwrap();
+
+        let error = begin_write(
+            Some("external-case"),
+            &path,
+            WriteIntent::Contextual,
+            "patch",
+        )
+        .await
+        .err()
+        .expect("a file changed underneath a visible read must be refused");
+        crate::coordination::file_provenance::reset_for_tests();
+
+        assert!(error.contains("changed on disk"), "{error}");
+        assert!(
+            error.contains(crate::coordination::file_provenance::EXTERNAL_OR_UNKNOWN),
+            "an editor, a shell or a formatter must never be given a fabricated name: {error}"
+        );
+    }
+
+    #[serial_test::serial(file_provenance)]
+    #[tokio::test]
+    async fn a_stale_refusal_names_the_writer_another_engine_recorded() {
+        crate::coordination::file_provenance::reset_for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared-with-a-peer");
+        std::fs::write(&path, "before").unwrap();
+        let key = resolve_key(&path).0;
+        let store = Arc::new(
+            refact_work_core::CoordinationStore::open_in_memory(
+                &refact_work_core::CoordinationSettings::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        crate::coordination::file_provenance::install_sink(
+            store,
+            refact_work_core::ProjectKey::new("alpha"),
+            "engine-peer",
+            None,
+        );
+        record_read(Some("named-case"), &path, "before", 1, 1, 1, None);
+        crate::coordination::file_provenance::observe(
+            crate::coordination::file_provenance::ObservedActivity {
+                file_key: key,
+                file_alias: None,
+                path: path.to_string_lossy().into_owned(),
+                actor: Some("peer-chat".to_string()),
+                tool: "patch".to_string(),
+                access: refact_work_core::AccessKind::Write,
+                digest_before: Some(digest_of("before")),
+                digest_after: Some(digest_of("peer wrote this")),
+                at_ms: now_ms() as i64,
+            },
+        );
+        std::fs::write(&path, "peer wrote this").unwrap();
+
+        let error = begin_write(Some("named-case"), &path, WriteIntent::Contextual, "patch")
+            .await
+            .err()
+            .expect("a file changed underneath a visible read must be refused");
+        crate::coordination::file_provenance::reset_for_tests();
+
+        assert!(error.contains("changed on disk"), "{error}");
+        assert!(
+            error.contains("written by peer-chat using patch"),
+            "a recorded cooperating writer has to be named: {error}"
+        );
     }
 }
