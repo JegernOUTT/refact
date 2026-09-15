@@ -88,7 +88,10 @@ pub struct SettingsChrome {
 
 impl SettingsChrome {
     pub fn launch_options(&self) -> BrowserLaunchOptions {
-        let base = browser_settings::current().to_launch_options();
+        self.launch_options_over(browser_settings::current().to_launch_options())
+    }
+
+    pub fn launch_options_over(&self, base: BrowserLaunchOptions) -> BrowserLaunchOptions {
         BrowserLaunchOptions {
             headless: self.headless.parse().unwrap_or(base.headless),
             chrome_path: (!self.chrome_path.is_empty())
@@ -124,9 +127,96 @@ impl SettingsChrome {
                 .ignore_https_errors
                 .parse()
                 .unwrap_or(base.ignore_https_errors),
-            gpu: BrowserGpuMode::parse(&self.gpu).unwrap_or(base.gpu),
+            gpu: if self.gpu.trim().is_empty() {
+                base.gpu
+            } else {
+                BrowserGpuMode::parse(&self.gpu).unwrap_or(base.gpu)
+            },
             ..base
         }
+    }
+}
+
+#[cfg(test)]
+mod launch_options_tests {
+    use super::*;
+
+    fn base_with_gpu(gpu: BrowserGpuMode) -> BrowserLaunchOptions {
+        BrowserLaunchOptions {
+            gpu,
+            ..BrowserLaunchOptions::default()
+        }
+    }
+
+    fn merged_gpu(gpu: &str, base: BrowserGpuMode) -> BrowserGpuMode {
+        SettingsChrome {
+            gpu: gpu.to_string(),
+            ..SettingsChrome::default()
+        }
+        .launch_options_over(base_with_gpu(base))
+        .gpu
+    }
+
+    #[test]
+    fn unset_gpu_defers_to_base() {
+        assert_eq!(
+            merged_gpu("", BrowserGpuMode::Hardware),
+            BrowserGpuMode::Hardware
+        );
+        assert_eq!(
+            merged_gpu("", BrowserGpuMode::Software),
+            BrowserGpuMode::Software
+        );
+        assert_eq!(
+            merged_gpu("   ", BrowserGpuMode::Hardware),
+            BrowserGpuMode::Hardware
+        );
+    }
+
+    #[test]
+    fn explicit_gpu_overrides_base() {
+        assert_eq!(
+            merged_gpu("disabled", BrowserGpuMode::Hardware),
+            BrowserGpuMode::Disabled
+        );
+        assert_eq!(
+            merged_gpu("software", BrowserGpuMode::Hardware),
+            BrowserGpuMode::Software
+        );
+        assert_eq!(
+            merged_gpu("hardware", BrowserGpuMode::Disabled),
+            BrowserGpuMode::Hardware
+        );
+    }
+
+    #[test]
+    fn unparseable_gpu_falls_back_to_base() {
+        assert_eq!(
+            merged_gpu("metal", BrowserGpuMode::Hardware),
+            BrowserGpuMode::Hardware
+        );
+    }
+
+    #[test]
+    fn unset_fields_defer_to_base() {
+        let base = BrowserLaunchOptions {
+            headless: true,
+            chrome_path: Some(PathBuf::from("/usr/bin/chromium")),
+            downloads_dir: Some(PathBuf::from("/tmp/downloads")),
+            proxy: Some(BrowserProxyOptions {
+                server: "http://127.0.0.1:8080".to_string(),
+                bypass: Some("localhost".to_string()),
+            }),
+            extra_args: vec!["--mute-audio".to_string()],
+            chromium_sandbox: false,
+            ignore_https_errors: false,
+            idle_timeout: Some(Duration::from_secs(42)),
+            ..BrowserLaunchOptions::default()
+        };
+
+        let merged = SettingsChrome::default().launch_options_over(base.clone());
+
+        assert_eq!(merged, base);
     }
 }
 
