@@ -859,3 +859,51 @@ fn classify_mounts_decodes_escaped_mount_points() {
         other => panic!("expected NonLocal, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn a_peer_connection_predating_the_wal_switch_does_not_cost_the_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("coordination.sqlite");
+    let peer = rusqlite::Connection::open(&path).unwrap();
+    let before: String = peer
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(before, "delete");
+
+    let store = CoordinationStore::open_on_filesystem(&path, &settings(), FilesystemKind::Local)
+        .await
+        .expect("a peer holding the database open must not cost this engine its durability");
+
+    let observer = rusqlite::Connection::open(&path).unwrap();
+    let mode: String = observer
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    drop(store);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_first_opens_of_one_store_all_succeed() {
+    for attempt in 0..20 {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coordination.sqlite");
+        let mut opening = Vec::new();
+        for _ in 0..8 {
+            let path = path.clone();
+            opening.push(tokio::spawn(async move {
+                CoordinationStore::open_on_filesystem(&path, &settings(), FilesystemKind::Local)
+                    .await
+            }));
+        }
+        let mut held = Vec::new();
+        for opened in opening {
+            match opened.await.unwrap() {
+                Ok(store) => held.push(store),
+                Err(error) => panic!(
+                    "attempt {attempt}: a store another connection is still holding open must \
+                     not cost this one its durability: {error}"
+                ),
+            }
+        }
+    }
+}

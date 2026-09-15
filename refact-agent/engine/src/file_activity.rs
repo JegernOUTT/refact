@@ -1542,6 +1542,20 @@ mod tests {
         .unwrap();
     }
 
+    /// A subprocess that never reaches the barrier has to say why. Without its
+    /// exit status and its own output a crashed writer is indistinguishable
+    /// from a slow one, and the only symptom left is the barrier timeout.
+    fn subprocess_report(root: &Path, child: &mut std::process::Child, id: &str) -> String {
+        let status = match child.try_wait() {
+            Ok(Some(status)) => format!("exited with {status}"),
+            Ok(None) => "is still running".to_string(),
+            Err(error) => format!("has no reportable status: {error}"),
+        };
+        let log = std::fs::read_to_string(root.join(format!("log-{id}")))
+            .unwrap_or_else(|error| format!("<log unreadable: {error}>"));
+        format!("subprocess {id} {status}; its output was:\n{log}")
+    }
+
     async fn install_race_provenance(id: &str) {
         let Ok(store_path) = std::env::var("REFACT_TEST_FILE_RACE_STORE") else {
             return;
@@ -1562,6 +1576,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_subprocess_that_dies_before_the_barrier_reports_its_status_and_its_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let unusable = dir.path().join("not-a-directory");
+        std::fs::write(&unusable, "").unwrap();
+        let log = File::create(dir.path().join("log-x")).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "file_activity::tests::subprocess_file_writer",
+                "--nocapture",
+            ])
+            .env("REFACT_TEST_FILE_RACE_ROOT", dir.path())
+            .env("REFACT_TEST_FILE_RACE_ID", "x")
+            .env(
+                "REFACT_TEST_FILE_RACE_STORE",
+                unusable.join("coordination.sqlite"),
+            )
+            .stdout(std::process::Stdio::from(log.try_clone().unwrap()))
+            .stderr(std::process::Stdio::from(log))
+            .spawn()
+            .unwrap();
+        let status = child.wait().unwrap();
+        let report = subprocess_report(dir.path(), &mut child, "x");
+
+        assert!(!status.success());
+        assert!(
+            !dir.path().join("ready-x").exists(),
+            "this writer has to die before the barrier for the report to be the only evidence"
+        );
+        assert!(report.contains("exited with"), "{report}");
+        assert!(report.contains("panicked"), "{report}");
+        assert!(
+            report.contains("subprocess_file_writer"),
+            "a barrier timeout must name the subprocess that never arrived: {report}"
+        );
+    }
+
     #[serial_test::serial(file_provenance)]
     #[test]
     fn cooperating_processes_serialize_and_refuse_a_stale_visible_read() {
@@ -1569,6 +1621,7 @@ mod tests {
         let store_path = dir.path().join("coordination.sqlite");
         std::fs::write(dir.path().join("shared"), "before").unwrap();
         let spawn = |id: &str| {
+            let log = File::create(dir.path().join(format!("log-{id}"))).unwrap();
             std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -1578,8 +1631,8 @@ mod tests {
                 .env("REFACT_TEST_FILE_RACE_ROOT", dir.path())
                 .env("REFACT_TEST_FILE_RACE_ID", id)
                 .env("REFACT_TEST_FILE_RACE_STORE", &store_path)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stdout(std::process::Stdio::from(log.try_clone().unwrap()))
+                .stderr(std::process::Stdio::from(log))
                 .spawn()
                 .unwrap()
         };
@@ -1588,17 +1641,30 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(20);
         while !dir.path().join("ready-a").exists() || !dir.path().join("ready-b").exists() {
             if Instant::now() >= deadline {
+                let report = format!(
+                    "{}\n{}",
+                    subprocess_report(dir.path(), &mut a, "a"),
+                    subprocess_report(dir.path(), &mut b, "b")
+                );
                 let _ = a.kill();
                 let _ = b.kill();
                 let _ = a.wait();
                 let _ = b.wait();
-                panic!("cooperating subprocesses did not reach barrier");
+                panic!("cooperating subprocesses did not reach barrier\n{report}");
             }
             std::thread::sleep(Duration::from_millis(5));
         }
         std::fs::write(dir.path().join("go"), "go").unwrap();
-        assert!(a.wait().unwrap().success());
-        assert!(b.wait().unwrap().success());
+        assert!(
+            a.wait().unwrap().success(),
+            "{}",
+            subprocess_report(dir.path(), &mut a, "a")
+        );
+        assert!(
+            b.wait().unwrap().success(),
+            "{}",
+            subprocess_report(dir.path(), &mut b, "b")
+        );
         let a = std::fs::read_to_string(dir.path().join("result-a")).unwrap();
         let b = std::fs::read_to_string(dir.path().join("result-b")).unwrap();
         assert_ne!(a, b);

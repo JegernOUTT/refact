@@ -15,10 +15,12 @@ use rusqlite::{params, OptionalExtension};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio_rusqlite::Connection;
 
 const MEMORY_PATH: &str = ":memory:";
+
+const WAL_SWITCH_POLL: Duration = Duration::from_millis(20);
 
 const ACTIVITY_COLUMNS: &str = "project, record_id, runtime, work_id, path, access, \
      content_hash, observed_at_ms, file_key, file_alias, instance_id, tool_call, \
@@ -361,7 +363,7 @@ impl CoordinationStore {
 
         conn.call(move |conn| {
             if persistent {
-                let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+                enable_wal(conn, busy_timeout_ms)?;
             }
             conn.pragma_update(None, "synchronous", "NORMAL")?;
             conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -1618,6 +1620,49 @@ fn sql_terminal_delivery_states() -> String {
         .filter(DeliveryState::is_terminal)
         .collect::<Vec<_>>();
     sql_state_list(&terminal)
+}
+
+/// Two peers creating the same database attempt the journal switch in
+/// lockstep, and a fixed wait keeps them in it: each fails on the other's lock,
+/// both wait the same span, and neither ever wins. Decorrelating the waits is
+/// what breaks the symmetry.
+fn wal_switch_wait() -> Duration {
+    let jitter = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| u64::from(since.subsec_nanos()))
+        .unwrap_or_default()
+        % WAL_SWITCH_POLL.as_millis() as u64;
+    WAL_SWITCH_POLL + Duration::from_millis(jitter)
+}
+
+/// Puts the database in WAL, waiting out a peer that is still creating it.
+///
+/// Two things SQLite will not do for us here. It does not run the busy handler
+/// for a journal-mode change, so the configured busy timeout has to be honoured
+/// explicitly — without it a second engine instance fails its whole `open` on a
+/// lock that clears in milliseconds and loses durability for its entire life.
+/// And it takes the exclusive lock before noticing the mode is already the one
+/// being asked for, so the mode is read first: an open that has nothing to
+/// change must never contend with a peer, which is every open but the first.
+fn enable_wal(conn: &rusqlite::Connection, busy_timeout_ms: u64) -> Result<(), rusqlite::Error> {
+    let deadline = Instant::now() + Duration::from_millis(busy_timeout_ms);
+    loop {
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        if mode.eq_ignore_ascii_case("wal") {
+            return Ok(());
+        }
+        let attempt = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0));
+        let code = attempt
+            .as_ref()
+            .err()
+            .and_then(rusqlite::Error::sqlite_error_code);
+        match code {
+            Some(rusqlite::ErrorCode::DatabaseBusy) | Some(rusqlite::ErrorCode::DatabaseLocked)
+                if Instant::now() < deadline => {}
+            _ => return attempt.map(|_| ()),
+        }
+        std::thread::sleep(wal_switch_wait());
+    }
 }
 
 fn prepare_parent_dir(path: &Path) -> Result<(), StoreError> {
