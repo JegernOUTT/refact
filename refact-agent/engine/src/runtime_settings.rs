@@ -172,6 +172,14 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_bool("strict_path_scope_default"),
     coordination_integer("max_path_scope_entries", 1, 100_000),
     coordination_integer("agent_closed_retained_max", 1, 100_000),
+    coordination_integer("store_busy_timeout_ms", 1, 600_000),
+    coordination_bool("store_allow_non_local_filesystem"),
+    coordination_integer("store_max_engine_instances", 1, 100_000),
+    coordination_integer("store_max_run_intents", 1, 4_000_000),
+    coordination_integer("store_max_queued_work", 1, 4_000_000),
+    coordination_integer("store_max_leases", 1, 4_000_000),
+    coordination_integer("store_max_outbox_messages", 1, 4_000_000),
+    coordination_integer("store_max_activity_observations", 1, 16_000_000),
 ];
 
 pub fn coordination_field_bounds() -> &'static [CoordinationFieldBound] {
@@ -1135,7 +1143,16 @@ trajectory_writer_enabled: false
             .iter()
             .map(|bound| bound.name.to_string())
             .collect();
-        assert_eq!(bounded, serialized);
+        let unregistered: Vec<&String> = serialized.difference(&bounded).collect();
+        assert!(
+            unregistered.is_empty(),
+            "coordination settings absent from COORDINATION_FIELD_BOUNDS: {unregistered:?}"
+        );
+        let unknown: Vec<&String> = bounded.difference(&serialized).collect();
+        assert!(
+            unknown.is_empty(),
+            "COORDINATION_FIELD_BOUNDS names fields CoordinationSettings no longer has: {unknown:?}"
+        );
         for bound in coordination_field_bounds() {
             match (bound.minimum, bound.maximum) {
                 (Some(minimum), Some(maximum)) => {
@@ -1145,6 +1162,70 @@ trajectory_writer_enabled: false
                 _ => assert_eq!(bound.value_type, "boolean"),
             }
         }
+    }
+
+    #[test]
+    fn every_coordination_store_setting_is_bounded_and_rejects_out_of_range_values() {
+        for (name, below, above) in [
+            ("store_busy_timeout_ms", 0u64, 600_001u64),
+            ("store_max_engine_instances", 0, 100_001),
+            ("store_max_run_intents", 0, 4_000_001),
+            ("store_max_queued_work", 0, 4_000_001),
+            ("store_max_leases", 0, 4_000_001),
+            ("store_max_outbox_messages", 0, 4_000_001),
+            ("store_max_activity_observations", 0, 16_000_001),
+        ] {
+            let bound = coordination_field_bounds()
+                .iter()
+                .find(|bound| bound.name == name)
+                .unwrap_or_else(|| panic!("{name} is missing from the coordination bounds table"));
+            assert_eq!(bound.value_type, "integer");
+            for value in [below, above] {
+                let overrides =
+                    CoordinationOverride::from([(name.to_string(), serde_json::json!(value))]);
+                let error = normalize_coordination_override(overrides).unwrap_err();
+                assert!(error.contains(name), "unexpected error: {error}");
+            }
+        }
+        let flag = coordination_field_bounds()
+            .iter()
+            .find(|bound| bound.name == "store_allow_non_local_filesystem")
+            .unwrap();
+        assert_eq!(flag.value_type, "boolean");
+        assert!(
+            normalize_coordination_override(CoordinationOverride::from([(
+                "store_allow_non_local_filesystem".to_string(),
+                serde_json::json!(7)
+            )]))
+            .is_err()
+        );
+
+        let resolved = resolve_coordination(
+            &CoordinationSettings::default(),
+            &CoordinationOverride::from([
+                ("store_max_leases".to_string(), serde_json::json!(4_096)),
+                (
+                    "store_allow_non_local_filesystem".to_string(),
+                    serde_json::json!(true),
+                ),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(resolved.store_max_leases, 4_096);
+        assert!(resolved.store_allow_non_local_filesystem);
+    }
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn stock_defaults_resolve_for_a_project_without_an_override_file() {
+        reset_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!project_coordination_path(dir.path()).exists());
+        assert_eq!(
+            coordination_for_project(dir.path()).await.unwrap(),
+            CoordinationSettings::default()
+        );
+        assert!(validate(&TrajectoryRuntimeSettings::default()).is_ok());
     }
 
     #[test]
