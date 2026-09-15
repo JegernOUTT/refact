@@ -722,7 +722,7 @@ export const BuddyCanvas: React.FC<BuddyCanvasProps> = ({
             width: hitDiameter,
             height: hitHeight,
             transform: "translate(-50%, -50%)",
-            borderRadius: 9999,
+            borderRadius: 999,
             pointerEvents: "auto",
             cursor: "pointer",
           }}

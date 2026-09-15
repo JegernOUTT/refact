@@ -15,11 +15,7 @@
 }
 
 .label {
-  color: var(--rf-color-muted);
-  font-size: 10px;
-  font-weight: var(--rf-weight-bold);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  color: var(--rf-color-fg);
   white-space: nowrap;
 }
 

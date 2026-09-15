@@ -314,7 +314,7 @@ const BuddyHomeDraftReview: React.FC<{ draftId: string }> = ({ draftId }) => {
           <Text size="1" color="gray" className={styles.draftLabel}>
             Buddy draft review
           </Text>
-          <Text size="3" weight="bold">
+          <Text as="h2" size="3" weight="bold">
             {draft.title}
           </Text>
         </div>
@@ -1029,7 +1029,7 @@ const BuddyHomeContent: React.FC = () => {
             Back
           </Button>
           <div className={styles.topIdentity}>
-            <Text size="2" weight="bold" className={styles.topTitle}>
+            <Text as="h1" size="5" weight="bold" className={styles.topTitle}>
               {name}
             </Text>
             {statusPill}
@@ -1093,7 +1093,7 @@ const BuddyHomeContent: React.FC = () => {
           Back
         </Button>
         <div className={styles.topIdentity}>
-          <Text size="2" weight="bold" className={styles.topTitle}>
+          <Text as="h1" size="5" weight="bold" className={styles.topTitle}>
             {name}
           </Text>
           {statusPill}
@@ -1434,10 +1434,10 @@ const BuddyHomeContent: React.FC = () => {
           data-testid="buddy-setup-strip"
           data-disabled={degraded ? "true" : undefined}
         >
-          <span className={styles.setupLabel}>
+          <Text as="h2" size="3" weight="bold" className={styles.setupLabel}>
             <Icon icon={Wrench} size="sm" tone="muted" />
             Project setup
-          </span>
+          </Text>
           {SETUP_MODES.map((m) => (
             <Button
               key={m.mode}

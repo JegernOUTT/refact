@@ -48,7 +48,7 @@ function NativeWork({ identity }: { identity: string }) {
               )}
               {query.currentData.sessions.map((row) => (
                 <article key={row.chat_id} className={styles.question}>
-                  <h4>{row.title || "Untitled chat"}</h4>
+                  <h3>{row.title || "Untitled chat"}</h3>
                   <p>
                     {humanizeIdentifier(row.state)} ·{" "}
                     {row.model || "No model selected"}
@@ -78,7 +78,7 @@ function NativeWork({ identity }: { identity: string }) {
                   )}
                   {row.goal && (
                     <section aria-label="Native goal">
-                      <h5>Goal · {humanizeIdentifier(row.goal.status)}</h5>
+                      <h4>Goal · {humanizeIdentifier(row.goal.status)}</h4>
                       <p>{row.goal.content}</p>
                       <p>
                         {row.goal.active

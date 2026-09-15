@@ -52,7 +52,7 @@
   border: 1px solid var(--rf-border);
   border-radius: var(--rf-radius-chip);
   color: var(--rf-color-fg);
-  font-size: 11px;
+  font-size: var(--rf-text-1);
   padding: var(--rf-space-2xs) var(--rf-space-2);
   text-transform: capitalize;
 }

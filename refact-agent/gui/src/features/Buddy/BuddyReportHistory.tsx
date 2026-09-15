@@ -46,7 +46,7 @@ function RunEvidence({
               {humanizeIdentifier(run.status)} · {run.started_at} —{" "}
               {run.ended_at ?? "No terminal time"}
             </Text>
-            <h5 className={styles.heading}>Observed scope</h5>
+            <h3 className={styles.heading}>Observed scope</h3>
             <Text as="p" size="2">
               {run.coverage}
             </Text>

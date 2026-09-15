@@ -6,7 +6,7 @@ import {
   within,
 } from "../utils/test-utils";
 import { http, HttpResponse } from "msw";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
@@ -1757,6 +1757,71 @@ describe("BuddyHome_layout_contract", () => {
     expect(source).not.toContain("never permissions");
     expect(source).not.toContain("Play is optional");
     expect(source).not.toContain("Back to Desk");
+  });
+
+  it("exposes a real heading outline instead of styled spans", async () => {
+    server.use(
+      ...layoutHandlers,
+      http.get("*/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [] }),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyHome />, { store });
+    await screen.findByTestId("buddy-home-content");
+
+    const headings = screen.getAllByRole("heading");
+    const levels = headings.map((heading) => Number(heading.tagName.slice(1)));
+
+    expect(levels.filter((level) => level === 1)).toHaveLength(1);
+    expect(levels[0]).toBe(1);
+    expect(levels).toContain(2);
+    expect(
+      screen.getByRole("heading", { level: 1 }).textContent,
+    ).not.toHaveLength(0);
+
+    let previous = 1;
+    for (const level of levels) {
+      expect(level).toBeLessThanOrEqual(previous + 1);
+      previous = level;
+    }
+  });
+
+  it("keeps every Buddy stylesheet on the shared type and radius scale", async () => {
+    const directory = resolve(process.cwd(), "src/features/Buddy");
+    const sheets = (await readdir(directory)).filter((file) =>
+      file.endsWith(".module.css"),
+    );
+    expect(sheets.length).toBeGreaterThan(20);
+
+    const offenders: string[] = [];
+    for (const sheet of sheets) {
+      const css = await readGuiSource(`features/Buddy/${sheet}`);
+      for (const [declaration, value] of css.matchAll(
+        /font-size:\s*([\d.]+)px/g,
+      )) {
+        if (Number(value) < 12) offenders.push(`${sheet}: ${declaration}`);
+      }
+      for (const dead of ["--rf-font-size-", "--rf-radius-control"]) {
+        if (css.includes(dead)) offenders.push(`${sheet}: ${dead}`);
+      }
+    }
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("gives every Buddy control a hit-area floor", async () => {
+    const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
+
+    expect(
+      readCssBlock(
+        css,
+        '.page :is(button, [role="tab"], select, input, summary)',
+      ),
+    ).toContain("min-height: var(--rf-hit-min)");
+    expect(css).toContain("--rf-hit-min: var(--rf-hit-min-touch)");
   });
 
   it("sizes the tab strip so narrow viewports scroll instead of truncating", async () => {

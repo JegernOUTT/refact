@@ -52,7 +52,21 @@
   gap: var(--rf-space-2);
   min-width: 0;
   max-width: 100%;
+  min-height: var(--rf-hit-min);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-radius: var(--rf-radius-ctl);
   color: var(--rf-color-fg);
+  cursor: pointer;
+}
+
+.choice:hover {
+  background: var(--rf-surface-1);
+}
+
+.choice input {
+  flex: none;
+  margin: 0;
+  accent-color: var(--rf-color-accent);
 }
 
 .choice input:disabled {

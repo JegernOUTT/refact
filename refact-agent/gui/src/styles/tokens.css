@@ -89,6 +89,7 @@
   --rf-z-popover-modal: 800;
   --rf-z-tooltip-modal: 900;
   --rf-elev-overlay: 0 14px 40px rgba(0, 0, 0, 0.4);
+  --rf-elev-raised: 0 6px 18px rgba(0, 0, 0, 0.3);
   --rf-elev-panel: 0 1px 2px rgba(0, 0, 0, 0.18);
   --rf-blur-overlay: 14px;
   --rf-dur-fast: 0.12s;
@@ -132,6 +133,8 @@
   --rf-ease-entrance: cubic-bezier(0.16, 1, 0.3, 1);
   --rf-ease-exit: cubic-bezier(0.4, 0, 1, 1);
   --rf-control-h: 30px;
+  --rf-hit-min: 32px;
+  --rf-hit-min-touch: 44px;
   --rf-control-h-sm: 26px;
   --rf-control-h-lg: 36px;
   --rf-control-h-icon-sm: 28px;
@@ -270,6 +273,7 @@
   --rf-chart-grid: rgba(0, 0, 0, 0.09);
   --rf-chart-axis: rgba(0, 0, 0, 0.45);
   --rf-elev-overlay: 0 14px 40px rgba(0, 0, 0, 0.16);
+  --rf-elev-raised: 0 6px 18px rgba(0, 0, 0, 0.1);
   --rf-elev-panel: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 

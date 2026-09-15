@@ -50,7 +50,7 @@
   min-width: 0;
   max-width: 100%;
   color: var(--rf-color-muted);
-  font-size: 11px;
+  font-size: var(--rf-text-1);
 }
 
 .choice {
@@ -90,7 +90,7 @@
 .input:focus-visible,
 .select:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-focus-offset);
+  outline-offset: var(--rf-space-1);
 }
 
 .input:disabled,

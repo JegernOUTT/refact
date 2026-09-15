@@ -290,7 +290,7 @@ describe("BuddyCanvas sprite pointer mode", () => {
     expect(hitArea).toHaveStyle({
       cursor: "pointer",
       pointerEvents: "auto",
-      borderRadius: "9999px",
+      borderRadius: "999px",
     });
     expect(canvas).not.toBeNull();
     expect(canvas?.getAttribute("style")).toContain("pointer-events: none");

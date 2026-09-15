@@ -54,16 +54,16 @@
 
 .disclosure {
   border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-control);
+  border-radius: var(--rf-radius-ctl);
   padding: var(--rf-space-1) var(--rf-space-2);
   min-width: 0;
 }
 
 .summary {
   cursor: pointer;
-  font-size: var(--rf-font-size-1);
+  font-size: var(--rf-text-1);
   color: var(--rf-color-muted);
-  border-radius: var(--rf-radius-control);
+  border-radius: var(--rf-radius-ctl);
 }
 
 .summary:focus-visible {

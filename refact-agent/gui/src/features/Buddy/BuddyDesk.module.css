@@ -4,6 +4,12 @@
   flex-direction: column;
   gap: var(--rf-space-3);
   padding: var(--rf-space-3);
+  box-shadow: var(--rf-elev-raised);
+}
+
+.desk :is(button, input, select, summary) {
+  min-height: var(--rf-hit-min);
+  min-width: var(--rf-hit-min);
 }
 
 .collapsed {
@@ -29,7 +35,7 @@
 
 .heading {
   margin: 0;
-  font-size: var(--rf-font-size-2);
+  font-size: var(--rf-text-3);
   font-weight: var(--rf-weight-semibold);
   color: var(--rf-color-fg);
   overflow-wrap: anywhere;
@@ -42,8 +48,17 @@
 .views {
   display: flex;
   align-items: center;
+  align-self: flex-start;
   flex-wrap: wrap;
-  gap: var(--rf-space-2);
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-surface-1);
+}
+
+.views button {
+  border-radius: var(--rf-radius-pill);
 }
 
 .layout {
@@ -92,7 +107,7 @@
   height: var(--rf-control-h);
   padding: 0 var(--rf-space-2);
   border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-control);
+  border-radius: var(--rf-radius-ctl);
   color: var(--rf-color-fg);
   background: var(--rf-surface-1);
   min-width: 0;
@@ -118,7 +133,7 @@
   text-align: start;
   padding: var(--rf-space-2) var(--rf-space-3);
   border: 0;
-  border-radius: var(--rf-radius-control);
+  border-radius: var(--rf-radius-ctl);
   color: var(--rf-color-fg);
   background: transparent;
   cursor: pointer;
@@ -176,7 +191,7 @@
   gap: var(--rf-space-2);
   align-items: flex-start;
   padding: var(--rf-space-3);
-  border-radius: var(--rf-radius-control);
+  border-radius: var(--rf-radius-ctl);
 }
 
 .noteActions {
@@ -240,29 +255,29 @@
   gap: var(--rf-space-1);
   padding: var(--rf-space-3);
   border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-control);
+  border-radius: var(--rf-radius-ctl);
   min-width: 0;
 }
 
 .embedded p {
   margin: 0;
-  font-size: var(--rf-font-size-1);
+  font-size: var(--rf-text-1);
   color: var(--rf-color-muted);
   overflow-wrap: anywhere;
 }
 
 .disclosure {
   border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-control);
+  border-radius: var(--rf-radius-ctl);
   min-width: 0;
 }
 
 .summary {
   padding: var(--rf-space-2) var(--rf-space-3);
   cursor: pointer;
-  font-size: var(--rf-font-size-1);
+  font-size: var(--rf-text-1);
   color: var(--rf-color-muted);
-  border-radius: var(--rf-radius-control);
+  border-radius: var(--rf-radius-ctl);
   overflow-wrap: anywhere;
 }
 

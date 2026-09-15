@@ -103,7 +103,9 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
 
       <div className={styles.meterColumns}>
         <section className={styles.meterSection}>
-          <span className={styles.sectionLabel}>Needs</span>
+          <Text as="h3" size="2" weight="bold" className={styles.sectionLabel}>
+            Needs
+          </Text>
           {needRows.map((item) => (
             <Meter
               key={item.key}
@@ -114,7 +116,9 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
           ))}
         </section>
         <section className={styles.meterSection}>
-          <span className={styles.sectionLabel}>Traits</span>
+          <Text as="h3" size="2" weight="bold" className={styles.sectionLabel}>
+            Traits
+          </Text>
           {Object.entries(personality?.traits ?? {}).map(([key, value]) => {
             const fill = Math.max(0, Math.min(100, Number(value) || 0));
             return <Meter key={key} label={key} value={value} fill={fill} />;
@@ -123,7 +127,9 @@ export const BuddyPersonalityPanel: React.FC<BuddyPersonalityPanelProps> = ({
       </div>
 
       <section className={styles.skillsSection}>
-        <span className={styles.sectionLabel}>Skills</span>
+        <Text as="h3" size="2" weight="bold" className={styles.sectionLabel}>
+          Skills
+        </Text>
         <div className={styles.skillsRow}>
           {unlockedSkills.length === 0 && (
             <Text size="1" color="gray">

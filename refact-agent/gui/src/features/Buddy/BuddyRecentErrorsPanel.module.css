@@ -90,7 +90,7 @@
   max-width: 100%;
   min-width: 0;
   color: var(--rf-color-fg);
-  font-size: 12px;
+  font-size: var(--rf-text-1);
 }
 
 .listSubtitle {
@@ -100,7 +100,7 @@
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   color: var(--rf-color-muted);
-  font-size: 11px;
+  font-size: var(--rf-text-1);
   overflow-wrap: anywhere;
 }
 
@@ -110,7 +110,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--rf-color-muted);
-  font-size: 10px;
+  font-size: var(--rf-text-1);
 }
 
 .errorActions {
@@ -129,7 +129,7 @@
 .emptyText {
   padding: var(--rf-space-2) var(--rf-space-1);
   color: var(--rf-color-muted);
-  font-size: 11px;
+  font-size: var(--rf-text-1);
 }
 
 @media (max-width: 720px) {

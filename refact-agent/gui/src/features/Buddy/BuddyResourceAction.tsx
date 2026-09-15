@@ -244,7 +244,7 @@ function ResourceControl({
     tracking?.recovery_execution_id == null;
   return (
     <section className={styles.action} aria-label={label}>
-      <h5>{label}</h5>
+      <h4>{label}</h4>
       <p>
         Availability: {humanizeIdentifier(spec.availability)}. Actions require
         server rollout and explicit consent; nothing runs automatically.
@@ -285,7 +285,7 @@ function ResourceControl({
               does not activate or reload them.
             </p>
           )}
-          <h6>Separate native rights</h6>
+          <h5>Separate native rights</h5>
           <pre className={styles.preview}>
             {rights === null
               ? "No additional native rights requested by the server."

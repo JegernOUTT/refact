@@ -63,7 +63,7 @@
 }
 
 .name {
-  font-size: 11px;
+  font-size: var(--rf-text-1);
   font-weight: var(--rf-weight-semibold);
   flex-shrink: 0;
 }
@@ -73,8 +73,8 @@
   align-items: center;
   gap: var(--rf-space-2xs);
   padding: var(--rf-space-2xs) var(--rf-space-xs);
-  border-radius: 9999px;
-  font-size: 10px;
+  border-radius: var(--rf-radius-pill);
+  font-size: var(--rf-text-1);
   font-weight: var(--rf-weight-semibold);
   flex-shrink: 0;
 }
@@ -101,7 +101,7 @@
 }
 
 .xpText {
-  font-size: 10px;
+  font-size: var(--rf-text-1);
   color: var(--rf-color-muted);
   white-space: nowrap;
   flex-shrink: 0;
@@ -110,7 +110,7 @@
 .needsMini {
   display: flex;
   gap: var(--rf-space-2);
-  font-size: 10px;
+  font-size: var(--rf-text-1);
   color: var(--rf-color-muted);
 }
 
@@ -120,10 +120,10 @@
   gap: var(--rf-space-1);
   max-width: 100%;
   padding: var(--rf-space-2xs) var(--rf-space-2);
-  border-radius: 9999px;
+  border-radius: var(--rf-radius-pill);
   border: 1px solid var(--rf-border-strong);
   background: var(--rf-color-accent-soft);
-  font-size: 10px;
+  font-size: var(--rf-text-1);
   color: var(--rf-color-fg);
 }
 
@@ -150,9 +150,9 @@
   border: 1px solid var(--rf-border);
   background: var(--rf-surface-1);
   color: var(--rf-color-fg);
-  border-radius: 9999px;
+  border-radius: var(--rf-radius-pill);
   padding: var(--rf-space-2xs) var(--rf-space-xs);
-  font-size: 10px;
+  font-size: var(--rf-text-1);
   cursor: pointer;
 }
 
@@ -164,7 +164,7 @@
   background: var(--rf-surface-2);
   border: 1px solid var(--rf-border);
   border-radius: var(--rf-radius-chip);
-  font-size: 10px;
+  font-size: var(--rf-text-1);
   max-width: 100%;
   width: 100%;
   overflow: hidden;
@@ -172,7 +172,7 @@
 
 .statusIcon {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: var(--rf-text-1);
 }
 
 .statusTitle {

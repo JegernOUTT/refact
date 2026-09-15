@@ -197,7 +197,7 @@ export function BuddyDeskActions({
       className={styles.panel}
       aria-label="Registered actions"
     >
-      <BuddySectionHeader icon={Zap} label="What you can do" />
+      <BuddySectionHeader icon={Zap} label="What you can do" level="h3" />
       {isFetching && (
         <Text as="p" size="1" color="gray" role="status">
           Loading current actions…

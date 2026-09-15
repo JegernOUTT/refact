@@ -9,6 +9,17 @@
   color: var(--rf-color-fg);
 }
 
+.page :is(button, [role="tab"], select, input, summary) {
+  min-height: var(--rf-hit-min);
+  min-width: var(--rf-hit-min);
+}
+
+@media (pointer: coarse) {
+  .page {
+    --rf-hit-min: var(--rf-hit-min-touch);
+  }
+}
+
 .content {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   flex: 1 1 0;
@@ -194,11 +205,7 @@
   align-items: center;
   flex: 0 0 auto;
   gap: var(--rf-space-1);
-  color: var(--rf-color-muted);
-  font-size: 10px;
-  font-weight: var(--rf-weight-bold);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  color: var(--rf-color-fg);
   white-space: nowrap;
 }
 
@@ -365,10 +372,7 @@
 }
 
 .draftLabel {
-  font-size: 10px;
-  font-weight: var(--rf-weight-bold);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  color: var(--rf-color-muted);
 }
 
 .draftMeta {
@@ -390,7 +394,7 @@
   background: var(--rf-surface-2);
   color: var(--rf-color-fg);
   font-family: var(--rf-font-mono);
-  font-size: 12px;
+  font-size: var(--rf-text-1);
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;

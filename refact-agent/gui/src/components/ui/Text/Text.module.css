@@ -24,6 +24,15 @@
   line-height: var(--rf-line-4);
 }
 
+.size-5 {
+  font-size: var(--rf-text-5);
+  line-height: var(--rf-line-5);
+}
+
+.heading {
+  margin: 0;
+}
+
 .weight-regular {
   font-weight: var(--rf-weight-regular);
 }
