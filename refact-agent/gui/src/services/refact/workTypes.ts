@@ -12,6 +12,9 @@ export const workStates = [
 ] as const;
 export type WorkState = (typeof workStates)[number];
 
+export const workDisclosures = ["full", "withheld"] as const;
+export type WorkDisclosure = (typeof workDisclosures)[number];
+
 export type WorkRoot = {
   id: string;
   kind: "project" | "worktree";
@@ -38,6 +41,7 @@ export type WorkRow = {
   updated_at_ms: number;
   measured_tokens: number | null;
   measured_cost_cents: number | null;
+  disclosure?: WorkDisclosure;
 };
 export type WorkPage = {
   snapshot_id: string;
@@ -52,6 +56,7 @@ export type WorkPage = {
   truncated: boolean;
   next_cursor?: string;
   generated_at_ms: number;
+  withheld_rows?: number;
 };
 
 const object = (value: unknown): value is Record<string, unknown> =>
@@ -97,7 +102,10 @@ export function isWorkRow(value: unknown): value is WorkRow {
       value.current_tool,
     ].every(optionalText) &&
     (value.measured_tokens === null || integer(value.measured_tokens)) &&
-    (value.measured_cost_cents === null || integer(value.measured_cost_cents))
+    (value.measured_cost_cents === null ||
+      integer(value.measured_cost_cents)) &&
+    (value.disclosure === undefined ||
+      workDisclosures.some((level) => level === value.disclosure))
   );
 }
 export function parseWorkPage(value: unknown): WorkPage | null {
@@ -116,7 +124,8 @@ export function parseWorkPage(value: unknown): WorkPage | null {
     !integer(value.returned) ||
     !integer(value.generated_at_ms) ||
     typeof value.truncated !== "boolean" ||
-    !optionalText(value.next_cursor)
+    !optionalText(value.next_cursor) ||
+    (value.withheld_rows !== undefined && !integer(value.withheld_rows))
   )
     return null;
   const count =
@@ -137,4 +146,42 @@ export function workSequence(
     return "reset";
   if (next.seq <= previous.seq) return "duplicate";
   return next.seq === previous.seq + 1 ? "accept" : "reset";
+}
+export type WorkOverlapKind = "physical" | "advisory";
+export type WorkOverlap = { overlap: WorkOverlapKind; row: WorkRow };
+export type WorkFileOverlaps = { paths: string[]; overlaps: WorkOverlap[] };
+
+export function workKeyText(key: { runtime: string; id: string }): string {
+  return `${key.runtime}:${key.id}`;
+}
+
+export function parseWorkFileOverlaps(
+  value: unknown,
+  page: WorkPage,
+): WorkFileOverlaps | null {
+  if (!object(value)) return null;
+  const selector = value.selector;
+  if (!object(selector) || selector.kind !== "files") return null;
+  const paths = selector.paths;
+  if (!strings(paths)) return null;
+  const reported = value.integration_overlaps;
+  let advisory: string[];
+  if (reported === undefined) advisory = [];
+  else if (strings(reported)) advisory = reported;
+  else return null;
+  return {
+    paths,
+    overlaps: page.rows.map((row) => ({
+      overlap: advisory.includes(workKeyText(row.key))
+        ? "advisory"
+        : "physical",
+      row,
+    })),
+  };
+}
+
+export function withheldRowCount(page: WorkPage): number | null {
+  return typeof page.withheld_rows === "number" && page.withheld_rows > 0
+    ? page.withheld_rows
+    : null;
 }

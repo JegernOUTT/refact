@@ -123,6 +123,70 @@ describe("Work panel", () => {
     expect(await screen.findByText("Work 0")).toBeInTheDocument();
   });
 
+  it("renders nothing about overlap when the page reports none", async () => {
+    settingsHandler();
+    server.use(http.get("*/v1/work", () => HttpResponse.json(workFixture)));
+    renderPanel();
+    await screen.findByText("Board work");
+    expect(screen.queryByLabelText("File overlap")).not.toBeInTheDocument();
+    expect(screen.queryByText(/overlap/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/same physical file/i)).not.toBeInTheDocument();
+  });
+
+  it("marks a withheld row without leaking it and without inventing a count", async () => {
+    settingsHandler();
+    server.use(
+      http.get("*/v1/work", () =>
+        HttpResponse.json({
+          ...workFixture,
+          rows: [
+            {
+              ...workFixture.rows[0],
+              title: undefined,
+              disclosure: "withheld",
+            },
+            {
+              ...workFixture.rows[0],
+              key: { runtime: "trajectory", id: "visible" },
+              title: "Visible work",
+              disclosure: "full",
+            },
+          ],
+          total: 2,
+          returned: 2,
+        }),
+      ),
+    );
+    renderPanel();
+    expect(
+      await screen.findByText("Work withheld by privacy policy"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Withheld by privacy policy"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Visible work")).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Withheld work count"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/reduced by your privacy policy/),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/File activity/)).toBeInTheDocument();
+  });
+
+  it("reports the withheld count only when the payload supplies one", async () => {
+    settingsHandler();
+    server.use(
+      http.get("*/v1/work", () =>
+        HttpResponse.json({ ...workFixture, withheld_rows: 3 }),
+      ),
+    );
+    renderPanel();
+    expect(
+      await screen.findByLabelText("Withheld work count"),
+    ).toHaveTextContent("3 rows were reduced by your privacy policy.");
+  });
+
   it("hides cached rows immediately after a visibility failure", async () => {
     server.use(
       http.get("*/v1/coordination-settings", () =>

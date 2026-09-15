@@ -12,7 +12,10 @@ import { useConfig } from "../../../hooks/useConfig";
 import { useGetWorkQuery } from "../../../services/refact/work";
 import { getEngineEndpointIdentity } from "../../../services/refact/apiUrl";
 import { humanizeIdentifier } from "../../../utils/displayNames";
-import type { WorkRow } from "../../../services/refact/workTypes";
+import {
+  withheldRowCount,
+  type WorkRow,
+} from "../../../services/refact/workTypes";
 import styles from "./WorkPanel.module.css";
 import { useWorkStream } from "./useWorkStream";
 
@@ -28,20 +31,58 @@ function WorkItem({
     ["Read", row.observed_reads],
     ["Written", row.observed_files],
   ];
+  const withheld = row.disclosure === "withheld";
   return (
     <li className={styles.item}>
       <div className={styles.heading}>
         <strong className="rf-wrap-anywhere">
-          {row.title ?? humanizeIdentifier(row.kind)}
+          {withheld
+            ? "Work withheld by privacy policy"
+            : row.title ?? humanizeIdentifier(row.kind)}
         </strong>
         <Badge tone={row.attention ? "warning" : "muted"}>
           {humanizeIdentifier(row.state)}
         </Badge>
+        {withheld && (
+          <Badge tone="muted" aria-label="Withheld by privacy policy">
+            Withheld
+          </Badge>
+        )}
       </div>
       <span className={styles.muted}>
         {humanizeIdentifier(row.kind)} · {humanizeIdentifier(row.freshness)}
       </span>
       {row.attention && <span role="status">Needs attention</span>}
+      {withheld ? (
+        <p className={styles.muted}>
+          This work exists, but its title, files and location are not available
+          to you.
+        </p>
+      ) : (
+        <WorkItemDetail row={row} filesByKind={filesByKind} />
+      )}
+      {row.chat_id && onNavigate && (
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => onNavigate(row.chat_id ?? "")}
+        >
+          Open trajectory
+        </Button>
+      )}
+    </li>
+  );
+}
+
+function WorkItemDetail({
+  row,
+  filesByKind,
+}: {
+  row: WorkRow;
+  filesByKind: [string, string[]][];
+}) {
+  return (
+    <>
       {row.summary && <p className={styles.summary}>{row.summary}</p>}
       {row.current_tool && <span>Tool: {row.current_tool}</span>}
       <span className="rf-wrap-anywhere">
@@ -70,16 +111,17 @@ function WorkItem({
           ))}
         </div>
       </details>
-      {row.chat_id && onNavigate && (
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => onNavigate(row.chat_id ?? "")}
-        >
-          Open trajectory
-        </Button>
-      )}
-    </li>
+    </>
+  );
+}
+
+function WithheldNotice({ count }: { count: number | null }) {
+  if (count === null) return null;
+  return (
+    <p role="status" aria-label="Withheld work count" className={styles.muted}>
+      {count} {count === 1 ? "row was" : "rows were"} reduced by your privacy
+      policy.
+    </p>
   );
 }
 
@@ -155,6 +197,7 @@ function WorkPanelContents({
           <p role="status" className={styles.muted}>
             {page.total} observed · {humanizeIdentifier(page.coverage)} coverage
           </p>
+          <WithheldNotice count={withheldRowCount(page)} />
           <div className={styles.body}>
             {page.rows.length === 0 ? (
               <EmptyState
