@@ -10,6 +10,7 @@ const BROKEN_MAIN_SCROLL_WIDTH_PX = 466;
 const BROKEN_MAIN_CLIENT_WIDTH_PX = 328;
 const BROKEN_TRIGGER_WIDTH_PX = 38;
 const MIN_TRIGGER_WIDTH_PX = 44;
+const MIN_VISIBLE_CONTENT_PX = 200;
 
 const OPPORTUNITY_TITLE =
   "Investigate a long-running diagnostic cluster before it becomes gremlin soup";
@@ -94,6 +95,25 @@ async function openBuddy(
     options.theme ? `${BUDDY_ROUTE}&theme=${options.theme}` : BUDDY_ROUTE,
   );
   await page.getByTestId("buddy-home-content").waitFor();
+}
+
+function readTabReach(page: Page) {
+  return page.evaluate(() => {
+    const tablist = document.querySelector<HTMLElement>("[role='tablist']");
+    if (!tablist) return null;
+    const style = window.getComputedStyle(tablist);
+    return {
+      scrollWidth: tablist.scrollWidth,
+      clientWidth: tablist.clientWidth,
+      scrollable: ["auto", "scroll"].includes(style.overflowX),
+      unreachable: [...tablist.querySelectorAll<HTMLElement>("[role='tab']")]
+        .filter(
+          (trigger) =>
+            trigger.offsetLeft + trigger.offsetWidth > tablist.scrollWidth + 1,
+        )
+        .map((trigger) => (trigger.textContent ?? "").trim()),
+    };
+  });
 }
 
 function readTabTriggers(page: Page) {
@@ -202,31 +222,73 @@ test.describe("Buddy layout", () => {
             `tab trigger "${trigger.text}" is ${trigger.width}px wide; the broken build rendered ${BROKEN_TRIGGER_WIDTH_PX}px`,
           ).toBeGreaterThanOrEqual(MIN_TRIGGER_WIDTH_PX);
         }
+
+        const reach = await readTabReach(page);
+        expect(reach).not.toBeNull();
+        expect(
+          reach!.unreachable,
+          `tab triggers ${reach!.unreachable.join(
+            ", ",
+          )} sit outside the scrollable extent of their own tab strip, so no scrolling reaches them`,
+        ).toEqual([]);
+        expect(
+          reach!.scrollWidth <= reach!.clientWidth + 1 || reach!.scrollable,
+          `tab strip overflows (${reach!.scrollWidth} > ${
+            reach!.clientWidth
+          }) without being scrollable; distinct labels are not the same thing as reachable tabs`,
+        ).toBe(true);
+
+        for (const trigger of triggers) {
+          const tab = page.getByRole("tab", {
+            name: trigger.text,
+            exact: true,
+          });
+          await tab.click();
+          await expect(tab).toHaveAttribute("aria-selected", "true");
+        }
       });
     }
   }
 
-  test(`puts the tab strip above the fold at 1280x900 (was ${BROKEN_TABLIST_TOP_PX}px)`, async ({
+  test(`puts the default tab's content above the fold at 1280x900 (the tab strip alone was ${BROKEN_TABLIST_TOP_PX}px)`, async ({
     page,
   }) => {
     await openBuddy(page, { width: 1280 });
 
     const geometry = await page.evaluate(() => {
       const tablist = document.querySelector("[role='tablist']");
-      if (!tablist) return null;
-      const rect = tablist.getBoundingClientRect();
-      return { top: Math.round(rect.top), viewport: window.innerHeight };
+      const panel = document.querySelector(
+        "[role='tabpanel']:not([hidden])",
+      ) as HTMLElement | null;
+      if (!tablist || !panel) return null;
+      const strip = tablist.getBoundingClientRect();
+      const content = panel.getBoundingClientRect();
+      return {
+        stripTop: Math.round(strip.top),
+        contentTop: Math.round(content.top),
+        visibleContent: Math.round(
+          Math.min(content.bottom, window.innerHeight) - content.top,
+        ),
+        viewport: window.innerHeight,
+      };
     });
     expect(geometry).not.toBeNull();
     expect(
-      geometry!.top,
+      geometry!.stripTop,
       `tab strip top is ${
-        geometry!.top
+        geometry!.stripTop
       }px; the broken build measured ${BROKEN_TABLIST_TOP_PX}px inside a ${
         geometry!.viewport
       }px viewport`,
     ).toBeLessThan(FOLD_LIMIT_PX);
-    expect(geometry!.top).toBeLessThan(geometry!.viewport);
+    expect(
+      geometry!.visibleContent,
+      `the selected tab panel starts at ${geometry!.contentTop}px and only ${
+        geometry!.visibleContent
+      }px of it is inside the ${
+        geometry!.viewport
+      }px viewport; a tab strip above the fold with nothing readable under it is still an empty first screen`,
+    ).toBeGreaterThanOrEqual(MIN_VISIBLE_CONTENT_PX);
   });
 
   test("keeps the scene mounted while other tabs are active", async ({

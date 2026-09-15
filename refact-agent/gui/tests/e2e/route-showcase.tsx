@@ -88,21 +88,48 @@ const chatDndRoute = route === "chat-dnd";
 const queueRoute = route === "queue";
 const multiChatRoute = route === "chat-split" || chatDndRoute;
 
-// This showcase exercises legacy layout only under authoritative disabled mode.
-// An absent/failed status must remain unavailable, never imply compatibility.
-const buddyOperatorStatus: OperatorStatus = {
-  schema_version: 1,
-  mode: "disabled",
-  features: {
-    storage: false,
-    actions: false,
-    supervision: false,
-    improvement: false,
-    editorial: false,
-  },
-  project: null,
-  worker: null,
+// Legacy layout is the default so an absent/failed status never implies
+// compatibility. `?operator=enabled|unavailable` opts into the operator surface
+// so browser specs can exercise the Desk and the degraded collapse.
+const operatorParam = new URLSearchParams(window.location.search).get(
+  "operator",
+);
+const showcaseProject = {
+  project_id: "showcase",
+  canonical_root: "/workspace/refact",
 };
+const buddyOperatorStatus: OperatorStatus =
+  operatorParam === "enabled"
+    ? {
+        schema_version: 1,
+        mode: "enabled",
+        features: {
+          storage: true,
+          actions: true,
+          supervision: false,
+          improvement: false,
+          editorial: false,
+        },
+        project: showcaseProject,
+        worker: {
+          worker_id: "showcase-worker",
+          engine_instance_id: "showcase-engine",
+          epoch: 1,
+        },
+      }
+    : {
+        schema_version: 1,
+        mode: operatorParam === "unavailable" ? "unavailable" : "disabled",
+        features: {
+          storage: false,
+          actions: false,
+          supervision: false,
+          improvement: false,
+          editorial: false,
+        },
+        project: null,
+        worker: null,
+      };
 
 const buddySettings: BuddySettings = {
   enabled: true,
