@@ -13,6 +13,7 @@ mod generation;
 pub(crate) use generation::prepare_project_work_context;
 pub(crate) mod evidence;
 pub(crate) mod evidence_cache;
+pub(crate) mod evidence_revision;
 pub mod goal_monitor;
 pub mod goal_review;
 pub mod goal_role;

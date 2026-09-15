@@ -766,7 +766,7 @@ pub async fn resolve_goal_evidence(
     criteria: &[GoalCriterion],
     author: &str,
     worktree_root: Option<PathBuf>,
-    content_revision: String,
+    scope: String,
 ) -> GoalEvidence {
     let defaults = EvidenceDefaults::from_settings();
     let specs = specs_from_criteria(criteria, author, &defaults);
@@ -804,7 +804,7 @@ pub async fn resolve_goal_evidence(
         EvidenceContext {
             commit: git_head_commit(&root).await,
             worktree: root,
-            content_revision,
+            scope,
         },
     );
     let mut runner = SystemEvidenceRunner { gcx };
@@ -913,7 +913,7 @@ pub async fn run_goal_verification(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> Result<GoalVerifierReply, String> {
-    let (criteria, worktree_root, author, content_revision, sub_goals) = {
+    let (criteria, worktree_root, author, scope, sub_goals) = {
         let session = session_arc.lock().await;
         (
             session
@@ -927,18 +927,12 @@ pub async fn run_goal_verification(
                 .as_ref()
                 .map(|worktree| worktree.root.clone()),
             session.chat_id.clone(),
-            format!("{}@{}", session.chat_id, session.trajectory_version),
+            session.chat_id.clone(),
             session.sub_goal_rollup(),
         )
     };
-    let mut evidence = resolve_goal_evidence(
-        app.gcx.clone(),
-        &criteria,
-        &author,
-        worktree_root,
-        content_revision,
-    )
-    .await;
+    let mut evidence =
+        resolve_goal_evidence(app.gcx.clone(), &criteria, &author, worktree_root, scope).await;
     merge_sub_goal_gates(&mut evidence.gates, &sub_goals);
     if !evidence.gates.judge_allowed() {
         return Ok(goal_verdict_from_evidence(&evidence, None));

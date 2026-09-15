@@ -816,7 +816,7 @@ mod tests {
             crate::chat::evidence::EvidenceContext {
                 worktree: worktree_root.clone(),
                 commit: None,
-                content_revision: "T-1@7".to_string(),
+                scope: "T-1".to_string(),
             },
         );
         let mut green = FixedRunner {
@@ -854,7 +854,7 @@ mod tests {
                     checkout,
                     vec![contract()],
                     VerifyCommandPolicy::permissive(),
-                    "T-1@8".to_string(),
+                    "T-1".to_string(),
                     &cache,
                     &mut red,
                 )

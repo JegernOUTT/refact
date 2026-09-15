@@ -11,6 +11,7 @@ use crate::chat::evidence::{
     completion_decision, evaluate_gates, specs_from_card, EvidenceContext, EvidenceDefaults,
     EvidenceRecord, EvidenceService, GateOutcome, SystemEvidenceRunner,
 };
+use crate::chat::evidence_revision::supersede_stale;
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::verifier_diff::{
     git_changed_files_summary, git_head_commit, resolve_verifier_diff_base,
@@ -286,12 +287,13 @@ pub async fn verify_card(
 
     let defaults = EvidenceDefaults::from_settings();
     let specs = specs_from_card(&card, &defaults);
+    let commit = git_head_commit(&worktree).await;
     let service = EvidenceService::new(
         VerifyCommandPolicy::load(gcx.clone()).await,
         EvidenceContext {
             worktree: worktree.clone(),
-            commit: git_head_commit(&worktree).await,
-            content_revision: format!("{}@{}", card.id, board.rev),
+            commit: commit.clone(),
+            scope: card.id.clone(),
         },
     );
     let mut runner = SystemEvidenceRunner { gcx: gcx.clone() };
@@ -314,6 +316,7 @@ pub async fn verify_card(
         crate::chat::evidence_cache::CacheMode::Replay,
     )
     .await;
+    let evidence = supersede_stale(&worktree, commit.as_deref(), &specs, evidence).await;
     let command_results = evidence
         .iter()
         .map(EvidenceRecord::to_verification_result)

@@ -738,7 +738,7 @@ mod tests {
             crate::chat::evidence::EvidenceContext {
                 worktree: temp.path().to_path_buf(),
                 commit: None,
-                content_revision: "chat@1".to_string(),
+                scope: "chat".to_string(),
             },
         );
         let mut runner = crate::chat::evidence::SystemEvidenceRunner {

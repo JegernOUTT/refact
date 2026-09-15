@@ -197,7 +197,10 @@ fn confined_input_path(worktree: &Path, declared: &str) -> Result<PathBuf, Strin
 
 /// Content digests for every declared input. A declared directory contributes every
 /// file under it, so an untracked file appearing there moves the key.
-async fn input_digests(worktree: &Path, declared: &[String]) -> BTreeMap<String, String> {
+pub(crate) async fn input_digests(
+    worktree: &Path,
+    declared: &[String],
+) -> BTreeMap<String, String> {
     let mut digests = BTreeMap::new();
     for entry in declared {
         let Ok(root) = confined_input_path(worktree, entry) else {
@@ -513,7 +516,7 @@ pub async fn revalidate_merged_tree<R: EvidenceRunner>(
     checkout: PathBuf,
     specs: Vec<VerificationSpec>,
     policy: VerifyCommandPolicy,
-    content_revision: String,
+    scope: String,
     cache: &Mutex<EvidenceCache>,
     runner: &mut R,
 ) -> Option<MergeVerification> {
@@ -525,7 +528,7 @@ pub async fn revalidate_merged_tree<R: EvidenceRunner>(
         EvidenceContext {
             commit: crate::chat::verifier_diff::git_head_commit(&checkout).await,
             worktree: checkout,
-            content_revision,
+            scope,
         },
     );
     let records = execute_cached_all(&service, cache, specs, runner, CacheMode::Revalidate).await;
@@ -609,7 +612,7 @@ mod tests {
             EvidenceContext {
                 worktree: worktree.to_path_buf(),
                 commit: Some("abc1234".to_string()),
-                content_revision: "T-1@7".to_string(),
+                scope: "T-1".to_string(),
             },
         )
     }
@@ -707,7 +710,7 @@ mod tests {
             EvidenceContext {
                 worktree: temp.path().to_path_buf(),
                 commit: Some("abc1234".to_string()),
-                content_revision: "T-1@7".to_string(),
+                scope: "T-1".to_string(),
             },
         );
         assert_ne!(
@@ -796,7 +799,7 @@ mod tests {
             EvidenceContext {
                 worktree: temp.path().to_path_buf(),
                 commit: Some("abc1234".to_string()),
-                content_revision: "T-1@7".to_string(),
+                scope: "T-1".to_string(),
             },
         );
         let after_policy = execute_cached(
@@ -1247,7 +1250,7 @@ mod tests {
             merged.path().to_path_buf(),
             vec![spec("cargo test --lib")],
             VerifyCommandPolicy::permissive(),
-            "T-1@8".to_string(),
+            "T-1".to_string(),
             &cache,
             &mut red,
         )

@@ -17,6 +17,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::chat::evidence_cache::CacheDeclaration;
+use crate::chat::evidence_revision::ContentRevision;
 use crate::chat::types::{CriterionEvidence, CriterionVerdict, GoalCriterion, VerdictSource};
 use crate::chat::verify_cmd::{
     instruction_verification_commands, looks_like_command, parse_verification_argv,
@@ -254,13 +255,16 @@ impl VerificationSpec {
     }
 }
 
-/// What the evidence was produced against, so a later reader can tell whether it
-/// still describes the current content.
+/// Where the evidence comes from. `scope` names *what* the evidence is about —
+/// a card id, a chat — and is deliberately not a revision: whether the evidence
+/// still describes the current content is decided by
+/// [`crate::chat::evidence_revision::ContentRevision`], which moves only when
+/// the evidence's own inputs move.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EvidenceContext {
     pub worktree: PathBuf,
     pub commit: Option<String>,
-    pub content_revision: String,
+    pub scope: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -289,6 +293,10 @@ pub struct EvidenceRecord {
     pub output_tail: String,
     pub artifacts: Vec<ArtifactCheck>,
     pub fingerprint: ExecutionFingerprint,
+    /// The content this evidence depended on when it was produced. A later
+    /// reader recomputes it and supersedes the record when it has moved.
+    #[serde(default)]
+    pub content_revision: ContentRevision,
     /// When the command actually ran. A replayed record keeps the original
     /// execution time here, never the replay time.
     pub started_at: String,
@@ -337,6 +345,7 @@ pub(crate) fn unexecuted_record(
         output_tail: reason.clone(),
         artifacts: Vec::new(),
         fingerprint: ExecutionFingerprint::default(),
+        content_revision: ContentRevision::declared(spec),
         started_at: now.clone(),
         finished_at: now,
         accepted_by: spec
@@ -409,6 +418,9 @@ impl EvidenceService {
         let finished_at = Utc::now().to_rfc3339();
         let artifacts = self.check_artifacts(spec).await;
         let (verdict, reason) = verdict_for(spec, &result, &artifacts);
+        let content_revision =
+            ContentRevision::observe(&self.context.worktree, self.context.commit.as_deref(), spec)
+                .await;
         EvidenceRecord {
             spec_id: spec.spec_id.clone(),
             spec_revision: spec.revision,
@@ -421,7 +433,8 @@ impl EvidenceService {
             exit_code: result.exit_code,
             output_tail: tail_chars(&result.output_tail, spec.output_cap_bytes),
             artifacts,
-            fingerprint: self.fingerprint(spec),
+            fingerprint: self.fingerprint(spec, &content_revision),
+            content_revision,
             started_at,
             finished_at,
             accepted_by: spec
@@ -482,11 +495,15 @@ impl EvidenceService {
         records
     }
 
-    fn fingerprint(&self, spec: &VerificationSpec) -> ExecutionFingerprint {
+    fn fingerprint(
+        &self,
+        spec: &VerificationSpec,
+        revision: &ContentRevision,
+    ) -> ExecutionFingerprint {
         ExecutionFingerprint {
             worktree: self.context.worktree.to_string_lossy().to_string(),
             commit: self.context.commit.clone(),
-            content_revision: self.context.content_revision.clone(),
+            content_revision: revision.digest(),
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
             program: spec.argv.first().cloned().unwrap_or_default(),
@@ -557,7 +574,7 @@ impl EvidenceService {
     }
 }
 
-fn resolve_artifact_path(
+pub(crate) fn resolve_artifact_path(
     worktree: &Path,
     spec: &VerificationSpec,
     artifact: &str,
@@ -999,7 +1016,7 @@ mod tests {
             EvidenceContext {
                 worktree: worktree.to_path_buf(),
                 commit: Some("abc1234".to_string()),
-                content_revision: "T-1@7".to_string(),
+                scope: "T-1".to_string(),
             },
         )
     }
@@ -1166,7 +1183,12 @@ mod tests {
         );
         assert_eq!(record.argv, vec!["cargo", "test", "--lib"]);
         assert_eq!(record.exit_code, Some(0));
-        assert_eq!(record.fingerprint.content_revision, "T-1@7");
+        assert_eq!(
+            record.fingerprint.content_revision,
+            record.content_revision.digest()
+        );
+        assert_eq!(record.content_revision.spec_id, "S-1");
+        assert_eq!(record.content_revision.commit.as_deref(), Some("abc1234"));
         assert_eq!(record.fingerprint.commit.as_deref(), Some("abc1234"));
         assert_eq!(
             record.fingerprint.worktree,
@@ -1463,7 +1485,7 @@ mod tests {
             EvidenceContext {
                 worktree: temp.path().to_path_buf(),
                 commit: None,
-                content_revision: "T-1@1".to_string(),
+                scope: "T-1".to_string(),
             },
         );
 
@@ -1492,7 +1514,7 @@ mod tests {
             EvidenceContext {
                 worktree: temp.path().to_path_buf(),
                 commit: None,
-                content_revision: "T-1@1".to_string(),
+                scope: "T-1".to_string(),
             },
         );
 
