@@ -153,6 +153,7 @@ pub async fn store_verifier_report(
     card_id: &str,
     expected_state: Option<&ExpectedCardState>,
     report: VerifierReport,
+    evidence_spec_ids: Vec<String>,
 ) -> Result<bool, String> {
     let card_id = card_id.to_string();
     let task_id_owned = task_id.to_string();
@@ -172,6 +173,11 @@ pub async fn store_verifier_report(
         }
         card.verifier_report = Some(report.clone());
         append_verifier_status(card, &report);
+        board.attach_card_evidence(
+            &card_id,
+            crate::tasks::types::OUTCOME_FRAGMENT_VERIFICATION,
+            &evidence_spec_ids,
+        );
         Ok(())
     })
     .await
@@ -212,6 +218,7 @@ pub async fn schedule_card_verifier(gcx: Arc<GlobalContext>, request: VerifyCard
                 &request.card_id,
                 request.expected_state.as_ref(),
                 report,
+                Vec::new(),
             )
             .await
             {
@@ -413,6 +420,7 @@ pub async fn verify_card(
         &request.card_id,
         request.expected_state.as_ref(),
         report.clone(),
+        specs.iter().map(|spec| spec.spec_id.clone()).collect(),
     )
     .await?;
     if !stored {
@@ -983,6 +991,7 @@ mod tests {
             "T-1",
             Some(&expected),
             verifier_report(true),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -1027,6 +1036,7 @@ mod tests {
             "T-1",
             Some(&expected),
             verifier_report(false),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -1069,6 +1079,7 @@ mod tests {
             "T-1",
             Some(&expected),
             verifier_report(false),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -1092,9 +1103,16 @@ mod tests {
             .await
             .unwrap();
 
-        store_verifier_report(gcx.clone(), "task-1", "T-1", None, verifier_report(true))
-            .await
-            .unwrap();
+        store_verifier_report(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            None,
+            verifier_report(true),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
 
         let stored = store_verifier_report(
             gcx.clone(),
@@ -1102,6 +1120,7 @@ mod tests {
             "T-1",
             Some(&expected),
             verifier_report(false),
+            Vec::new(),
         )
         .await
         .unwrap();

@@ -78,6 +78,8 @@ pub struct TaskBoard {
     pub card_claims: std::collections::BTreeMap<String, CardClaim>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub dependency_overrides: std::collections::BTreeMap<String, DependencyOverride>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub card_outcomes: std::collections::BTreeMap<String, CardOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +179,405 @@ pub struct BoardReviewAttestation {
     pub report: VerifierReport,
 }
 
+pub const OUTCOME_FRAGMENT_SUMMARY: &str = "summary";
+pub const OUTCOME_FRAGMENT_FILES_CHANGED: &str = "files_changed";
+pub const OUTCOME_FRAGMENT_TESTS: &str = "tests_added_or_updated";
+pub const OUTCOME_FRAGMENT_VERIFICATION: &str = "verification";
+pub const OUTCOME_FRAGMENT_FOLLOWUP_CARDS: &str = "followup_cards";
+pub const OUTCOME_FRAGMENT_RISKS: &str = "risks";
+pub const OUTCOME_FRAGMENT_ASSUMPTIONS: &str = "assumptions";
+
+const OUTCOME_PLACEHOLDERS: [&str; 5] = ["_none._", "_none_", "_none provided._", "none", "n/a"];
+
+/// A required fragment is never satisfied by an empty section or by the
+/// placeholder text the markdown renderer emits for an absent one.
+pub fn fragment_content_is_absent(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    trimmed.lines().all(|line| {
+        let line = line.trim().trim_start_matches('-').trim();
+        line.is_empty()
+            || OUTCOME_PLACEHOLDERS
+                .iter()
+                .any(|placeholder| line.eq_ignore_ascii_case(placeholder))
+    })
+}
+
+pub fn normalize_fragment_name(name: &str) -> String {
+    name.trim()
+        .trim_matches('`')
+        .trim_matches('.')
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-'], "_")
+}
+
+/// The planner declares required sections in the card instructions:
+/// `Required outcome: summary, verification` and, for sections that must carry
+/// evidence provenance, `Required outcome evidence: verification`.
+pub fn outcome_requirements_from_instructions(instructions: &str) -> Vec<OutcomeRequirement> {
+    let mut required: Vec<OutcomeRequirement> = Vec::new();
+    let mut needs_evidence: Vec<String> = Vec::new();
+    for line in instructions.lines() {
+        let line = line.trim().trim_start_matches('-').trim().replace("**", "");
+        let lower = line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("required outcome evidence:") {
+            for name in fragment_names(rest) {
+                if !needs_evidence.contains(&name) {
+                    needs_evidence.push(name);
+                }
+            }
+        } else if let Some(rest) = lower.strip_prefix("required outcome:") {
+            for name in fragment_names(rest) {
+                if !required.iter().any(|entry| entry.fragment == name) {
+                    required.push(OutcomeRequirement {
+                        fragment: name,
+                        requires_evidence: false,
+                    });
+                }
+            }
+        }
+    }
+    for name in needs_evidence {
+        match required.iter_mut().find(|entry| entry.fragment == name) {
+            Some(entry) => entry.requires_evidence = true,
+            None => required.push(OutcomeRequirement {
+                fragment: name,
+                requires_evidence: true,
+            }),
+        }
+    }
+    required
+}
+
+fn fragment_names(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(normalize_fragment_name)
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FragmentReview {
+    #[default]
+    Pending,
+    Approved,
+    Rejected,
+    Contradicted,
+}
+
+impl FragmentReview {
+    pub fn label(&self) -> &'static str {
+        match self {
+            FragmentReview::Pending => "pending",
+            FragmentReview::Approved => "approved",
+            FragmentReview::Rejected => "rejected",
+            FragmentReview::Contradicted => "contradicted",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct OutcomeRequirement {
+    pub fragment: String,
+    pub requires_evidence: bool,
+}
+
+/// Which run produced a fragment, and which evidence records support it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct OutcomeProvenance {
+    pub source_run: Option<String>,
+    pub evidence_spec_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct OutcomeFragment {
+    pub name: String,
+    pub content: String,
+    pub provenance: OutcomeProvenance,
+    pub review: FragmentReview,
+    pub reviewer_chat_id: Option<String>,
+    pub reviewed_at: Option<String>,
+    pub review_note: Option<String>,
+}
+
+impl OutcomeFragment {
+    pub fn new(
+        name: impl Into<String>,
+        content: impl Into<String>,
+        source_run: Option<String>,
+    ) -> Self {
+        Self {
+            name: normalize_fragment_name(&name.into()),
+            content: content.into(),
+            provenance: OutcomeProvenance {
+                source_run,
+                evidence_spec_ids: Vec::new(),
+            },
+            ..Default::default()
+        }
+    }
+
+    pub fn has_content(&self) -> bool {
+        !fragment_content_is_absent(&self.content)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardFinalization {
+    pub finalized_by: String,
+    pub finalized_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct CardOutcome {
+    pub required: Vec<OutcomeRequirement>,
+    pub fragments: Vec<OutcomeFragment>,
+    pub finalized: Option<CardFinalization>,
+}
+
+impl CardOutcome {
+    pub fn is_empty(&self) -> bool {
+        self.required.is_empty() && self.fragments.is_empty() && self.finalized.is_none()
+    }
+
+    pub fn fragment(&self, name: &str) -> Option<&OutcomeFragment> {
+        let name = normalize_fragment_name(name);
+        self.fragments.iter().find(|entry| entry.name == name)
+    }
+
+    pub fn requirement(&self, name: &str) -> Option<&OutcomeRequirement> {
+        let name = normalize_fragment_name(name);
+        self.required.iter().find(|entry| entry.fragment == name)
+    }
+
+    pub fn set_fragment(&mut self, fragment: OutcomeFragment) {
+        match self
+            .fragments
+            .iter_mut()
+            .find(|entry| entry.name == fragment.name)
+        {
+            Some(existing) => *existing = fragment,
+            None => self.fragments.push(fragment),
+        }
+    }
+
+    pub fn record_review(
+        &mut self,
+        fragment: &str,
+        review: FragmentReview,
+        reviewer_chat_id: &str,
+        reviewed_at: String,
+        note: Option<String>,
+    ) -> Result<(), String> {
+        let name = normalize_fragment_name(fragment);
+        let entry = self
+            .fragments
+            .iter_mut()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| format!("outcome has no fragment {name}"))?;
+        entry.review = review;
+        entry.reviewer_chat_id = Some(reviewer_chat_id.to_string());
+        entry.reviewed_at = Some(reviewed_at);
+        entry.review_note = note;
+        Ok(())
+    }
+
+    pub fn attach_evidence(&mut self, fragment: &str, spec_ids: &[String]) {
+        let name = normalize_fragment_name(fragment);
+        let Some(entry) = self.fragments.iter_mut().find(|entry| entry.name == name) else {
+            return;
+        };
+        for spec_id in spec_ids {
+            if !entry.provenance.evidence_spec_ids.contains(spec_id) {
+                entry.provenance.evidence_spec_ids.push(spec_id.clone());
+            }
+        }
+    }
+
+    pub fn to_markdown(&self) -> String {
+        let mut output = String::from("# Outcome Document\n\n");
+        for requirement in &self.required {
+            output.push_str("## ");
+            output.push_str(&requirement.fragment);
+            output.push_str(if requirement.requires_evidence {
+                " (required, evidence)\n"
+            } else {
+                " (required)\n"
+            });
+            match self
+                .fragment(&requirement.fragment)
+                .filter(|fragment| fragment.has_content())
+            {
+                Some(fragment) => push_fragment_body(&mut output, fragment),
+                None => output.push_str("**MISSING — required outcome fragment.**\n\n"),
+            }
+        }
+        for fragment in &self.fragments {
+            if self.requirement(&fragment.name).is_some() {
+                continue;
+            }
+            output.push_str("## ");
+            output.push_str(&fragment.name);
+            output.push('\n');
+            push_fragment_body(&mut output, fragment);
+        }
+        if let Some(finalized) = self.finalized.as_ref() {
+            output.push_str(&format!(
+                "## Finalized\n- by: {}\n- at: {}\n\n",
+                finalized.finalized_by, finalized.finalized_at
+            ));
+        }
+        while output.ends_with('\n') {
+            output.pop();
+        }
+        output.push('\n');
+        output
+    }
+}
+
+fn push_fragment_body(output: &mut String, fragment: &OutcomeFragment) {
+    let content = fragment.content.trim();
+    if content.is_empty() {
+        output.push_str("_None._\n");
+    } else {
+        output.push_str(content);
+        output.push('\n');
+    }
+    output.push_str(&format!(
+        "- source run: {}\n",
+        fragment
+            .provenance
+            .source_run
+            .as_deref()
+            .unwrap_or("_unrecorded_")
+    ));
+    if fragment.provenance.evidence_spec_ids.is_empty() {
+        output.push_str("- evidence: _unrecorded_\n");
+    } else {
+        output.push_str(&format!(
+            "- evidence: {}\n",
+            fragment.provenance.evidence_spec_ids.join(", ")
+        ));
+    }
+    output.push_str(&format!("- review: {}\n\n", fragment.review.label()));
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FinalizeBlock {
+    CardNotFound {
+        card_id: String,
+    },
+    NotCompleted {
+        card_id: String,
+        column: String,
+    },
+    AlreadyFinalized {
+        card_id: String,
+        finalized_by: String,
+    },
+    ReviewDenied {
+        reason: String,
+    },
+    MissingFragment {
+        fragment: String,
+    },
+    EmptyFragment {
+        fragment: String,
+    },
+    RejectedFragment {
+        fragment: String,
+        reason: String,
+    },
+    ContradictedFragment {
+        fragment: String,
+        reason: String,
+    },
+    MissingSourceRun {
+        fragment: String,
+    },
+    MissingEvidence {
+        fragment: String,
+    },
+}
+
+impl FinalizeBlock {
+    pub fn message(&self) -> String {
+        match self {
+            FinalizeBlock::CardNotFound { card_id } => {
+                format!("card {card_id} not found on this board")
+            }
+            FinalizeBlock::NotCompleted { card_id, column } => {
+                format!("card {card_id} is in '{column}'; finalising requires a completed card")
+            }
+            FinalizeBlock::AlreadyFinalized {
+                card_id,
+                finalized_by,
+            } => format!("card {card_id} was already finalized by {finalized_by}"),
+            FinalizeBlock::ReviewDenied { reason } => reason.clone(),
+            FinalizeBlock::MissingFragment { fragment } => {
+                format!("required outcome fragment '{fragment}' is missing")
+            }
+            FinalizeBlock::EmptyFragment { fragment } => {
+                format!("required outcome fragment '{fragment}' is empty or a placeholder")
+            }
+            FinalizeBlock::RejectedFragment { fragment, reason } => {
+                format!("required outcome fragment '{fragment}' was rejected in review: {reason}")
+            }
+            FinalizeBlock::ContradictedFragment { fragment, reason } => {
+                format!(
+                    "required outcome fragment '{fragment}' is contradicted and unresolved: {reason}"
+                )
+            }
+            FinalizeBlock::MissingSourceRun { fragment } => format!(
+                "required outcome fragment '{fragment}' does not record the run that produced it"
+            ),
+            FinalizeBlock::MissingEvidence { fragment } => {
+                format!("required outcome fragment '{fragment}' references no evidence record")
+            }
+        }
+    }
+}
+
+/// Every unmet requirement at once: a blocked finalize is a gate answer, not a
+/// first-failure notification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct FinalizeDecision {
+    pub blocks: Vec<FinalizeBlock>,
+}
+
+impl FinalizeDecision {
+    pub fn allowed(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    pub fn message(&self) -> String {
+        if self.blocks.is_empty() {
+            return "finalize allowed".to_string();
+        }
+        let reasons = self
+            .blocks
+            .iter()
+            .map(|block| format!("- {}", block.message()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "finalize blocked by {} unmet requirement(s):\n{}",
+            self.blocks.len(),
+            reasons
+        )
+    }
+}
+
 fn default_columns() -> Vec<BoardColumn> {
     vec![
         BoardColumn {
@@ -215,6 +616,7 @@ impl Default for TaskBoard {
             review_attestations: std::collections::BTreeMap::new(),
             card_claims: std::collections::BTreeMap::new(),
             dependency_overrides: std::collections::BTreeMap::new(),
+            card_outcomes: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -413,6 +815,70 @@ impl FinalReport {
         output.push('\n');
         output
     }
+
+    /// Outcome fragments carry the section text plus the run that produced it.
+    /// Sections the run did not provide yield no fragment at all, so a declared
+    /// requirement reports them as missing rather than as an empty placeholder.
+    pub fn to_outcome_fragments(&self, source_run: Option<&str>) -> Vec<OutcomeFragment> {
+        let source_run = source_run.map(str::to_string);
+        let mut fragments = Vec::new();
+        let mut push = |name: &str, content: String| {
+            if !fragment_content_is_absent(&content) {
+                fragments.push(OutcomeFragment::new(name, content, source_run.clone()));
+            }
+        };
+        push(OUTCOME_FRAGMENT_SUMMARY, self.summary.clone());
+        push(
+            OUTCOME_FRAGMENT_FILES_CHANGED,
+            bullet_lines(&self.files_changed),
+        );
+        push(
+            OUTCOME_FRAGMENT_TESTS,
+            bullet_lines(&self.tests_added_or_updated),
+        );
+        push(
+            OUTCOME_FRAGMENT_VERIFICATION,
+            self.verification
+                .iter()
+                .map(|result| match result.exit_code {
+                    Some(exit_code) => format!(
+                        "- {} — {} (exit code {})",
+                        result.command,
+                        if result.passed { "passed" } else { "failed" },
+                        exit_code
+                    ),
+                    None => format!(
+                        "- {} — {}",
+                        result.command,
+                        if result.passed { "passed" } else { "failed" }
+                    ),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        push(
+            OUTCOME_FRAGMENT_FOLLOWUP_CARDS,
+            self.followup_cards
+                .iter()
+                .map(|card| format!("- {}", card.title))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        push(OUTCOME_FRAGMENT_RISKS, bullet_lines(&self.risks));
+        push(
+            OUTCOME_FRAGMENT_ASSUMPTIONS,
+            bullet_lines(&self.assumptions),
+        );
+        fragments
+    }
+}
+
+fn bullet_lines(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|item| format!("- {}", item))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn push_text_or_empty(output: &mut String, text: &str) {
@@ -1040,10 +1506,170 @@ impl TaskBoard {
         Ok(())
     }
 
+    pub fn card_outcome(&self, card_id: &str) -> Option<&CardOutcome> {
+        self.card_outcomes.get(card_id)
+    }
+
+    pub fn card_is_finalized(&self, card_id: &str) -> bool {
+        self.card_outcomes
+            .get(card_id)
+            .is_some_and(|outcome| outcome.finalized.is_some())
+    }
+
+    /// Records what a run produced. Declared requirements come from the card
+    /// instructions, so a run can never erase the requirements it must meet.
+    pub fn record_card_outcome(
+        &mut self,
+        card_id: &str,
+        required: Vec<OutcomeRequirement>,
+        fragments: Vec<OutcomeFragment>,
+    ) {
+        let outcome = self.card_outcomes.entry(card_id.to_string()).or_default();
+        outcome.required = required;
+        for fragment in fragments {
+            outcome.set_fragment(fragment);
+        }
+    }
+
+    pub fn attach_card_evidence(&mut self, card_id: &str, fragment: &str, spec_ids: &[String]) {
+        if spec_ids.is_empty() {
+            return;
+        }
+        if let Some(outcome) = self.card_outcomes.get_mut(card_id) {
+            outcome.attach_evidence(fragment, spec_ids);
+        }
+    }
+
+    /// The finalize gate. Reuses the single review-authority path
+    /// (`authorize_finalizer` plus `review_policy_allows_report`) and reports
+    /// every unmet requirement in one answer.
+    pub fn evaluate_finalize(
+        &self,
+        card_id: &str,
+        principal: &str,
+        allow_self_review: bool,
+    ) -> FinalizeDecision {
+        let mut blocks = Vec::new();
+        let Some(card) = self.get_card(card_id) else {
+            return FinalizeDecision {
+                blocks: vec![FinalizeBlock::CardNotFound {
+                    card_id: card_id.to_string(),
+                }],
+            };
+        };
+        if card.column != "done" {
+            blocks.push(FinalizeBlock::NotCompleted {
+                card_id: card_id.to_string(),
+                column: card.column.clone(),
+            });
+        }
+        let outcome = self.card_outcomes.get(card_id);
+        if let Some(finalized) = outcome.and_then(|outcome| outcome.finalized.as_ref()) {
+            blocks.push(FinalizeBlock::AlreadyFinalized {
+                card_id: card_id.to_string(),
+                finalized_by: finalized.finalized_by.clone(),
+            });
+        }
+        if let Err(violation) = self.authorize_finalizer(card_id, principal, allow_self_review) {
+            blocks.push(FinalizeBlock::ReviewDenied {
+                reason: violation.message(),
+            });
+        }
+        if self.owner_chat_id.is_some() {
+            match card.verifier_report.as_ref() {
+                Some(report) => {
+                    if let Err(reason) =
+                        self.review_policy_allows_report(card_id, report, allow_self_review)
+                    {
+                        blocks.push(FinalizeBlock::ReviewDenied { reason });
+                    }
+                }
+                None => blocks.push(FinalizeBlock::ReviewDenied {
+                    reason: "finalising requires a reviewer report for the card".to_string(),
+                }),
+            }
+        }
+        for requirement in outcome
+            .map(|outcome| outcome.required.as_slice())
+            .unwrap_or(&[])
+        {
+            let fragment = outcome.and_then(|outcome| outcome.fragment(&requirement.fragment));
+            let Some(fragment) = fragment else {
+                blocks.push(FinalizeBlock::MissingFragment {
+                    fragment: requirement.fragment.clone(),
+                });
+                continue;
+            };
+            if !fragment.has_content() {
+                blocks.push(FinalizeBlock::EmptyFragment {
+                    fragment: requirement.fragment.clone(),
+                });
+            }
+            let note = fragment
+                .review_note
+                .clone()
+                .unwrap_or_else(|| "no reason recorded".to_string());
+            match fragment.review {
+                FragmentReview::Rejected => blocks.push(FinalizeBlock::RejectedFragment {
+                    fragment: requirement.fragment.clone(),
+                    reason: note,
+                }),
+                FragmentReview::Contradicted => blocks.push(FinalizeBlock::ContradictedFragment {
+                    fragment: requirement.fragment.clone(),
+                    reason: note,
+                }),
+                FragmentReview::Pending | FragmentReview::Approved => {}
+            }
+            if requirement.requires_evidence {
+                if fragment
+                    .provenance
+                    .source_run
+                    .as_deref()
+                    .map(str::trim)
+                    .is_none_or(str::is_empty)
+                {
+                    blocks.push(FinalizeBlock::MissingSourceRun {
+                        fragment: requirement.fragment.clone(),
+                    });
+                }
+                if fragment.provenance.evidence_spec_ids.is_empty() {
+                    blocks.push(FinalizeBlock::MissingEvidence {
+                        fragment: requirement.fragment.clone(),
+                    });
+                }
+            }
+        }
+        FinalizeDecision { blocks }
+    }
+
+    pub fn finalize_card(
+        &mut self,
+        card_id: &str,
+        principal: &str,
+        allow_self_review: bool,
+        finalized_at: String,
+    ) -> Result<(), FinalizeDecision> {
+        let decision = self.evaluate_finalize(card_id, principal, allow_self_review);
+        if !decision.allowed() {
+            return Err(decision);
+        }
+        self.card_outcomes
+            .entry(card_id.to_string())
+            .or_default()
+            .finalized = Some(CardFinalization {
+            finalized_by: principal.to_string(),
+            finalized_at,
+        });
+        Ok(())
+    }
+
     pub fn clear_verifier_reports(&mut self) {
         self.review_attestations.clear();
         for card in &mut self.cards {
             card.verifier_report = None;
+        }
+        for outcome in self.card_outcomes.values_mut() {
+            outcome.finalized = None;
         }
     }
 
@@ -1064,6 +1690,9 @@ impl TaskBoard {
 
     pub fn invalidate_card_review(&mut self, card_id: &str) {
         self.review_attestations.remove(card_id);
+        if let Some(outcome) = self.card_outcomes.get_mut(card_id) {
+            outcome.finalized = None;
+        }
         if let Some(card) = self.get_card_mut(card_id) {
             card.verifier_report = None;
         }
@@ -1876,5 +2505,460 @@ mod tests {
 
         assert!(decoded.base_branch.is_none());
         assert!(decoded.base_commit.is_none());
+    }
+
+    fn passing_verifier_report() -> VerifierReport {
+        VerifierReport {
+            passed: true,
+            recommendation: "merge".into(),
+            classification: VerifierReportClassification::Passed,
+            ..Default::default()
+        }
+    }
+
+    fn reviewed_board() -> TaskBoard {
+        let mut done = card("T-1", "Card", "done", vec![]);
+        done.verifier_report = Some(passing_verifier_report());
+        let mut board = TaskBoard {
+            cards: vec![done],
+            owner_chat_id: Some("planner-chat".into()),
+            reviewer_chat_ids: vec!["reviewer-chat".into()],
+            ..Default::default()
+        };
+        board
+            .attest_review(
+                "T-1",
+                "reviewer-chat",
+                &passing_verifier_report(),
+                "2026-05-16T00:00:00Z".into(),
+                false,
+            )
+            .unwrap();
+        board
+    }
+
+    fn fragment(name: &str, content: &str) -> OutcomeFragment {
+        OutcomeFragment::new(name, content, Some("agent-chat-1".into()))
+    }
+
+    fn requirement(name: &str) -> OutcomeRequirement {
+        OutcomeRequirement {
+            fragment: name.into(),
+            requires_evidence: false,
+        }
+    }
+
+    #[test]
+    fn a_missing_required_fragment_blocks_finalize_and_a_placeholder_never_satisfies_one() {
+        let mut board = reviewed_board();
+        board.record_card_outcome(
+            "T-1",
+            vec![requirement("summary"), requirement("files_changed")],
+            vec![fragment("summary", "_None._")],
+        );
+
+        let decision = board.evaluate_finalize("T-1", "planner-chat", false);
+
+        assert!(!decision.allowed());
+        assert!(
+            decision.blocks.contains(&FinalizeBlock::EmptyFragment {
+                fragment: "summary".into()
+            }),
+            "the renderer's placeholder must never stand in for a required fragment: {:?}",
+            decision.blocks
+        );
+        assert!(decision.blocks.contains(&FinalizeBlock::MissingFragment {
+            fragment: "files_changed".into()
+        }));
+        assert!(board
+            .finalize_card("T-1", "planner-chat", false, now())
+            .is_err());
+        assert!(!board.card_is_finalized("T-1"));
+    }
+
+    fn now() -> String {
+        "2026-05-16T01:00:00Z".to_string()
+    }
+
+    #[test]
+    fn a_rejected_required_fragment_blocks_finalize_even_when_another_is_approved() {
+        let mut board = reviewed_board();
+        board.record_card_outcome(
+            "T-1",
+            vec![requirement("summary"), requirement("verification")],
+            vec![
+                fragment("summary", "Implemented the gate."),
+                fragment("verification", "- cargo test -p refact-tasks — passed"),
+            ],
+        );
+        let outcome = board.card_outcomes.get_mut("T-1").unwrap();
+        outcome
+            .record_review(
+                "summary",
+                FragmentReview::Approved,
+                "reviewer-chat",
+                now(),
+                None,
+            )
+            .unwrap();
+        outcome
+            .record_review(
+                "verification",
+                FragmentReview::Rejected,
+                "reviewer-chat",
+                now(),
+                Some("the quoted run never happened".into()),
+            )
+            .unwrap();
+
+        let decision = board.evaluate_finalize("T-1", "planner-chat", false);
+
+        assert_eq!(
+            decision.blocks,
+            vec![FinalizeBlock::RejectedFragment {
+                fragment: "verification".into(),
+                reason: "the quoted run never happened".into()
+            }],
+            "an approved sibling fragment must not buy off a rejected required one"
+        );
+    }
+
+    #[test]
+    fn an_unresolved_contradicted_required_fragment_blocks_finalize() {
+        let mut board = reviewed_board();
+        board.record_card_outcome(
+            "T-1",
+            vec![requirement("summary")],
+            vec![fragment("summary", "All tests pass.")],
+        );
+        board
+            .card_outcomes
+            .get_mut("T-1")
+            .unwrap()
+            .record_review(
+                "summary",
+                FragmentReview::Contradicted,
+                "reviewer-chat",
+                now(),
+                Some("the verifier recorded a failing gate".into()),
+            )
+            .unwrap();
+
+        let decision = board.evaluate_finalize("T-1", "planner-chat", false);
+
+        assert_eq!(
+            decision.blocks,
+            vec![FinalizeBlock::ContradictedFragment {
+                fragment: "summary".into(),
+                reason: "the verifier recorded a failing gate".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn self_review_is_refused_by_default_and_permitted_only_with_the_setting() {
+        let mut done = card("T-1", "Card", "done", vec![]);
+        done.verifier_report = Some(passing_verifier_report());
+        let mut board = TaskBoard {
+            cards: vec![done],
+            owner_chat_id: Some("planner-chat".into()),
+            reviewer_chat_ids: vec!["agent-chat".into()],
+            ..Default::default()
+        };
+        board
+            .claim_card("T-1", "agent-chat", "key-1", now())
+            .unwrap();
+
+        let refused = board.evaluate_finalize("T-1", "agent-chat", false);
+
+        assert!(refused.blocks.iter().any(|block| matches!(
+            block,
+            FinalizeBlock::ReviewDenied { reason } if reason.contains("self-review is refused")
+        )));
+        assert!(board.evaluate_finalize("T-1", "agent-chat", true).allowed());
+    }
+
+    #[test]
+    fn independent_required_still_forbids_owner_self_attestation() {
+        let mut board = reviewed_board();
+        board
+            .attest_review(
+                "T-1",
+                "planner-chat",
+                &passing_verifier_report(),
+                now(),
+                true,
+            )
+            .unwrap();
+        board.review_policy = BoardReviewPolicy::IndependentRequired;
+
+        let decision = board.evaluate_finalize("T-1", "planner-chat", true);
+
+        assert!(decision.blocks.iter().any(|block| matches!(
+            block,
+            FinalizeBlock::ReviewDenied { reason } if reason.contains("forbids owner self-review")
+        )));
+    }
+
+    #[test]
+    fn a_blocked_finalize_names_every_unmet_requirement_at_once() {
+        let mut doing = card("T-1", "Card", "doing", vec![]);
+        doing.verifier_report = Some(passing_verifier_report());
+        let mut board = TaskBoard {
+            cards: vec![doing],
+            owner_chat_id: Some("planner-chat".into()),
+            reviewer_chat_ids: vec!["reviewer-chat".into()],
+            ..Default::default()
+        };
+        board
+            .attest_review(
+                "T-1",
+                "reviewer-chat",
+                &passing_verifier_report(),
+                now(),
+                false,
+            )
+            .unwrap();
+        board.record_card_outcome(
+            "T-1",
+            vec![
+                requirement("summary"),
+                OutcomeRequirement {
+                    fragment: "verification".into(),
+                    requires_evidence: true,
+                },
+            ],
+            vec![OutcomeFragment::new(
+                "verification",
+                "- cargo test — passed",
+                None,
+            )],
+        );
+
+        let decision = board.evaluate_finalize("T-1", "stranger-chat", false);
+
+        assert_eq!(
+            decision.blocks,
+            vec![
+                FinalizeBlock::NotCompleted {
+                    card_id: "T-1".into(),
+                    column: "doing".into()
+                },
+                FinalizeBlock::ReviewDenied {
+                    reason: "card T-1: finalising requires the board owner or an assigned reviewer"
+                        .into()
+                },
+                FinalizeBlock::MissingFragment {
+                    fragment: "summary".into()
+                },
+                FinalizeBlock::MissingSourceRun {
+                    fragment: "verification".into()
+                },
+                FinalizeBlock::MissingEvidence {
+                    fragment: "verification".into()
+                },
+            ],
+            "a blocked finalize is a gate answer, not a first-failure notification"
+        );
+        let message = decision.message();
+        assert!(message.contains("5 unmet requirement"));
+        assert!(message.contains("'summary' is missing"));
+        assert!(message.contains("references no evidence record"));
+    }
+
+    #[test]
+    fn done_stays_agent_declared_and_finalized_is_a_separate_state() {
+        let mut board = reviewed_board();
+        board.record_card_outcome(
+            "T-1",
+            vec![requirement("summary")],
+            vec![fragment("summary", "Implemented the gate.")],
+        );
+
+        assert_eq!(board.get_card("T-1").unwrap().column, "done");
+        assert!(!board.card_is_finalized("T-1"));
+
+        board
+            .finalize_card("T-1", "planner-chat", false, now())
+            .unwrap();
+
+        assert_eq!(board.get_card("T-1").unwrap().column, "done");
+        assert!(board.card_is_finalized("T-1"));
+        assert_eq!(
+            board.card_outcome("T-1").unwrap().finalized,
+            Some(CardFinalization {
+                finalized_by: "planner-chat".into(),
+                finalized_at: now()
+            })
+        );
+        assert!(board
+            .finalize_card("T-1", "planner-chat", false, now())
+            .unwrap_err()
+            .blocks
+            .contains(&FinalizeBlock::AlreadyFinalized {
+                card_id: "T-1".into(),
+                finalized_by: "planner-chat".into()
+            }));
+    }
+
+    #[test]
+    fn an_outcome_with_no_declared_requirements_finalizes_as_before() {
+        let mut board = TaskBoard {
+            cards: vec![card("T-1", "Card", "done", vec![])],
+            ..Default::default()
+        };
+
+        assert!(board.evaluate_finalize("T-1", "any-chat", false).allowed());
+        assert!(board.finalize_card("T-1", "any-chat", false, now()).is_ok());
+    }
+
+    #[test]
+    fn evidence_provenance_is_required_only_where_it_was_declared() {
+        let mut board = reviewed_board();
+        board.record_card_outcome(
+            "T-1",
+            vec![
+                requirement("summary"),
+                OutcomeRequirement {
+                    fragment: "verification".into(),
+                    requires_evidence: true,
+                },
+            ],
+            vec![
+                fragment("summary", "Implemented the gate."),
+                fragment("verification", "- cargo test -p refact-tasks — passed"),
+            ],
+        );
+
+        assert_eq!(
+            board.evaluate_finalize("T-1", "planner-chat", false).blocks,
+            vec![FinalizeBlock::MissingEvidence {
+                fragment: "verification".into()
+            }]
+        );
+
+        board.attach_card_evidence("T-1", "verification", &["T-1#0".to_string()]);
+
+        assert!(board
+            .evaluate_finalize("T-1", "planner-chat", false)
+            .allowed());
+        assert_eq!(
+            board
+                .card_outcome("T-1")
+                .unwrap()
+                .fragment("verification")
+                .unwrap()
+                .provenance
+                .evidence_spec_ids,
+            vec!["T-1#0".to_string()]
+        );
+    }
+
+    #[test]
+    fn invalidating_a_card_review_unfinalizes_it() {
+        let mut board = reviewed_board();
+        board.record_card_outcome("T-1", vec![], vec![fragment("summary", "Done.")]);
+        board
+            .finalize_card("T-1", "planner-chat", false, now())
+            .unwrap();
+
+        board.invalidate_card_review("T-1");
+
+        assert!(!board.card_is_finalized("T-1"));
+        assert!(board
+            .card_outcome("T-1")
+            .unwrap()
+            .fragment("summary")
+            .is_some());
+    }
+
+    #[test]
+    fn required_outcome_fragments_are_declared_in_card_instructions() {
+        let requirements = outcome_requirements_from_instructions(
+            "## Requirements\n- **Required outcome:** Summary, files changed, `verification`\n- Required outcome evidence: verification\n",
+        );
+
+        assert_eq!(
+            requirements,
+            vec![
+                OutcomeRequirement {
+                    fragment: "summary".into(),
+                    requires_evidence: false
+                },
+                OutcomeRequirement {
+                    fragment: "files_changed".into(),
+                    requires_evidence: false
+                },
+                OutcomeRequirement {
+                    fragment: "verification".into(),
+                    requires_evidence: true
+                },
+            ]
+        );
+        assert!(outcome_requirements_from_instructions("no declaration here").is_empty());
+    }
+
+    #[test]
+    fn the_outcome_document_never_renders_a_placeholder_for_a_required_fragment() {
+        let mut outcome = CardOutcome {
+            required: vec![requirement("summary"), requirement("files_changed")],
+            ..Default::default()
+        };
+        outcome.set_fragment(fragment("summary", "_None._"));
+        outcome.set_fragment(fragment("risks", "- the gate is new"));
+        outcome.attach_evidence("risks", &["T-1#0".to_string()]);
+
+        let markdown = outcome.to_markdown();
+
+        assert!(markdown.contains("## summary (required)"));
+        assert!(markdown.contains("## files_changed (required)"));
+        assert_eq!(
+            markdown
+                .matches("**MISSING — required outcome fragment.**")
+                .count(),
+            2,
+            "a placeholder required fragment is reported as missing, never rendered as content"
+        );
+        assert!(!markdown.contains("_None._"));
+        assert!(markdown.contains("## risks"));
+        assert!(markdown.contains("- source run: agent-chat-1"));
+        assert!(markdown.contains("- evidence: T-1#0"));
+    }
+
+    #[test]
+    fn a_final_report_becomes_fragments_that_name_the_run_that_produced_them() {
+        let report = FinalReport {
+            summary: "Implemented the gate.".into(),
+            success: true,
+            files_changed: vec!["types.rs".into()],
+            verification: vec![VerificationResult {
+                command: "cargo test -p refact-tasks".into(),
+                exit_code: Some(0),
+                passed: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let fragments = report.to_outcome_fragments(Some("agent-chat-1"));
+
+        assert_eq!(
+            fragments
+                .iter()
+                .map(|fragment| fragment.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["summary", "files_changed", "verification"],
+            "sections the run did not provide must not appear as empty fragments"
+        );
+        assert!(fragments
+            .iter()
+            .all(|fragment| fragment.provenance.source_run.as_deref() == Some("agent-chat-1")));
+        assert_eq!(
+            fragments[2].content,
+            "- cargo test -p refact-tasks — passed (exit code 0)"
+        );
+        assert!(FinalReport::default()
+            .to_outcome_fragments(Some("agent-chat-1"))
+            .is_empty());
     }
 }

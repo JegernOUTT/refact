@@ -12,8 +12,9 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::verifier::{schedule_card_verifier_after_finish, ExpectedCardState};
 use crate::tasks::storage;
 use crate::tasks::types::{
-    AbVariantFinish, AbVariantInfo, BoardCard, FinalReport, StatusUpdate, SuggestedCard,
-    VerificationResult,
+    fragment_content_is_absent, outcome_requirements_from_instructions, AbVariantFinish,
+    AbVariantInfo, BoardCard, FinalReport, OutcomeFragment, StatusUpdate, SuggestedCard,
+    VerificationResult, OUTCOME_FRAGMENT_SUMMARY,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::types::WorktreeMeta;
@@ -602,6 +603,24 @@ fn mark_ab_variant_finished(
     Ok(all_finished)
 }
 
+/// What the run produced, tagged with the run that produced it. A section the
+/// run left empty yields no fragment, so a declared requirement reports it as
+/// missing instead of accepting a placeholder.
+fn outcome_fragments_for_finish(
+    report: &ParsedFinishReport,
+    source_run: &str,
+) -> Vec<OutcomeFragment> {
+    match report.structured.as_ref() {
+        Some(structured) => structured.to_outcome_fragments(Some(source_run)),
+        None if fragment_content_is_absent(&report.markdown) => Vec::new(),
+        None => vec![OutcomeFragment::new(
+            OUTCOME_FRAGMENT_SUMMARY,
+            report.markdown.clone(),
+            Some(source_run.to_string()),
+        )],
+    }
+}
+
 fn clear_finished_agent_session(card: &mut BoardCard) {
     card.agent_chat_id = None;
     card.assignee = None;
@@ -948,6 +967,13 @@ impl Tool for ToolTaskAgentFinish {
 
                 mark_finished_card(card, success_clone, &report_clone, commit_hash.as_deref());
                 let verifier_expected_state = ExpectedCardState::from_card(next_board_rev, card);
+                let instructions = card.instructions.clone();
+
+                board.record_card_outcome(
+                    &card_id_owned,
+                    outcome_requirements_from_instructions(&instructions),
+                    outcome_fragments_for_finish(&report_clone, &finish_chat_id),
+                );
 
                 let agents_active = agents_active(&board.cards);
                 let all_finished = agents_active == 0;
@@ -1092,7 +1118,8 @@ impl Tool for ToolTaskAgentFinish {
 mod tests {
     use super::*;
     use crate::tasks::types::{
-        AbVariantInfo, AbVariants, BoardCard, TaskBoard, TaskMeta as StoredTaskMeta, TaskStatus,
+        AbVariantInfo, AbVariants, BoardCard, FinalizeBlock, OutcomeRequirement, TaskBoard,
+        TaskMeta as StoredTaskMeta, TaskStatus,
     };
 
     fn run_git(cwd: &Path, args: &[&str]) -> String {
@@ -1654,6 +1681,156 @@ mod tests {
         assert!(parse_success_arg(&true_args).unwrap());
         assert!(!parse_success_arg(&false_args).unwrap());
         assert!(parse_success_arg(&bool_args).unwrap());
+    }
+
+    fn finished_board(instructions: &str, report: &ParsedFinishReport) -> TaskBoard {
+        let mut card = test_card(None);
+        card.instructions = instructions.to_string();
+        let mut board = TaskBoard {
+            cards: vec![card],
+            ..Default::default()
+        };
+        let card = board.get_card_mut("T-1").unwrap();
+        mark_finished_card(card, true, report, None);
+        let instructions = card.instructions.clone();
+        board.record_card_outcome(
+            "T-1",
+            outcome_requirements_from_instructions(&instructions),
+            outcome_fragments_for_finish(report, "agent-chat-1"),
+        );
+        board
+    }
+
+    #[test]
+    fn agent_finish_records_the_outcome_document_and_leaves_done_agent_declared() {
+        let args = HashMap::from_iter([
+            ("success".to_string(), json!(true)),
+            (
+                "report".to_string(),
+                json!({
+                    "summary": "Implemented the finalize gate.",
+                    "files_changed": ["crates/refact-tasks/src/types.rs"]
+                }),
+            ),
+        ]);
+        let parsed = parse_finish_report(&args, true).unwrap();
+
+        let board = finished_board(
+            "Required outcome: summary, files_changed\nRequired outcome evidence: verification\n",
+            &parsed,
+        );
+
+        assert_eq!(
+            board.get_card("T-1").unwrap().column,
+            "done",
+            "done still means the agent declared it finished"
+        );
+        assert!(
+            !board.card_is_finalized("T-1"),
+            "finishing must never finalize: they are distinct states"
+        );
+        let outcome = board.card_outcome("T-1").unwrap();
+        assert_eq!(
+            outcome.required,
+            vec![
+                OutcomeRequirement {
+                    fragment: "summary".into(),
+                    requires_evidence: false
+                },
+                OutcomeRequirement {
+                    fragment: "files_changed".into(),
+                    requires_evidence: false
+                },
+                OutcomeRequirement {
+                    fragment: "verification".into(),
+                    requires_evidence: true
+                },
+            ]
+        );
+        assert_eq!(
+            outcome
+                .fragment("summary")
+                .unwrap()
+                .provenance
+                .source_run
+                .as_deref(),
+            Some("agent-chat-1")
+        );
+        assert_eq!(
+            board.evaluate_finalize("T-1", "planner-chat", false).blocks,
+            vec![FinalizeBlock::MissingFragment {
+                fragment: "verification".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn an_empty_report_renders_cleanly_but_satisfies_no_declared_requirement() {
+        let parsed = ParsedFinishReport {
+            markdown: FinalReport::default().to_markdown(),
+            structured: Some(FinalReport::default()),
+        };
+        assert!(
+            parsed.markdown.contains("_None._"),
+            "the legacy renderer still makes an empty report look complete"
+        );
+
+        let board = finished_board("Required outcome: summary, verification", &parsed);
+
+        assert!(board.card_outcome("T-1").unwrap().fragments.is_empty());
+        assert_eq!(
+            board.evaluate_finalize("T-1", "planner-chat", false).blocks,
+            vec![
+                FinalizeBlock::MissingFragment {
+                    fragment: "summary".into()
+                },
+                FinalizeBlock::MissingFragment {
+                    fragment: "verification".into()
+                },
+            ],
+            "a blocked finalize names every unmet requirement at once"
+        );
+    }
+
+    #[test]
+    fn agent_finish_legacy_markdown_report_still_becomes_the_summary_fragment() {
+        let args = HashMap::from_iter([
+            ("success".to_string(), json!(true)),
+            ("report".to_string(), json!("Landed the gate by hand.")),
+        ]);
+        let parsed = parse_finish_report(&args, true).unwrap();
+        assert!(parsed.structured.is_none());
+
+        let board = finished_board("Required outcome: summary", &parsed);
+
+        assert_eq!(
+            board
+                .card_outcome("T-1")
+                .unwrap()
+                .fragment("summary")
+                .unwrap()
+                .content,
+            "Landed the gate by hand."
+        );
+        assert!(board
+            .evaluate_finalize("T-1", "planner-chat", false)
+            .allowed());
+    }
+
+    #[test]
+    fn a_card_without_declared_requirements_finishes_exactly_as_before() {
+        let args = HashMap::from_iter([
+            ("success".to_string(), json!(true)),
+            ("report".to_string(), json!("No requirements declared.")),
+        ]);
+        let parsed = parse_finish_report(&args, true).unwrap();
+
+        let board = finished_board("Plain instructions with no declaration.", &parsed);
+
+        assert!(board.card_outcome("T-1").unwrap().required.is_empty());
+        assert!(board
+            .evaluate_finalize("T-1", "planner-chat", false)
+            .allowed());
     }
 
     #[tokio::test]
