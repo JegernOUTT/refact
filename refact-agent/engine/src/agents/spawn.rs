@@ -2195,7 +2195,7 @@ async fn install_resumed_session(
             trajectory.waiting_for_card_ids.clone(),
             trajectory.goal.clone(),
         );
-        session.goal_ledger = trajectory.goal_ledger.clone();
+        session.set_goal_ledger(trajectory.goal_ledger.clone());
         session.goal_verification_blocked_until_ms = trajectory.goal_verification_blocked_until_ms;
         session.compression_retry_after_ms = trajectory.compression_retry_after_ms.clone();
         session.pending_deliveries = trajectory.pending_deliveries.clone().into();

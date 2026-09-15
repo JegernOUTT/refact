@@ -112,35 +112,25 @@ pub(crate) fn sub_goal_report_from_agent(record: &BackgroundAgent) -> SubGoalRep
     }
 }
 
-async fn parent_sub_goal_lane(app: &AppState, record: &BackgroundAgent) -> Option<String> {
-    let session_arc = {
-        let sessions = app.gcx.chat_sessions.read().await;
-        sessions.get(&record.parent_chat_id).cloned()
-    }?;
-    let owner = SubGoalOwner::background_agent(&record.agent_id);
-    let session = session_arc.lock().await;
-    session
-        .sub_goal_graph()
-        .nodes
-        .iter()
-        .find(|state| state.node.owner.as_ref() == Some(&owner))
-        .map(|state| state.node.id.clone())
+async fn parent_session(
+    app: &AppState,
+    record: &BackgroundAgent,
+) -> Option<std::sync::Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>> {
+    let sessions = app.gcx.chat_sessions.read().await;
+    sessions.get(&record.parent_chat_id).cloned()
 }
 
 /// Files a finished child's structured verdicts on the parent lane it owns. A
 /// child closed by its parent supersedes the lane instead of reporting on it.
 pub(crate) async fn record_sub_goal_outcome(app: &AppState, record: &BackgroundAgent) {
-    let Some(node_id) = parent_sub_goal_lane(app, record).await else {
+    let Some(session_arc) = parent_session(app, record).await else {
         return;
     };
-    let session_arc = {
-        let sessions = app.gcx.chat_sessions.read().await;
-        sessions.get(&record.parent_chat_id).cloned()
-    };
-    let Some(session_arc) = session_arc else {
-        return;
-    };
+    let owner = SubGoalOwner::background_agent(&record.agent_id);
     let mut session = session_arc.lock().await;
+    let Some(node_id) = session.sub_goal_lane_for_owner(&owner) else {
+        return;
+    };
     if record.status == BgAgentStatus::Closed {
         session.supersede_sub_goal(&node_id, "closed by parent");
         return;
@@ -148,52 +138,26 @@ pub(crate) async fn record_sub_goal_outcome(app: &AppState, record: &BackgroundA
     session.record_sub_goal_report(&node_id, sub_goal_report_from_agent(record));
 }
 
-/// Opens a lane for a child launched under a parent that is pursuing a goal, so
-/// the child's eventual verdicts have somewhere to land. The lane is optional:
-/// composing a required lane is the parent's explicit choice, and an automatic
-/// one must never start gating a goal that never asked for it.
-async fn ensure_sub_goal_lane(app: &AppState, record: &BackgroundAgent) -> Option<String> {
-    if let Some(node_id) = parent_sub_goal_lane(app, record).await {
-        return Some(node_id);
-    }
-    let session_arc = {
-        let sessions = app.gcx.chat_sessions.read().await;
-        sessions.get(&record.parent_chat_id).cloned()
-    }?;
-    let mut session = session_arc.lock().await;
-    session.goal.as_ref()?;
-    let node_id = format!("agent:{}", record.agent_id);
-    let declaration = refact_chat_api::SubGoalDeclaration {
-        nodes: vec![
-            refact_chat_api::SubGoalNode::new(node_id.clone(), record.title.clone())
-                .with_owner(SubGoalOwner::background_agent(&record.agent_id)),
-        ],
-        edges: vec![refact_chat_api::SubGoalEdge::optional(
-            refact_chat_api::ROOT_SUB_GOAL_ID,
-            node_id.clone(),
-        )],
-    };
-    session.declare_sub_goals(declaration).ok()?;
-    Some(node_id)
-}
-
-/// Marks the lane this agent owns as dispatched, so a lane in flight never
-/// reads as `not_run`.
+/// Opens (or reuses) the lane this agent owns and marks it dispatched, so a
+/// lane in flight never reads as `not_run`. Lookup, creation and dispatch all
+/// happen under one acquisition of the parent session.
 pub(crate) async fn mark_sub_goal_dispatched(app: &AppState, record: &BackgroundAgent) {
-    let Some(node_id) = ensure_sub_goal_lane(app, record).await else {
+    let Some(session_arc) = parent_session(app, record).await else {
         return;
     };
-    let session_arc = {
-        let sessions = app.gcx.chat_sessions.read().await;
-        sessions.get(&record.parent_chat_id).cloned()
-    };
-    let Some(session_arc) = session_arc else {
-        return;
-    };
-    session_arc.lock().await.dispatch_sub_goal(
-        &node_id,
-        Some(SubGoalOwner::background_agent(&record.agent_id)),
-    );
+    let owner = SubGoalOwner::background_agent(&record.agent_id);
+    let refusal = session_arc
+        .lock()
+        .await
+        .ensure_and_dispatch_sub_goal_lane(owner, record.title.clone())
+        .err();
+    if let Some(refusal) = refusal.filter(|refusal| !refusal.is_no_goal()) {
+        tracing::warn!(
+            "no sub-goal lane for agent {}: {}",
+            record.agent_id,
+            refusal
+        );
+    }
 }
 
 pub async fn push_completion_to_parent(

@@ -312,7 +312,7 @@ mod tests {
                 saved.waiting_for_card_ids,
                 saved.goal,
             );
-            restored.goal_ledger = saved.goal_ledger;
+            restored.set_goal_ledger(saved.goal_ledger);
             insert_session(&app, restored).await;
             let output = result_json(
                 ToolGetGoal::new(String::new())

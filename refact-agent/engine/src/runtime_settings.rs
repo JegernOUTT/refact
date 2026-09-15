@@ -55,6 +55,7 @@ const GOAL_REVIEW_MAX_REPAIR_ATTEMPTS_DEFAULT: usize = 2;
 const GOAL_REVIEW_SPOT_CHECK_PERCENT_DEFAULT: usize = 0;
 const GOAL_SUB_GOAL_MAX_DEPTH_DEFAULT: usize = refact_chat_api::DEFAULT_SUB_GOAL_MAX_DEPTH;
 const GOAL_SUB_GOAL_MAX_FAN_OUT_DEFAULT: usize = refact_chat_api::DEFAULT_SUB_GOAL_MAX_FAN_OUT;
+const GOAL_AUTO_SUB_GOAL_LANE_CAP_DEFAULT: usize = refact_chat_api::DEFAULT_SUB_GOAL_MAX_FAN_OUT;
 const VERIFICATION_EVIDENCE_CACHE_MAX_ENTRIES_DEFAULT: usize = 512;
 const VERIFICATION_EVIDENCE_CACHE_MAX_BYTES_DEFAULT: usize = 8_388_608;
 const VERIFICATION_EVIDENCE_CACHE_TTL_SECS_DEFAULT: u64 = 3_600;
@@ -352,6 +353,10 @@ pub struct TrajectoryRuntimeSettings {
     pub goal_sub_goal_max_depth: usize,
     /// How many child lanes one sub-goal may own.
     pub goal_sub_goal_max_fan_out: usize,
+    /// How many sub-goal lanes a goal may have opened automatically for
+    /// spawned children. Past the cap the lane is refused explicitly and the
+    /// child runs untracked, rather than the ledger growing without limit.
+    pub goal_auto_sub_goal_lane_cap: usize,
     /// Bounds on the replayable evidence cache. Eviction is deterministic, so
     /// these decide exactly which entries survive.
     pub verification_evidence_cache_max_entries: usize,
@@ -421,6 +426,7 @@ impl Default for TrajectoryRuntimeSettings {
             goal_review_spot_check_percent: GOAL_REVIEW_SPOT_CHECK_PERCENT_DEFAULT,
             goal_sub_goal_max_depth: GOAL_SUB_GOAL_MAX_DEPTH_DEFAULT,
             goal_sub_goal_max_fan_out: GOAL_SUB_GOAL_MAX_FAN_OUT_DEFAULT,
+            goal_auto_sub_goal_lane_cap: GOAL_AUTO_SUB_GOAL_LANE_CAP_DEFAULT,
             verification_evidence_cache_max_entries:
                 VERIFICATION_EVIDENCE_CACHE_MAX_ENTRIES_DEFAULT,
             verification_evidence_cache_max_bytes: VERIFICATION_EVIDENCE_CACHE_MAX_BYTES_DEFAULT,
@@ -847,6 +853,12 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
         32,
     )?;
     validate_usize(
+        "goal_auto_sub_goal_lane_cap",
+        settings.goal_auto_sub_goal_lane_cap,
+        1,
+        4_096,
+    )?;
+    validate_usize(
         "goal_sub_goal_max_fan_out",
         settings.goal_sub_goal_max_fan_out,
         1,
@@ -871,6 +883,11 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
         604_800,
     )?;
     validate_coordination(&settings.coordination)
+}
+
+/// Live cap on lanes opened automatically for spawned children.
+pub fn auto_sub_goal_lane_cap() -> usize {
+    current().goal_auto_sub_goal_lane_cap
 }
 
 /// Live depth and fan-out caps for the sub-goal DAG.

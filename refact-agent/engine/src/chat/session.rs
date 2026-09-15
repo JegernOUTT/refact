@@ -118,6 +118,39 @@ fn message_affects_goal_projection(message: &ChatMessage) -> bool {
     message.role == GOAL_ROLE || is_goal_projection_event(message)
 }
 
+/// Node-id prefix for lanes opened automatically for a spawned child, as
+/// opposed to lanes a parent composed explicitly.
+pub(crate) const AUTO_SUB_GOAL_LANE_PREFIX: &str = "agent:";
+
+/// Why an automatic lane was not opened. `NoGoal` is the ordinary case for a
+/// chat that is not pursuing a goal; the other two are refusals worth logging.
+#[derive(Debug)]
+pub(crate) enum AutoSubGoalLaneRefusal {
+    NoGoal,
+    CapReached { lanes: usize, cap: usize },
+    Rejected(refact_chat_api::SubGoalDeclarationError),
+}
+
+impl AutoSubGoalLaneRefusal {
+    pub(crate) fn is_no_goal(&self) -> bool {
+        matches!(self, AutoSubGoalLaneRefusal::NoGoal)
+    }
+}
+
+impl std::fmt::Display for AutoSubGoalLaneRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AutoSubGoalLaneRefusal::NoGoal => write!(f, "chat is not pursuing a goal"),
+            AutoSubGoalLaneRefusal::CapReached { lanes, cap } => write!(
+                f,
+                "goal already tracks {lanes} automatic sub-goal lanes, at the cap of {cap}; \
+                 the child runs untracked"
+            ),
+            AutoSubGoalLaneRefusal::Rejected(error) => write!(f, "{error}"),
+        }
+    }
+}
+
 const GOAL_EVIDENCE_EXEMPT_TOOLS: &[&str] =
     &["sleep", "get_goal", "get_plan", "pause_goal", "snooze_goal"];
 
@@ -508,6 +541,7 @@ impl ChatSession {
             background_agents: HashMap::new(),
             goal_stopped_by_abort: false,
             goal_ledger: Vec::new(),
+            sub_goal_graph_cache: Default::default(),
             goal_turn_evidence: false,
             goal_verification_blocked_until_ms: None,
             goal_verification_generation: 0,
@@ -644,6 +678,7 @@ impl ChatSession {
             background_agents: HashMap::new(),
             goal_stopped_by_abort: false,
             goal_ledger: Vec::new(),
+            sub_goal_graph_cache: Default::default(),
             goal_turn_evidence: false,
             goal_verification_blocked_until_ms: None,
             goal_verification_generation: 0,
@@ -909,10 +944,56 @@ impl ChatSession {
         true
     }
 
-    pub(crate) fn sub_goal_graph(&self) -> refact_chat_api::SubGoalGraph {
-        refact_chat_api::reduce_goal_ledger(&self.goal_ledger)
-            .map(|state| state.sub_goals)
-            .unwrap_or_default()
+    /// Reduces the goal ledger into the sub-goal DAG once per ledger state.
+    /// The ledger stays authoritative; the memo is keyed on its last sequence
+    /// and length, so any append discards it.
+    pub(crate) fn sub_goal_graph(&self) -> Arc<refact_chat_api::SubGoalGraph> {
+        let ledger_seq = self.goal_ledger_last_seq();
+        let ledger_len = self.goal_ledger.len();
+        let mut cache = self
+            .sub_goal_graph_cache
+            .reduced
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = cache.as_ref() {
+            if entry.ledger_seq == ledger_seq && entry.ledger_len == ledger_len {
+                return entry.graph.clone();
+            }
+        }
+        let graph = Arc::new(
+            refact_chat_api::reduce_goal_ledger(&self.goal_ledger)
+                .map(|state| state.sub_goals)
+                .unwrap_or_default(),
+        );
+        self.sub_goal_graph_cache
+            .reductions
+            .fetch_add(1, Ordering::Relaxed);
+        *cache = Some(SubGoalGraphCacheEntry {
+            ledger_seq,
+            ledger_len,
+            graph: graph.clone(),
+        });
+        graph
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sub_goal_graph_reductions(&self) -> u64 {
+        self.sub_goal_graph_cache.reductions.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn invalidate_sub_goal_graph_cache(&self) {
+        *self
+            .sub_goal_graph_cache
+            .reduced
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    /// The only supported way to replace the ledger wholesale: a restore must
+    /// not leave a reduction from the previous ledger behind.
+    pub(crate) fn set_goal_ledger(&mut self, ledger: Vec<GoalLedgerEntry>) {
+        self.goal_ledger = ledger;
+        self.invalidate_sub_goal_graph_cache();
     }
 
     /// Rolls the goal's required and optional child lanes into one mechanical
@@ -922,6 +1003,63 @@ impl ChatSession {
             &self.sub_goal_graph(),
             refact_chat_api::ROOT_SUB_GOAL_ID,
         )
+    }
+
+    pub(crate) fn sub_goal_lane_for_owner(
+        &self,
+        owner: &refact_chat_api::SubGoalOwner,
+    ) -> Option<String> {
+        self.sub_goal_graph()
+            .nodes
+            .iter()
+            .find(|state| state.node.owner.as_ref() == Some(owner))
+            .map(|state| state.node.id.clone())
+    }
+
+    /// Looks up or opens this owner's lane and marks it dispatched under a
+    /// single acquisition, so two concurrent spawns cannot both observe "no
+    /// lane" and declare one each.
+    ///
+    /// The lane is optional: composing a required lane is the parent's explicit
+    /// choice, and an automatic one must never start gating a goal that never
+    /// asked for it. Auto-created lanes are capped, and passing the cap is an
+    /// explicit refusal — the child still runs, it is simply not tracked.
+    pub(crate) fn ensure_and_dispatch_sub_goal_lane(
+        &mut self,
+        owner: refact_chat_api::SubGoalOwner,
+        title: String,
+    ) -> Result<String, AutoSubGoalLaneRefusal> {
+        if let Some(node_id) = self.sub_goal_lane_for_owner(&owner) {
+            self.dispatch_sub_goal(&node_id, Some(owner));
+            return Ok(node_id);
+        }
+        if self.goal.is_none() {
+            return Err(AutoSubGoalLaneRefusal::NoGoal);
+        }
+        let cap = crate::runtime_settings::auto_sub_goal_lane_cap();
+        let lanes = self
+            .sub_goal_graph()
+            .nodes
+            .iter()
+            .filter(|state| state.node.id.starts_with(AUTO_SUB_GOAL_LANE_PREFIX))
+            .count();
+        if lanes >= cap {
+            return Err(AutoSubGoalLaneRefusal::CapReached { lanes, cap });
+        }
+        let node_id = format!("{AUTO_SUB_GOAL_LANE_PREFIX}{}", owner.id);
+        let declaration = refact_chat_api::SubGoalDeclaration {
+            nodes: vec![
+                refact_chat_api::SubGoalNode::new(node_id.clone(), title).with_owner(owner.clone())
+            ],
+            edges: vec![refact_chat_api::SubGoalEdge::optional(
+                refact_chat_api::ROOT_SUB_GOAL_ID,
+                node_id.clone(),
+            )],
+        };
+        self.declare_sub_goals(declaration)
+            .map_err(AutoSubGoalLaneRefusal::Rejected)?;
+        self.dispatch_sub_goal(&node_id, Some(owner));
+        Ok(node_id)
     }
 
     /// Validates the whole prospective graph before a single op is written, so
@@ -1045,6 +1183,7 @@ impl ChatSession {
             .map(|entry| entry.seq + 1)
             .unwrap_or(1);
         self.goal_ledger.push(GoalLedgerEntry { seq, at_ms, op });
+        self.invalidate_sub_goal_graph_cache();
         seq
     }
 
@@ -5645,6 +5784,158 @@ mod tests {
             let mut gates = crate::chat::evidence::GateOutcome::default();
             crate::chat::goal_verifier::merge_sub_goal_gates(&mut gates, &rollup);
             assert_eq!(gates, crate::chat::evidence::GateOutcome::default());
+        }
+
+        #[test]
+        fn reducing_the_graph_repeatedly_costs_one_reduction() {
+            let mut session = make_session();
+            install(&mut session);
+            session
+                .declare_sub_goals(refact_chat_api::SubGoalDeclaration {
+                    nodes: vec![lane("lint", &["c1"])],
+                    edges: vec![refact_chat_api::SubGoalEdge::required(
+                        refact_chat_api::ROOT_SUB_GOAL_ID,
+                        "lint",
+                    )],
+                })
+                .expect("declaration is valid");
+
+            let before = session.sub_goal_graph_reductions();
+            for _ in 0..16 {
+                assert_eq!(session.sub_goal_graph().nodes.len(), 1);
+                assert!(!session.sub_goal_rollup().parent_may_proceed());
+            }
+
+            assert_eq!(session.sub_goal_graph_reductions(), before + 1);
+        }
+
+        #[test]
+        fn any_ledger_append_invalidates_the_cached_graph() {
+            let mut session = make_session();
+            install(&mut session);
+            session.sub_goal_graph();
+            let before = session.sub_goal_graph_reductions();
+
+            session.goal_note_no_progress_turn();
+            session.sub_goal_graph();
+            assert_eq!(session.sub_goal_graph_reductions(), before + 1);
+
+            session
+                .declare_sub_goals(refact_chat_api::SubGoalDeclaration {
+                    nodes: vec![lane("audit", &[])],
+                    edges: vec![refact_chat_api::SubGoalEdge::optional(
+                        refact_chat_api::ROOT_SUB_GOAL_ID,
+                        "audit",
+                    )],
+                })
+                .expect("declaration is valid");
+            // The declaration's own validation read the graph, and that read
+            // was a cache hit: only the append that followed it costs a
+            // reduction.
+            assert_eq!(session.sub_goal_graph().nodes.len(), 1);
+            assert_eq!(session.sub_goal_graph_reductions(), before + 2);
+
+            session.set_goal_ledger(Vec::new());
+            assert!(session.sub_goal_graph().is_empty());
+            assert_eq!(session.sub_goal_graph_reductions(), before + 3);
+        }
+
+        #[test]
+        fn auto_lane_creation_past_the_cap_refuses_explicitly() {
+            let mut session = make_session();
+            install(&mut session);
+            let cap = crate::runtime_settings::auto_sub_goal_lane_cap();
+            for index in 0..cap {
+                let owner = refact_chat_api::SubGoalOwner::background_agent(format!("a{index}"));
+                session
+                    .ensure_and_dispatch_sub_goal_lane(owner, format!("child {index}"))
+                    .expect("lane below the cap is opened");
+            }
+            let ledger_len = session.goal_ledger.len();
+
+            let refusal = session
+                .ensure_and_dispatch_sub_goal_lane(
+                    refact_chat_api::SubGoalOwner::background_agent("overflow"),
+                    "one too many".to_string(),
+                )
+                .expect_err("past the cap the lane must be refused");
+
+            assert!(matches!(
+                refusal,
+                AutoSubGoalLaneRefusal::CapReached { lanes, cap: limit } if lanes == cap && limit == cap
+            ));
+            assert!(refusal.to_string().contains("runs untracked"));
+            assert_eq!(session.goal_ledger.len(), ledger_len);
+            assert_eq!(session.sub_goal_graph().nodes.len(), cap);
+            assert!(session.sub_goal_rollup().parent_may_proceed());
+        }
+
+        #[test]
+        fn an_auto_lane_is_refused_without_a_goal_and_reported_as_such() {
+            let mut session = make_session();
+
+            let refusal = session
+                .ensure_and_dispatch_sub_goal_lane(
+                    refact_chat_api::SubGoalOwner::background_agent("child"),
+                    "child".to_string(),
+                )
+                .expect_err("a chat without a goal has no lanes");
+
+            assert!(refusal.is_no_goal());
+            assert!(session.goal_ledger.is_empty());
+        }
+
+        #[tokio::test]
+        async fn two_concurrent_spawns_produce_exactly_one_lane_per_child() {
+            let mut session = make_session();
+            install(&mut session);
+            let session_arc = Arc::new(AMutex::new(session));
+
+            let mut handles = Vec::new();
+            for agent_id in ["left", "right", "left", "right"] {
+                let session_arc = session_arc.clone();
+                handles.push(tokio::spawn(async move {
+                    session_arc
+                        .lock()
+                        .await
+                        .ensure_and_dispatch_sub_goal_lane(
+                            refact_chat_api::SubGoalOwner::background_agent(agent_id),
+                            agent_id.to_string(),
+                        )
+                        .expect("lane is opened")
+                }));
+            }
+            for handle in handles {
+                handle.await.unwrap();
+            }
+
+            let session = session_arc.lock().await;
+            let graph = session.sub_goal_graph();
+            let mut lane_ids: Vec<_> = graph
+                .nodes
+                .iter()
+                .map(|state| state.node.id.clone())
+                .collect();
+            lane_ids.sort();
+            assert_eq!(lane_ids, vec!["agent:left", "agent:right"]);
+            assert_eq!(
+                session
+                    .goal_ledger
+                    .iter()
+                    .filter(|entry| matches!(entry.op, GoalLedgerOp::SubGoalsDeclared { .. }))
+                    .count(),
+                2,
+                "create-and-dispatch must be atomic: one declaration per child"
+            );
+            assert!(graph.nodes.iter().all(|state| state.dispatched));
+            assert_eq!(
+                session
+                    .sub_goal_lane_for_owner(&refact_chat_api::SubGoalOwner::background_agent(
+                        "left"
+                    ))
+                    .as_deref(),
+                Some("agent:left")
+            );
         }
 
         #[test]

@@ -4933,27 +4933,37 @@ pub async fn flush_all_trajectories(app: AppState) -> Result<(), Vec<String>> {
     flush_all_trajectories_with_timeout(app, TRAJECTORY_FLUSH_TIMEOUT).await
 }
 
-async fn flush_all_trajectories_with_timeout(
-    app: AppState,
-    timeout: Duration,
-) -> Result<(), Vec<String>> {
+/// Flushes every session this app owns and then joins the detached writers,
+/// completing when each writer acknowledges its commit. Unbounded on purpose:
+/// the wall-clock budget belongs to the shutdown caller, not to the flush.
+///
+/// The detached-writer registry is process-global rather than app-scoped, so
+/// this join also waits for writers owned by any other `AppState` alive in the
+/// process. That is exact in production, where there is one app; in a test
+/// binary it makes one app's flush wait on another's.
+async fn flush_all_trajectories_errors(app: AppState) -> Vec<String> {
     let sessions: Vec<Arc<AMutex<ChatSession>>> = {
         let sessions = app.chat.sessions.read().await;
         sessions.values().cloned().collect()
     };
-    let flushes = async move {
-        let results = futures::future::join_all(
-            sessions
-                .into_iter()
-                .map(|session_arc| flush_trajectory_for_session(app.clone(), session_arc)),
-        )
-        .await;
-        let mut errors: Vec<String> = results.into_iter().filter_map(Result::err).collect();
-        if let Err(mut detached_errors) = flush_detached_trajectory_writers().await {
-            errors.append(&mut detached_errors);
-        }
-        errors
-    };
+    let results = futures::future::join_all(
+        sessions
+            .into_iter()
+            .map(|session_arc| flush_trajectory_for_session(app.clone(), session_arc)),
+    )
+    .await;
+    let mut errors: Vec<String> = results.into_iter().filter_map(Result::err).collect();
+    if let Err(mut detached_errors) = flush_detached_trajectory_writers().await {
+        errors.append(&mut detached_errors);
+    }
+    errors
+}
+
+async fn flush_all_trajectories_with_timeout(
+    app: AppState,
+    timeout: Duration,
+) -> Result<(), Vec<String>> {
+    let flushes = flush_all_trajectories_errors(app);
     let errors = match tokio::time::timeout(timeout, flushes).await {
         Ok(errors) => errors,
         Err(_) => vec![format!(
@@ -5217,7 +5227,7 @@ fn apply_external_delete_to_session(session: &mut ChatSession, chat_id: &str) {
     session.created_at = chrono::Utc::now().to_rfc3339();
     session.wake_up_at = None;
     session.waiting_for_card_ids.clear();
-    session.goal_ledger.clear();
+    session.set_goal_ledger(Vec::new());
     session.goal_verification_blocked_until_ms = None;
     session.set_goal_projection(None);
     session.reset_compaction_runtime_state();
@@ -5238,7 +5248,7 @@ fn apply_loaded_external_update_to_session(
     session.thread = loaded.thread;
     session.compression_retry_after_ms = loaded.compression_retry_after_ms;
     session.reset_compaction_runtime_state();
-    session.goal_ledger = loaded.goal_ledger;
+    session.set_goal_ledger(loaded.goal_ledger);
     session.goal_verification_blocked_until_ms = loaded.goal_verification_blocked_until_ms;
     session.set_goal_projection(loaded.goal);
     session.created_at = loaded.created_at;
@@ -8914,16 +8924,26 @@ mod tests {
                 SessionTrajectoryCommitOutcome::SkippedStale
             );
 
-            session_arc
-                .lock()
-                .await
-                .add_message(ChatMessage::new("user".to_string(), "shutdown".to_string()));
+            let shutdown_version = {
+                let mut session = session_arc.lock().await;
+                session.add_message(ChatMessage::new("user".to_string(), "shutdown".to_string()));
+                session.trajectory_version
+            };
             app.chat
                 .sessions
                 .write()
                 .await
-                .insert(chat_id.clone(), session_arc);
-            flush_all_trajectories(app).await.unwrap();
+                .insert(chat_id.clone(), session_arc.clone());
+            // A flush is done when the writer acknowledges the commit, not when
+            // a stopwatch says so: assert the acknowledgement.
+            assert_eq!(
+                flush_all_trajectories_errors(app).await,
+                Vec::<String>::new()
+            );
+            let session = session_arc.lock().await;
+            assert!(!session.trajectory_dirty);
+            assert_eq!(session.trajectory_committed_version, shutdown_version);
+            drop(session);
 
             let loaded = load_trajectory_for_chat(gcx, &chat_id).await.unwrap();
             assert_eq!(
@@ -9595,6 +9615,58 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("timed out"));
         drop(guard);
+    }
+
+    /// The mechanism behind a shutdown flush that blows its wall-clock budget
+    /// with nothing of its own left to write: `flush_all_trajectories` joins a
+    /// process-global detached-writer registry, so a writer belonging to an
+    /// entirely different app, workspace and chat is inside this app's budget.
+    ///
+    /// This is why the bound is useless as a correctness assertion — it is not
+    /// measuring the flush under test.
+    #[tokio::test]
+    async fn a_foreign_detached_writer_is_inside_this_apps_flush_budget() {
+        let own_workspace = tempfile::tempdir().unwrap();
+        let (_own_gcx, app) = make_app_with_workspace(own_workspace.path()).await;
+        let foreign_workspace = tempfile::tempdir().unwrap();
+        let (foreign_gcx, _foreign_app) = make_app_with_workspace(foreign_workspace.path()).await;
+
+        let foreign_snapshot = {
+            let mut session = ChatSession::new("foreign-chat".to_string());
+            session.add_message(ChatMessage::new("user".to_string(), "foreign".to_string()));
+            trajectory_snapshot_from_session(&session)
+        };
+        // A writer that another app has started and not yet acknowledged. The
+        // strong reference stays in this test, which is what keeps it in the
+        // global registry.
+        let foreign_writer = detached_trajectory_writer(&foreign_gcx, &foreign_snapshot);
+        {
+            let mut state = foreign_writer.lock().await;
+            state.requested_version = 1;
+            state.in_flight = true;
+            state.pending = Some((1, foreign_snapshot));
+        }
+
+        let errors = flush_all_trajectories_with_timeout(app, Duration::from_millis(20))
+            .await
+            .unwrap_err();
+
+        // Release the foreign writer before asserting, so a flush running
+        // concurrently in this test binary is never left waiting on it.
+        {
+            let mut state = foreign_writer.lock().await;
+            state.pending = None;
+            state.in_flight = false;
+            state.committed_version = state.requested_version;
+            state.notify.notify_waiters();
+        }
+
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].contains("trajectory flush timed out"),
+            "unexpected error: {}",
+            errors[0]
+        );
     }
 
     fn assert_same_path(left: &Path, right: &Path) {
@@ -18391,6 +18463,7 @@ mod tests {
             background_agents: std::collections::HashMap::new(),
             goal_stopped_by_abort: false,
             goal_ledger: Vec::new(),
+            sub_goal_graph_cache: Default::default(),
             goal_turn_evidence: false,
             goal_verification_generation: 0,
             goal_verification_blocked_until_ms: None,
@@ -18519,6 +18592,7 @@ mod tests {
             background_agents: std::collections::HashMap::new(),
             goal_stopped_by_abort: false,
             goal_ledger: Vec::new(),
+            sub_goal_graph_cache: Default::default(),
             goal_turn_evidence: false,
             goal_verification_generation: 0,
             goal_verification_blocked_until_ms: None,

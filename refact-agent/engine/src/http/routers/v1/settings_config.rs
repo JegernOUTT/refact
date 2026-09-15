@@ -517,6 +517,7 @@ fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         live_usize("goal_review_spot_check_percent", 0, 100),
         live_usize("goal_sub_goal_max_depth", 1, 32),
         live_usize("goal_sub_goal_max_fan_out", 1, 256),
+        live_usize("goal_auto_sub_goal_lane_cap", 1, 4_096),
         live_usize("verification_evidence_cache_max_entries", 1, 100_000),
         live_usize("verification_evidence_cache_max_bytes", 1_024, 268_435_456),
         live_usize("verification_evidence_cache_ttl_secs", 60, 604_800),
@@ -843,7 +844,7 @@ mod tests {
         );
         assert_eq!(
             initial.fields.len(),
-            59 + crate::runtime_settings::coordination_field_bounds().len()
+            60 + crate::runtime_settings::coordination_field_bounds().len()
         );
         assert!(initial
             .fields

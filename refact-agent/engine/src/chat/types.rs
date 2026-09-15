@@ -391,9 +391,24 @@ pub struct ChatSession {
     pub background_agents: HashMap<String, BackgroundAgentSummary>,
     pub goal_stopped_by_abort: bool,
     pub goal_ledger: Vec<GoalLedgerEntry>,
+    /// Memoized reduction of `goal_ledger` into the sub-goal DAG. The ledger
+    /// stays the only source of truth; this is discarded whenever it changes.
+    pub(crate) sub_goal_graph_cache: SubGoalGraphCache,
     pub goal_turn_evidence: bool,
     pub goal_verification_blocked_until_ms: Option<u64>,
     pub goal_verification_generation: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct SubGoalGraphCache {
+    pub(crate) reduced: std::sync::Mutex<Option<SubGoalGraphCacheEntry>>,
+    pub(crate) reductions: std::sync::atomic::AtomicU64,
+}
+
+pub(crate) struct SubGoalGraphCacheEntry {
+    pub(crate) ledger_seq: u64,
+    pub(crate) ledger_len: usize,
+    pub(crate) graph: Arc<refact_chat_api::SubGoalGraph>,
 }
 
 #[derive(Default)]
