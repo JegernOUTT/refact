@@ -97,15 +97,50 @@ impl AccessKind {
     }
 }
 
+/// What an engine instance declares about itself in its own record.
+///
+/// `Idle` means the engine advertises no running work; `Closed` is written by a
+/// clean shutdown so a reader never has to guess whether the process crashed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceMark {
+    Active,
+    Idle,
+    Closed,
+}
+
+impl PresenceMark {
+    pub const ALL: [PresenceMark; 3] = [
+        PresenceMark::Active,
+        PresenceMark::Idle,
+        PresenceMark::Closed,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PresenceMark::Active => "active",
+            PresenceMark::Idle => "idle",
+            PresenceMark::Closed => "closed",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<PresenceMark> {
+        PresenceMark::ALL.into_iter().find(|m| m.as_str() == raw)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineInstanceRecord {
     pub project: ProjectKey,
     pub instance_id: String,
     pub pid: i64,
     pub boot_id: String,
+    /// Milliseconds since boot at which this PID started; `-1` when the
+    /// platform could not tell us.
     pub process_started_at_ms: i64,
     pub host_id: String,
     pub heartbeat_at_ms: i64,
+    pub presence_mark: PresenceMark,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

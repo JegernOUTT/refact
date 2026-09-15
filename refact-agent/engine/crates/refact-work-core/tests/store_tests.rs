@@ -4,7 +4,8 @@ use refact_work_core::settings::CoordinationSettings;
 use refact_work_core::store::filesystem::{classify_mounts, FilesystemKind};
 use refact_work_core::store::records::{
     AccessKind, ActivityObservationRecord, DeliveryOutboxRecord, DeliveryState,
-    EngineInstanceRecord, IntentState, LeaseRecord, QueuedWorkRecord, RunIntentRecord,
+    EngineInstanceRecord, IntentState, LeaseRecord, PresenceMark, QueuedWorkRecord,
+    RunIntentRecord,
 };
 use refact_work_core::store::schema;
 use refact_work_core::store::{CoordinationStore, StoreError};
@@ -27,6 +28,7 @@ fn engine_instance(project: &str, instance_id: &str) -> EngineInstanceRecord {
         pid: 4242,
         boot_id: format!("boot-{project}"),
         process_started_at_ms: 1_700_000_000_000,
+        presence_mark: PresenceMark::Active,
         host_id: format!("host-{project}"),
         heartbeat_at_ms: 1_700_000_005_000,
     }

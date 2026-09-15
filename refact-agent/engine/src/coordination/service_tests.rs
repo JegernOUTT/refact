@@ -4,6 +4,7 @@ use super::scope::WorkCaller;
 use crate::app_state::AppState;
 use crate::chat::types::ChatSession;
 use std::sync::Arc;
+use serial_test::serial;
 use tokio::sync::Mutex;
 
 async fn fixture() -> (AppState, tempfile::TempDir, WorkCaller) {
@@ -38,6 +39,7 @@ async fn fixture() -> (AppState, tempfile::TempDir, WorkCaller) {
     (app, dir, caller)
 }
 
+#[serial(coordination_work_overview)]
 #[tokio::test]
 async fn shared_projection_paginates_without_gaps_and_rejects_changed_state() {
     let (app, _dir, caller) = fixture().await;
@@ -81,6 +83,7 @@ async fn shared_projection_paginates_without_gaps_and_rejects_changed_state() {
     );
 }
 
+#[serial(coordination_work_overview)]
 #[tokio::test]
 async fn denied_titles_paths_counts_and_changes_do_not_affect_visible_pages() {
     use refact_privacy::{PrivacyPolicy, Zone, ShellBehavior, Attribution, FileRecord};
@@ -163,6 +166,7 @@ async fn denied_titles_paths_counts_and_changes_do_not_affect_visible_pages() {
     assert_eq!(denied.message, absent.message);
 }
 
+#[serial(coordination_work_overview)]
 #[tokio::test]
 async fn changed_destination_invalidates_cursor_and_policy_failure_is_not_empty_success() {
     let (app, _dir, mut caller) = fixture().await;
@@ -197,6 +201,7 @@ async fn changed_destination_invalidates_cursor_and_policy_failure_is_not_empty_
     assert!(!error.to_string().contains("private config"));
 }
 
+#[serial(coordination_work_overview)]
 #[tokio::test]
 async fn inspector_scopes_files_and_pages_worktree_inventory() {
     let (app, dir, caller) = fixture().await;
@@ -247,6 +252,7 @@ async fn inspector_scopes_files_and_pages_worktree_inventory() {
     assert!(files.integration_overlaps.is_empty());
 }
 
+#[serial(coordination_work_overview)]
 #[tokio::test]
 async fn same_relative_path_in_a_separate_checkout_is_an_advisory_overlap_only() {
     let (app, dir, caller) = fixture().await;
@@ -353,6 +359,7 @@ async fn same_relative_path_in_a_separate_checkout_is_an_advisory_overlap_only()
     assert!(unrelated.integration_overlaps.is_empty());
 }
 
+#[serial(coordination_work_overview)]
 #[tokio::test]
 async fn board_catalog_bootstraps_once_and_guarded_writes_and_deletion_update_it() {
     let (app, dir, mut caller) = fixture().await;
@@ -429,6 +436,7 @@ async fn board_catalog_bootstraps_once_and_guarded_writes_and_deletion_update_it
         .any(|row| row.chat_id.as_deref() == Some("agent-a")));
 }
 
+#[serial(coordination_work_overview)]
 #[tokio::test]
 async fn board_model_disclosure_carries_writer_provenance_and_denied_counts_stay_hidden() {
     let (app, dir, caller) = fixture().await;
@@ -531,6 +539,7 @@ async fn board_model_disclosure_carries_writer_provenance_and_denied_counts_stay
     assert_eq!(hidden.withheld_rows, 0);
 }
 
+#[serial(coordination_work_overview)]
 #[tokio::test]
 async fn inspection_keeps_operator_degradation_but_models_cannot_probe_hidden_source_failures() {
     let (app, dir, mut caller) = fixture().await;
@@ -555,6 +564,7 @@ async fn inspection_keeps_operator_degradation_but_models_cannot_probe_hidden_so
         .any(|source| source == "board index unavailable"));
 }
 
+#[serial(coordination_work_overview)]
 #[tokio::test]
 async fn known_board_writer_waits_for_provenance_before_taking_the_board_lock() {
     let (app, _dir, _caller) = fixture().await;
@@ -572,6 +582,7 @@ async fn known_board_writer_waits_for_provenance_before_taking_the_board_lock() 
     assert!(source.await.unwrap().unwrap().1);
 }
 
+#[serial(coordination_work_overview)]
 #[tokio::test]
 async fn missing_or_timed_out_board_writer_never_changes_persisted_board() {
     let (app, dir, _caller) = fixture().await;

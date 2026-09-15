@@ -1,4 +1,8 @@
-pub const MIGRATIONS: &[&str] = &[V1_COORDINATION_CORE, V2_ACTIVITY_OBSERVATIONS];
+pub const MIGRATIONS: &[&str] = &[
+    V1_COORDINATION_CORE,
+    V2_ACTIVITY_OBSERVATIONS,
+    V3_ENGINE_PRESENCE_MARK,
+];
 
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
@@ -86,4 +90,8 @@ CREATE INDEX idx_activity_observations_path
     ON activity_observations (project, path, observed_at_ms);
 CREATE INDEX idx_activity_observations_time
     ON activity_observations (project, observed_at_ms);
+";
+
+const V3_ENGINE_PRESENCE_MARK: &str = "
+ALTER TABLE engine_instances ADD COLUMN presence_mark TEXT NOT NULL DEFAULT 'idle';
 ";

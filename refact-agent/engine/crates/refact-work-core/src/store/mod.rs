@@ -8,7 +8,8 @@ use crate::settings::{CoordinationSettings, SettingsError};
 use filesystem::FilesystemKind;
 use records::{
     AccessKind, ActivityObservationRecord, DeliveryOutboxRecord, DeliveryState,
-    EngineInstanceRecord, IntentState, LeaseRecord, PruneReport, QueuedWorkRecord, RunIntentRecord,
+    EngineInstanceRecord, IntentState, LeaseRecord, PresenceMark, PruneReport, QueuedWorkRecord,
+    RunIntentRecord,
 };
 use rusqlite::{params, OptionalExtension};
 use std::fmt;
@@ -396,12 +397,13 @@ impl CoordinationStore {
             .call(move |conn| {
                 conn.execute(
                     "INSERT INTO engine_instances (project, instance_id, pid, boot_id, \
-                     process_started_at_ms, host_id, heartbeat_at_ms) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                     process_started_at_ms, host_id, heartbeat_at_ms, presence_mark) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
                      ON CONFLICT(project, instance_id) DO UPDATE SET pid = excluded.pid, \
                      boot_id = excluded.boot_id, \
                      process_started_at_ms = excluded.process_started_at_ms, \
-                     host_id = excluded.host_id, heartbeat_at_ms = excluded.heartbeat_at_ms",
+                     host_id = excluded.host_id, heartbeat_at_ms = excluded.heartbeat_at_ms, \
+                     presence_mark = excluded.presence_mark",
                     params![
                         scope,
                         record.instance_id,
@@ -409,7 +411,8 @@ impl CoordinationStore {
                         record.boot_id,
                         record.process_started_at_ms,
                         record.host_id,
-                        record.heartbeat_at_ms
+                        record.heartbeat_at_ms,
+                        record.presence_mark.as_str()
                     ],
                 )?;
                 Ok(())
@@ -429,12 +432,16 @@ impl CoordinationStore {
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT project, instance_id, pid, boot_id, process_started_at_ms, host_id, \
-                     heartbeat_at_ms FROM engine_instances WHERE project = ?1 AND instance_id = ?2",
+                     heartbeat_at_ms, presence_mark FROM engine_instances \
+                     WHERE project = ?1 AND instance_id = ?2",
                 )?;
-                let record = stmt
-                    .query_row(params![scope, instance_id], engine_instance_from_row)
+                let row = stmt
+                    .query_row(params![scope, instance_id], engine_instance_columns)
                     .optional()?;
-                Ok(record)
+                match row {
+                    Some(row) => Ok(Some(decode_engine_instance(row)?)),
+                    None => Ok(None),
+                }
             })
             .await
             .map_err(|err| from_tokio(&self.path, err))
@@ -450,13 +457,13 @@ impl CoordinationStore {
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT project, instance_id, pid, boot_id, process_started_at_ms, host_id, \
-                     heartbeat_at_ms FROM engine_instances WHERE project = ?1 \
+                     heartbeat_at_ms, presence_mark FROM engine_instances WHERE project = ?1 \
                      ORDER BY heartbeat_at_ms DESC, instance_id ASC LIMIT ?2",
                 )?;
-                let rows = stmt.query_map(params![scope, limit], engine_instance_from_row)?;
+                let rows = stmt.query_map(params![scope, limit], engine_instance_columns)?;
                 let mut records = Vec::new();
                 for row in rows {
-                    records.push(row?);
+                    records.push(decode_engine_instance(row?)?);
                 }
                 Ok(records)
             })
@@ -1156,15 +1163,48 @@ fn restrict_dir_permissions(_dir: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn engine_instance_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EngineInstanceRecord> {
+type EngineInstanceColumns = (String, String, i64, String, i64, String, i64, String);
+
+fn engine_instance_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<EngineInstanceColumns> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+    ))
+}
+
+fn decode_engine_instance(
+    columns: EngineInstanceColumns,
+) -> Result<EngineInstanceRecord, tokio_rusqlite::Error> {
+    let (
+        project,
+        instance_id,
+        pid,
+        boot_id,
+        process_started_at_ms,
+        host_id,
+        heartbeat_at_ms,
+        presence_mark,
+    ) = columns;
+    let presence_mark = PresenceMark::parse(&presence_mark).ok_or_else(|| {
+        decode(format!(
+            "unknown presence mark `{presence_mark}` in engine_instances"
+        ))
+    })?;
     Ok(EngineInstanceRecord {
-        project: ProjectKey::new(row.get::<_, String>(0)?),
-        instance_id: row.get(1)?,
-        pid: row.get(2)?,
-        boot_id: row.get(3)?,
-        process_started_at_ms: row.get(4)?,
-        host_id: row.get(5)?,
-        heartbeat_at_ms: row.get(6)?,
+        project: ProjectKey::new(project),
+        instance_id,
+        pid,
+        boot_id,
+        process_started_at_ms,
+        host_id,
+        heartbeat_at_ms,
+        presence_mark,
     })
 }
 

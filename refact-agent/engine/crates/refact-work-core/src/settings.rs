@@ -114,6 +114,11 @@ pub struct CoordinationSettings {
     /// filesystem, where WAL locking is not dependable. Setting this accepts
     /// that risk and downgrades the refusal to a reported warning.
     pub store_allow_non_local_filesystem: bool,
+    /// How often this engine rewrites its own presence record.
+    pub presence_heartbeat_interval_ms: u64,
+    /// After this long without a heartbeat another engine reads as
+    /// `unreachable`; it is never read as dead on a stale heartbeat alone.
+    pub presence_stale_after_ms: u64,
     pub store_max_engine_instances: usize,
     pub store_max_run_intents: usize,
     pub store_max_queued_work: usize,
@@ -211,6 +216,8 @@ impl Default for CoordinationSettings {
             agent_closed_retained_max: 64,
             store_busy_timeout_ms: 5_000,
             store_allow_non_local_filesystem: false,
+            presence_heartbeat_interval_ms: 15_000,
+            presence_stale_after_ms: 120_000,
             store_max_engine_instances: 512,
             store_max_run_intents: 65_536,
             store_max_queued_work: 65_536,
@@ -490,6 +497,25 @@ impl CoordinationSettings {
             "store_busy_timeout_ms",
             self.store_busy_timeout_ms,
             1,
+        );
+        at_least(
+            &mut v,
+            "presence_heartbeat_interval_ms",
+            self.presence_heartbeat_interval_ms,
+            1,
+        );
+        at_least(
+            &mut v,
+            "presence_stale_after_ms",
+            self.presence_stale_after_ms,
+            1,
+        );
+        not_greater(
+            &mut v,
+            "presence_heartbeat_interval_ms",
+            self.presence_heartbeat_interval_ms,
+            "presence_stale_after_ms",
+            self.presence_stale_after_ms,
         );
         at_least(
             &mut v,
@@ -878,6 +904,25 @@ mod tests {
             |settings: &mut CoordinationSettings| settings.store_max_leases = 0,
             |settings: &mut CoordinationSettings| settings.store_max_outbox_messages = 0,
             |settings: &mut CoordinationSettings| settings.store_max_activity_observations = 0,
+        ] {
+            let mut settings = CoordinationSettings::default();
+            mutate(&mut settings);
+            assert!(settings.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn presence_bounds_default_generous_and_reject_invalid_values() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert!(settings.presence_heartbeat_interval_ms >= 5_000);
+        assert!(settings.presence_stale_after_ms >= settings.presence_heartbeat_interval_ms * 3);
+        for mutate in [
+            |settings: &mut CoordinationSettings| settings.presence_heartbeat_interval_ms = 0,
+            |settings: &mut CoordinationSettings| settings.presence_stale_after_ms = 0,
+            |settings: &mut CoordinationSettings| {
+                settings.presence_heartbeat_interval_ms = settings.presence_stale_after_ms + 1
+            },
         ] {
             let mut settings = CoordinationSettings::default();
             mutate(&mut settings);

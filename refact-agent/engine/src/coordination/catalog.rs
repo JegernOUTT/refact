@@ -475,6 +475,17 @@ pub async fn build_catalog(
         }
     }
 
+    // Work this engine does not own is only as live as the engine that could be
+    // running it. Without presence data nothing is claimed either way.
+    if let Some(liveness) = super::presence::project_liveness(&project) {
+        for row in rows.values_mut() {
+            if row.metadata.freshness != Freshness::Live {
+                row.metadata.freshness =
+                    super::presence::apply_to_freshness(row.metadata.freshness.clone(), liveness);
+            }
+        }
+    }
+
     Ok(WorkCatalog {
         project,
         roots,

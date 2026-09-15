@@ -16,6 +16,7 @@ pub mod error;
 pub mod history;
 pub mod paging;
 pub mod peer_authority;
+pub mod presence;
 pub mod privacy_guard;
 pub mod provenance;
 pub mod roots;
