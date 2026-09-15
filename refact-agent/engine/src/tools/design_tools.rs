@@ -29,6 +29,8 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType
 
 const DEFAULT_VIEWPORT_HEIGHT: u32 = 900;
 const DEFAULT_DIFF_THRESHOLD: f64 = 0.1;
+const BASELINE_META_SCHEMA: u32 = 1;
+const BASELINE_META_SUFFIX: &str = ".meta.json";
 const MAX_TARGETS: usize = 50;
 const MAX_MATRIX_CELLS: usize = 400;
 const MAX_AUDIT_FINDINGS: usize = 500;
@@ -994,6 +996,40 @@ pub struct DiffMask {
     pub height: u32,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CaptureViewport {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl CaptureViewport {
+    fn validate(self) -> Result<Self, String> {
+        if self.width == 0 || self.height == 0 {
+            return Err("viewport dimensions must be positive".to_string());
+        }
+        Ok(self)
+    }
+}
+
+/// Geometry recorded next to a visual baseline so a later comparison can reproduce the exact
+/// capture conditions instead of guessing them from whatever the session last emulated.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct BaselineMeta {
+    #[serde(default = "baseline_meta_schema")]
+    pub schema: u32,
+    pub viewport: CaptureViewport,
+    pub device_scale_factor: f64,
+    pub color_scheme: Option<String>,
+    pub url: String,
+    pub width: u32,
+    pub height: u32,
+    pub captured_at: String,
+}
+
+fn baseline_meta_schema() -> u32 {
+    BASELINE_META_SCHEMA
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct VisualDiffArgs {
     pub baseline: String,
@@ -1003,6 +1039,8 @@ pub struct VisualDiffArgs {
     pub masks: Vec<DiffMask>,
     #[serde(default)]
     pub update_baseline: bool,
+    #[serde(default)]
+    pub viewport: Option<CaptureViewport>,
 }
 
 fn default_diff_threshold() -> f64 {
@@ -1966,6 +2004,145 @@ fn baseline_path(root: &Path, requested: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+pub fn baseline_meta_path(baseline: &Path) -> PathBuf {
+    let mut name = baseline
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    name.push(BASELINE_META_SUFFIX);
+    baseline.with_file_name(name)
+}
+
+async fn read_baseline_meta(path: &Path) -> Option<BaselineMeta> {
+    let raw = tokio::fs::read_to_string(path).await.ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+pub fn resolve_capture_viewport(
+    requested: Option<CaptureViewport>,
+    recorded: Option<CaptureViewport>,
+    current: impl FnOnce() -> Result<CaptureViewport, String>,
+) -> Result<CaptureViewport, String> {
+    match requested.or(recorded) {
+        Some(viewport) => viewport.validate(),
+        None => current()?.validate(),
+    }
+}
+
+fn runtime_css_viewport(runtime: &BrowserRuntime, tab: &Tab) -> Result<CaptureViewport, String> {
+    if let Some(viewport) = runtime.context_state.viewport.as_ref() {
+        if viewport.width > 0 && viewport.height > 0 {
+            return Ok(CaptureViewport {
+                width: viewport.width,
+                height: viewport.height,
+            });
+        }
+    }
+    let measured = runtime
+        .world_manager
+        .eval_in_utility(tab, "[innerWidth, innerHeight]")
+        .map_err(|error| {
+            map_design_runtime_error(&format!("failed to read the page viewport: {error}"))
+        })?;
+    let side = |index: usize| {
+        measured
+            .get(index)
+            .and_then(Value::as_f64)
+            .map(|value| value.round() as i64)
+            .filter(|value| *value > 0)
+            .map(|value| value as u32)
+    };
+    match (side(0), side(1)) {
+        (Some(width), Some(height)) => Ok(CaptureViewport { width, height }),
+        _ => Err(
+            "the page reported no usable viewport size; pass `viewport` to pin the capture geometry"
+                .to_string(),
+        ),
+    }
+}
+
+/// Captures the viewport at an explicit CSS-pixel geometry with device scale factor 1 and no
+/// policy downscale, restoring whatever emulation the session had on every path.
+fn capture_pinned_screenshot(
+    runtime: &mut BrowserRuntime,
+    tab: &Tab,
+    viewport: CaptureViewport,
+) -> Result<ImageArtifact, String> {
+    let original = runtime.context_state.viewport.clone();
+    let pinned = ViewportState {
+        width: viewport.width,
+        height: viewport.height,
+        device_scale_factor: 1.0,
+        is_mobile: false,
+        has_touch: false,
+    };
+    let captured = refact_browser::context_state::apply_viewport(tab, &pinned).and_then(|()| {
+        capture_runtime_screenshot(
+            runtime,
+            &ImagePolicy::lossless_native(),
+            default_page_text_masks(),
+        )
+    });
+    match original.as_ref() {
+        Some(viewport) => {
+            let _ = refact_browser::context_state::apply_viewport(tab, viewport);
+        }
+        None => {
+            let _ = tab.call_method(Emulation::ClearDeviceMetricsOverride(None));
+        }
+    }
+    captured
+}
+
+pub fn baseline_geometry_conflict(
+    baseline: &Path,
+    recorded: CaptureViewport,
+    requested: CaptureViewport,
+) -> Option<String> {
+    (recorded != requested).then(|| {
+        format!(
+            "baseline `{}` was captured at {}x{} (dpr 1); requested {}x{} — pass \
+             update_baseline: true to re-baseline at the new geometry",
+            baseline.display(),
+            recorded.width,
+            recorded.height,
+            requested.width,
+            requested.height
+        )
+    })
+}
+
+pub fn baseline_dimension_mismatch(
+    baseline: &Path,
+    baseline_size: (u32, u32),
+    current_size: (u32, u32),
+    viewport: CaptureViewport,
+    meta: Option<&BaselineMeta>,
+) -> String {
+    let provenance = match meta {
+        Some(meta) => format!(
+            "the metadata sidecar records viewport {}x{} at dpr {} — pass update_baseline: true \
+             to re-baseline at the new geometry",
+            meta.viewport.width, meta.viewport.height, meta.device_scale_factor
+        ),
+        None => format!(
+            "no metadata sidecar found; re-baseline with update_baseline: true (legacy baselines \
+             carry no {BASELINE_META_SUFFIX} geometry record)"
+        ),
+    };
+    format!(
+        "baseline `{}` is {}x{} but the capture pinned at viewport {}x{} (dpr 1) is {}x{}; \
+         {provenance}",
+        baseline.display(),
+        baseline_size.0,
+        baseline_size.1,
+        viewport.width,
+        viewport.height,
+        current_size.0,
+        current_size.1
+    )
+}
+
 pub fn artifact_reference_name(requested: &str) -> Option<String> {
     let trimmed = requested.trim();
     let trimmed = trimmed
@@ -2619,27 +2796,48 @@ impl Tool for ToolVisualDiff {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let args: VisualDiffArgs = parse_args(args)?;
+        let requested_viewport = args.viewport.map(CaptureViewport::validate).transpose()?;
         let (app, lookup, model_id, execution_scope) = tool_context(&ccx).await;
         let root = project_root(&app.gcx, execution_scope.as_ref())?;
         let baseline = baseline_path(&root, &args.baseline)?;
+        let meta_path = baseline_meta_path(&baseline);
+        let recorded = read_baseline_meta(&meta_path).await;
+        if !baseline.exists() && !args.update_baseline {
+            return Err(format!(
+                "Baseline `{}` does not exist; pass update_baseline: true to create it",
+                baseline.display()
+            ));
+        }
+        if !args.update_baseline {
+            if let (Some(meta), Some(requested)) = (recorded.as_ref(), requested_viewport) {
+                if let Some(error) = baseline_geometry_conflict(&baseline, meta.viewport, requested)
+                {
+                    return Err(error);
+                }
+            }
+        }
         let policy = image_policy_for_model(app.gcx.clone(), &model_id).await;
         let runtime = attached_runtime(app, &lookup).await?;
         let mut runtime = runtime.lock().await;
-        let current = capture_runtime_screenshot(
-            &mut runtime,
-            &ImagePolicy::browser_capture(),
-            default_page_text_masks(),
+        let tab = browser_controller::session_tab(&mut runtime)?;
+        let viewport = resolve_capture_viewport(
+            requested_viewport,
+            recorded.as_ref().map(|meta| meta.viewport),
+            || runtime_css_viewport(&runtime, &tab),
         )?;
+        let current = capture_pinned_screenshot(&mut runtime, &tab, viewport)?;
         let current_bytes = base64::prelude::BASE64_STANDARD
             .decode(&current.data)
             .map_err(|error| format!("failed to decode current screenshot: {error}"))?;
-        if !baseline.exists() || args.update_baseline {
-            if !args.update_baseline {
-                return Err(format!(
-                    "Baseline `{}` does not exist; pass update_baseline: true to create it",
-                    baseline.display()
-                ));
-            }
+        let url = tab.get_url();
+        let capture = json!({
+            "viewport":{"width":viewport.width,"height":viewport.height},
+            "device_scale_factor":1.0,
+            "width":current.width,
+            "height":current.height,
+            "url":url
+        });
+        if args.update_baseline {
             if let Some(parent) = baseline.parent() {
                 tokio::fs::create_dir_all(parent)
                     .await
@@ -2648,14 +2846,37 @@ impl Tool for ToolVisualDiff {
             tokio::fs::write(&baseline, &current_bytes)
                 .await
                 .map_err(|error| format!("failed to write baseline: {error}"))?;
+            let meta = BaselineMeta {
+                schema: BASELINE_META_SCHEMA,
+                viewport,
+                device_scale_factor: 1.0,
+                color_scheme: runtime.context_state.media.color_scheme.clone(),
+                url,
+                width: current.width,
+                height: current.height,
+                captured_at: chrono::Utc::now().to_rfc3339(),
+            };
+            tokio::fs::write(
+                &meta_path,
+                serde_json::to_vec_pretty(&meta).map_err(|error| error.to_string())?,
+            )
+            .await
+            .map_err(|error| format!("failed to write baseline metadata: {error}"))?;
             let spilled = spill_artifact(&current, &runtime.artifacts_dir, "visual-diff-baseline")?;
             runtime.touch();
             return tool_image_message(
                 tool_call_id,
                 ToolJson::new(
                     "visual_diff",
-                    format!("Visual baseline updated at `{}`", baseline.display()),
-                    json!({"baseline":baseline,"baseline_updated":true,"changed_pixels":0,"changed_percent":0.0,"regions":[],"artifact":spilled}),
+                    format!(
+                        "Visual baseline updated at `{}` ({}x{} at viewport {}x{}, dpr 1)",
+                        baseline.display(),
+                        current.width,
+                        current.height,
+                        viewport.width,
+                        viewport.height
+                    ),
+                    json!({"baseline":baseline,"baseline_meta_path":meta_path,"baseline_updated":true,"changed_pixels":0,"changed_percent":0.0,"regions":[],"capture":capture,"artifact":spilled}),
                 )
                 .to_text(),
                 &current,
@@ -2668,6 +2889,15 @@ impl Tool for ToolVisualDiff {
             .map_err(|error| format!("failed to decode baseline: {error}"))?;
         let current_image = image::load_from_memory(&current_bytes)
             .map_err(|error| format!("failed to decode current screenshot: {error}"))?;
+        if baseline_image.dimensions() != current_image.dimensions() {
+            return Err(baseline_dimension_mismatch(
+                &baseline,
+                baseline_image.dimensions(),
+                current_image.dimensions(),
+                viewport,
+                recorded.as_ref(),
+            ));
+        }
         let diff = compare_images(&baseline_image, &current_image, args.threshold, &args.masks)?;
         let artifact = artifact_from_bytes(encode_png(&diff.image)?, "image/png", &policy)?;
         let spilled = spill_artifact(&artifact, &runtime.artifacts_dir, "visual-diff")?;
@@ -2684,12 +2914,14 @@ impl Tool for ToolVisualDiff {
                 json!({
                     "baseline":baseline,
                     "baseline_updated":false,
+                    "baseline_meta":recorded,
                     "threshold":args.threshold,
                     "changed_pixels":diff.changed_pixels,
                     "total_pixels":diff.total_pixels,
                     "changed_percent":diff.changed_percent,
                     "regions":diff.regions,
                     "masks":args.masks,
+                    "capture":capture,
                     "artifact":spilled
                 }),
             )
@@ -2703,14 +2935,15 @@ impl Tool for ToolVisualDiff {
             &self.config_path,
             "visual_diff",
             "Visual Diff",
-            "Compare the masked live-page screenshot with an explicit baseline stored under .refact/. Never overwrites a baseline unless update_baseline is true; returns pixel statistics, changed regions, and a policy-processed diff artifact.",
+            "Compare the masked live-page screenshot with an explicit baseline stored under .refact/. Captures are pinned: the viewport is always emulated at explicit CSS pixels with device scale factor 1, encoded as lossless PNG with no policy downscale, and the session's own emulation is restored afterwards, so a sticky device_scale_factor from an earlier `chrome` call cannot change the geometry. Updating a baseline also writes a `<baseline>.meta.json` sidecar recording that geometry, and a comparison re-applies it, so the same baseline stays comparable across sessions. Geometry resolution order: the `viewport` argument, then the sidecar, then the session's current CSS viewport. Masks are CSS pixels of the captured viewport. Never overwrites a baseline unless update_baseline is true; a geometry or dimension mismatch is reported with both geometries and the way out instead of a bare pixel-size error. Returns pixel statistics, changed regions, the resolved `capture` geometry, the baseline sidecar, and a policy-processed diff artifact.",
             json!({
                 "type":"object",
                 "properties":{
                     "baseline":{"type":"string","description":"Repository-relative baseline name or .refact path"},
                     "threshold":{"type":"number","minimum":0,"maximum":1,"default":DEFAULT_DIFF_THRESHOLD},
-                    "masks":{"type":"array","items":{"type":"object","properties":{"x":{"type":"integer","minimum":0},"y":{"type":"integer","minimum":0},"width":{"type":"integer","minimum":1},"height":{"type":"integer","minimum":1}},"required":["x","y","width","height"]}},
-                    "update_baseline":{"type":"boolean","default":false,"description":"Explicitly create or overwrite the baseline"}
+                    "masks":{"type":"array","items":{"type":"object","properties":{"x":{"type":"integer","minimum":0},"y":{"type":"integer","minimum":0},"width":{"type":"integer","minimum":1},"height":{"type":"integer","minimum":1}},"required":["x","y","width","height"]},"description":"Regions ignored by the comparison, in CSS pixels of the captured viewport"},
+                    "update_baseline":{"type":"boolean","default":false,"description":"Explicitly create or overwrite the baseline and its geometry sidecar"},
+                    "viewport":{"type":"object","properties":{"width":{"type":"integer","minimum":1},"height":{"type":"integer","minimum":1}},"required":["width","height"],"description":"Pins the capture geometry in CSS pixels at device scale factor 1; omitted means the baseline sidecar, else the session's current viewport"}
                 },
                 "required":["baseline"]
             }),
@@ -3657,6 +3890,220 @@ mod tests {
         );
         assert!(baseline_path(root, "../outside.png").is_err());
         assert!(baseline_path(root, "/tmp/outside.png").is_err());
+    }
+
+    fn meta(width: u32, height: u32) -> BaselineMeta {
+        BaselineMeta {
+            schema: BASELINE_META_SCHEMA,
+            viewport: CaptureViewport { width, height },
+            device_scale_factor: 1.0,
+            color_scheme: Some("dark".to_string()),
+            url: "http://localhost:5173/".to_string(),
+            width,
+            height,
+            captured_at: "2026-09-15T00:00:00+00:00".to_string(),
+        }
+    }
+
+    #[test]
+    fn baseline_sidecars_sit_next_to_the_baseline_whatever_its_extension() {
+        let root = Path::new("/repo");
+        assert_eq!(
+            baseline_meta_path(&baseline_path(root, "home.png").unwrap()),
+            PathBuf::from("/repo/.refact/visual_baselines/home.png.meta.json")
+        );
+        assert_eq!(
+            baseline_meta_path(&baseline_path(root, "g-dashboard").unwrap()),
+            PathBuf::from("/repo/.refact/visual_baselines/g-dashboard.meta.json")
+        );
+        assert_eq!(
+            baseline_meta_path(&baseline_path(root, "themes/dark/home.png").unwrap()),
+            PathBuf::from("/repo/.refact/visual_baselines/themes/dark/home.png.meta.json")
+        );
+    }
+
+    #[test]
+    fn baseline_metadata_round_trips_and_tolerates_a_missing_schema() {
+        let original = meta(800, 600);
+        let encoded = serde_json::to_string(&original).unwrap();
+        assert_eq!(
+            serde_json::from_str::<BaselineMeta>(&encoded).unwrap(),
+            original
+        );
+        let decoded: BaselineMeta = serde_json::from_value(json!({
+            "viewport": {"width": 1280, "height": 800},
+            "device_scale_factor": 1.0,
+            "color_scheme": Value::Null,
+            "url": "http://localhost:5173/",
+            "width": 1280,
+            "height": 800,
+            "captured_at": "2026-09-15T00:00:00+00:00"
+        }))
+        .unwrap();
+        assert_eq!(decoded.schema, BASELINE_META_SCHEMA);
+        assert_eq!(
+            decoded.viewport,
+            CaptureViewport {
+                width: 1280,
+                height: 800
+            }
+        );
+        assert_eq!(decoded.color_scheme, None);
+    }
+
+    #[test]
+    fn capture_geometry_prefers_the_argument_then_the_sidecar_then_the_session() {
+        let explicit = CaptureViewport {
+            width: 1024,
+            height: 768,
+        };
+        let sidecar = CaptureViewport {
+            width: 800,
+            height: 600,
+        };
+        let session = CaptureViewport {
+            width: 375,
+            height: 667,
+        };
+        assert_eq!(
+            resolve_capture_viewport(Some(explicit), Some(sidecar), || Ok(session)).unwrap(),
+            explicit
+        );
+        assert_eq!(
+            resolve_capture_viewport(None, Some(sidecar), || Ok(session)).unwrap(),
+            sidecar
+        );
+        assert_eq!(
+            resolve_capture_viewport(None, None, || Ok(session)).unwrap(),
+            session
+        );
+        assert_eq!(
+            resolve_capture_viewport(None, None, || Err("no session".to_string())).unwrap_err(),
+            "no session"
+        );
+        for invalid in [
+            CaptureViewport {
+                width: 0,
+                height: 600,
+            },
+            CaptureViewport {
+                width: 800,
+                height: 0,
+            },
+        ] {
+            assert_eq!(
+                resolve_capture_viewport(Some(invalid), None, || Ok(session)).unwrap_err(),
+                "viewport dimensions must be positive"
+            );
+        }
+        assert!(serde_json::from_value::<VisualDiffArgs>(
+            json!({"baseline": "home.png", "viewport": {"width": 800}})
+        )
+        .is_err());
+        assert!(
+            serde_json::from_value::<VisualDiffArgs>(json!({"baseline": "home.png"}))
+                .unwrap()
+                .viewport
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn geometry_errors_state_both_sides_and_the_way_out() {
+        let baseline = PathBuf::from("/repo/.refact/visual_baselines/home.png");
+        let requested = CaptureViewport {
+            width: 1024,
+            height: 768,
+        };
+        let conflict = baseline_geometry_conflict(
+            &baseline,
+            CaptureViewport {
+                width: 800,
+                height: 600,
+            },
+            requested,
+        )
+        .expect("a different requested geometry must be refused");
+        assert!(
+            conflict.contains("was captured at 800x600 (dpr 1)"),
+            "{conflict}"
+        );
+        assert!(conflict.contains("requested 1024x768"), "{conflict}");
+        assert!(conflict.contains("update_baseline: true"), "{conflict}");
+        assert!(baseline_geometry_conflict(
+            &baseline,
+            CaptureViewport {
+                width: 800,
+                height: 600
+            },
+            CaptureViewport {
+                width: 800,
+                height: 600
+            }
+        )
+        .is_none());
+
+        let with_sidecar = baseline_dimension_mismatch(
+            &baseline,
+            (1568, 992),
+            (1568, 980),
+            requested,
+            Some(&meta(800, 600)),
+        );
+        for expected in [
+            "is 1568x992",
+            "is 1568x980",
+            "viewport 1024x768 (dpr 1)",
+            "sidecar records viewport 800x600",
+            "update_baseline: true",
+        ] {
+            assert!(
+                with_sidecar.contains(expected),
+                "{expected}: {with_sidecar}"
+            );
+        }
+        let legacy =
+            baseline_dimension_mismatch(&baseline, (1568, 992), (800, 600), requested, None);
+        assert!(legacy.contains("no metadata sidecar found"), "{legacy}");
+        assert!(
+            legacy.contains("re-baseline with update_baseline: true"),
+            "{legacy}"
+        );
+        for message in [&with_sidecar, &legacy] {
+            assert!(
+                !message.starts_with("image dimensions differ"),
+                "a bare pixel-size error explains nothing: {message}"
+            );
+            assert!(message.contains("home.png"), "{message}");
+        }
+    }
+
+    #[test]
+    fn visual_baselines_are_captured_lossless_at_native_geometry() {
+        let policy = ImagePolicy::lossless_native();
+        assert_eq!(policy.max_side, 0);
+        assert_eq!(policy.preferred_side, 0);
+        assert_eq!(policy.quality, None);
+        let description = ToolVisualDiff {
+            config_path: "builtin".to_string(),
+        }
+        .tool_description();
+        for expected in [
+            "device scale factor 1",
+            "lossless PNG",
+            "meta.json",
+            "CSS pixels of the captured viewport",
+        ] {
+            assert!(
+                description.description.contains(expected),
+                "{expected}: {}",
+                description.description
+            );
+        }
+        assert_eq!(
+            description.input_schema["properties"]["viewport"]["required"],
+            json!(["width", "height"])
+        );
     }
 
     #[tokio::test]

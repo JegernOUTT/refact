@@ -7352,17 +7352,61 @@ async fn dispatch_event_fires_listeners_with_the_inferred_class_and_detail() {
 
 struct DesignToolCase {
     ccx: Arc<tokio::sync::Mutex<refact_lsp::at_commands::at_commands::AtCommandsContext>>,
+    app: refact_lsp::app_state::AppState,
+    chat_id: String,
+    workspace: TempDir,
     _profile: TempDir,
     _cache_dir: TempDir,
     _config_dir: TempDir,
     _server: FixtureServer,
-    _tab: Arc<Tab>,
+    tab: Arc<Tab>,
+}
+
+impl DesignToolCase {
+    async fn set_viewport(&self, width: u32, height: u32, device_scale_factor: f64) {
+        let (_, runtime) = refact_lsp::integrations::browser_runtime::find_runtime_for_chat(
+            self.app.clone(),
+            &refact_lsp::integrations::browser_runtime::ChatRuntimeLookup::for_chat(&self.chat_id),
+        )
+        .await
+        .expect("the registered runtime must stay discoverable");
+        let mut runtime = runtime.lock().await;
+        let report = execute_steps_with_runtime(
+            &mut runtime,
+            &[BrowserStep::SetViewport {
+                width,
+                height,
+                device_scale_factor: Some(device_scale_factor),
+                is_mobile: Some(false),
+                has_touch: Some(false),
+            }],
+            &ImagePolicy::browser_capture(),
+        );
+        assert!(report.ok, "set_viewport failed: {report:?}");
+    }
+
+    fn baseline_file(&self, name: &str) -> std::path::PathBuf {
+        self.workspace
+            .path()
+            .join(".refact")
+            .join("visual_baselines")
+            .join(name)
+    }
+
+    fn viewport_readout(&self) -> serde_json::Value {
+        self.tab
+            .evaluate("[innerWidth, innerHeight].join('x')", false)
+            .unwrap()
+            .value
+            .unwrap()
+    }
 }
 
 async fn design_tool_context(case: BrowserCase, chat_id: &str) -> DesignToolCase {
     let mut case = case;
     let cache_dir = tempdir().unwrap();
     let config_dir = tempdir().unwrap();
+    let workspace = tempdir().unwrap();
     let command_line = refact_lsp::global_context::CommandLine::from_iter_safe([
         "browser-e2e",
         "--http-port",
@@ -7378,6 +7422,11 @@ async fn design_tool_context(case: BrowserCase, chat_id: &str) -> DesignToolCase
         command_line,
     )
     .await;
+    gcx.documents_state
+        .workspace_folders
+        .lock()
+        .unwrap()
+        .push(workspace.path().to_path_buf());
     let app = refact_lsp::app_state::AppState::from_gcx(gcx).await;
     case.runtime.reattach(chat_id);
     refact_lsp::integrations::browser_runtime::register_browser_runtime(app.clone(), case.runtime)
@@ -7385,7 +7434,7 @@ async fn design_tool_context(case: BrowserCase, chat_id: &str) -> DesignToolCase
     DesignToolCase {
         ccx: Arc::new(tokio::sync::Mutex::new(
             refact_lsp::at_commands::at_commands::AtCommandsContext::new_from_app(
-                app,
+                app.clone(),
                 4096,
                 10,
                 false,
@@ -7398,11 +7447,14 @@ async fn design_tool_context(case: BrowserCase, chat_id: &str) -> DesignToolCase
             )
             .await,
         )),
+        app,
+        chat_id: chat_id.to_string(),
+        workspace,
         _profile: case._profile,
         _cache_dir: cache_dir,
         _config_dir: config_dir,
         _server: case.server,
-        _tab: case.tab,
+        tab: case.tab,
     }
 }
 
@@ -7558,6 +7610,104 @@ async fn design_tools_scope_the_aria_snapshot_and_compose_with_refs() {
     .expect("a ref emitted by mark_elements must compose as a ui_probe target");
     let payload = design_tool_payload(messages);
     assert_eq!(payload["matrix"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn visual_diff_pins_css_pixel_geometry_across_dpr_changes() {
+    let Some(mut case) = BrowserCase::start("visual-states.html").await else {
+        return;
+    };
+    case.setup_world();
+    let case = design_tool_context(case, "visual-diff-geometry-e2e").await;
+    case.set_viewport(800, 600, 2.0).await;
+    let ccx = case.ccx.clone();
+    let mut diff = refact_lsp::tools::design_tools::ToolVisualDiff {
+        config_path: "builtin".to_string(),
+    };
+
+    let (_, messages) = refact_lsp::tools::tools_description::Tool::tool_execute(
+        &mut diff,
+        ccx.clone(),
+        &"visual-diff-baseline".to_string(),
+        &std::collections::HashMap::from([
+            ("baseline".to_string(), json!("geometry-e2e.png")),
+            ("update_baseline".to_string(), json!(true)),
+        ]),
+    )
+    .await
+    .expect("visual_diff must be able to create a baseline");
+    let payload = design_tool_payload(messages);
+    assert_eq!(payload["baseline_updated"], json!(true));
+    assert_eq!(
+        payload["capture"]["viewport"],
+        json!({"width": 800, "height": 600}),
+        "a sticky device_scale_factor must not change the capture geometry: {payload}"
+    );
+    assert_eq!(payload["capture"]["device_scale_factor"], json!(1.0));
+
+    let baseline = case.baseline_file("geometry-e2e.png");
+    let decoded = image::load_from_memory(&std::fs::read(&baseline).unwrap()).unwrap();
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (800, 600),
+        "baselines are DPR-1 CSS-pixel captures with no policy downscale"
+    );
+    let sidecar: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(case.baseline_file("geometry-e2e.png.meta.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(sidecar["schema"], json!(1));
+    assert_eq!(sidecar["viewport"], json!({"width": 800, "height": 600}));
+    assert_eq!(sidecar["device_scale_factor"], json!(1.0));
+    assert_eq!(sidecar["width"], json!(800));
+    assert_eq!(sidecar["height"], json!(600));
+    assert!(sidecar["url"].as_str().unwrap().contains("visual-states"));
+
+    case.set_viewport(1024, 768, 1.0).await;
+    let (_, messages) = refact_lsp::tools::tools_description::Tool::tool_execute(
+        &mut diff,
+        ccx.clone(),
+        &"visual-diff-compare".to_string(),
+        &std::collections::HashMap::from([("baseline".to_string(), json!("geometry-e2e.png"))]),
+    )
+    .await
+    .expect("the sidecar geometry must make the baseline comparable again");
+    let payload = design_tool_payload(messages);
+    assert_eq!(
+        payload["capture"]["viewport"],
+        json!({"width": 800, "height": 600}),
+        "the sidecar pins the comparison geometry: {payload}"
+    );
+    assert_eq!(payload["changed_pixels"], json!(0));
+    assert_eq!(payload["changed_percent"].as_f64().unwrap(), 0.0);
+    assert_eq!(
+        payload["baseline_meta"]["viewport"],
+        json!({"width": 800, "height": 600})
+    );
+    assert_eq!(
+        case.viewport_readout(),
+        json!("1024x768"),
+        "the session's own emulation must be restored after the capture"
+    );
+
+    let error = refact_lsp::tools::tools_description::Tool::tool_execute(
+        &mut diff,
+        ccx,
+        &"visual-diff-regeometry".to_string(),
+        &std::collections::HashMap::from([
+            ("baseline".to_string(), json!("geometry-e2e.png")),
+            (
+                "viewport".to_string(),
+                json!({"width": 1024, "height": 768}),
+            ),
+        ]),
+    )
+    .await
+    .expect_err("a geometry that differs from the baseline must be refused");
+    assert!(error.contains("was captured at 800x600"), "{error}");
+    assert!(error.contains("requested 1024x768"), "{error}");
+    assert!(error.contains("update_baseline: true"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
