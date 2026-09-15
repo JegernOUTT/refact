@@ -284,6 +284,57 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
+    fn wiring_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is gone from background_tasks.rs"));
+        let rest = &source[start + signature.len()..];
+        let end = ["\npub ", "\nasync fn ", "\nfn ", "\n#[cfg(test)]"]
+            .iter()
+            .filter_map(|marker| rest.find(marker))
+            .min()
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    fn background_agent_monitor_spawns(body: &str) -> usize {
+        let compact: String = body
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(str::chars)
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        compact
+            .match_indices("run_background_agent_monitor(")
+            .filter(|(at, _)| {
+                compact[..*at]
+                    .rsplit_once("tokio::spawn(")
+                    .is_some_and(|(_, path)| {
+                        path.chars()
+                            .all(|c| c.is_alphanumeric() || c == '_' || c == ':')
+                    })
+            })
+            .count()
+    }
+
+    #[test]
+    fn both_wiring_paths_spawn_the_background_agent_monitor() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/background_tasks.rs"),
+        )
+        .unwrap();
+        for signature in [
+            "\npub async fn start_background_tasks(",
+            "\npub async fn start_full_soak_background_tasks(",
+        ] {
+            assert_eq!(
+                background_agent_monitor_spawns(wiring_body(&source, signature)),
+                1,
+                "{signature} must spawn agents::monitor::run_background_agent_monitor exactly once"
+            );
+        }
+    }
+
     struct DropFlag(Arc<AtomicBool>);
 
     impl Drop for DropFlag {

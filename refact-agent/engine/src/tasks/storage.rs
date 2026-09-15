@@ -1670,6 +1670,58 @@ mod tests {
             .all(|id| id.starts_with("planner-task-planner-race-")));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn planner_ids_are_unique_across_a_canonical_and_an_aliased_task_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let canonical_root = temp.path().join("canonical");
+        let alias_root = temp.path().join("alias");
+        tokio::fs::create_dir_all(alias_root.join(".refact"))
+            .await
+            .unwrap();
+        let task_id = "task-alias-ids";
+        let canonical_gcx = task_with_board(&canonical_root, task_id).await;
+        std::os::unix::fs::symlink(
+            canonical_root.join(".refact").join("tasks"),
+            alias_root.join(".refact").join("tasks"),
+        )
+        .unwrap();
+        let alias_gcx = setup_workspace(&alias_root).await;
+
+        let canonical_dir = find_task_dir(canonical_gcx.clone(), task_id).await.unwrap();
+        let aliased_dir = find_task_dir(alias_gcx.clone(), task_id).await.unwrap();
+        assert_ne!(canonical_dir, aliased_dir);
+        assert_eq!(
+            board_lock::canonical_dir(&aliased_dir).await.unwrap(),
+            canonical_dir
+        );
+
+        let mut handles = vec![];
+        for index in 0..8 {
+            let gcx = match index % 2 {
+                0 => canonical_gcx.clone(),
+                _ => alias_gcx.clone(),
+            };
+            handles.push(tokio::spawn(async move {
+                next_planner_chat_id(gcx, task_id).await
+            }));
+        }
+        let mut ids = vec![];
+        for handle in handles {
+            ids.push(handle.await.unwrap().unwrap());
+        }
+
+        let unique: HashSet<String> = ids.iter().cloned().collect();
+        assert_eq!(unique.len(), 8, "duplicate planner ids: {ids:?}");
+        let prefix = format!("planner-{task_id}-");
+        let mut reserved = ids
+            .iter()
+            .map(|id| id.strip_prefix(&prefix).unwrap().parse::<u32>().unwrap())
+            .collect::<Vec<_>>();
+        reserved.sort();
+        assert_eq!(reserved, (1..=8).collect::<Vec<u32>>(), "{ids:?}");
+    }
+
     async fn task_with_cards(
         root: &std::path::Path,
         task_id: &str,
