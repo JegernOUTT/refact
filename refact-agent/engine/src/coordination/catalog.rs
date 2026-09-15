@@ -464,6 +464,7 @@ pub async fn build_catalog(
     for row in rows.values_mut() {
         if let Some(ticket) = tickets.iter().find(|t| t.run.work == row.key) {
             row.metadata.run = Some(ticket.run.clone());
+            row.metadata.priority = Some(ticket.priority);
             row.metadata.freshness = Freshness::Live;
             row.stale = false;
             row.root_chat_id = Some(ticket.scope.root.to_string());
@@ -570,6 +571,46 @@ mod tests {
         assert!(catalog.find("local").is_some());
         assert!(catalog.find("foreign").is_none());
         assert!(catalog.find("unknown").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_row_carries_the_admission_class_it_is_waiting_in() {
+        let project = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![project.path().into()];
+        let app = AppState::from_gcx(gcx).await;
+        let mut session = ChatSession::new("typing".into());
+        session.work_project_root = Some(project.path().into());
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("typing".into(), Arc::new(tokio::sync::Mutex::new(session)));
+        assert!(build_catalog(&app, None)
+            .await
+            .unwrap()
+            .find("typing")
+            .unwrap()
+            .metadata
+            .priority
+            .is_none());
+
+        let _ticket = app
+            .work_scheduler
+            .reserve(
+                refact_work_core::AdmissionRequest::new(
+                    WorkKey::trajectory("typing").run(1),
+                    refact_work_core::WorkScope::single("project"),
+                )
+                .with_priority(refact_work_core::WorkPriority::UserBlocking),
+            )
+            .unwrap();
+        let catalog = build_catalog(&app, None).await.unwrap();
+        assert_eq!(
+            catalog.find("typing").unwrap().metadata.priority,
+            Some(refact_work_core::WorkPriority::UserBlocking),
+            "a queued row says which class it is waiting in"
+        );
     }
 
     #[test]

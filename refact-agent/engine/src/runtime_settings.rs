@@ -58,6 +58,8 @@ pub struct CoordinationFieldBound {
     pub value_type: &'static str,
     pub minimum: Option<u64>,
     pub maximum: Option<u64>,
+    /// The only accepted values of a `string_enum` leaf.
+    pub allowed: Option<&'static [&'static str]>,
 }
 
 const fn coordination_bool(name: &'static str) -> CoordinationFieldBound {
@@ -66,6 +68,7 @@ const fn coordination_bool(name: &'static str) -> CoordinationFieldBound {
         value_type: "boolean",
         minimum: None,
         maximum: None,
+        allowed: None,
     }
 }
 
@@ -79,6 +82,20 @@ const fn coordination_integer(
         value_type: "integer",
         minimum: Some(minimum),
         maximum: Some(maximum),
+        allowed: None,
+    }
+}
+
+const fn coordination_string_enum(
+    name: &'static str,
+    allowed: &'static [&'static str],
+) -> CoordinationFieldBound {
+    CoordinationFieldBound {
+        name,
+        value_type: "string_enum",
+        minimum: None,
+        maximum: None,
+        allowed: Some(allowed),
     }
 }
 
@@ -94,9 +111,12 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
         value_type: "integer_map",
         minimum: Some(1),
         maximum: Some(1_024),
+        allowed: None,
     },
     coordination_integer("max_root_weight_entries", 1, 1_000_000),
     coordination_integer("max_resume_burst", 1, 1_024),
+    coordination_string_enum("default_priority", refact_work_core::WorkPriority::NAMES),
+    coordination_integer("max_priority_burst", 1, 1_024),
     coordination_integer("max_pending", 1, 1_000_000),
     coordination_integer("max_outstanding", 1, 4_000_000),
     coordination_integer("max_parked_residency", 1, 4_000_000),
@@ -732,6 +752,10 @@ pub fn validate_coordination(coordination: &CoordinationSettings) -> Result<(), 
             validate_coordination_integer_map(bound, value)?;
             continue;
         }
+        if bound.value_type == "string_enum" {
+            validate_coordination_string_enum(bound, value)?;
+            continue;
+        }
         let (minimum, maximum) = match (bound.minimum, bound.maximum) {
             (Some(minimum), Some(maximum)) => (minimum, maximum),
             _ => {
@@ -775,6 +799,22 @@ pub fn validate_coordination(coordination: &CoordinationSettings) -> Result<(), 
 /// A sparse per-project override: only the coordination leaves the project
 /// actually pins are present, everything else stays inherited.
 pub type CoordinationOverride = std::collections::BTreeMap<String, serde_json::Value>;
+
+fn validate_coordination_string_enum(
+    bound: &CoordinationFieldBound,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let allowed = bound.allowed.unwrap_or(&[]);
+    let chosen = value.as_str().filter(|chosen| allowed.contains(chosen));
+    if chosen.is_none() {
+        return Err(format!(
+            "{} must be one of {}",
+            coordination_field_path(bound.name),
+            allowed.join(", ")
+        ));
+    }
+    Ok(())
+}
 
 fn validate_coordination_integer_map(
     bound: &CoordinationFieldBound,
@@ -872,6 +912,11 @@ pub fn normalize_coordination_override(
             .ok_or_else(|| format!("unknown coordination setting '{name}'"))?;
         if bound.value_type == "integer_map" {
             validate_coordination_integer_map(bound, &value)?;
+            normalized.insert(name, value);
+            continue;
+        }
+        if bound.value_type == "string_enum" {
+            validate_coordination_string_enum(bound, &value)?;
             normalized.insert(name, value);
             continue;
         }
@@ -1193,10 +1238,51 @@ trajectory_writer_enabled: false
                 (Some(minimum), Some(maximum)) => {
                     assert!(matches!(bound.value_type, "integer" | "integer_map"));
                     assert!(minimum <= maximum, "{} has an empty range", bound.name);
+                    assert!(bound.allowed.is_none());
                 }
-                _ => assert_eq!(bound.value_type, "boolean"),
+                _ => match bound.value_type {
+                    "string_enum" => assert!(
+                        bound.allowed.is_some_and(|allowed| !allowed.is_empty()),
+                        "{} publishes no accepted values",
+                        bound.name
+                    ),
+                    other => assert_eq!(other, "boolean"),
+                },
             }
         }
+    }
+
+    #[test]
+    fn a_priority_class_outside_the_published_ladder_is_refused() {
+        let rendered = serde_json::to_value(CoordinationSettings::default()).unwrap();
+        assert_eq!(rendered["default_priority"], "normal");
+        for rejected in [
+            serde_json::json!("urgent"),
+            serde_json::json!("Normal"),
+            serde_json::json!(1),
+        ] {
+            let error = normalize_coordination_override(CoordinationOverride::from([(
+                "default_priority".to_string(),
+                rejected.clone(),
+            )]))
+            .unwrap_err();
+            assert!(
+                error.contains("coordination.default_priority") && error.contains("user_blocking"),
+                "unexpected error for {rejected}: {error}"
+            );
+        }
+        let accepted = resolve_coordination(
+            &CoordinationSettings::default(),
+            &CoordinationOverride::from([(
+                "default_priority".to_string(),
+                serde_json::json!("user_blocking"),
+            )]),
+        )
+        .unwrap();
+        assert_eq!(
+            accepted.default_priority,
+            refact_work_core::WorkPriority::UserBlocking
+        );
     }
 
     #[test]

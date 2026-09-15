@@ -89,6 +89,50 @@ impl WorkOrigin {
     }
 }
 
+/// A coarse, named urgency ladder assigned from a run's launch context — a
+/// user is waiting on this chat, this is a background exploration — never
+/// inferred from what the run is doing.
+///
+/// Declared most urgent first, so the derived order sorts the most urgent run
+/// first. Urgency changes admission *order* only: it never raises a cap and
+/// never touches a run that already holds a permit.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkPriority {
+    UserBlocking,
+    Interactive,
+    #[default]
+    Normal,
+    Speculative,
+}
+
+impl WorkPriority {
+    pub const ALL: [WorkPriority; 4] = [
+        WorkPriority::UserBlocking,
+        WorkPriority::Interactive,
+        WorkPriority::Normal,
+        WorkPriority::Speculative,
+    ];
+
+    pub const NAMES: &'static [&'static str] =
+        &["user_blocking", "interactive", "normal", "speculative"];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkPriority::UserBlocking => "user_blocking",
+            WorkPriority::Interactive => "interactive",
+            WorkPriority::Normal => "normal",
+            WorkPriority::Speculative => "speculative",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<WorkPriority> {
+        WorkPriority::ALL.into_iter().find(|p| p.as_str() == raw)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivityState {

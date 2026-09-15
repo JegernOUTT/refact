@@ -583,10 +583,14 @@ async fn accept_prepared_launch(
         refact_work_core::ProjectKey::new(project_identity),
         refact_work_core::CheckoutKey::new(root),
     );
-    let ticket = match app
-        .work_scheduler
-        .reserve(refact_work_core::AdmissionRequest::new(run, scope).with_depth(req.subchat_depth))
-    {
+    // Launch context, not content: a root chat's own child keeps that chat's
+    // ordinary standing, a child of another agent is background exploration.
+    let mut request =
+        refact_work_core::AdmissionRequest::new(run, scope).with_depth(req.subchat_depth);
+    if req.subchat_depth > 0 {
+        request = request.with_priority(refact_work_core::WorkPriority::Speculative);
+    }
+    let ticket = match app.work_scheduler.reserve(request) {
         Ok(ticket) => ticket,
         Err(error) => {
             app.agent_executions.forget_launch_provenance(&agent_id);
@@ -1788,12 +1792,16 @@ pub(super) async fn resume_agent_inner(
     if launch_stopping(&app) {
         return Err("resume cancelled before reopening".into());
     }
+    // A resume keeps the class its launch context assigned.
+    let launcher_depth = config.subchat_depth - 1;
+    let mut request =
+        refact_work_core::AdmissionRequest::new(run, scope).with_depth(launcher_depth);
+    if launcher_depth > 0 {
+        request = request.with_priority(refact_work_core::WorkPriority::Speculative);
+    }
     let ticket = app
         .work_scheduler
-        .reserve(
-            refact_work_core::AdmissionRequest::new(run, scope)
-                .with_depth(config.subchat_depth - 1),
-        )
+        .reserve(request)
         .map_err(|error| error.to_string())?;
     let (record, abort, notify) = app
         .agents

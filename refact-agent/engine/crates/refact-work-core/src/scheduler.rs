@@ -1,3 +1,4 @@
+use crate::contracts::WorkPriority;
 use crate::identity::{CheckoutKey, ProjectKey, RunKey, RuntimeKind, WorkScope};
 use crate::settings::{CoordinationSettings, SettingsError};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,10 @@ pub struct AdmissionRequest {
     pub run: RunKey,
     pub scope: WorkScope,
     pub depth: usize,
+    /// Assigned by the launcher from its own context. Left unset, the run takes
+    /// the configured `default_priority`; the scheduler never guesses a class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<WorkPriority>,
 }
 
 impl AdmissionRequest {
@@ -29,11 +34,17 @@ impl AdmissionRequest {
             run,
             scope,
             depth: 0,
+            priority: None,
         }
     }
 
     pub fn with_depth(mut self, depth: usize) -> Self {
         self.depth = depth;
+        self
+    }
+
+    pub fn with_priority(mut self, priority: WorkPriority) -> Self {
+        self.priority = Some(priority);
         self
     }
 }
@@ -110,6 +121,7 @@ pub struct TicketSnapshot {
     pub depth: usize,
     pub seq: u64,
     pub state: TicketState,
+    pub priority: WorkPriority,
     pub park_count: u32,
     pub evict_count: u32,
 }
@@ -137,6 +149,7 @@ struct Entry {
     ready_seq: u64,
     parked_seq: u64,
     state: TicketState,
+    priority: WorkPriority,
     park_count: u32,
     evict_count: u32,
     cancel_requested: bool,
@@ -157,6 +170,7 @@ struct State {
     roots: VecDeque<CheckoutKey>,
     root_credit: usize,
     resume_burst: HashMap<CheckoutKey, usize>,
+    priority_burst: usize,
 }
 
 impl State {
@@ -182,6 +196,11 @@ impl State {
     /// the least valuable parked run — the one idle longest since its last
     /// park — is checkpointed and evicted. Eviction never cancels: the entry,
     /// its queue age and its accounting survive so `acquire` resumes it.
+    ///
+    /// Priority deliberately has no say here. Residency is memory, not order:
+    /// letting an urgent class hold a resident parked slot would make priority
+    /// grant capacity, which it never does. An evicted urgent run keeps its
+    /// class and outranks on its next admission.
     fn evict_parked_over_residency(&mut self) {
         let mut parked: Vec<(u64, TicketId)> = self
             .entries
@@ -276,36 +295,68 @@ impl State {
                 self.roots.rotate_left(1);
                 self.root_credit = 0;
             }
-            let Some(root) = chosen_root else {
+            let Some(turn_root) = chosen_root else {
                 break;
             };
-            if self.last_root.as_ref() != Some(&root) || self.root_credit == 0 {
-                self.root_credit = self.settings.root_quantum(root.as_str());
-            }
-            self.last_root = Some(root.clone());
-            let lane = &lanes[&root];
-            let burst = self.resume_burst.get(&root).copied().unwrap_or(0);
-            let fairness_turn = burst >= self.settings.max_resume_burst;
-            let chosen = if fairness_turn {
-                // Every bounded burst gets a strict ready-FIFO turn, not only
-                // fresh work. Otherwise two older resumers can alternate forever
-                // ahead of a younger accepted resumer with no fresh work present.
-                lane.iter()
+            let turn_burst = self.resume_burst.get(&turn_root).copied().unwrap_or(0);
+            let fairness_turn = turn_burst >= self.settings.max_resume_burst;
+            // The turn fairness alone would serve: the rotation's root, its
+            // oldest waiter, or on a bounded burst a strict ready-FIFO turn —
+            // otherwise two older resumers can alternate forever ahead of a
+            // younger accepted resumer with no fresh work present.
+            let natural = if fairness_turn {
+                *lanes[&turn_root]
+                    .iter()
                     .min_by_key(|(_, id)| self.entries[id].ready_seq)
                     .unwrap()
             } else {
-                &lane[0]
+                lanes[&turn_root][0]
             };
-            let (seq, id) = *chosen;
+            // Urgency biases the order; it never suspends it. A more urgent
+            // class may take the turn, but only `max_priority_burst` times in
+            // a row: past that the fair-share turn is taken whatever the
+            // classes are, so every class keeps a minimum share of one
+            // opportunity in every `max_priority_burst + 1`. A resume-fairness
+            // turn is P-2's guarantee and is never preempted.
+            let preemption =
+                if fairness_turn || self.priority_burst >= self.settings.max_priority_burst {
+                    None
+                } else {
+                    lanes
+                        .iter()
+                        .flat_map(|(root, lane)| lane.iter().map(move |slot| (root, slot)))
+                        .min_by_key(|(_, (seq, id))| (self.entries[id].priority, *seq))
+                        .filter(|(_, (_, id))| {
+                            self.entries[id].priority < self.entries[&natural.1].priority
+                        })
+                        .map(|(root, slot)| (root.clone(), *slot))
+                };
+            let preempting = preemption.is_some();
+            let (root, (seq, id)) = preemption.unwrap_or((turn_root, natural));
+            self.priority_burst = if preempting {
+                self.priority_burst.saturating_add(1)
+            } else {
+                0
+            };
             let scope = self.entries[&id].scope.clone();
+            let burst = self.resume_burst.get(&root).copied().unwrap_or(0);
             if !fairness_turn && self.entries[&id].park_count > 0 {
-                self.resume_burst.insert(root, burst.saturating_add(1));
+                self.resume_burst
+                    .insert(root.clone(), burst.saturating_add(1));
             } else {
                 self.resume_burst.remove(&root);
             }
-            self.root_credit = self.root_credit.saturating_sub(1);
-            if self.root_credit == 0 {
-                self.roots.rotate_left(1);
+            // A preemption spends no fair share: the rotation still owes this
+            // root the turn urgency took from it.
+            if !preempting {
+                if self.last_root.as_ref() != Some(&root) || self.root_credit == 0 {
+                    self.root_credit = self.settings.root_quantum(root.as_str());
+                }
+                self.last_root = Some(root);
+                self.root_credit = self.root_credit.saturating_sub(1);
+                if self.root_credit == 0 {
+                    self.roots.rotate_left(1);
+                }
             }
             self.charge(&scope);
             self.queue.remove(&(seq, id));
@@ -479,6 +530,7 @@ impl AdmissionScheduler {
                     roots: VecDeque::new(),
                     root_credit: 0,
                     resume_burst: HashMap::new(),
+                    priority_burst: 0,
                 }),
             }),
         }
@@ -548,6 +600,7 @@ impl AdmissionScheduler {
         state.next_id += 1;
         let seq = state.next_seq;
         state.next_seq += 1;
+        let priority = request.priority.unwrap_or(state.settings.default_priority);
         let run = request.run.clone();
         state.entries.insert(
             id,
@@ -559,6 +612,7 @@ impl AdmissionScheduler {
                 ready_seq: seq,
                 parked_seq: 0,
                 state: TicketState::Reserved,
+                priority,
                 park_count: 0,
                 evict_count: 0,
                 cancel_requested: false,
@@ -602,6 +656,7 @@ impl AdmissionScheduler {
                 depth: entry.depth,
                 seq: entry.seq,
                 state: entry.state,
+                priority: entry.priority,
                 park_count: entry.park_count,
                 evict_count: entry.evict_count,
             })

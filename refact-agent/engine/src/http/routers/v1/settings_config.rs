@@ -422,6 +422,8 @@ struct TrajectorySettingField {
     value_type: &'static str,
     minimum: Option<u64>,
     maximum: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allowed: Option<&'static [&'static str]>,
     apply_mode: &'static str,
 }
 
@@ -431,6 +433,7 @@ fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         value_type: "integer",
         minimum: Some(minimum),
         maximum: Some(maximum),
+        allowed: None,
         apply_mode: "live",
     };
     let restart_usize = |name: &str, minimum, maximum| TrajectorySettingField {
@@ -438,6 +441,7 @@ fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         value_type: "integer",
         minimum: Some(minimum),
         maximum: Some(maximum),
+        allowed: None,
         apply_mode: "restart_required",
     };
     let restart_bool = |name: &str| TrajectorySettingField {
@@ -445,6 +449,7 @@ fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         value_type: "boolean",
         minimum: None,
         maximum: None,
+        allowed: None,
         apply_mode: "restart_required",
     };
     let live_bool = |name: &str| TrajectorySettingField {
@@ -452,6 +457,7 @@ fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         value_type: "boolean",
         minimum: None,
         maximum: None,
+        allowed: None,
         apply_mode: "live",
     };
     let mut fields = vec![
@@ -519,6 +525,7 @@ fn coordination_settings_fields(dotted: bool) -> Vec<TrajectorySettingField> {
             value_type: field.value_type,
             minimum: field.minimum,
             maximum: field.maximum,
+            allowed: field.allowed,
             apply_mode: "live",
         })
         .collect()
@@ -743,11 +750,18 @@ mod tests {
             let (minimum, maximum) = match (field.minimum, field.maximum) {
                 (Some(minimum), Some(maximum)) => (minimum, maximum),
                 _ => {
-                    assert_eq!(
-                        field.value_type, "boolean",
-                        "{} has no bounds but is not a boolean",
-                        field.name
-                    );
+                    match field.value_type {
+                        "string_enum" => assert!(
+                            field.allowed.is_some_and(|allowed| !allowed.is_empty()),
+                            "{} publishes no accepted values",
+                            field.name
+                        ),
+                        other => assert_eq!(
+                            other, "boolean",
+                            "{} has no bounds but is neither a boolean nor an enum",
+                            field.name
+                        ),
+                    }
                     continue;
                 }
             };
@@ -1272,6 +1286,7 @@ mod tests {
             assert_eq!(field.value_type, bound.value_type);
             assert_eq!(field.minimum, bound.minimum);
             assert_eq!(field.maximum, bound.maximum);
+            assert_eq!(field.allowed, bound.allowed);
         }
     }
 

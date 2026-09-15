@@ -11,7 +11,7 @@ pub mod settings;
 pub mod store;
 pub mod waitgraph;
 
-pub use contracts::{ActivityState, WorkOrigin, WorkPhase, WorkSummary, WorkerProjection};
+pub use contracts::{ActivityState, WorkOrigin, WorkPhase, WorkPriority, WorkSummary, WorkerProjection};
 pub use identity::{CheckoutKey, ProjectKey, RunKey, RuntimeKind, WorkKey, WorkScope};
 pub use scheduler::{
     AdmissionError, AdmissionRequest, AdmissionScheduler, AdmissionSchedulerHandle, Permit,

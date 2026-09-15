@@ -409,6 +409,10 @@ pub enum Freshness {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WorkMetadata {
     pub run: Option<refact_work_core::RunKey>,
+    /// The admission class this run was launched with, so a queued row can say
+    /// why it is waiting. Absent for work this engine no longer schedules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<refact_work_core::WorkPriority>,
     pub task_id: Option<String>,
     pub card_id: Option<String>,
     pub runtime_status: Option<String>,

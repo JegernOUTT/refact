@@ -1,3 +1,4 @@
+use crate::contracts::WorkPriority;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -18,6 +19,13 @@ pub struct CoordinationSettings {
     pub max_root_weight_entries: usize,
     /// Maximum consecutive aged resumes before an eligible fresh run gets a turn.
     pub max_resume_burst: usize,
+    /// Ordering class a run gets when its launch context assigns none.
+    pub default_priority: WorkPriority,
+    /// Consecutive admission opportunities a more urgent class may take ahead
+    /// of the turn fairness alone would have served. Past the bound the
+    /// fair-share turn is taken whatever the classes are, so every class keeps
+    /// a minimum share of one opportunity in every `max_priority_burst + 1`.
+    pub max_priority_burst: usize,
     pub max_pending: usize,
     pub max_outstanding: usize,
     /// Parked runs kept resident. Beyond this bound the least valuable parked
@@ -214,6 +222,8 @@ impl Default for CoordinationSettings {
             root_weights: BTreeMap::new(),
             max_root_weight_entries: 4096,
             max_resume_burst: 4,
+            default_priority: WorkPriority::Normal,
+            max_priority_burst: 4,
             max_pending: 1024,
             max_outstanding: 4096,
             max_parked_residency: 256,
@@ -488,6 +498,12 @@ impl CoordinationSettings {
             1,
         );
         at_least(&mut v, "max_resume_burst", self.max_resume_burst as u64, 1);
+        at_least(
+            &mut v,
+            "max_priority_burst",
+            self.max_priority_burst as u64,
+            1,
+        );
         at_least(
             &mut v,
             "max_root_weight_entries",
@@ -1069,6 +1085,30 @@ mod tests {
             mutate(&mut settings);
             assert!(settings.validate().is_err());
         }
+    }
+
+    #[test]
+    fn priority_bounds_default_usable_and_reject_an_unusable_burst() {
+        let settings = CoordinationSettings::default();
+        settings.validate().unwrap();
+        assert_eq!(settings.default_priority, WorkPriority::Normal);
+        assert!(settings.max_priority_burst >= 1);
+        let mut settings = CoordinationSettings::default();
+        settings.max_priority_burst = 0;
+        assert!(settings.validate().is_err());
+        let rendered = serde_json::to_value(CoordinationSettings::default()).unwrap();
+        assert_eq!(rendered["default_priority"], "normal");
+        let parsed: CoordinationSettings =
+            serde_json::from_value(serde_json::json!({"default_priority": "user_blocking"}))
+                .unwrap();
+        assert_eq!(parsed.default_priority, WorkPriority::UserBlocking);
+        assert!(
+            serde_json::from_value::<CoordinationSettings>(
+                serde_json::json!({"default_priority": "urgent"})
+            )
+            .is_err(),
+            "a class outside the ladder is refused, not coerced"
+        );
     }
 
     #[test]
