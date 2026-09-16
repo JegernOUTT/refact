@@ -1,6 +1,32 @@
 import { describe, expect, test } from "vitest";
 import { render, screen, fireEvent } from "../../../utils/test-utils";
 import { GoalToolView } from "./GoalToolView";
+import type { EvidenceVerdict } from "../../../services/refact/evidenceTypes";
+
+const VERDICT_LABELS: [EvidenceVerdict, string][] = [
+  ["not_run", "Validation not run"],
+  ["passed", "Criteria met"],
+  ["failed", "Criteria not met"],
+  ["blocked", "Validation blocked"],
+  ["unavailable", "Validation unavailable"],
+  ["superseded", "Verdict superseded"],
+];
+
+function validation(content: string, evidence_verdict?: string) {
+  return (
+    <GoalToolView
+      toolName="validate_goal"
+      content={content}
+      extra={
+        evidence_verdict === undefined
+          ? {}
+          : { validate_goal: { evidence_verdict } }
+      }
+      pending={false}
+      failed={false}
+    />
+  );
+}
 
 const snapshot = (content = "Finish with evidence") =>
   JSON.stringify({
@@ -86,26 +112,6 @@ describe("GoalToolView", () => {
       "Goal pursuit snoozed for 4 minutes; it resumes automatically afterwards or on the next user message.",
       "Snooze accepted",
     ],
-    [
-      "validate_goal",
-      "Goal validation could not run: unavailable model",
-      "Validation unavailable",
-    ],
-    [
-      "validate_goal",
-      "Goal state changed during validation; verdict discarded.",
-      "Verdict superseded",
-    ],
-    [
-      "validate_goal",
-      "No active goal to validate.",
-      "No active goal to validate",
-    ],
-    [
-      "validate_goal",
-      "Goal budget exhausted — cannot validate; ceiling reached",
-      "Validation blocked by budget",
-    ],
   ])(
     "handles %s receipt without promoting it to evidence",
     (toolName, content, expected) => {
@@ -119,25 +125,6 @@ describe("GoalToolView", () => {
       );
       expect(screen.getByLabelText("Goal receipt")).toHaveTextContent(expected);
       expect(screen.getByText(/cannot grant permissions/)).toBeInTheDocument();
-    },
-  );
-
-  test.each(["met", "unmet"])(
-    "shows structured %s verifier verdict without claiming commands passed",
-    (verdict) => {
-      render(
-        <GoalToolView
-          toolName="validate_goal"
-          content="Verifier report"
-          extra={{ validate_goal: { verdict } }}
-          pending={false}
-          failed={false}
-        />,
-      );
-      expect(screen.getByLabelText("Goal receipt")).toHaveTextContent(
-        verdict === "met" ? "Goal marked complete" : "Remaining gaps",
-      );
-      expect(screen.getByText(/not proof that tests/)).toBeInTheDocument();
     },
   );
 
@@ -179,4 +166,87 @@ describe("GoalToolView", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("operation failed");
     expect(screen.queryByText("Goal accepted")).toBeNull();
   });
+});
+
+describe("Goal evidence verdicts", () => {
+  test.each(VERDICT_LABELS)(
+    "renders the structured %s verdict under the engine's own term",
+    (verdict, label) => {
+      render(validation("Verifier report", verdict));
+      const badge = screen.getByLabelText("Evidence verdict");
+      expect(badge).toHaveAttribute("data-value", verdict);
+      expect(badge).toHaveTextContent(label);
+    },
+  );
+
+  test("the six verdicts never collapse into one another", () => {
+    const view = render(validation("Verifier report", "not_run"));
+    const seen = VERDICT_LABELS.map(([verdict]) => {
+      view.rerender(validation("Verifier report", verdict));
+      const badge = screen.getByLabelText("Evidence verdict");
+      expect(badge).toHaveAttribute("data-value", verdict);
+      return badge.textContent;
+    });
+    expect(new Set(seen).size).toBe(VERDICT_LABELS.length);
+  });
+
+  test("rewording the reason does not change the rendered verdict", () => {
+    const view = render(
+      validation(
+        "GOAL NOT YET MET — remaining gaps:\n- missing tests",
+        "failed",
+      ),
+    );
+    const first = screen.getByLabelText("Evidence verdict");
+    expect(first).toHaveAttribute("data-value", "failed");
+    expect(first).toHaveTextContent("Criteria not met");
+
+    view.rerender(
+      validation(
+        "The bar was not reached; some work is still outstanding.",
+        "failed",
+      ),
+    );
+    const reworded = screen.getByLabelText("Evidence verdict");
+    expect(reworded).toHaveAttribute("data-value", "failed");
+    expect(reworded).toHaveTextContent("Criteria not met");
+  });
+
+  test("prose that says passed does not outrank a structured failed verdict", () => {
+    render(
+      validation(
+        "Everything passed. GOAL MET — all criteria passed cleanly.",
+        "failed",
+      ),
+    );
+    const badge = screen.getByLabelText("Evidence verdict");
+    expect(badge).toHaveAttribute("data-value", "failed");
+    expect(badge).toHaveTextContent("Criteria not met");
+    expect(screen.queryByText("Criteria met")).toBeNull();
+  });
+
+  test.each([
+    undefined,
+    {},
+    { validate_goal: {} },
+    { validate_goal: { verdict: "met" } },
+    { validate_goal: { evidence_verdict: "ok" } },
+  ])(
+    "an absent or unrecognised verdict reads unknown, never a guess %#",
+    (extra) => {
+      render(
+        <GoalToolView
+          toolName="validate_goal"
+          content="GOAL MET — everything passed."
+          extra={extra}
+          pending={false}
+          failed={false}
+        />,
+      );
+      const badge = screen.getByLabelText("Evidence verdict");
+      expect(badge).toHaveAttribute("data-value", "unknown");
+      expect(badge).toHaveTextContent("Verdict unknown");
+      expect(screen.getByRole("alert")).toHaveTextContent("does not confirm");
+    },
+  );
 });

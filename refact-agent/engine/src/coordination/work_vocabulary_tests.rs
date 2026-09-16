@@ -15,19 +15,30 @@
 //! names its own `SessionState`, which the catalog already maps into this
 //! vocabulary, so pinning it would assert a synonym rather than forbid one.
 //!
+//! The six evidence verdicts are pinned here too. They had a GUI surface all
+//! along — the goal receipt card — but it re-derived the verdict by matching
+//! words in the engine's reason string, so rewording a sentence changed what
+//! the user was told happened. The verdict now crosses as a value and is
+//! pinned to `EvidenceVerdict::ALL` below.
+//!
 //! Concepts that reach the tool and HTTP surfaces but have no GUI panel yet —
-//! merge state and dirty-baseline refusal, evidence verdicts, `done` vs
-//! `finalized`, recovery/reconciliation actions, handoff-brief signal and
-//! disagreement status. They are omitted here on purpose: each belongs to the
-//! panel of its own milestone, and inventing a second work-shaped list for
-//! them is the parallel dashboard M10 exists to avoid.
+//! merge state and dirty-baseline refusal, `done` vs `finalized`,
+//! recovery/reconciliation actions, handoff-brief signal and disagreement
+//! status. They are omitted here on purpose: each belongs to the panel of its
+//! own milestone, and inventing a second work-shaped list for them is the
+//! parallel dashboard M10 exists to avoid.
 
 use std::path::{Path, PathBuf};
 
 use super::types::{Disclosure, Freshness, WorkStateTag};
+use crate::chat::evidence::EvidenceVerdict;
 
 fn gui_contract_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../gui/src/services/refact/workTypes.ts")
+}
+
+fn gui_evidence_contract_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../gui/src/services/refact/evidenceTypes.ts")
 }
 
 /// Collect the double-quoted literals between `start` and the next `terminator`.
@@ -116,6 +127,54 @@ fn work_freshness_and_disclosure_reach_the_gui_surface_unrenamed() {
             .map(|value| value.as_str().to_string())
             .collect::<Vec<_>>(),
         "GUI disclosure drifted from the engine vocabulary"
+    );
+}
+
+fn engine_verdicts() -> Vec<String> {
+    EvidenceVerdict::ALL
+        .iter()
+        .map(|verdict| verdict.label().to_string())
+        .collect()
+}
+
+#[test]
+fn evidence_verdict_names_round_trip_and_all_is_complete() {
+    for verdict in EvidenceVerdict::ALL {
+        // An exhaustive match: a seventh verdict fails to compile here until it
+        // is added to ALL, which every other surface is pinned to.
+        match verdict {
+            EvidenceVerdict::NotRun
+            | EvidenceVerdict::Passed
+            | EvidenceVerdict::Failed
+            | EvidenceVerdict::Blocked
+            | EvidenceVerdict::Unavailable
+            | EvidenceVerdict::Superseded => {}
+        }
+        assert_eq!(
+            serde_json::from_value::<EvidenceVerdict>(serde_json::json!(verdict.label())).unwrap(),
+            verdict,
+            "the wire name and the label disagree for {verdict:?}"
+        );
+    }
+    let mut unique = engine_verdicts();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        EvidenceVerdict::ALL.len(),
+        "duplicate verdict name"
+    );
+}
+
+#[test]
+fn evidence_verdicts_reach_the_gui_surface_under_the_engine_names() {
+    let text = std::fs::read_to_string(gui_evidence_contract_path()).unwrap();
+    assert_eq!(
+        literals_between(&text, "export const evidenceVerdicts = [", "] as const"),
+        engine_verdicts(),
+        "GUI evidence verdicts drifted from the engine vocabulary; a verdict the \
+         GUI does not list reads as `unknown`, and a renamed one lets the goal \
+         card report an outcome the engine never gave"
     );
 }
 

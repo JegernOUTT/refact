@@ -7,6 +7,7 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
+use crate::chat::evidence::EvidenceVerdict;
 use crate::chat::goal_verifier::{
     apply_goal_verdict_guarded_with_delivery, begin_goal_verification_if_needed,
     run_goal_verification, GoalVerificationApplyOutcome, GoalVerificationBegin,
@@ -85,10 +86,18 @@ impl Tool for ToolValidateGoal {
         match begin {
             GoalVerificationBegin::Started => {}
             GoalVerificationBegin::NoActiveGoal => {
-                return tool_message(tool_call_id, "No active goal to validate.".to_string());
+                return tool_message_with_extra(
+                    tool_call_id,
+                    "No active goal to validate.".to_string(),
+                    verdict_extra(EvidenceVerdict::NotRun, None),
+                );
             }
             GoalVerificationBegin::BudgetExhausted => {
-                return tool_message(tool_call_id, budget_exhausted_message());
+                return tool_message_with_extra(
+                    tool_call_id,
+                    budget_exhausted_message(),
+                    verdict_extra(EvidenceVerdict::Blocked, None),
+                );
             }
         }
 
@@ -102,9 +111,10 @@ impl Tool for ToolValidateGoal {
                     Some(tool_call_id),
                 )
                 .await;
-                return tool_message(
+                return tool_message_with_extra(
                     tool_call_id,
                     format!("Goal validation could not run: {error}"),
+                    verdict_extra(EvidenceVerdict::Unavailable, None),
                 );
             }
         };
@@ -196,6 +206,36 @@ fn validation_content(
     }
 }
 
+/// How this validation reads as evidence. Only a finalized `Met` is `Passed`;
+/// everything else either proves a gap or proves no verdict was obtained. Every
+/// surface reads this value, and none of them may re-derive it by matching words
+/// in the human-readable content, which changes whenever the wording does.
+fn validation_evidence_verdict(
+    outcome: GoalVerificationApplyOutcome,
+    verdict: &GoalVerdict,
+) -> EvidenceVerdict {
+    match (outcome, verdict) {
+        (GoalVerificationApplyOutcome::Finalized, GoalVerdict::Met) => EvidenceVerdict::Passed,
+        (GoalVerificationApplyOutcome::Superseded, _) => EvidenceVerdict::Superseded,
+        (
+            GoalVerificationApplyOutcome::Rearmed
+            | GoalVerificationApplyOutcome::Continued
+            | GoalVerificationApplyOutcome::Stalled,
+            GoalVerdict::Unmet(_),
+        ) => EvidenceVerdict::Failed,
+        _ => EvidenceVerdict::NotRun,
+    }
+}
+
+fn verdict_extra(verdict: EvidenceVerdict, marker: Option<&str>) -> Map<String, Value> {
+    let mut row = Map::new();
+    row.insert("evidence_verdict".to_string(), json!(verdict.label()));
+    if let Some(marker) = marker {
+        row.insert("verdict".to_string(), json!(marker));
+    }
+    Map::from_iter([("validate_goal".to_string(), Value::Object(row))])
+}
+
 fn validation_extra(
     outcome: GoalVerificationApplyOutcome,
     verdict: &GoalVerdict,
@@ -211,9 +251,7 @@ fn validation_extra(
         ) => Some("unmet"),
         _ => None,
     };
-    marker
-        .map(|verdict| Map::from_iter([("validate_goal".to_string(), json!({"verdict": verdict}))]))
-        .unwrap_or_default()
+    verdict_extra(validation_evidence_verdict(outcome, verdict), marker)
 }
 
 fn format_gaps(gaps: &[String]) -> String {
@@ -224,10 +262,6 @@ fn format_gaps(gaps: &[String]) -> String {
         .map(|gap| format!("- {gap}"))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn tool_message(tool_call_id: &str, content: String) -> Result<(bool, Vec<ContextEnum>), String> {
-    tool_message_with_extra(tool_call_id, content, Map::new())
 }
 
 fn tool_message_with_extra(
@@ -558,6 +592,52 @@ mod tests {
     }
 
     #[test]
+    fn every_receipt_path_carries_one_of_the_six_engine_verdicts() {
+        let paths = [
+            verdict_extra(EvidenceVerdict::NotRun, None),
+            verdict_extra(EvidenceVerdict::Blocked, None),
+            verdict_extra(EvidenceVerdict::Unavailable, None),
+            validation_extra(GoalVerificationApplyOutcome::Finalized, &GoalVerdict::Met),
+            validation_extra(GoalVerificationApplyOutcome::Superseded, &GoalVerdict::Met),
+            validation_extra(
+                GoalVerificationApplyOutcome::Continued,
+                &GoalVerdict::Unmet(vec!["gap".to_string()]),
+            ),
+            validation_extra(GoalVerificationApplyOutcome::NoGoal, &GoalVerdict::Met),
+        ];
+        let emitted: Vec<String> = paths
+            .iter()
+            .map(|extra| {
+                extra["validate_goal"]["evidence_verdict"]
+                    .as_str()
+                    .expect("every receipt path carries a structured verdict")
+                    .to_string()
+            })
+            .collect();
+
+        for label in &emitted {
+            assert!(
+                EvidenceVerdict::ALL
+                    .iter()
+                    .any(|verdict| verdict.label() == label),
+                "{label} is not a verdict the engine vocabulary defines"
+            );
+        }
+        assert_eq!(
+            emitted,
+            vec![
+                "not_run",
+                "blocked",
+                "unavailable",
+                "passed",
+                "superseded",
+                "failed",
+                "not_run",
+            ]
+        );
+    }
+
+    #[test]
     fn begin_validate_goal_sets_verifying_for_active_goal_only() {
         let mut session = session_with_goal();
 
@@ -607,6 +687,10 @@ mod tests {
             validation_extra(outcome, &verdict)["validate_goal"]["verdict"],
             json!("met")
         );
+        assert_eq!(
+            validation_extra(outcome, &verdict)["validate_goal"]["evidence_verdict"],
+            json!("passed")
+        );
     }
 
     #[test]
@@ -644,6 +728,10 @@ mod tests {
         assert_eq!(
             validation_extra(outcome, &verdict)["validate_goal"]["verdict"],
             json!("unmet")
+        );
+        assert_eq!(
+            validation_extra(outcome, &verdict)["validate_goal"]["evidence_verdict"],
+            json!("failed")
         );
         assert_eq!(
             content,

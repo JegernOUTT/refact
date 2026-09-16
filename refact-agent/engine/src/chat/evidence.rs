@@ -43,6 +43,18 @@ pub enum EvidenceVerdict {
 }
 
 impl EvidenceVerdict {
+    /// Every verdict the engine can report, in declaration order. Surfaces that
+    /// carry the vocabulary are generated from or pinned to this list so a
+    /// seventh verdict cannot reach one surface and be silently absent on another.
+    pub const ALL: [EvidenceVerdict; 6] = [
+        EvidenceVerdict::NotRun,
+        EvidenceVerdict::Passed,
+        EvidenceVerdict::Failed,
+        EvidenceVerdict::Blocked,
+        EvidenceVerdict::Unavailable,
+        EvidenceVerdict::Superseded,
+    ];
+
     pub fn is_passed(self) -> bool {
         matches!(self, EvidenceVerdict::Passed)
     }

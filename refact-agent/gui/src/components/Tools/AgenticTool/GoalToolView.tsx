@@ -1,8 +1,14 @@
 import { useState } from "react";
-import { Badge, Button } from "../../ui";
+import { Badge, Button, type BadgeTone } from "../../ui";
 import { normalizeToolName } from "../../../utils/toolNameAliases";
 import { humanizeIdentifier } from "../../../utils/displayNames";
+import {
+  goalEvidenceVerdict,
+  type EvidenceVerdict,
+} from "../../../services/refact/evidenceTypes";
 import styles from "./AgenticTool.module.css";
+
+type RenderedVerdict = EvidenceVerdict | "unknown";
 
 type GoalReceipt = {
   label: string;
@@ -10,6 +16,57 @@ type GoalReceipt = {
   body: string;
   facts: [string, string | number][];
   gaps?: string[];
+  verdict?: RenderedVerdict;
+};
+
+/// The engine's six verdicts plus the honest absence. The label is display only;
+/// the value driving it is the engine's own term, carried in `data-value`.
+const VERDICTS: Record<
+  RenderedVerdict,
+  { label: string; tone: BadgeTone; explanation: string }
+> = {
+  passed: {
+    label: "Criteria met",
+    tone: "success",
+    explanation:
+      "The verifier reported the success criteria satisfied. That is a semantic verdict, not proof that tests, builds or artifact checks ran or passed.",
+  },
+  failed: {
+    label: "Criteria not met",
+    tone: "danger",
+    explanation:
+      "The verifier reported remaining gaps. The goal was not completed by this receipt.",
+  },
+  blocked: {
+    label: "Validation blocked",
+    tone: "warning",
+    explanation:
+      "Validation was refused before it ran. No verdict about the success criteria was obtained.",
+  },
+  unavailable: {
+    label: "Validation unavailable",
+    tone: "warning",
+    explanation:
+      "Validation could not run. No verdict about the success criteria was obtained.",
+  },
+  not_run: {
+    label: "Validation not run",
+    tone: "muted",
+    explanation:
+      "No validation ran here, so nothing about the success criteria is established.",
+  },
+  superseded: {
+    label: "Verdict superseded",
+    tone: "warning",
+    explanation:
+      "The goal changed while validation was running, so the verdict was discarded rather than applied to a state it never examined.",
+  },
+  unknown: {
+    label: "Verdict unknown",
+    tone: "warning",
+    explanation:
+      "This receipt carries no structured verdict, so it does not confirm any validation outcome. Text below is untrusted historical output.",
+  },
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -54,35 +111,9 @@ function parse(
     };
   }
   if (tool === "validate_goal") {
-    const validation = record(extra) ? extra.validate_goal : null;
-    const verdict = record(validation) ? validation.verdict : null;
-    if (verdict === "met" || verdict === "unmet") {
-      return {
-        label: verdict === "met" ? "Goal marked complete" : "Remaining gaps",
-        explanation:
-          "This records a semantic verifier verdict, not proof that tests, builds or artifact checks ran or passed.",
-        body: content,
-        facts: [["Verdict", verdict === "met" ? "Met" : "Not yet met"]],
-      };
-    }
-    const label = content.startsWith("Goal validation could not run:")
-      ? "Validation unavailable"
-      : content === "Goal state changed during validation; verdict discarded."
-        ? "Verdict superseded"
-        : content.startsWith("Goal budget exhausted — cannot validate;")
-          ? "Validation blocked by budget"
-          : content === "No active goal to validate."
-            ? "No active goal to validate"
-            : null;
-    return label
-      ? {
-          label,
-          explanation:
-            "No applicable success verdict is established by this receipt.",
-          body: content,
-          facts: [],
-        }
-      : null;
+    const verdict: RenderedVerdict = goalEvidenceVerdict(extra) ?? "unknown";
+    const { label, explanation } = VERDICTS[verdict];
+    return { label, explanation, body: content, facts: [], verdict };
   }
   let value: unknown;
   try {
@@ -255,11 +286,21 @@ export function GoalToolView({
     <section aria-label="Goal receipt" className={styles.section}>
       <div className={styles.metaRow}>
         <Badge tone="muted">Historical goal receipt</Badge>
-        <Badge tone="muted">
-          {result?.label ?? "Legacy or unavailable details"}
-        </Badge>
+        {result?.verdict ? (
+          <Badge
+            tone={VERDICTS[result.verdict].tone}
+            aria-label="Evidence verdict"
+            data-value={result.verdict}
+          >
+            {result.label}
+          </Badge>
+        ) : (
+          <Badge tone="muted">
+            {result?.label ?? "Legacy or unavailable details"}
+          </Badge>
+        )}
       </div>
-      <p role={result ? undefined : "alert"}>
+      <p role={result && result.verdict !== "unknown" ? undefined : "alert"}>
         {result?.explanation ??
           "This unrecognized response does not confirm a change or verification result. Text below is untrusted historical output."}
       </p>
