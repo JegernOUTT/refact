@@ -13,7 +13,7 @@
 //! saturated human refuses new low-priority questions instead of queueing them.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
@@ -311,8 +311,26 @@ struct Tracked {
     key: DedupKey,
     scope: AttentionScope,
     priority: AttentionPriority,
+    /// The waiter whose question the human was actually shown. Everything else
+    /// in `waiters` was deduped into it.
+    origin: String,
     waiters: BTreeSet<String>,
     presented: bool,
+}
+
+/// How many settled questions stay visible after the fact. A question that
+/// timed out into its default is the whole reason this history exists: the
+/// human has to be able to see, afterwards, what was decided without them.
+const SETTLED_HISTORY: usize = 64;
+
+struct Retired {
+    question: QuestionContract,
+    scope: AttentionScope,
+    priority: AttentionPriority,
+    origin: String,
+    waiters: Vec<String>,
+    presented: bool,
+    retired_at_ms: i64,
 }
 
 #[derive(Default)]
@@ -320,6 +338,124 @@ struct BudgetState {
     by_key: HashMap<DedupKey, String>,
     tracked: HashMap<String, Tracked>,
     batch_opened_at: Option<DateTime<Utc>>,
+    retired: VecDeque<Retired>,
+}
+
+/// What became of a question the human was asked. `Defaulted` is the state this
+/// surface exists for: nobody consented, a documented default was applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionEntryState {
+    Waiting,
+    Answered,
+    Defaulted,
+    Rejected,
+    Cancelled,
+    Expired,
+}
+
+impl AttentionEntryState {
+    fn from_question(state: QuestionState) -> Self {
+        match state {
+            QuestionState::Pending => Self::Waiting,
+            QuestionState::Answered => Self::Answered,
+            QuestionState::Defaulted => Self::Defaulted,
+            QuestionState::Rejected => Self::Rejected,
+            QuestionState::Cancelled => Self::Cancelled,
+            QuestionState::Expired => Self::Expired,
+        }
+    }
+}
+
+/// One prompt as the human should see it: where it ranks, why it ranks there,
+/// who was merged into it, and what settled it when they never got to it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionQueueEntry {
+    pub question_id: String,
+    pub text: String,
+    pub kind: QuestionKind,
+    pub priority: AttentionPriority,
+    pub state: AttentionEntryState,
+    pub rank: usize,
+    pub rank_reason: String,
+    pub blocked_runs: usize,
+    pub waiters: Vec<String>,
+    /// The waiter whose ask produced the prompt the human sees.
+    pub asked_by: String,
+    /// Waiters that joined a question the human was already asked, so no second
+    /// prompt was owed. Empty when nothing was deduped into this one.
+    pub merged_waiters: Vec<String>,
+    pub presented: bool,
+    pub irreversible: bool,
+    pub default_answer: Option<String>,
+    /// The default that was applied because nobody answered in time.
+    pub default_used: Option<String>,
+    pub project: String,
+    pub asked_at_ms: i64,
+    pub settled_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionQueue {
+    pub waiting: Vec<AttentionQueueEntry>,
+    /// Newest first. Retained so a silent default is impossible to miss later.
+    pub settled: Vec<AttentionQueueEntry>,
+    pub outstanding: usize,
+    pub cap: usize,
+    pub batch_window_ms: u64,
+    pub default_timeout_secs: u64,
+    pub silent_defaults: usize,
+    pub generated_at_ms: i64,
+}
+
+fn rank_reason(blocked_runs: usize, priority: AttentionPriority) -> String {
+    let runs = if blocked_runs == 1 {
+        "1 run blocked".to_string()
+    } else {
+        format!("{blocked_runs} runs blocked")
+    };
+    let note = match priority {
+        AttentionPriority::Blocking => "blocking priority skips the batching window",
+        AttentionPriority::Normal => "normal priority",
+        AttentionPriority::Low => "low priority, refused when saturated",
+    };
+    format!("{runs} · {note}")
+}
+
+fn queue_entry(
+    question: QuestionContract,
+    scope: &AttentionScope,
+    priority: AttentionPriority,
+    origin: &str,
+    waiters: Vec<String>,
+    presented: bool,
+    settled_at_ms: Option<i64>,
+) -> AttentionQueueEntry {
+    let blocked_runs = waiters.len();
+    AttentionQueueEntry {
+        question_id: question.id.clone(),
+        text: question.text.clone(),
+        kind: question.kind,
+        priority,
+        state: AttentionEntryState::from_question(question.state),
+        rank: 0,
+        rank_reason: rank_reason(blocked_runs, priority),
+        blocked_runs,
+        asked_by: origin.to_string(),
+        merged_waiters: waiters
+            .iter()
+            .filter(|waiter| waiter.as_str() != origin)
+            .cloned()
+            .collect(),
+        waiters,
+        presented,
+        irreversible: question.is_irreversible(),
+        default_answer: question.default_answer.clone(),
+        default_used: question.defaulted().map(str::to_string),
+        project: scope.project.clone(),
+        asked_at_ms: question.asked_at.timestamp_millis(),
+        settled_at_ms,
+    }
 }
 
 /// Governs what reaches the human. Wraps the one question service rather than
@@ -425,6 +561,7 @@ impl AttentionBudget {
                 key,
                 scope: request.scope,
                 priority: request.priority,
+                origin: waiter.to_string(),
                 waiters: BTreeSet::from([waiter.to_string()]),
                 presented: false,
             },
@@ -457,10 +594,94 @@ impl AttentionBudget {
         if let Some(question) = self.questions.get(question_id) {
             let _ = self.questions.cancel(question_id, &question.asker, now);
         }
-        if let Some(tracked) = state.tracked.remove(question_id) {
-            state.by_key.remove(&tracked.key);
-        }
+        self.retire(&mut state, question_id, now);
         Ok(0)
+    }
+
+    /// Move a question out of the live queue and into the retained history, so
+    /// what settled it stays visible after the fact.
+    fn retire(&self, state: &mut BudgetState, question_id: &str, now: DateTime<Utc>) {
+        let Some(tracked) = state.tracked.remove(question_id) else {
+            return;
+        };
+        state.by_key.remove(&tracked.key);
+        let Some(question) = self.questions.get(question_id) else {
+            return;
+        };
+        state.retired.push_back(Retired {
+            question,
+            scope: tracked.scope,
+            priority: tracked.priority,
+            origin: tracked.origin,
+            waiters: tracked.waiters.into_iter().collect(),
+            presented: tracked.presented,
+            retired_at_ms: now.timestamp_millis(),
+        });
+        while state.retired.len() > SETTLED_HISTORY {
+            state.retired.pop_front();
+        }
+    }
+
+    /// Everything waiting on the human right now, ranked with the reason for
+    /// the rank, plus what was settled without them.
+    pub fn queue(&self, now: DateTime<Utc>) -> AttentionQueue {
+        let mut state = self.guard();
+        self.sweep(&mut state, now);
+        let mut waiting: Vec<AttentionQueueEntry> = state
+            .tracked
+            .iter()
+            .filter_map(|(id, tracked)| {
+                let question = self.questions.get(id)?;
+                Some(queue_entry(
+                    question,
+                    &tracked.scope,
+                    tracked.priority,
+                    &tracked.origin,
+                    tracked.waiters.iter().cloned().collect(),
+                    tracked.presented,
+                    None,
+                ))
+            })
+            .collect();
+        waiting.sort_by(|left, right| {
+            right
+                .blocked_runs
+                .cmp(&left.blocked_runs)
+                .then_with(|| left.asked_at_ms.cmp(&right.asked_at_ms))
+                .then_with(|| left.question_id.cmp(&right.question_id))
+        });
+        for (index, entry) in waiting.iter_mut().enumerate() {
+            entry.rank = index + 1;
+        }
+        let settled: Vec<AttentionQueueEntry> = state
+            .retired
+            .iter()
+            .rev()
+            .map(|retired| {
+                queue_entry(
+                    retired.question.clone(),
+                    &retired.scope,
+                    retired.priority,
+                    &retired.origin,
+                    retired.waiters.clone(),
+                    retired.presented,
+                    Some(retired.retired_at_ms),
+                )
+            })
+            .collect();
+        AttentionQueue {
+            outstanding: waiting.len(),
+            silent_defaults: settled
+                .iter()
+                .filter(|entry| entry.state == AttentionEntryState::Defaulted)
+                .count(),
+            waiting,
+            settled,
+            cap: self.limits.max_outstanding,
+            batch_window_ms: self.limits.batch_window_ms,
+            default_timeout_secs: self.limits.default_timeout_secs,
+            generated_at_ms: now.timestamp_millis(),
+        }
     }
 
     /// The prompts the human should see now, ranked by stalled work. Blocking
@@ -543,9 +764,7 @@ impl AttentionBudget {
             .cloned()
             .collect();
         for id in settled {
-            if let Some(tracked) = state.tracked.remove(&id) {
-                state.by_key.remove(&tracked.key);
-            }
+            self.retire(state, &id, now);
         }
         if !state
             .tracked
@@ -1019,6 +1238,106 @@ mod tests {
             budget.join(request("   "), "agent-one", now),
             Err(AttentionError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn the_queue_surface_ranks_by_blocked_work_and_names_the_reason() {
+        let budget = new_budget(limits());
+        let now = Utc::now();
+        let lonely = budget.join(request("Lonely?"), "agent-one", now).unwrap();
+        let popular = budget.join(request("Crowded?"), "agent-two", now).unwrap();
+        for waiter in ["agent-three", "agent-four"] {
+            budget.join(request("Crowded?"), waiter, now).unwrap();
+        }
+        let queue = budget.queue(now);
+        assert_eq!(queue.outstanding, 2);
+        assert_eq!(queue.cap, limits().max_outstanding);
+        assert_eq!(
+            queue
+                .waiting
+                .iter()
+                .map(|entry| (entry.question_id.clone(), entry.rank, entry.blocked_runs))
+                .collect::<Vec<_>>(),
+            vec![
+                (popular.question_id.clone(), 1, 3),
+                (lonely.question_id, 2, 1)
+            ]
+        );
+        assert_eq!(
+            queue.waiting[0].rank_reason,
+            "3 runs blocked · normal priority"
+        );
+        assert_eq!(
+            queue.waiting[1].rank_reason,
+            "1 run blocked · normal priority"
+        );
+        assert_eq!(queue.waiting[0].asked_by, "agent-two");
+        assert_eq!(
+            queue.waiting[0].merged_waiters,
+            vec!["agent-four".to_string(), "agent-three".to_string()],
+            "the asker that produced the prompt is never listed as merged into itself"
+        );
+        assert_eq!(queue.waiting[1].asked_by, "agent-one");
+        assert!(queue.waiting[1].merged_waiters.is_empty());
+        assert_eq!(
+            budget.queue(now),
+            queue,
+            "identical input ranks identically"
+        );
+    }
+
+    #[test]
+    fn a_question_that_timed_out_into_its_default_stays_visible_afterwards() {
+        let budget = new_budget(limits());
+        let now = Utc::now();
+        let admission = budget
+            .join(
+                request("Rename the branch?")
+                    .with_priority(AttentionPriority::Low)
+                    .with_default_answer(Some("keep the name".into())),
+                "agent-one",
+                now,
+            )
+            .unwrap();
+        assert!(budget.queue(now).settled.is_empty());
+        let later = now + ChronoDuration::seconds(limits().default_timeout_secs as i64 + 1);
+        let queue = budget.queue(later);
+        assert!(queue.waiting.is_empty());
+        assert_eq!(queue.silent_defaults, 1);
+        let entry = &queue.settled[0];
+        assert_eq!(entry.question_id, admission.question_id);
+        assert_eq!(entry.state, AttentionEntryState::Defaulted);
+        assert_eq!(entry.default_used.as_deref(), Some("keep the name"));
+        assert_eq!(entry.settled_at_ms, Some(later.timestamp_millis()));
+    }
+
+    #[test]
+    fn an_answered_question_is_never_reported_as_a_silent_default() {
+        let budget = new_budget(limits());
+        let now = Utc::now();
+        let admission = budget.join(request("Ship it?"), "agent-one", now).unwrap();
+        budget
+            .questions()
+            .answer(&admission.question_id, "user", "yes".into(), now)
+            .unwrap();
+        let queue = budget.queue(now);
+        assert_eq!(queue.silent_defaults, 0);
+        assert_eq!(queue.settled[0].state, AttentionEntryState::Answered);
+        assert_eq!(queue.settled[0].default_used, None);
+    }
+
+    #[test]
+    fn an_empty_queue_is_an_empty_queue_and_a_single_prompt_ranks_first() {
+        let budget = new_budget(limits());
+        let now = Utc::now();
+        let empty = budget.queue(now);
+        assert!(empty.waiting.is_empty());
+        assert!(empty.settled.is_empty());
+        assert_eq!(empty.outstanding, 0);
+        budget.join(request("Only?"), "agent-one", now).unwrap();
+        let one = budget.queue(now);
+        assert_eq!(one.waiting.len(), 1);
+        assert_eq!(one.waiting[0].rank, 1);
     }
 
     #[test]

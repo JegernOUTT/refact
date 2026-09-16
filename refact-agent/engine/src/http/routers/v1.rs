@@ -136,6 +136,7 @@ use crate::http::routers::v1::background_agents::{
 mod ast;
 pub mod at_commands;
 pub mod at_tools;
+mod attention;
 mod background_agents;
 pub mod browser_settings;
 pub mod buddy;
@@ -283,6 +284,8 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/work/provenance", delete(work::forget_provenance))
         .route("/work/causal", get(causal::trace))
         .route("/work/causal/subscribe", get(causal::subscribe))
+        .route("/attention", get(attention::queue))
+        .route("/hooks", get(hooks::handle_v1_hooks_surface))
         .route("/work/:id", get(work::inspect))
         .route("/ping", get(handle_v1_ping))
         .route(

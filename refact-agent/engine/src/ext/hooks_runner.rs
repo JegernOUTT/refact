@@ -311,37 +311,64 @@ fn control_outcome_from_json(stdout: &str) -> Option<ControlOutcome> {
     }
 }
 
+/// A verdict together with the hook that produced it. Deny precedence is
+/// deterministic, so the hook that actually decided is always identifiable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ControlDecision {
+    pub verdict: ControlVerdict,
+    /// Index into the outcomes that were resolved. `None` for an allow that
+    /// nothing objected to.
+    pub decided_by: Option<usize>,
+}
+
 /// Deny always wins, whatever the order the outcomes arrive in and whatever
 /// their timing. A timeout or a shutdown cancellation is a deny, never a
 /// fallthrough to allow. A non-blocking hook failure stays advisory.
-pub fn resolve_control_verdict(outcomes: &[ControlOutcome]) -> ControlVerdict {
-    let explicit_deny = outcomes.iter().find_map(|o| match o {
-        ControlOutcome::Deny(reason) => Some(reason.clone()),
+pub fn resolve_control_decision(outcomes: &[ControlOutcome]) -> ControlDecision {
+    let decision = |verdict, index| ControlDecision {
+        verdict,
+        decided_by: Some(index),
+    };
+    let explicit_deny = outcomes.iter().enumerate().find_map(|(index, o)| match o {
+        ControlOutcome::Deny(reason) => Some((index, reason.clone())),
         _ => None,
     });
-    if let Some(reason) = explicit_deny {
-        return ControlVerdict::Deny(reason);
+    if let Some((index, reason)) = explicit_deny {
+        return decision(ControlVerdict::Deny(reason), index);
     }
-    if outcomes
+    if let Some(index) = outcomes
         .iter()
-        .any(|o| matches!(o, ControlOutcome::Timeout))
+        .position(|o| matches!(o, ControlOutcome::Timeout))
     {
-        return ControlVerdict::Deny("control hook timed out, failing closed".to_string());
+        return decision(
+            ControlVerdict::Deny("control hook timed out, failing closed".to_string()),
+            index,
+        );
     }
-    if outcomes
+    if let Some(index) = outcomes
         .iter()
-        .any(|o| matches!(o, ControlOutcome::Cancelled))
+        .position(|o| matches!(o, ControlOutcome::Cancelled))
     {
-        return ControlVerdict::Deny("control hook cancelled by shutdown".to_string());
+        return decision(
+            ControlVerdict::Deny("control hook cancelled by shutdown".to_string()),
+            index,
+        );
     }
-    let rewrite = outcomes.iter().find_map(|o| match o {
-        ControlOutcome::Rewrite(value) => Some(value.clone()),
+    let rewrite = outcomes.iter().enumerate().find_map(|(index, o)| match o {
+        ControlOutcome::Rewrite(value) => Some((index, value.clone())),
         _ => None,
     });
     match rewrite {
-        Some(value) => ControlVerdict::Rewrite(value),
-        None => ControlVerdict::Allow,
+        Some((index, value)) => decision(ControlVerdict::Rewrite(value), index),
+        None => ControlDecision {
+            verdict: ControlVerdict::Allow,
+            decided_by: None,
+        },
     }
+}
+
+pub fn resolve_control_verdict(outcomes: &[ControlOutcome]) -> ControlVerdict {
+    resolve_control_decision(outcomes).verdict
 }
 
 fn referenced_tool_names(args: &serde_json::Value) -> Vec<String> {
@@ -389,6 +416,402 @@ fn push_tool_names(raw: &str, found: &mut Vec<String>) {
             found.push(name.to_string());
         }
     }
+}
+
+/// Why a registered hook is or is not executed. "Untrusted project" is the one
+/// this surface must never blur: such a hook is listed, and never run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookTrust {
+    Global,
+    TrustedProject,
+    UntrustedProject,
+    InstalledPlugin,
+}
+
+pub fn source_trust(source: &CommandSource, trusted_projects: &[String]) -> HookTrust {
+    match source {
+        CommandSource::GlobalClaude | CommandSource::GlobalRefact => HookTrust::Global,
+        CommandSource::ProjectClaude(root) | CommandSource::ProjectRefact(root) => {
+            if project_root_trusted(root, trusted_projects) {
+                HookTrust::TrustedProject
+            } else {
+                HookTrust::UntrustedProject
+            }
+        }
+        CommandSource::InstalledPlugin(_) => HookTrust::InstalledPlugin,
+    }
+}
+
+pub fn source_label(source: &CommandSource) -> String {
+    match source {
+        CommandSource::GlobalClaude => "global .claude".to_string(),
+        CommandSource::GlobalRefact => "global refact".to_string(),
+        CommandSource::ProjectClaude(root) => format!("project .claude {}", root.display()),
+        CommandSource::ProjectRefact(root) => format!("project refact {}", root.display()),
+        CommandSource::InstalledPlugin(name) => format!("installed plugin {name}"),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HookRegistration {
+    pub event: String,
+    pub kind: &'static str,
+    pub matcher: Option<String>,
+    pub command: String,
+    pub source: String,
+    pub trust: HookTrust,
+    /// False means this hook has never run and never will under the current
+    /// trust configuration.
+    pub runs: bool,
+    pub blocked_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookOutcomeTag {
+    Allow,
+    Deny,
+    Rewrite,
+    Timeout,
+    Cancelled,
+    Failed,
+    Observed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HookRun {
+    pub command: String,
+    pub source: String,
+    pub trust: HookTrust,
+    pub outcome: HookOutcomeTag,
+    pub detail: Option<String>,
+    /// This hook's answer is the one deny precedence selected.
+    pub decided: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookVerdictTag {
+    Allow,
+    Deny,
+    Rewrite,
+    Observed,
+    RecursionBlocked,
+    RewriteAccepted,
+    RewriteRefused,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HookActivityRecord {
+    pub event: String,
+    pub kind: &'static str,
+    pub verdict: HookVerdictTag,
+    /// The command of the hook that decided, when one did.
+    pub decided_by: Option<String>,
+    pub reason: Option<String>,
+    pub tool: Option<String>,
+    pub runs: Vec<HookRun>,
+    pub at_ms: u64,
+}
+
+const HOOK_ACTIVITY_CAPACITY: usize = 100;
+pub const HOOK_ACTIVITY_DEFAULT_LIMIT: usize = 50;
+
+/// A bounded record of what hooks actually did. Read-only: nothing here can be
+/// replayed or edited.
+pub struct HookActivityLog {
+    entries: std::sync::Mutex<std::collections::VecDeque<HookActivityRecord>>,
+    capacity: usize,
+}
+
+impl HookActivityLog {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            capacity: capacity.max(1),
+        }
+    }
+
+    pub fn record(&self, record: HookActivityRecord) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        entries.push_back(record);
+        while entries.len() > self.capacity {
+            entries.pop_front();
+        }
+    }
+
+    /// Newest first.
+    pub fn recent(&self, limit: usize) -> Vec<HookActivityRecord> {
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        entries.iter().rev().take(limit).cloned().collect()
+    }
+}
+
+static HOOK_ACTIVITY: OnceLock<HookActivityLog> = OnceLock::new();
+
+pub fn hook_activity() -> &'static HookActivityLog {
+    HOOK_ACTIVITY.get_or_init(|| HookActivityLog::new(HOOK_ACTIVITY_CAPACITY))
+}
+
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn control_run(
+    config: &HookConfig,
+    outcome: &ControlOutcome,
+    trusted: &[String],
+    decided: bool,
+) -> HookRun {
+    let (tag, detail) = match outcome {
+        ControlOutcome::Allow => (HookOutcomeTag::Allow, None),
+        ControlOutcome::Deny(reason) => (HookOutcomeTag::Deny, Some(reason.clone())),
+        ControlOutcome::Rewrite(_) => (HookOutcomeTag::Rewrite, None),
+        ControlOutcome::Timeout => (HookOutcomeTag::Timeout, None),
+        ControlOutcome::Cancelled => (HookOutcomeTag::Cancelled, None),
+        ControlOutcome::Failed(reason) => (HookOutcomeTag::Failed, Some(reason.clone())),
+    };
+    HookRun {
+        command: config.command.clone(),
+        source: source_label(&config.source),
+        trust: source_trust(&config.source, trusted),
+        outcome: tag,
+        detail,
+        decided,
+    }
+}
+
+fn observation_run(
+    config: &HookConfig,
+    outcome: &ObservationOutcome,
+    trusted: &[String],
+) -> HookRun {
+    let (tag, detail) = match outcome {
+        ObservationOutcome::Observed => (HookOutcomeTag::Observed, None),
+        ObservationOutcome::Failed(reason) => (HookOutcomeTag::Failed, Some(reason.clone())),
+        ObservationOutcome::Timeout => (HookOutcomeTag::Timeout, None),
+        ObservationOutcome::Cancelled => (HookOutcomeTag::Cancelled, None),
+        ObservationOutcome::Skipped(reason) => (HookOutcomeTag::Skipped, Some(reason.clone())),
+    };
+    HookRun {
+        command: config.command.clone(),
+        source: source_label(&config.source),
+        trust: source_trust(&config.source, trusted),
+        outcome: tag,
+        detail,
+        decided: false,
+    }
+}
+
+pub fn control_activity(
+    event: &HookEvent,
+    tool: Option<&str>,
+    configs: &[HookConfig],
+    outcomes: &[ControlOutcome],
+    trusted: &[String],
+    decision: &ControlDecision,
+) -> HookActivityRecord {
+    let (verdict, reason) = match &decision.verdict {
+        ControlVerdict::Allow => (HookVerdictTag::Allow, None),
+        ControlVerdict::Deny(reason) => (HookVerdictTag::Deny, Some(reason.clone())),
+        ControlVerdict::Rewrite(_) => (HookVerdictTag::Rewrite, None),
+    };
+    HookActivityRecord {
+        event: event.as_str().to_string(),
+        kind: "control",
+        verdict,
+        decided_by: decision
+            .decided_by
+            .and_then(|index| configs.get(index))
+            .map(|config| config.command.clone()),
+        reason,
+        tool: tool.map(str::to_string),
+        runs: configs
+            .iter()
+            .zip(outcomes.iter())
+            .enumerate()
+            .map(|(index, (config, outcome))| {
+                control_run(config, outcome, trusted, decision.decided_by == Some(index))
+            })
+            .collect(),
+        at_ms: unix_now_ms(),
+    }
+}
+
+pub fn observation_activity(
+    event: &HookEvent,
+    tool: Option<&str>,
+    configs: &[HookConfig],
+    outcomes: &[ObservationOutcome],
+    trusted: &[String],
+) -> HookActivityRecord {
+    HookActivityRecord {
+        event: event.as_str().to_string(),
+        kind: "observation",
+        verdict: HookVerdictTag::Observed,
+        decided_by: None,
+        reason: None,
+        tool: tool.map(str::to_string),
+        runs: configs
+            .iter()
+            .zip(outcomes.iter())
+            .map(|(config, outcome)| observation_run(config, outcome, trusted))
+            .collect(),
+        at_ms: unix_now_ms(),
+    }
+}
+
+pub fn recursion_activity(
+    event: &HookEvent,
+    tool: Option<&str>,
+    error: &HookRecursionError,
+) -> HookActivityRecord {
+    HookActivityRecord {
+        event: event.as_str().to_string(),
+        kind: "control",
+        verdict: HookVerdictTag::RecursionBlocked,
+        decided_by: None,
+        reason: Some(error.to_string()),
+        tool: tool.map(str::to_string),
+        runs: Vec::new(),
+        at_ms: unix_now_ms(),
+    }
+}
+
+pub fn revalidation_activity(tool: &str, refused: Option<String>) -> HookActivityRecord {
+    HookActivityRecord {
+        event: HookEvent::PreToolUse.as_str().to_string(),
+        kind: "rewrite_revalidation",
+        verdict: match refused {
+            Some(_) => HookVerdictTag::RewriteRefused,
+            None => HookVerdictTag::RewriteAccepted,
+        },
+        decided_by: None,
+        reason: refused,
+        tool: Some(tool.to_string()),
+        runs: Vec::new(),
+        at_ms: unix_now_ms(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HookSurface {
+    pub enabled: bool,
+    pub registrations: Vec<HookRegistration>,
+    pub recent: Vec<HookActivityRecord>,
+    pub registered: usize,
+    pub runnable: usize,
+    pub blocked: usize,
+    pub denials: usize,
+    pub max_recursion_depth: u32,
+    pub generated_at_ms: u64,
+}
+
+pub fn hook_registration(config: &HookConfig, hooks: &HooksConfig) -> HookRegistration {
+    let trust = source_trust(&config.source, &hooks.trusted_projects);
+    let blocked_reason = if !hooks.enabled {
+        Some("hooks are disabled in privacy.yaml, so nothing is executed".to_string())
+    } else {
+        match trust {
+            HookTrust::Global | HookTrust::TrustedProject => None,
+            HookTrust::UntrustedProject => Some(
+                "this project is not listed in hooks.trusted_projects, so this hook is never executed"
+                    .to_string(),
+            ),
+            HookTrust::InstalledPlugin => {
+                Some("hooks shipped by an installed plugin are never executed".to_string())
+            }
+        }
+    };
+    HookRegistration {
+        event: config.event.as_str().to_string(),
+        kind: match config.event.kind() {
+            HookKind::Control => "control",
+            HookKind::Observation => "observation",
+        },
+        matcher: config.matcher.clone(),
+        command: config.command.clone(),
+        source: source_label(&config.source),
+        trust,
+        runs: blocked_reason.is_none(),
+        blocked_reason,
+    }
+}
+
+pub fn build_hook_surface(
+    configs: &[HookConfig],
+    hooks: &HooksConfig,
+    recent: Vec<HookActivityRecord>,
+) -> HookSurface {
+    let mut registrations: Vec<HookRegistration> = configs
+        .iter()
+        .map(|config| hook_registration(config, hooks))
+        .collect();
+    registrations.sort_by(|left, right| {
+        left.event
+            .cmp(&right.event)
+            .then_with(|| left.command.cmp(&right.command))
+            .then_with(|| left.source.cmp(&right.source))
+    });
+    let runnable = registrations.iter().filter(|entry| entry.runs).count();
+    HookSurface {
+        enabled: hooks.enabled,
+        registered: registrations.len(),
+        blocked: registrations.len() - runnable,
+        runnable,
+        denials: recent
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.verdict,
+                    HookVerdictTag::Deny
+                        | HookVerdictTag::RecursionBlocked
+                        | HookVerdictTag::RewriteRefused
+                )
+            })
+            .count(),
+        registrations,
+        recent,
+        max_recursion_depth: hooks.max_recursion_depth,
+        generated_at_ms: unix_now_ms(),
+    }
+}
+
+/// Every registered hook, whether or not it is allowed to run, plus what the
+/// hooks that did run actually returned.
+pub async fn hook_surface(app: AppState, limit: usize) -> HookSurface {
+    let hooks = app.gcx.hooks_config.clone();
+    let ext_dirs = get_ext_dirs(app).await;
+    let compiled = get_compiled_hooks_from_ext_dirs(&ext_dirs).await;
+    let configs: Vec<HookConfig> = compiled.iter().map(|hook| hook.config.clone()).collect();
+    build_hook_surface(&configs, &hooks, hook_activity().recent(limit))
+}
+
+/// A rewritten tool call is re-checked against the same authority the original
+/// call is checked against, so a hook can never widen authority or reach a tool
+/// outside the ceiling. Records the outcome so a refused rewrite is visible.
+pub fn revalidate_rewritten_tool_call(
+    tool_name: &str,
+    rewritten: &serde_json::Value,
+    authority: Option<&ToolsPolicy>,
+) -> Result<serde_json::Map<String, serde_json::Value>, HookRewriteError> {
+    let result = revalidate_rewritten_arguments(tool_name, rewritten, authority);
+    hook_activity().record(revalidation_activity(
+        tool_name,
+        result.as_ref().err().map(ToString::to_string),
+    ));
+    result
 }
 
 /// A rewritten tool call is re-checked against the same authority the original
@@ -599,6 +1022,11 @@ pub async fn run_control_hooks(
     let limits = HookLimits::from(&config);
     if let Err(error) = check_hook_recursion(&event, payload.depth, limits.max_recursion_depth) {
         tracing::warn!("hooks_runner: {}", error);
+        hook_activity().record(recursion_activity(
+            &event,
+            payload.tool_name.as_deref(),
+            &error,
+        ));
         return ControlVerdict::Deny(error.to_string());
     }
     let shutdown = app.gcx.shutdown_flag.clone();
@@ -623,7 +1051,20 @@ pub async fn run_control_hooks(
         .map(|hook| run_with_permit(hook.evaluate(&payload, &limits, Some(&shutdown))))
         .collect();
     let outcomes = futures::future::join_all(futs).await;
-    resolve_control_verdict(&outcomes)
+    let decision = resolve_control_decision(&outcomes);
+    let configs: Vec<HookConfig> = control_hooks
+        .iter()
+        .map(|hook| hook.config.clone())
+        .collect();
+    hook_activity().record(control_activity(
+        &event,
+        tool_name.as_deref(),
+        &configs,
+        &outcomes,
+        &config.trusted_projects,
+        &decision,
+    ));
+    decision.verdict
 }
 
 /// Run every observation hook registered for `event`. Observation hooks are
@@ -641,6 +1082,11 @@ pub async fn run_observation_hooks(
     let limits = HookLimits::from(&config);
     if let Err(error) = check_hook_recursion(&event, payload.depth, limits.max_recursion_depth) {
         tracing::warn!("hooks_runner: {}", error);
+        hook_activity().record(recursion_activity(
+            &event,
+            payload.tool_name.as_deref(),
+            &error,
+        ));
         return vec![ObservationOutcome::Skipped(error.to_string())];
     }
     let shutdown = app.gcx.shutdown_flag.clone();
@@ -665,7 +1111,19 @@ pub async fn run_observation_hooks(
         .iter()
         .map(|hook| run_with_permit(hook.observe(&payload, &limits, Some(&shutdown))))
         .collect();
-    futures::future::join_all(futs).await
+    let outcomes = futures::future::join_all(futs).await;
+    let configs: Vec<HookConfig> = observation_hooks
+        .iter()
+        .map(|hook| hook.config.clone())
+        .collect();
+    hook_activity().record(observation_activity(
+        &event,
+        tool_name.as_deref(),
+        &configs,
+        &outcomes,
+        &config.trusted_projects,
+    ));
+    outcomes
 }
 
 async fn run_with_permit<F: std::future::Future>(fut: F) -> F::Output {
@@ -1465,6 +1923,253 @@ mod tests {
             "Process {} should have been killed and reaped on shutdown",
             pid
         );
+    }
+
+    fn project_hook(root: &str, command: &str) -> HookConfig {
+        HookConfig {
+            event: HookEvent::PreToolUse,
+            matcher: None,
+            command: command.to_string(),
+            timeout: Some(5),
+            source: CommandSource::ProjectRefact(PathBuf::from(root)),
+        }
+    }
+
+    #[test]
+    fn test_hooks_surface_names_the_hook_that_denied_and_respects_deny_precedence() {
+        let configs = vec![
+            make_hook_config(HookEvent::PreToolUse, None, "allow.sh"),
+            make_hook_config(HookEvent::PreToolUse, None, "block.sh"),
+            make_hook_config(HookEvent::PreToolUse, None, "rewrite.sh"),
+        ];
+        let outcomes = vec![
+            ControlOutcome::Allow,
+            ControlOutcome::Deny("no rm".to_string()),
+            ControlOutcome::Rewrite(serde_json::json!({"command": "ls"})),
+        ];
+        let decision = resolve_control_decision(&outcomes);
+        assert_eq!(decision.decided_by, Some(1));
+        assert_eq!(
+            decision.verdict,
+            ControlVerdict::Deny("no rm".to_string()),
+            "deny outranks a rewrite whatever the order"
+        );
+        let record = control_activity(
+            &HookEvent::PreToolUse,
+            Some("shell"),
+            &configs,
+            &outcomes,
+            &[],
+            &decision,
+        );
+        assert_eq!(record.verdict, HookVerdictTag::Deny);
+        assert_eq!(record.decided_by.as_deref(), Some("block.sh"));
+        assert_eq!(record.reason.as_deref(), Some("no rm"));
+        assert_eq!(record.tool.as_deref(), Some("shell"));
+        assert_eq!(
+            record
+                .runs
+                .iter()
+                .map(|run| (run.command.as_str(), run.decided))
+                .collect::<Vec<_>>(),
+            vec![
+                ("allow.sh", false),
+                ("block.sh", true),
+                ("rewrite.sh", false)
+            ]
+        );
+    }
+
+    #[test]
+    fn test_hooks_surface_attributes_a_timeout_deny_to_the_hook_that_timed_out() {
+        let configs = vec![
+            make_hook_config(HookEvent::PreToolUse, None, "fast.sh"),
+            make_hook_config(HookEvent::PreToolUse, None, "slow.sh"),
+        ];
+        let outcomes = vec![ControlOutcome::Allow, ControlOutcome::Timeout];
+        let decision = resolve_control_decision(&outcomes);
+        let record = control_activity(
+            &HookEvent::PreToolUse,
+            None,
+            &configs,
+            &outcomes,
+            &[],
+            &decision,
+        );
+        assert_eq!(record.verdict, HookVerdictTag::Deny);
+        assert_eq!(record.decided_by.as_deref(), Some("slow.sh"));
+        assert_eq!(record.runs[1].outcome, HookOutcomeTag::Timeout);
+    }
+
+    #[test]
+    fn test_hooks_surface_allow_names_no_decider() {
+        let configs = vec![make_hook_config(HookEvent::PreToolUse, None, "ok.sh")];
+        let outcomes = vec![ControlOutcome::Allow];
+        let decision = resolve_control_decision(&outcomes);
+        assert_eq!(decision.decided_by, None);
+        let record = control_activity(
+            &HookEvent::PreToolUse,
+            None,
+            &configs,
+            &outcomes,
+            &[],
+            &decision,
+        );
+        assert_eq!(record.verdict, HookVerdictTag::Allow);
+        assert_eq!(record.decided_by, None);
+        assert!(!record.runs[0].decided);
+    }
+
+    #[test]
+    fn test_hooks_surface_shows_an_untrusted_project_hook_as_never_executed() {
+        let configs = vec![
+            make_hook_config(HookEvent::PreToolUse, None, "global.sh"),
+            project_hook("/untrusted", "project.sh"),
+            HookConfig {
+                source: CommandSource::InstalledPlugin("vendor".to_string()),
+                ..make_hook_config(HookEvent::SessionStart, None, "plugin.sh")
+            },
+        ];
+        let surface = build_hook_surface(&configs, &HooksConfig::default(), Vec::new());
+        assert_eq!(surface.registered, 3);
+        assert_eq!(surface.runnable, 1);
+        assert_eq!(surface.blocked, 2);
+
+        let untrusted = surface
+            .registrations
+            .iter()
+            .find(|entry| entry.command == "project.sh")
+            .unwrap();
+        assert_eq!(untrusted.trust, HookTrust::UntrustedProject);
+        assert!(!untrusted.runs);
+        assert!(untrusted
+            .blocked_reason
+            .as_deref()
+            .unwrap()
+            .contains("never executed"));
+
+        let plugin = surface
+            .registrations
+            .iter()
+            .find(|entry| entry.command == "plugin.sh")
+            .unwrap();
+        assert_eq!(plugin.trust, HookTrust::InstalledPlugin);
+        assert!(!plugin.runs);
+
+        let global = surface
+            .registrations
+            .iter()
+            .find(|entry| entry.command == "global.sh")
+            .unwrap();
+        assert_eq!(global.trust, HookTrust::Global);
+        assert!(global.runs);
+        assert_eq!(global.blocked_reason, None);
+        assert!(!surface
+            .recent
+            .iter()
+            .any(|record| record.runs.iter().any(|run| run.command == "project.sh")));
+    }
+
+    #[test]
+    fn test_hooks_surface_marks_a_trusted_project_hook_as_running() {
+        let configs = vec![project_hook("/trusted", "project.sh")];
+        let hooks = HooksConfig {
+            trusted_projects: vec!["/trusted".to_string()],
+            ..HooksConfig::default()
+        };
+        let surface = build_hook_surface(&configs, &hooks, Vec::new());
+        assert_eq!(surface.registrations[0].trust, HookTrust::TrustedProject);
+        assert!(surface.registrations[0].runs);
+        assert_eq!(surface.runnable, 1);
+    }
+
+    #[test]
+    fn test_hooks_surface_is_empty_when_nothing_is_registered() {
+        let surface = build_hook_surface(&[], &HooksConfig::default(), Vec::new());
+        assert_eq!(surface.registered, 0);
+        assert_eq!(surface.runnable, 0);
+        assert_eq!(surface.blocked, 0);
+        assert_eq!(surface.denials, 0);
+        assert!(surface.registrations.is_empty());
+        assert!(surface.recent.is_empty());
+        assert!(surface.enabled);
+    }
+
+    #[test]
+    fn test_hooks_surface_counts_recursion_and_refused_rewrites_as_denials() {
+        let error = check_hook_recursion(&HookEvent::PreToolUse, 2, 2).unwrap_err();
+        let recursion = recursion_activity(&HookEvent::PreToolUse, Some("shell"), &error);
+        assert_eq!(recursion.verdict, HookVerdictTag::RecursionBlocked);
+        assert!(recursion.reason.unwrap().contains("max_recursion_depth"));
+        let refused = revalidation_activity("shell", Some("outside authority".to_string()));
+        assert_eq!(refused.verdict, HookVerdictTag::RewriteRefused);
+        let accepted = revalidation_activity("shell", None);
+        assert_eq!(accepted.verdict, HookVerdictTag::RewriteAccepted);
+        let recursion = recursion_activity(&HookEvent::PreToolUse, Some("shell"), &error);
+        let surface = build_hook_surface(
+            &[],
+            &HooksConfig::default(),
+            vec![recursion, refused, accepted],
+        );
+        assert_eq!(surface.denials, 2);
+    }
+
+    #[test]
+    fn test_hook_activity_log_is_bounded_and_newest_first() {
+        let log = HookActivityLog::new(2);
+        assert!(log.recent(10).is_empty());
+        for command in ["one", "two", "three"] {
+            log.record(revalidation_activity(command, None));
+        }
+        let recent = log.recent(10);
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].tool.as_deref(), Some("three"));
+        assert_eq!(recent[1].tool.as_deref(), Some("two"));
+        assert_eq!(log.recent(1).len(), 1);
+    }
+
+    #[test]
+    fn test_observation_activity_never_claims_a_verdict() {
+        let configs = vec![make_hook_config(HookEvent::SessionStart, None, "watch.sh")];
+        let record = observation_activity(
+            &HookEvent::SessionStart,
+            None,
+            &configs,
+            &[ObservationOutcome::Failed("boom".to_string())],
+            &[],
+        );
+        assert_eq!(record.verdict, HookVerdictTag::Observed);
+        assert_eq!(record.decided_by, None);
+        assert!(!record.runs[0].decided);
+        assert_eq!(record.runs[0].outcome, HookOutcomeTag::Failed);
+    }
+
+    #[test]
+    fn test_revalidate_rewritten_tool_call_records_both_outcomes() {
+        let log = HookActivityLog::new(8);
+        let authority = ToolsPolicy::Only(vec!["cat".to_string()]);
+        let refused = revalidate_rewritten_arguments(
+            "shell",
+            &serde_json::json!({"command": "ls"}),
+            Some(&authority),
+        );
+        log.record(revalidation_activity(
+            "shell",
+            refused.as_ref().err().map(ToString::to_string),
+        ));
+        let accepted = revalidate_rewritten_arguments(
+            "cat",
+            &serde_json::json!({"paths": "a.rs"}),
+            Some(&authority),
+        );
+        log.record(revalidation_activity(
+            "cat",
+            accepted.as_ref().err().map(ToString::to_string),
+        ));
+        let recent = log.recent(10);
+        assert_eq!(recent[0].verdict, HookVerdictTag::RewriteAccepted);
+        assert_eq!(recent[1].verdict, HookVerdictTag::RewriteRefused);
+        assert!(recent[1].reason.as_ref().unwrap().contains("authority"));
     }
 
     #[test]

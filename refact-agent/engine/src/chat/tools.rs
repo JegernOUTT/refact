@@ -24,7 +24,7 @@ use crate::yaml_configs::customization_registry::{
 };
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{
-    ControlVerdict, HookPayload, get_project_dir_string, revalidate_rewritten_arguments,
+    ControlVerdict, HookPayload, get_project_dir_string, revalidate_rewritten_tool_call,
     run_control_hooks,
 };
 use refact_runtime_api::{ToolCatalogSnapshot, TurnToolPool};
@@ -2425,7 +2425,7 @@ pub async fn process_tool_calls_once(
         let denial = match verdict {
             ControlVerdict::Allow => None,
             ControlVerdict::Deny(reason) => Some(reason),
-            ControlVerdict::Rewrite(value) => match revalidate_rewritten_arguments(
+            ControlVerdict::Rewrite(value) => match revalidate_rewritten_tool_call(
                 &tc.function.name,
                 &value,
                 hook_authority.as_ref(),

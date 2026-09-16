@@ -69,6 +69,23 @@ pub struct HookJobFireResult {
     pub fired: bool,
 }
 
+/// Read-only: which hooks are registered, which are trusted, which ran and
+/// what each returned. Nothing here registers, edits or fires a hook.
+pub async fn handle_v1_hooks_surface(
+    State(app): State<AppState>,
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
+) -> Result<Json<crate::ext::hooks_runner::HookSurface>, crate::coordination::error::WorkError> {
+    super::work::authorize(&app, &headers, peer.map(|p| p.0))?;
+    Ok(Json(
+        crate::ext::hooks_runner::hook_surface(
+            app.clone(),
+            crate::ext::hooks_runner::HOOK_ACTIVITY_DEFAULT_LIMIT,
+        )
+        .await,
+    ))
+}
+
 pub async fn handle_v1_hooks_fire(
     State(app): State<AppState>,
     headers: HeaderMap,
