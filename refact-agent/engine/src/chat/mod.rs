@@ -37,6 +37,7 @@ pub mod prompt_snippets;
 pub mod prompts;
 mod queue;
 pub(crate) mod retry_policy;
+pub mod review_reuse;
 mod session;
 pub(crate) use session::goal_snapshot_from_messages;
 pub mod session_runtime;

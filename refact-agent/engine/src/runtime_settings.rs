@@ -53,6 +53,9 @@ const VERIFICATION_EVIDENCE_TIMEOUT_SECS_DEFAULT: u64 = 600;
 const VERIFICATION_EVIDENCE_OUTPUT_CAP_BYTES_DEFAULT: usize = 4_000;
 const GOAL_REVIEW_MAX_REPAIR_ATTEMPTS_DEFAULT: usize = 2;
 const GOAL_REVIEW_SPOT_CHECK_PERCENT_DEFAULT: usize = 0;
+const GOAL_REVIEW_REUSE_MAX_ENTRIES_DEFAULT: usize = 64;
+const GOAL_REVIEW_REUSE_MAX_BYTES_DEFAULT: usize = 8_388_608;
+const GOAL_REVIEW_REUSE_TTL_SECS_DEFAULT: u64 = 3_600;
 const GOAL_SUB_GOAL_MAX_DEPTH_DEFAULT: usize = refact_chat_api::DEFAULT_SUB_GOAL_MAX_DEPTH;
 const GOAL_SUB_GOAL_MAX_FAN_OUT_DEFAULT: usize = refact_chat_api::DEFAULT_SUB_GOAL_MAX_FAN_OUT;
 const GOAL_AUTO_SUB_GOAL_LANE_CAP_DEFAULT: usize = refact_chat_api::DEFAULT_SUB_GOAL_MAX_FAN_OUT;
@@ -371,6 +374,11 @@ pub struct TrajectoryRuntimeSettings {
     pub verification_evidence_cache_max_entries: usize,
     pub verification_evidence_cache_max_bytes: usize,
     pub verification_evidence_cache_ttl_secs: u64,
+    /// The window within which a review of an unchanged diff is reused instead of
+    /// re-run, and the bounds on how much reusable review is kept.
+    pub goal_review_reuse_max_entries: usize,
+    pub goal_review_reuse_max_bytes: usize,
+    pub goal_review_reuse_ttl_secs: u64,
     pub coordination: CoordinationSettings,
 }
 
@@ -440,6 +448,9 @@ impl Default for TrajectoryRuntimeSettings {
                 VERIFICATION_EVIDENCE_CACHE_MAX_ENTRIES_DEFAULT,
             verification_evidence_cache_max_bytes: VERIFICATION_EVIDENCE_CACHE_MAX_BYTES_DEFAULT,
             verification_evidence_cache_ttl_secs: VERIFICATION_EVIDENCE_CACHE_TTL_SECS_DEFAULT,
+            goal_review_reuse_max_entries: GOAL_REVIEW_REUSE_MAX_ENTRIES_DEFAULT,
+            goal_review_reuse_max_bytes: GOAL_REVIEW_REUSE_MAX_BYTES_DEFAULT,
+            goal_review_reuse_ttl_secs: GOAL_REVIEW_REUSE_TTL_SECS_DEFAULT,
             coordination: CoordinationSettings::default(),
         }
     }
@@ -888,6 +899,24 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
     validate_u64(
         "verification_evidence_cache_ttl_secs",
         settings.verification_evidence_cache_ttl_secs,
+        60,
+        604_800,
+    )?;
+    validate_usize(
+        "goal_review_reuse_max_entries",
+        settings.goal_review_reuse_max_entries,
+        1,
+        100_000,
+    )?;
+    validate_usize(
+        "goal_review_reuse_max_bytes",
+        settings.goal_review_reuse_max_bytes,
+        1_024,
+        268_435_456,
+    )?;
+    validate_u64(
+        "goal_review_reuse_ttl_secs",
+        settings.goal_review_reuse_ttl_secs,
         60,
         604_800,
     )?;

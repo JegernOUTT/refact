@@ -10,7 +10,8 @@
 //! facts contribute to a blocking outcome, and repair rounds are bounded so a
 //! goal escalates explicitly instead of looping.
 
-use std::sync::atomic::AtomicBool;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -21,12 +22,18 @@ use crate::chat::evidence::{
     evaluate_goal_gates, unexecuted_record, EvidenceDefaults, EvidenceRecord, EvidenceVerdict,
     SpecAuthority, VerificationSpec,
 };
+use crate::chat::evidence_cache::EvidenceCacheKey;
 use crate::chat::goal_verifier::GoalEvidence;
+use crate::chat::review_reuse::{
+    review_policy_fingerprint, review_reuse_limits, review_reuse_store, review_revision,
+    ReusableReview, ReviewIdentity, ReviewReuseInputs, ReviewReuseStore,
+};
 use crate::chat::types::{ChatSession, TaskMeta};
 use crate::global_context::GlobalContext;
 use crate::tasks::types::VerificationOutcome;
-use crate::tools::review_agents::config::{load_review_config, ReviewConfig};
+use crate::tools::review_agents::config::{load_review_config, slot_model_id, ReviewConfig};
 use crate::tools::review_agents::runner::StageCtx;
+use crate::tools::review_agents::stages::{load_stage_catalog, select_stages};
 use crate::tools::review_types::{
     ReviewFinding, ReviewOutcome, ReviewReport, ReviewSeverity, ScopeMode,
 };
@@ -282,15 +289,62 @@ pub fn spot_check_child(settings: &GoalReviewSettings) -> bool {
 #[async_trait]
 pub trait GoalReviewer: Send {
     async fn review(&mut self, request: GoalReviewRequest) -> Result<ReviewReport, String>;
+
+    /// What this reviewer is about to read and with what. A reviewer that cannot
+    /// describe itself returns `None`, and then nothing it produces is ever
+    /// reused: an unknown identity is not an unchanged one.
+    async fn identity(&self, request: &GoalReviewRequest) -> Option<ReviewIdentity>;
+}
+
+async fn reuse_key<R: GoalReviewer>(
+    reviewer: &R,
+    request: &GoalReviewRequest,
+) -> Option<EvidenceCacheKey> {
+    let identity = reviewer.identity(request).await?;
+    Some(
+        ReviewReuseInputs {
+            identity,
+            what_to_check: request.what_to_check.clone(),
+            plan: request.plan.clone(),
+            base: request.base.clone(),
+            files: request.files.clone(),
+        }
+        .key(),
+    )
 }
 
 /// The goal path's review entry: obtain a report, record it as evidence, and
 /// decide whether a bounded repair round is still available.
+///
+/// A goal that fails verification several times must not pay for the same review
+/// of the same diff each time, so a report still describing the tree under review
+/// is reused — visibly, never disguised as a fresh reading.
 pub async fn review_goal_work<R: GoalReviewer>(
     settings: &GoalReviewSettings,
     reviewer: &mut R,
     request: GoalReviewRequest,
     attempts_used: usize,
+) -> GoalReviewResult {
+    let store = review_reuse_store();
+    store.lock().await.set_limits(review_reuse_limits());
+    review_goal_work_in(
+        settings,
+        reviewer,
+        request,
+        attempts_used,
+        store,
+        crate::chat::evidence_cache::now_ms(),
+    )
+    .await
+}
+
+pub async fn review_goal_work_in<R: GoalReviewer>(
+    settings: &GoalReviewSettings,
+    reviewer: &mut R,
+    request: GoalReviewRequest,
+    attempts_used: usize,
+    store: &AMutex<ReviewReuseStore>,
+    now_ms: i64,
 ) -> GoalReviewResult {
     if !settings.enabled {
         return GoalReviewResult {
@@ -302,9 +356,28 @@ pub async fn review_goal_work<R: GoalReviewer>(
         };
     }
     let spec = review_spec(&EvidenceDefaults::from_settings());
+    let key = reuse_key(reviewer, &request).await;
+    if let Some(key) = key.as_ref() {
+        if let Some(reused) = store.lock().await.lookup(key, now_ms) {
+            let outcome =
+                decide_repair(&reused.report, attempts_used, settings.max_repair_attempts);
+            return GoalReviewResult {
+                outcome,
+                report: Some(reused.report),
+                evidence: Some((spec, reused.record)),
+            };
+        }
+    }
     match reviewer.review(request).await {
         Ok(report) => {
             let record = review_evidence_record(&report, &spec);
+            if let Some(key) = key {
+                let reusable = ReusableReview {
+                    report: report.clone(),
+                    record: record.clone(),
+                };
+                store.lock().await.store(key, &reusable, now_ms);
+            }
             let outcome = decide_repair(&report, attempts_used, settings.max_repair_attempts);
             GoalReviewResult {
                 outcome,
@@ -335,8 +408,23 @@ pub struct PipelineReviewer {
     gcx: Arc<GlobalContext>,
     cfg: ReviewConfig,
     ctx: StageCtx,
-    stage_events: UnboundedReceiver<serde_json::Value>,
+    stage_drain: tokio::task::JoinHandle<()>,
+    stage_events_seen: Arc<AtomicU64>,
     pub metering: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Stage progress is watched, never collected. A deep review emits progress for
+/// as long as it runs, so the receiver is consumed as events arrive and only a
+/// count survives; nothing is buffered for a caller that never reads it.
+fn drain_stage_progress(
+    mut events: UnboundedReceiver<serde_json::Value>,
+    seen: Arc<AtomicU64>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while events.recv().await.is_some() {
+            seen.fetch_add(1, Ordering::Relaxed);
+        }
+    })
 }
 
 pub struct GoalReviewScope {
@@ -363,37 +451,82 @@ impl PipelineReviewer {
             chat_id: scope.chat_id,
             root_chat_id: scope.root_chat_id,
         };
+        let stage_events_seen = Arc::new(AtomicU64::new(0));
+        let stage_drain = drain_stage_progress(stage_events, stage_events_seen.clone());
         Ok(Self {
             gcx,
             cfg,
             ctx,
-            stage_events,
+            stage_drain,
+            stage_events_seen,
             metering: serde_json::Map::new(),
         })
     }
 
-    pub fn drain_stage_events(&mut self) -> Vec<serde_json::Value> {
-        let mut events = Vec::new();
-        while let Ok(event) = self.stage_events.try_recv() {
-            events.push(event);
+    pub fn stage_events_seen(&self) -> u64 {
+        self.stage_events_seen.load(Ordering::Relaxed)
+    }
+
+    /// The tree this reviewer would read. Without one there is no revision, and
+    /// without a revision nothing is reused.
+    async fn review_root(&self) -> Option<PathBuf> {
+        if let Some(worktree) = self.ctx.worktree.as_ref() {
+            return Some(worktree.root.clone());
         }
-        events
+        crate::files_correction::get_project_dirs(self.gcx.clone())
+            .await
+            .first()
+            .cloned()
+    }
+}
+
+impl Drop for PipelineReviewer {
+    fn drop(&mut self) {
+        self.stage_drain.abort();
     }
 }
 
 #[async_trait]
 impl GoalReviewer for PipelineReviewer {
     async fn review(&mut self, request: GoalReviewRequest) -> Result<ReviewReport, String> {
-        let report = run_review(
+        run_review(
             self.gcx.clone(),
             self.ctx.clone(),
             self.cfg.clone(),
             request.into_review_args(),
             &mut self.metering,
         )
-        .await;
-        self.drain_stage_events();
-        report
+        .await
+    }
+
+    async fn identity(&self, request: &GoalReviewRequest) -> Option<ReviewIdentity> {
+        let root = self.review_root().await?;
+        let depth = self.cfg.settings.depth_or_default(None);
+        let selection = select_stages(
+            load_stage_catalog(self.gcx.clone()).await,
+            depth,
+            None,
+            &request.files,
+        )
+        .ok()?;
+        let mut reviewer_models = Vec::new();
+        for slot in self
+            .cfg
+            .settings
+            .slots_for_variants(self.cfg.settings.variants)
+        {
+            reviewer_models.push(slot_model_id(self.gcx.clone(), slot).await.ok()?);
+        }
+        Some(ReviewIdentity {
+            revision: review_revision(&root, request.base.as_deref()).await,
+            reviewer_models,
+            stages: selection
+                .scheduled
+                .into_iter()
+                .map(|spec| spec.id)
+                .collect(),
+            policy: review_policy_fingerprint(&self.cfg),
+        })
     }
 }
 
@@ -515,6 +648,7 @@ mod tests {
 
     struct FakeReviewer {
         report: Result<ReviewReport, String>,
+        identity: Option<ReviewIdentity>,
         requests: Vec<GoalReviewRequest>,
     }
 
@@ -523,6 +657,37 @@ mod tests {
         async fn review(&mut self, request: GoalReviewRequest) -> Result<ReviewReport, String> {
             self.requests.push(request);
             self.report.clone()
+        }
+
+        async fn identity(&self, _request: &GoalReviewRequest) -> Option<ReviewIdentity> {
+            self.identity.clone()
+        }
+    }
+
+    /// A reviewer that cannot describe what it is about to read, so nothing it
+    /// produces is ever reused.
+    fn fake(report: Result<ReviewReport, String>) -> FakeReviewer {
+        FakeReviewer {
+            report,
+            identity: None,
+            requests: Vec::new(),
+        }
+    }
+
+    fn identity() -> ReviewIdentity {
+        ReviewIdentity {
+            revision: "rev-1".to_string(),
+            reviewer_models: vec![REVIEWER_MODEL.to_string()],
+            stages: vec!["mechanical".to_string(), "spec".to_string()],
+            policy: "policy-1".to_string(),
+        }
+    }
+
+    fn identified(report: Result<ReviewReport, String>) -> FakeReviewer {
+        FakeReviewer {
+            report,
+            identity: Some(identity()),
+            requests: Vec::new(),
         }
     }
 
@@ -536,10 +701,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_goal_path_obtains_a_review_report_without_a_tool_call() {
-        let mut reviewer = FakeReviewer {
-            report: Ok(reviewed(vec![])),
-            requests: Vec::new(),
-        };
+        let mut reviewer = fake(Ok(reviewed(vec![])));
         let request = GoalReviewRequest {
             what_to_check: Some("the goal's acceptance criteria".to_string()),
             plan: Some("ship the feature".to_string()),
@@ -755,10 +917,7 @@ mod tests {
         assert_eq!(settings.goal_review_spot_check_percent, 0);
         assert_eq!(settings.goal_review_max_repair_attempts, 2);
 
-        let mut reviewer = FakeReviewer {
-            report: Ok(reviewed(vec![fact("rf-1", ReviewSeverity::Blocker)])),
-            requests: Vec::new(),
-        };
+        let mut reviewer = fake(Ok(reviewed(vec![fact("rf-1", ReviewSeverity::Blocker)])));
         let off = GoalReviewSettings {
             enabled: false,
             max_repair_attempts: 2,
@@ -784,10 +943,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_review_that_could_not_run_is_unavailable_evidence_not_a_pass() {
-        let mut reviewer = FakeReviewer {
-            report: Err("no usable model configured for slot 'chat'".to_string()),
-            requests: Vec::new(),
-        };
+        let mut reviewer = fake(Err("no usable model configured for slot 'chat'".to_string()));
 
         let result = review_goal_work(
             &enabled_settings(2),
@@ -808,6 +964,209 @@ mod tests {
         let mut evidence = GoalEvidence::default();
         attach_review_evidence(&mut evidence, spec, record);
         assert!(!evidence.gates.judge_allowed());
+    }
+
+    #[tokio::test]
+    async fn repeat_goal_verification_attempts_against_an_unchanged_diff_review_once() {
+        let store = crate::chat::review_reuse::test_store();
+        let mut reviewer = identified(Ok(reviewed(vec![fact("rf-1", ReviewSeverity::Blocker)])));
+
+        for attempt in 0..3 {
+            let result = review_goal_work_in(
+                &enabled_settings(4),
+                &mut reviewer,
+                GoalReviewRequest::default(),
+                attempt,
+                &store,
+                1_000,
+            )
+            .await;
+            assert!(
+                matches!(result.outcome, GoalReviewOutcome::Repair { .. }),
+                "attempt {attempt} still decides a repair round from the reused report"
+            );
+            assert_eq!(
+                result.report.map(|report| report.findings.len()),
+                Some(1),
+                "attempt {attempt} still receives the report"
+            );
+        }
+
+        assert_eq!(
+            reviewer.requests.len(),
+            1,
+            "three verification attempts against one unchanged diff must run the reviewer once"
+        );
+    }
+
+    #[tokio::test]
+    async fn each_changed_review_input_forces_a_fresh_review() {
+        let store = crate::chat::review_reuse::test_store();
+        let mut reviewer = identified(Ok(reviewed(vec![])));
+        async fn run(reviewer: &mut FakeReviewer, store: &AMutex<ReviewReuseStore>) {
+            review_goal_work_in(
+                &enabled_settings(2),
+                reviewer,
+                GoalReviewRequest::default(),
+                0,
+                store,
+                1_000,
+            )
+            .await;
+        }
+
+        run(&mut reviewer, &store).await;
+        assert_eq!(reviewer.requests.len(), 1);
+
+        let mutations: Vec<(&str, Box<dyn Fn(&mut ReviewIdentity)>)> = vec![
+            (
+                "diff",
+                Box::new(|id: &mut ReviewIdentity| id.revision = "rev-2".to_string()),
+            ),
+            (
+                "reviewer model",
+                Box::new(|id: &mut ReviewIdentity| {
+                    id.reviewer_models = vec!["reviewer-model-c".to_string()]
+                }),
+            ),
+            (
+                "stage set",
+                Box::new(|id: &mut ReviewIdentity| id.stages.push("execution".to_string())),
+            ),
+            (
+                "policy",
+                Box::new(|id: &mut ReviewIdentity| id.policy = "policy-2".to_string()),
+            ),
+        ];
+        let mut expected = 1;
+        for (label, mutate) in mutations {
+            let mut mutated = identity();
+            mutate(&mut mutated);
+            reviewer.identity = Some(mutated);
+            run(&mut reviewer, &store).await;
+            expected += 1;
+            assert_eq!(
+                reviewer.requests.len(),
+                expected,
+                "a changed {label} must run the reviewer again"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reused_report_is_marked_reused_and_carries_its_original_timestamp() {
+        let store = crate::chat::review_reuse::test_store();
+        let mut reviewer = identified(Ok(reviewed(vec![])));
+
+        let first = review_goal_work_in(
+            &enabled_settings(2),
+            &mut reviewer,
+            GoalReviewRequest::default(),
+            0,
+            &store,
+            1_000,
+        )
+        .await;
+        let second = review_goal_work_in(
+            &enabled_settings(2),
+            &mut reviewer,
+            GoalReviewRequest::default(),
+            0,
+            &store,
+            9_000,
+        )
+        .await;
+
+        let (_, fresh) = first.evidence.expect("the first review is recorded");
+        let (_, reused) = second.evidence.expect("the reused review is recorded");
+        assert_eq!(reviewer.requests.len(), 1);
+        assert!(!fresh.from_cache);
+        assert!(fresh.replayed_at.is_none());
+        assert!(
+            reused.from_cache,
+            "a reuse must never look like a fresh run"
+        );
+        assert_eq!(
+            reused.started_at, fresh.started_at,
+            "a reused review carries its original timestamp"
+        );
+        assert_eq!(reused.finished_at, fresh.finished_at);
+        assert!(
+            reused.replayed_at.is_some(),
+            "the reuse time is recorded apart from the review time"
+        );
+        assert_eq!(reused.verdict, fresh.verdict);
+
+        let consumer = reused.to_verification_result();
+        assert!(consumer.from_cache);
+        assert_eq!(
+            consumer.executed_at.as_deref(),
+            Some(fresh.started_at.as_str())
+        );
+        assert!(crate::chat::evidence::replay_note(&reused)
+            .unwrap()
+            .contains(&fresh.started_at));
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_review_is_never_reused() {
+        for unavailable in [
+            Ok(inconclusive()),
+            Ok(partial()),
+            Err("no reviewer".to_string()),
+        ] {
+            let store = crate::chat::review_reuse::test_store();
+            let mut reviewer = identified(unavailable);
+
+            for _ in 0..3 {
+                let result = review_goal_work_in(
+                    &enabled_settings(2),
+                    &mut reviewer,
+                    GoalReviewRequest::default(),
+                    0,
+                    &store,
+                    1_000,
+                )
+                .await;
+                let (_, record) = result.evidence.expect("unavailable evidence is recorded");
+                assert_eq!(record.verdict, EvidenceVerdict::Unavailable);
+                assert!(!record.from_cache);
+            }
+
+            assert_eq!(
+                reviewer.requests.len(),
+                3,
+                "a review that produced no usable result must run again"
+            );
+            assert!(store.lock().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn stage_progress_is_drained_as_it_arrives_and_never_accumulates() {
+        let (stage_tx, stage_events) = unbounded_channel();
+        let seen = Arc::new(AtomicU64::new(0));
+        let drain = drain_stage_progress(stage_events, seen.clone());
+
+        for index in 0..10_000u64 {
+            stage_tx
+                .send(serde_json::json!({"subchat_id": index}))
+                .unwrap();
+        }
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while seen.load(Ordering::Relaxed) < 10_000 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+
+        assert!(
+            drained.is_ok(),
+            "progress must be consumed while the review is still running, not buffered for a caller that never reads it"
+        );
+        drop(stage_tx);
+        drain.await.unwrap();
+        assert_eq!(seen.load(Ordering::Relaxed), 10_000);
     }
 
     #[test]

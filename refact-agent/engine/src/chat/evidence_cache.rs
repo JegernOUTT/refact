@@ -99,6 +99,17 @@ impl EvidenceCacheKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// A key over any canonical description of what was proven. One digest scheme
+    /// serves the whole evidence subsystem, so a second keyed store never grows a
+    /// second one.
+    pub fn of(canonical: &str) -> Self {
+        Self(digest_bytes(canonical.as_bytes()))
+    }
+}
+
+pub(crate) fn digest_text(text: &str) -> String {
+    digest_bytes(text.as_bytes())
 }
 
 /// Every input the key is computed from, kept apart so each one can be mutated on
@@ -265,26 +276,60 @@ impl EvidenceCacheLimits {
     }
 }
 
+/// What a bounded reuse store may hold. A value knows whether it is already a
+/// reuse, how to admit that it is one, whether it is a result worth keeping at
+/// all, and what it costs to keep.
+pub trait Reusable: Clone {
+    fn is_replay(&self) -> bool;
+    fn mark_replayed(&mut self, now_ms: i64);
+    fn is_storable(&self) -> bool;
+    fn size_bytes(&self) -> usize;
+}
+
+impl Reusable for EvidenceRecord {
+    fn is_replay(&self) -> bool {
+        self.from_cache
+    }
+
+    fn mark_replayed(&mut self, now_ms: i64) {
+        self.from_cache = true;
+        self.replayed_at = Some(rfc3339(now_ms));
+    }
+
+    fn is_storable(&self) -> bool {
+        verdict_is_cacheable(self.verdict)
+    }
+
+    fn size_bytes(&self) -> usize {
+        self.command.len()
+            + self.output_tail.len()
+            + self.spec_id.len()
+            + self.reason.as_ref().map(String::len).unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone)]
-struct CacheEntry {
-    record: EvidenceRecord,
+struct CacheEntry<T> {
+    value: T,
     stored_at_ms: i64,
     used_seq: u64,
     bytes: usize,
 }
 
-/// Bounded store of replayable evidence. Eviction is deterministic: the entry
+/// Bounded store of reusable results. Eviction is deterministic: the entry
 /// untouched for longest goes first, and use order is a strictly increasing
 /// sequence, so there are no ties to break arbitrarily.
 #[derive(Debug)]
-pub struct EvidenceCache {
-    entries: HashMap<String, CacheEntry>,
+pub struct ReuseStore<T: Reusable> {
+    entries: HashMap<String, CacheEntry<T>>,
     limits: EvidenceCacheLimits,
     seq: u64,
     bytes: usize,
 }
 
-impl EvidenceCache {
+pub type EvidenceCache = ReuseStore<EvidenceRecord>;
+
+impl<T: Reusable> ReuseStore<T> {
     pub fn new(limits: EvidenceCacheLimits) -> Self {
         Self {
             entries: HashMap::new(),
@@ -307,36 +352,35 @@ impl EvidenceCache {
         self.bytes
     }
 
-    /// A hit hands back a record marked as replayed, carrying the original
+    /// A hit hands back a value marked as reused, carrying the original
     /// execution timestamps untouched.
-    pub fn lookup(&mut self, key: &EvidenceCacheKey, now_ms: i64) -> Option<EvidenceRecord> {
+    pub fn lookup(&mut self, key: &EvidenceCacheKey, now_ms: i64) -> Option<T> {
         self.expire(now_ms);
         self.seq += 1;
         let seq = self.seq;
         let entry = self.entries.get_mut(key.as_str())?;
         entry.used_seq = seq;
-        let mut replay = entry.record.clone();
-        replay.from_cache = true;
-        replay.replayed_at = Some(rfc3339(now_ms));
+        let mut replay = entry.value.clone();
+        replay.mark_replayed(now_ms);
         Some(replay)
     }
 
     /// Store an executed result. A replay is never re-stored, and a verdict that
     /// is not a result is refused.
-    pub fn store(&mut self, key: EvidenceCacheKey, record: &EvidenceRecord, now_ms: i64) -> bool {
-        if record.from_cache || !verdict_is_cacheable(record.verdict) {
+    pub fn store(&mut self, key: EvidenceCacheKey, value: &T, now_ms: i64) -> bool {
+        if value.is_replay() || !value.is_storable() {
             return false;
         }
         self.expire(now_ms);
         self.seq += 1;
-        let bytes = record_bytes(record);
+        let bytes = value.size_bytes();
         if let Some(previous) = self.entries.remove(key.as_str()) {
             self.bytes = self.bytes.saturating_sub(previous.bytes);
         }
         self.entries.insert(
             key.0,
             CacheEntry {
-                record: record.clone(),
+                value: value.clone(),
                 stored_at_ms: now_ms,
                 used_seq: self.seq,
                 bytes,
@@ -385,7 +429,7 @@ impl EvidenceCache {
 }
 
 #[cfg(test)]
-impl EvidenceCache {
+impl<T: Reusable> ReuseStore<T> {
     pub fn limits(&self) -> EvidenceCacheLimits {
         self.limits
     }
@@ -399,14 +443,7 @@ impl EvidenceCache {
     }
 }
 
-fn record_bytes(record: &EvidenceRecord) -> usize {
-    record.command.len()
-        + record.output_tail.len()
-        + record.spec_id.len()
-        + record.reason.as_ref().map(String::len).unwrap_or_default()
-}
-
-fn rfc3339(now_ms: i64) -> String {
+pub(crate) fn rfc3339(now_ms: i64) -> String {
     DateTime::<Utc>::from_timestamp_millis(now_ms)
         .unwrap_or_else(Utc::now)
         .to_rfc3339()
