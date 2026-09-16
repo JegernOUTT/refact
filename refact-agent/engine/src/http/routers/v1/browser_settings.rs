@@ -339,6 +339,21 @@ pub async fn refresh_from_disk(config_dir: &Path) -> Arc<BrowserSettings> {
     current()
 }
 
+pub async fn init_from_disk(config_dir: &Path) -> Arc<BrowserSettings> {
+    let path = settings_path(config_dir);
+    let present = tokio::fs::metadata(&path).await.is_ok();
+    let settings = refresh_from_disk(config_dir).await;
+    if present {
+        tracing::info!("browser settings loaded from {}", path.display());
+    } else {
+        tracing::info!(
+            "browser settings file absent at {}, using defaults",
+            path.display()
+        );
+    }
+    settings
+}
+
 fn bad_request(message: impl Into<String>) -> ScratchError {
     ScratchError::new(StatusCode::BAD_REQUEST, message.into())
 }
@@ -410,6 +425,59 @@ pub async fn handle_v1_browser_settings_post(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static PUBLISHED_SETTINGS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn lock_published_settings() -> MutexGuard<'static, ()> {
+        PUBLISHED_SETTINGS_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[tokio::test]
+    async fn startup_init_publishes_disk_settings_without_http() {
+        let _guard = lock_published_settings();
+        let config_dir =
+            std::env::temp_dir().join(format!("refact-browser-settings-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&config_dir).await.unwrap();
+        tokio::fs::write(
+            settings_path(&config_dir),
+            "launch:\n  gpu: hardware\n  chromium_sandbox: false\n",
+        )
+        .await
+        .unwrap();
+
+        init_from_disk(&config_dir).await;
+        let options = current().to_launch_options();
+
+        publish(BrowserSettings::default());
+        let _ = tokio::fs::remove_dir_all(&config_dir).await;
+
+        assert_eq!(options.gpu, refact_browser::BrowserGpuMode::Hardware);
+        assert!(!options.chromium_sandbox);
+        assert_eq!(*current(), BrowserSettings::default());
+    }
+
+    #[tokio::test]
+    async fn startup_init_is_idempotent_and_absent_file_keeps_defaults() {
+        let _guard = lock_published_settings();
+        let config_dir =
+            std::env::temp_dir().join(format!("refact-browser-settings-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&config_dir).await.unwrap();
+
+        let first = init_from_disk(&config_dir).await;
+        let second = init_from_disk(&config_dir).await;
+        let refreshed = refresh_from_disk(&config_dir).await;
+
+        let _ = tokio::fs::remove_dir_all(&config_dir).await;
+
+        assert_eq!(*first, BrowserSettings::default());
+        assert_eq!(*second, BrowserSettings::default());
+        assert_eq!(*refreshed, BrowserSettings::default());
+        assert_eq!(*current(), BrowserSettings::default());
+    }
 
     #[test]
     fn defaults_round_trip_through_yaml() {

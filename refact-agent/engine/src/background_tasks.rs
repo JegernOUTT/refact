@@ -174,6 +174,7 @@ pub async fn start_background_tasks(
     gcx: Arc<GlobalContext>,
     _config_dir: &PathBuf,
 ) -> BackgroundTasksHolder {
+    crate::http::routers::v1::browser_settings::init_from_disk(&gcx.config_dir).await;
     let (stats_tx, stats_rx) = tokio::sync::mpsc::channel(1000);
     {
         *gcx.llm_stats_sender.lock().unwrap() = Some(stats_tx);
@@ -269,4 +270,38 @@ pub async fn start_background_tasks(
         )]);
     }
     bg
+}
+
+#[cfg(test)]
+mod tests {
+    fn start_background_tasks_body() -> &'static str {
+        include_str!("background_tasks.rs")
+            .split_once("pub async fn start_background_tasks(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn browser_settings_are_loaded_before_the_browser_monitor_starts() {
+        let body = start_background_tasks_body();
+        let init = body
+            .find("browser_settings::init_from_disk(&gcx.config_dir)")
+            .expect("startup must load browser settings from disk");
+        let monitor = body
+            .find("browser_monitor_background_task(")
+            .expect("startup must spawn the browser monitor");
+        assert!(
+            init < monitor,
+            "browser settings must be published before the browser monitor is spawned"
+        );
+    }
+
+    #[test]
+    fn browser_settings_init_is_awaited_at_startup() {
+        assert!(start_background_tasks_body()
+            .contains("browser_settings::init_from_disk(&gcx.config_dir).await;"));
+    }
 }
