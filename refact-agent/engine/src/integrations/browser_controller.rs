@@ -8545,8 +8545,11 @@ fn step_accessibility_snapshot(
                 .min(settings.capture.max_aria_snapshot_chars);
             let frames = frames_for_snapshot(tab, &snapshot.yaml);
             snapshot.yaml = truncate_chars(snapshot.yaml, limit);
-            let mut data = serde_json::to_value(snapshot)
-                .unwrap_or_else(|error| serde_json::json!({"error": error.to_string()}));
+            let generation = snapshot
+                .generation
+                .as_ref()
+                .map(|generation| (generation.document_generation, generation.frame_generation));
+            let mut data = accessibility_snapshot_data(snapshot.yaml, generation);
             if !frames.is_empty() {
                 if let Some(object) = data.as_object_mut() {
                     object.insert(
@@ -8566,6 +8569,22 @@ fn step_accessibility_snapshot(
         }
         Err(error) => StepResult::failure(idx, "Accessibility snapshot failed", error.to_string()),
     }
+}
+
+fn accessibility_snapshot_data(yaml: String, generation: Option<(u64, u64)>) -> Value {
+    let mut data = serde_json::json!({"yaml": yaml});
+    if let (Some((document_generation, frame_generation)), Some(object)) =
+        (generation, data.as_object_mut())
+    {
+        object.insert(
+            "generation".to_string(),
+            serde_json::json!({
+                "document_generation": document_generation,
+                "frame_generation": frame_generation,
+            }),
+        );
+    }
+    data
 }
 
 fn truncate_chars(value: String, max_chars: usize) -> String {
@@ -11545,6 +11564,19 @@ mod tests {
         assert!(!snapshot.truncated);
         assert!(snapshot.artifact.is_none());
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn an_explicit_accessibility_snapshot_returns_only_the_text_tree() {
+        let yaml = "- button \"Save\" [ref=e1]".to_string();
+
+        let data = accessibility_snapshot_data(yaml.clone(), Some((3, 7)));
+
+        assert_eq!(data["yaml"], yaml);
+        assert!(data.get("nodes").is_none());
+        assert_eq!(data["generation"]["document_generation"], 3);
+        assert_eq!(data["generation"]["frame_generation"], 7);
+        assert!(data["generation"].get("refs").is_none());
     }
 
     #[test]

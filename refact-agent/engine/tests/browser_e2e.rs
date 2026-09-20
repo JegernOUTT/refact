@@ -102,6 +102,20 @@ fn execute_steps(
     execute_steps_with_policy(tab, steps, &ImagePolicy::default())
 }
 
+fn snapshot_ref(yaml: &str, name: &str) -> String {
+    let quoted_name = format!("\"{name}\"");
+    yaml.lines()
+        .find_map(|line| {
+            if !line.contains(&quoted_name) {
+                return None;
+            }
+            let start = line.find("[ref=")? + "[ref=".len();
+            let end = line[start..].find(']')? + start;
+            Some(line[start..end].to_string())
+        })
+        .unwrap_or_else(|| panic!("snapshot lacks ref for {name}: {yaml}"))
+}
+
 struct WsEchoServer {
     address: std::net::SocketAddr,
     task: tokio::task::JoinHandle<()>,
@@ -1195,13 +1209,12 @@ async fn design_tools_measure_marks_contrast_and_visual_changes() {
         &ImagePolicy::browser_capture(),
     );
     assert!(report.ok, "design probe failed: {report:?}");
-    let nodes = report.steps[3].data.as_ref().unwrap()["nodes"]
-        .as_array()
+    let yaml = report.steps[3].data.as_ref().unwrap()["yaml"]
+        .as_str()
         .unwrap();
-    assert!(nodes.iter().any(|node| {
-        node["ref"].as_str().is_some()
-            && node["box"]["width"].as_i64().is_some_and(|width| width > 0)
-    }));
+    assert!(yaml
+        .lines()
+        .any(|line| line.contains("[ref=") && line.contains("[box=")));
 
     let contrast = case
         .tab
@@ -5573,14 +5586,7 @@ async fn scoped_accessibility_snapshot_returns_only_the_target_subtree() {
         "boxes must compose with scoping: {yaml}"
     );
 
-    let save_ref = data["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|node| node["name"].as_str() == Some("Save"))
-        .and_then(|node| node["ref"].as_str())
-        .unwrap()
-        .to_string();
+    let save_ref = snapshot_ref(yaml, "Save");
     let click = execute_steps_with_runtime(
         &mut case.runtime,
         &[BrowserStep::Click {
@@ -5669,17 +5675,10 @@ async fn tool_contract_canonical_ref_batch_executes_end_to_end() {
         &ImagePolicy::browser_capture(),
     );
     assert!(snapshot.ok, "snapshot failed: {snapshot:?}");
-    let nodes = snapshot.steps[0].data.as_ref().unwrap()["nodes"]
-        .as_array()
+    let yaml = snapshot.steps[0].data.as_ref().unwrap()["yaml"]
+        .as_str()
         .unwrap();
-    let reference = |name: &str| {
-        nodes
-            .iter()
-            .find(|node| node["name"].as_str() == Some(name))
-            .and_then(|node| node["ref"].as_str())
-            .unwrap_or_else(|| panic!("snapshot lacks ref for {name}: {nodes:?}"))
-            .to_string()
-    };
+    let reference = |name: &str| snapshot_ref(yaml, name);
     let request: BrowserActionRequest = serde_json::from_value(json!({
         "steps": [
             {"action":"accessibility_snapshot"},
@@ -5729,14 +5728,12 @@ async fn production_ref_errors_distinguish_stale_and_navigation_generations() {
         }],
         &ImagePolicy::browser_capture(),
     );
-    let save_ref = first.steps[0].data.as_ref().unwrap()["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|node| node["name"] == "Save")
-        .and_then(|node| node["ref"].as_str())
-        .unwrap()
-        .to_string();
+    let save_ref = snapshot_ref(
+        first.steps[0].data.as_ref().unwrap()["yaml"]
+            .as_str()
+            .unwrap(),
+        "Save",
+    );
     case.tab
         .evaluate(
             "document.querySelector('button').setAttribute('aria-label', 'Save changed')",
@@ -5758,14 +5755,12 @@ async fn production_ref_errors_distinguish_stale_and_navigation_generations() {
     assert!(stale.steps[1].error.as_deref().unwrap().contains("stale"));
     assert!(stale.steps[1].error.as_deref().unwrap().contains(&save_ref));
 
-    let current_ref = stale.steps[0].data.as_ref().unwrap()["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|node| node["name"] == "Save changed")
-        .and_then(|node| node["ref"].as_str())
-        .unwrap()
-        .to_string();
+    let current_ref = snapshot_ref(
+        stale.steps[0].data.as_ref().unwrap()["yaml"]
+            .as_str()
+            .unwrap(),
+        "Save changed",
+    );
     case.navigate("delayed-button.html");
     let navigated = execute_steps_with_runtime(
         &mut case.runtime,
