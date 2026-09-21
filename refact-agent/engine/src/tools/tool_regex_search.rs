@@ -30,6 +30,7 @@ use crate::tools::tools_description::{
 };
 use crate::knowledge_index::format_related_memories_section;
 use crate::tools::native_enrichment::{workspace_roots, NativeReferences};
+use refact_postprocessing::line_truncation::truncate_tool_line;
 
 pub struct ToolRegexSearch {
     pub config_path: String,
@@ -77,7 +78,12 @@ fn format_preview(
         let lineno = idx + 1;
         let marker = if lineno == match_line { ">" } else { " " };
         if let Some(line) = lines.get(idx) {
-            out.push_str(&format!("{}{:>6} | {}\n", marker, lineno, line));
+            out.push_str(&format!(
+                "{}{:>6} | {}\n",
+                marker,
+                lineno,
+                truncate_tool_line(line)
+            ));
         }
     }
     out.trim_end().to_string()
@@ -633,6 +639,22 @@ mod tests {
             )
             .await,
         ))
+    }
+
+    #[test]
+    fn preview_caps_a_large_minified_line() {
+        let line = format!("HEAD needle {} TAIL", "x".repeat(50_000));
+        let preview = format_preview(&[line.as_str()], 0, 1, 1);
+
+        assert!(preview.contains("HEAD needle"));
+        assert!(preview.contains("TAIL"));
+        assert!(preview.contains("chars omitted"));
+        assert!(preview.contains("tool_max_line_chars"));
+        assert!(
+            preview.chars().count() < 2_040,
+            "{}",
+            preview.chars().count()
+        );
     }
 
     #[tokio::test]

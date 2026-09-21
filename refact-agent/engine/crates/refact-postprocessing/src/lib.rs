@@ -1,4 +1,5 @@
 pub mod config;
+pub mod line_truncation;
 pub mod pp_capture_buffer;
 pub mod pp_command_output;
 pub mod pp_context_files;

@@ -25,6 +25,7 @@ const TRAJECTORY_TOP_N_DEFAULT: usize = 2;
 const PP_MAX_TOOL_BUDGET_TOKENS_DEFAULT: usize = 131_072;
 const PP_MAX_PER_FILE_BUDGET_TOKENS_DEFAULT: usize = 131_072;
 const PP_MAX_LINE_LENGTH_CHARS_DEFAULT: usize = 10_000;
+const TOOL_MAX_LINE_CHARS_DEFAULT: usize = 2_000;
 const PP_TOKENS_FOR_TEXT_PERCENT_DEFAULT: usize = 30;
 const GIT_INTEL_MAX_COMMITS_DEFAULT: usize = 5_000;
 const GIT_INTEL_DEEP_WALK_LIMIT_DEFAULT: usize = 50_000;
@@ -76,6 +77,7 @@ pub struct TrajectoryRuntimeSettings {
     pub pp_max_tool_budget_tokens: usize,
     pub pp_max_per_file_budget_tokens: usize,
     pub pp_max_line_length_chars: usize,
+    pub tool_max_line_chars: usize,
     pub pp_tokens_for_text_percent: usize,
     pub git_intel_max_commits: usize,
     pub git_intel_deep_walk_limit: usize,
@@ -129,6 +131,7 @@ impl Default for TrajectoryRuntimeSettings {
             pp_max_tool_budget_tokens: PP_MAX_TOOL_BUDGET_TOKENS_DEFAULT,
             pp_max_per_file_budget_tokens: PP_MAX_PER_FILE_BUDGET_TOKENS_DEFAULT,
             pp_max_line_length_chars: PP_MAX_LINE_LENGTH_CHARS_DEFAULT,
+            tool_max_line_chars: TOOL_MAX_LINE_CHARS_DEFAULT,
             pp_tokens_for_text_percent: PP_TOKENS_FOR_TEXT_PERCENT_DEFAULT,
             git_intel_max_commits: GIT_INTEL_MAX_COMMITS_DEFAULT,
             git_intel_deep_walk_limit: GIT_INTEL_DEEP_WALK_LIMIT_DEFAULT,
@@ -209,6 +212,7 @@ fn install_crate_limits(settings: &TrajectoryRuntimeSettings) {
             max_tool_budget_tokens: settings.pp_max_tool_budget_tokens,
             max_per_file_budget_tokens: settings.pp_max_per_file_budget_tokens,
             max_line_length_chars: settings.pp_max_line_length_chars,
+            tool_max_line_chars: settings.tool_max_line_chars,
             tokens_for_text_percent: settings.pp_tokens_for_text_percent,
         },
     );
@@ -423,6 +427,12 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
         1_000_000,
     )?;
     validate_usize(
+        "tool_max_line_chars",
+        settings.tool_max_line_chars,
+        100,
+        1_000_000,
+    )?;
+    validate_usize(
         "pp_tokens_for_text_percent",
         settings.pp_tokens_for_text_percent,
         1,
@@ -569,6 +579,7 @@ mod tests {
             pp_max_tool_budget_tokens: 262_144,
             pp_max_per_file_budget_tokens: 65_536,
             pp_max_line_length_chars: 4_096,
+            tool_max_line_chars: 2_048,
             pp_tokens_for_text_percent: 42,
             git_intel_max_commits: 1_234,
             git_intel_deep_walk_limit: 23_456,
@@ -592,6 +603,7 @@ mod tests {
             settings.pp_max_per_file_budget_tokens
         );
         assert_eq!(pp.max_line_length_chars, settings.pp_max_line_length_chars);
+        assert_eq!(pp.tool_max_line_chars, settings.tool_max_line_chars);
         assert_eq!(
             pp.tokens_for_text_percent,
             settings.pp_tokens_for_text_percent

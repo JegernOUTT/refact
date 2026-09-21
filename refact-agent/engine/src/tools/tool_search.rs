@@ -28,6 +28,7 @@ use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile}
 use crate::knowledge_index::format_related_memories_section;
 use crate::tools::native_enrichment::{workspace_roots, NativeReferences};
 use crate::worktrees::scope::ExecutionScope;
+use refact_postprocessing::line_truncation::truncate_tool_line;
 
 pub struct ToolSearch {
     pub config_path: String,
@@ -73,7 +74,7 @@ fn format_preview(lines: &[&str], start_idx: usize, end_idx_exclusive: usize) ->
     lines[start_idx..end_idx_exclusive]
         .iter()
         .enumerate()
-        .map(|(i, line)| format!("{:>6} | {}", start_idx + i + 1, line))
+        .map(|(i, line)| format!("{:>6} | {}", start_idx + i + 1, truncate_tool_line(line)))
         .join("\n")
 }
 
@@ -661,6 +662,22 @@ mod tests {
             )
             .unwrap(),
             Some(7)
+        );
+    }
+
+    #[test]
+    fn semantic_preview_caps_a_large_minified_line() {
+        let line = format!("HEAD query {} TAIL", "x".repeat(50_000));
+        let preview = format_preview(&[line.as_str()], 0, 1);
+
+        assert!(preview.contains("HEAD query"));
+        assert!(preview.contains("TAIL"));
+        assert!(preview.contains("chars omitted"));
+        assert!(preview.contains("tool_max_line_chars"));
+        assert!(
+            preview.chars().count() < 2_040,
+            "{}",
+            preview.chars().count()
         );
     }
 

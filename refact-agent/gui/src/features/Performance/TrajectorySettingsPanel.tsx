@@ -77,6 +77,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
       "pp_max_tool_budget_tokens",
       "pp_max_per_file_budget_tokens",
       "pp_max_line_length_chars",
+      "tool_max_line_chars",
       "pp_tokens_for_text_percent",
     ],
   },

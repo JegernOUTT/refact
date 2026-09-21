@@ -482,6 +482,7 @@ fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         live_usize("pp_max_tool_budget_tokens", 4_096, 2_000_000),
         live_usize("pp_max_per_file_budget_tokens", 1_024, 2_000_000),
         live_usize("pp_max_line_length_chars", 80, 1_000_000),
+        live_usize("tool_max_line_chars", 100, 1_000_000),
         live_usize("pp_tokens_for_text_percent", 1, 100),
         live_usize("git_intel_max_commits", 100, 1_000_000),
         live_usize("git_intel_deep_walk_limit", 100, 5_000_000),
@@ -733,7 +734,7 @@ mod tests {
             initial.config,
             crate::runtime_settings::TrajectoryRuntimeSettings::default()
         );
-        assert_eq!(initial.fields.len(), 47);
+        assert_eq!(initial.fields.len(), 48);
         assert!(initial
             .fields
             .iter()

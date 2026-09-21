@@ -3,6 +3,7 @@ pub struct PostprocessingLimits {
     pub max_tool_budget_tokens: usize,
     pub max_per_file_budget_tokens: usize,
     pub max_line_length_chars: usize,
+    pub tool_max_line_chars: usize,
     pub tokens_for_text_percent: usize,
 }
 
@@ -12,6 +13,7 @@ impl Default for PostprocessingLimits {
             max_tool_budget_tokens: 131_072,
             max_per_file_budget_tokens: 131_072,
             max_line_length_chars: 10_000,
+            tool_max_line_chars: 2_000,
             tokens_for_text_percent: 30,
         }
     }
@@ -53,6 +55,7 @@ mod tests {
         assert_eq!(d.max_tool_budget_tokens, 131_072);
         assert_eq!(d.max_per_file_budget_tokens, 131_072);
         assert_eq!(d.max_line_length_chars, 10_000);
+        assert_eq!(d.tool_max_line_chars, 2_000);
         assert_eq!(d.tokens_for_text_percent, 30);
     }
 
@@ -63,6 +66,7 @@ mod tests {
             max_tool_budget_tokens: 262_144,
             max_per_file_budget_tokens: 65_536,
             max_line_length_chars: 4_096,
+            tool_max_line_chars: 2_048,
             tokens_for_text_percent: 40,
         });
         let installed = limits();
@@ -72,6 +76,7 @@ mod tests {
         assert_eq!(installed.max_tool_budget_tokens, 262_144);
         assert_eq!(installed.max_per_file_budget_tokens, 65_536);
         assert_eq!(installed.max_line_length_chars, 4_096);
+        assert_eq!(installed.tool_max_line_chars, 2_048);
         assert_eq!(installed.tokens_for_text_percent, 40);
         assert_eq!(limits().max_tool_budget_tokens, 131_072);
     }
