@@ -27,8 +27,10 @@ import {
   selectIsWaitingById,
   selectMessagesById,
   selectSnapshotReceivedById,
-  selectThreadById,
+  selectThreadModeById,
   selectThreadPauseById,
+  selectThreadTitleById,
+  selectThreadWorktreeById,
   selectIsCompressingById,
   selectCompressionPhaseById,
   selectCompressionReasonById,
@@ -141,12 +143,20 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const snapshotReceived = useAppSelector((s) =>
     selectSnapshotReceivedById(s, renderChatId),
   );
-  const thread = useAppSelector((s) => selectThreadById(s, renderChatId));
+  const threadMode = useAppSelector((s) =>
+    selectThreadModeById(s, renderChatId),
+  );
+  const threadTitle = useAppSelector((s) =>
+    selectThreadTitleById(s, renderChatId),
+  );
+  const threadWorktree = useAppSelector((s) =>
+    selectThreadWorktreeById(s, renderChatId),
+  );
   const sseStatus = useAppSelector((s) =>
     selectSseStatusForChat(s, renderChatId),
   );
 
-  const isConfig = thread !== null && thread.mode === "configurator";
+  const isConfig = threadMode === "configurator";
   const isWaiting = useAppSelector((s) => selectIsWaitingById(s, renderChatId));
   const integrationMeta = useAppSelector((s) =>
     selectIntegrationById(s, renderChatId),
@@ -230,7 +240,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const handleBranch = useCallback(
     (messageId: string) => {
       const newChatId = uuidv4();
-      const title = `[branched] ${thread?.title ?? "Chat"}`;
+      const title = `[branched] ${threadTitle ?? "Chat"}`;
 
       dispatch(
         createChatWithId({
@@ -238,7 +248,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
           title,
           parentId: renderChatId,
           linkType: "branch",
-          worktree: thread?.worktree,
+          worktree: threadWorktree ?? undefined,
         }),
       );
 
@@ -255,7 +265,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         console.error("Failed to branch chat:", err);
       });
     },
-    [dispatch, thread?.title, thread?.worktree, renderChatId, config, apiKey],
+    [dispatch, threadTitle, threadWorktree, renderChatId, config, apiKey],
   );
 
   const handleDelete = useCallback(
@@ -285,18 +295,18 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     dispatch(
       popBackTo({
         name: "integrations page",
-        projectPath: thread?.integration?.project,
-        integrationName: thread?.integration?.name,
-        integrationPath: thread?.integration?.path,
+        projectPath: integrationMeta?.project,
+        integrationName: integrationMeta?.name,
+        integrationPath: integrationMeta?.path,
         wasOpenedThroughChat: true,
       }),
     );
   }, [
     onStopStreaming,
     dispatch,
-    thread?.integration?.project,
-    thread?.integration?.name,
-    thread?.integration?.path,
+    integrationMeta?.project,
+    integrationMeta?.name,
+    integrationMeta?.path,
   ]);
 
   const shouldConfigButtonBeVisible = useMemo(() => {

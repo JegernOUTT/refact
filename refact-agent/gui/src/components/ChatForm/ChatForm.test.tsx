@@ -379,6 +379,50 @@ describe("ChatForm", () => {
     expect(previewSpy).not.toHaveBeenCalled();
   });
 
+  test("previews a draft without resending the existing transcript", async () => {
+    const previewBodies: { messages: { role: string; content: unknown }[] }[] =
+      [];
+    server.use(
+      http.post("*/v1/at-command-preview", async ({ request }) => {
+        previewBodies.push(
+          (await request.json()) as {
+            messages: { role: string; content: unknown }[];
+          },
+        );
+        return HttpResponse.json({
+          messages: [],
+          current_context: 1,
+          number_context: 10,
+        });
+      }),
+    );
+
+    const chat = chatStateWithThread({
+      messages: [
+        {
+          role: "user",
+          content: "large history".repeat(100_000),
+        },
+      ],
+    });
+    const { user, container } = render(<App />, {
+      preloadedState: {
+        chat,
+        ...engineConfigState,
+      },
+    });
+    const textarea = container.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+    if (!textarea) return;
+
+    await user.type(textarea, "draft");
+    await waitFor(() => expect(previewBodies).toHaveLength(1));
+
+    expect(previewBodies[0]?.messages).toHaveLength(1);
+    expect(previewBodies[0]?.messages[0]?.role).toBe("user");
+    expect(String(previewBodies[0]?.messages[0]?.content).trim()).toBe("draft");
+  });
+
   test.skip("does not submit while IME composition is active", async () => {
     // TODO: happy-dom/user-event cannot preserve native isComposing through the ComboBox
     // keydown path; keep as an executable characterization once the harness can model IME.

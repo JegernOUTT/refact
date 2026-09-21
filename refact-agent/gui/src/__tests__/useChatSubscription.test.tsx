@@ -117,7 +117,7 @@ describe("useChatSubscription", () => {
 
     await waitFor(() => {
       expect(mockFetch).toHaveBeenCalledWith(
-        "https://remote.example.com/v1/chats/subscribe?chat_id=remote-chat",
+        "https://remote.example.com/v1/chats/subscribe?chat_id=remote-chat&snapshot_chunks=1",
         expect.objectContaining({ method: "GET" }),
       );
     });

@@ -11,7 +11,6 @@ use refact_privacy::{
 use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
-use crate::call_validation::ChatMessage;
 use crate::custom_error::ScratchError;
 use crate::files_correction::registered_worktree_path_mappings;
 use crate::files_in_workspace::strictest_zone_for_path;
@@ -46,6 +45,12 @@ pub struct PrivacyStatusResponse {
 pub struct PrivacyInspectRequest {
     pub chat_id: String,
     pub destination: Destination,
+    #[serde(default = "default_include_messages")]
+    pub include_messages: bool,
+}
+
+fn default_include_messages() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize)]
@@ -59,7 +64,8 @@ pub struct PrivacyInspectResponse {
     pub chat_id: String,
     pub destination: Destination,
     pub sendable: bool,
-    pub would_send: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub would_send: Option<Vec<crate::call_validation::ChatMessage>>,
     pub records: Vec<FileRecord>,
     pub blocked: Vec<PrivacyBlockedRecord>,
     pub refusal: Option<String>,
@@ -145,6 +151,7 @@ pub async fn handle_v1_privacy_inspect(
     Json(request): Json<PrivacyInspectRequest>,
 ) -> Result<Json<PrivacyInspectResponse>, ScratchError> {
     crate::privacy::load_privacy_if_needed(app.gcx.clone()).await;
+    let include_messages = request.include_messages;
     let session = {
         let sessions = app.gcx.chat_sessions.read().await;
         sessions.get(&request.chat_id).cloned()
@@ -152,8 +159,22 @@ pub async fn handle_v1_privacy_inspect(
     .ok_or_else(|| {
         ScratchError::new(StatusCode::NOT_FOUND, "Chat session not found".to_string())
     })?;
-    let messages = Arc::new(session.lock().await.messages.clone());
-    let indexed_records = refact_privacy::records_from_messages(&messages);
+    let (indexed_records, would_send) = {
+        let session = session.lock().await;
+        let records = refact_privacy::records_from_messages(&session.messages);
+        let messages = request.include_messages.then(|| {
+            session
+                .messages
+                .iter()
+                .cloned()
+                .map(|mut message| {
+                    message.extra.remove("privacy");
+                    message
+                })
+                .collect::<Vec<_>>()
+        });
+        (records, messages)
+    };
     let records = indexed_records
         .as_ref()
         .map(|records| records.iter().map(|(_, record)| record.clone()).collect())
@@ -172,19 +193,10 @@ pub async fn handle_v1_privacy_inspect(
         &request.destination,
         &compiled,
     );
-    let sendable_messages = messages
-        .iter()
-        .cloned()
-        .map(|mut message| {
-            message.extra.remove("privacy");
-            message
-        })
-        .collect::<Vec<_>>();
-    let (sendable, would_send, blocked, refusal) = match clearance {
-        Ok(_) => (true, sendable_messages, Vec::new(), None),
+    let (sendable, blocked, refusal) = match clearance {
+        Ok(_) => (true, Vec::new(), None),
         Err(refusal) => (
             false,
-            Vec::new(),
             refusal
                 .offending
                 .into_iter()
@@ -201,7 +213,13 @@ pub async fn handle_v1_privacy_inspect(
         chat_id: request.chat_id,
         destination: request.destination,
         sendable,
-        would_send,
+        would_send: include_messages.then(|| {
+            if sendable {
+                would_send.unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        }),
         records,
         blocked,
         refusal,
@@ -549,6 +567,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::call_validation::ChatMessage;
     use crate::chat::types::ChatSession;
     use crate::privacy::{FilePrivacySettings, PrivacySettings};
 
@@ -855,7 +874,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn privacy_inspect_reports_allowed_messages_and_blocking_records() {
+    async fn privacy_inspect_keeps_large_allowed_histories_out_of_the_response() {
         let (_cache, config, app) = test_app().await;
         let secret = config.path().join("secret.env");
         let parsed: PrivacyPolicy =
@@ -865,7 +884,7 @@ mod tests {
             error: None,
             source_paths: Vec::new(),
         };
-        let mut message = ChatMessage::new("user".to_string(), "use the secret".to_string());
+        let mut message = ChatMessage::new("user".to_string(), "x".repeat(1024 * 1024));
         crate::privacy::records::attach_record(
             &mut message,
             FileRecord {
@@ -908,14 +927,18 @@ mod tests {
             router,
             post_json(
                 "/v1/privacy/inspect",
-                json!({"chat_id": "chat-1", "destination": destination("trusted")}),
+                json!({
+                    "chat_id": "chat-1",
+                    "destination": destination("trusted"),
+                    "include_messages": false
+                }),
             ),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(allowed["sendable"], true);
-        assert_eq!(allowed["would_send"].as_array().unwrap().len(), 1);
-        assert!(allowed["would_send"][0]["privacy"].is_null());
+        assert!(allowed.get("would_send").is_none());
         assert_eq!(allowed["blocked"], json!([]));
+        assert!(serde_json::to_vec(&allowed).unwrap().len() < 4096);
     }
 }

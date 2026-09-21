@@ -19,8 +19,8 @@ use super::trajectories::{task_context_from_task_meta, trajectory_meta_title, Tr
 
 pub use super::session_runtime::{
     clean_background_processes_for_chat, close_all_chat_sessions,
-    get_or_create_session_with_trajectory, snapshot_with_agents, start_session_cleanup_task,
-    try_restore_session_if_trajectory_exists,
+    get_or_create_session_with_trajectory, snapshot_with_agents, snapshot_with_agents_mode,
+    start_session_cleanup_task, try_restore_session_if_trajectory_exists,
 };
 
 pub(super) fn has_displayable_assistant_content(message: &ChatMessage) -> bool {
@@ -1621,6 +1621,23 @@ impl ChatSession {
         &self,
         background_agents: Vec<BackgroundAgentSummary>,
     ) -> ChatEvent {
+        self.snapshot_with_background_agents_and_messages(
+            background_agents,
+            self.snapshot_messages(),
+        )
+    }
+
+    pub(crate) fn snapshot_without_messages(&self) -> ChatEvent {
+        let mut background_agents: Vec<_> = self.background_agents.values().cloned().collect();
+        background_agents.sort_by(|a, b| {
+            b.change_seq
+                .cmp(&a.change_seq)
+                .then(a.agent_id.cmp(&b.agent_id))
+        });
+        self.snapshot_with_background_agents_and_messages(background_agents, Vec::new())
+    }
+
+    pub(crate) fn snapshot_messages(&self) -> Vec<ChatMessage> {
         let mut messages = self.messages.clone();
         if self.runtime.state == SessionState::Generating {
             if let Some(ref draft) = self.draft_message {
@@ -1629,6 +1646,14 @@ impl ChatSession {
                 }
             }
         }
+        messages
+    }
+
+    fn snapshot_with_background_agents_and_messages(
+        &self,
+        background_agents: Vec<BackgroundAgentSummary>,
+        messages: Vec<ChatMessage>,
+    ) -> ChatEvent {
         let mut runtime = self.runtime.clone();
         apply_goal_runtime_projection(&mut runtime, self.goal.as_ref());
         runtime.is_compressing = self.is_compressing;

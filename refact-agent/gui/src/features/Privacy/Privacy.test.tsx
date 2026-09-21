@@ -102,7 +102,6 @@ describe("Privacy shield", () => {
           chat_id: "chat",
           destination,
           sendable: false,
-          would_send: [],
           records: [effectiveFile],
           blocked: [{ record_index: 0, record: effectiveFile }],
           refusal:
@@ -158,7 +157,6 @@ describe("Privacy shield", () => {
           chat_id: "chat",
           destination: body.destination,
           sendable: isTrusted,
-          would_send: [],
           records: [effectiveFile],
           blocked: isTrusted
             ? []
@@ -240,7 +238,6 @@ describe("Privacy block card actions", () => {
           chat_id: "chat",
           destination,
           sendable: false,
-          would_send: [],
           records: [effectiveFile],
           blocked: [{ record_index: 1, record: effectiveFile }],
           refusal:

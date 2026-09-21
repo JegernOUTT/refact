@@ -1256,7 +1256,6 @@ const privacyInspectResponse: PrivacyInspectResponse = {
     display_name: "untrusted/model",
   },
   sendable: false,
-  would_send: [],
   records: [privacyFile],
   blocked: [{ record_index: 0, record: privacyFile }],
   refusal: "destination untrusted cannot receive message 0 path .env",

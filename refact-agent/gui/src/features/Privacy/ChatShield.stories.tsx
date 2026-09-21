@@ -52,7 +52,6 @@ const inspection: PrivacyInspectResponse = {
   chat_id: STORY_CHAT_ID,
   destination,
   sendable: false,
-  would_send: [],
   records: [guardedFile],
   blocked: [{ record_index: 0, record: guardedFile }],
   refusal: "The selected provider cannot receive files from the secrets zone.",

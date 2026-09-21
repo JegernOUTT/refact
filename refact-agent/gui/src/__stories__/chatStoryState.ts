@@ -143,7 +143,6 @@ const goodPrivacyInspect: HttpHandler = http.post("*/v1/privacy/inspect", () =>
     chat_id: STORY_CHAT_ID,
     destination: { id: "gpt-4o", kind: "provider", display_name: "gpt-4o" },
     sendable: true,
-    would_send: [],
     records: [],
     blocked: [],
     refusal: null,

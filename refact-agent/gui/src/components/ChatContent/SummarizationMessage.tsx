@@ -269,6 +269,7 @@ function reconstructionTriggerLabel(trigger: string): string {
 const ReconstructedHistoryReport: React.FC<{
   metadata: ReconstructedHistoryMetadata;
 }> = ({ metadata }) => {
+  const [open, setOpen] = useState(false);
   const stats = useMemo(
     () => statsFromReconstructionMetrics(metadata.metrics),
     [metadata.metrics],
@@ -279,6 +280,8 @@ const ReconstructedHistoryReport: React.FC<{
       <details
         className={styles.disclosure}
         data-testid="reconstructed-history-report"
+        open={open}
+        onToggle={(event) => setOpen(event.currentTarget.open)}
       >
         <summary
           className={styles.header}
@@ -310,27 +313,29 @@ const ReconstructedHistoryReport: React.FC<{
             <Icon icon={ChevronDown} size="sm" tone="muted" />
           </span>
         </summary>
-        <div className={styles.body}>
-          {(metadata.from_mode ?? metadata.to_mode) &&
-            metadata.from_mode !== metadata.to_mode && (
-              <p>
-                Mode: {metadata.from_mode ?? "—"} → {metadata.to_mode ?? "—"}
-              </p>
-            )}
-          {metadata.payload.messages.map((item, index) => (
-            <section key={item.message_id ?? index}>
-              <strong>{item.role}</strong>
-              <ToolMarkdown>
-                {typeof item.content === "string"
-                  ? item.content
-                  : JSON.stringify(item.content, null, 2)}
-              </ToolMarkdown>
-              {"tool_calls" in item && item.tool_calls && (
-                <pre>{JSON.stringify(item.tool_calls, null, 2)}</pre>
+        {open && (
+          <div className={styles.body}>
+            {(metadata.from_mode ?? metadata.to_mode) &&
+              metadata.from_mode !== metadata.to_mode && (
+                <p>
+                  Mode: {metadata.from_mode ?? "—"} → {metadata.to_mode ?? "—"}
+                </p>
               )}
-            </section>
-          ))}
-        </div>
+            {metadata.payload.messages.map((item, index) => (
+              <section key={item.message_id ?? index}>
+                <strong>{item.role}</strong>
+                <ToolMarkdown>
+                  {typeof item.content === "string"
+                    ? item.content
+                    : JSON.stringify(item.content, null, 2)}
+                </ToolMarkdown>
+                {"tool_calls" in item && item.tool_calls && (
+                  <pre>{JSON.stringify(item.tool_calls, null, 2)}</pre>
+                )}
+              </section>
+            ))}
+          </div>
+        )}
       </details>
       <div
         className={styles.eventSummary}
@@ -504,9 +509,9 @@ const LegacySummarizationMessage: React.FC<SummarizationMessageProps> = ({
 };
 
 /** Rebuilt messages belong inside this disclosure, never beside the report. */
-export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
+export const SummarizationMessage = React.memo(function SummarizationMessage({
   message,
-}) => {
+}: SummarizationMessageProps) {
   const report = getReconstructedHistoryMetadata({
     ...message,
     role: "compression_report",
@@ -520,4 +525,4 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
       </div>
     );
   return <ReconstructedHistoryReport metadata={report.metadata} />;
-};
+});

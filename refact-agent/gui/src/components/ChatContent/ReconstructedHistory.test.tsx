@@ -30,6 +30,7 @@ describe("reconstructed history disclosure", () => {
     );
     expect(screen.queryByTestId("summarization-card-stats")).toBeNull();
     expect(screen.getByText(/Context rebuilt/)).toBeInTheDocument();
+    expect(screen.queryByText("Reconstructed request")).toBeNull();
     await user.click(screen.getByTestId("summarization-card-header"));
     expect(disclosure).toHaveAttribute("open");
     expect(screen.getAllByText("Reconstructed request")).toHaveLength(1);

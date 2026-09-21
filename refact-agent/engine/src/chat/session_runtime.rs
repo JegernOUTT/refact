@@ -54,10 +54,30 @@ pub fn snapshot_with_agents(
     app: AppState,
     session: &ChatSession,
 ) -> impl std::future::Future<Output = (ChatEvent, Vec<BackgroundAgentSummary>)> + Send + 'static {
+    snapshot_with_agents_mode(app, session, true)
+}
+
+pub fn snapshot_with_agents_mode(
+    app: AppState,
+    session: &ChatSession,
+    include_messages: bool,
+) -> impl std::future::Future<Output = (ChatEvent, Vec<BackgroundAgentSummary>)> + Send + 'static {
+    let snapshot = if include_messages {
+        session.snapshot()
+    } else {
+        session.snapshot_without_messages()
+    };
+    snapshot_event_with_agents(app, session, snapshot)
+}
+
+fn snapshot_event_with_agents(
+    app: AppState,
+    session: &ChatSession,
+    mut snapshot: ChatEvent,
+) -> impl std::future::Future<Output = (ChatEvent, Vec<BackgroundAgentSummary>)> + Send + 'static {
     let chat_id = session.chat_id.clone();
     let base_background_agents: HashMap<String, BackgroundAgentSummary> =
         session.background_agents.clone();
-    let mut snapshot = session.snapshot();
     async move {
         let browser =
             crate::integrations::browser_runtime::browser_snapshot_for_chat(app.clone(), &chat_id)
