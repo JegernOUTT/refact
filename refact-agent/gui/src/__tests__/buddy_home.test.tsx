@@ -5421,7 +5421,11 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     const panelBlock = readCssBlock(recentChatsCss, ".panel");
     const entriesBlock = readCssBlock(recentChatsCss, ".scrollList");
 
-    expect(panelBlock).toContain("height: 100%");
+    // `max-height: 100%` contains the substring `height: 100%`, so the old
+    // single assertion silently matched either shape and could no longer tell a
+    // content-sized panel from one forced to fill its slot. Pin both halves.
+    expect(panelBlock).toContain("height: fit-content");
+    expect(panelBlock).toContain("max-height: 100%");
     expect(panelBlock).toContain("overflow: hidden");
     expect(entriesBlock).toContain("flex: 1");
     expect(entriesBlock).toContain("min-height: 0");

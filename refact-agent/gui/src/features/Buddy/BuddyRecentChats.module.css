@@ -1,8 +1,14 @@
+/* The panel sizes to its rows and stops at a bound: one conversation used to
+ * sit inside a 1192x468 box holding ~400px of reserved nothing. The old
+ * `height: 100%` becomes `max-height: 100%`, so a bounded tab slot still clips
+ * the panel rather than letting it grow — it just no longer forces the panel
+ * to fill a slot it has nothing to put in. */
 .panel {
   display: flex;
   flex-direction: column;
   gap: var(--rf-space-2);
-  height: 100%;
+  height: fit-content;
+  max-height: 100%;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -18,13 +24,16 @@
 
 /* Internal scroller — the panel header and filter stay pinned while the
  * conversation list scrolls. overflow-x stays hidden so long titles never
- * produce a stray horizontal scrollbar. */
+ * produce a stray horizontal scrollbar. The 220px cap is what keeps the
+ * content-sized panel under ~320px overall once its header, filter, gaps and
+ * padding are counted: long lists scroll here instead of stretching the page. */
 .scrollList {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
   gap: var(--rf-space-1);
+  max-height: 220px;
   min-width: 0;
   min-height: 0;
   overflow-y: auto;

@@ -472,6 +472,10 @@ const BuddyHomeContent: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [chosenTab, setChosenTab] = useState<BuddyHomeTab | null>(null);
   const [sceneOpen, setSceneOpen] = useState(true);
+  // The scene is decoration with a thumbnail's worth of decision value, so it
+  // starts as a compact strip and the full diorama is opt-in. `sceneOpen` still
+  // owns mount/unmount ("Open Play" / "Close Play"); this only owns size.
+  const [sceneExpanded, setSceneExpanded] = useState(false);
   const legacyTabs = legacyCompatibility || operatorMode === "loading";
   const defaultTab = legacyTabs ? LEGACY_DEFAULT_TAB : OPERATOR_DEFAULT_TAB;
   const tabOrder = useMemo(() => {
@@ -506,6 +510,10 @@ const BuddyHomeContent: React.FC = () => {
   const [updateSettings, { isLoading: isSavingSettings }] =
     useUpdateBuddySettingsMutation();
 
+  // Play is the one place the scene IS the content, so it always gets the full
+  // diorama regardless of the strip preference the rest of the page uses.
+  const sceneStrip = !sceneExpanded && activeTab !== "play";
+
   useEffect(() => {
     if (activeTab !== "play") return;
     setSceneOpen(true);
@@ -522,6 +530,11 @@ const BuddyHomeContent: React.FC = () => {
     if (sceneOpen && activeTab === "play") setChosenTab(null);
     setSceneOpen(!sceneOpen);
   }, [activeTab, sceneOpen]);
+
+  const handleToggleSceneSize = useCallback(() => {
+    if (activeTab === "play") setChosenTab(null);
+    setSceneExpanded((expanded) => !expanded);
+  }, [activeTab]);
 
   const handleLeavePlay = useCallback(() => {
     setChosenTab(null);
@@ -1240,66 +1253,103 @@ const BuddyHomeContent: React.FC = () => {
           />
         )}
 
-        <div ref={presenceRef} tabIndex={-1} className={styles.presenceSlot}>
-          <BuddyPresence
-            state={state}
-            headline={snapshot.state.semantic.headline}
-            speech={activeTab === "play" ? null : heroSpeech}
-            sceneMounted={sceneOpen}
-            sceneToggleLabel={sceneOpen ? "Close Play" : "Open Play"}
-            onToggleScene={handleToggleScene}
-            onControl={handleSpeechControl}
-          />
-        </div>
-
-        {sceneOpen && (
-          <Surface
-            as="section"
-            variant="glass"
-            radius="card"
-            className={classNames(
-              styles.heroCard,
-              activeTab === "play" && styles.heroCardExpanded,
-              deskHasWork && activeTab !== "play" && styles.heroCardDemoted,
-            )}
-            data-testid="buddy-home-hero"
-          >
-            <BuddyErrorBoundary key={worldBoundaryKey}>
-              <BuddyWorld
-                homeDoorDisabled
-                compact={activeTab !== "play"}
-                palette={palette}
-                stage={stage}
-                state={state}
-                pulse={pulse}
-                pet={pet}
-                nowPlaying={nowPlaying}
-                activeQuest={activeQuest}
-                onCanvasEvent={buddy.handleCanvasEvent}
-                activeSpeech={activeTab === "play" ? heroSpeech : null}
-                setupNeeded={setupNeeded}
-                onRunMode={handleRunMode}
-                onDismissSetup={handleDismissSetup}
-                onCare={(action, toy) => void handleCare(action, toy)}
-                onOpenPage={handleOpenWorldPage}
-                onSpeechControl={(control) => void handleSpeechControl(control)}
-                pendingCards={
-                  legacyCompatibility ? unreadOpportunities.length : 0
-                }
-                onOpenInbox={
-                  legacyCompatibility
-                    ? () => setChosenTab("opportunities")
-                    : undefined
-                }
-                verdictReaction={verdictReaction}
-              />
-            </BuddyErrorBoundary>
-          </Surface>
-        )}
-
         <BuddyNativeDecisions />
         <BuddyNativeApprovals />
         <BuddySupervision />
+
+        {/* Prominence, not deletion: the scene follows the Desk and the
+         * decision panels, and renders as a ~56px strip until someone asks for
+         * the diorama. A security finding and a snack request are no longer
+         * adjacent, and seasonal poetry no longer separates the work rows from
+         * the controls that act on them. */}
+        <Surface
+          as="section"
+          variant="plain"
+          radius="none"
+          className={classNames(
+            styles.sceneBlock,
+            sceneStrip && styles.sceneBlockStrip,
+          )}
+          aria-label="Buddy scene"
+          data-testid="buddy-home-scene"
+          data-scene-view={sceneStrip ? "strip" : "scene"}
+        >
+          {sceneOpen && (
+            <Surface
+              as="section"
+              variant="glass"
+              radius="card"
+              className={classNames(
+                styles.heroCard,
+                sceneStrip && styles.heroCardStrip,
+                activeTab === "play" && styles.heroCardExpanded,
+                deskHasWork && activeTab !== "play" && styles.heroCardDemoted,
+              )}
+              id="buddy-home-hero"
+              data-testid="buddy-home-hero"
+            >
+              <BuddyErrorBoundary key={worldBoundaryKey}>
+                <BuddyWorld
+                  homeDoorDisabled
+                  compact={activeTab !== "play"}
+                  palette={palette}
+                  stage={stage}
+                  state={state}
+                  pulse={pulse}
+                  pet={pet}
+                  nowPlaying={nowPlaying}
+                  activeQuest={activeQuest}
+                  onCanvasEvent={buddy.handleCanvasEvent}
+                  activeSpeech={activeTab === "play" ? heroSpeech : null}
+                  setupNeeded={setupNeeded}
+                  onRunMode={handleRunMode}
+                  onDismissSetup={handleDismissSetup}
+                  onCare={(action, toy) => void handleCare(action, toy)}
+                  onOpenPage={handleOpenWorldPage}
+                  onSpeechControl={(control) =>
+                    void handleSpeechControl(control)
+                  }
+                  pendingCards={
+                    legacyCompatibility ? unreadOpportunities.length : 0
+                  }
+                  onOpenInbox={
+                    legacyCompatibility
+                      ? () => setChosenTab("opportunities")
+                      : undefined
+                  }
+                  verdictReaction={verdictReaction}
+                />
+              </BuddyErrorBoundary>
+            </Surface>
+          )}
+
+          <div ref={presenceRef} tabIndex={-1} className={styles.presenceSlot}>
+            <BuddyPresence
+              state={state}
+              headline={snapshot.state.semantic.headline}
+              speech={activeTab === "play" ? null : heroSpeech}
+              sceneMounted={sceneOpen}
+              sceneToggleLabel={sceneOpen ? "Close Play" : "Open Play"}
+              onToggleScene={handleToggleScene}
+              onControl={handleSpeechControl}
+            />
+          </div>
+
+          {sceneOpen && (
+            <div className={styles.sceneSizeActions}>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                aria-expanded={!sceneStrip}
+                aria-controls="buddy-home-hero"
+                onClick={handleToggleSceneSize}
+              >
+                {sceneStrip ? "Expand scene" : "Collapse scene"}
+              </Button>
+            </div>
+          )}
+        </Surface>
 
         {editorial.canFeedback && editorial.speech && (
           <Surface
