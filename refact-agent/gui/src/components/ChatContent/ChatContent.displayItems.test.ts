@@ -1036,4 +1036,131 @@ describe("ChatContent display items", () => {
     expect(items).toHaveLength(1);
     expect(items[0]?.type).toBe("skill_activated");
   });
+
+  describe("ask_questions answer replies", () => {
+    const toolCallId = "toolu_01K3TWmB6ooX36c3eEXQkVWB";
+
+    function askQuestionsExchange(answerContent: string): ChatMessages {
+      return [
+        assistantMessage({
+          message_id: "assistant-ask",
+          content: "",
+          tool_calls: [
+            {
+              id: toolCallId,
+              index: 0,
+              type: "function",
+              function: { name: "ask_questions", arguments: "{}" },
+            },
+          ],
+        }),
+        {
+          role: "tool",
+          message_id: "tool-ask",
+          tool_call_id: toolCallId,
+          content: JSON.stringify({
+            type: "ask_questions",
+            tool_call_id: toolCallId,
+            questions: [],
+          }),
+        },
+        userMessage({ message_id: "user-answer", content: answerContent }),
+      ];
+    }
+
+    it("hides the native ask_questions_answer reply so only the tool card renders", () => {
+      const messages = askQuestionsExchange(
+        JSON.stringify({
+          type: "ask_questions_answer",
+          tool_call_id: toolCallId,
+          answers: [
+            { id: "count_method", answer: "A) Crown-lobe clustering" },
+            { id: "delete_scope", answer: true },
+          ],
+        }),
+      );
+
+      const items = buildDisplayItems(messages, false);
+
+      expect(items.some((item) => item.type === "user")).toBe(false);
+    });
+
+    it("still hides the legacy [QA:] marker reply", () => {
+      const messages = askQuestionsExchange(
+        `[QA:${toolCallId}] answered via form`,
+      );
+
+      const items = buildDisplayItems(messages, false);
+
+      expect(items.some((item) => item.type === "user")).toBe(false);
+    });
+
+    it("keeps an answer reply addressed to a different tool call visible", () => {
+      const messages = askQuestionsExchange(
+        JSON.stringify({
+          type: "ask_questions_answer",
+          tool_call_id: "some-other-tool-call",
+          answers: [{ id: "count_method", answer: "nope" }],
+        }),
+      );
+
+      const items = buildDisplayItems(messages, false);
+
+      expect(items.some((item) => item.type === "user")).toBe(true);
+    });
+
+    it("keeps an ordinary user reply visible", () => {
+      const messages = askQuestionsExchange("just a normal follow-up message");
+
+      const items = buildDisplayItems(messages, false);
+
+      expect(items.some((item) => item.type === "user")).toBe(true);
+    });
+
+    it("hides the appended native answer on the incremental live path", () => {
+      const answered = askQuestionsExchange(
+        JSON.stringify({
+          type: "ask_questions_answer",
+          tool_call_id: toolCallId,
+          answers: [{ id: "delete_scope", answer: true }],
+        }),
+      );
+      const base = answered.slice(0, 2);
+      const previousItems = buildDisplayItems(base, false);
+
+      const incremental = tryIncrementalDisplayItemsUpdate(
+        base,
+        answered,
+        previousItems,
+        false,
+      );
+      const full = buildDisplayItems(answered, false);
+
+      expect(full.some((item) => item.type === "user")).toBe(false);
+      expect(incremental?.some((item) => item.type === "user") ?? false).toBe(
+        false,
+      );
+    });
+
+    it("hides the native answer carried in a multimodal text block", () => {
+      const messages = askQuestionsExchange("placeholder");
+      messages[2] = userMessage({
+        message_id: "user-answer",
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              type: "ask_questions_answer",
+              tool_call_id: toolCallId,
+              answers: [{ id: "delete_scope", answer: true }],
+            }),
+          },
+        ],
+      });
+
+      const items = buildDisplayItems(messages, false);
+
+      expect(items.some((item) => item.type === "user")).toBe(false);
+    });
+  });
 });

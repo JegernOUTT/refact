@@ -3802,6 +3802,31 @@ mod tests {
     }
 
     #[test]
+    fn registered_questions_reach_subscribers_in_the_next_snapshot() {
+        let mut session = make_session();
+        let mut rx = session.subscribe();
+
+        session
+            .register_pending_questions(question_set("ask-live"))
+            .unwrap();
+        let snapshot = session.snapshot();
+        session.emit(snapshot);
+
+        let envelope: EventEnvelope =
+            serde_json::from_str(rx.try_recv().unwrap().as_str()).unwrap();
+        match envelope.event {
+            ChatEvent::Snapshot {
+                pending_questions, ..
+            } => {
+                assert_eq!(pending_questions.len(), 1);
+                assert_eq!(pending_questions[0].tool_call_id, "ask-live");
+                assert_eq!(pending_questions[0].status, PendingQuestionStatus::Pending);
+            }
+            _ => panic!("expected a Snapshot event carrying pending questions"),
+        }
+    }
+
+    #[test]
     fn pending_questions_reject_invalid_answers_without_mutating_or_user_message() {
         let mut session = make_session();
         session

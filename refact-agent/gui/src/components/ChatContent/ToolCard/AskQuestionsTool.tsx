@@ -463,6 +463,25 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
     dispatch(requestSseRefresh({ chatId: threadId }));
   }, [dispatch, submissionAck, threadId]);
 
+  const syncRefreshRequestedRef = useRef(false);
+  useEffect(() => {
+    if (nativeQuestionSet) {
+      syncRefreshRequestedRef.current = false;
+      return;
+    }
+    if (!hasNativeQuestionCapability || !data || hasNextMessage) return;
+    if (syncRefreshRequestedRef.current) return;
+    syncRefreshRequestedRef.current = true;
+    dispatch(requestSseRefresh({ chatId: threadId }));
+  }, [
+    dispatch,
+    hasNativeQuestionCapability,
+    data,
+    hasNextMessage,
+    nativeQuestionSet,
+    threadId,
+  ]);
+
   if (nativeQuestionSet) {
     const isPending = nativeQuestionSet.status === "pending";
     const hasCompleteAnswers = nativeQuestionSet.questions.every((question) => {

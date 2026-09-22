@@ -7,6 +7,11 @@ import {
   within,
 } from "../../../utils/test-utils";
 import { AskQuestionsTool } from "./AskQuestionsTool";
+import { setUpStore } from "../../../app/store";
+import {
+  backUpMessages,
+  clearSseRefreshRequest,
+} from "../../../features/Chat/Thread/actions";
 import type { ChatMessage, ToolCall } from "../../../services/refact/types";
 
 function toolCall(): ToolCall {
@@ -149,5 +154,64 @@ describe("AskQuestionsTool", () => {
     runtime.thread.pending_questions[0].status = "cancelled";
     rerender(<AskQuestionsTool toolCall={toolCall()} />);
     expect(screen.queryByRole("button", { name: "Submit Answers" })).toBeNull();
+  });
+
+  describe("pending question sync self-heal", () => {
+    test("requests one SSE refresh while the question set is still syncing", () => {
+      const chat = createDefaultChatState();
+      const threadId = chat.current_thread_id;
+      const runtime = chat.threads[threadId];
+      runtime.thread.messages = [toolMessage()];
+      runtime.thread.pending_questions = [];
+
+      const store = setUpStore({ chat });
+      const { rerender } = render(<AskQuestionsTool toolCall={toolCall()} />, {
+        store,
+      });
+
+      expect(screen.getByText("Questions syncing")).toBeInTheDocument();
+      expect(store.getState().chat.sse_refresh_requested).toBe(threadId);
+
+      store.dispatch(clearSseRefreshRequest());
+      store.dispatch(
+        backUpMessages({ id: threadId, messages: [toolMessage()] }),
+      );
+      rerender(<AskQuestionsTool toolCall={toolCall()} />);
+
+      expect(store.getState().chat.sse_refresh_requested).toBeNull();
+    });
+
+    test("does not refresh when the engine never advertised pending questions", () => {
+      const chat = createDefaultChatState();
+      const runtime = chat.threads[chat.current_thread_id];
+      runtime.thread.messages = [toolMessage()];
+
+      const store = setUpStore({ chat });
+      render(<AskQuestionsTool toolCall={toolCall()} />, { store });
+
+      expect(store.getState().chat.sse_refresh_requested).toBeNull();
+    });
+
+    test("does not refresh for a historical question the chat already moved past", () => {
+      const chat = createDefaultChatState();
+      const runtime = chat.threads[chat.current_thread_id];
+      runtime.thread.messages = [
+        toolMessage(),
+        {
+          role: "user",
+          content: JSON.stringify({
+            type: "ask_questions_answer",
+            tool_call_id: "ask-questions-single-select",
+            answers: [{ id: "priority_path", answer: "already answered" }],
+          }),
+        },
+      ];
+      runtime.thread.pending_questions = [];
+
+      const store = setUpStore({ chat });
+      render(<AskQuestionsTool toolCall={toolCall()} />, { store });
+
+      expect(store.getState().chat.sse_refresh_requested).toBeNull();
+    });
   });
 });

@@ -1077,6 +1077,26 @@ function extractUserMessageText(content: UserMessage["content"]): string {
   return "";
 }
 
+function isAskQuestionsAnswerText(
+  contentStr: string,
+  toolCallId: string,
+): boolean {
+  if (contentStr.startsWith(`[QA:${toolCallId}]`)) return true;
+  const trimmed = contentStr.trim();
+  if (!trimmed.startsWith("{")) return false;
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (typeof parsed !== "object" || parsed === null) return false;
+    const record = parsed as Record<string, unknown>;
+    return (
+      record.type === "ask_questions_answer" &&
+      record.tool_call_id === toolCallId
+    );
+  } catch {
+    return false;
+  }
+}
+
 function computeHiddenQaMessageIndices(messages: ChatMessages): Set<number> {
   const hiddenIndices = new Set<number>();
   const askQuestionsToolIds = new Map<string, number>();
@@ -1102,7 +1122,7 @@ function computeHiddenQaMessageIndices(messages: ChatMessages): Set<number> {
       }
       if (foundToolResult && msg.role === "user") {
         const contentStr = extractUserMessageText(msg.content);
-        if (contentStr.startsWith(`[QA:${toolCallId}]`)) {
+        if (isAskQuestionsAnswerText(contentStr, toolCallId)) {
           hiddenIndices.add(j);
         }
         break;

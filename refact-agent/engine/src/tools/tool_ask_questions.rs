@@ -172,6 +172,11 @@ impl Tool for ToolAskQuestions {
                 session.rollback_pending_question_registration(tool_call_id);
                 return Err(format!("failed to persist pending questions: {error}"));
             }
+            {
+                let mut session = session_arc.lock().await;
+                let snapshot = session.snapshot();
+                session.emit(snapshot);
+            }
         }
 
         {
