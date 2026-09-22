@@ -17,6 +17,7 @@
 blocklist:
   - "*/.*"
   - "*/target/*"
+  - "*/target-*/*"
   - "*/node_modules/*"
   - "*/vendor/*"
   - "*/build/*"

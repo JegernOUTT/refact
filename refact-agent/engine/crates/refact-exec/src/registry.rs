@@ -18,12 +18,12 @@ use crate::types::{
     ExecStatus, ExecWriteStdinResult, PushMode,
 };
 
-#[cfg(not(test))]
+// Tests used to shorten this to 200ms on non-Windows, which turned a kill budget into a
+// measurement of the machine: removing two processes exceeded it on a loaded macOS runner and
+// failed the release. Windows tests already opted back out to 5s. No test asserts the duration,
+// only that the path is reached, so one value everywhere costs ~10s of suite time and removes the
+// flake.
 const REMOVE_KILL_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(all(test, target_os = "windows"))]
-const REMOVE_KILL_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(all(test, not(target_os = "windows")))]
-const REMOVE_KILL_TIMEOUT: Duration = Duration::from_millis(200);
 const PROCESS_COMPLETION_CHANNEL_CAPACITY: usize = 256;
 const PROCESS_OUTPUT_CHANNEL_CAPACITY: usize = 4096;
 const STDIN_OUTPUT_QUIET_PERIOD: Duration = Duration::from_millis(100);

@@ -35,4 +35,4 @@ pub use ruby::RubyExtractor;
 pub use rust::RustExtractor;
 pub use scala::ScalaExtractor;
 pub use swift::SwiftExtractor;
-pub use typescript::TypeScriptExtractor;
+pub use typescript::{TsxExtractor, TypeScriptExtractor};

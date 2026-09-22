@@ -1,0 +1,118 @@
+.approvals,
+.session {
+  display: flex;
+  box-sizing: border-box;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.approvals {
+  padding: var(--rf-panel-pad);
+}
+
+.session {
+  padding: var(--rf-space-3);
+}
+
+.sessionTitle {
+  margin: 0;
+  color: var(--rf-color-fg);
+}
+
+.request {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+}
+
+.request[data-disabled="true"] {
+  opacity: 0.55;
+}
+
+.request[data-disabled="true"] .choice {
+  cursor: not-allowed;
+}
+
+.requestTitle {
+  margin: 0;
+  color: var(--rf-color-fg);
+}
+
+.choice {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--rf-hit-min);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-radius: var(--rf-radius-ctl);
+  color: var(--rf-color-fg);
+  cursor: pointer;
+}
+
+.choice:hover {
+  background: var(--rf-surface-1);
+}
+
+.choice input {
+  flex: none;
+  margin: 0;
+  accent-color: var(--rf-color-accent);
+}
+
+.choice input:disabled {
+  cursor: not-allowed;
+}
+
+.command {
+  box-sizing: border-box;
+  max-width: 100%;
+  max-height: 12rem;
+  margin: 0;
+  padding: var(--rf-space-2);
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--rf-color-fg);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-2);
+}
+
+.note {
+  margin: 0;
+  color: var(--rf-color-muted);
+}
+
+.alert {
+  margin: 0;
+  color: var(--rf-color-danger);
+}
+
+.errorRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-color-danger);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-color-danger-soft);
+}
+
+.errorText {
+  flex: 1 1 12rem;
+  margin: 0;
+  min-width: 0;
+  color: var(--rf-color-fg);
+}

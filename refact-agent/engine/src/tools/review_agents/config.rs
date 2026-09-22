@@ -38,6 +38,17 @@ pub struct StageOverride {
     pub enabled: Option<bool>,
     pub model_slot: Option<ModelSlot>,
     pub max_steps: Option<usize>,
+    pub budget_minutes: Option<u64>,
+}
+
+impl StageOverride {
+    pub fn warn_if_deprecated(&self, stage_id: &str) {
+        if self.budget_minutes.is_some() {
+            tracing::warn!(
+                "review_agents.yaml override for stage '{stage_id}' sets budget_minutes, which no longer has any effect: stages are stopped only after idle_timeout_secs of silence"
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -1,7 +1,9 @@
 use crate::app_state::AppState;
 
-use super::super::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
-use super::super::voice_service::{voice_service, SpeechIntent, VoiceCtx};
+use super::super::scheduler::{
+    planned_speech_runtime_event, BuddyJob, BuddyJobContext, BuddyJobResult, SpeechCandidate,
+};
+use super::super::voice_service::SpeechIntent;
 
 pub struct SpeakerMemoryPulseCommentaryJob;
 
@@ -26,32 +28,20 @@ impl BuddyJob for SpeakerMemoryPulseCommentaryJob {
             || ctx.pulse.memory.stale_conflicts > 0
     }
 
-    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
+    async fn execute(&self, _gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let summary = memory_summary(&ctx);
-        let voice = voice_service().await;
-        let speech = voice
-            .render_speech(
-                gcx,
-                VoiceCtx {
-                    persona: &ctx.personality,
-                    identity_name: &ctx.identity_name,
-                    pulse_one_liner: summary.clone(),
-                    workflow_id: None,
-                    workflow_summary: Some(&summary),
-                },
-                SpeechIntent::MemoryPulseCommentary,
-            )
-            .await;
+        let candidate = SpeechCandidate::from_context(
+            &ctx,
+            SpeechIntent::MemoryPulseCommentary,
+            None,
+            summary.clone(),
+            summary.clone(),
+            "Memory pulse note".to_string(),
+            Some(summary.clone()),
+        );
         BuddyJobResult {
-            speech_intent: Some(SpeechIntent::MemoryPulseCommentary),
-            runtime_event: Some(super::super::scheduler::speech_runtime_event(
-                self.id(),
-                SpeechIntent::MemoryPulseCommentary,
-                &speech,
-                "Memory pulse note".to_string(),
-                Some(summary.clone()),
-            )),
-            speech: Some(speech),
+            runtime_event: Some(planned_speech_runtime_event(self.id(), &candidate)),
+            speech_candidate: Some(candidate),
             last_result: Some(summary),
             ..Default::default()
         }

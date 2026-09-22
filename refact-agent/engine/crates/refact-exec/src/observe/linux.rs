@@ -191,7 +191,7 @@ impl Handle {
             state
                 .status
                 .clone()
-                .unwrap_or_else(|| ObservationStatus::Pending(state.access.clone()))
+                .unwrap_or_else(|| ObservationStatus::Pending(state.access()))
         }
     }
 }
@@ -247,8 +247,23 @@ impl Runtime {
 struct SharedState {
     exit: Option<Result<Option<i32>, String>>,
     status: Option<ObservationStatus>,
-    access: ObservedAccess,
+    reads: HashSet<PathBuf>,
+    writes: HashSet<PathBuf>,
     failure: Option<String>,
+}
+
+impl SharedState {
+    fn access(&self) -> ObservedAccess {
+        sorted_access(&self.reads, &self.writes)
+    }
+}
+
+fn sorted_access(reads: &HashSet<PathBuf>, writes: &HashSet<PathBuf>) -> ObservedAccess {
+    let mut reads: Vec<_> = reads.iter().cloned().collect();
+    let mut writes: Vec<_> = writes.iter().cloned().collect();
+    reads.sort();
+    writes.sort();
+    ObservedAccess { reads, writes }
 }
 
 struct Shared {
@@ -309,13 +324,13 @@ impl Shared {
 
     fn record_access(&self, path: PathBuf, reads: bool, writes: bool) {
         let mut state = self.state.lock().unwrap();
-        if reads && !state.access.reads.contains(&path) {
-            state.access.reads.push(path.clone());
-            state.access.reads.sort();
-        }
-        if writes && !state.access.writes.contains(&path) {
-            state.access.writes.push(path);
-            state.access.writes.sort();
+        if reads && writes {
+            state.reads.insert(path.clone());
+            state.writes.insert(path);
+        } else if reads {
+            state.reads.insert(path);
+        } else if writes {
+            state.writes.insert(path);
         }
     }
 }
@@ -475,14 +490,7 @@ impl Supervisor {
                 match returned_fd(process_id) {
                     Ok(Some(fd)) => {
                         if let Some(path) = resolve_fd(process_id, fd) {
-                            self.shared
-                                .record_access(path.clone(), open.reads, open.writes);
-                            if open.reads {
-                                self.reads.insert(path.clone());
-                            }
-                            if open.writes {
-                                self.writes.insert(path);
-                            }
+                            self.publish_access(path, open);
                         }
                     }
                     Ok(None) => {}
@@ -518,12 +526,25 @@ impl Supervisor {
         true
     }
 
+    fn publish_access(&mut self, path: PathBuf, open: PendingOpen) -> bool {
+        let publish_reads = open.reads && !self.reads.contains(&path);
+        let publish_writes = open.writes && !self.writes.contains(&path);
+        if !publish_reads && !publish_writes {
+            return false;
+        }
+        if publish_reads {
+            self.reads.insert(path.clone());
+        }
+        if publish_writes {
+            self.writes.insert(path.clone());
+        }
+        self.shared
+            .record_access(path, publish_reads, publish_writes);
+        true
+    }
+
     fn observed_access(&self) -> ObservedAccess {
-        let mut reads: Vec<_> = self.reads.iter().cloned().collect();
-        let mut writes: Vec<_> = self.writes.iter().cloned().collect();
-        reads.sort();
-        writes.sort();
-        ObservedAccess { reads, writes }
+        sorted_access(&self.reads, &self.writes)
     }
 
     fn release_remaining_tracees(&mut self) {
@@ -960,5 +981,91 @@ mod tests {
         let unavailable = ObservationStatus::Unavailable("injected observer failure".to_string());
         assert_eq!(handle.status(), unavailable);
         assert_eq!(handle.wait_status().await, unavailable);
+    }
+
+    fn read_open() -> PendingOpen {
+        PendingOpen {
+            reads: true,
+            writes: false,
+        }
+    }
+
+    fn write_open() -> PendingOpen {
+        PendingOpen {
+            reads: false,
+            writes: true,
+        }
+    }
+
+    fn shared_access(shared: &Arc<Shared>) -> ObservedAccess {
+        shared.state.lock().unwrap().access()
+    }
+
+    #[test]
+    fn repeated_path_is_published_once() {
+        let shared = Arc::new(Shared::new());
+        let mut supervisor = Supervisor::new(0, false, shared.clone());
+        let path = PathBuf::from("/tmp/repeat");
+
+        assert!(supervisor.publish_access(path.clone(), read_open()));
+        assert!(!supervisor.publish_access(path.clone(), read_open()));
+        assert!(!supervisor.publish_access(path.clone(), read_open()));
+
+        let access = shared_access(&shared);
+        assert_eq!(access.reads, vec![path]);
+        assert!(access.writes.is_empty());
+        assert_eq!(access, supervisor.observed_access());
+    }
+
+    #[test]
+    fn read_then_write_publishes_both_bits() {
+        let shared = Arc::new(Shared::new());
+        let mut supervisor = Supervisor::new(0, false, shared.clone());
+        let path = PathBuf::from("/tmp/read-then-write");
+
+        assert!(supervisor.publish_access(path.clone(), read_open()));
+        assert!(supervisor.publish_access(path.clone(), write_open()));
+        assert!(!supervisor.publish_access(path.clone(), write_open()));
+
+        let access = shared_access(&shared);
+        assert_eq!(access.reads, vec![path.clone()]);
+        assert_eq!(access.writes, vec![path]);
+    }
+
+    #[test]
+    fn write_then_read_publishes_both_bits() {
+        let shared = Arc::new(Shared::new());
+        let mut supervisor = Supervisor::new(0, false, shared.clone());
+        let path = PathBuf::from("/tmp/write-then-read");
+
+        assert!(supervisor.publish_access(path.clone(), write_open()));
+        assert!(supervisor.publish_access(path.clone(), read_open()));
+        assert!(!supervisor.publish_access(path.clone(), read_open()));
+
+        let access = shared_access(&shared);
+        assert_eq!(access.reads, vec![path.clone()]);
+        assert_eq!(access.writes, vec![path]);
+    }
+
+    #[test]
+    fn snapshot_is_sorted_and_deduplicated() {
+        let shared = Arc::new(Shared::new());
+        let mut supervisor = Supervisor::new(0, false, shared.clone());
+        let both = PendingOpen {
+            reads: true,
+            writes: true,
+        };
+        for name in ["/tmp/c", "/tmp/a", "/tmp/b", "/tmp/a", "/tmp/c"] {
+            supervisor.publish_access(PathBuf::from(name), both);
+        }
+
+        let expected: Vec<PathBuf> = ["/tmp/a", "/tmp/b", "/tmp/c"]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        let access = shared_access(&shared);
+        assert_eq!(access.reads, expected);
+        assert_eq!(access.writes, expected);
+        assert_eq!(access, supervisor.observed_access());
     }
 }

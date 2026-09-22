@@ -17,14 +17,11 @@ import {
 import type { LspChatMessage } from "../../services/refact";
 import {
   selectModelById,
-  selectMessagesById,
   selectThreadModeById,
   selectThreadImagesById,
   useThreadId,
 } from "../../features/Chat/Thread";
 import { formatMessagesForLsp } from "../../features/Chat/Thread/utils";
-
-const EMPTY_MESSAGES: ReturnType<typeof selectMessagesById> = [];
 
 function useGetCommandCompletionQuery(
   query: string,
@@ -90,9 +87,6 @@ function useGetCommandPreviewQuery(
     selectThreadImagesById(state, chatId),
   );
 
-  const messages = useAppSelector((state) =>
-    hasPreviewQuery ? selectMessagesById(state, chatId) : EMPTY_MESSAGES,
-  );
   const currentThreadMode = useAppSelector((state) =>
     selectThreadModeById(state, chatId),
   );
@@ -124,8 +118,8 @@ function useGetCommandPreviewQuery(
   }, [query, attachedImages]);
 
   const messagesToSend: LspChatMessage[] = useMemo(
-    () => formatMessagesForLsp([...messages, userMessage]),
-    [messages, userMessage],
+    () => formatMessagesForLsp([userMessage]),
+    [userMessage],
   );
 
   const metaToSend: ChatMeta = {

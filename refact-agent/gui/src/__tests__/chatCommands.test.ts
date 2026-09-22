@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { QueuedMessage } from "../components/ChatContent/QueuedMessage";
+import { QueueRow } from "../components/ChatContent/QueueRow";
 import { ChatThreadProvider } from "../features/Chat/Thread";
 import {
   createDefaultChatState,
@@ -15,6 +15,7 @@ import {
   abortGeneration,
   respondToToolConfirmation,
   respondToToolConfirmations,
+  answerQuestions,
   updateMessage,
   removeMessage,
   cancelQueuedItem,
@@ -248,7 +249,7 @@ describe("chatCommands", () => {
         React.createElement(
           ThreadProvider,
           { chatId },
-          React.createElement(QueuedMessage, {
+          React.createElement(QueueRow, {
             position: 1,
             queuedItem: {
               client_request_id: "image/request",
@@ -272,9 +273,9 @@ describe("chatCommands", () => {
         },
       );
 
-      await user.click(
-        screen.getByRole("button", { name: "Change to send next" }),
-      );
+      await user.click(screen.getByRole("button", { name: /1 Your message/ }));
+
+      await user.click(screen.getByRole("radio", { name: "Send next" }));
 
       await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
       expect(mockFetch).toHaveBeenCalledWith(
@@ -560,6 +561,36 @@ describe("chatCommands", () => {
       const calledBody = getRequestBody(mockFetch.mock.calls[0] as MockCall);
       expect(calledBody.type).toBe("tool_decisions");
       expect(calledBody.decisions).toEqual(decisions);
+    });
+  });
+
+  describe("answerQuestions", () => {
+    it("sends the native answer_questions command", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true } as Response);
+
+      const requestId = await answerQuestions(
+        "test-chat",
+        "call-questions",
+        [
+          { id: "confirm", answer: true },
+          { id: "scope", answer: ["GUI"] },
+        ],
+        8001,
+      );
+
+      expect(getRequestBody(mockFetch.mock.calls[0] as MockCall)).toMatchObject(
+        {
+          type: "answer_questions",
+          tool_call_id: "call-questions",
+          answers: [
+            { id: "confirm", answer: true },
+            { id: "scope", answer: ["GUI"] },
+          ],
+        },
+      );
+      expect(requestId).toBe(
+        getRequestBody(mockFetch.mock.calls[0] as MockCall).client_request_id,
+      );
     });
   });
 

@@ -10,6 +10,7 @@ use refact_core::chat_types::{
     ChatContent, ChatMessage, ContextFile, PostprocessSettings, SearchResult, format_search_results,
 };
 use crate::config::limits;
+use crate::line_truncation::{truncate_tool_line, truncate_tool_text_lines};
 use crate::pp_context_files::postprocess_context_files;
 use crate::pp_context_provider::PPContextTrait;
 use crate::pp_plain_text::postprocess_plain_text;
@@ -599,6 +600,8 @@ async fn fill_skip_pp_files_with_budget(
                 continue;
             }
 
+            cf.file_content = truncate_tool_text_lines(&cf.file_content);
+
             let tokens = count_text_tokens_with_fallback(tokenizer.clone(), &cf.file_content);
             if tokens > per_file_budget {
                 let total_lines = cf.file_content.lines().count();
@@ -793,7 +796,7 @@ fn format_lines_with_numbers(lines: &[&str], start: usize, end: usize) -> String
     lines[start..end]
         .iter()
         .enumerate()
-        .map(|(i, line)| format!("{:4} | {}", start + i + 1, line))
+        .map(|(i, line)| format!("{:4} | {}", start + i + 1, truncate_tool_line(line)))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1081,6 +1084,47 @@ mod tests {
         assert!(result.contains("lines omitted"));
         assert!(result.contains("of 100 lines"));
         assert!(result.contains("pp_max_per_file_budget_tokens"));
+    }
+
+    #[tokio::test]
+    async fn skip_pp_prefilled_one_liner_uses_the_tool_line_cap() {
+        let mut file = make_context_file("minified.json", 1, 1);
+        file.skip_pp = true;
+        file.file_content = format!("HEAD{}TAIL", "x".repeat(50_000));
+
+        let (result, notes) =
+            fill_skip_pp_files_with_budget(Arc::new(NoopPPContext), None, vec![file], 100_000, &[])
+                .await;
+
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].file_content.chars().count(), 2_000);
+        assert!(result[0].file_content.starts_with("HEAD"));
+        assert!(result[0].file_content.ends_with("TAIL"));
+        assert!(result[0].file_content.contains("chars omitted"));
+        assert!(result[0].file_content.contains("tool_max_line_chars"));
+        assert_eq!((result[0].line1, result[0].line2), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn skip_pp_hydrated_one_liner_uses_the_tool_line_cap() {
+        let mut file = make_context_file("minified.power", 1, 1);
+        file.skip_pp = true;
+        let context = StaticPPContext {
+            content: format!("HEAD{}TAIL", "x".repeat(50_000)),
+        };
+
+        let (result, notes) =
+            fill_skip_pp_files_with_budget(Arc::new(context), None, vec![file], 100_000, &[]).await;
+
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].file_content.lines().count(), 1);
+        assert!(result[0].file_content.contains("chars omitted"));
+        assert!(result[0].file_content.contains("tool_max_line_chars"));
+        assert!(result[0].file_content.ends_with("TAIL"));
+        assert!(result[0].file_content.chars().count() < 2_020);
+        assert_eq!((result[0].line1, result[0].line2), (1, 1));
     }
 
     #[test]
@@ -1449,6 +1493,32 @@ mod tests {
         }
         async fn correct_to_nearest_filename(&self, _path: &str, _limit: usize) -> Vec<String> {
             vec![]
+        }
+        async fn shortify_paths(&self, paths: &[String]) -> Vec<String> {
+            paths.to_vec()
+        }
+        async fn doc_defs_for_path(
+            &self,
+            _path: &str,
+        ) -> Vec<Arc<refact_core::ast_types::AstDefinition>> {
+            vec![]
+        }
+        fn canonical_path(&self, path: &str) -> PathBuf {
+            PathBuf::from(path)
+        }
+    }
+
+    struct StaticPPContext {
+        content: String,
+    }
+
+    #[async_trait::async_trait]
+    impl PPContextTrait for StaticPPContext {
+        async fn read_file(&self, _path: &PathBuf) -> Result<String, String> {
+            Ok(self.content.clone())
+        }
+        async fn correct_to_nearest_filename(&self, path: &str, _limit: usize) -> Vec<String> {
+            vec![path.to_string()]
         }
         async fn shortify_paths(&self, paths: &[String]) -> Vec<String> {
             paths.to_vec()

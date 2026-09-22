@@ -1,7 +1,8 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::global_context::GlobalContext;
+use crate::tools::tools_list::ToolGating;
 
 const BUDDY_ERROR_TYPE: &str = "mode_config";
 const BUDDY_SOURCE: &str = "yaml_configs/mode_validation.rs";
@@ -17,16 +18,6 @@ fn claim_first_report(key: String) -> bool {
         Ok(mut seen) => seen.insert(key),
         Err(_) => false,
     }
-}
-
-pub fn unknown_tool_names(declared: &[String], registered: &HashSet<String>) -> Vec<String> {
-    declared
-        .iter()
-        .filter(|name| !registered.contains(name.as_str()))
-        .cloned()
-        .collect::<BTreeSet<String>>()
-        .into_iter()
-        .collect()
 }
 
 pub fn dropped_tool_names(base_tools: &[String], resolved_tools: &[String]) -> Vec<String> {
@@ -51,28 +42,100 @@ fn summarize_tools(names: &[String]) -> String {
     )
 }
 
-pub async fn warn_unknown_mode_tools(
+pub fn unknown_tool_names(
+    declared: &[String],
+    registered: &HashSet<String>,
+    gated: &HashMap<String, ToolGating>,
+) -> Vec<String> {
+    declared
+        .iter()
+        .filter(|name| !registered.contains(name.as_str()) && !gated.contains_key(name.as_str()))
+        .cloned()
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect()
+}
+
+pub fn gated_tool_names(
+    declared: &[String],
+    gated: &HashMap<String, ToolGating>,
+) -> BTreeMap<(String, String), Vec<String>> {
+    let mut grouped = BTreeMap::new();
+    for name in declared.iter().collect::<BTreeSet<_>>() {
+        let Some(gating) = gated.get(name.as_str()) else {
+            continue;
+        };
+        grouped
+            .entry((
+                gating.capability.to_string(),
+                format!("{} ({})", gating.unavailable_reason, gating.enablement),
+            ))
+            .or_insert_with(Vec::new)
+            .push(name.clone());
+    }
+    grouped
+}
+
+pub fn mode_tool_diagnostics(
+    mode_id: &str,
+    declared: &[String],
+    registered: &HashSet<String>,
+    gated: &HashMap<String, ToolGating>,
+) -> Vec<(String, crate::buddy::diagnostics::DiagnosticSeverity)> {
+    let mut diagnostics = Vec::new();
+    let unknown = unknown_tool_names(declared, registered, gated);
+    if !unknown.is_empty() {
+        diagnostics.push((
+            format!(
+                "Mode '{}' lists {} tool name(s) that are not registered, so they are silently unavailable and the model will get \"tool not found\" if it calls them: {}. Fix the spelling or remove them from the mode YAML.",
+                mode_id,
+                unknown.len(),
+                summarize_tools(&unknown)
+            ),
+            crate::buddy::diagnostics::DiagnosticSeverity::High,
+        ));
+    }
+    for ((capability, enablement), names) in gated_tool_names(declared, gated) {
+        diagnostics.push((
+            format!(
+                "Mode '{}' lists {} tool{} that {} currently unavailable: {} need{} the {}, {}. This is not a typo — leave the mode YAML alone.",
+                mode_id,
+                names.len(),
+                if names.len() == 1 { "" } else { "s" },
+                if names.len() == 1 {
+                    "exists but is"
+                } else {
+                    "exist but are"
+                },
+                summarize_tools(&names),
+                if names.len() == 1 { "s" } else { "" },
+                capability,
+                enablement,
+            ),
+            crate::buddy::diagnostics::DiagnosticSeverity::Low,
+        ));
+    }
+    diagnostics
+}
+
+pub async fn warn_unavailable_mode_tools(
     gcx: Arc<GlobalContext>,
     mode_id: &str,
     declared: &[String],
     registered: &HashSet<String>,
+    gated: &HashMap<String, ToolGating>,
 ) {
-    let unknown = unknown_tool_names(declared, registered);
-    if unknown.is_empty() {
-        return;
+    for (message, severity) in mode_tool_diagnostics(mode_id, declared, registered, gated) {
+        let key = format!("mode-tools:{}:{}", mode_id, message);
+        if !claim_first_report(key) {
+            continue;
+        }
+        match severity {
+            crate::buddy::diagnostics::DiagnosticSeverity::High => tracing::warn!("{}", message),
+            _ => tracing::info!("{}", message),
+        }
+        notify_buddy(gcx.clone(), &message, severity).await;
     }
-    let listed = summarize_tools(&unknown);
-    if !claim_first_report(format!("unknown-tools:{}:{}", mode_id, unknown.join(","))) {
-        return;
-    }
-    let message = format!(
-        "Mode '{}' lists {} tool name(s) that are not registered, so they are silently unavailable and the model will get \"tool not found\" if it calls them: {}. Fix the spelling or remove them from the mode YAML.",
-        mode_id,
-        unknown.len(),
-        listed
-    );
-    tracing::warn!("{}", message);
-    notify_buddy(gcx, &message).await;
 }
 
 pub async fn warn_override_tool_drift(
@@ -101,19 +164,35 @@ pub async fn warn_override_tool_drift(
         listed
     );
     tracing::warn!("{}", message);
-    notify_buddy(gcx, &message).await;
-}
-
-async fn notify_buddy(gcx: Arc<GlobalContext>, message: &str) {
-    let app = crate::app_state::AppState::from_gcx(gcx).await;
-    crate::buddy::actor::report_error_persisted(
-        app,
-        BUDDY_ERROR_TYPE,
-        message,
-        Some(BUDDY_SOURCE),
-        None,
+    notify_buddy(
+        gcx,
+        &message,
+        crate::buddy::diagnostics::DiagnosticSeverity::High,
     )
     .await;
+}
+
+async fn notify_buddy(
+    gcx: Arc<GlobalContext>,
+    message: &str,
+    severity: crate::buddy::diagnostics::DiagnosticSeverity,
+) {
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    let buddy = app.buddy.buddy.clone();
+    let mut service = buddy.lock().await;
+    if let Some(service) = service.as_mut() {
+        service.add_diagnostic(crate::buddy::diagnostics::DiagnosticContext {
+            error_type: BUDDY_ERROR_TYPE.to_string(),
+            error_message: message.to_string(),
+            source_file: Some(BUDDY_SOURCE.to_string()),
+            tool_name: None,
+            chat_id: None,
+            model_id: None,
+            collected_at: chrono::Utc::now().to_rfc3339(),
+            severity,
+            occurrences: None,
+        });
+    }
 }
 
 #[cfg(test)]
@@ -124,13 +203,24 @@ mod tests {
         values.iter().map(|v| v.to_string()).collect()
     }
 
+    fn vecdb_gated_tools() -> HashMap<String, ToolGating> {
+        HashMap::from([(
+            "search_semantic".to_string(),
+            ToolGating {
+                capability: "vector database",
+                unavailable_reason: "which is not enabled on this engine",
+                enablement: "start it with --vecdb",
+            },
+        )])
+    }
+
     #[test]
     fn unknown_tool_names_reports_only_unregistered_sorted_and_deduped() {
         let registered: HashSet<String> = strings(&["cat", "shell"]).into_iter().collect();
         let declared = strings(&["shell", "glob", "cat", "delegate", "glob"]);
 
         assert_eq!(
-            unknown_tool_names(&declared, &registered),
+            unknown_tool_names(&declared, &registered, &HashMap::new()),
             strings(&["delegate", "glob"])
         );
     }
@@ -139,7 +229,86 @@ mod tests {
     fn unknown_tool_names_is_empty_when_every_declared_tool_exists() {
         let registered: HashSet<String> = strings(&["cat", "shell"]).into_iter().collect();
 
-        assert!(unknown_tool_names(&strings(&["cat"]), &registered).is_empty());
+        assert!(unknown_tool_names(&strings(&["cat"]), &registered, &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn unknown_tool_name_still_reports_as_a_typo() {
+        let diagnostics = mode_tool_diagnostics(
+            "agent",
+            &strings(&["definitely_missing"]),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].1,
+            crate::buddy::diagnostics::DiagnosticSeverity::High
+        );
+        assert_eq!(
+            diagnostics[0].0,
+            "Mode 'agent' lists 1 tool name(s) that are not registered, so they are silently unavailable and the model will get \"tool not found\" if it calls them: definitely_missing. Fix the spelling or remove them from the mode YAML."
+        );
+    }
+
+    #[test]
+    fn vecdb_gated_tool_reports_as_gated_not_typo() {
+        for mode_id in ["agent", "task_planner", "task_agent"] {
+            let diagnostics = mode_tool_diagnostics(
+                mode_id,
+                &strings(&["search_semantic"]),
+                &HashSet::new(),
+                &vecdb_gated_tools(),
+            );
+
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(
+                diagnostics[0].1,
+                crate::buddy::diagnostics::DiagnosticSeverity::Low
+            );
+            assert!(diagnostics[0].0.contains("search_semantic"));
+            assert!(diagnostics[0].0.contains("vector database"));
+            assert!(diagnostics[0].0.contains("start it with --vecdb"));
+            assert!(diagnostics[0].0.contains("This is not a typo"));
+            assert!(!diagnostics[0].0.contains("Fix the spelling"));
+        }
+    }
+
+    #[test]
+    fn vecdb_enabled_produces_no_diagnostic_for_search_semantic() {
+        let registered = HashSet::from(["search_semantic".to_string()]);
+
+        assert!(mode_tool_diagnostics(
+            "agent",
+            &strings(&["search_semantic"]),
+            &registered,
+            &HashMap::new(),
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn mixed_mode_reports_each_category_separately() {
+        let diagnostics = mode_tool_diagnostics(
+            "agent",
+            &strings(&["search_semantic", "definitely_missing"]),
+            &HashSet::new(),
+            &vecdb_gated_tools(),
+        );
+
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics.iter().any(|(message, severity)| {
+            *severity == crate::buddy::diagnostics::DiagnosticSeverity::High
+                && message.contains("definitely_missing")
+                && message.contains("Fix the spelling")
+        }));
+        assert!(diagnostics.iter().any(|(message, severity)| {
+            *severity == crate::buddy::diagnostics::DiagnosticSeverity::Low
+                && message.contains("search_semantic")
+                && message.contains("This is not a typo")
+                && !message.contains("Fix the spelling")
+        }));
     }
 
     #[test]

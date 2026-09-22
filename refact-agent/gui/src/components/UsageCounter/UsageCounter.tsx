@@ -365,7 +365,7 @@ export const UsageCounter: React.FC<UsageCounterProps> = ({
   const maybeAttachedImages = useAppSelector((state) =>
     selectThreadImagesById(state, chatId),
   );
-  const { currentThreadUsage, isOverflown, isWarning, currentSessionTokens } =
+  const { totalThreadUsage, isOverflown, isWarning, currentSessionTokens } =
     useUsageCounter();
   const currentMessageTokens = useAppSelector((state) =>
     selectThreadCurrentMessageTokensById(state, chatId),
@@ -395,7 +395,7 @@ export const UsageCounter: React.FC<UsageCounterProps> = ({
   }, [meteringTokens]);
 
   const inputUsageTokens = calculateUsageInputTokens({
-    usage: currentThreadUsage,
+    usage: totalThreadUsage,
     keys: [
       "prompt_tokens",
       "cache_creation_input_tokens",
@@ -403,7 +403,7 @@ export const UsageCounter: React.FC<UsageCounterProps> = ({
     ],
   });
   const outputUsageTokens = calculateUsageInputTokens({
-    usage: currentThreadUsage,
+    usage: totalThreadUsage,
     keys: ["completion_tokens"],
   });
 
@@ -419,16 +419,16 @@ export const UsageCounter: React.FC<UsageCounterProps> = ({
     if (typeof meteringValue === "number") {
       return meteringValue;
     }
-    return getCacheReadTokens(currentThreadUsage);
-  }, [meteringTokens, currentThreadUsage]);
+    return getCacheReadTokens(totalThreadUsage);
+  }, [meteringTokens, totalThreadUsage]);
 
   const cacheCreationTokens = useMemo(() => {
     const meteringValue = meteringTokens?.metering_cache_creation_tokens_n;
     if (typeof meteringValue === "number") {
       return meteringValue;
     }
-    return getCacheCreationTokens(currentThreadUsage);
-  }, [meteringTokens, currentThreadUsage]);
+    return getCacheCreationTokens(totalThreadUsage);
+  }, [meteringTokens, totalThreadUsage]);
 
   const maxContextTokens =
     useAppSelector((state) =>

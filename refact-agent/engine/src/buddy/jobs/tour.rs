@@ -1,13 +1,14 @@
 use crate::app_state::AppState;
 
-use super::super::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
+use super::super::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult, SpeechCandidate};
 use super::super::types::BuddySpeechItem;
-use crate::buddy::voice_service::{SpeechIntent, SpeechIntentWireToken, VoiceCtx, voice_service};
+use crate::buddy::voice_service::SpeechIntent;
 
 pub struct TourJob;
 
 fn tour_fallback_speech(text: String) -> BuddySpeechItem {
     BuddySpeechItem {
+        editorial_delivery_required: false,
         id: format!("tour-{}", chrono::Utc::now().timestamp()),
         text,
         mood: "excited".to_string(),
@@ -22,7 +23,7 @@ fn tour_fallback_speech(text: String) -> BuddySpeechItem {
     }
 }
 
-fn normalize_tour_speech(
+pub(crate) fn normalize_tour_speech(
     mut fallback: BuddySpeechItem,
     voice_speech: BuddySpeechItem,
 ) -> BuddySpeechItem {
@@ -35,14 +36,22 @@ fn normalize_tour_speech(
     fallback
 }
 
-async fn emit_tour_speech(gcx: &AppState, mut speech: BuddySpeechItem) -> bool {
-    speech.speech_intent = Some(SpeechIntent::Tour.wire_token().to_string());
+async fn tour_speech_allowed(gcx: &AppState) -> bool {
     let buddy_arc = gcx.buddy.buddy.clone();
-    let mut buddy = buddy_arc.lock().await;
-    let Some(svc) = buddy.as_mut() else {
+    let buddy = buddy_arc.lock().await;
+    let Some(svc) = buddy.as_ref() else {
         return false;
     };
-    svc.update_speech(speech)
+    crate::buddy::speech_policy::gate_speech(
+        &svc.settings,
+        &svc.state.speech_rotation,
+        Some(SpeechIntent::Tour),
+        None,
+        chrono::Timelike::hour(&chrono::Local::now()),
+        svc.auto_quiet_window,
+        chrono::Utc::now(),
+    )
+    .allowed
 }
 
 #[async_trait::async_trait]
@@ -65,33 +74,23 @@ impl BuddyJob for TourJob {
         ctx.onboarding.greeted && !ctx.onboarding.tour_completed && ctx.job_state.last_run.is_none()
     }
 
-    async fn execute(&self, gcx: AppState, _ctx: BuddyJobContext) -> BuddyJobResult {
-        let fallback_text = "This is me on your dashboard — I track everything happening in your project. Ask me about setup, skills, or MCP anytime!".to_string();
-        let mut speech = tour_fallback_speech(fallback_text.clone());
-        if let Some(snapshot) = crate::buddy::actor::buddy_snapshot(gcx.clone()).await {
-            let pulse_one_liner = format!(
-                "{} pending ops, {} recent stuck task alerts",
-                snapshot.pulse.memory.pending_ops,
-                snapshot.pulse.tasks.recent_stuck_alert_count_1h()
-            );
-            let voice_ctx = VoiceCtx {
-                persona: &snapshot.state.personality,
-                identity_name: snapshot.state.identity.name.as_str(),
-                pulse_one_liner,
-                workflow_id: None,
-                workflow_summary: Some(&fallback_text),
-            };
-            let voice_speech = voice_service()
-                .await
-                .render_speech(gcx.clone(), voice_ctx, SpeechIntent::Tour)
-                .await;
-            speech = normalize_tour_speech(speech, voice_speech);
-        }
-        if !emit_tour_speech(&gcx, speech).await {
+    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
+        if !tour_speech_allowed(&gcx).await {
             return BuddyJobResult::default();
         }
+        let fallback_text = "Your Desk keeps saved results and pending questions together. Open Play whenever you want a break.".to_string();
+        let mut candidate = SpeechCandidate::from_context(
+            &ctx,
+            SpeechIntent::Tour,
+            Some("tour".into()),
+            fallback_text.clone(),
+            fallback_text.clone(),
+            "Buddy Desk tour".into(),
+            None,
+        );
+        candidate.template = Some(tour_fallback_speech(fallback_text));
         BuddyJobResult {
-            last_result: Some("completed".to_string()),
+            speech_candidate: Some(candidate),
             ..Default::default()
         }
     }
@@ -157,6 +156,7 @@ mod tests {
     fn tour_speech_preserves_fallback_fields_after_voice_render() {
         let fallback = tour_fallback_speech("fallback".to_string());
         let voice = BuddySpeechItem {
+            editorial_delivery_required: false,
             id: "voice-id".to_string(),
             text: "voice text".to_string(),
             mood: "curious".to_string(),
@@ -194,6 +194,7 @@ mod tests {
     fn tour_speech_preserves_fallback_text_and_mood_when_voice_text_empty() {
         let fallback = tour_fallback_speech("fallback".to_string());
         let voice = BuddySpeechItem {
+            editorial_delivery_required: false,
             id: "voice-id".to_string(),
             text: "   ".to_string(),
             mood: "curious".to_string(),
@@ -216,6 +217,10 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_tour_speech_does_not_return_recordable_completion() {
+        let (voice, renderer) = crate::buddy::voice_service::test_voice_service_with_responses(
+            vec![Some("should not render".into())],
+        );
+        let _guard = crate::buddy::voice_service::install_test_voice_service(voice).await;
         let gcx = make_gcx_with_quiet_buddy().await;
         let job = TourJob;
 
@@ -225,6 +230,7 @@ mod tests {
         assert!(result.speech.is_none());
         assert!(result.speech_intent.is_none());
         assert!(!job.records_empty_result());
+        assert_eq!(renderer.calls(), 0);
         let buddy = gcx.buddy.buddy.lock().await;
         let service = buddy.as_ref().unwrap();
         assert!(service.active_speech.is_none());

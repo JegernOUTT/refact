@@ -131,7 +131,7 @@ describe("ChatSettingsDropdown", () => {
     );
   });
 
-  test("shows model context default and resets auto-compression cap", async () => {
+  test("shows the 90% default and resets auto-compression cap", async () => {
     const chat = chatStateWithReasoning(false);
     const runtime = chat.threads[chat.current_thread_id];
     runtime.thread.auto_compression_cap = 8192;
@@ -143,9 +143,13 @@ describe("ChatSettingsDropdown", () => {
     await user.click(screen.getByRole("button", { name: /Token limits/ }));
     expect(screen.getByText("Auto-compression cap")).toBeInTheDocument();
     expect(
-      screen.getByText(/selected model's maximum context window/i),
+      screen.getByText(/90% of the effective model\/request/i),
     ).toBeInTheDocument();
     expect(screen.getAllByText("200K").length).toBeGreaterThan(0);
+    expect(
+      store.getState().chat.threads[chat.current_thread_id]?.thread
+        .auto_compression_cap,
+    ).toBe(8192);
 
     await user.click(
       screen.getByRole("button", { name: "Reset auto-compression cap" }),
@@ -153,11 +157,11 @@ describe("ChatSettingsDropdown", () => {
     expect(
       store.getState().chat.threads[chat.current_thread_id]?.thread
         .auto_compression_cap,
-    ).toBeNull();
-    expect(screen.getByText("200K (model maximum)")).toBeInTheDocument();
+    ).toBe(180000);
+    expect(screen.getByText("180000")).toBeInTheDocument();
   });
 
-  test("sets and clears the auto-compression cap from the token limits disclosure", async () => {
+  test("sets and resets the auto-compression cap from the token limits disclosure", async () => {
     const chat = chatStateWithReasoning(false);
     const { user, store } = render(<ChatSettingsDropdown />, {
       preloadedState: { chat, config },
@@ -166,15 +170,15 @@ describe("ChatSettingsDropdown", () => {
     await user.click(await screen.findByRole("button", { name: /openai\/o1/ }));
     await user.click(screen.getByRole("button", { name: /Token limits/ }));
 
-    // Unset means "no cap": the model's full context window is used.
+    // Restored unset caps remain uncapped until the user explicitly resets.
     expect(
       store.getState().chat.threads[chat.current_thread_id]?.thread
         .auto_compression_cap,
     ).toBeUndefined();
-    expect(screen.getByText("200K (model maximum)")).toBeInTheDocument();
+    expect(screen.getByText("200K (no cap)")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Reset auto-compression cap" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "Reset auto-compression cap" }),
+    ).toBeInTheDocument();
 
     fireEvent.keyDown(
       screen.getByRole("slider", { name: "Auto-compression cap" }),
@@ -193,7 +197,87 @@ describe("ChatSettingsDropdown", () => {
     expect(
       store.getState().chat.threads[chat.current_thread_id]?.thread
         .auto_compression_cap,
-    ).toBeNull();
-    expect(screen.getByText("200K (model maximum)")).toBeInTheDocument();
+    ).toBe(180000);
+    expect(screen.getByText("180000")).toBeInTheDocument();
+  });
+  test.each([100001, 0, -1])(
+    "reset respects positive request context cap %s",
+    async (requestCap) => {
+      const chat = chatStateWithReasoning(false);
+      const runtime = chat.threads[chat.current_thread_id];
+      runtime.thread.context_tokens_cap = requestCap;
+      runtime.thread.auto_compression_cap = 8192;
+      const { user, store } = render(<ChatSettingsDropdown />, {
+        preloadedState: { chat, config },
+      });
+      await user.click(
+        await screen.findByRole("button", { name: /openai\/o1/ }),
+      );
+      await user.click(screen.getByRole("button", { name: /Token limits/ }));
+      // Caps loading and rendering must not rewrite the user's explicit setting.
+      expect(
+        store.getState().chat.threads[chat.current_thread_id]?.thread
+          .auto_compression_cap,
+      ).toBe(8192);
+      await user.click(
+        screen.getByRole("button", { name: "Reset auto-compression cap" }),
+      );
+      expect(
+        store.getState().chat.threads[chat.current_thread_id]?.thread
+          .auto_compression_cap,
+      ).toBe(requestCap > 0 ? 90000 : 180000);
+    },
+  );
+
+  test.each([
+    [100001, 90000],
+    [300000, 180000],
+    [0, 180000],
+    [-1, 180000],
+  ])(
+    "reset respects positive request cap %s and floors 90%% to %s",
+    async (requestCap, expectedCap) => {
+      const chat = chatStateWithReasoning(false);
+      const thread = chat.threads[chat.current_thread_id].thread;
+      thread.context_tokens_cap = requestCap;
+      thread.auto_compression_cap = 7777;
+      const { user, store } = render(<ChatSettingsDropdown />, {
+        preloadedState: { chat, config },
+      });
+      await user.click(
+        await screen.findByRole("button", { name: /openai\/o1/ }),
+      );
+      await user.click(screen.getByRole("button", { name: /Token limits/ }));
+      expect(screen.getByText("7777")).toBeInTheDocument();
+      expect(
+        store.getState().chat.threads[chat.current_thread_id]?.thread
+          .auto_compression_cap,
+      ).toBe(7777);
+      await user.click(
+        screen.getByRole("button", { name: "Reset auto-compression cap" }),
+      );
+      expect(
+        store.getState().chat.threads[chat.current_thread_id]?.thread
+          .auto_compression_cap,
+      ).toBe(expectedCap);
+    },
+  );
+
+  test("does not change an explicit cap when selecting a smaller model", async () => {
+    const chat = chatStateWithReasoning(false);
+    chat.threads[chat.current_thread_id].thread.auto_compression_cap = 190000;
+    const { user, store } = render(<ChatSettingsDropdown />, {
+      preloadedState: { chat, config },
+    });
+    await user.click(await screen.findByRole("button", { name: /openai\/o1/ }));
+    await user.click(
+      await screen.findByRole("option", { name: /openai\/gpt-4o-mini/ }),
+    );
+    expect(
+      store.getState().chat.threads[chat.current_thread_id]?.thread
+        .auto_compression_cap,
+    ).toBe(190000);
+    await user.click(screen.getByRole("button", { name: /Token limits/ }));
+    expect(screen.getByText("190000")).toBeInTheDocument();
   });
 });

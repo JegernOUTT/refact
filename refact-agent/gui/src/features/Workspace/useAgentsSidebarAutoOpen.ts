@@ -14,12 +14,11 @@ import {
   setDockOpen,
   setDockSection,
 } from "./workspaceSlice";
-
-const narrowQuery = "(max-width: 767px)";
+import { WORKSPACE_NARROW_QUERY } from "./workspaceBreakpoints";
 
 export function useAgentsSidebarAutoOpen() {
   const dispatch = useAppDispatch();
-  const isNarrow = useMediaQuery(narrowQuery);
+  const isNarrow = useMediaQuery(WORKSPACE_NARROW_QUERY);
   const focusedChatId = useAppSelector(selectFocusedWorkspaceChatId);
   const dock = useAppSelector(selectWorkspaceDock);
   const autoOpenedFor = useAppSelector(selectAgentsPanelAutoOpenedFor);

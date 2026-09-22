@@ -17,6 +17,52 @@ pub(crate) fn canonical(name: &str) -> String {
     }
 }
 
+/// Keep the strictest of two supervised budgets field by field. `None` is
+/// "unlimited", so any concrete limit always wins over it; a longer cooldown
+/// and a lower no-progress threshold are the tighter side.
+fn tightest_budget(
+    left: &crate::chat::types::GoalBudget,
+    right: &crate::chat::types::GoalBudget,
+) -> crate::chat::types::GoalBudget {
+    fn tightest<T: Ord + Copy>(left: Option<T>, right: Option<T>) -> Option<T> {
+        match (left, right) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(only), None) | (None, Some(only)) => Some(only),
+            (None, None) => None,
+        }
+    }
+    crate::chat::types::GoalBudget {
+        max_turns: tightest(left.max_turns, right.max_turns),
+        max_minutes: tightest(left.max_minutes, right.max_minutes),
+        max_tokens: tightest(left.max_tokens, right.max_tokens),
+        max_cost_cents: tightest(left.max_cost_cents, right.max_cost_cents),
+        cooldown_ms: left.cooldown_ms.max(right.cooldown_ms),
+        no_progress_token_threshold: left
+            .no_progress_token_threshold
+            .min(right.no_progress_token_threshold),
+        no_progress_turns: tightest(left.no_progress_turns, right.no_progress_turns),
+        explicit: left.explicit || right.explicit,
+    }
+}
+
+/// A supervised policy stays supervised through narrowing: degrading it to a
+/// plain `Only` would silently drop the budget the native mandate attached to
+/// it, which is a widening of authority, not a narrowing.
+fn supervised_narrowed(
+    tools: &[String],
+    allowed: &[String],
+    budget: crate::chat::types::GoalBudget,
+) -> ToolsPolicy {
+    ToolsPolicy::Supervised {
+        tools: tools
+            .iter()
+            .filter(|name| allowed.contains(name))
+            .cloned()
+            .collect(),
+        budget,
+    }
+}
+
 pub(crate) fn intersect(policy: &ToolsPolicy, ceiling: &ToolsPolicy) -> ToolsPolicy {
     match (policy, ceiling) {
         (ToolsPolicy::None, _) | (_, ToolsPolicy::None) => ToolsPolicy::None,
@@ -28,6 +74,20 @@ pub(crate) fn intersect(policy: &ToolsPolicy, ceiling: &ToolsPolicy) -> ToolsPol
                 .cloned()
                 .collect(),
         )),
+        // `Supervised` is a concrete, bounded tool set minted by the native
+        // authority-guarded spawn path. It is never "all tools": intersecting
+        // it can only remove names, never add any.
+        (
+            ToolsPolicy::Supervised { tools, budget },
+            ToolsPolicy::Supervised {
+                tools: allowed,
+                budget: ceiling_budget,
+            },
+        ) => supervised_narrowed(tools, allowed, tightest_budget(budget, ceiling_budget)),
+        (ToolsPolicy::Supervised { tools, budget }, ToolsPolicy::Only(allowed))
+        | (ToolsPolicy::Only(allowed), ToolsPolicy::Supervised { tools, budget }) => {
+            supervised_narrowed(tools, allowed, budget.clone())
+        }
     }
 }
 

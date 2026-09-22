@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::buddy::drafts::{draft_kind_str, DraftCreateError, DraftTarget, DraftValidationError};
 use crate::buddy::opportunities::is_terminal_status;
 use crate::buddy::types::{
-    BuddyAction, BuddyDraft, BuddyFactKind, BuddyPulse, CustomizationKind, DefaultsKind, DraftKind,
+    BuddyAction, BuddyDraft, BuddyFactKind, BuddyPulse, CustomizationKind, DraftKind,
     InvestigationContext, MarketKind, OpportunityStatus, PulseScope,
 };
 use refact_buddy_core::action_policy::{action_execution, action_kind_str, ActionExecution};
@@ -34,6 +34,8 @@ use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 #[derive(Debug, Deserialize)]
 pub struct OpportunitiesQuery {
     pub status: Option<String>,
+    pub after: Option<u64>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -61,6 +63,14 @@ pub struct UnmuteRequest {
 pub(crate) struct ActionOutcome {
     pub result: serde_json::Value,
     pub status: OpportunityStatus,
+}
+
+fn require_legacy_mutation(storage_enabled: bool) -> Result<(), ScratchError> {
+    if storage_enabled {
+        return Err(ScratchError::new(StatusCode::CONFLICT,
+            "legacy_work_route_read_only: use Work Desk revision-bound actions/read/snooze; unmapped legacy actions are unavailable".into()));
+    }
+    Ok(())
 }
 
 fn draft_create_error(err: DraftCreateError) -> ScratchError {
@@ -127,7 +137,28 @@ pub async fn handle_v1_buddy_opportunities_list(
             "buddy not initialized".into(),
         )
     })?;
-    let mut opps = svc.opportunity_queue.snapshot();
+    let (mut opps, next_after, authority) = if svc.operator_features.storage {
+        drop(lock);
+        let runtime = crate::buddy::operator_runtime::runtime(
+            &app,
+            crate::buddy::operator_runtime::OperatorCapability::Storage,
+        )
+        .await
+        .map_err(|error| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, error))?;
+        let after = query.after;
+        let limit = query.limit.unwrap_or(50).clamp(1, 200);
+        let (opportunities, next_after) = runtime
+            .with_store(move |store| {
+                crate::buddy::legacy_work::projection_page(store, after, limit)
+            })
+            .await
+            .map_err(|error| {
+                ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, error.to_string())
+            })?;
+        (opportunities, next_after, "work_items")
+    } else {
+        (svc.opportunity_queue.snapshot(), None, "legacy")
+    };
     if let Some(status_filter) = &query.status {
         let allowed: Vec<&str> = status_filter.split(',').map(|s| s.trim()).collect();
         opps.retain(|o| {
@@ -138,7 +169,9 @@ pub async fn handle_v1_buddy_opportunities_list(
             allowed.contains(&s.as_str())
         });
     }
-    Ok(axum::Json(serde_json::json!({ "opportunities": opps })))
+    Ok(axum::Json(
+        serde_json::json!({ "opportunities": opps, "next_after": next_after, "authority": authority }),
+    ))
 }
 
 pub async fn handle_v1_buddy_opportunity_accept(
@@ -158,6 +191,7 @@ pub async fn handle_v1_buddy_opportunity_accept(
                 "buddy not initialized".into(),
             )
         })?;
+        require_legacy_mutation(svc.operator_features.storage)?;
         let opp = svc.opportunity_queue.get(&id).cloned().ok_or_else(|| {
             ScratchError::new(
                 StatusCode::NOT_FOUND,
@@ -255,6 +289,7 @@ pub async fn handle_v1_buddy_action_undo(
                 "buddy not initialized".into(),
             )
         })?;
+        require_legacy_mutation(svc.operator_features.storage)?;
         let action = BuddyAction::ApplyConfigPatch {
             draft_id: String::new(),
             target_path: String::new(),
@@ -286,10 +321,47 @@ pub async fn handle_v1_buddy_action_undo(
     Ok(axum::Json(serde_json::json!({ "receipt": receipt })))
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct HistoryQuery {
+    pub after: Option<u64>,
+    pub limit: Option<usize>,
+}
+
 pub async fn handle_v1_buddy_receipts(
     State(app): State<AppState>,
+    Query(query): Query<HistoryQuery>,
 ) -> Result<axum::Json<serde_json::Value>, ScratchError> {
-    let project_root = buddy_project_root(&app).await?;
+    let (enabled, project_root) = {
+        let lock = app.gcx.buddy.lock().await;
+        let svc = lock.as_ref().ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "buddy not initialized".into(),
+            )
+        })?;
+        (svc.operator_features.storage, svc.project_root.clone())
+    };
+    if enabled {
+        let runtime = crate::buddy::operator_runtime::runtime(
+            &app,
+            crate::buddy::operator_runtime::OperatorCapability::Storage,
+        )
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
+        let (receipts, next_after) = runtime
+            .with_store(move |store| {
+                crate::buddy::legacy_work::receipt_history_page(
+                    store,
+                    query.after,
+                    query.limit.unwrap_or(50).clamp(1, 200),
+                )
+            })
+            .await
+            .map_err(|e| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?;
+        return Ok(axum::Json(serde_json::json!({
+            "receipts": receipts, "next_after": next_after, "authority": "work_items"
+        })));
+    }
     let receipts = crate::buddy::receipts::load_receipts(&project_root).await;
     Ok(axum::Json(serde_json::json!({ "receipts": receipts })))
 }
@@ -314,18 +386,6 @@ pub async fn handle_v1_buddy_rule_unmute(
     ))
 }
 
-async fn buddy_project_root(app: &AppState) -> Result<PathBuf, ScratchError> {
-    let buddy_arc = app.gcx.buddy.clone();
-    let lock = buddy_arc.lock().await;
-    let svc = lock.as_ref().ok_or_else(|| {
-        ScratchError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "buddy not initialized".into(),
-        )
-    })?;
-    Ok(svc.project_root.clone())
-}
-
 async fn clear_accept_claim(gcx: Arc<GlobalContext>, id: &str) {
     let buddy_arc = gcx.buddy.clone();
     let mut lock = buddy_arc.lock().await;
@@ -334,26 +394,16 @@ async fn clear_accept_claim(gcx: Arc<GlobalContext>, id: &str) {
     }
 }
 
-fn provider_defaults_patch(defaults_kind: DefaultsKind) -> serde_json::Value {
-    match defaults_kind {
-        DefaultsKind::ChatModel => {
-            serde_json::json!({ "chat": { "model": "your-provider/model-name" } })
+fn defaults_patch_requires_selection(patch: &serde_json::Value) -> bool {
+    match patch {
+        serde_json::Value::Object(fields) => {
+            fields.is_empty() || fields.values().any(defaults_patch_requires_selection)
         }
-        DefaultsKind::ChatModel2 => {
-            serde_json::json!({ "chat_model_2": { "model": "your-provider/model-name" } })
+        serde_json::Value::Array(values) => values.iter().any(defaults_patch_requires_selection),
+        serde_json::Value::String(value) => {
+            value.trim().is_empty() || value == "your-provider/model-name"
         }
-        DefaultsKind::TaskPlannerAgentModel => {
-            serde_json::json!({ "task_planner_agent_model": { "model": "your-provider/model-name" } })
-        }
-        DefaultsKind::ChatLightModel => {
-            serde_json::json!({ "chat_light": { "model": "your-provider/model-name" } })
-        }
-        DefaultsKind::ChatThinkingModel => {
-            serde_json::json!({ "chat_thinking": { "model": "your-provider/model-name" } })
-        }
-        DefaultsKind::ChatBuddyModel => {
-            serde_json::json!({ "chat_buddy": { "model": "your-provider/model-name" } })
-        }
+        _ => false,
     }
 }
 
@@ -362,6 +412,12 @@ pub(crate) async fn dispatch_action(
     _opp_id: &str,
     action: &BuddyAction,
 ) -> Result<ActionOutcome, ScratchError> {
+    {
+        let lock = app.gcx.buddy.lock().await;
+        if let Some(svc) = lock.as_ref() {
+            require_legacy_mutation(svc.operator_features.storage)?;
+        }
+    }
     match action {
         BuddyAction::OpenPage { page } => {
             let nav_page = serde_json::to_value(page)
@@ -459,12 +515,17 @@ pub(crate) async fn dispatch_action(
             defaults_kind,
             patch,
         } => {
-            let content = if patch != &serde_json::json!({}) {
-                serde_json::to_string_pretty(patch).unwrap_or_default()
-            } else {
-                serde_json::to_string_pretty(&provider_defaults_patch(*defaults_kind))
-                    .unwrap_or_default()
-            };
+            if defaults_patch_requires_selection(patch) {
+                return Ok(ActionOutcome {
+                    result: serde_json::json!({
+                        "kind": "open_page", "navigate_to": { "type": "default_models" }
+                    }),
+                    status: OpportunityStatus::Accepted,
+                });
+            }
+            let content = serde_json::to_string_pretty(patch).map_err(|error| {
+                ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, error.to_string())
+            })?;
             let draft = synthesize_draft(
                 app.gcx.clone(),
                 DraftKind::DefaultsModel,
@@ -588,9 +649,12 @@ pub(crate) async fn dispatch_action(
                 .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
             {
                 let buddy_arc = app.gcx.buddy.clone();
-                let mut lock = buddy_arc.lock().await;
-                if let Some(svc) = lock.as_mut() {
-                    svc.set_memory_ops(memory_ops);
+                if let Err(error) = crate::buddy::actor::BuddyService::set_memory_ops_durable(
+                    &buddy_arc, memory_ops,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "memory proposal not persisted");
                 }
             }
             Ok(ActionOutcome {
@@ -1075,15 +1139,17 @@ async fn synthesize_draft(
     content: String,
 ) -> Result<BuddyDraft, ScratchError> {
     let buddy_arc = gcx.buddy.clone();
-    let mut lock = buddy_arc.lock().await;
-    let svc = lock.as_mut().ok_or_else(|| {
-        ScratchError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "buddy not initialized".into(),
-        )
-    })?;
-    svc.create_draft(kind, title, content, String::new())
-        .map_err(draft_create_error)
+    crate::buddy::drafts::validate_draft_payload(&title, &content, "")
+        .map_err(draft_create_error)?;
+    crate::buddy::actor::BuddyService::create_draft_durable(
+        &buddy_arc,
+        kind,
+        title,
+        content,
+        String::new(),
+    )
+    .await
+    .map_err(|error| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, error))
 }
 
 fn diagnostic_severity_label(
@@ -1391,12 +1457,12 @@ async fn create_investigation_chat(
     )
     .await;
     let snapshot = TrajectorySnapshot {
+        pending_browser_decision: None,
         pending_deliveries: Vec::new(),
         dropped_deliveries: Vec::new(),
         goal: None,
         goal_ledger: Vec::new(),
         goal_verification_blocked_until_ms: None,
-        compression_retry_after_ms: Default::default(),
         chat_id: chat_id.clone(),
         title: "Investigation".to_string(),
         model,
@@ -1430,6 +1496,7 @@ async fn create_investigation_chat(
         checkpoints_enabled: false,
         context_tokens_cap: None,
         auto_compression_cap: None,
+        auto_compression_cap_pending: true,
         include_project_info: true,
         is_title_generated: false,
         auto_approve_editing_tools: false,
@@ -1461,6 +1528,7 @@ async fn create_investigation_chat(
         reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
+        pending_questions: Vec::new(),
     };
 
     crate::chat::trajectories::save_trajectory_snapshot(gcx, snapshot)
@@ -1485,6 +1553,7 @@ pub async fn handle_v1_buddy_opportunity_dismiss(
             "buddy not initialized".into(),
         )
     })?;
+    require_legacy_mutation(svc.operator_features.storage)?;
     let opp = svc.opportunity_queue.get(&id).cloned().ok_or_else(|| {
         ScratchError::new(
             StatusCode::NOT_FOUND,
@@ -1520,6 +1589,101 @@ pub async fn handle_v1_buddy_opportunity_dismiss(
 mod tests {
     use super::*;
     use crate::buddy::types::TaskPulse;
+
+    #[tokio::test]
+    async fn enabled_legacy_accept_and_dismiss_fail_before_queue_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            root.path().join("cache"),
+            root.path().join("config"),
+        )
+        .await;
+        let (events, _) = tokio::sync::broadcast::channel(8);
+        let mut service = crate::buddy::actor::BuddyService::new(
+            root.path().to_path_buf(),
+            crate::buddy::state::default_buddy_state(),
+            Default::default(),
+            vec![],
+            Default::default(),
+            events,
+            None,
+        );
+        service.operator_features.storage = true;
+        *gcx.buddy.lock().await = Some(service);
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let accepted =
+            handle_v1_buddy_opportunity_accept(State(app.clone()), Path("missing".into()), None)
+                .await;
+        assert!(accepted
+            .unwrap_err()
+            .to_string()
+            .contains("legacy_work_route_read_only"));
+        let dismissed =
+            handle_v1_buddy_opportunity_dismiss(State(app.clone()), Path("missing".into()), None)
+                .await;
+        assert!(dismissed
+            .unwrap_err()
+            .to_string()
+            .contains("legacy_work_route_read_only"));
+        gcx.buddy
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .operator_features
+            .storage = false;
+        let legacy =
+            handle_v1_buddy_opportunity_accept(State(app), Path("missing".into()), None).await;
+        assert!(legacy
+            .unwrap_err()
+            .to_string()
+            .contains("opportunity not found"));
+        assert!(gcx
+            .buddy
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .opportunity_queue
+            .snapshot()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn enabled_legacy_list_does_not_fall_back_when_store_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            root.path().join("cache"),
+            root.path().join("config"),
+        )
+        .await;
+        let (events, _) = tokio::sync::broadcast::channel(8);
+        let mut service = crate::buddy::actor::BuddyService::new(
+            root.path().to_path_buf(),
+            crate::buddy::state::default_buddy_state(),
+            Default::default(),
+            vec![],
+            Default::default(),
+            events,
+            None,
+        );
+        service.operator_features.storage = true;
+        *gcx.buddy.lock().await = Some(service);
+        let app = AppState::from_gcx(gcx).await;
+        let result = handle_v1_buddy_opportunities_list(
+            State(app),
+            Query(OpportunitiesQuery {
+                status: None,
+                after: None,
+                limit: None,
+            }),
+        )
+        .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("operator store unavailable"));
+    }
 
     #[test]
     fn pulse_report_task_section_separates_current_state_from_recent_alerts() {

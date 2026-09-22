@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -18,7 +18,8 @@ pub use refact_chat_api::{
     CompressionPhase, CompressionReason, CriterionEvidence, CriterionVerdict, DeliveryOutcome,
     DeliveryStatus, DeliveryStatusRecord, DeltaOp, DiffBox, EventEnvelope, GoalAttempt, GoalBudget,
     GoalCriterion, GoalEvent, GoalLedgerEntry, GoalLedgerOp, GoalProgress, GoalSnapshot,
-    GoalStatus, GoalWait, GoalWaitResume, GoalWaitSubject, PauseReason, PendingDelivery, PushMode,
+    GoalStatus, GoalWait, GoalWaitResume, GoalWaitSubject, PauseReason, PendingDelivery,
+    PendingQuestion, PendingQuestionSet, PendingQuestionStatus, PushMode, QuestionAnswer,
     QueuedItem, RuntimeState, SessionState, TaskMeta, ThreadParams, TimelineEntry,
     ToolDecisionItem, VerdictSource, WindowBounds, WorktreeMeta, CLIENT_MESSAGE_ID_EXTRA_KEY,
     DELIVERY_COMMAND_TYPE, DELIVERY_EXTRA_KEY,
@@ -296,6 +297,9 @@ pub struct ChatSession {
     pub goal_turns_used: u32,
     pub goal_tokens_used: u64,
     pub goal_no_progress_turns: u32,
+    pub pending_context_rebuild: Option<super::context_rebuild::PendingContextRebuild>,
+    pub pending_mode_handoff: Option<serde_json::Value>,
+    pub last_rebuild_attempt_version: Option<u64>,
     pub is_compressing: bool,
     pub compression_phase: Option<CompressionPhase>,
     pub compression_reason: Option<CompressionReason>,
@@ -313,6 +317,9 @@ pub struct ChatSession {
     pub recent_request_ids_set: HashSet<String>,
     pub abort_flag: Arc<AtomicBool>,
     pub abort_notify: Arc<Notify>,
+    pub interruptible_waits: usize,
+    pub wait_delivery_boundary: bool,
+    pub wait_interrupt_flag: Arc<AtomicBool>,
     pub user_interrupt_flag: Arc<AtomicBool>,
     pub queue_processor_running: Arc<AtomicBool>,
     pub queue_notify: Arc<Notify>,
@@ -344,10 +351,6 @@ pub struct ChatSession {
     pub last_prompt_messages: Vec<ChatMessage>,
     pub tool_catalog: Option<Arc<ToolCatalogSnapshot>>,
     pub turn_tool_pool: Option<TurnToolPool>,
-    pub tier1_compact_attempts: usize,
-    pub tier1_compaction_disabled: bool,
-    pub compression_insufficient_hashes: HashSet<String>,
-    pub compression_retry_after_ms: BTreeMap<String, u64>,
     pub pending_max_new_tokens_boost: Option<usize>,
     pub cache_guard_snapshot: Option<serde_json::Value>,
     pub cache_guard_request_generation: u64,
@@ -397,6 +400,7 @@ pub struct ChatSession {
     pub goal_turn_evidence: bool,
     pub goal_verification_blocked_until_ms: Option<u64>,
     pub goal_verification_generation: u64,
+    pub pending_questions: Vec<PendingQuestionSet>,
 }
 
 #[derive(Default)]

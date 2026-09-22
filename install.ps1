@@ -7,6 +7,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
 if ([string]::IsNullOrWhiteSpace($HOME)) {
     Write-Error "HOME is not set"
@@ -61,15 +62,17 @@ function Normalize-Version([string]$Value) {
 function Get-LatestVersion {
     $releasesUrl = "$ApiUrl/releases?per_page=100"
     try {
-        $releases = @(Invoke-RestMethod -Uri $releasesUrl -Headers @{ Accept = "application/vnd.github+json" })
+        $releases = Invoke-RestMethod -Uri $releasesUrl -Headers @{ Accept = "application/vnd.github+json" }
     } catch {
         Fail "could not fetch releases from ${releasesUrl}: $($_.Exception.Message)"
     }
-    $engineRelease = $releases | Where-Object { $_.tag_name -like "engine/v*" } | Select-Object -First 1
-    if ($null -eq $engineRelease) {
-        Fail "could not find an engine/v* release in $releasesUrl"
+    foreach ($release in @($releases | ForEach-Object { $_ })) {
+        $tag = [string]$release.tag_name
+        if ($tag -like "engine/v*") {
+            return Normalize-Version $tag
+        }
     }
-    return Normalize-Version ([string]$engineRelease.tag_name)
+    Fail "could not find an engine/v* release in $releasesUrl"
 }
 
 function Resolve-Version {

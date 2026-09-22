@@ -1,0 +1,31 @@
+.presence,
+.identity,
+.speech {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.header,
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.identity {
+  flex: 1;
+}
+
+.avatar {
+  flex: 0 0 auto;
+  pointer-events: none;
+}
+
+.speech p {
+  margin: 0;
+}

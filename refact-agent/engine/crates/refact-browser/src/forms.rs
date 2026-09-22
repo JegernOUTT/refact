@@ -6,10 +6,23 @@ use serde_json::Value;
 
 use crate::{
     ActionKind, ActionabilityDiagnostic, ActionabilityDriver, ActionabilityEngine,
-    ActionabilityTimeouts, CdpKeyboardDispatcher, CdpMouseDispatcher, ElementHandle,
+    ActionabilityTimeouts, CdpKeyboardDispatcher, CdpMouseDispatcher, ElementHandle, HandleError,
     HitTargetController, HitTargetPoint, HitTargetResult, Keyboard, LocatorOutcome, Mouse,
     MouseButton, SystemClock, WorldManager,
 };
+
+macro_rules! native_value_js {
+    () => {
+        r#"
+  const hasNativeValue = (node, tags) => {
+    if (!node || !tags.includes(node.tagName)) return false;
+    for (let proto = Object.getPrototypeOf(node); proto; proto = Object.getPrototypeOf(proto)) {
+      if (Object.getOwnPropertyDescriptor(proto, 'value')) return true;
+    }
+    return false;
+  };"#
+    };
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FillOutcome {
@@ -92,7 +105,7 @@ impl ActionabilityDriver for FormActionabilityDriver<'_> {
         self.world
             .element_states(self.tab, self.handle)
             .map_err(|error| match error {
-                crate::HandleError::Invalidated { .. } => ActionabilityDiagnostic::Detached,
+                HandleError::Invalidated { .. } => ActionabilityDiagnostic::Detached,
                 _ => ActionabilityDiagnostic::PrecheckFailed {
                     description: error.to_string(),
                 },
@@ -201,18 +214,34 @@ pub fn choose_fill_strategies(field_kind: &FieldKind) -> Vec<FillStrategy> {
             FillStrategy::NativePrototypeSetter,
             FillStrategy::ClickAndType,
         ],
-        FieldKind::Select
-        | FieldKind::Checkbox
-        | FieldKind::Radio
-        | FieldKind::FileInput
-        | FieldKind::HiddenInput => Vec::new(),
-        _ => vec![
+        FieldKind::TextInput
+        | FieldKind::PasswordInput
+        | FieldKind::EmailInput
+        | FieldKind::SearchInput
+        | FieldKind::NumberInput
+        | FieldKind::TelInput
+        | FieldKind::UrlInput
+        | FieldKind::DateInput => vec![
             FillStrategy::NativeTyping,
             FillStrategy::DomValueSetter,
             FillStrategy::NativePrototypeSetter,
             FillStrategy::ClickAndType,
         ],
+        FieldKind::Select
+        | FieldKind::Checkbox
+        | FieldKind::Radio
+        | FieldKind::FileInput
+        | FieldKind::HiddenInput
+        | FieldKind::Unknown => Vec::new(),
     }
+}
+
+fn not_editable_message(tag: &str, role: Option<&str>) -> String {
+    let role = role.map(|role| format!(" role={role}")).unwrap_or_default();
+    format!(
+        "Element <{tag}{role}> is not an <input>, <textarea> or [contenteditable] element; use \
+         click/press_key to operate it, select_option for <select>, check/uncheck for checkboxes"
+    )
 }
 
 pub fn diagnostic_value(field_kind: &FieldKind, value: &str) -> String {
@@ -220,6 +249,30 @@ pub fn diagnostic_value(field_kind: &FieldKind, value: &str) -> String {
         "[REDACTED]".to_string()
     } else {
         value.to_string()
+    }
+}
+
+const LABEL_RETARGET_NO_HANDLE: &str = "Element retargeting returned no handle";
+
+fn map_label_retarget_error(error: HandleError) -> Result<Option<ElementHandle>, FormError> {
+    match &error {
+        HandleError::Resolution(message) if message == LABEL_RETARGET_NO_HANDLE => Ok(None),
+        _ => Err(FormError::new(error.to_string())),
+    }
+}
+
+fn label_control(
+    tab: &Tab,
+    world: &WorldManager,
+    handle: &ElementHandle,
+    info: &ElementInfo,
+) -> Result<Option<ElementHandle>, FormError> {
+    if info.tag != "label" {
+        return Ok(None);
+    }
+    match world.call_function_handle_on(tab, handle, "function() { return this.control; }") {
+        Ok(control) => Ok(Some(control)),
+        Err(error) => map_label_retarget_error(error),
     }
 }
 
@@ -232,6 +285,12 @@ pub fn fill(
     clear_first: bool,
     verify: bool,
 ) -> Result<FillOutcome, FormError> {
+    if matches!(info.field_kind, FieldKind::Unknown) {
+        return Err(FormError::new(not_editable_message(
+            &info.tag,
+            info.role.as_deref(),
+        )));
+    }
     if info.readonly {
         return Err(FormError::new("Element is readonly"));
     }
@@ -242,21 +301,33 @@ pub fn fill(
             info.field_kind
         )));
     }
-    let actionability = run_actionability(tab, world, handle, ActionKind::Fill, false)?;
-    let mut executor = CdpFillExecutor { tab, world, handle };
-    run_fill(
-        &mut executor,
-        &info.field_kind,
-        &strategies,
-        text,
-        clear_first,
-        verify,
-    )
-    .map(|mut outcome| {
-        outcome.actionability = Some(actionability.clone());
-        outcome
-    })
-    .map_err(|error| error.with_actionability(Some(actionability)))
+    let control = label_control(tab, world, handle, info)?;
+    let target = control.as_ref().unwrap_or(handle);
+    let outcome =
+        run_actionability(tab, world, target, ActionKind::Fill, false).and_then(|actionability| {
+            let mut executor = CdpFillExecutor {
+                tab,
+                world,
+                handle: target,
+            };
+            run_fill(
+                &mut executor,
+                &info.field_kind,
+                &strategies,
+                text,
+                clear_first,
+                verify,
+            )
+            .map(|mut outcome| {
+                outcome.actionability = Some(actionability.clone());
+                outcome
+            })
+            .map_err(|error| error.with_actionability(Some(actionability)))
+        });
+    if let Some(control) = control {
+        let _ = world.release_handle(tab, &control);
+    }
+    outcome
 }
 
 pub fn clear(
@@ -577,25 +648,35 @@ const PLAYWRIGHT_FILL_PREPARE: &str = r#"function(value) {
   return { needs_input: true };
 }"#;
 
-const VERIFY_VALUE: &str = r#"function(expected) {
+const VERIFY_VALUE: &str = concat!(
+    r#"function(expected) {
   const injected = globalThis.__refact_injected__;
-  const el = this.tagName === 'LABEL' && this.control ? this.control : this;
+  const el = this.tagName === 'LABEL' && this.control ? this.control : this;"#,
+    native_value_js!(),
+    r#"
   if (!el || !el.isConnected) throw new Error('Element is not attached');
   if (el.isContentEditable) return { matches: (el.innerText || el.textContent || '') === expected };
+  if (!hasNativeValue(el, ['INPUT', 'TEXTAREA', 'SELECT'])) return { matches: false, reason: 'not_editable' };
   let normalized = expected;
   const type = (el.type || '').toLowerCase();
   if (['date', 'time', 'datetime-local', 'month', 'range', 'week', 'number'].includes(type)) normalized = normalized.trim();
   if (type === 'color') normalized = normalized.trim().toLowerCase();
   if (type === 'password') return { matches: String(el.value || '').length === normalized.length };
   return { matches: String(el.value === undefined ? '' : el.value) === normalized };
-}"#;
+}"#
+);
 
 fn fallback_fill_function(strategy: &FillStrategy) -> &'static str {
     match strategy {
         FillStrategy::DomValueSetter => {
-            r#"function(text) {
+            concat!(
+                r#"function(text) {
   const injected = globalThis.__refact_injected__;
-  const el = this.tagName === 'LABEL' && this.control ? this.control : this;
+  const el = this.tagName === 'LABEL' && this.control ? this.control : this;"#,
+                native_value_js!(),
+                r#"
+  if (!hasNativeValue(el, ['INPUT', 'TEXTAREA']))
+    throw new Error('Element has no native value property');
   el.scrollIntoView({ block: 'center', behavior: 'instant' });
   el.focus();
   el.value = text;
@@ -603,11 +684,17 @@ fn fallback_fill_function(strategy: &FillStrategy) -> &'static str {
   el.dispatchEvent(new Event('change', { bubbles: true }));
   return true;
 }"#
+            )
         }
         FillStrategy::NativePrototypeSetter => {
-            r#"function(text) {
+            concat!(
+                r#"function(text) {
   const injected = globalThis.__refact_injected__;
-  const el = this.tagName === 'LABEL' && this.control ? this.control : this;
+  const el = this.tagName === 'LABEL' && this.control ? this.control : this;"#,
+                native_value_js!(),
+                r#"
+  if (!hasNativeValue(el, ['INPUT', 'TEXTAREA']))
+    throw new Error('Element has no native value property');
   const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
   if (!setter) throw new Error('No value setter on prototype');
@@ -618,6 +705,7 @@ fn fallback_fill_function(strategy: &FillStrategy) -> &'static str {
   el.dispatchEvent(new Event('change', { bubbles: true }));
   return true;
 }"#
+            )
         }
         FillStrategy::ContentEditablePath => {
             r#"function(text) {
@@ -840,6 +928,82 @@ mod tests {
         );
         assert!(choose_fill_strategies(&FieldKind::Select).is_empty());
         assert!(choose_fill_strategies(&FieldKind::Radio).is_empty());
+    }
+
+    #[test]
+    fn unknown_fields_have_no_fill_strategies() {
+        assert!(choose_fill_strategies(&FieldKind::Unknown).is_empty());
+        let spinbutton = not_editable_message("div", Some("spinbutton"));
+        assert!(spinbutton.starts_with("Element <div role=spinbutton> is not an <input>"));
+        assert!(spinbutton.contains("not an <input>, <textarea> or [contenteditable] element"));
+        assert!(spinbutton.contains("select_option for <select>, check/uncheck for checkboxes"));
+        assert!(
+            not_editable_message("button", None).starts_with("Element <button> is not an <input>")
+        );
+    }
+
+    #[test]
+    fn verification_and_value_setters_reject_expando_values() {
+        assert!(VERIFY_VALUE.contains(
+            "if (!hasNativeValue(el, ['INPUT', 'TEXTAREA', 'SELECT'])) return { matches: false, \
+             reason: 'not_editable' };"
+        ));
+        for strategy in [
+            FillStrategy::DomValueSetter,
+            FillStrategy::NativePrototypeSetter,
+        ] {
+            let function = fallback_fill_function(&strategy);
+            assert!(function.contains("if (!hasNativeValue(el, ['INPUT', 'TEXTAREA']))"));
+            assert!(function.contains("Element has no native value property"));
+        }
+    }
+
+    #[test]
+    fn native_value_checks_walk_the_prototype_chain() {
+        for function in [
+            VERIFY_VALUE,
+            fallback_fill_function(&FillStrategy::DomValueSetter),
+            fallback_fill_function(&FillStrategy::NativePrototypeSetter),
+        ] {
+            assert!(function.contains(
+                "for (let proto = Object.getPrototypeOf(node); proto; proto = \
+                 Object.getPrototypeOf(proto)) {"
+            ));
+            assert!(function
+                .contains("if (Object.getOwnPropertyDescriptor(proto, 'value')) return true;"));
+            assert!(function.contains("if (!node || !tags.includes(node.tagName)) return false;"));
+            assert!(!function.contains("const proto = Object.getPrototypeOf(el);"));
+        }
+    }
+
+    #[test]
+    fn label_retarget_reports_protocol_failures_and_swallows_null_controls() {
+        assert_eq!(
+            map_label_retarget_error(HandleError::Resolution(
+                LABEL_RETARGET_NO_HANDLE.to_string()
+            )),
+            Ok(None)
+        );
+        assert_eq!(
+            map_label_retarget_error(HandleError::Protocol("Target closed".to_string()))
+                .unwrap_err()
+                .message,
+            "Target closed"
+        );
+        assert_eq!(
+            map_label_retarget_error(HandleError::Resolution("Node is detached".to_string()))
+                .unwrap_err()
+                .message,
+            "Node is detached"
+        );
+        assert_eq!(
+            map_label_retarget_error(HandleError::Invalidated {
+                object_id: "obj-7".to_string()
+            })
+            .unwrap_err()
+            .message,
+            "Element handle obj-7 is no longer valid"
+        );
     }
 
     #[test]

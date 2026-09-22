@@ -65,7 +65,6 @@ const RESPONSES_INCOMPLETE_STREAM_ERROR: &str =
 const RESPONSES_CONTEXT_CUTOFF_ERROR: &str =
     "context_length_exceeded: Responses stream ended before a terminal event at critical context pressure";
 
-const MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS: usize = 1;
 const DELTA_COALESCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(10);
 const MAX_DELTA_BATCH_EVENTS: usize = 64;
 const MAX_DELTA_OPS_PER_EMIT: usize = 128;
@@ -206,10 +205,6 @@ pub(crate) fn batch_stream_delta_ops(ops: Vec<DeltaOp>) -> Vec<Vec<DeltaOp>> {
     batches
 }
 
-fn should_try_post_llm_deterministic_sweep(round: usize) -> bool {
-    round == MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS + 1
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NormalizedStopReason {
     ProviderLengthStop,
@@ -309,7 +304,7 @@ fn safe_context_limit_error_for_log(error: &str) -> String {
 
 fn context_limit_final_error_message(error: &str) -> String {
     format!(
-        "Context too large and automatic compaction could not free enough space. Run ctx_probe()/ctx_apply() to trim the chat manually, or start a new chat. Original error: {}",
+        "Context too large and context reconstruction failed or the rebuilt context is still too large. Explicitly rebuild the context or start a new chat. Original error: {}",
         safe_provider_error_diagnostic(error)
     )
 }
@@ -406,13 +401,16 @@ fn maybe_inject_token_budget_instruction(
     cadence: usize,
     image_token_mode: refact_core::provider_types::ImageTokenMode,
 ) -> bool {
+    let Ok(active) = refact_core::active_context::active_context(&session.messages) else {
+        return false;
+    };
+    let messages = &active.messages;
     let used_tokens = refact_chat_history::trajectory_ops::approx_token_count_for_image_mode(
-        &session.messages,
+        messages,
         image_token_mode,
     );
     let remaining = effective_n_ctx.saturating_sub(used_tokens);
-    let last_has_tool_calls = session
-        .messages
+    let last_has_tool_calls = messages
         .last()
         .map(|msg| {
             msg.role == "assistant"
@@ -427,8 +425,7 @@ fn maybe_inject_token_budget_instruction(
         return false;
     }
 
-    if session
-        .messages
+    if messages
         .last()
         .is_some_and(|message| length_stop_kind(message).is_some())
     {
@@ -438,14 +435,14 @@ fn maybe_inject_token_budget_instruction(
     let mut last_marker_idx = None;
     let mut user_or_assistant_since = 0usize;
 
-    for (idx, msg) in session.messages.iter().enumerate().rev() {
+    for (idx, msg) in messages.iter().enumerate().rev() {
         if msg.role == "cd_instruction" && msg.tool_call_id == TOKEN_BUDGET_MARKER {
             last_marker_idx = Some(idx);
             break;
         }
     }
 
-    for (idx, msg) in session.messages.iter().enumerate().rev() {
+    for (idx, msg) in messages.iter().enumerate().rev() {
         if let Some(marker_idx) = last_marker_idx {
             if idx <= marker_idx {
                 break;
@@ -460,8 +457,7 @@ fn maybe_inject_token_budget_instruction(
         return false;
     }
 
-    if session
-        .messages
+    if messages
         .iter()
         .rev()
         .take(cadence)
@@ -502,28 +498,110 @@ fn build_mcp_lazy_hint(total: usize) -> String {
 }
 
 fn inject_mcp_lazy_hint(session: &mut ChatSession, total: usize) -> bool {
-    if session.messages.iter().any(|message| {
+    let active = match refact_core::active_context::active_context(&session.messages) {
+        Ok(active) => active.messages,
+        Err(error) => {
+            warn!("Skipping MCP lazy hint for {}: {}", session.chat_id, error);
+            return false;
+        }
+    };
+    if active.iter().any(|message| {
         message.role == "cd_instruction" && message.tool_call_id == MCP_LAZY_INDEX_MARKER
     }) {
         return false;
     }
 
-    let insert_pos = session
-        .messages
+    let insert_pos = active
         .iter()
         .position(|message| message.role == "system")
         .map(|index| index + 1)
         .unwrap_or(0);
-    session.insert_message(
-        insert_pos,
-        ChatMessage {
-            role: "cd_instruction".to_string(),
-            tool_call_id: MCP_LAZY_INDEX_MARKER.to_string(),
-            content: ChatContent::SimpleText(build_mcp_lazy_hint(total)),
-            ..Default::default()
-        },
-    );
-    true
+    let hint = ChatMessage {
+        role: "cd_instruction".to_string(),
+        tool_call_id: MCP_LAZY_INDEX_MARKER.to_string(),
+        content: ChatContent::SimpleText(build_mcp_lazy_hint(total)),
+        ..Default::default()
+    };
+    match session.insert_active_message(insert_pos, hint) {
+        Ok(_) => true,
+        Err(error) => {
+            warn!("Failed to inject MCP lazy hint: {}", error);
+            false
+        }
+    }
+}
+
+fn is_preamble_conversation_start(message: &ChatMessage) -> bool {
+    message.role == "user"
+        || message.role == "assistant"
+        || message.role == crate::chat::internal_roles::EVENT_ROLE
+}
+
+fn preamble_already_present(active_view: &[ChatMessage], msg: &ChatMessage) -> bool {
+    if !msg.message_id.is_empty() && active_view.iter().any(|m| m.message_id == msg.message_id) {
+        return true;
+    }
+    match msg.role.as_str() {
+        "assistant" | "compression_report" => true,
+        "system" => active_view.first().is_some_and(|m| m.role == "system"),
+        "cd_instruction" => active_view.iter().any(|m| m.role == "cd_instruction"),
+        "context_file" => active_view
+            .iter()
+            .any(|m| m.role == "context_file" && m.tool_call_id == msg.tool_call_id),
+        _ => false,
+    }
+}
+
+/// Persist the preamble messages the prompt mixer placed ahead of the conversation
+/// into the active view, so they reach the model even after a context rebuild.
+fn persist_preamble_messages(
+    session: &mut ChatSession,
+    messages_with_preamble: &[ChatMessage],
+) -> usize {
+    let first_conv_idx = messages_with_preamble
+        .iter()
+        .position(is_preamble_conversation_start)
+        .unwrap_or(messages_with_preamble.len());
+    let Ok(active) = refact_core::active_context::active_context(&session.messages) else {
+        return 0;
+    };
+    let mut active_view = active.messages;
+    let mut system_insert_idx = 0;
+    let mut context_insert_idx = active_view
+        .iter()
+        .position(|m| m.role == "system")
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let mut inserted = 0;
+    for msg in messages_with_preamble.iter().take(first_conv_idx) {
+        if preamble_already_present(&active_view, msg) {
+            continue;
+        }
+        let insert_idx = if msg.role == "system" {
+            let idx = system_insert_idx;
+            system_insert_idx += 1;
+            context_insert_idx += 1;
+            idx
+        } else {
+            let idx = context_insert_idx;
+            context_insert_idx += 1;
+            idx
+        };
+        match session.insert_active_message(insert_idx, msg.clone()) {
+            Ok(_) => {
+                active_view.insert(insert_idx.min(active_view.len()), msg.clone());
+                inserted += 1;
+            }
+            Err(error) => {
+                warn!(
+                    "Failed to persist preamble message ({}): {}",
+                    msg.role, error
+                );
+                break;
+            }
+        }
+    }
+    inserted
 }
 
 fn enrichment_insertion_index(
@@ -563,24 +641,44 @@ pub fn prepare_session_preamble_and_knowledge(
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> futures::future::BoxFuture<'static, ()> {
     Box::pin(async move {
-        prepare_session_preamble_and_knowledge_inner(app.clone(), session_arc.clone()).await;
+        ensure_session_preamble_inner(app.clone(), session_arc.clone()).await;
+        prepare_session_knowledge_inner(app.clone(), session_arc.clone()).await;
         prepare_project_work_context(&app, &session_arc).await;
     })
 }
 
-async fn prepare_session_preamble_and_knowledge_inner(
+/// A rebuilt or handed-off context starts without its preamble, so the generation
+/// loop re-checks the active head before every request; the full preamble pipeline
+/// only runs when the system prompt is actually missing.
+pub fn ensure_session_preamble(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
-) {
+) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        let system_missing = {
+            let session = session_arc.lock().await;
+            refact_core::active_context::active_context(&session.messages)
+                .is_ok_and(|active| !active.messages.first().is_some_and(|m| m.role == "system"))
+        };
+        if system_missing {
+            ensure_session_preamble_inner(app, session_arc).await;
+        }
+    })
+}
+
+async fn ensure_session_preamble_inner(app: AppState, session_arc: Arc<AMutex<ChatSession>>) {
     let gcx = app.gcx.clone();
     let (thread, chat_id, has_system, has_project_context) = {
         let session = session_arc.lock().await;
-        let has_sys = session
-            .messages
-            .first()
-            .map(|m| m.role == "system")
-            .unwrap_or(false);
-        let has_proj = session.messages.iter().any(|m| {
+        let active = match refact_core::active_context::active_context(&session.messages) {
+            Ok(active) => active.messages,
+            Err(error) => {
+                warn!("Skipping preamble for {}: {}", session.chat_id, error);
+                return;
+            }
+        };
+        let has_sys = active.first().is_some_and(|m| m.role == "system");
+        let has_proj = active.iter().any(|m| {
             m.role == "context_file"
                 && m.tool_call_id == crate::chat::system_context::PROJECT_CONTEXT_MARKER
         });
@@ -649,7 +747,13 @@ async fn prepare_session_preamble_and_knowledge_inner(
 
         let messages = {
             let session = session_arc.lock().await;
-            session.messages.clone()
+            match refact_core::active_context::active_context(&session.messages) {
+                Ok(active) => active.messages,
+                Err(error) => {
+                    warn!("Skipping preamble for {}: {}", session.chat_id, error);
+                    return;
+                }
+            }
         };
         let mut has_rag_results = crate::scratchpads::scratchpad_utils::HasRagResults::new();
         let (messages_with_preamble, skills_info) =
@@ -665,75 +769,12 @@ async fn prepare_session_preamble_and_knowledge_inner(
             )
             .await;
 
-        let first_conv_idx = messages_with_preamble
-            .iter()
-            .position(|m| {
-                m.role == "user"
-                    || m.role == "assistant"
-                    || m.role == crate::chat::internal_roles::EVENT_ROLE
-            })
-            .unwrap_or(messages_with_preamble.len());
-
-        {
-            let mut session = session_arc.lock().await;
-            session.skills_available_count = skills_info.available_count;
-            session.skills_included = skills_info.included_names.clone();
-        }
-
-        if first_conv_idx > 0 {
-            let mut session = session_arc.lock().await;
-
-            let mut system_insert_idx = 0;
-            let mut context_insert_idx = session
-                .messages
-                .iter()
-                .position(|m| m.role == "system")
-                .map(|i| i + 1)
-                .unwrap_or(0);
-
-            let mut inserted = 0;
-            for msg in messages_with_preamble.iter().take(first_conv_idx) {
-                if msg.role == "assistant" {
-                    continue;
-                }
-                if msg.role == "system"
-                    && session
-                        .messages
-                        .first()
-                        .map(|m| m.role == "system")
-                        .unwrap_or(false)
-                {
-                    continue;
-                }
-                if msg.role == "cd_instruction"
-                    && session.messages.iter().any(|m| m.role == "cd_instruction")
-                {
-                    continue;
-                }
-                if msg.role == "context_file"
-                    && session
-                        .messages
-                        .iter()
-                        .any(|m| m.role == "context_file" && m.tool_call_id == msg.tool_call_id)
-                {
-                    continue;
-                }
-                let insert_idx = if msg.role == "system" {
-                    let idx = system_insert_idx;
-                    system_insert_idx += 1;
-                    context_insert_idx += 1;
-                    idx
-                } else {
-                    let idx = context_insert_idx;
-                    context_insert_idx += 1;
-                    idx
-                };
-                session.insert_message(insert_idx, msg.clone());
-                inserted += 1;
-            }
-            if inserted > 0 {
-                info!("Saved {} preamble messages to session", inserted);
-            }
+        let mut session = session_arc.lock().await;
+        session.skills_available_count = skills_info.available_count;
+        session.skills_included = skills_info.included_names.clone();
+        let inserted = persist_preamble_messages(&mut session, &messages_with_preamble);
+        if inserted > 0 {
+            info!("Saved {} preamble messages to session", inserted);
         }
     }
 
@@ -748,6 +789,14 @@ async fn prepare_session_preamble_and_knowledge_inner(
             info!("Injected MCP lazy discovery hint with {} tools", mcp_total);
         }
     }
+}
+
+async fn prepare_session_knowledge_inner(app: AppState, session_arc: Arc<AMutex<ChatSession>>) {
+    let gcx = app.gcx.clone();
+    let (thread, chat_id) = {
+        let session = session_arc.lock().await;
+        (session.thread.clone(), session.chat_id.clone())
+    };
 
     let (
         last_is_user,
@@ -1237,7 +1286,7 @@ async fn maybe_compact_after_high_pressure_length_stop(
             .last()
             .is_some_and(is_length_stop_compression_candidate)
         {
-            crate::chat::summarization::emit_compression_skipped_status(
+            crate::chat::context_rebuild::emit_compression_skipped_status(
                 &mut session,
                 CompressionReason::EffectiveContextUnknown,
             );
@@ -1268,8 +1317,8 @@ async fn maybe_compact_after_high_pressure_length_stop(
             .map(compression_reason_for_stop_reason)
     };
 
-    warn!("High-pressure length stop, summarizing oldest eligible segments to reduce context");
-    let outcome = crate::chat::summarization::apply_segment_summarization_with_reason(
+    warn!("High-pressure length stop, rebuilding active context");
+    let outcome = crate::chat::context_rebuild::apply_context_rebuild_with_reason(
         gcx,
         session_arc,
         thread,
@@ -1281,17 +1330,6 @@ async fn maybe_compact_after_high_pressure_length_stop(
         let mut session = session_arc.lock().await;
         session.thread.previous_response_id = None;
         session.reset_cache_guard_snapshot();
-        return true;
-    }
-
-    if matches!(
-        outcome,
-        crate::chat::summarization::CompactionOutcome::LlmUnavailable
-            | crate::chat::summarization::CompactionOutcome::NothingToCompact
-    ) && crate::chat::summarization::apply_deterministic_compaction_for_recovery(session_arc)
-        .await
-    {
-        warn!("High-pressure length stop recovered via deterministic full sweep");
         return true;
     }
 
@@ -1594,6 +1632,28 @@ pub fn start_generation(
         // in-flight, so `when_idle` deliveries do not land on a transient Idle.
         let mut turn_guard = TurnDepthGuard::enter(app.clone(), session_arc.clone()).await;
         loop {
+            match crate::chat::context_rebuild::drain_pending(gcx.clone(), &session_arc).await {
+                Ok(true) => break,
+                Err(error) => {
+                    let mut session = session_arc.lock().await;
+                    session.append_error_message_deduped(&format!(
+                        "Context operation failed: {}",
+                        safe_provider_error_diagnostic(&error)
+                    ));
+                    session.set_runtime_state(SessionState::Error, Some(error));
+                    break;
+                }
+                Ok(false) => {}
+            }
+            {
+                let mut session = session_arc.lock().await;
+                if let Err(error) = refact_core::active_context::active_context(&session.messages) {
+                    let error = format!("Invalid active context: {error}. Explicit rebuild required before generation");
+                    session.append_error_message_deduped(&error);
+                    session.set_runtime_state(SessionState::Error, Some(error));
+                    break;
+                }
+            }
             if inject_priority_messages_before_llm_if_safe(app.clone(), session_arc.clone()).await {
                 continue;
             }
@@ -1632,12 +1692,15 @@ pub fn start_generation(
             if let Some(agent_name) = fork_agent_name {
                 let user_content_opt = {
                     let session = session_arc.lock().await;
-                    session
-                        .messages
-                        .iter()
-                        .rev()
-                        .find(|m| m.role == "user")
-                        .map(|m| m.content.content_text_only())
+                    refact_core::active_context::active_context(&session.messages)
+                        .ok()
+                        .and_then(|view| {
+                            view.messages
+                                .into_iter()
+                                .rev()
+                                .find(|message| message.role == "user")
+                                .map(|message| message.content.content_text_only())
+                        })
                 };
                 {
                     let mut session = session_arc.lock().await;
@@ -1687,18 +1750,55 @@ pub fn start_generation(
                 }
             }
 
-            crate::chat::summarization::apply_segment_summarization(
-                gcx.clone(),
-                &session_arc,
-                &thread,
-                false,
-            )
-            .await;
+            // Resolve before the very first proactive check, with the command's
+            // actual model override applied. Failed resolution remains pending.
+            if thread.auto_compression_cap_pending {
+                if let Ok(caps) =
+                    crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+                        .await
+                {
+                    if let Ok(model) = crate::caps::resolve_chat_model(caps, &thread.model) {
+                        let window = if model.base.n_ctx > 0 {
+                            model.base.n_ctx
+                        } else {
+                            tokens().default_n_ctx
+                        };
+                        resolve_session_compression_cap(&app, &session_arc, &mut thread, window)
+                            .await;
+                    }
+                }
+            }
+
+            if matches!(
+                crate::chat::context_rebuild::apply_context_rebuild_with_reason(
+                    gcx.clone(),
+                    &session_arc,
+                    &thread,
+                    false,
+                    None,
+                )
+                .await,
+                crate::chat::context_rebuild::CompactionOutcome::LlmUnavailable
+            ) {
+                break;
+            }
 
             thread = {
                 let session = session_arc.lock().await;
-                session.thread.clone()
+                let mut refreshed = session.thread.clone();
+                if let Some(model) = session
+                    .active_command
+                    .model_override
+                    .as_ref()
+                    .filter(|m| !m.is_empty())
+                {
+                    refreshed.model = model.clone();
+                }
+                refreshed
             };
+
+            // Rebuilds and handoffs replace the conversation but not the preamble.
+            ensure_session_preamble(app.clone(), session_arc.clone()).await;
 
             if user_stop_requested(&session_arc).await {
                 break;
@@ -1827,8 +1927,7 @@ pub fn start_generation(
                     let original_error = error.message.clone();
                     let round = {
                         let mut session = session_arc.lock().await;
-                        session.clear_stream_for_retry();
-                        session.add_message(make_ui_only_error_message(&original_error));
+                        session.finish_stream_for_rebuild();
                         let round = session
                             .thread
                             .reactive_compact_attempts
@@ -1839,79 +1938,18 @@ pub fn start_generation(
                         session.touch();
                         round
                     };
-                    if round <= MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS {
-                        let log_error = safe_context_limit_error_for_log(&original_error);
-                        warn!(
-                            "Context limit error, compacting (round {}/{}): {}",
-                            round, MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS, log_error,
-                        );
-                        let outcome =
-                            crate::chat::summarization::apply_segment_summarization_with_reason(
-                                gcx.clone(),
-                                &session_arc,
-                                &thread,
-                                true,
-                                Some(CompressionReason::ContextLengthStop),
-                            )
-                            .await;
-                        match outcome {
-                            crate::chat::summarization::CompactionOutcome::Applied => {
-                                let mut session = session_arc.lock().await;
-                                session.clear_stream_for_retry();
-                                session.thread.previous_response_id = None;
-                                session.reset_cache_guard_snapshot();
-                                session.thread.reactive_compact_attempts =
-                                    Some(MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS);
-                                continue;
-                            }
-                            stalled_outcome @ (crate::chat::summarization::CompactionOutcome::LlmUnavailable
-                            | crate::chat::summarization::CompactionOutcome::NothingToCompact) => {
-                                // A single oversize span (or image-only history) can leave the
-                                // summarizer with nothing eligible while the context is still
-                                // over the limit; the deterministic sweep is the recovery for
-                                // both stalls, not just summarizer unavailability.
-                                if crate::chat::summarization::apply_deterministic_compaction_for_recovery(
-                                    &session_arc,
-                                )
-                                .await
-                                {
-                                    if matches!(
-                                        stalled_outcome,
-                                        crate::chat::summarization::CompactionOutcome::LlmUnavailable
-                                    ) {
-                                        warn!(
-                                            "Context limit recovered via deterministic full sweep (summarizer unavailable)"
-                                        );
-                                    } else {
-                                        warn!(
-                                            "Context limit recovered via deterministic full sweep (no summarizable segment)"
-                                        );
-                                    }
-                                    let mut session = session_arc.lock().await;
-                                    session.clear_stream_for_retry();
-                                    session.thread.previous_response_id = None;
-                                    session.reset_cache_guard_snapshot();
-                                    session.thread.reactive_compact_attempts =
-                                        Some(MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS + 1);
-                                    continue;
-                                }
-                            }
-                        }
-                    } else if should_try_post_llm_deterministic_sweep(round)
-                        && crate::chat::summarization::apply_deterministic_compaction_for_recovery(
+                    if round == 1
+                        && thread.auto_compact_enabled_effective()
+                        && crate::chat::context_rebuild::apply_context_rebuild_with_reason(
+                            gcx.clone(),
                             &session_arc,
+                            &thread,
+                            true,
+                            Some(CompressionReason::ContextLengthStop),
                         )
                         .await
+                        .applied()
                     {
-                        warn!(
-                            "Context limit persisted after one-shot LLM compression; applied the deterministic full sweep"
-                        );
-                        let mut session = session_arc.lock().await;
-                        session.clear_stream_for_retry();
-                        session.thread.previous_response_id = None;
-                        session.reset_cache_guard_snapshot();
-                        session.thread.reactive_compact_attempts =
-                            Some(MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS + 1);
                         continue;
                     }
                     error.message = context_limit_final_error_message(&original_error);
@@ -2147,7 +2185,62 @@ pub fn start_generation(
                     );
                     ev.chat_id = Some(chat_id.to_string());
                     ev.persistent = true;
-                    app.buddy_event_sink.enqueue_event(ev).await;
+                    let origin = {
+                        let session = session_arc.lock().await;
+                        session.thread.worktree.as_ref().map(|worktree| {
+                            (
+                                worktree.source_workspace_root.clone(),
+                                session.created_at.clone(),
+                                session.event_seq,
+                            )
+                        })
+                    };
+                    let mut correlated = false;
+                    if let Some((root, version, sequence)) = origin {
+                        if let Ok(root) = tokio::fs::canonicalize(root).await {
+                            use refact_buddy_core::operator_events::{
+                                OperatorSignal, OperatorSignalAuthority, OperatorSignalKind,
+                                OPERATOR_SIGNAL_SCHEMA_VERSION_V1,
+                            };
+                            use refact_buddy_core::operator_types::{
+                                NativeSourceIdentity, NativeSourceKind, ProjectIdentity,
+                                ResourceRef,
+                            };
+                            let canonical_root = root.to_string_lossy().into_owned();
+                            let signal = OperatorSignal {
+                                schema_version: OPERATOR_SIGNAL_SCHEMA_VERSION_V1,
+                                kind: OperatorSignalKind::OperationState,
+                                authority: OperatorSignalAuthority::Hint,
+                                project: ProjectIdentity {
+                                    project_id: canonical_root.clone(),
+                                    canonical_root,
+                                },
+                                worker: None,
+                                source: NativeSourceIdentity {
+                                    source_kind: NativeSourceKind::Chat,
+                                    source_id: chat_id.to_string(),
+                                    source_version: version.clone(),
+                                },
+                                source_sequence: Some(sequence),
+                                chat: Some(ResourceRef {
+                                    resource_kind: "chat".into(),
+                                    resource_id: chat_id.to_string(),
+                                    version,
+                                }),
+                                tool: None,
+                                goal: None,
+                                runtime_event: ev.clone(),
+                            };
+                            correlated = app
+                                .buddy_event_sink
+                                .enqueue_operator_signal(signal)
+                                .await
+                                .is_ok();
+                        }
+                    }
+                    if !correlated {
+                        app.buddy_event_sink.enqueue_event(ev).await;
+                    }
                     break;
                 }
                 ToolStepOutcome::Stop => {
@@ -2256,10 +2349,46 @@ impl Drop for TurnDepthGuard {
     }
 }
 
+/// Persist the new-chat default at the model-resolution boundary, not on load or
+/// based on an empty history. Shared by the proactive gate and direct generation.
+async fn resolve_session_compression_cap(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    thread: &mut ThreadParams,
+    model_window: usize,
+) {
+    let changed = {
+        let mut session = session_arc.lock().await;
+        let changed = session
+            .thread
+            .resolve_pending_compression_cap(Some(model_window));
+        thread.auto_compression_cap = session.thread.auto_compression_cap;
+        thread.auto_compression_cap_pending = session.thread.auto_compression_cap_pending;
+        if changed {
+            let params = json!({
+                "auto_compression_cap": session.thread.auto_compression_cap,
+                "auto_compression_cap_pending": session.thread.auto_compression_cap_pending,
+            });
+            session.emit(ChatEvent::ThreadUpdated { params });
+            session.increment_version();
+            session.touch();
+        }
+        changed
+    };
+    if changed {
+        maybe_save_trajectory_with_intent(
+            app.clone(),
+            session_arc.clone(),
+            TrajectoryCommitIntent::Checkpoint,
+        )
+        .await;
+    }
+}
+
 pub async fn run_llm_generation(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
-    thread: ThreadParams,
+    mut thread: ThreadParams,
     chat_id: String,
     abort_flag: Arc<AtomicBool>,
     abort_notify: Arc<tokio::sync::Notify>,
@@ -2292,6 +2421,12 @@ pub async fn run_llm_generation(
         .await
         .map_err(|e| e.message)?;
     let model_rec = crate::caps::resolve_chat_model(caps.clone(), &thread.model)?;
+    let model_n_ctx = if model_rec.base.n_ctx > 0 {
+        model_rec.base.n_ctx
+    } else {
+        tokens().default_n_ctx
+    };
+    resolve_session_compression_cap(&app, &session_arc, &mut thread, model_n_ctx).await;
     check_aborted_before_stream(&abort_flag)?;
 
     let execution_scope = thread
@@ -2327,7 +2462,9 @@ pub async fn run_llm_generation(
     let (messages, existing_frozen_prefix) = {
         let session = session_arc.lock().await;
         (
-            session.messages.clone(),
+            refact_core::active_context::active_context(&session.messages)
+                .map_err(|error| error.to_string())?
+                .messages,
             session.thread.frozen_request_prefix.clone(),
         )
     };
@@ -2362,11 +2499,6 @@ pub async fn run_llm_generation(
         );
     }
 
-    let model_n_ctx = if model_rec.base.n_ctx > 0 {
-        model_rec.base.n_ctx
-    } else {
-        tokens().default_n_ctx
-    };
     let effective_n_ctx = match thread.context_tokens_cap {
         Some(cap) if cap > 0 => cap.min(model_n_ctx),
         _ => model_n_ctx,
@@ -3720,10 +3852,8 @@ mod tests {
             "context_length_exceeded: Authorization: Bearer sk-test-secret",
         );
 
-        assert!(text.starts_with(
-            "Context too large and automatic compaction could not free enough space."
-        ));
-        assert!(text.contains("ctx_probe()/ctx_apply()"));
+        assert!(text.starts_with("Context too large and context reconstruction failed"));
+        assert!(text.contains("Explicitly rebuild"));
         assert!(text.contains("Original error:"));
         assert_context_limit_secret_redacted(&text);
         assert!(
@@ -3897,6 +4027,222 @@ mod tests {
     }
 
     #[test]
+    fn token_budget_instruction_uses_only_latest_payload_and_suffix() {
+        use refact_core::active_context::{make_reconstruction_report, ReconstructionMetadata};
+        let mut active = make_user_msg("short active request");
+        active.message_id = "payload-budget".into();
+        let report =
+            make_reconstruction_report(vec![active], ReconstructionMetadata::default()).unwrap();
+        let mut session = ChatSession::new("budget-archive".into());
+        session.add_message(make_user_msg(&"archived".repeat(20_000)));
+        let mut old_marker = ChatMessage::new("cd_instruction".into(), "old budget".into());
+        old_marker.tool_call_id = TOKEN_BUDGET_MARKER.into();
+        session.add_message(old_marker);
+        session.add_message(report);
+        let before = serde_json::to_value(&session.messages).unwrap();
+        let image_mode = refact_core::provider_types::ImageTokenMode::Provider;
+        assert!(!maybe_inject_token_budget_instruction(
+            &mut session,
+            10000,
+            2,
+            image_mode
+        ));
+        let active = refact_core::active_context::active_context(&session.messages).unwrap();
+        let used = refact_chat_history::trajectory_ops::approx_token_count_for_image_mode(
+            &active.messages,
+            image_mode,
+        );
+        assert!(maybe_inject_token_budget_instruction(
+            &mut session,
+            10000,
+            1,
+            image_mode
+        ));
+        assert_eq!(
+            serde_json::to_value(&session.messages[..3]).unwrap(),
+            before
+        );
+        assert!(session
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .content_text_only()
+            .contains(&format!("~{} tokens remaining", 10000 - used)));
+    }
+
+    fn identified(id: &str, mut message: ChatMessage) -> ChatMessage {
+        message.message_id = id.to_string();
+        message
+    }
+
+    fn marked_context_file(id: &str, marker: &str) -> ChatMessage {
+        let mut message = ChatMessage::new("context_file".into(), format!("{marker} files"));
+        message.message_id = id.to_string();
+        message.tool_call_id = marker.to_string();
+        message
+    }
+
+    /// A handed-off chat starts as a single reconstruction report whose payload begins
+    /// with context files, exactly like the mode-transition destination.
+    fn handed_off_session() -> ChatSession {
+        use refact_core::active_context::{make_reconstruction_report, ReconstructionMetadata};
+        let payload = vec![
+            identified(
+                "rebuilt-files",
+                ChatMessage::new("context_file".into(), "rebuilt files".into()),
+            ),
+            identified(
+                "rebuilt-memory",
+                ChatMessage::new("context_file".into(), "rebuilt memory".into()),
+            ),
+            identified("previous", make_user_msg("## Previous Conversation")),
+            identified("summary", make_user_msg("## Summary")),
+        ];
+        let mut session = ChatSession::new("handoff-destination".into());
+        session.add_message(ChatMessage::new("system".into(), "archived prompt".into()));
+        session.add_message(
+            make_reconstruction_report(payload, ReconstructionMetadata::default()).unwrap(),
+        );
+        session
+    }
+
+    fn active_roles(session: &ChatSession) -> Vec<String> {
+        refact_core::active_context::active_context(&session.messages)
+            .unwrap()
+            .messages
+            .iter()
+            .map(|m| m.role.clone())
+            .collect()
+    }
+
+    #[test]
+    fn preamble_lands_at_the_head_of_a_reconstructed_context() {
+        let mut session = handed_off_session();
+        let archive = serde_json::to_value(&session.messages[0]).unwrap();
+        let report_id = session.messages[1].message_id.clone();
+        let mut events = session.subscribe();
+        let active = refact_core::active_context::active_context(&session.messages)
+            .unwrap()
+            .messages;
+        let mut with_preamble = vec![ChatMessage::new("system".into(), "fresh prompt".into())];
+        with_preamble.extend(active[..2].iter().cloned());
+        with_preamble.push(marked_context_file(
+            "project",
+            crate::chat::system_context::PROJECT_CONTEXT_MARKER,
+        ));
+        with_preamble.push(marked_context_file("memories", "memories_context"));
+        with_preamble.extend(active[2..].iter().cloned());
+
+        assert_eq!(persist_preamble_messages(&mut session, &with_preamble), 3);
+        assert_eq!(
+            active_roles(&session),
+            vec![
+                "system",
+                "context_file",
+                "context_file",
+                "context_file",
+                "context_file",
+                "user",
+                "user"
+            ]
+        );
+        let active = refact_core::active_context::active_context(&session.messages)
+            .unwrap()
+            .messages;
+        assert_eq!(active[0].content.content_text_only(), "fresh prompt");
+        assert_eq!(
+            active[1].tool_call_id,
+            crate::chat::system_context::PROJECT_CONTEXT_MARKER
+        );
+        assert_eq!(active[2].tool_call_id, "memories_context");
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(serde_json::to_value(&session.messages[0]).unwrap(), archive);
+        assert_eq!(
+            session
+                .messages
+                .iter()
+                .filter(|m| m.role == "compression_report")
+                .count(),
+            1
+        );
+        let linearized =
+            crate::chat::linearize::apply_summarization_linearize(session.messages.clone())
+                .unwrap();
+        assert!(crate::chat::history_limit::validate_chat_history(&linearized).is_ok());
+        assert_eq!(
+            crate::chat::trajectories::first_system_prompt(&linearized).as_deref(),
+            Some("fresh prompt")
+        );
+
+        let mut updated_report = 0;
+        while let Ok(event) = events.try_recv() {
+            let event: serde_json::Value = serde_json::from_str(&event).unwrap();
+            assert_ne!(event["type"], "message_added");
+            if event["type"] == "message_updated" {
+                assert_eq!(event["message_id"], report_id);
+                updated_report += 1;
+            }
+        }
+        assert_eq!(updated_report, 3);
+
+        assert_eq!(persist_preamble_messages(&mut session, &with_preamble), 0);
+    }
+
+    #[test]
+    fn mcp_lazy_hint_targets_the_active_context() {
+        let mut session = handed_off_session();
+        let mut archived_hint = ChatMessage::new("cd_instruction".into(), "archived".into());
+        archived_hint.tool_call_id = MCP_LAZY_INDEX_MARKER.into();
+        session.insert_message(1, archived_hint);
+        assert_eq!(
+            persist_preamble_messages(
+                &mut session,
+                &[ChatMessage::new("system".into(), "fresh prompt".into())]
+            ),
+            1
+        );
+
+        assert!(inject_mcp_lazy_hint(&mut session, 7));
+        assert_eq!(
+            active_roles(&session)[..3],
+            ["system", "cd_instruction", "context_file"]
+        );
+        assert!(!inject_mcp_lazy_hint(&mut session, 7));
+        assert_eq!(session.messages.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn resolved_new_chat_default_persists_through_checkpoint_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        *app.workspace
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![root.path().canonicalize().unwrap()];
+        let mut session = ChatSession::new("resolved-default-snapshot".into());
+        session.thread.context_tokens_cap = Some(100_000);
+        session.add_message(make_user_msg("ready for first request"));
+        let session = Arc::new(AMutex::new(session));
+        let mut thread = session.lock().await.thread.clone();
+        assert!(thread.auto_compression_cap_pending);
+        resolve_session_compression_cap(&app, &session, &mut thread, 128_000).await;
+        assert_eq!(thread.auto_compression_cap, Some(90_000));
+        assert!(!thread.auto_compression_cap_pending);
+        crate::chat::trajectories::flush_trajectory_for_session(app, session.clone())
+            .await
+            .unwrap();
+        let restored = crate::chat::trajectories::load_trajectory_for_chat(gcx, &thread.id)
+            .await
+            .unwrap();
+        assert_eq!(restored.thread.auto_compression_cap, Some(90_000));
+        assert!(!restored.thread.auto_compression_cap_pending);
+        assert!(session.lock().await.draft_message.is_none());
+    }
+
+    #[test]
     fn test_token_budget_skips_after_tool_call_when_not_low() {
         let mut session = ChatSession::new("test".to_string());
         for idx in 0..TOKEN_BUDGET_CADENCE {
@@ -4040,50 +4386,6 @@ mod tests {
             refact_core::provider_types::ImageTokenMode::Provider,
         ));
         assert_eq!(session.messages.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn high_pressure_length_stop_triggers_compression_attempt() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let mut session = ChatSession::new("length-stop-attempt".to_string());
-        session.messages = vec![make_user_msg("continue"), make_high_pressure_length_stop()];
-        let thread = session.thread.clone();
-        let mut rx = session.subscribe();
-        let session_arc = Arc::new(AMutex::new(session));
-
-        assert!(
-            !maybe_compact_after_high_pressure_length_stop(
-                gcx,
-                &session_arc,
-                &thread,
-                Some(100_000),
-                refact_core::provider_types::ImageTokenMode::Provider,
-            )
-            .await
-        );
-
-        let session = session_arc.lock().await;
-        assert_eq!(session.thread.reactive_compact_attempts, None);
-        assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
-        assert_eq!(
-            session.compression_reason,
-            Some(CompressionReason::NoEligibleSegment)
-        );
-        drop(session);
-
-        let mut saw_provider_length_status = false;
-        while let Ok(json) = rx.try_recv() {
-            let env: EventEnvelope = serde_json::from_str(&json).unwrap();
-            if let ChatEvent::RuntimeUpdated {
-                compression_phase: Some(CompressionPhase::Checking),
-                compression_reason: Some(CompressionReason::ProviderLengthStop),
-                ..
-            } = env.event
-            {
-                saw_provider_length_status = true;
-            }
-        }
-        assert!(saw_provider_length_status);
     }
 
     #[test]
@@ -4375,32 +4677,6 @@ mod tests {
     }
 
     #[test]
-    fn test_context_limit_compaction_sets_cache_guard_after_segment_summary() {
-        let mut session = ChatSession::new("test".to_string());
-        session.messages = vec![
-            make_user_msg("hello"),
-            make_assistant_msg("old answer"),
-            make_user_msg("again"),
-        ];
-        assert!(
-            crate::chat::summarization::summarize_oldest_segment_with_static_summary(
-                &mut session.messages,
-                "summary",
-                "test",
-            )
-        );
-        session.thread.previous_response_id = None;
-        session.reset_cache_guard_snapshot();
-
-        assert!(session.cache_guard_force_next);
-        assert!(session.thread.previous_response_id.is_none());
-        assert!(session
-            .messages
-            .iter()
-            .any(crate::chat::summarization::is_segment_summary));
-    }
-
-    #[test]
     fn test_context_limit_compaction_allows_partial_output_errors() {
         let abort = std::sync::atomic::AtomicBool::new(false);
         let partial_context_error = context_limit_error(
@@ -4430,52 +4706,6 @@ mod tests {
                 && !abort.load(Ordering::SeqCst)),
             "abort must suppress reactive compaction",
         );
-    }
-
-    #[tokio::test]
-    async fn context_limit_no_eligible_segment_emits_visible_skip() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let mut session = ChatSession::new("context-limit-no-eligible".to_string());
-        session.messages = vec![make_user_msg("continue")];
-        session.start_stream();
-        let error = context_limit_error("context_length_exceeded", false);
-        let thread = session.thread.clone();
-        let session_arc = Arc::new(AMutex::new(session));
-
-        {
-            let mut session = session_arc.lock().await;
-            session.clear_stream_for_retry();
-            session.add_message(make_ui_only_error_message(&error.message));
-            session.thread.reactive_compact_attempts = Some(1);
-        }
-
-        assert!(
-            !crate::chat::summarization::apply_segment_summarization(
-                gcx,
-                &session_arc,
-                &thread,
-                true,
-            )
-            .await
-        );
-
-        let session = session_arc.lock().await;
-        assert_eq!(session.compression_phase, Some(CompressionPhase::Skipped));
-        assert_eq!(
-            session.compression_reason,
-            Some(CompressionReason::NoEligibleSegment)
-        );
-        assert!(session
-            .messages
-            .iter()
-            .any(crate::chat::diagnostics::is_ui_only_message));
-    }
-
-    #[test]
-    fn context_limit_post_llm_retry_allows_exactly_one_deterministic_sweep() {
-        assert!(!should_try_post_llm_deterministic_sweep(1));
-        assert!(should_try_post_llm_deterministic_sweep(2));
-        assert!(!should_try_post_llm_deterministic_sweep(3));
     }
 
     #[test]

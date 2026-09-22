@@ -246,6 +246,42 @@ impl WorldManager {
         )
     }
 
+    /// Counts locator matches by value without materializing element handles, returning up to
+    /// `preview_limit` outerHTML previews. Strict-mode callers use this so an ambiguous locator
+    /// over hundreds of elements costs one CDP round trip instead of one handle release each.
+    pub fn count_injected_matches(
+        &self,
+        tab: &Tab,
+        locator: Value,
+        preview_limit: usize,
+    ) -> Result<(usize, Vec<String>), String> {
+        let locator = serde_json::to_string(&locator)
+            .map_err(|error| format!("Failed to serialize browser locator: {error}"))?;
+        let value = self.eval_in_utility(
+            tab,
+            &format!(
+                "(() => {{ const instance = globalThis[{instance_name:?}]; if (!instance) throw new Error('RefactInjected is not installed'); const elements = instance.resolveAll({locator}); return {{count: elements.length, previews: elements.slice(0, {preview_limit}).map((el) => String(el.outerHTML ?? el).substring(0, 200))}}; }})()",
+                instance_name = INJECTED_INSTANCE_NAME,
+            ),
+        )?;
+        let count = value
+            .get("count")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "Locator match count did not return a number".to_string())?
+            as usize;
+        let previews = value
+            .get("previews")
+            .and_then(Value::as_array)
+            .map(|previews| {
+                previews
+                    .iter()
+                    .filter_map(|preview| preview.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok((count, previews))
+    }
+
     pub fn call_injected_handle(
         &self,
         tab: &Tab,
@@ -956,7 +992,7 @@ impl WorldManager {
             .attach(frame_id.to_string(), Some(parent_frame_id.to_string()));
     }
 
-    fn frame_detached(&self, target_id: &str, frame_id: &str) {
+    pub(crate) fn frame_detached(&self, target_id: &str, frame_id: &str) {
         let mut state = self.state.lock().unwrap();
         let invalidation = state
             .tabs
@@ -1264,6 +1300,46 @@ mod tests {
         let attach = oopif_auto_attach();
         assert!(attach.auto_attach);
         assert_eq!(attach.flatten, Some(true));
+    }
+
+    #[test]
+    fn stale_frame_errors_are_classified_case_insensitively() {
+        for stale in [
+            "Failed to create browser utility world for frame 42: No frame for given id",
+            "Cannot find context with specified id",
+            "Execution context was destroyed.",
+            "cannot find object with given id",
+        ] {
+            assert!(
+                crate::is_stale_frame_error(stale),
+                "missed stale frame error: {stale}"
+            );
+        }
+
+        for alive in [
+            "",
+            "Element not found",
+            "Timed out after 5000ms",
+            "Element handle object-1 is no longer valid",
+            "Strict mode violation: frame locator resolved to 2 iframe elements",
+            "Unable to make method calls because underlying connection is closed",
+        ] {
+            assert!(
+                !crate::is_stale_frame_error(alive),
+                "false positive stale frame error: {alive}"
+            );
+        }
+    }
+
+    #[test]
+    fn detaching_a_frame_drops_its_utility_world_context() {
+        let manager = WorldManager::default();
+        manager.context_created(TAB, 7, UTILITY_WORLD_NAME);
+        manager.record_context(TAB, FRAME.to_string(), 7);
+
+        manager.frame_detached(TAB, FRAME);
+
+        assert_eq!(manager.context_for_frame(TAB, &FRAME.to_string()), None);
     }
 
     #[test]

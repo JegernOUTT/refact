@@ -126,6 +126,7 @@ async fn repo_fixture() -> RepoFixture {
 
 fn spawn_request(parent_chat_id: &str, kind: BgAgentKind) -> SpawnRequest {
     SpawnRequest {
+        native_supervision_guard: None,
         kind,
         parent_chat_id: parent_chat_id.to_string(),
         parent_root_chat_id: Some(parent_chat_id.to_string()),

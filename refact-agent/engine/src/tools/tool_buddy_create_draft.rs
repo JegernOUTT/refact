@@ -85,12 +85,15 @@ impl Tool for ToolBuddyCreateDraft {
 
         let gcx = ccx.lock().await.app.gcx.clone();
         let buddy_arc = gcx.buddy.clone();
-        let mut lock = buddy_arc.lock().await;
-        let svc = lock.as_mut().ok_or("buddy service not initialized")?;
-
-        let draft = svc
-            .create_draft(kind, title.clone(), yaml_or_json, explanation)
-            .map_err(|e| e.to_string())?;
+        let draft = crate::buddy::actor::BuddyService::create_draft_durable(
+            &buddy_arc,
+            kind,
+            title.clone(),
+            yaml_or_json,
+            explanation,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
 
         let draft_id = draft.id.clone();
         let expires_at = draft.expires_at.to_rfc3339();

@@ -18,7 +18,7 @@
 	"bugs": {
 		"url": "https://github.com/JegernOUTT/refact/issues"
 	},
-	"version": "8.6.3",
+	"version": "8.6.4",
 	"dependencies": {
 		"@types/marked": "^4.0.8",
 		"@types/vscode": "^1.69.0",
@@ -250,6 +250,21 @@
 		"properties": [],
 		"commands": [
 			{
+				"command": "refactaicmd.hostReleaseIdentity",
+				"title": "Show Native Release Identity",
+				"category": "Refact.ai"
+			},
+			{
+				"command": "refactaicmd.hostRelease",
+				"title": "Install or Recover Prepared Native Release",
+				"category": "Refact.ai"
+			},
+			{
+				"command": "refactaicmd.hostReleaseReconcile",
+				"title": "Reconcile Native Release Status",
+				"category": "Refact.ai"
+			},
+			{
 				"command": "refactaicmd.sendChatToSidebar",
 				"title": "Open in Sidebar",
 				"enablement": "refactaicmd.openSidebarButtonEnabled"
@@ -441,7 +456,7 @@
 		"watch": "tsc -watch -p ./",
 		"pretest": "npm run compile && npm run lint",
 		"lint": "eslint src --ext ts",
-		"test": "node ./out/sidebar.test.js && node ./out/refactDaemon.test.js && node ./out/launchRustHealth.test.js",
+		"test": "node ./out/sidebar.test.js && node ./out/refactDaemon.test.js && node ./out/launchRustHealth.test.js && node ./out/hostRelease.test.js",
 		"esbuild-base": "esbuild ./src/extension.ts --bundle --outfile=out/main.js --external:vscode --format=cjs --platform=node",
 		"esbuild": "npm run esbuild-base -- --sourcemap",
 		"esbuild-watch": "npm run esbuild-base -- --sourcemap --watch"

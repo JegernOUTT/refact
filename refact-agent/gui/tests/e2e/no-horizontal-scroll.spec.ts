@@ -25,7 +25,12 @@ type BuddyTabPanelTarget = {
 
 const BUDDY_TAB_PANELS: (BuddyTabPanelTarget & { tab: string })[] = [
   {
-    tab: "Personality",
+    tab: "Play",
+    selector: "[data-testid='buddy-home-hero']",
+    description: "Buddy Play scene",
+  },
+  {
+    tab: "Settings",
     selector: "[data-testid='buddy-personality-panel']",
     description: "Buddy personality panel",
   },
@@ -38,6 +43,11 @@ const BUDDY_TAB_PANELS: (BuddyTabPanelTarget & { tab: string })[] = [
     tab: "Pulse",
     selector: "[data-testid='buddy-pulse-card']",
     description: "Buddy pulse card",
+  },
+  {
+    tab: "Opportunities",
+    selector: "[data-testid='buddy-opportunities-feed']",
+    description: "Buddy opportunities feed",
   },
   {
     tab: "Recent errors",
@@ -170,6 +180,8 @@ test.describe("no page-level horizontal scroll", () => {
         }
         if (route.path.includes("route=buddy")) {
           await page.getByTestId("buddy-home-content").waitFor();
+          await expect(page.getByTestId("buddy-presence")).toBeVisible();
+          await expect(page.getByTestId("buddy-world")).toBeVisible();
           await expect(page.getByTestId("buddy-home-hero")).toBeVisible();
         }
         if (route.path.includes("route=chat-split")) {
@@ -268,6 +280,7 @@ test.describe("no page-level horizontal scroll", () => {
               ? [...document.querySelectorAll("*")]
                   .filter((el) => {
                     if (el.closest(".scrollX")) return false;
+                    if (el.getAttribute("role") === "tablist") return false;
                     const style = getComputedStyle(el);
                     return (
                       el.scrollWidth > el.clientWidth + 2 &&
@@ -329,16 +342,16 @@ test.describe("no page-level horizontal scroll", () => {
               description: "Buddy content scroller",
             },
             {
-              selector: "[data-testid='buddy-home-hero']",
-              description: "Buddy hero band",
+              selector: "[data-testid='buddy-presence']",
+              description: "Buddy compact presence",
             },
             {
               selector: "[data-testid='buddy-summary-strip']",
               description: "Buddy summary strip",
             },
             {
-              selector: "[data-testid='buddy-opportunities-feed']",
-              description: "Buddy opportunities feed",
+              selector: "[data-testid='buddy-home-hero']",
+              description: "Buddy hoisted scene",
             },
           ]);
 
@@ -386,7 +399,7 @@ test.describe("overlay right-edge regressions", () => {
     await page.goto("/tests/e2e/route-showcase.html?route=overlay-regression");
     await page.locator("[data-element='app-root']").waitFor();
 
-    await page.getByLabel("Compress or Handoff").click();
+    await page.getByLabel("Compress or rebuild context").click();
     await page.getByRole("dialog").waitFor();
 
     const trajectoryGutters = await page.evaluate<GutterMeasurement[]>(() => {
@@ -451,24 +464,24 @@ test.describe("overlay right-edge regressions", () => {
       expect(edge.delta, edge.details).toBeLessThanOrEqual(maxDelta);
     }
 
-    await page.getByRole("tab", { name: "Handoff" }).click();
+    await page.getByRole("tab", { name: "LLM compression" }).click();
 
-    const handoffEdges = await page.evaluate<EdgeMeasurement[]>(() => {
+    const llmCompressEdges = await page.evaluate<EdgeMeasurement[]>(() => {
       const rect = (el: Element) => el.getBoundingClientRect();
-      const create = [...document.querySelectorAll("button")].find(
-        (el) => el.textContent?.trim() === "Create",
+      const rebuild = [...document.querySelectorAll("button")].find(
+        (el) => el.textContent?.trim() === "Rebuild context",
       );
-      const label = create?.querySelector("span");
-      if (!create || !label) {
+      const label = rebuild?.querySelector("span");
+      if (!rebuild || !label) {
         return [
-          { name: "trajectory create", delta: 999, details: "missing target" },
+          { name: "trajectory rebuild", delta: 999, details: "missing target" },
         ];
       }
-      const buttonRect = rect(create);
+      const buttonRect = rect(rebuild);
       const labelRect = rect(label);
       return [
         {
-          name: "trajectory create button",
+          name: "trajectory rebuild button",
           delta: Math.abs(
             labelRect.left -
               buttonRect.left -
@@ -479,11 +492,13 @@ test.describe("overlay right-edge regressions", () => {
       ];
     });
 
-    for (const edge of handoffEdges) {
+    for (const edge of llmCompressEdges) {
       expect(edge.delta, edge.details).toBeLessThanOrEqual(1);
     }
 
     await page.keyboard.press("Escape");
+    await page.mouse.move(0, 0);
+    await page.getByLabel("Compress or rebuild context").blur();
     await page.getByLabel("Select model").click();
     await page.getByRole("listbox", { name: "Models" }).waitFor();
 
@@ -509,6 +524,7 @@ test.describe("overlay right-edge regressions", () => {
     }
 
     await page.keyboard.press("Escape");
+    await page.mouse.move(0, 0);
     await page.getByRole("button", { name: /Agent/ }).click();
     await page.getByRole("dialog").waitFor();
 
@@ -551,11 +567,25 @@ test.describe("Buddy route smoke", () => {
 
     await expect(page.getByTestId("buddy-home-hero")).toBeVisible();
     await expect(page.getByTestId("buddy-world")).toBeVisible();
+    await expect(page.getByTestId("buddy-presence-avatar")).toHaveCount(0);
     await expect(page.getByTestId("buddy-summary-strip")).toBeVisible();
-    await expect(page.getByTestId("buddy-opportunities-feed")).toBeVisible();
+
+    await page.getByRole("button", { name: "Close Play", exact: true }).click();
+    await expect(page.getByTestId("buddy-world")).toHaveCount(0);
+    await expect(page.getByTestId("buddy-presence-avatar")).toBeVisible();
+    await page.getByRole("button", { name: "Open Play", exact: true }).click();
+    await expect(page.getByTestId("buddy-world")).toBeVisible();
+    await expect(page.getByTestId("buddy-presence-avatar")).toHaveCount(0);
+
+    await page.getByRole("tab", { name: "Play", exact: true }).click();
+    await page.getByRole("button", { name: "Leave Play", exact: true }).click();
+    await expect(page.getByTestId("buddy-world")).toBeVisible();
 
     await page.getByRole("tab", { name: "Pulse", exact: true }).click();
     await expect(page.getByTestId("buddy-pulse-card")).toBeVisible();
+
+    await page.getByRole("tab", { name: "Opportunities", exact: true }).click();
+    await expect(page.getByTestId("buddy-opportunities-feed")).toBeVisible();
 
     await page.getByRole("tab", { name: "Activity", exact: true }).click();
     await expect(page.getByTestId("buddy-activity-panel")).toBeVisible();

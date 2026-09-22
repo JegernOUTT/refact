@@ -9,6 +9,17 @@
   color: var(--rf-color-fg);
 }
 
+.page :is(button, [role="tab"], select, input, summary) {
+  min-height: var(--rf-hit-min);
+  min-width: var(--rf-hit-min);
+}
+
+@media (pointer: coarse) {
+  .page {
+    --rf-hit-min: var(--rf-hit-min-touch);
+  }
+}
+
 .content {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   flex: 1 1 0;
@@ -47,13 +58,34 @@
   background: transparent;
 }
 
-.topTitle {
+.topIdentity {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex: 1;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.topTitle {
   min-width: 0;
   overflow: hidden;
-  text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+
+.statusPill {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* A failed work authority must not read as a colour swap on a 13px pill:
+ * the alert state gains an icon, a heavier border and its own outline ring. */
+.statusPillAlert {
+  gap: var(--rf-space-1);
+  border-width: var(--rf-focus-ring-w);
+  box-shadow: 0 0 0 var(--rf-hairline) var(--rf-color-danger);
   letter-spacing: 0.02em;
 }
 
@@ -64,21 +96,93 @@
   width: var(--rf-control-h);
 }
 
-/* Hero — the world canvas owns the full card width; identity moved to the
- * summary strip below so no column steals horizontal space from the scene. */
+.presenceSlot {
+  min-width: 0;
+}
+
+/* Hero — the scene sits at the top of every tab, compact by default so the
+ * tab strip stays inside the first viewport; Play expands it. */
 .heroCard {
   min-width: 0;
   overflow: hidden;
   padding: var(--rf-space-2);
 }
 
-.heroCard [data-testid="buddy-world"] {
-  height: clamp(280px, 38vh, 430px);
-  min-height: 240px;
+.heroCard.heroCard [data-testid="buddy-world"] {
+  height: clamp(180px, 22vh, 240px);
+  min-height: 160px;
   margin: 0;
+  padding: 0;
   border-color: var(--rf-border);
   background: var(--rf-surface-1);
   box-shadow: inset 0 0 0 var(--rf-hairline) var(--rf-surface-2);
+}
+
+.heroCard.heroCard [data-testid="buddy-world-canvas"] {
+  height: 100%;
+}
+
+.heroCardExpanded.heroCardExpanded [data-testid="buddy-world"] {
+  height: clamp(280px, 38vh, 430px);
+  min-height: 240px;
+}
+
+/* When the Desk carries real work the scene drops to a strip: Pixel stays
+ * visible, but decoration never outranks the work above it. */
+.heroCardDemoted.heroCardDemoted [data-testid="buddy-world"] {
+  height: clamp(112px, 13vh, 150px);
+  min-height: 104px;
+}
+
+/* Work authority failure banner. It leads the page so a total outage can
+ * never be mistaken for a quiet day. */
+.degradedCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-panel-pad);
+  border-color: var(--rf-color-danger);
+  box-shadow: inset var(--rf-focus-ring-w) 0 0 0 var(--rf-color-danger);
+}
+
+.degradedHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.degradedTitle,
+.degradedText {
+  min-width: 0;
+}
+
+.degradedActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.editorialCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-panel-pad);
+}
+
+.editorialText,
+.editorialStatus {
+  min-width: 0;
+}
+
+.editorialActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  min-width: 0;
 }
 
 /* Project setup strip — pinned right below the identity bar. */
@@ -91,17 +195,23 @@
   padding: var(--rf-space-2) var(--rf-space-3);
 }
 
+.setupStrip[data-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
 .setupLabel {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
   gap: var(--rf-space-1);
-  color: var(--rf-color-muted);
-  font-size: 10px;
-  font-weight: var(--rf-weight-bold);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  color: var(--rf-color-fg);
   white-space: nowrap;
+}
+
+.setupNotice {
+  flex: 1 1 100%;
+  min-width: 0;
 }
 
 /* Panels now live in tabs (reusing the shared kit Tabs strip). Each data
@@ -111,8 +221,37 @@
   min-width: 0;
 }
 
+/* Content-sized columns that only stretch to equal widths when there is room,
+ * so narrow viewports scroll the strip instead of truncating every label.
+ * The scrollbar is kept visible rather than hover-only: at 360px the strip is
+ * the only way to reach the trailing tabs, and an invisible scroller reads as
+ * a dead end. */
 .tabsList {
   min-width: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rf-border-strong) transparent;
+  scroll-snap-type: x proximity;
+}
+
+.tabsList::-webkit-scrollbar {
+  height: var(--rf-space-1);
+}
+
+.tabsList::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tabsList::-webkit-scrollbar-thumb {
+  background-color: var(--rf-border-strong);
+  border-radius: var(--rf-radius-pill);
+}
+
+.tabsList [role="tab"] {
+  scroll-snap-align: start;
+}
+
+.tabs .tabsList {
+  grid-auto-columns: minmax(max-content, 1fr);
 }
 
 .tabContent {
@@ -126,6 +265,58 @@
   overflow: hidden;
 }
 
+.tabPanelSplit {
+  display: flex;
+  gap: var(--rf-space-3);
+  height: clamp(320px, 52vh, 560px);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tabPanelSplit > * {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+.tabNotice {
+  display: block;
+  min-width: 0;
+  padding: var(--rf-space-2) 0;
+}
+
+.tabNoticeList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.tabNoticeRow {
+  display: block;
+  min-width: 0;
+}
+
+.playPanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.playActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.playHint {
+  min-width: 0;
+}
+
 .settingsSection {
   min-width: 0;
   overflow: hidden;
@@ -135,33 +326,26 @@
   min-width: 0;
 }
 
+.settingsStack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+}
+
 .draftSection {
   min-width: 0;
 }
 
-.inboxOverlay {
-  position: fixed;
-  top: var(--rf-space-6);
-  right: var(--rf-space-4);
-  width: min(380px, calc(100vw - 2 * var(--rf-space-4)));
-  max-height: calc(100vh - 2 * var(--rf-space-6));
-  overflow-y: auto;
-  z-index: var(--rf-z-overlay, 40);
-  display: grid;
+.draftNotice {
+  display: flex;
+  flex-direction: column;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-3);
-  background: var(--rf-surface-glass);
-  border: 1px solid var(--rf-color-border-subtle, var(--gray-a5));
-  border-radius: var(--rf-radius-card, 12px);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay, 12px));
+  min-width: 0;
+  padding: var(--rf-panel-pad);
 }
 
-.inboxHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--rf-space-2);
+.draftNoticeText {
+  min-width: 0;
 }
 
 .draftPanel {
@@ -188,10 +372,7 @@
 }
 
 .draftLabel {
-  font-size: 10px;
-  font-weight: var(--rf-weight-bold);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  color: var(--rf-color-muted);
 }
 
 .draftMeta {
@@ -213,7 +394,7 @@
   background: var(--rf-surface-2);
   color: var(--rf-color-fg);
   font-family: var(--rf-font-mono);
-  font-size: 12px;
+  font-size: var(--rf-text-1);
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
@@ -247,13 +428,23 @@
     padding: var(--rf-space-2);
   }
 
-  .heroCard [data-testid="buddy-world"] {
+  .heroCard.heroCard [data-testid="buddy-world"] {
+    height: 180px;
+    min-height: 160px;
+  }
+
+  .heroCardExpanded.heroCardExpanded [data-testid="buddy-world"] {
     height: 250px;
     min-height: 220px;
   }
 
   .tabPanel {
     height: min(460px, 70vh);
+  }
+
+  .tabPanelSplit {
+    flex-direction: column;
+    height: min(620px, 84vh);
   }
 
   .draftMeta {
@@ -270,7 +461,12 @@
     padding: var(--rf-space-1);
   }
 
-  .heroCard [data-testid="buddy-world"] {
+  .heroCard.heroCard [data-testid="buddy-world"] {
+    height: 170px;
+    min-height: 150px;
+  }
+
+  .heroCardExpanded.heroCardExpanded [data-testid="buddy-world"] {
     height: 230px;
     min-height: 210px;
   }

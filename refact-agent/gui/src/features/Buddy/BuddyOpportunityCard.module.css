@@ -26,8 +26,8 @@
   display: inline-flex;
   align-items: center;
   padding: var(--rf-space-2xs) var(--rf-space-xs);
-  border-radius: 9999px;
-  font-size: 10px;
+  border-radius: var(--rf-radius-pill);
+  font-size: var(--rf-text-1);
   font-weight: var(--rf-weight-semibold);
   flex-shrink: 0;
   text-transform: uppercase;

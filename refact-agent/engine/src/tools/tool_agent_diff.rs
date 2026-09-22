@@ -18,6 +18,7 @@ use crate::tools::task_tool_helpers::{required_string, require_bound_planner_tas
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::{WorktreeRecordView, WorktreeReference};
+use refact_postprocessing::line_truncation::truncate_tool_line;
 
 const DEFAULT_MAX_LINES: usize = 300;
 const GIT_DIFF_TIMEOUT: Duration = Duration::from_secs(10);
@@ -865,13 +866,17 @@ fn output_fence(mode: AgentDiffMode) -> &'static str {
 fn truncate_lines(output: &str, max_lines: usize) -> String {
     let lines = output.lines().collect::<Vec<_>>();
     if lines.len() <= max_lines {
-        return output.to_string();
+        return lines
+            .iter()
+            .map(|line| truncate_tool_line(line))
+            .collect::<Vec<_>>()
+            .join("\n");
     }
     let omitted = lines.len().saturating_sub(max_lines);
     let mut result = lines
         .iter()
         .take(max_lines)
-        .copied()
+        .map(|line| truncate_tool_line(line))
         .collect::<Vec<_>>()
         .join("\n");
     if !result.is_empty() {
@@ -1903,6 +1908,21 @@ mod tests {
         assert!(
             rendered.contains("a\nb\n... (2 more lines, use mode='name-only' to see all files)")
         );
+    }
+
+    #[test]
+    fn tool_agent_diff_caps_large_individual_lines() {
+        let output = format!("HEAD{}TAIL\nnext", "x".repeat(50_000));
+
+        let rendered = truncate_lines(&output, 10);
+
+        let first_line = rendered.lines().next().unwrap();
+        assert_eq!(first_line.chars().count(), 2_000);
+        assert!(first_line.starts_with("HEAD"));
+        assert!(first_line.ends_with("TAIL"));
+        assert!(first_line.contains("chars omitted"));
+        assert!(first_line.contains("tool_max_line_chars"));
+        assert!(rendered.ends_with("\nnext"));
     }
 
     #[tokio::test]

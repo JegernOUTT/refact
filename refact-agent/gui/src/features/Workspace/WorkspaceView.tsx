@@ -2,7 +2,7 @@ import classNames from "classnames";
 import { Columns3 } from "lucide-react";
 import { type DragEvent, useCallback, useEffect, useState } from "react";
 
-import { IconButton, Tooltip } from "../../components/ui";
+import { IconButton, Tooltip, useMediaQuery } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectCurrentThreadId,
@@ -38,6 +38,7 @@ import {
 } from "./workspaceSlice";
 import { useAgentsSidebarAutoOpen } from "./useAgentsSidebarAutoOpen";
 import { useWorkspaceShortcuts } from "./useWorkspaceShortcuts";
+import { WORKSPACE_NARROW_QUERY } from "./workspaceBreakpoints";
 import {
   isDockSectionAvailable,
   resolveWorkspaceDockAvailability,
@@ -84,6 +85,8 @@ export function WorkspaceView() {
     activeTabId ? selectIsTabSplit(state, activeTabId) : false,
   );
   const activeTabCanSplit = activeTabId ? isChatSurface(activeTabId) : false;
+  const isNarrow = useMediaQuery(WORKSPACE_NARROW_QUERY);
+  const splitAffordanceVisible = activeTabCanSplit && !isNarrow;
 
   useEffect(() => {
     if (
@@ -253,7 +256,7 @@ export function WorkspaceView() {
                   <div className={styles.unsplitDropHint}>Drop to split</div>
                 </div>
               ) : null}
-              {activeTabCanSplit ? (
+              {splitAffordanceVisible ? (
                 <div className={styles.unsplitSplitAffordance}>
                   <Tooltip content="Split this tab">
                     <IconButton

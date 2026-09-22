@@ -18,14 +18,13 @@ use refact_chat_history::trajectory_ops::{
     insert_compression_report_at_boundary_scoped, is_memory_path, should_preserve_tool,
 };
 use refact_core::string_utils::redact_sensitive;
-use refact_runtime_api::{ChatSessionUpdate, SessionState};
+use refact_runtime_api::SessionState;
 use sha2::{Digest, Sha256};
 
 const TOOL_OUTPUT_TRUNCATE_LIMIT: usize = 200;
 const MAX_PER_MESSAGE_ENTRIES: usize = 200;
 const MAX_CONTEXT_ENTRIES: usize = 200;
 const MAX_TOOL_OUTPUT_ENTRIES: usize = 200;
-const AGGRESSIVE_SUMMARY_SKIPPED_REASON: &str = "llm_segment_summarization_required";
 
 fn find_preserve_cutoff(messages: &[crate::call_validation::ChatMessage], turns: usize) -> usize {
     if turns == 0 {
@@ -52,18 +51,6 @@ fn preserve_cutoff_for(messages: &[ChatMessage], preserve_last_turns: Option<usi
         .unwrap_or(messages.len())
 }
 
-fn aggressive_summary_required_reason(
-    messages: &[ChatMessage],
-    preserve_cutoff: usize,
-) -> Option<&'static str> {
-    let cutoff = preserve_cutoff.min(messages.len());
-    if crate::chat::summarization::closed_non_user_segments(&messages[..cutoff]).is_empty() {
-        None
-    } else {
-        Some(AGGRESSIVE_SUMMARY_SKIPPED_REASON)
-    }
-}
-
 #[derive(Default)]
 struct CompressChatApplyStats {
     context_files_dropped: usize,
@@ -74,7 +61,6 @@ struct CompressChatApplyStats {
     project_info_dropped: usize,
     dedup_count: usize,
     non_text_stripped: usize,
-    aggressive_summary_skipped_reason: Option<&'static str>,
 }
 
 impl CompressChatApplyStats {
@@ -289,7 +275,6 @@ fn compress_chat_apply_head_output(
         });
     }
 
-    let mut dropped_message_ids: HashSet<String> = HashSet::new();
     let mut updated_head: Vec<ChatMessage> = Vec::with_capacity(head_messages.len());
     for msg in head_messages.into_iter() {
         if msg.role != "context_file" {
@@ -299,9 +284,6 @@ fn compress_chat_apply_head_output(
         if !msg.tool_call_id.is_empty() && request.drop_context_messages.contains(&msg.tool_call_id)
         {
             stats.context_messages_dropped += 1;
-            if !msg.message_id.is_empty() {
-                dropped_message_ids.insert(msg.message_id.clone());
-            }
             continue;
         }
 
@@ -331,9 +313,6 @@ fn compress_chat_apply_head_output(
 
         if remaining.is_empty() {
             stats.context_messages_dropped += 1;
-            if !msg.message_id.is_empty() {
-                dropped_message_ids.insert(msg.message_id.clone());
-            }
             continue;
         }
 
@@ -343,7 +322,6 @@ fn compress_chat_apply_head_output(
     }
 
     head_messages = updated_head;
-    prune_dropped_ids_from_summaries(&mut head_messages, &dropped_message_ids);
 
     if request.strip_images {
         for msg in head_messages.iter_mut() {
@@ -417,15 +395,6 @@ fn compress_chat_apply_head_output(
         }
     }
 
-    if request.strength == "aggressive" {
-        let cur_tokens = tokens_with_tail(&head_messages, &preserved_tail, immutable_tail);
-        let needs_more = request.target_tokens.map_or(true, |t| cur_tokens > t);
-        if needs_more {
-            stats.aggressive_summary_skipped_reason =
-                aggressive_summary_required_reason(&head_messages, head_messages.len());
-        }
-    }
-
     let report = if stats.has_meaningful_mutation() {
         let after_tokens_pre_report =
             tokens_with_tail(&head_messages, &preserved_tail, immutable_tail);
@@ -477,105 +446,6 @@ fn compress_chat_apply_head_output(
         affected_boundary,
         modifiable_len,
     }
-}
-
-const SUMMARY_ID_ARRAY_FIELDS: &[&str] = &[
-    "source_message_ids",
-    "summarized_source_message_ids",
-    "preserved_source_message_ids",
-];
-
-/// ctx_apply and deterministic sweeps can drop messages that active segment
-/// summaries list as sources. Prune the dropped ids from summary metadata in
-/// the modifiable head so summaries stay truthful instead of accumulating dead
-/// references (observed in field trajectories as summaries with 100+ missing
-/// sources). Visible compression reports keep their original arrays as a
-/// historical record.
-fn prune_dropped_ids_from_summaries(
-    messages: &mut [ChatMessage],
-    dropped_message_ids: &HashSet<String>,
-) {
-    if dropped_message_ids.is_empty() {
-        return;
-    }
-    for message in messages.iter_mut() {
-        if message.role != "assistant" {
-            continue;
-        }
-        let Some(compression) = message.extra.get_mut("compression") else {
-            continue;
-        };
-        if compression.get("kind").and_then(|value| value.as_str()) != Some("llm_segment_summary") {
-            continue;
-        }
-        let Some(object) = compression.as_object_mut() else {
-            continue;
-        };
-        for field in SUMMARY_ID_ARRAY_FIELDS {
-            if let Some(values) = object
-                .get_mut(*field)
-                .and_then(|value| value.as_array_mut())
-            {
-                values.retain(|value| {
-                    value
-                        .as_str()
-                        .map_or(true, |id| !dropped_message_ids.contains(id))
-                });
-            }
-        }
-    }
-}
-
-pub(crate) fn deterministic_full_sweep(messages: &[ChatMessage]) -> Option<Vec<ChatMessage>> {
-    let truncate_tool_outputs: HashSet<String> = messages
-        .iter()
-        .filter(|m| (m.role == "tool" || m.role == "diff") && !m.tool_call_id.is_empty())
-        .filter(|m| {
-            let text = m.content.content_text_only();
-            text.len() > TOOL_OUTPUT_TRUNCATE_LIMIT && !text.starts_with("Tool result compressed:")
-        })
-        .map(|m| m.tool_call_id.clone())
-        .collect();
-    let drop_context_files: HashSet<String> = messages
-        .iter()
-        .flat_map(extract_context_files)
-        .map(|cf| cf.file_name)
-        .collect();
-    let tool_call_names: HashMap<String, String> = messages
-        .iter()
-        .filter_map(|m| m.tool_calls.as_ref())
-        .flatten()
-        .map(|tc| (tc.id.clone(), tc.function.name.clone()))
-        .collect();
-    let empty: HashSet<String> = HashSet::new();
-    let request = CompressChatApplyRequest {
-        drop_context_files: &drop_context_files,
-        drop_memories: &empty,
-        drop_all_memories: true,
-        truncate_tool_outputs: &truncate_tool_outputs,
-        drop_tool_outputs: &empty,
-        drop_context_messages: &empty,
-        dedup_context_files: true,
-        drop_project_information: true,
-        strip_images: true,
-        strength: "aggressive",
-        preserve_last_turns: None,
-        target_tokens: None,
-        tool_call_names: &tool_call_names,
-    };
-    let CompressChatApplyOutput {
-        mut messages,
-        stats,
-        report,
-        affected_boundary,
-        modifiable_len,
-        ..
-    } = compress_chat_apply_head_output(messages.to_vec(), &[], &request);
-    if !stats.has_meaningful_mutation() {
-        return None;
-    }
-    insert_current_compression_report(&mut messages, report, affected_boundary, modifiable_len);
-    Some(messages)
 }
 
 #[cfg(test)]
@@ -713,37 +583,6 @@ mod tests {
         assert_eq!(privacy.files, vec![secrets_record()]);
     }
 
-    #[test]
-    fn deterministic_full_sweep_truncates_tools_drops_context_and_is_idempotent() {
-        let big = "tool output line ".repeat(400);
-        let mut tool = tool_message("call_1", &big);
-        crate::privacy::records::attach_record(&mut tool, secrets_record());
-        let messages = vec![
-            user_message("start"),
-            assistant_tool_call_message("call_1", "cat"),
-            tool,
-            context_file_message("call_2", "/repo/big.rs", &"x".repeat(5000)),
-            user_message("continue"),
-        ];
-
-        let swept = deterministic_full_sweep(&messages).expect("sweep must free space");
-        let truncated = swept
-            .iter()
-            .find(|message| {
-                message.role == "tool"
-                    && message
-                        .content
-                        .content_text_only()
-                        .starts_with("Tool result compressed:")
-            })
-            .expect("tool result should be truncated");
-        assert_secrets_record(truncated);
-        assert!(!swept.iter().any(|m| m.role == "context_file"));
-        assert!(swept.iter().any(|m| m.role == "compression_report"));
-
-        assert!(deterministic_full_sweep(&swept).is_none());
-    }
-
     fn apply_request<'a>(
         drop_context_files: &'a HashSet<String>,
         drop_memories: &'a HashSet<String>,
@@ -770,47 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_full_sweep_strips_non_text_multimodal_content() {
-        use crate::call_validation::MultimodalElement;
-        let mut image_msg = ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::Multimodal(vec![
-                MultimodalElement {
-                    m_type: "text".to_string(),
-                    m_content: "look at this".to_string(),
-                },
-                MultimodalElement {
-                    m_type: "image/png".to_string(),
-                    m_content: "AAAA".repeat(2000),
-                },
-            ]),
-            ..Default::default()
-        };
-        image_msg.message_id = "u-img".to_string();
-        let messages = vec![image_msg, assistant_message("ok")];
-
-        let swept = deterministic_full_sweep(&messages).expect("stripping images is a mutation");
-
-        let user_msg = swept
-            .iter()
-            .find(|message| message.message_id == "u-img")
-            .expect("user message survives the sweep");
-        match &user_msg.content {
-            ChatContent::Multimodal(elements) => {
-                assert!(elements.iter().all(|element| element.m_type == "text"));
-                assert!(elements.iter().any(
-                    |element| element.m_content == "[non-text content removed by compression]"
-                ));
-                assert!(elements
-                    .iter()
-                    .any(|element| element.m_content == "look at this"));
-            }
-            other => panic!("expected multimodal content, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn apply_prunes_dropped_context_ids_from_summary_metadata() {
+    fn static_transform_preserves_legacy_summary_metadata() {
         let mut context_msg = context_file_message("ctx", "old.rs", "old context");
         context_msg.message_id = "cf-1".to_string();
         let mut summary = assistant_message("segment summary");
@@ -854,24 +653,19 @@ mod tests {
             .find(|message| message.message_id == "sum-1")
             .expect("summary survives");
         let compression = summary.extra.get("compression").expect("metadata kept");
-        let source_ids: Vec<&str> = compression["source_message_ids"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|value| value.as_str())
-            .collect();
-        assert_eq!(source_ids, vec!["a-2"], "dropped source id must be pruned");
         assert_eq!(
-            compression["summarized_source_message_ids"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
+            compression["source_message_ids"],
+            serde_json::json!(["cf-1", "a-2"])
         );
-        assert!(compression["preserved_source_message_ids"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            compression["summarized_source_message_ids"],
+            serde_json::json!(["cf-1", "a-2"])
+        );
+        assert_eq!(
+            compression["preserved_source_message_ids"],
+            serde_json::json!(["cf-1"])
+        );
+        assert!(refact_core::active_context::active_context(&messages).is_err());
     }
 
     fn assert_preserved_tail_unchanged(
@@ -1079,77 +873,6 @@ mod tests {
         assert_eq!(find_preserve_cutoff(&messages, 2), 0);
     }
 
-    #[test]
-    fn aggressive_summary_required_detects_only_modifiable_segments() {
-        let messages = vec![
-            user_message("old user"),
-            assistant_message("old assistant"),
-            user_message("tail user"),
-            assistant_message("tail assistant"),
-            user_message("active tool user"),
-        ];
-        let preserve_cutoff = find_preserve_cutoff(&messages, 1);
-        let preserved_tail_count = messages.len() - preserve_cutoff;
-        let preserved_tail_before = serde_json::to_string(&messages[preserve_cutoff..]).unwrap();
-
-        assert_eq!(
-            aggressive_summary_required_reason(&messages, preserve_cutoff),
-            Some(AGGRESSIVE_SUMMARY_SKIPPED_REASON),
-        );
-
-        let preserved_tail_start = messages.len() - preserved_tail_count;
-        let preserved_tail_after =
-            serde_json::to_string(&messages[preserved_tail_start..]).unwrap();
-        assert_eq!(preserved_tail_after, preserved_tail_before);
-    }
-
-    #[test]
-    fn aggressive_summary_required_ignores_eligible_segment_only_in_preserved_tail() {
-        let messages = vec![
-            user_message("old user"),
-            user_message("tail user"),
-            assistant_message("tail assistant"),
-            user_message("active tool user"),
-        ];
-        let preserve_cutoff = find_preserve_cutoff(&messages, 1);
-        let before = serde_json::to_string(&messages).unwrap();
-
-        assert_eq!(
-            aggressive_summary_required_reason(&messages, preserve_cutoff),
-            None
-        );
-
-        assert_eq!(serde_json::to_string(&messages).unwrap(), before);
-    }
-
-    #[test]
-    fn aggressive_summary_skip_does_not_create_static_placeholder() {
-        let messages = vec![
-            user_message("old user"),
-            assistant_message("old assistant"),
-            user_message("middle user"),
-            user_message("tail user"),
-        ];
-        let preserve_cutoff = find_preserve_cutoff(&messages, 1);
-
-        assert_eq!(
-            aggressive_summary_required_reason(&messages, preserve_cutoff),
-            Some(AGGRESSIVE_SUMMARY_SKIPPED_REASON),
-        );
-        let removed_placeholder = [
-            "Previous non-user chat activity",
-            "was summarized by",
-            "compress_chat_apply",
-        ]
-        .join(" ");
-        assert!(!messages.iter().any(|message| message
-            .content
-            .content_text_only()
-            .contains(&removed_placeholder)));
-        assert!(!messages
-            .iter()
-            .any(crate::chat::summarization::is_segment_summary));
-    }
     #[test]
     fn apply_drop_all_memories_preserves_tail_context_files() {
         let messages = vec![
@@ -2020,10 +1743,6 @@ mod tests {
 
         assert_eq!(stats.memory_dropped, 1);
         assert_eq!(stats.tool_truncated, 0);
-        assert_eq!(
-            stats.aggressive_summary_skipped_reason,
-            Some(AGGRESSIVE_SUMMARY_SKIPPED_REASON)
-        );
         assert_preserved_tail_unchanged(&messages, &after, 1);
     }
 }
@@ -2123,7 +1842,9 @@ impl Tool for ToolCompressChatProbe {
         // Probe the linearized view: sources suppressed by segment summaries
         // never reach the model, so counting them would overstate usage and
         // tempt the agent into compressing messages that cost nothing.
-        let messages = crate::chat::linearize::apply_summarization_linearize(messages);
+        let messages = refact_core::active_context::active_context(&messages)
+            .map_err(|e| e.to_string())?
+            .messages;
 
         if messages.is_empty() {
             return Err("Cannot probe an empty chat".to_string());
@@ -2360,6 +2081,7 @@ impl Tool for ToolCompressChatApply {
         let input_schema = json!({
             "type": "object",
             "properties": {
+                "rebuild_context": {"type": "boolean", "description": "Queue a full model-based context rebuild after tool results complete. Cannot be mixed with static operations; dry_run never invokes a model."},
                 "drop_context_files": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -2404,7 +2126,7 @@ impl Tool for ToolCompressChatApply {
                 "strength": {
                     "type": "string",
                     "enum": ["conservative", "balanced", "aggressive"],
-                    "description": "conservative=explicit ops only, balanced=+auto dedup, aggressive=+dedup and reports when LLM segment summarization is required"
+                    "description": "conservative=explicit ops only, balanced=+auto dedup, aggressive=+auto dedup (static only; use rebuild_context for model reconstruction)"
                 },
                 "preserve_last_turns": {
                     "type": "integer",
@@ -2440,6 +2162,42 @@ impl Tool for ToolCompressChatApply {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        if parse_bool(args, "rebuild_context") {
+            if args
+                .keys()
+                .any(|key| !matches!(key.as_str(), "rebuild_context" | "dry_run"))
+            {
+                return Err(
+                    "rebuild_context cannot be mixed with static compression options".into(),
+                );
+            }
+            let dry_run = parse_bool(args, "dry_run");
+            if !dry_run {
+                let (gcx, chat_id) = {
+                    let c = ccx.lock().await;
+                    (c.app.gcx.clone(), c.chat_id.clone())
+                };
+                let session = gcx
+                    .chat_sessions
+                    .read()
+                    .await
+                    .get(&chat_id)
+                    .cloned()
+                    .ok_or("Chat session not found")?;
+                crate::chat::context_rebuild::request_rebuild(
+                    &mut *session.lock().await,
+                    crate::chat::context_rebuild::PendingContextRebuild {
+                        model: None,
+                        trigger: "compress_chat_apply".into(),
+                    },
+                )?;
+            }
+            return Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".into(), tool_call_id: tool_call_id.clone(),
+                content: ChatContent::SimpleText(json!({"type":"ctx_apply", "rebuild_context":true, "dry_run":dry_run, "queued":!dry_run}).to_string()),
+                ..Default::default()
+            })]));
+        }
         let drop_context_files = parse_string_list(args, "drop_context_files");
         let drop_memories = parse_string_list(args, "drop_memories");
         let drop_all_memories = parse_bool(args, "drop_all_memories");
@@ -2468,7 +2226,11 @@ impl Tool for ToolCompressChatApply {
             (ccx_lock.app.chat.facade.clone(), ccx_lock.chat_id.clone())
         };
 
-        let session_snapshot = chat_facade.session_snapshot(&chat_id).await?;
+        let mut session_snapshot = chat_facade.session_snapshot(&chat_id).await?;
+        let stored_messages = session_snapshot.messages.clone();
+        let projection = refact_core::active_context::active_context(&stored_messages)
+            .map_err(|e| e.to_string())?;
+        session_snapshot.messages = projection.messages.clone();
         if matches!(session_snapshot.session_state, SessionState::Generating) {
             return Err("Cannot compress while generating".to_string());
         }
@@ -2563,16 +2325,38 @@ impl Tool for ToolCompressChatApply {
         }
 
         if !dry_run {
-            chat_facade
-                .update_session(
-                    &chat_id,
-                    ChatSessionUpdate {
-                        messages: head_messages,
-                        previous_response_id: None,
-                    },
-                )
-                .await?;
-
+            let gcx = ccx.lock().await.app.gcx.clone();
+            let session = gcx
+                .chat_sessions
+                .read()
+                .await
+                .get(&chat_id)
+                .cloned()
+                .ok_or("Chat session not found")?;
+            let mut session = session.lock().await;
+            if session.closed
+                || crate::chat::context_rebuild::compression_attempt_active(&session)
+                || session.pending_mode_handoff.is_some()
+                || session.pending_context_rebuild.is_some()
+                || serde_json::to_value(&session.messages).ok()
+                    != serde_json::to_value(&stored_messages).ok()
+            {
+                return Err("Context changed while applying static compression".into());
+            }
+            let updated = refact_core::active_context::writeback_active_context(
+                &stored_messages,
+                &projection,
+                &head_messages,
+            )
+            .map_err(|e| e.to_string())?;
+            session.replace_messages(updated);
+            session.thread.previous_response_id = None;
+            session.thread.frozen_request_prefix = None;
+            session.thread.claude_code_identity = None;
+            session.openai_codex_websocket = Default::default();
+            session.reset_cache_guard_snapshot();
+            session.provider_usage_stale = true;
+            drop(session);
             chat_facade.maybe_save_session(&chat_id).await?;
         }
 
@@ -2601,7 +2385,6 @@ impl Tool for ToolCompressChatApply {
                 "tokens_before": metadata.get("tokens_before").cloned().unwrap_or(Value::Null),
                 "tokens_after": metadata.get("tokens_after").cloned().unwrap_or(Value::Null),
             })),
-            "aggressive_summary_skipped_reason": stats.aggressive_summary_skipped_reason,
             "active_tail_start": active_start,
             "would_produce_invalid_history": !first_role_valid,
         });

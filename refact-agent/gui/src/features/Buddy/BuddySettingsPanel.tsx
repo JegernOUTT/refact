@@ -148,8 +148,8 @@ function formatChatReactionStatus(
   debug: ReturnType<typeof selectChatReactionDebug>,
 ): string {
   if (!debug) return "No chat reaction diagnostics yet.";
-  const emitted = debug.counts_by_result.emitted;
-  const skipped = debug.counts_by_result.skipped;
+  const emitted = debug.counts_by_result?.emitted ?? 0;
+  const skipped = debug.counts_by_result?.skipped ?? 0;
   const last = debug.recent_attempts.at(-1);
   if (last?.result === "emitted") {
     return `Last emitted ${last.signal_type ?? "chat reaction"}.`;
@@ -180,6 +180,7 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
   const liveSettings = useAppSelector(selectBuddySettings);
   const storage = useAppSelector(selectBuddyStorage);
   const buddyState = useAppSelector(selectBuddyState);
+  const buddyName = buddyState?.identity.name ?? "Buddy";
   const telemetryRows = useMemo(
     () =>
       [...(buddyState?.workflow_summaries ?? [])].sort(
@@ -392,7 +393,8 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
             SETTINGS
           </Text>
           <Text size="1" className={styles.headerDescription}>
-            Tune Pixel's autonomy, observations, and tiny-chaos operating hours.
+            Tune {buddyName}'s autonomy, observations, and tiny-chaos operating
+            hours.
           </Text>
         </div>
         {saveLabel ? (
@@ -499,9 +501,9 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
             <span className={styles.settingText}>
               <Text size="2">Live chat reactions</Text>
               <small className={styles.settingDescription}>
-                Pixel reacts to your messages with short comments, insights, or
-                bug-candidate flags. Uses redacted input transiently and does
-                not store it.
+                {buddyName} reacts to your messages with short comments,
+                insights, or bug-candidate flags. Uses redacted input
+                transiently and does not store it.
               </small>
             </span>
             <Switch

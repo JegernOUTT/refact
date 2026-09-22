@@ -114,12 +114,18 @@ pub async fn daemon_link_task(gcx: Arc<GlobalContext>) {
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     interval.tick().await;
     let mut consecutive_failures = 0;
+    let mut supervision_cursor = 0u64;
     loop {
         tokio::select! {
             _ = interval.tick() => {
                 let report = collect_status_snapshot(gcx.clone()).await;
                 match post_worker_status(gcx.clone(), &url, &report).await {
-                    Ok(()) => consecutive_failures = 0,
+                    Ok(()) => {
+                        consecutive_failures = 0;
+                        supervision_cursor = supervision_cursor.saturating_add(1);
+                        // Best-effort observation cannot alter daemon-link shutdown semantics.
+                        let _ = publish_supervision_projection(gcx.clone(), &daemon_endpoint, supervision_cursor).await;
+                    },
                     Err(DaemonLinkError::PlannedShutdown) => {
                         tracing::info!("daemon requested planned worker shutdown");
                         request_worker_shutdown(&gcx, "daemon-planned-shutdown");
@@ -159,6 +165,48 @@ pub async fn daemon_link_task(gcx: Arc<GlobalContext>) {
             }
         }
     }
+}
+
+async fn publish_supervision_projection(
+    gcx: Arc<GlobalContext>,
+    endpoint: &str,
+    cursor: u64,
+) -> Result<(), String> {
+    let token = gcx
+        .cmdline
+        .daemon_auth_token
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .ok_or("authenticated daemon link unavailable")?;
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    // Includes the store scan in the bound; this is not a worker localhost API call.
+    tokio::time::timeout(DAEMON_LINK_POST_TIMEOUT, async {
+        let supervision = crate::buddy::supervision::daemon_projection(&app).await?;
+        let roots = crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await;
+        if roots.len() != 1 {
+            return Err("single project required".into());
+        }
+        let report = crate::daemon::buddy_reconciliation::WorkerProjection {
+            project_id: gcx.cmdline.project_id.clone(),
+            canonical_root: roots[0].clone(),
+            pid: std::process::id(),
+            instance_token: gcx.cmdline.ping_message.clone(),
+            cursor,
+            supervision,
+        };
+        gcx.http_client
+            .post(format!("{endpoint}/daemon/v1/buddy/worker-projection"))
+            .bearer_auth(token)
+            .json(&report)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .error_for_status()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| "supervision projection timed out".to_string())?
 }
 
 fn request_worker_shutdown(gcx: &GlobalContext, reason: &str) {

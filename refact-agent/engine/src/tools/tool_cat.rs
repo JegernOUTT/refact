@@ -277,7 +277,7 @@ impl Tool for ToolCat {
             if cards.is_empty() {
                 cards = idx_guard.related_for_related_files(&filenames_present, 8);
             }
-            format_related_memories_section(&cards, None)
+            format_related_memories_section(&cards)
         };
 
         let chat_content = if multimodal.is_empty() {

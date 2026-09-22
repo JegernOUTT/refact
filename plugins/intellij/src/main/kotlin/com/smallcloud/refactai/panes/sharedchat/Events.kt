@@ -39,6 +39,7 @@ class EventNames {
         DROPDOWN_STATE_CHANGED("ide/dropdownStateChanged"),
         TASK_DONE("ide/taskDone"),
         ASK_QUESTIONS("ide/askQuestions"),
+        DECISION_RESOLVED("ide/decisionResolved"),
         REQUEST_LOGS("ide/requestLogs")
     }
 
@@ -161,8 +162,13 @@ class Events {
                 }
 
                 EventNames.FromChat.ASK_QUESTIONS.value -> {
-                    val questionPayload = p2?.deserialize<AskQuestionsPayload>(payload, AskQuestionsPayload::class.java) ?: return null
+                    val questionPayload = com.smallcloud.refactai.notifications.DecisionWire.ask(payload) ?: return null
                     AskQuestions(questionPayload)
+                }
+
+                EventNames.FromChat.DECISION_RESOLVED.value -> {
+                    val resolvedPayload = com.smallcloud.refactai.notifications.DecisionWire.resolved(payload) ?: return null
+                    DecisionResolved(resolvedPayload)
                 }
 
                 EventNames.FromChat.REQUEST_LOGS.value -> {
@@ -510,10 +516,24 @@ class Events {
     data class AskQuestionsPayload(
         val chatId: String,
         val toolCallId: String,
-        val questions: List<QuestionItem>
+        val questions: List<QuestionItem>,
+        val askedAtMs: Long? = null,
+        val scope: com.smallcloud.refactai.notifications.DecisionScope? = null,
+        val origin: String? = null
     ) : Payload()
 
     data class AskQuestions(override val payload: AskQuestionsPayload) : FromChat(EventNames.FromChat.ASK_QUESTIONS, payload)
+
+    data class DecisionResolvedPayload(
+        val chatId: String,
+        val toolCallId: String,
+        val resolution: String,
+        val askedAtMs: Long? = null,
+        val scope: com.smallcloud.refactai.notifications.DecisionScope? = null,
+        val origin: String? = null
+    ) : Payload()
+
+    data class DecisionResolved(override val payload: DecisionResolvedPayload) : FromChat(EventNames.FromChat.DECISION_RESOLVED, payload)
 
     data class RequestLogsPayload(val limit: Int? = null) : Payload()
 

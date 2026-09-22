@@ -82,6 +82,10 @@
         <projectService serviceImplementation="com.smallcloud.refactai.io.NotificationSSEClient"/>
         </extensions>
     <actions>
+        <action id="RefactAI.NativeHostRelease"
+                class="com.smallcloud.refactai.lsp.NativeHostReleaseAction"
+                text="Refact: Install or Reconcile Exact Host Release"
+                description="Confirm an issuing-user grant and schedule a verified local plugin package for manual restart"/>
         <!-- overrides="true" replaces the platform action in place; it already sits in
              the InlineCompletion group (LangActions.xml), so no add-to-group here —
              re-adding it trips "Cannot add an action twice" since 2026.2. -->

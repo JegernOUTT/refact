@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Mutex as AMutex, mpsc};
 use serde_json::{json, Value};
 use tracing::{info, warn};
@@ -66,7 +66,7 @@ fn should_compact_context_limit_error(
 }
 
 fn subchat_retries_allowed(config: &SubchatConfig) -> bool {
-    config.tool_name != "segment_summarize"
+    config.tool_name != "mode_transition" && !matches!(config.tools, ToolsPolicy::Supervised { .. })
 }
 
 fn append_runner_deliveries(
@@ -119,7 +119,14 @@ async fn import_runner_local_deliveries(
     chat_id: &str,
     messages: &[ChatMessage],
 ) {
-    if !runner_tool_window_closed(messages) {
+    let projected = match refact_core::active_context::active_context(messages) {
+        Ok(view) => view.messages,
+        Err(error) => {
+            warn!(%chat_id, %error, "Cannot import deliveries into unavailable active context");
+            return;
+        }
+    };
+    if !runner_tool_window_closed(&projected) {
         return;
     }
     let session = app.chat.sessions.read().await.get(chat_id).cloned();
@@ -129,12 +136,12 @@ async fn import_runner_local_deliveries(
     let deliveries = session.lock().await.pending_deliveries.clone();
     for mut delivery in deliveries {
         if let Some(tool_id) = delivery.after_tool_call_id.as_deref() {
-            let ready = messages.iter().enumerate().any(|(index, message)| {
+            let ready = projected.iter().enumerate().any(|(index, message)| {
                 message.role == "assistant"
                     && message.tool_calls.as_ref().is_some_and(|calls| {
                         calls.iter().any(|call| {
                             (tool_id.is_empty() || call.id == tool_id)
-                                && messages[index + 1..].iter().any(|result| {
+                                && projected[index + 1..].iter().any(|result| {
                                     result.role == "tool" && result.tool_call_id == call.id
                                 })
                         })
@@ -165,23 +172,39 @@ pub(crate) async fn drain_background_agent_inbox(
     if !runner_tool_window_closed(messages) {
         return;
     }
-    let (app, agent_id, chat_id) = {
+    let (app, agent_id, chat_id, model) = {
         let ccx = ccx.lock().await;
         (
             ccx.app.clone(),
             ccx.background_agent_id.clone(),
             ccx.chat_id.clone(),
+            ccx.current_model.clone(),
         )
     };
     let Some(agent_id) = agent_id else {
         return;
     };
     import_runner_local_deliveries(&app, &agent_id, &chat_id, messages).await;
-    match crate::agents::delivery::drain_authorized(&app, &agent_id, false).await {
-        Ok(deliveries) => {
-            append_runner_deliveries(messages, deliveries);
+    {
+        let session = app.chat.sessions.read().await.get(&chat_id).cloned();
+        let mut session = match session.as_ref() {
+            Some(session) => Some(session.lock().await),
+            None => None,
+        };
+        // A yielded wait opens C only after every tool result has landed. Keep
+        // the boundary through local tick import, and retain it on drain errors.
+        let include_when_idle = session
+            .as_ref()
+            .is_some_and(|session| session.wait_delivery_boundary);
+        match crate::agents::delivery::drain_authorized(&app, &agent_id, include_when_idle).await {
+            Ok(deliveries) => {
+                append_runner_deliveries(messages, deliveries);
+                if let Some(session) = session.as_mut() {
+                    session.wait_delivery_boundary = false;
+                }
+            }
+            Err(error) => warn!(%agent_id, %error, "Failed to drain runner deliveries"),
         }
-        Err(error) => warn!(%agent_id, %error, "Failed to drain runner deliveries"),
     }
     crate::agents::delivery::publish_runner_queue(&app, &agent_id).await;
     for message in app.agents.drain_inbox(&agent_id).await {
@@ -197,6 +220,51 @@ pub(crate) async fn drain_background_agent_inbox(
             format!("{sender}\n{}", message.text),
         ));
     }
+    // Native steering notes are authorized again at consume time against the
+    // chat and model that will actually see them. A note whose grant was
+    // revoked, expired, re-epoched, or rebound while queued is dropped here;
+    // nothing is ever composed from request text.
+    for note in app.agents.drain_native_notes(&agent_id).await {
+        match note.consume(&chat_id, &model) {
+            Ok(text) => messages.push(event(
+                EventSubkind::SystemNotice,
+                "agents.native_note",
+                json!({
+                    "from": "supervisor",
+                    "control_id": note.control_id,
+                    "note_id": note.note_id,
+                    "queued_at": note.queued_at,
+                }),
+                format!("[steering note from supervisor]\n{text}"),
+            )),
+            Err(error) => warn!(
+                "dropping queued native steering note {} for {}: {}",
+                note.control_id, agent_id, error
+            ),
+        }
+    }
+}
+
+/// Cooperative pause barrier at a model/tool boundary. Parks while the native
+/// owner has a pause requested and returns `Ok(true)` when the wait ended by
+/// cancellation, in which case the caller must not dispatch anything else.
+/// The messages the caller already holds (the in-flight outcome) are never
+/// touched. Agents without a live registry runtime never park.
+pub(crate) async fn hold_native_pause(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    config: &SubchatConfig,
+) -> bool {
+    let (app, agent_id) = {
+        let ccx = ccx.lock().await;
+        (ccx.app.clone(), ccx.background_agent_id.clone())
+    };
+    let Some(agent_id) = agent_id else {
+        return is_aborted(&config.abort_flag);
+    };
+    let Some(gate) = app.agents.pause_gate(&agent_id).await else {
+        return is_aborted(&config.abort_flag);
+    };
+    gate.hold(config.abort_flag.as_deref()).await || is_aborted(&config.abort_flag)
 }
 
 async fn emit_parent_compaction_diagnostics(
@@ -223,12 +291,12 @@ async fn emit_parent_compaction_diagnostics(
 fn parent_compaction_diagnostic_status(error: &str, attempt: usize, compacted: bool) -> String {
     let prefix = if compacted {
         format!(
-            "Context limit error handled by compacting the oldest eligible context (attempt {}):\n",
+            "Context limit error handled by rebuilding active context (attempt {}):\n",
             attempt,
         )
     } else {
         format!(
-            "Context limit error could not summarize an eligible closed non-user segment (attempt {}):\n",
+            "Context limit error could not rebuild active context (attempt {}):\n",
             attempt,
         )
     };
@@ -328,45 +396,58 @@ async fn apply_subchat_reactive_compaction(
     attempt: usize,
     preserve_last_message: bool,
 ) -> bool {
-    let original_messages = messages.clone();
-    append_reactive_compaction_diagnostic(messages, error, preserve_last_message);
-    let trace_owner = config.trace_parent.trace_folder_owner();
-    let compacted = match crate::chat::summarization::summarize_oldest_segment_with_resolved_model(
+    if !subchat_retries_allowed(config) {
+        return false;
+    }
+    let input = match refact_core::active_context::active_context(messages) {
+        Ok(view) => view.messages,
+        Err(_) => return false,
+    };
+    let owner = config.trace_parent.trace_folder_owner();
+    let outcome = Box::pin(crate::agentic::mode_transition::reconstruct_context(
         gcx,
-        messages,
-        &config.model,
-        config.n_ctx,
-        trace_owner.as_deref(),
-        config.abort_flag.clone(),
-    )
-    .await
-    {
-        Ok(true) => true,
-        Ok(false) => crate::tools::tool_compress_chat::deterministic_full_sweep(&original_messages)
-            .map(|compacted| {
-                *messages = compacted;
+        crate::agentic::mode_transition::ReconstructionRequest {
+            messages: &input,
+            target_mode: &config.mode,
+            target_mode_description: "Continue this subchat with rebuilt context",
+            parent_chat_id: owner.as_deref(),
+            model_override: Some(config.model.clone()),
+            chat_model: None,
+            abort_flag: config.abort_flag.clone(),
+            hints: None,
+            target_budget_symbols: Some(config.n_ctx.saturating_mul(2)),
+            preserve_goal_messages: true,
+        },
+    ))
+    .await;
+    let compacted = match outcome {
+        Ok(outcome) => match refact_core::active_context::make_reconstruction_report(
+            outcome.messages,
+            refact_core::active_context::ReconstructionMetadata {
+                model: Some(outcome.model),
+                trigger: Some("subchat_context_limit".into()),
+                from_mode: Some(config.mode.clone()),
+                to_mode: Some(config.mode.clone()),
+                ..Default::default()
+            },
+        ) {
+            Ok(report) => {
+                messages.push(report);
                 true
-            })
-            .unwrap_or(false),
+            }
+            Err(_) => false,
+        },
         Err(failure) => {
-            let failure_for_log =
-                crate::chat::summarization::safe_segment_summary_failure_for_log(&failure);
             warn!(
-                "Subchat context-limit segment summarization failed; preserving original messages: {}",
-                failure_for_log
+                "Subchat context rebuild failed: {}",
+                safe_provider_error_diagnostic(&failure)
             );
-            crate::tools::tool_compress_chat::deterministic_full_sweep(&original_messages)
-                .map(|compacted| {
-                    *messages = compacted;
-                    true
-                })
-                .unwrap_or_else(|| {
-                    *messages = original_messages;
-                    append_reactive_compaction_diagnostic(messages, error, preserve_last_message);
-                    false
-                })
+            false
         }
     };
+    if !compacted {
+        append_reactive_compaction_diagnostic(messages, error, preserve_last_message);
+    }
 
     emit_parent_compaction_diagnostics(config, error, attempt, compacted).await;
     compacted
@@ -407,6 +488,11 @@ pub enum ToolsPolicy {
     All,
     None,
     Only(Vec<String>),
+    /// Constructed only by the native authority-guarded spawn path.
+    Supervised {
+        tools: Vec<String>,
+        budget: crate::chat::types::GoalBudget,
+    },
 }
 
 impl ToolsPolicy {
@@ -423,6 +509,7 @@ impl ToolsPolicy {
             ToolsPolicy::All => None,
             ToolsPolicy::None => Some(vec![]),
             ToolsPolicy::Only(v) => Some(v.clone()),
+            ToolsPolicy::Supervised { tools, .. } => Some(tools.clone()),
         }
     }
 
@@ -431,6 +518,7 @@ impl ToolsPolicy {
             ToolsPolicy::All => true,
             ToolsPolicy::None => false,
             ToolsPolicy::Only(v) => v.iter().any(|t| t == tool_name),
+            ToolsPolicy::Supervised { tools, .. } => tools.iter().any(|t| t == tool_name),
         }
     }
 }
@@ -511,6 +599,7 @@ pub struct SubchatConfig {
     #[serde(skip)]
     pub abort_flag: Option<Arc<AtomicBool>>,
     pub soft_abort: bool,
+    pub activity_stamp: Option<Arc<AtomicU64>>,
     pub background_agent_id: Option<String>,
     pub subchat_depth: usize,
     pub final_step_force_answer: bool,
@@ -541,6 +630,7 @@ fn should_stream_thinking_progress(tool_name: &str) -> bool {
 struct SubchatProgressCollector {
     sender: Option<mpsc::UnboundedSender<Value>>,
     tool_call_id: Option<String>,
+    activity_stamp: Option<Arc<AtomicU64>>,
     thinking_tail: String,
     reasoning_tail: String,
     content_tail: String,
@@ -549,10 +639,15 @@ struct SubchatProgressCollector {
 }
 
 impl SubchatProgressCollector {
-    fn new(sender: Option<mpsc::UnboundedSender<Value>>, tool_call_id: Option<String>) -> Self {
+    fn new(
+        sender: Option<mpsc::UnboundedSender<Value>>,
+        tool_call_id: Option<String>,
+        activity_stamp: Option<Arc<AtomicU64>>,
+    ) -> Self {
         Self {
             sender,
             tool_call_id,
+            activity_stamp,
             thinking_tail: String::new(),
             reasoning_tail: String::new(),
             content_tail: String::new(),
@@ -650,6 +745,7 @@ impl SubchatProgressCollector {
 
 impl StreamCollector for SubchatProgressCollector {
     fn on_delta_ops(&mut self, _choice_idx: usize, ops: Vec<crate::chat::types::DeltaOp>) {
+        stamp_activity(&self.activity_stamp);
         for op in ops {
             match op {
                 crate::chat::types::DeltaOp::AppendReasoning { text } => {
@@ -757,6 +853,9 @@ fn prepare_subchat_messages(
     messages: Vec<ChatMessage>,
     model_id: &str,
 ) -> Result<Vec<ChatMessage>, String> {
+    let messages = refact_core::active_context::active_context(&messages)
+        .map_err(|e| e.to_string())?
+        .messages;
     gate_subchat_boundary(gcx, &messages, model_id)?;
     if refact_privacy::records_from_messages(&messages)
         .map_err(|error| error.to_string())?
@@ -880,6 +979,22 @@ pub async fn resolve_subchat_params(
     gcx: Arc<GlobalContext>,
     tool_name: &str,
 ) -> Result<SubchatParameters, String> {
+    let mut params = load_subchat_params(gcx.clone(), tool_name).await?;
+    let model = resolve_subchat_model_for_tool(gcx.clone(), tool_name, &params).await?;
+    let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+        .await
+        .map_err(|e| format!("failed to load caps: {:?}", e))?;
+    let model_rec = resolve_chat_model(caps, &model)?;
+    normalize_subchat_params_for_model(tool_name, &mut params, &model_rec);
+
+    Ok(params)
+}
+
+/// Subagent parameters as configured, before any model is resolved or normalized against.
+pub async fn load_subchat_params(
+    gcx: Arc<GlobalContext>,
+    tool_name: &str,
+) -> Result<SubchatParameters, String> {
     use crate::yaml_configs::customization_registry::get_subagent_config;
 
     let subagent_config = get_subagent_config(gcx.clone(), tool_name, None)
@@ -919,7 +1034,7 @@ pub async fn resolve_subchat_params(
     };
     let cache_control = parse_subchat_cache_control(tool_name, subchat.cache_control.as_deref())?;
 
-    let mut params = SubchatParameters {
+    let params = SubchatParameters {
         subchat_model_type: model_type,
         subchat_model: subchat.model.clone().unwrap_or_default(),
         subchat_n_ctx: subchat.n_ctx.unwrap_or(0),
@@ -942,13 +1057,6 @@ pub async fn resolve_subchat_params(
             tool_name
         ));
     }
-
-    let model = resolve_subchat_model_for_tool(gcx.clone(), tool_name, &params).await?;
-    let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
-        .await
-        .map_err(|e| format!("failed to load caps: {:?}", e))?;
-    let model_rec = resolve_chat_model(caps, &model)?;
-    normalize_subchat_params_for_model(tool_name, &mut params, &model_rec);
 
     Ok(params)
 }
@@ -1314,6 +1422,7 @@ pub async fn resolve_subchat_config_with_parent(
         parent_subchat_tx,
         abort_flag,
         soft_abort: false,
+        activity_stamp: None,
         background_agent_id: None,
         subchat_depth,
         final_step_force_answer: false,
@@ -1443,6 +1552,7 @@ pub async fn resolve_subchat_config_with_explicit_params(
         parent_subchat_tx,
         abort_flag,
         soft_abort: false,
+        activity_stamp: None,
         background_agent_id: None,
         subchat_depth,
         final_step_force_answer: false,
@@ -1505,10 +1615,17 @@ fn stateful_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadP
         ToolsPolicy::All => "agent".to_string(),
         ToolsPolicy::None => "none".to_string(),
         ToolsPolicy::Only(v) => v.join(","),
+        ToolsPolicy::Supervised { tools, .. } => {
+            if tools.is_empty() {
+                "none".into()
+            } else {
+                tools.join(",")
+            }
+        }
     };
     let task_meta = task_meta_for_stateful_subchat(config);
 
-    ThreadParams {
+    let mut thread = ThreadParams {
         id: chat_id.to_string(),
         title: config
             .title
@@ -1526,8 +1643,12 @@ fn stateful_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadP
         auto_approve_editing_tools: config.auto_approve_editing_tools,
         auto_approve_dangerous_commands: config.auto_approve_dangerous_commands,
         buddy_meta: config.buddy_meta.clone(),
+        context_tokens_cap: Some(config.n_ctx),
         ..Default::default()
-    }
+    };
+    // SubchatConfig carries the already model-normalized request window.
+    thread.resolve_pending_compression_cap(Some(config.n_ctx));
+    thread
 }
 
 async fn resolve_subagent_confirmation_defaults(
@@ -1570,7 +1691,7 @@ fn trace_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadPara
 }
 
 fn should_persist_subchat_trajectory(config: &SubchatConfig) -> bool {
-    config.stateful || config.tool_name != "segment_summarize"
+    config.stateful || config.tool_name != "mode_transition"
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1814,6 +1935,7 @@ pub(crate) mod test_support {
             final_step_force_answer: false,
             buddy_meta: None,
             step_progress: None,
+            activity_stamp: None,
             trace_parent: TraceParent::rooted(parent, parent),
         }
     }
@@ -1841,8 +1963,12 @@ pub(crate) fn prepare_child_history(
 pub async fn run_subchat(
     gcx: Arc<GlobalContext>,
     messages: Vec<ChatMessage>,
-    config: SubchatConfig,
+    mut config: SubchatConfig,
 ) -> Result<SubchatResult, String> {
+    if !subchat_retries_allowed(&config) {
+        config.wrap_up = None;
+        config.final_step_force_answer = false;
+    }
     info!(
         "run_subchat tool={} model={} stateful={}",
         config.tool_name, config.model, config.stateful
@@ -1850,6 +1976,10 @@ pub async fn run_subchat(
 
     let chat_id = stable_subchat_chat_id(&config, || format!("subchat-{}", Uuid::new_v4()));
 
+    let messages = refact_core::active_context::active_context(&messages)
+        .map_err(|e| e.to_string())?
+        .messages;
+    let messages = sanitize_messages_for_new_thread(&messages);
     let resuming = config.stateful
         && (agent_resume_boundary(&messages, config.background_agent_id.as_deref()).is_some()
             || previous_agent_cap(&messages, config.background_agent_id.as_deref()).is_some());
@@ -1892,6 +2022,7 @@ pub async fn run_subchat(
 
     ccx.lock().await.subchat_depth = config.subchat_depth;
     ccx.lock().await.background_agent_id = config.background_agent_id.clone();
+    ccx.lock().await.activity_stamp = config.activity_stamp.clone();
     ccx.lock().await.child_tool_ceiling = Some(config.tools.clone());
 
     if let Some(ref parent_tx) = config.parent_subchat_tx {
@@ -1930,8 +2061,8 @@ pub async fn run_subchat(
             if aborted {
                 break Ok((completed, true));
             }
-            // C is eligible only after the entire run, including forced finals
-            // and wrap-up, has finished. The registry closes acceptance atomically
+            // Outside interruptible-wait boundaries, C becomes eligible after
+            // forced finals and wrap-up. The registry closes acceptance atomically
             // with this drain so a successful enqueue cannot be stranded on exit.
             let wake = if let Some(agent_id) = config.background_agent_id.as_deref() {
                 import_runner_local_deliveries(&app, agent_id, &chat_id, &completed).await;
@@ -2249,6 +2380,19 @@ fn is_abort_error(err: &str) -> bool {
     err.eq_ignore_ascii_case("aborted")
 }
 
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn stamp_activity(stamp: &Option<Arc<AtomicU64>>) {
+    if let Some(stamp) = stamp {
+        stamp.store(epoch_ms(), Ordering::Relaxed);
+    }
+}
+
 fn is_aborted(abort_flag: &Option<Arc<AtomicBool>>) -> bool {
     abort_flag
         .as_ref()
@@ -2298,7 +2442,9 @@ async fn runner_model_turn(
     tools_subset: Option<Vec<String>>,
     prepend_system_prompt: bool,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
-    if !runner_tool_window_closed(messages) {
+    let projected =
+        refact_core::active_context::active_context(messages).map_err(|error| error.to_string())?;
+    if !runner_tool_window_closed(&projected.messages) {
         return Err(
             "Cannot generate a runner draft before all tool calls have results".to_string(),
         );
@@ -2328,7 +2474,9 @@ async fn runner_model_turn(
                 ccx.clone(),
                 &config.model,
                 &config.mode,
-                messages.clone(),
+                refact_core::active_context::active_context(messages)
+                    .map_err(|e| e.to_string())?
+                    .messages,
                 tools_subset.clone(),
                 false,
                 config.temperature,
@@ -2355,7 +2503,20 @@ async fn runner_model_turn(
             }
         };
         if let Some(result) = result {
-            return result;
+            let projected_len = refact_core::active_context::active_context(messages)
+                .map_err(|e| e.to_string())?
+                .messages
+                .len();
+            return result.map(|choices| {
+                choices
+                    .into_iter()
+                    .map(|choice| {
+                        let mut raw = messages.clone();
+                        raw.extend(choice.into_iter().skip(projected_len));
+                        raw
+                    })
+                    .collect()
+            });
         }
         // The cancelled generation has been dropped before touching its context.
         clear_unbound_openai_codex_websocket_session(&chat_id).await;
@@ -2460,6 +2621,7 @@ async fn run_subchat_loop(
 ) -> Result<(Vec<ChatMessage>, bool), String> {
     let mut context_limit_compact_count = 0usize;
     let mut empty_choice_retry_count = 0usize;
+    let mut supervised_cost = 0.0_f64;
     let previous_cap = previous_agent_cap(&messages, config.background_agent_id.as_deref());
     let resume_boundary = agent_resume_boundary(&messages, config.background_agent_id.as_deref());
     let steps_before = resume_boundary.map_or_else(
@@ -2473,9 +2635,52 @@ async fn run_subchat_loop(
             }
             return Err("Aborted".to_string());
         }
+        // Model boundary: honour a native pause before any new dispatch.
+        if hold_native_pause(&ccx, config).await {
+            if config.soft_abort {
+                return Ok((messages, true));
+            }
+            return Err("Aborted".to_string());
+        }
+        stamp_activity(&config.activity_stamp);
         emit_subchat_progress(config, SubchatProgress::Step(step + 1));
         drain_background_agent_inbox(&ccx, &mut messages).await;
         persist_subchat_progress(&ccx, config, progress, &messages).await;
+
+        // Reserve the entire possible input/output envelope before a provider
+        // call. Unknown pricing/usage fails closed; retries and wrap-up calls
+        // are disabled for supervision, and budgets are never increased.
+        let mut supervised_pricing = None;
+        if let ToolsPolicy::Supervised { budget, .. } = tools_policy {
+            let envelope = config.n_ctx.saturating_add(config.max_new_tokens) as u64;
+            if budget.max_turns.is_none_or(|limit| step >= limit as usize)
+                || budget.max_tokens.is_none_or(|limit| {
+                    (usage.total_tokens as u64).saturating_add(envelope) > limit
+                })
+            {
+                return Err("Aborted: supervised token/turn budget exhausted".into());
+            }
+            if let Some(cents) = budget.max_cost_cents {
+                let gcx = ccx.lock().await.global_context.clone();
+                let pricing = crate::providers::pricing::lookup_model_pricing(&gcx, &config.model)
+                    .await
+                    .ok_or("Aborted: supervised cost pricing unavailable")?;
+                let reserve = ChatUsage {
+                    prompt_tokens: config.n_ctx as _,
+                    completion_tokens: config.max_new_tokens as _,
+                    total_tokens: envelope as _,
+                    ..Default::default()
+                };
+                let cost = crate::providers::pricing::compute_cost(&reserve, &pricing)
+                    .ok_or("Aborted: supervised cost bound unavailable")?
+                    .total_usd;
+                if !cost.is_finite() || cost < 0.0 || supervised_cost + cost > cents as f64 / 100.0
+                {
+                    return Err("Aborted: supervised cost budget exhausted".into());
+                }
+                supervised_pricing = Some(pricing);
+            }
+        }
 
         let results = loop {
             match runner_model_turn(
@@ -2500,7 +2705,7 @@ async fn run_subchat_loop(
                     let log_error = safe_context_limit_error_for_log(&original_error);
                     context_limit_compact_count += 1;
                     warn!(
-                        "Subchat context limit, applying segment summarization attempt {}/{}: {}",
+                        "Subchat context limit, rebuilding context attempt {}/{}: {}",
                         context_limit_compact_count, MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS, log_error,
                     );
                     apply_subchat_reactive_compaction(
@@ -2534,6 +2739,30 @@ async fn run_subchat_loop(
             }
         };
 
+        if let ToolsPolicy::Supervised { budget, .. } = tools_policy {
+            let actual = results
+                .first()
+                .and_then(|messages| messages.last())
+                .and_then(|m| m.usage.as_ref())
+                .ok_or("Aborted: supervised provider usage unavailable")?;
+            if let Some(pricing) = supervised_pricing.as_ref() {
+                let cost = crate::providers::pricing::compute_cost(actual, pricing)
+                    .ok_or("Aborted: supervised provider cost unavailable")?
+                    .total_usd;
+                if !cost.is_finite() || cost < 0.0 {
+                    return Err("Aborted: invalid provider cost".into());
+                }
+                supervised_cost += cost;
+            }
+            if budget.max_tokens.is_none_or(|limit| {
+                (usage.total_tokens as u64).saturating_add(actual.total_tokens as u64) > limit
+            }) || budget
+                .max_cost_cents
+                .is_some_and(|limit| supervised_cost > limit as f64 / 100.0)
+            {
+                return Err("Aborted: supervised provider budget exhausted".into());
+            }
+        }
         update_usage_from_messages(usage, &results);
         let gcx = ccx.lock().await.global_context.clone();
         emit_usage_progress(&gcx, config, &results).await;
@@ -2544,6 +2773,14 @@ async fn run_subchat_loop(
             break;
         }
 
+        // Tool boundary: the provider outcome above is retained; a pause
+        // parks here and cancellation exits before any tool starts.
+        if hold_native_pause(&ccx, config).await {
+            if config.soft_abort {
+                return Ok((messages, true));
+            }
+            return Err("Aborted".to_string());
+        }
         messages = execute_pending_tool_calls(
             ccx.clone(),
             &config.model,
@@ -2612,7 +2849,7 @@ async fn run_subchat_loop(
     }
 
     if needs_forced_final_answer(
-        config.final_step_force_answer,
+        config.final_step_force_answer && subchat_retries_allowed(config),
         is_aborted(&config.abort_flag),
         has_final_answer(&messages),
     ) {
@@ -2656,7 +2893,7 @@ async fn run_forced_final_answer_turn(
                 let log_error = safe_context_limit_error_for_log(&original_error);
                 *context_limit_compact_count += 1;
                 warn!(
-                    "Subchat forced final answer context limit, applying segment summarization attempt {}/{}: {}",
+                    "Subchat forced final answer context limit, rebuilding context attempt {}/{}: {}",
                     *context_limit_compact_count, MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS, log_error,
                 );
                 apply_subchat_reactive_compaction(
@@ -2717,6 +2954,7 @@ async fn run_subchat_with_wrap_up(
             return Err("Aborted".to_string());
         }
 
+        stamp_activity(&config.activity_stamp);
         emit_subchat_progress(config, SubchatProgress::Step(step_n + 1));
         drain_background_agent_inbox(&ccx, &mut messages).await;
         persist_subchat_progress(&ccx, config, progress, &messages).await;
@@ -2769,10 +3007,8 @@ async fn run_subchat_with_wrap_up(
                     let log_error = safe_context_limit_error_for_log(&original_error);
                     context_limit_compact_count += 1;
                     warn!(
-                        "Subchat wrap-up context limit, applying segment summarization attempt {}/{}: {}",
-                        context_limit_compact_count,
-                        MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
-                        log_error,
+                        "Subchat wrap-up context limit, rebuilding context attempt {}/{}: {}",
+                        context_limit_compact_count, MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS, log_error,
                     );
                     apply_subchat_reactive_compaction(
                         ccx.lock().await.global_context.clone(),
@@ -2881,10 +3117,8 @@ async fn run_subchat_with_wrap_up(
                 let log_error = safe_context_limit_error_for_log(&original_error);
                 context_limit_compact_count += 1;
                 warn!(
-                    "Subchat wrap-up final context limit, applying segment summarization attempt {}/{}: {}",
-                    context_limit_compact_count,
-                    MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS,
-                    log_error,
+                    "Subchat wrap-up final context limit, rebuilding context attempt {}/{}: {}",
+                    context_limit_compact_count, MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS, log_error,
                 );
                 apply_subchat_reactive_compaction(
                     ccx.lock().await.global_context.clone(),
@@ -3005,18 +3239,29 @@ async fn execute_pending_tool_calls(
     auto_approve_dangerous_commands: bool,
     step_progress: Option<Arc<dyn Fn(SubchatProgress) + Send + Sync>>,
 ) -> Result<Vec<ChatMessage>, String> {
-    let (gcx, n_ctx, task_meta, worktree, chat_id, root_chat_id) = {
+    let (n_ctx, task_meta, worktree, chat_id, root_chat_id, app, agent_id, abort_flag) = {
         let cgcx = ccx.lock().await;
         (
-            cgcx.global_context.clone(),
             cgcx.n_ctx,
             cgcx.task_meta.clone(),
             cgcx.execution_scope_worktree(),
             cgcx.chat_id.clone(),
             cgcx.root_chat_id.clone(),
+            cgcx.app.clone(),
+            cgcx.background_agent_id.clone(),
+            cgcx.abort_flag.clone(),
         )
     };
-    let app = AppState::from_gcx(gcx.clone()).await;
+    let native_pause = if matches!(tools_policy, ToolsPolicy::Supervised { .. }) {
+        let agent_id = agent_id.ok_or_else(|| {
+            "supervised native tool dispatch missing background agent identity".to_string()
+        })?;
+        Some(app.agents.pause_gate(&agent_id).await.ok_or_else(|| {
+            "supervised native tool dispatch missing live registry runtime".to_string()
+        })?)
+    } else {
+        None
+    };
     let last = match messages.last() {
         Some(m) => m,
         None => return Ok(messages),
@@ -3148,6 +3393,8 @@ async fn execute_pending_tool_calls(
         &thread.mode,
         Some(&thread.model),
         ExecuteToolsOptions {
+            native_pause,
+            native_abort: Some(abort_flag.clone()),
             execution_context: Some(ccx.clone()),
             ..Default::default()
         },
@@ -3158,12 +3405,16 @@ async fn execute_pending_tool_calls(
         callback(SubchatProgress::ToolsFinished);
     }
 
+    // A cancelled dispatch deliberately leaves unstarted calls without a
+    // fabricated success result; the enclosing subchat observes the same
+    // abort flag and exits rather than continuing this turn.
+    let dispatch_aborted = abort_flag.load(Ordering::Relaxed);
     for tc in &tool_calls {
         let answered = denied_msgs
             .iter()
             .chain(tool_results.iter())
             .any(|m| m.tool_call_id == tc.id);
-        if !answered {
+        if !answered && !dispatch_aborted {
             tool_results.push(ChatMessage {
                 message_id: Uuid::new_v4().to_string(),
                 role: "tool".to_string(),
@@ -3222,12 +3473,22 @@ async fn subchat_stream(
     progress_tool_call_id: Option<&str>,
     allow_provider_retries: bool,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
-    let (gcx, effective_n_ctx, abort_flag, task_meta, worktree, context_chat_id, context_root_id) = {
+    let (
+        gcx,
+        effective_n_ctx,
+        abort_flag,
+        activity_stamp,
+        task_meta,
+        worktree,
+        context_chat_id,
+        context_root_id,
+    ) = {
         let cgcx = ccx.lock().await;
         (
             cgcx.global_context.clone(),
             cgcx.n_ctx,
             cgcx.abort_flag.clone(),
+            cgcx.activity_stamp.clone(),
             cgcx.task_meta.clone(),
             cgcx.execution_scope_worktree(),
             cgcx.chat_id.clone(),
@@ -3363,8 +3624,11 @@ async fn subchat_stream(
             supports_temperature: model_rec.supports_temperature,
         };
 
-        let mut collector =
-            SubchatProgressCollector::new(progress_sender.clone(), progress_tool_call_id.clone());
+        let mut collector = SubchatProgressCollector::new(
+            progress_sender.clone(),
+            progress_tool_call_id.clone(),
+            activity_stamp.clone(),
+        );
 
         let call_ts_start = chrono::Utc::now().to_rfc3339();
         let call_start = std::time::Instant::now();
@@ -3702,8 +3966,9 @@ mod subchat_tests {
         stable_subchat_chat_id, should_compact_context_limit_error,
         should_persist_subchat_trajectory, stateful_thread_from_config, subchat_retries_allowed,
         subchat_trajectory_commit_intent, trace_thread_from_config, save_failed_subchat_trajectory,
-        SubchatConfig, SubchatProgress, SubchatTrajectoryCommitPhase, ToolsPolicy, TraceParent,
-        GUARDED_REPORT_INSTRUCTION, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
+        SubchatConfig, SubchatProgress, SubchatProgressCollector, SubchatTrajectoryCommitPhase,
+        ToolsPolicy, TraceParent, GUARDED_REPORT_INSTRUCTION,
+        PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
@@ -3711,7 +3976,7 @@ mod subchat_tests {
     use crate::chat::diagnostics::{
         SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS, SAFE_PROVIDER_ERROR_DIAGNOSTIC_TRUNCATED,
     };
-    use crate::chat::summarization::{safe_segment_summary_failure_for_log, SegmentSummaryFailure};
+
     use crate::chat::trajectory_ops::sanitize_messages_for_new_thread;
     use crate::chat::trajectories::save_trajectory_as_with_intent;
     use crate::call_validation::{
@@ -3727,9 +3992,11 @@ mod subchat_tests {
         Attribution, FileRecord, PolicyLoad, PrivacyPolicy, PrivacyRecord, ShellBehavior,
         SubagentPolicy, Zone,
     };
+    use crate::chat::stream_core::StreamCollector;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3865,6 +4132,133 @@ mod subchat_tests {
             .await
             .unwrap();
         assert_eq!(saved.messages.len(), messages.len());
+    }
+
+    #[tokio::test]
+    async fn runner_wait_boundary_releases_idle_after_all_results_and_local_ticks() {
+        use refact_chat_api::{PendingDelivery, PushMode};
+        let ccx = abort_test_ccx().await;
+        let (app, chat_id) = {
+            let ccx = ccx.lock().await;
+            (ccx.app.clone(), ccx.chat_id.clone())
+        };
+        let (agent, _, _) = app
+            .agents
+            .create(crate::agents::types::CreateAgentRequest {
+                parent_chat_id: "parent".into(),
+                parent_root_chat_id: None,
+                parent_tool_call_id: None,
+                kind: crate::agents::types::BgAgentKind::Subagent,
+                config_name: "subagent".into(),
+                title: "wait boundary test".into(),
+                prompt: "test".into(),
+                target_files: vec![],
+                model: "test".into(),
+                model_type: None,
+                goal_summary: None,
+                plan_present: false,
+                worktree_id: None,
+                worktree_branch: None,
+            })
+            .await
+            .unwrap();
+        ccx.lock().await.background_agent_id = Some(agent.agent_id.clone());
+        let delivery = PendingDelivery::with_id(
+            "runner-idle",
+            vec![ChatMessage::new("user".into(), "continue".into())],
+            PushMode::WhenIdle,
+            "parent",
+            true,
+        );
+        app.agents
+            .enqueue_delivery(&agent.agent_id, delivery.clone())
+            .await
+            .unwrap();
+        let mut session = crate::chat::types::ChatSession::new(chat_id.clone());
+        session.set_runner_pending_deliveries(vec![delivery]);
+        let session = Arc::new(tokio::sync::Mutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id, session.clone());
+        let mut messages = vec![];
+        super::drain_background_agent_inbox(&ccx, &mut messages).await;
+        assert!(messages.is_empty(), "ordinary runner boundaries retain C");
+
+        let assistant: ChatMessage = serde_json::from_value(serde_json::json!({
+            "role": "assistant", "content": "", "tool_calls": [
+                {"id":"sleep", "type":"function", "function":{"name":"sleep", "arguments":"{}"}},
+                {"id":"other", "type":"function", "function":{"name":"sleep", "arguments":"{}"}}
+            ]
+        }))
+        .unwrap();
+        messages.push(assistant);
+        {
+            let mut session = session.lock().await;
+            session.messages = messages.clone();
+            session.turn_depth = 1;
+            session.interruptible_waits = 1;
+            session.interrupt_wait_for_delivery();
+            assert!(session.wait_delivery_boundary);
+            assert!(!session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+            session.interruptible_waits = 0;
+            session
+                .queue_post_tool_delivery(PendingDelivery::with_id(
+                    "local-tick",
+                    vec![ChatMessage::new("event".into(), "tick".into())],
+                    PushMode::WhenIdle,
+                    "sleep",
+                    false,
+                ))
+                .unwrap();
+        }
+        for id in ["sleep", "other"] {
+            super::drain_background_agent_inbox(&ccx, &mut messages).await;
+            assert!(session.lock().await.wait_delivery_boundary);
+            assert!(!messages.iter().any(|message| message.role == "user"));
+            messages.push(ChatMessage {
+                role: "tool".into(),
+                tool_call_id: id.into(),
+                content: ChatContent::SimpleText("yielded".into()),
+                ..Default::default()
+            });
+        }
+        super::drain_background_agent_inbox(&ccx, &mut messages).await;
+        assert!(!session.lock().await.wait_delivery_boundary);
+        assert!(session.lock().await.pending_deliveries.is_empty());
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[3].extra["delivery"]["id"], "runner-idle");
+        assert_eq!(messages[4].extra["delivery"]["id"], "local-tick");
+        super::drain_background_agent_inbox(&ccx, &mut messages).await;
+        assert_eq!(
+            messages.len(),
+            5,
+            "claimed deliveries must not be duplicated"
+        );
+        app.agents
+            .enqueue_delivery(
+                &agent.agent_id,
+                PendingDelivery::with_id(
+                    "later-idle",
+                    vec![ChatMessage::new("user".into(), "later".into())],
+                    PushMode::WhenIdle,
+                    "parent",
+                    true,
+                ),
+            )
+            .await
+            .unwrap();
+        super::drain_background_agent_inbox(&ccx, &mut messages).await;
+        assert_eq!(messages.len(), 5, "wait boundary is consumed once");
+
+        session.lock().await.wait_delivery_boundary = true;
+        ccx.lock().await.background_agent_id = Some("missing-agent".into());
+        super::drain_background_agent_inbox(&ccx, &mut messages).await;
+        assert!(
+            session.lock().await.wait_delivery_boundary,
+            "failed drains retain the boundary"
+        );
     }
 
     #[tokio::test]
@@ -4093,6 +4487,19 @@ mod subchat_tests {
     }
 
     #[test]
+    fn runner_boundary_accepts_diff_results_for_edit_tools() {
+        let mut assistant = ChatMessage::new("assistant".into(), String::new());
+        assistant.tool_calls = Some(vec![serde_json::from_value(serde_json::json!({
+            "id":"edit", "type":"function", "function":{"name":"update_textdoc", "arguments":"{}"}
+        }))
+        .unwrap()]);
+        let mut diff = ChatMessage::new("diff".into(), "[]".into());
+        diff.tool_call_id = "edit".into();
+        let messages = vec![assistant, diff];
+        assert!(super::runner_tool_window_closed(&messages));
+    }
+
+    #[test]
     fn needs_forced_final_answer_gating() {
         assert!(needs_forced_final_answer(true, false, false));
         assert!(!needs_forced_final_answer(false, false, false));
@@ -4140,6 +4547,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             soft_abort: false,
+            activity_stamp: None,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
@@ -4197,6 +4605,21 @@ mod subchat_tests {
         config.abort_flag = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
         config.soft_abort = soft_abort;
         config
+    }
+
+    #[test]
+    fn streaming_deltas_stamp_watchdog_activity() {
+        let stamp = Arc::new(AtomicU64::new(0));
+        let mut collector = SubchatProgressCollector::new(None, None, Some(stamp.clone()));
+
+        collector.on_delta_ops(
+            0,
+            vec![crate::chat::types::DeltaOp::AppendContent {
+                text: "token".to_string(),
+            }],
+        );
+
+        assert!(stamp.load(Ordering::Relaxed) > 0);
     }
 
     #[test]
@@ -4300,6 +4723,131 @@ mod subchat_tests {
         )
         .await;
         assert_eq!(result.err(), Some("Aborted".to_string()));
+    }
+
+    /// Real registry runtime bound to a loop context: the loop parks on the
+    /// agent's own pause gate and observes the agent's own abort flag.
+    async fn paused_agent_loop(
+        app: &crate::app_state::AppState,
+        tools_policy: ToolsPolicy,
+    ) -> (
+        String,
+        Arc<crate::agents::registry::PauseGate>,
+        tokio::sync::mpsc::UnboundedReceiver<SubchatProgress>,
+        tokio::task::JoinHandle<Result<(Vec<ChatMessage>, bool), String>>,
+    ) {
+        let (record, abort_flag, _) = app
+            .agents
+            .create(crate::agents::types::CreateAgentRequest {
+                parent_chat_id: "parent".into(),
+                parent_root_chat_id: None,
+                parent_tool_call_id: None,
+                kind: crate::agents::types::BgAgentKind::Subagent,
+                config_name: "test".into(),
+                title: "paused".into(),
+                prompt: "prompt".into(),
+                target_files: vec![],
+                model: "model".into(),
+                model_type: None,
+                goal_summary: None,
+                plan_present: false,
+                worktree_id: None,
+                worktree_branch: None,
+            })
+            .await
+            .unwrap();
+        let gate = app.agents.pause_gate(&record.agent_id).await.unwrap();
+        app.agents.request_pause(&record.agent_id).await.unwrap();
+        let mut ccx = crate::at_commands::at_commands::AtCommandsContext::new_from_app(
+            app.clone(),
+            4096,
+            1,
+            false,
+            vec![],
+            format!("subchat-{}", record.agent_id),
+            None,
+            "model".to_string(),
+            None,
+            None,
+        )
+        .await;
+        ccx.background_agent_id = Some(record.agent_id.clone());
+        let ccx = Arc::new(tokio::sync::Mutex::new(ccx));
+        let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = test_subchat_config();
+        config.abort_flag = Some(abort_flag);
+        config.background_agent_id = Some(record.agent_id.clone());
+        config.max_steps = 3;
+        config.tools = tools_policy.clone();
+        config.step_progress = Some(Arc::new(move |update| {
+            let _ = progress_tx.send(update);
+        }));
+        let task = tokio::spawn(async move {
+            let mut usage = crate::call_validation::ChatUsage::default();
+            let progress = Arc::new(StdMutex::new(Vec::new()));
+            super::run_subchat_loop(
+                ccx,
+                &config,
+                vec![ChatMessage::new("user".to_string(), "hi".to_string())],
+                &tools_policy,
+                &mut usage,
+                &progress,
+            )
+            .await
+        });
+        (record.agent_id, gate, progress_rx, task)
+    }
+
+    #[tokio::test]
+    async fn paused_loop_parks_before_any_dispatch_and_cancel_wakes_it_without_effect() {
+        let app = crate::app_state::AppState::from_gcx(make_test_gcx().await).await;
+        let (agent_id, gate, mut progress, task) = paused_agent_loop(&app, ToolsPolicy::None).await;
+        gate.quiesced().await;
+        let status = app.agents.pause_status(&agent_id).await.unwrap();
+        assert!(status.requested && status.quiescent);
+        assert!(!status.running_tool_cancelable);
+        assert!(
+            progress.try_recv().is_err(),
+            "no step may start while parked"
+        );
+        app.agents
+            .cancel("parent", &agent_id, Some("owner cancel".into()))
+            .await
+            .unwrap();
+        assert_eq!(task.await.unwrap().err(), Some("Aborted".to_string()));
+        assert!(
+            progress.try_recv().is_err(),
+            "cancel must not release a dispatch"
+        );
+        assert!(app.agents.pause_status(&agent_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resume_wakes_parked_loop_and_next_boundary_is_reached() {
+        let app = crate::app_state::AppState::from_gcx(make_test_gcx().await).await;
+        // A zero-turn supervised budget makes the first post-barrier check
+        // fail closed deterministically, proving the loop moved past the gate
+        // without needing a provider.
+        let policy = ToolsPolicy::Supervised {
+            tools: vec![],
+            budget: crate::chat::types::GoalBudget {
+                max_turns: Some(0),
+                max_tokens: Some(1),
+                explicit: true,
+                ..Default::default()
+            },
+        };
+        let (agent_id, gate, mut progress, task) = paused_agent_loop(&app, policy).await;
+        gate.quiesced().await;
+        assert!(progress.try_recv().is_err());
+        let status = app.agents.release_pause(&agent_id).await.unwrap();
+        assert!(!status.requested);
+        assert_eq!(progress.recv().await, Some(SubchatProgress::Step(1)));
+        assert_eq!(
+            task.await.unwrap().err(),
+            Some("Aborted: supervised token/turn budget exhausted".to_string())
+        );
+        assert!(!gate.is_quiescent());
     }
 
     #[test]
@@ -4428,14 +4976,14 @@ mod subchat_tests {
     }
 
     #[test]
-    fn segment_summarizer_is_the_only_ephemeral_subchat_trajectory() {
+    fn context_reconstruction_is_the_only_ephemeral_subchat_trajectory() {
         let mut config = test_subchat_config();
         assert!(should_persist_subchat_trajectory(&config));
 
         config.tool_name = "title_generation".to_string();
         assert!(should_persist_subchat_trajectory(&config));
 
-        config.tool_name = "segment_summarize".to_string();
+        config.tool_name = "mode_transition".to_string();
         assert!(!should_persist_subchat_trajectory(&config));
 
         config.stateful = true;
@@ -4506,11 +5054,11 @@ mod subchat_tests {
     }
 
     #[test]
-    fn segment_summarizer_never_retries_provider_calls() {
+    fn context_reconstruction_never_retries_provider_calls() {
         let mut config = test_subchat_config();
         assert!(subchat_retries_allowed(&config));
 
-        config.tool_name = "segment_summarize".to_string();
+        config.tool_name = "mode_transition".to_string();
         assert!(!subchat_retries_allowed(&config));
     }
 
@@ -4603,6 +5151,32 @@ mod subchat_tests {
     }
 
     #[tokio::test]
+    async fn subchat_projects_archived_secrets_before_privacy_gate() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        install_privacy_policy(&gcx, "trusted", true);
+        let archived = message_with_privacy(
+            "user",
+            "archived secret",
+            vec![privacy_record(".env", "secrets")],
+        );
+        assert!(gate_subchat_boundary(&gcx, &[archived.clone()], "untrusted/model").is_err());
+        let mut current = ChatMessage::new("user".into(), "public current request".into());
+        current.message_id = "public-current-request".into();
+        let report = refact_core::active_context::make_reconstruction_report(
+            vec![current],
+            Default::default(),
+        )
+        .unwrap();
+        let prepared =
+            prepare_subchat_messages(&gcx, vec![archived, report], "untrusted/model").unwrap();
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(
+            prepared[0].content.content_text_only(),
+            "public current request"
+        );
+    }
+
+    #[tokio::test]
     async fn subchat_privacy_in_gate_checks_subagent_model_destination() {
         let gcx = make_test_gcx().await;
         install_privacy_policy(&gcx, "trusted", true);
@@ -4629,28 +5203,6 @@ mod subchat_tests {
         )];
 
         let sanitized = sanitize_messages_for_new_thread(&messages);
-        let error = prepare_subchat_messages(&gcx, sanitized, "untrusted/model").unwrap_err();
-
-        assert!(error.starts_with("Output withheld by user privacy policy"));
-        assert!(error.contains("zone \""));
-    }
-
-    #[tokio::test]
-    async fn secrets_tagged_summarizer_request_is_refused_for_untrusted_model() {
-        let gcx = make_test_gcx().await;
-        install_privacy_policy(&gcx, "trusted", true);
-        let sources = vec![message_with_privacy(
-            "tool",
-            "guarded segment",
-            vec![privacy_record(".env", "secrets")],
-        )];
-        let request = crate::chat::summarization::summarizer_request_messages(
-            "summarize".to_string(),
-            &sources,
-        )
-        .unwrap();
-
-        let sanitized = sanitize_messages_for_new_thread(&request);
         let error = prepare_subchat_messages(&gcx, sanitized, "untrusted/model").unwrap_err();
 
         assert!(error.starts_with("Output withheld by user privacy policy"));
@@ -4802,8 +5354,9 @@ mod subchat_tests {
     }
 
     #[tokio::test]
-    async fn subchat_reactive_compaction_falls_back_deterministically_and_preserves_last_message() {
+    async fn subchat_reactive_compaction_unavailable_model_has_no_fallback_and_preserves_archive() {
         let gcx = make_test_gcx().await;
+        install_caps(gcx.clone(), CodeAssistantCaps::default()).await;
         let config = test_subchat_config();
         let mut messages = vec![
             ChatMessage::new("user".to_string(), "first".to_string()),
@@ -4816,7 +5369,8 @@ mod subchat_tests {
             ChatMessage::new("user".to_string(), "wrap up".to_string()),
         ];
 
-        apply_subchat_reactive_compaction(
+        let original = serde_json::to_value(&messages).unwrap();
+        let compacted = apply_subchat_reactive_compaction(
             gcx,
             &config,
             &mut messages,
@@ -4826,17 +5380,27 @@ mod subchat_tests {
         )
         .await;
 
+        assert!(!compacted);
+        assert_eq!(messages.len(), 4);
+        let diagnostic = messages.remove(2);
+        assert_eq!(diagnostic.role, "error");
+        assert!(crate::chat::diagnostics::is_ui_only_message(&diagnostic));
+        assert!(diagnostic
+            .content
+            .content_text_only()
+            .contains("context_length_exceeded"));
+        assert_eq!(serde_json::to_value(&messages).unwrap(), original);
         assert_eq!(
             messages.last().unwrap().content.content_text_only(),
             "wrap up"
         );
-        assert!(messages
+        assert!(!messages
             .iter()
             .any(|message| message.role
                 == refact_chat_history::trajectory_ops::COMPRESSION_REPORT_ROLE));
         assert!(!messages
             .iter()
-            .any(crate::chat::summarization::is_segment_summary));
+            .any(refact_core::active_context::is_legacy_summary));
         assert!(!messages.iter().any(|message| {
             message
                 .content
@@ -4848,6 +5412,7 @@ mod subchat_tests {
     #[tokio::test]
     async fn subchat_reactive_compaction_emits_parent_diagnostics() {
         let gcx = make_test_gcx().await;
+        install_caps(gcx.clone(), CodeAssistantCaps::default()).await;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut config = test_subchat_config();
         config.parent_tool_call_id = Some("call_1".to_string());
@@ -4863,26 +5428,31 @@ mod subchat_tests {
             ChatMessage::new("user".to_string(), "second".to_string()),
         ];
 
-        apply_subchat_reactive_compaction(
-            gcx,
-            &config,
-            &mut messages,
-            "context_length_exceeded",
-            1,
-            false,
-        )
-        .await;
+        let original = serde_json::to_value(&messages).unwrap();
+        let error = "context_length_exceeded: Authorization: Bearer sk-test-secret";
+        let compacted =
+            apply_subchat_reactive_compaction(gcx, &config, &mut messages, error, 1, false).await;
 
+        assert!(!compacted);
+        assert_eq!(messages.len(), 4);
+        let diagnostic = messages.pop().unwrap();
+        assert_eq!(diagnostic.role, "error");
+        assert!(crate::chat::diagnostics::is_ui_only_message(&diagnostic));
+        let diagnostic_json = serde_json::to_string(&diagnostic).unwrap();
+        assert!(!diagnostic_json.contains("sk-test-secret"));
+        assert!(diagnostic_json.contains("[REDACTED"));
+        assert_eq!(serde_json::to_value(&messages).unwrap(), original);
         let first = rx.try_recv().unwrap();
         assert_eq!(
             first.get("tool_call_id").and_then(|v| v.as_str()),
             Some("call_1")
         );
-        assert!(first
-            .get("subchat_id")
-            .and_then(|v| v.as_str())
-            .unwrap()
-            .contains("compacting the oldest eligible context"));
+        let status = first.get("subchat_id").and_then(|v| v.as_str()).unwrap();
+        assert!(status.contains("could not rebuild active context (attempt 1)"));
+        assert!(status.contains("context_length_exceeded"));
+        assert!(!status.contains("sk-test-secret"));
+        assert!(status.contains("[REDACTED"));
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -4897,7 +5467,7 @@ mod subchat_tests {
 
         let first = rx.try_recv().unwrap();
         let status = first.get("subchat_id").and_then(|v| v.as_str()).unwrap();
-        assert!(status.contains("handled by compacting"));
+        assert!(status.contains("handled by rebuilding active context"));
         assert!(status.contains("attempt 1"));
         assert!(!status.contains("sk-test-secret"));
         assert!(!status.contains("Authorization: Bearer sk-test-secret"));
@@ -4917,28 +5487,12 @@ mod subchat_tests {
     }
 
     #[test]
-    fn subchat_compaction_failure_log_text_redacts_summarizer_secret() {
-        let failure = SegmentSummaryFailure::Transient(
-            "summarizer failed: Authorization: Bearer sk-test-secret".to_string(),
-        );
-
-        let log_error = safe_segment_summary_failure_for_log(&failure);
-
-        assert!(!log_error.contains("sk-test-secret"));
-        assert!(!log_error.contains("Authorization: Bearer sk-test-secret"));
-        assert!(log_error.contains("[REDACTED"));
-        assert!(
-            log_error.len() <= crate::chat::diagnostics::SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS
-        );
-    }
-
-    #[test]
     fn subchat_parent_compaction_diagnostic_caps_long_provider_error() {
         let error = format!("context_length_exceeded: {}", "x".repeat(4_000));
 
         let status = parent_compaction_diagnostic_status(&error, 9, false);
 
-        assert!(status.contains("could not summarize an eligible closed non-user segment"));
+        assert!(status.contains("could not rebuild active context"));
         assert!(status.contains("attempt 9"));
         assert!(status.len() <= PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS);
         assert!(status.ends_with(PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED));
@@ -5020,6 +5574,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             soft_abort: false,
+            activity_stamp: None,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
@@ -5031,6 +5586,11 @@ mod subchat_tests {
         let thread = stateful_thread_from_config("subchat-1", &config);
 
         assert_eq!(thread.id, "subchat-1");
+        assert_eq!(thread.context_tokens_cap, Some(4096));
+        assert_eq!(thread.auto_compression_cap, Some(3686));
+        assert!(!thread.auto_compression_cap_pending);
+        assert_eq!(thread.auto_compression_cap, Some(3686));
+        assert!(!thread.auto_compression_cap_pending);
         assert_eq!(thread.task_meta, Some(task_meta));
         assert_eq!(thread.worktree, Some(worktree));
         assert_eq!(thread.tool_use, "cat");
@@ -5088,6 +5648,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             soft_abort: false,
+            activity_stamp: None,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
@@ -5150,6 +5711,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             soft_abort: false,
+            activity_stamp: None,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
@@ -5396,6 +5958,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             soft_abort: false,
+            activity_stamp: None,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,

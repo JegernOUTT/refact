@@ -16,6 +16,13 @@ use crate::yaml_configs::customization_registry::{
 use super::tool_config_subagent::ToolConfigSubagent;
 use super::tools_description::{Tool, ToolDesc, ToolGroup, ToolGroupCategory, ToolSourceType};
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolGating {
+    pub capability: &'static str,
+    pub unavailable_reason: &'static str,
+    pub enablement: &'static str,
+}
+
 /// When MCP tool count exceeds this threshold, lazy loading activates.
 /// The full MCP schemas are replaced by two fixed proxy tools:
 /// - `mcp_tool_search` — discover MCP tools by regex, returns schema text
@@ -229,43 +236,56 @@ pub async fn mcp_config_allowed_for_model(
         .mcp_allowed(provider_of_model(model_id), &server)
 }
 
-fn tool_available(
-    tool: &Box<dyn Tool + Send>,
-    codegraph_on: bool,
-    vecdb_on: bool,
-    is_there_a_thinking_model: bool,
-    allow_knowledge: bool,
-    allow_experimental: bool,
-) -> bool {
+fn tool_gating(tool: &Box<dyn Tool + Send>, availability: &ToolAvailability) -> Option<ToolGating> {
     let dependencies = tool.tool_depends_on();
     if dependencies
         .iter()
         .any(|dependency| dependency == "ast" || dependency == "codegraph")
-        && !codegraph_on
+        && !availability.codegraph_on
     {
-        return false;
+        return Some(ToolGating {
+            capability: "code graph index",
+            unavailable_reason: "which is not enabled on this engine",
+            enablement: "enable code graph indexing",
+        });
     }
-    if dependencies.iter().any(|dependency| dependency == "vecdb") && !vecdb_on {
-        return false;
+    if dependencies.iter().any(|dependency| dependency == "vecdb") && !availability.vecdb_on {
+        return Some(ToolGating {
+            capability: "vector database",
+            unavailable_reason: "which is not enabled on this engine",
+            enablement: "start it with --vecdb",
+        });
     }
     if dependencies
         .iter()
         .any(|dependency| dependency == "thinking")
-        && !is_there_a_thinking_model
+        && !availability.is_there_a_thinking_model
     {
-        return false;
+        return Some(ToolGating {
+            capability: "thinking model",
+            unavailable_reason: "which is not configured on this engine",
+            enablement: "configure a thinking-capable model",
+        });
     }
     if dependencies
         .iter()
         .any(|dependency| dependency == "knowledge")
-        && !allow_knowledge
+        && !availability.allow_knowledge
     {
-        return false;
+        return Some(ToolGating {
+            capability: "knowledge tools",
+            unavailable_reason: "which are not enabled on this engine",
+            enablement: "enable knowledge tools",
+        });
     }
-    if tool.tool_description().experimental && !allow_experimental {
-        return false;
+    if tool.tool_description().experimental && !availability.allow_experimental {
+        return Some(ToolGating {
+            capability: "experimental tools",
+            unavailable_reason: "which are not enabled on this engine",
+            enablement: "start it with --experimental",
+        });
     }
-    true
+    None
 }
 
 pub(crate) fn catalog_policy_for_tools(
@@ -288,41 +308,85 @@ pub(crate) fn catalog_policy_for_tools(
         .collect()
 }
 
-async fn tool_available_from_gcx(
-    gcx: Arc<GlobalContext>,
-) -> impl Fn(&Box<dyn Tool + Send>) -> bool {
-    let (codegraph_on, vecdb_on, allow_experimental) = {
+#[cfg(test)]
+fn availability_build_counters() -> &'static std::sync::Mutex<HashMap<PathBuf, usize>> {
+    static COUNTERS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, usize>>> =
+        std::sync::OnceLock::new();
+    COUNTERS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn availability_build_count(config_dir: &PathBuf) -> usize {
+    availability_build_counters()
+        .lock()
+        .unwrap()
+        .get(config_dir)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[derive(Clone, Copy)]
+struct ToolAvailability {
+    codegraph_on: bool,
+    vecdb_on: bool,
+    is_there_a_thinking_model: bool,
+    allow_knowledge: bool,
+    allow_experimental: bool,
+}
+
+impl ToolAvailability {
+    async fn from_gcx(gcx: Arc<GlobalContext>) -> Self {
+        #[cfg(test)]
+        {
+            *availability_build_counters()
+                .lock()
+                .unwrap()
+                .entry(gcx.config_dir.clone())
+                .or_insert(0) += 1;
+        }
+
         let vecdb_on = gcx.vec_db.lock().await.is_some();
         let codegraph_on = gcx.codegraph.lock().await.is_some();
-        (codegraph_on, vecdb_on, gcx.cmdline.experimental)
-    };
 
-    let is_there_a_thinking_model = match try_load_caps_quickly_if_not_present(gcx.clone(), 0).await
-    {
-        Ok(caps) => caps
-            .chat_models
-            .get(&caps.defaults.chat_thinking_model)
-            .is_some(),
-        Err(_) => false,
-    };
-    let allow_knowledge = true;
+        let is_there_a_thinking_model =
+            match try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
+                Ok(caps) => caps
+                    .chat_models
+                    .get(&caps.defaults.chat_thinking_model)
+                    .is_some(),
+                Err(_) => false,
+            };
 
-    move |tool: &Box<dyn Tool + Send>| {
-        tool_available(
-            tool,
+        Self {
             codegraph_on,
             vecdb_on,
             is_there_a_thinking_model,
-            allow_knowledge,
-            allow_experimental,
-        )
+            allow_knowledge: true,
+            allow_experimental: gcx.cmdline.experimental,
+        }
+    }
+
+    fn allows(&self, tool: &Box<dyn Tool + Send>) -> bool {
+        tool_gating(tool, self).is_none()
     }
 }
 
 impl ToolGroup {
-    pub async fn retain_available_tools(&mut self, gcx: Arc<GlobalContext>) {
-        let tool_available = tool_available_from_gcx(gcx.clone()).await;
-        self.tools.retain(|tool| tool_available(tool));
+    fn retain_available_tools(
+        &mut self,
+        availability: &ToolAvailability,
+        gated_tools: Option<&mut HashMap<String, ToolGating>>,
+    ) {
+        let mut gated_tools = gated_tools;
+        self.tools.retain(|tool| {
+            let Some(gating) = tool_gating(tool, availability) else {
+                return true;
+            };
+            if let Some(gated_tools) = gated_tools.as_deref_mut() {
+                gated_tools.insert(tool.tool_description().name, gating);
+            }
+            false
+        });
     }
 }
 
@@ -388,7 +452,11 @@ pub(crate) fn builtin_system_tools(config_path: String) -> Vec<Box<dyn Tool + Se
     ]
 }
 
-async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
+async fn get_builtin_tools(
+    gcx: Arc<GlobalContext>,
+    availability: &ToolAvailability,
+    gated_tools: Option<&mut HashMap<String, ToolGating>>,
+) -> Vec<ToolGroup> {
     let config_dir = gcx.config_dir.clone();
     let config_path = config_dir
         .join("builtin_tools.yaml")
@@ -889,14 +957,24 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         },
     ];
 
+    let mut gated_tools = gated_tools;
     for tool_group in tool_groups.iter_mut() {
-        tool_group.retain_available_tools(gcx.clone()).await;
+        tool_group.retain_available_tools(availability, gated_tools.as_deref_mut());
     }
 
     tool_groups
 }
 
 pub async fn get_integration_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
+    let availability = ToolAvailability::from_gcx(gcx.clone()).await;
+    build_integration_tool_groups(gcx, &availability, None).await
+}
+
+async fn build_integration_tool_groups(
+    gcx: Arc<GlobalContext>,
+    availability: &ToolAvailability,
+    gated_tools: Option<&mut HashMap<String, ToolGating>>,
+) -> Vec<ToolGroup> {
     let mut integrations_group = ToolGroup {
         name: "Integrations".to_string(),
         description: "Integration tools".to_string(),
@@ -943,8 +1021,9 @@ pub async fn get_integration_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
     let mut tool_groups = vec![integrations_group];
     tool_groups.extend(sorted_mcp.into_iter().map(|(_, group)| group));
 
+    let mut gated_tools = gated_tools;
     for tool_group in tool_groups.iter_mut() {
-        tool_group.retain_available_tools(gcx.clone()).await;
+        tool_group.retain_available_tools(availability, gated_tools.as_deref_mut());
     }
 
     span.finish_tool(PerfOutcome::Success, 1, tool_groups.len() as u64, None);
@@ -971,6 +1050,76 @@ async fn get_config_subagent_tools(gcx: Arc<GlobalContext>) -> ToolGroup {
         category: ToolGroupCategory::ConfigSubagent,
         tools: subagent_tools,
     }
+}
+
+enum McpToolQuery<'a> {
+    ByName(&'a str),
+    All,
+}
+
+async fn collect_mcp_integration_tools(
+    gcx: Arc<GlobalContext>,
+    query: McpToolQuery<'_>,
+) -> Vec<Box<dyn Tool + Send>> {
+    let span = perf_diagnostics::span(PerfComponent::ToolIntegrationToolsBuild, None, None);
+    let integrations_map = load_integrations_cached(gcx.clone()).await;
+    let availability = ToolAvailability::from_gcx(gcx.clone()).await;
+
+    let mut integr_names: Vec<&String> = integrations_map.keys().collect();
+    integr_names.sort();
+
+    let mut collected: Vec<(String, Box<dyn Tool + Send>)> = vec![];
+    'outer: for integr_name in integr_names {
+        let integr = match integrations_map.get(integr_name) {
+            Some(integr) => integr,
+            None => continue,
+        };
+        for tool in integr.integr_tools(integr_name).await {
+            let tool_desc = tool.tool_description();
+            if !tool_desc.name.starts_with("mcp") || !availability.allows(&tool) {
+                continue;
+            }
+            let server = std::path::Path::new(&tool_desc.source.config_path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            match query {
+                McpToolQuery::ByName(requested) => {
+                    if crate::tools::tool_mcp_call::mcp_tool_name_matches(
+                        &tool_desc.name,
+                        requested,
+                    ) {
+                        collected.push((server, tool));
+                        break 'outer;
+                    }
+                }
+                McpToolQuery::All => collected.push((server, tool)),
+            }
+        }
+    }
+
+    collected.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let tools: Vec<Box<dyn Tool + Send>> = collected.into_iter().map(|(_, tool)| tool).collect();
+    span.finish_tool(PerfOutcome::Success, 1, tools.len() as u64, None);
+    tools
+}
+
+/// Resolve a single MCP tool by the name the model used, stopping at the first integration
+/// that provides it instead of materialising every MCP tool box.
+pub async fn get_integration_mcp_tool_by_name(
+    gcx: Arc<GlobalContext>,
+    tool_name: &str,
+) -> Option<Box<dyn Tool + Send>> {
+    collect_mcp_integration_tools(gcx, McpToolQuery::ByName(tool_name))
+        .await
+        .pop()
+}
+
+/// Every available MCP tool as a flat list, ordered by server the same way
+/// `get_integration_tools` groups them.
+pub async fn get_integration_mcp_tools(gcx: Arc<GlobalContext>) -> Vec<Box<dyn Tool + Send>> {
+    collect_mcp_integration_tools(gcx, McpToolQuery::All).await
 }
 
 #[cfg(test)]
@@ -1028,13 +1177,38 @@ mod tests {
     #[tokio::test]
     async fn builtin_catalog_registers_set_trajectory_label() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let names = get_builtin_tools(gcx)
+        let availability = ToolAvailability::from_gcx(gcx.clone()).await;
+        let names = get_builtin_tools(gcx, &availability, None)
             .await
             .into_iter()
             .flat_map(|group| group.tools)
             .map(|tool| tool.tool_description().name)
             .collect::<HashSet<_>>();
         assert!(names.contains("set_trajectory_label"));
+    }
+
+    #[tokio::test]
+    async fn unavailable_catalog_records_vecdb_gating_without_enabling_the_tool() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let availability = ToolAvailability::from_gcx(gcx.clone()).await;
+        assert!(!availability.vecdb_on);
+        let mut gated_tools = HashMap::new();
+        let names = get_builtin_tools(gcx, &availability, Some(&mut gated_tools))
+            .await
+            .into_iter()
+            .flat_map(|group| group.tools)
+            .map(|tool| tool.tool_description().name)
+            .collect::<HashSet<_>>();
+
+        assert!(!names.contains("search_semantic"));
+        assert_eq!(
+            gated_tools.get("search_semantic"),
+            Some(&ToolGating {
+                capability: "vector database",
+                unavailable_reason: "which is not enabled on this engine",
+                enablement: "start it with --vecdb",
+            })
+        );
     }
 
     struct TestTool(ToolDesc);
@@ -1267,6 +1441,7 @@ mod tests {
     struct TestIntegration {
         state: IntegrationTestState,
         config_path: String,
+        tool_names: Vec<String>,
     }
 
     #[async_trait::async_trait]
@@ -1293,24 +1468,29 @@ mod tests {
             Default::default()
         }
 
-        async fn integr_tools(&self, integr_name: &str) -> Vec<Box<dyn Tool + Send>> {
+        async fn integr_tools(&self, _integr_name: &str) -> Vec<Box<dyn Tool + Send>> {
             let build_number = self.state.tool_builds.fetch_add(1, Ordering::SeqCst);
-            vec![Box::new(IntegrationTestTool {
-                desc: ToolDesc {
-                    name: format!("{integr_name}_tool"),
-                    experimental: false,
-                    allow_parallel: true,
-                    description: format!("build {build_number}"),
-                    input_schema: serde_json::json!({"type":"object"}),
-                    output_schema: None,
-                    annotations: None,
-                    display_name: format!("{integr_name}_tool"),
-                    source: ToolSource {
-                        source_type: ToolSourceType::Integration,
-                        config_path: self.config_path.clone(),
-                    },
-                },
-            })]
+            self.tool_names
+                .iter()
+                .map(|tool_name| {
+                    Box::new(IntegrationTestTool {
+                        desc: ToolDesc {
+                            name: tool_name.clone(),
+                            experimental: false,
+                            allow_parallel: true,
+                            description: format!("build {build_number}"),
+                            input_schema: serde_json::json!({"type":"object"}),
+                            output_schema: None,
+                            annotations: None,
+                            display_name: tool_name.clone(),
+                            source: ToolSource {
+                                source_type: ToolSourceType::Integration,
+                                config_path: self.config_path.clone(),
+                            },
+                        },
+                    }) as Box<dyn Tool + Send>
+                })
+                .collect()
         }
     }
 
@@ -1331,21 +1511,25 @@ mod tests {
         gcx
     }
 
-    async fn with_test_integration_factory<T>(
+    async fn with_test_integrations<T>(
         config_dir: PathBuf,
         state: IntegrationTestState,
+        specs: Vec<(String, Vec<String>)>,
         f: impl std::future::Future<Output = T>,
     ) -> T {
         let factory: TestIntegrationFactory = Arc::new(move |_gcx: Arc<GlobalContext>| {
             state.loads.fetch_add(1, Ordering::SeqCst);
             let mut integrations: LoadedIntegrations = indexmap::IndexMap::new();
-            integrations.insert(
-                "cmdline".to_string(),
-                Box::new(TestIntegration {
-                    state: state.clone(),
-                    config_path: "cmdline.yaml".to_string(),
-                }),
-            );
+            for (integr_name, tool_names) in &specs {
+                integrations.insert(
+                    integr_name.clone(),
+                    Box::new(TestIntegration {
+                        state: state.clone(),
+                        config_path: format!("{integr_name}.yaml"),
+                        tool_names: tool_names.clone(),
+                    }),
+                );
+            }
             (integrations, Vec::new())
         });
         test_integration_factory()
@@ -1355,6 +1539,20 @@ mod tests {
         let result = f.await;
         test_integration_factory().lock().await.remove(&config_dir);
         result
+    }
+
+    async fn with_test_integration_factory<T>(
+        config_dir: PathBuf,
+        state: IntegrationTestState,
+        f: impl std::future::Future<Output = T>,
+    ) -> T {
+        with_test_integrations(
+            config_dir,
+            state,
+            vec![("cmdline".to_string(), vec!["cmdline_tool".to_string()])],
+            f,
+        )
+        .await
     }
 
     #[async_trait::async_trait]
@@ -1478,6 +1676,144 @@ mod tests {
 
         assert_eq!(state.loads.load(Ordering::SeqCst), 2);
         assert_eq!(state.tool_builds.load(Ordering::SeqCst), 3);
+    }
+
+    fn counting_state() -> IntegrationTestState {
+        IntegrationTestState {
+            loads: Arc::new(AtomicUsize::new(0)),
+            tool_builds: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn mcp_integration_specs() -> Vec<(String, Vec<String>)> {
+        vec![
+            (
+                "alpha".to_string(),
+                vec!["mcp_alpha_one".to_string(), "mcp_alpha_two".to_string()],
+            ),
+            ("beta".to_string(), vec!["mcp_beta_one".to_string()]),
+            ("plain".to_string(), vec!["plain_shell".to_string()]),
+            ("zeta".to_string(), vec!["mcp_zeta_one".to_string()]),
+        ]
+    }
+
+    #[tokio::test]
+    async fn call_builds_integration_tools_once_per_invocation() {
+        let state = counting_state();
+        let gcx = integration_test_gcx().await;
+
+        with_test_integrations(
+            gcx.config_dir.clone(),
+            state.clone(),
+            mcp_integration_specs(),
+            async {
+                let confirmation =
+                    get_integration_mcp_tool_by_name(gcx.clone(), "mcp_alpha_one").await;
+                let execution =
+                    get_integration_mcp_tool_by_name(gcx.clone(), "mcp_alpha_one").await;
+                assert!(confirmation.is_some());
+                assert!(execution.is_some());
+            },
+        )
+        .await;
+
+        assert_eq!(state.tool_builds.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn call_confirmation_and_execution_see_same_tool() {
+        let state = counting_state();
+        let gcx = integration_test_gcx().await;
+
+        with_test_integrations(
+            gcx.config_dir.clone(),
+            state.clone(),
+            mcp_integration_specs(),
+            async {
+                let confirmation = get_integration_mcp_tool_by_name(gcx.clone(), "mcp_beta_one")
+                    .await
+                    .expect("confirmation resolves the tool");
+                let execution = get_integration_mcp_tool_by_name(gcx.clone(), "mcp_beta_one")
+                    .await
+                    .expect("execution resolves the tool");
+                let stripped = get_integration_mcp_tool_by_name(gcx.clone(), "beta_one")
+                    .await
+                    .expect("prefix-stripped spelling resolves the tool");
+
+                let confirmation = confirmation.tool_description();
+                let execution = execution.tool_description();
+                let stripped = stripped.tool_description();
+
+                assert_eq!(confirmation.name, "mcp_beta_one");
+                assert_eq!(execution.name, confirmation.name);
+                assert_eq!(
+                    execution.source.config_path,
+                    confirmation.source.config_path
+                );
+                assert_eq!(execution.input_schema, confirmation.input_schema);
+                assert_eq!(stripped.name, confirmation.name);
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn call_handles_missing_tool_and_disconnected_session() {
+        let state = counting_state();
+        let gcx = integration_test_gcx().await;
+        let specs = vec![
+            ("alpha".to_string(), vec![]),
+            ("zeta".to_string(), vec!["mcp_zeta_one".to_string()]),
+        ];
+
+        with_test_integrations(gcx.config_dir.clone(), state.clone(), specs, async {
+            assert!(
+                get_integration_mcp_tool_by_name(gcx.clone(), "mcp_alpha_one")
+                    .await
+                    .is_none()
+            );
+            assert!(get_integration_mcp_tool_by_name(gcx.clone(), "mcp_nope")
+                .await
+                .is_none());
+
+            let survivor = get_integration_mcp_tool_by_name(gcx.clone(), "mcp_zeta_one").await;
+            assert_eq!(
+                survivor.map(|tool| tool.tool_description().name),
+                Some("mcp_zeta_one".to_string())
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn search_resolves_without_full_rebuild() {
+        let state = counting_state();
+        let gcx = integration_test_gcx().await;
+
+        with_test_integrations(
+            gcx.config_dir.clone(),
+            state.clone(),
+            mcp_integration_specs(),
+            async {
+                let names: Vec<String> = get_integration_mcp_tools(gcx.clone())
+                    .await
+                    .iter()
+                    .map(|tool| tool.tool_description().name)
+                    .collect();
+                assert_eq!(
+                    names,
+                    vec![
+                        "mcp_alpha_one",
+                        "mcp_alpha_two",
+                        "mcp_beta_one",
+                        "mcp_zeta_one"
+                    ]
+                );
+            },
+        )
+        .await;
+
+        assert_eq!(state.tool_builds.load(Ordering::SeqCst), 4);
     }
 
     #[test]
@@ -2224,11 +2560,247 @@ mod tests {
             );
         }
     }
+
+    struct CountingTool {
+        desc: ToolDesc,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for CountingTool {
+        async fn tool_execute(
+            &mut self,
+            _ccx: Arc<tokio::sync::Mutex<crate::at_commands::at_commands::AtCommandsContext>>,
+            _tool_call_id: &String,
+            _args: &HashMap<String, serde_json::Value>,
+        ) -> Result<(bool, Vec<crate::call_validation::ContextEnum>), String> {
+            unreachable!("test tools are only used to build the catalog")
+        }
+
+        fn tool_description(&self) -> ToolDesc {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.desc.clone()
+        }
+
+        fn config(&self) -> Result<crate::tools::tools_description::ToolConfig, String> {
+            Ok(crate::tools::tools_description::ToolConfig::default())
+        }
+    }
+
+    fn described_builtin(name: &str) -> DescribedTool {
+        let tool_desc = builtin_desc(name);
+        (
+            ToolGroupCategory::Builtin,
+            tool_desc.clone(),
+            Box::new(TestTool(tool_desc)) as Box<dyn Tool + Send>,
+        )
+    }
+
+    fn described_integration(name: &str) -> DescribedTool {
+        let tool_desc = mcp_desc("stdio_test.yaml", name);
+        (
+            ToolGroupCategory::Integration,
+            tool_desc.clone(),
+            Box::new(TestTool(tool_desc)) as Box<dyn Tool + Send>,
+        )
+    }
+
+    fn selected_names(tools: Vec<Box<dyn Tool + Send>>) -> Vec<String> {
+        tools
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect()
+    }
+
+    #[test]
+    fn tool_ordering_is_unchanged_after_cached_key_sort() {
+        let mode_tools = vec!["shell".to_string(), "cat".to_string(), "tree".to_string()];
+        let described = vec![
+            described_builtin("tree"),
+            described_builtin("glob"),
+            described_builtin("shell"),
+            described_builtin("cat"),
+        ];
+
+        let names = selected_names(select_and_order_mode_tools(
+            described,
+            &mode_tools,
+            false,
+            false,
+            false,
+            false,
+            None,
+        ));
+
+        assert_eq!(names, vec!["shell", "cat", "tree"]);
+    }
+
+    #[test]
+    fn tools_missing_from_order_map_sort_last_by_name() {
+        let mode_tools = vec!["shell".to_string(), "cat".to_string()];
+        let described = vec![
+            described_integration("mcp_zeta"),
+            described_builtin("cat"),
+            described_integration("mcp_alpha"),
+            described_builtin("shell"),
+        ];
+
+        let names = selected_names(select_and_order_mode_tools(
+            described,
+            &mode_tools,
+            true,
+            false,
+            false,
+            false,
+            None,
+        ));
+
+        assert_eq!(names, vec!["shell", "cat", "mcp_alpha", "mcp_zeta"]);
+    }
+
+    #[test]
+    fn web_search_is_dropped_when_the_model_has_native_web_search() {
+        let mode_tools = vec!["web_search".to_string(), "cat".to_string()];
+        let build = || vec![described_builtin("web_search"), described_builtin("cat")];
+
+        let kept = selected_names(select_and_order_mode_tools(
+            build(),
+            &mode_tools,
+            false,
+            false,
+            false,
+            false,
+            None,
+        ));
+        let dropped = selected_names(select_and_order_mode_tools(
+            build(),
+            &mode_tools,
+            false,
+            false,
+            false,
+            true,
+            None,
+        ));
+
+        assert_eq!(kept, vec!["web_search", "cat"]);
+        assert_eq!(dropped, vec!["cat"]);
+    }
+
+    #[test]
+    fn tool_description_is_called_once_per_tool_per_catalog_build() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mode_tools = vec!["shell".to_string(), "cat".to_string(), "tree".to_string()];
+        let described: Vec<DescribedTool> = ["tree", "cat", "shell"]
+            .into_iter()
+            .map(|name| {
+                let tool = CountingTool {
+                    desc: builtin_desc(name),
+                    calls: calls.clone(),
+                };
+                let tool_desc = tool.tool_description();
+                (
+                    ToolGroupCategory::Builtin,
+                    tool_desc,
+                    Box::new(tool) as Box<dyn Tool + Send>,
+                )
+            })
+            .collect();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        let selected =
+            select_and_order_mode_tools(described, &mode_tools, false, false, false, false, None);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(selected.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn availability_predicate_computed_once_per_build() {
+        let gcx = task_prompt_contract_gcx().await;
+        let before = availability_build_count(&gcx.config_dir);
+
+        let groups = get_available_tool_groups(gcx.clone()).await;
+
+        assert!(groups.len() > 5, "{}", groups.len());
+        assert_eq!(availability_build_count(&gcx.config_dir), before + 1);
+    }
+
+    #[tokio::test]
+    async fn tool_availability_decisions_unchanged() {
+        let disabled = crate::global_context::tests::make_test_gcx().await;
+        crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all(
+            &disabled.config_dir,
+        )
+        .await
+        .unwrap();
+        let names_disabled = get_available_tools(disabled)
+            .await
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect::<HashSet<_>>();
+        assert!(!names_disabled.contains("search_symbol_definition"));
+        assert!(!names_disabled.contains("search_semantic"));
+
+        let enabled = task_prompt_contract_gcx().await;
+        let availability = ToolAvailability::from_gcx(enabled.clone()).await;
+        let groups = get_available_tool_groups(enabled).await;
+        let names_enabled = groups
+            .iter()
+            .flat_map(|group| group.tools.iter())
+            .map(|tool| tool.tool_description().name)
+            .collect::<HashSet<_>>();
+        assert!(names_enabled.contains("search_symbol_definition"));
+        assert!(names_enabled.contains("search_semantic"));
+
+        for group in &groups {
+            for tool in &group.tools {
+                assert!(
+                    availability.allows(tool),
+                    "{} survived a predicate that rejects it",
+                    tool.tool_description().name
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mode_tool_order_follows_the_mode_config_tool_list() {
+        let gcx = task_prompt_contract_gcx().await;
+        let mode = read_default_task_mode("shell");
+
+        let names = get_tools_for_mode(gcx, "shell", None)
+            .await
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect::<Vec<_>>();
+        let expected = mode
+            .tools
+            .iter()
+            .filter(|name| names.contains(name))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert!(!names.is_empty());
+        assert_eq!(names, expected);
+    }
 }
 
 pub async fn get_available_tool_groups(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
-    let mut tools_all = get_builtin_tools(gcx.clone()).await;
-    tools_all.extend(get_integration_tools(gcx.clone()).await);
+    let availability = ToolAvailability::from_gcx(gcx.clone()).await;
+    get_available_tool_groups_with_availability(gcx, &availability, None).await
+}
+
+async fn get_available_tool_groups_with_availability(
+    gcx: Arc<GlobalContext>,
+    availability: &ToolAvailability,
+    gated_tools: Option<&mut HashMap<String, ToolGating>>,
+) -> Vec<ToolGroup> {
+    let mut gated_tools = gated_tools;
+    let mut tools_all =
+        get_builtin_tools(gcx.clone(), availability, gated_tools.as_deref_mut()).await;
+    let integration_tools =
+        build_integration_tool_groups(gcx.clone(), availability, gated_tools.as_deref_mut()).await;
+    tools_all.extend(integration_tools);
 
     let config_subagent_group = get_config_subagent_tools(gcx).await;
     if !config_subagent_group.tools.is_empty() {
@@ -2244,6 +2816,57 @@ pub async fn get_available_tools(gcx: Arc<GlobalContext>) -> Vec<Box<dyn Tool + 
         .into_iter()
         .flat_map(|g| g.tools)
         .collect()
+}
+
+type DescribedTool = (ToolGroupCategory, ToolDesc, Box<dyn Tool + Send>);
+
+fn select_and_order_mode_tools(
+    described_tools: Vec<DescribedTool>,
+    mode_tools: &[String],
+    allow_integrations: bool,
+    allow_mcp: bool,
+    allow_subagents: bool,
+    model_supports_web_search: bool,
+    mcp_access: Option<(&refact_privacy::PrivacyPolicy, &str)>,
+) -> Vec<Box<dyn Tool + Send>> {
+    let allowed_tools: std::collections::HashSet<&str> =
+        mode_tools.iter().map(|name| name.as_str()).collect();
+    let tool_order: HashMap<&str, usize> = mode_tools
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect();
+
+    let mut selected: Vec<(ToolDesc, Box<dyn Tool + Send>)> = described_tools
+        .into_iter()
+        .filter(|(_, _, tool)| tool.config().unwrap_or_default().enabled)
+        .filter(|(_, desc, _)| !(desc.name == "web_search" && model_supports_web_search))
+        .filter(|(category, desc, _)| match category {
+            ToolGroupCategory::Integration if allow_integrations => true,
+            ToolGroupCategory::MCP if allow_mcp => true,
+            ToolGroupCategory::ConfigSubagent if allow_subagents => true,
+            _ => allowed_tools.contains(desc.name.as_str()),
+        })
+        .filter(|(_, desc, _)| match mcp_access {
+            Some((policy, provider)) => mcp_tool_allowed(policy, provider, desc),
+            None => true,
+        })
+        .map(|(_, desc, tool)| (desc, tool))
+        .collect();
+
+    selected.sort_by(|(a, _), (b, _)| {
+        let a_order = tool_order
+            .get(a.name.as_str())
+            .copied()
+            .unwrap_or(usize::MAX);
+        let b_order = tool_order
+            .get(b.name.as_str())
+            .copied()
+            .unwrap_or(usize::MAX);
+        a_order.cmp(&b_order).then_with(|| a.name.cmp(&b.name))
+    });
+
+    selected.into_iter().map(|(_, tool)| tool).collect()
 }
 
 pub async fn get_tools_for_mode(
@@ -2268,8 +2891,6 @@ pub async fn get_tools_for_mode(
         return vec![];
     }
 
-    let allowed_tools: HashSet<&str> = mode_config.tools.iter().map(|s| s.as_str()).collect();
-
     let model_supports_web_search = if let Some(mid) = model_id {
         match try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
             Ok(caps) => resolve_chat_model(caps, mid)
@@ -2281,82 +2902,58 @@ pub async fn get_tools_for_mode(
         false
     };
 
-    let allow_integrations = mode_config.allow_integrations;
-    let allow_mcp = mode_config.allow_mcp;
-    let allow_subagents = mode_config.allow_subagents;
+    let availability = ToolAvailability::from_gcx(gcx.clone()).await;
+    let mut gated_tools = HashMap::new();
+    let described_tools: Vec<DescribedTool> = get_available_tool_groups_with_availability(
+        gcx.clone(),
+        &availability,
+        Some(&mut gated_tools),
+    )
+    .await
+    .into_iter()
+    .flat_map(|group| {
+        let category = group.category;
+        group.tools.into_iter().map(move |tool| {
+            let desc = tool.tool_description();
+            (category, desc, tool)
+        })
+    })
+    .collect();
 
-    let all_tool_groups: Vec<(ToolGroupCategory, Box<dyn Tool + Send>)> =
-        get_available_tool_groups(gcx.clone())
-            .await
-            .into_iter()
-            .flat_map(|g| {
-                let cat = g.category;
-                g.tools.into_iter().map(move |t| (cat, t))
-            })
-            .collect();
-
-    let registered_tool_names: HashSet<String> = all_tool_groups
+    let registered_tool_names: HashSet<String> = described_tools
         .iter()
-        .map(|(_, tool)| tool.tool_description().name)
+        .map(|(_, desc, _)| desc.name.clone())
         .collect();
-    crate::yaml_configs::mode_validation::warn_unknown_mode_tools(
+    crate::yaml_configs::mode_validation::warn_unavailable_mode_tools(
         gcx.clone(),
         mode_id,
         &mode_config.tools,
         &registered_tool_names,
+        &gated_tools,
     )
     .await;
 
-    let all_tools: Vec<(ToolGroupCategory, Box<dyn Tool + Send>)> = all_tool_groups
-        .into_iter()
-        .filter(|(_, tool)| tool.config().unwrap_or_default().enabled)
-        .filter(|(_, tool)| {
-            if tool.tool_description().name == "web_search" && model_supports_web_search {
-                return false;
+    let mcp_access = match model_id {
+        Some(mid) => {
+            let policy = tool_access_policy(gcx.clone()).await;
+            if policy.tool_access.providers.is_empty() {
+                None
+            } else {
+                Some((policy, provider_of_model(mid).to_string()))
             }
-            true
-        })
-        .collect();
-
-    let tool_order: HashMap<&str, usize> = mode_config
-        .tools
-        .iter()
-        .enumerate()
-        .map(|(i, name)| (name.as_str(), i))
-        .collect();
-
-    let mut result: Vec<Box<dyn Tool + Send>> = all_tools
-        .into_iter()
-        .filter(|(cat, tool)| match cat {
-            ToolGroupCategory::Integration if allow_integrations => true,
-            ToolGroupCategory::MCP if allow_mcp => true,
-            ToolGroupCategory::ConfigSubagent if allow_subagents => true,
-            _ => allowed_tools.contains(tool.tool_description().name.as_str()),
-        })
-        .map(|(_, tool)| tool)
-        .collect();
-
-    if let Some(mid) = model_id {
-        let policy = tool_access_policy(gcx.clone()).await;
-        if !policy.tool_access.providers.is_empty() {
-            let provider = provider_of_model(mid).to_string();
-            result.retain(|tool| mcp_tool_allowed(&policy, &provider, &tool.tool_description()));
         }
-    }
+        None => None,
+    };
 
-    result.sort_by(|a, b| {
-        let a_order = tool_order
-            .get(a.tool_description().name.as_str())
-            .copied()
-            .unwrap_or(usize::MAX);
-        let b_order = tool_order
-            .get(b.tool_description().name.as_str())
-            .copied()
-            .unwrap_or(usize::MAX);
-        a_order
-            .cmp(&b_order)
-            .then_with(|| a.tool_description().name.cmp(&b.tool_description().name))
-    });
-
-    result
+    select_and_order_mode_tools(
+        described_tools,
+        &mode_config.tools,
+        mode_config.allow_integrations,
+        mode_config.allow_mcp,
+        mode_config.allow_subagents,
+        model_supports_web_search,
+        mcp_access
+            .as_ref()
+            .map(|(policy, provider)| (policy.as_ref(), provider.as_str())),
+    )
 }

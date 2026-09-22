@@ -74,7 +74,9 @@ import { commandsApi, isDetailMessage } from "../services/refact/commands";
 import { pathApi } from "../services/refact/path";
 import { pingApi } from "../services/refact/ping";
 import {
+  clearCapsProvidersError,
   clearError,
+  getCapsProvidersErrorMessage,
   setError,
   setIsAuthError,
 } from "../features/Errors/errorsSlice";
@@ -110,7 +112,13 @@ import {
   ideToolCallResponse,
   ideTaskDone,
   ideAskQuestions,
+  ideDecisionResolved,
 } from "../hooks/useEventBusForIDE";
+import {
+  announceHostDecision,
+  observeHostQuestionStatuses,
+  scopeHostDecisions,
+} from "../events/hostDecisionTracker";
 import { upsertToolCallIntoHistory } from "../features/History/historySlice";
 import {
   getEventMetadata,
@@ -1020,7 +1028,7 @@ startListening({
           ? action.payload.data.detail
           : `fetching caps from lsp`;
 
-      listenerApi.dispatch(setError(message));
+      listenerApi.dispatch(setError({ message, source: "caps_providers" }));
       listenerApi.dispatch(setIsAuthError(isAuthError));
     }
     if (
@@ -1146,13 +1154,21 @@ startListening({
         | undefined;
       const errorStatus = payload?.status;
       const isAuthError = errorStatus === 401;
+      const isProvidersFetch =
+        providersApi.endpoints.getConfiguredProviders.matchRejected(action);
       const message = isAuthError
         ? AUTH_ERROR_MESSAGE
         : isDetailMessage(payload?.data)
           ? (payload.data as { detail: string }).detail
-          : `provider update error.`;
+          : isProvidersFetch
+            ? `fetching providers from lsp`
+            : `provider update error.`;
 
-      listenerApi.dispatch(setError(message));
+      listenerApi.dispatch(
+        isProvidersFetch
+          ? setError({ message, source: "caps_providers" })
+          : setError(message),
+      );
       listenerApi.dispatch(setIsAuthError(isAuthError));
     }
     if (
@@ -1186,6 +1202,25 @@ startListening({
 });
 
 startListening({
+  matcher: isAnyOf(
+    capsApi.endpoints.getCaps.matchFulfilled,
+    providersApi.endpoints.getConfiguredProviders.matchFulfilled,
+  ),
+  effect: (_action, listenerApi) => {
+    const state = listenerApi.getState();
+    if (!getCapsProvidersErrorMessage(state)) return;
+    if (capsApi.endpoints.getCaps.select(undefined)(state).isError) return;
+    if (
+      providersApi.endpoints.getConfiguredProviders.select(undefined)(state)
+        .isError
+    ) {
+      return;
+    }
+    listenerApi.dispatch(clearCapsProvidersError());
+  },
+});
+
+startListening({
   actionCreator: setBackendStatus,
   effect: (action, listenerApi) => {
     const previousStatus =
@@ -1193,6 +1228,7 @@ startListening({
     if (action.payload.status === "online") {
       if (previousStatus === "online") return;
       listenerApi.dispatch(clearError());
+      listenerApi.dispatch(clearCapsProvidersError());
       listenerApi.dispatch(capsApi.util.resetApiState());
       listenerApi.dispatch(modelsApi.util.resetApiState());
       listenerApi.dispatch(providersApi.util.resetApiState());
@@ -1511,6 +1547,7 @@ interface AskQuestionsContent {
 interface HandoffToModeContent {
   type: "handoff_to_mode";
   new_chat_id: string;
+  status?: string;
   target_mode?: string;
   reason?: string;
   messages_count?: number;
@@ -1550,6 +1587,7 @@ function isHandoffToModeContent(
   if (content.type !== "handoff_to_mode" || !("new_chat_id" in content)) {
     return false;
   }
+  if ("status" in content && content.status !== "completed") return false;
   const id = content.new_chat_id;
   return typeof id === "string" && id.length > 0;
 }
@@ -1583,11 +1621,28 @@ function safeParseJson(str: string): unknown {
 
 startListening({
   actionCreator: applyChatEvent,
-  effect: (action) => {
+  effect: (action, listenerApi) => {
     if (!isIdeHost()) return;
-
+    const state = listenerApi.getState();
     const event = action.payload;
+    const scope = {
+      projectRoot: state.current_project.workspaceRoots?.[0] ?? "",
+      endpointIdentity: getEngineEndpointIdentity(state.config),
+    };
+    scopeHostDecisions(scope);
+    if (event.type === "snapshot") {
+      for (const payload of observeHostQuestionStatuses(
+        scope,
+        event.chat_id,
+        event.pending_questions,
+      )) {
+        getPostMessageForHost()(ideDecisionResolved(payload));
+      }
+      return;
+    }
     if (event.type !== "message_added") return;
+    if (state.chat.threads[event.chat_id]?.last_applied_seq !== event.seq)
+      return;
 
     const msg = event.message;
     if (!isToolMessage(msg)) return;
@@ -1611,13 +1666,22 @@ startListening({
         }),
       );
     } else if (isAskQuestionsContent(content)) {
-      postToIde(
-        ideAskQuestions({
-          chatId,
-          toolCallId,
-          questions: content.questions,
-        }),
+      const native = state.chat.threads[chatId]?.thread.pending_questions?.find(
+        (question) => question.tool_call_id === toolCallId,
       );
+      if (native && native.status !== "pending") return;
+      const askedAtMs =
+        native?.asked_at_ms ?? (parsed as { asked_at_ms?: number }).asked_at_ms;
+      const payload = {
+        chatId,
+        toolCallId,
+        questions: content.questions,
+        askedAtMs,
+        scope,
+        origin: "native_chat_event" as const,
+      };
+      if (announceHostDecision(payload, scope))
+        postToIde(ideAskQuestions(payload));
     }
   },
 });
@@ -1642,10 +1706,11 @@ startListening({
   actionCreator: applyChatEvent,
   effect: async (action, listenerApi) => {
     const event = action.payload;
-    if (event.type !== "message_added") return;
+    if (event.type !== "message_added" && event.type !== "message_updated")
+      return;
 
     const msg = event.message;
-    if (!isToolMessage(msg)) return;
+    if (!isToolMessage(msg) || msg.tool_failed) return;
     if (typeof msg.content !== "string") return;
 
     const toolCallId = msg.tool_call_id;

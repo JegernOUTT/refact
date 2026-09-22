@@ -905,7 +905,8 @@ mod tests {
             context.event,
             context.screenshot.unwrap(),
             ChatMessage::new("user".to_string(), "inspect this page".to_string()),
-        ]);
+        ])
+        .unwrap();
         let request = LlmRequest::new("gpt-4.1".to_string(), linearized);
         let settings = AdapterSettings {
             api_key: String::new(),
@@ -950,7 +951,8 @@ mod tests {
             context.event,
             context.screenshot.unwrap(),
             ChatMessage::new("user".to_string(), "inspect this page".to_string()),
-        ]);
+        ])
+        .unwrap();
         let request = LlmRequest::new("claude-sonnet-4-5".to_string(), linearized);
         let settings = AdapterSettings {
             api_key: String::new(),

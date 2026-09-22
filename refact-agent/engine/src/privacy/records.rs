@@ -55,23 +55,42 @@ pub fn provider_destination(model_id: &str) -> Destination {
     }
 }
 
-pub fn shell_observation_needed(gcx: &Arc<GlobalContext>, destination: &Destination) -> bool {
-    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
-    !policy.blocked.is_empty()
-        || policy
-            .zones
-            .iter()
-            .any(|zone| !destination.matches_send_to(&zone.send_to))
+/// Counts only: never carries paths, patterns or zone names, so it is safe to log.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ObservationReason {
+    pub blocked_patterns: usize,
+    pub guarded_zones: usize,
+    pub derived_labels: usize,
 }
 
-pub fn shell_observation_needed_for_session(
+impl ObservationReason {
+    pub fn needed(&self) -> bool {
+        self.blocked_patterns > 0 || self.guarded_zones > 0 || self.derived_labels > 0
+    }
+}
+
+pub fn shell_observation_reason(
+    gcx: &Arc<GlobalContext>,
+    destination: &Destination,
+) -> ObservationReason {
+    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+    ObservationReason {
+        blocked_patterns: policy.blocked.len(),
+        guarded_zones: policy
+            .zones
+            .iter()
+            .filter(|zone| !destination.matches_send_to(&zone.send_to))
+            .count(),
+        derived_labels: 0,
+    }
+}
+
+pub fn shell_observation_reason_for_session(
     gcx: &Arc<GlobalContext>,
     destination: &Destination,
     derived_zones: &DerivedPrivacyZones,
-) -> bool {
-    if shell_observation_needed(gcx, destination) {
-        return true;
-    }
+) -> ObservationReason {
+    let mut reason = shell_observation_reason(gcx, destination);
     let derived_zone_names = derived_zones
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -79,14 +98,30 @@ pub fn shell_observation_needed_for_session(
         .map(|derived| derived.zone.clone())
         .collect::<Vec<_>>();
     let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
-    derived_zone_names.iter().any(|name| {
-        name == "blocked"
-            || policy
-                .zones
-                .iter()
-                .find(|zone| zone.name == *name)
-                .is_some_and(|zone| !destination.matches_send_to(&zone.send_to))
-    })
+    reason.derived_labels = derived_zone_names
+        .iter()
+        .filter(|name| {
+            *name == "blocked"
+                || policy
+                    .zones
+                    .iter()
+                    .find(|zone| zone.name == **name)
+                    .is_some_and(|zone| !destination.matches_send_to(&zone.send_to))
+        })
+        .count();
+    reason
+}
+
+pub fn shell_observation_needed(gcx: &Arc<GlobalContext>, destination: &Destination) -> bool {
+    shell_observation_reason(gcx, destination).needed()
+}
+
+pub fn shell_observation_needed_for_session(
+    gcx: &Arc<GlobalContext>,
+    destination: &Destination,
+    derived_zones: &DerivedPrivacyZones,
+) -> bool {
+    shell_observation_reason_for_session(gcx, destination, derived_zones).needed()
 }
 
 pub(crate) async fn filter_path_enrichment_for_model_context(
@@ -700,6 +735,90 @@ pub fn carry_records_into(
     sources: &[ChatMessage],
 ) -> Result<(), refact_privacy::PrivacyAuditError> {
     merge_message_records(message, sources)
+}
+
+fn message_records(message: &ChatMessage) -> Option<Vec<FileRecord>> {
+    let value = message.extra.get("privacy")?;
+    serde_json::from_value::<PrivacyRecord>(value.clone())
+        .ok()
+        .map(|privacy| privacy.files)
+}
+
+/// Drops records from non-`user` reconstructed messages that the derived `user` messages
+/// already carry; destination clearance audits the message set, so nothing is lost.
+pub fn compact_reconstruction_privacy(messages: &mut [ChatMessage]) -> bool {
+    let Ok(audited) = refact_privacy::records_from_messages(messages) else {
+        return false;
+    };
+    let carried = audited
+        .into_iter()
+        .filter(|(index, _)| messages[*index].role == "user")
+        .map(|(_, record)| record)
+        .collect::<HashSet<_>>();
+    if carried.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    for message in messages.iter_mut().filter(|message| message.role != "user") {
+        let Some(records) = message_records(message) else {
+            continue;
+        };
+        if !records.is_empty() && records.iter().all(|record| carried.contains(record)) {
+            message.extra.remove("privacy");
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Repairs reconstruction payloads written by engines that stamped the whole source union
+/// onto every reconstructed message.
+pub fn compact_stored_reconstruction_privacy(messages: &mut [ChatMessage]) -> bool {
+    use refact_core::active_context::{
+        COMPRESSION_REPORT_KEY, RECONSTRUCTED_HISTORY_KIND, RECONSTRUCTION_SCHEMA_VERSION,
+    };
+    let mut changed = false;
+    for message in messages
+        .iter_mut()
+        .filter(|message| message.role == COMPRESSION_REPORT_KEY)
+    {
+        let Some(payload) = message
+            .extra
+            .get_mut(COMPRESSION_REPORT_KEY)
+            .filter(|report| {
+                report.get("kind").and_then(serde_json::Value::as_str)
+                    == Some(RECONSTRUCTED_HISTORY_KIND)
+                    && report
+                        .get("schema_version")
+                        .and_then(serde_json::Value::as_u64)
+                        == Some(u64::from(RECONSTRUCTION_SCHEMA_VERSION))
+            })
+            .and_then(|report| report.get_mut("payload"))
+            .and_then(|payload| payload.get_mut("messages"))
+        else {
+            continue;
+        };
+        let mut nested = match <Vec<ChatMessage> as serde::Deserialize>::deserialize(&*payload) {
+            Ok(nested) => nested,
+            Err(error) => {
+                tracing::warn!("skipping reconstruction payload privacy repair: {error}");
+                continue;
+            }
+        };
+        if !compact_reconstruction_privacy(&mut nested) {
+            continue;
+        }
+        match serde_json::to_value(nested) {
+            Ok(value) => {
+                *payload = value;
+                changed = true;
+            }
+            Err(error) => {
+                tracing::warn!("skipping reconstruction payload privacy repair: {error}");
+            }
+        }
+    }
+    changed
 }
 
 fn file_record(
@@ -1576,6 +1695,51 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn observation_reason_counts_match_the_boolean_decision() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = temp.path().join("secret.txt");
+        std::fs::write(&secret, "secret").unwrap();
+        let gcx = gcx_with_policy(&secret, &["trusted"], ShellBehavior::Withhold).await;
+        let allowed = provider_destination("trusted/model");
+        let guarded = provider_destination("untrusted/model");
+        let derived_zones = new_derived_privacy_zones();
+
+        let allowed_reason = shell_observation_reason(&gcx, &allowed);
+        assert_eq!(allowed_reason.blocked_patterns, 0);
+        assert_eq!(allowed_reason.guarded_zones, 0);
+        assert_eq!(allowed_reason.derived_labels, 0);
+        assert!(!allowed_reason.needed());
+        assert_eq!(
+            allowed_reason.needed(),
+            shell_observation_needed(&gcx, &allowed)
+        );
+
+        let guarded_reason = shell_observation_reason(&gcx, &guarded);
+        assert_eq!(guarded_reason.guarded_zones, 1);
+        assert!(guarded_reason.needed());
+        assert_eq!(
+            guarded_reason.needed(),
+            shell_observation_needed(&gcx, &guarded)
+        );
+
+        derived_zones.write().unwrap().insert(
+            temp.path().join("derived.txt"),
+            DerivedZone {
+                zone: "blocked".to_string(),
+                origin: None,
+            },
+        );
+        let session_reason = shell_observation_reason_for_session(&gcx, &allowed, &derived_zones);
+        assert_eq!(session_reason.guarded_zones, 0);
+        assert_eq!(session_reason.derived_labels, 1);
+        assert!(session_reason.needed());
+        assert_eq!(
+            session_reason.needed(),
+            shell_observation_needed_for_session(&gcx, &allowed, &derived_zones)
+        );
+    }
+
     #[test]
     fn merge_records_preserves_existing_records_and_deduplicates() {
         let mut message = ChatMessage::default();
@@ -1735,6 +1899,183 @@ mod tests {
         let privacy: PrivacyRecord =
             serde_json::from_value(message.extra["privacy"].clone()).unwrap();
         assert_eq!(privacy.files, vec![effective]);
+    }
+
+    fn guarded_record(path: &str) -> FileRecord {
+        FileRecord {
+            path: path.to_string(),
+            zone: "secrets".to_string(),
+            attribution: Attribution::Declared,
+        }
+    }
+
+    fn control_metadata(role: &str) -> Option<serde_json::Value> {
+        match role {
+            "goal" | "plan" => Some(serde_json::json!({"version": 1, "mode": "agent"})),
+            "event" => Some(serde_json::json!({
+                "subkind": "system_notice",
+                "source": "test",
+                "payload": {},
+            })),
+            _ => None,
+        }
+    }
+
+    fn message_with_records(id: &str, role: &str, records: Vec<FileRecord>) -> ChatMessage {
+        let mut message = ChatMessage {
+            message_id: id.to_string(),
+            role: role.to_string(),
+            content: crate::call_validation::ChatContent::SimpleText(format!("{role} body")),
+            ..Default::default()
+        };
+        if let Some(metadata) = control_metadata(role) {
+            message.extra.insert(role.to_string(), metadata);
+        }
+        merge_records(&mut message, records);
+        message
+    }
+
+    fn record_identity(messages: &[ChatMessage]) -> HashSet<(String, String, String)> {
+        refact_privacy::records_from_messages(messages)
+            .unwrap()
+            .into_iter()
+            .map(|(_, record)| {
+                (
+                    record.zone,
+                    record.path,
+                    serde_json::to_value(record.attribution)
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn compact_reconstruction_privacy_drops_records_covered_by_user_union() {
+        let first = guarded_record("a.env");
+        let second = guarded_record("b.env");
+        let third = guarded_record("c.env");
+        let mut payload = vec![
+            message_with_records("m-system", "system", Vec::new()),
+            message_with_records("m-user", "user", vec![first.clone(), second.clone()]),
+            message_with_records("m-event", "event", vec![first.clone()]),
+            message_with_records("m-goal", "goal", vec![first.clone(), second.clone()]),
+            message_with_records("m-context", "context_file", vec![third.clone()]),
+        ];
+        let before = record_identity(&payload);
+
+        assert!(compact_reconstruction_privacy(&mut payload));
+
+        assert!(payload[0].extra.get("privacy").is_none());
+        assert_eq!(
+            message_records(&payload[1]).unwrap(),
+            vec![first, second.clone()]
+        );
+        assert!(payload[2].extra.get("privacy").is_none());
+        assert!(payload[3].extra.get("privacy").is_none());
+        assert_eq!(message_records(&payload[4]).unwrap(), vec![third]);
+        assert_eq!(record_identity(&payload), before);
+    }
+
+    #[test]
+    fn compact_reconstruction_privacy_is_idempotent_and_noop_without_user_carrier() {
+        let record = guarded_record("a.env");
+        let mut without_user = vec![
+            message_with_records("m-event", "event", vec![record.clone()]),
+            message_with_records("m-goal", "goal", vec![record.clone()]),
+        ];
+        let unchanged = serde_json::to_value(&without_user).unwrap();
+
+        assert!(!compact_reconstruction_privacy(&mut without_user));
+        assert_eq!(serde_json::to_value(&without_user).unwrap(), unchanged);
+
+        let mut with_user = vec![
+            message_with_records("m-user", "user", vec![record.clone()]),
+            message_with_records("m-event", "event", vec![record]),
+        ];
+
+        assert!(compact_reconstruction_privacy(&mut with_user));
+        let compacted = serde_json::to_value(&with_user).unwrap();
+        assert!(!compact_reconstruction_privacy(&mut with_user));
+        assert_eq!(serde_json::to_value(&with_user).unwrap(), compacted);
+    }
+
+    #[test]
+    fn compact_stored_reconstruction_privacy_rewrites_legacy_payload() {
+        use refact_core::active_context::{
+            COMPRESSION_REPORT_KEY, ReconstructionMetadata, STATIC_COMPRESSION_REPORT_KIND,
+            active_context, make_reconstruction_report,
+        };
+
+        let first = guarded_record("a.env");
+        let second = guarded_record("b.env");
+        let union = vec![first.clone(), second];
+        let legacy_payload = vec![
+            message_with_records("p-user", "user", union.clone()),
+            message_with_records("p-event", "event", union.clone()),
+            message_with_records("p-goal", "goal", union.clone()),
+            message_with_records("p-user-two", "user", union.clone()),
+        ];
+        let boundary =
+            make_reconstruction_report(legacy_payload.clone(), ReconstructionMetadata::default())
+                .unwrap();
+        let mut stored = vec![
+            message_with_records("archived", "user", vec![guarded_record("archived.env")]),
+            boundary,
+            message_with_records("tail", "user", vec![first]),
+        ];
+        let before = record_identity(&active_context(&stored).unwrap().messages);
+
+        assert!(compact_stored_reconstruction_privacy(&mut stored));
+
+        let active = active_context(&stored).unwrap();
+        for message in &active.messages {
+            assert_eq!(
+                message.extra.contains_key("privacy"),
+                message.role == "user",
+                "only derived user messages keep the reconstruction union"
+            );
+        }
+        assert_eq!(record_identity(&active.messages), before);
+        assert!(!compact_stored_reconstruction_privacy(&mut stored));
+
+        let mut static_report = ChatMessage {
+            message_id: "static".to_string(),
+            role: COMPRESSION_REPORT_KEY.to_string(),
+            content: crate::call_validation::ChatContent::SimpleText("Static trim".to_string()),
+            ..Default::default()
+        };
+        static_report.extra.insert(
+            COMPRESSION_REPORT_KEY.to_string(),
+            serde_json::json!({
+                "kind": STATIC_COMPRESSION_REPORT_KIND,
+                "schema_version": 1,
+                "payload": { "messages": serde_json::to_value(&legacy_payload).unwrap() },
+            }),
+        );
+        let mut static_stored = vec![static_report];
+        let static_before = serde_json::to_value(&static_stored).unwrap();
+
+        assert!(!compact_stored_reconstruction_privacy(&mut static_stored));
+        assert_eq!(serde_json::to_value(&static_stored).unwrap(), static_before);
+
+        let mut malformed =
+            make_reconstruction_report(legacy_payload, ReconstructionMetadata::default()).unwrap();
+        malformed.extra.get_mut(COMPRESSION_REPORT_KEY).unwrap()["payload"]["messages"] =
+            serde_json::json!("not an array");
+        let mut malformed_stored = vec![malformed];
+        let malformed_before = serde_json::to_value(&malformed_stored).unwrap();
+
+        assert!(!compact_stored_reconstruction_privacy(
+            &mut malformed_stored
+        ));
+        assert_eq!(
+            serde_json::to_value(&malformed_stored).unwrap(),
+            malformed_before
+        );
     }
 
     #[test]

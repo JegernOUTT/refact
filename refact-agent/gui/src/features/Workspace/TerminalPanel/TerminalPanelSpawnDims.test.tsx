@@ -1,12 +1,16 @@
 import { screen, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { useEffect } from "react";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { server } from "../../../utils/mockServer";
+import { render } from "../../../utils/test-utils";
+import { TerminalPanel } from "./TerminalPanel";
 
-type TerminalPanelComponent = typeof import("./TerminalPanel").TerminalPanel;
-type RenderFn = typeof import("../../../utils/test-utils").render;
+vi.hoisted(() => vi.resetModules());
+vi.mock("./TerminalSession", () => ({
+  TerminalSession: StubTerminalSession,
+}));
 
 function StubTerminalSession({
   processId,
@@ -32,22 +36,6 @@ const CONFIG_STATE = {
     themeProps: {},
   },
 };
-
-let TerminalPanel: TerminalPanelComponent;
-let render: RenderFn;
-
-beforeEach(async () => {
-  vi.resetModules();
-  vi.doMock("./TerminalSession", () => ({
-    TerminalSession: StubTerminalSession,
-  }));
-  ({ TerminalPanel } = await import("./TerminalPanel"));
-  ({ render } = await import("../../../utils/test-utils"));
-});
-
-afterEach(() => {
-  vi.doUnmock("./TerminalSession");
-});
 
 describe("TerminalPanel spawn dimensions", () => {
   test("spawn body carries the current fitted rows and cols", async () => {

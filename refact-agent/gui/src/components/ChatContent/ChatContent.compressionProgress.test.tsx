@@ -306,37 +306,6 @@ describe("ChatContent compression progress", () => {
     ).toBeNull();
   });
 
-  it("renders queued messages inside the chat-width overlay", () => {
-    const preview = "queued message ".repeat(20).trim();
-    renderChatContent(
-      makeChatState({
-        messages: [userMessage("hello")],
-        queuedItems: [
-          {
-            client_request_id: "queued-1",
-            priority: false,
-            command_type: "user_message",
-            preview,
-            content: preview,
-          },
-        ],
-      }),
-    );
-
-    const queuedText = screen.getByText(preview);
-    const queuedCard = queuedText.closest("[class*='queuedMessage']");
-    const queuedContent = queuedText.closest(
-      "[class*='queuedMessagesContent']",
-    );
-    const queuedContainer = queuedText.closest(
-      "[class*='queuedMessagesContainer']",
-    );
-
-    expect(queuedCard?.className).toContain("queuedMessage");
-    expect(queuedContent?.className).toContain("queuedMessagesContent");
-    expect(queuedContainer?.className).toContain("queuedMessagesContainer");
-  });
-
   it("shows preloaded compression pulse on first mount", () => {
     vi.useFakeTimers({ now: 0 });
     renderChatContent(

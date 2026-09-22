@@ -657,12 +657,10 @@ describe("ChromeTool", () => {
             summary: "ARIA snapshot captured",
             retries: 0,
             data: {
-              yaml: '- button "Save" [ref=e1]',
-              nodes: [{ role: "button", name: "Save", ref: "e1" }],
+              yaml: '- button "Save" [ref=e1] [box=10,20,30,40]',
               generation: {
                 document_generation: 1,
                 frame_generation: 1,
-                refs: {},
               },
             },
           },
@@ -684,6 +682,8 @@ describe("ChromeTool", () => {
     expect(screen.getByText("button")).toBeInTheDocument();
     expect(screen.getByText("“Save”")).toBeInTheDocument();
     expect(screen.getByText("ref=e1")).toBeInTheDocument();
+    expect(screen.getByText("30×40@10,20")).toBeInTheDocument();
+    expect(screen.getByText("gen d1/f1")).toBeInTheDocument();
   });
 
   test("falls back to legacy command summary and text log", async () => {

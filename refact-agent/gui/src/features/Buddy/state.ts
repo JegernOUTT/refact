@@ -179,7 +179,6 @@ function addLogEntry(log: LogEntry[], entry: LogEntry): LogEntry[] {
 
 export type SemanticAction =
   | { kind: "signal"; signalType: string }
-  | { kind: "add_xp"; amount: number }
   | { kind: "pet" }
   | { kind: "rename"; name: string }
   | { kind: "next_palette" }
@@ -194,11 +193,6 @@ export function reduceSemanticState(
     case "signal": {
       const def = SIGNALS[action.signalType] as SignalDef | undefined;
       if (def === undefined) return state;
-
-      const xpGain = def.xp;
-      const newXP = state.progress.xp + xpGain;
-      // Stage is backend-authoritative; never advance it locally from signals.
-      // Stage only updates via snapshot sync (the "patch" action).
 
       const moodDelta = def.isError
         ? { happiness: -9, anxiety: 18, energy: -2 }
@@ -241,23 +235,12 @@ export function reduceSemanticState(
         ...state,
         mood: newMood,
         personality: newPersonality,
-        // Keep existing stage — stage advances only via backend snapshot sync
-        progress: { xp: newXP, stage: state.progress.stage },
         activity: {
           mood: def.mood,
           animationType: def.animationType,
           lastSignalTime: Date.now(),
           lastSignalType: action.signalType,
         },
-      };
-    }
-
-    case "add_xp": {
-      // Local XP accumulation for mood tracking; stage is backend-authoritative.
-      const newXP = state.progress.xp + action.amount;
-      return {
-        ...state,
-        progress: { xp: newXP, stage: state.progress.stage },
       };
     }
 

@@ -1,24 +1,28 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use refact_core::chat_types::{PendingDelivery, PushMode};
 use serde_json::{json, Value};
-use tokio::sync::{Mutex as AMutex, Notify};
-use tokio::time::{sleep, sleep_until, Instant as TokioInstant};
+use tokio::sync::Mutex as AMutex;
+#[cfg(test)]
+use tokio::sync::Notify;
+use tokio::time::{sleep_until, Instant as TokioInstant};
+#[cfg(test)]
+use tokio::time::sleep;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::postprocessing::pp_command_output::OutputFilter;
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
+use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, WaitInterrupt};
 
 const MIN_DURATION_MS: u64 = 100;
 const MAX_DURATION_MS: u64 = 3_600_000;
 const MIN_TICK_INTERVAL_MS: u64 = 5_000;
-const ABORT_POLL_MS: u64 = 50;
 pub struct ToolSleep {
     pub config_path: String,
 }
@@ -49,7 +53,7 @@ impl Tool for ToolSleep {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Wait for the specified duration. User-interruptible at any time. Use when you have nothing to do, when waiting for something, or when the user asks you to pause. Prefer this over Bash(sleep ...) — it doesn't hold a shell process. You can call this concurrently with other tools.".to_string(),
+            description: "Wait for the specified duration. Interruptible by user or incoming messages at any time. Use when you have nothing to do, when waiting for something, or when the user asks you to pause. Prefer this over Bash(sleep ...) — it doesn't hold a shell process. You can call this concurrently with other tools.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -84,16 +88,15 @@ impl Tool for ToolSleep {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let request = parse_sleep_request(args)?;
-        let (abort_flag, app, chat_id) = {
+        let (app, chat_id) = {
             let ccx = ccx.lock().await;
-            (ccx.abort_flag.clone(), ccx.app.clone(), ccx.chat_id.clone())
+            (ccx.app.clone(), ccx.chat_id.clone())
         };
-        let abort_notify = find_abort_notify(app.clone(), chat_id.clone()).await;
-        let outcome = sleep_with_ticks(
+        let interrupt = WaitInterrupt::from_context(&ccx).await;
+        let outcome = sleep_with_ticks_interruptible(
             request.duration_ms,
             request.tick_interval_ms,
-            abort_flag,
-            abort_notify,
+            interrupt.clone(),
         )
         .await;
         let SleepOutcome {
@@ -110,10 +113,13 @@ impl Tool for ToolSleep {
         )
         .await?;
 
-        let body = json!({
+        let mut body = json!({
             "slept_ms": slept_ms,
             "interrupted": interrupted,
         });
+        if interrupted {
+            body["reason"] = json!(interrupt.reason(slept_ms as f64 / 1000.0));
+        }
         let mut extra = serde_json::Map::new();
         extra.insert("sleep".to_string(), body.clone());
         let messages = vec![ContextEnum::ChatMessage(ChatMessage {
@@ -193,11 +199,29 @@ fn optional_u64(args: &HashMap<String, Value>, name: &str) -> Result<Option<u64>
         .transpose()
 }
 
+#[cfg(test)]
 async fn sleep_with_ticks(
     duration_ms: u64,
     tick_interval_ms: Option<u64>,
     abort_flag: Arc<AtomicBool>,
     abort_notify: Option<Arc<Notify>>,
+) -> SleepOutcome {
+    sleep_with_ticks_interruptible(
+        duration_ms,
+        tick_interval_ms,
+        WaitInterrupt {
+            abort_flag,
+            wait_flag: Arc::new(AtomicBool::new(false)),
+            notify: abort_notify,
+        },
+    )
+    .await
+}
+
+async fn sleep_with_ticks_interruptible(
+    duration_ms: u64,
+    tick_interval_ms: Option<u64>,
+    interrupt: WaitInterrupt,
 ) -> SleepOutcome {
     let started = TokioInstant::now();
     let end = started + Duration::from_millis(duration_ms);
@@ -205,7 +229,7 @@ async fn sleep_with_ticks(
     let mut ticks = Vec::new();
 
     loop {
-        if abort_flag.load(Ordering::Relaxed) {
+        if interrupt.interrupted() {
             return SleepOutcome {
                 slept_ms: elapsed_ms(started),
                 interrupted: true,
@@ -233,7 +257,7 @@ async fn sleep_with_ticks(
                     ticks,
                 };
             }
-            _ = wait_for_abort(abort_flag.clone(), abort_notify.clone()) => {
+            _ = interrupt.wait() => {
                 return SleepOutcome {
                     slept_ms: elapsed_ms(started),
                     interrupted: true,
@@ -257,23 +281,6 @@ async fn sleep_with_ticks(
     }
 }
 
-async fn wait_for_abort(abort_flag: Arc<AtomicBool>, abort_notify: Option<Arc<Notify>>) {
-    loop {
-        if abort_flag.load(Ordering::Relaxed) {
-            return;
-        }
-        match &abort_notify {
-            Some(abort_notify) => {
-                tokio::select! {
-                    _ = abort_notify.notified() => {}
-                    _ = sleep(Duration::from_millis(ABORT_POLL_MS)) => {}
-                }
-            }
-            None => sleep(Duration::from_millis(ABORT_POLL_MS)).await,
-        }
-    }
-}
-
 fn elapsed_ms(started: TokioInstant) -> u64 {
     started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
@@ -288,21 +295,6 @@ fn tick_event(elapsed_ms: u64, remaining_ms: u64) -> ChatMessage {
         }),
         "tick",
     )
-}
-
-async fn find_abort_notify(
-    app: crate::app_state::AppState,
-    chat_id: String,
-) -> Option<Arc<Notify>> {
-    let session = {
-        let sessions = app.chat.sessions.read().await;
-        sessions.get(&chat_id).cloned()
-    }?;
-    let abort_notify = {
-        let session = session.lock().await;
-        session.abort_notify.clone()
-    };
-    Some(abort_notify)
 }
 
 async fn queue_ticks(
@@ -359,6 +351,32 @@ mod tests {
             Ok(_) => panic!("expected parse_sleep_request to fail"),
             Err(error) => error,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delivery_interrupt_preserves_ticks_without_aborting_turn() {
+        let abort = Arc::new(AtomicBool::new(false));
+        let flag = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(Notify::new());
+        let interrupt = WaitInterrupt {
+            abort_flag: abort.clone(),
+            wait_flag: flag.clone(),
+            notify: Some(notify.clone()),
+        };
+        let run = tokio::spawn(sleep_with_ticks_interruptible(
+            30_000,
+            Some(5_000),
+            interrupt,
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(5_001)).await;
+        tokio::task::yield_now().await;
+        flag.store(true, Ordering::SeqCst);
+        notify.notify_waiters();
+        let outcome = run.await.unwrap();
+        assert!(outcome.interrupted);
+        assert_eq!(outcome.ticks.len(), 1);
+        assert!(!abort.load(Ordering::SeqCst));
     }
 
     #[test]

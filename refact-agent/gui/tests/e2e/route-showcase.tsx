@@ -8,6 +8,7 @@ import { setUpStore, type RootState } from "../../src/app/store";
 import { Theme } from "../../src/components/Theme";
 import { AbortControllerProvider } from "../../src/contexts/AbortControllers";
 import { Dashboard } from "../../src/features/Dashboard";
+import { Toolbar } from "../../src/components/Toolbar/Toolbar";
 import { TabBar } from "../../src/features/Workspace/TabBar";
 import { WorkspaceView } from "../../src/features/Workspace/WorkspaceView";
 import { WorkPanel } from "../../src/features/Workspace/WorkPanel/WorkPanel";
@@ -45,6 +46,7 @@ import type { EventEnvelope } from "../../src/services/refact/chatSubscription";
 import { isPushMode } from "../../src/services/refact/chatSubscription";
 import { sidebarSectionSnapshotReceived } from "../../src/features/Sidebar/sidebarSlice";
 import { tasksApi, type TaskMeta } from "../../src/services/refact/tasks";
+import type { OperatorStatus } from "../../src/services/refact/buddyOperator";
 import type { ChatHistoryItem } from "../../src/features/History/historySlice";
 import type { ChatThreadRuntime } from "../../src/features/Chat/Thread";
 import type { ChatMessages } from "../../src/services/refact";
@@ -92,6 +94,62 @@ const chatRoute =
 const chatDndRoute = route === "chat-dnd";
 const queueRoute = route === "queue";
 const multiChatRoute = route === "chat-split" || chatDndRoute;
+
+// Legacy layout is the default so an absent/failed status never implies
+// compatibility. `?operator=enabled|unavailable` opts into the operator surface
+// so browser specs can exercise the Desk and the degraded collapse.
+const operatorParam = new URLSearchParams(window.location.search).get(
+  "operator",
+);
+const sceneSpeechParam = new URLSearchParams(window.location.search).has(
+  "scene_speech",
+);
+const showcaseProject = {
+  project_id: "showcase",
+  canonical_root: "/workspace/refact",
+};
+const buddyOperatorStatus: OperatorStatus =
+  operatorParam === "enabled"
+    ? {
+        schema_version: 1,
+        mode: "enabled",
+        features: {
+          storage: true,
+          actions: true,
+          supervision: false,
+          improvement: false,
+          editorial: false,
+        },
+        project: showcaseProject,
+        worker: {
+          worker_id: "showcase-worker",
+          engine_instance_id: "showcase-engine",
+          epoch: 1,
+        },
+      }
+    : {
+        schema_version: 1,
+        mode: operatorParam === "unavailable" ? "unavailable" : "disabled",
+        features: {
+          storage: false,
+          actions: false,
+          supervision: false,
+          improvement: false,
+          editorial: false,
+        },
+        project: null,
+        worker: null,
+        ...(operatorParam === "unavailable"
+          ? {
+              unavailable_reason: {
+                kind: "already_owned",
+                detail:
+                  "operator store is already owned by another writer (pid 2810136 (refact-lsp 0.1.0) on svakhreev-work, started 2026-09-15 09:36:52 UTC, cmd: refact-lsp --http-port 8001)",
+                retry_in_seconds: 900,
+              },
+            }
+          : {}),
+      };
 
 const buddySettings: BuddySettings = {
   enabled: true,
@@ -322,7 +380,19 @@ const buddySnapshot: BuddySnapshot = {
     settings_path: "/workspace/refact/.refact/buddy/settings.json",
   },
   recent_diagnostics: [],
-  active_speech: null,
+  active_speech: sceneSpeechParam
+    ? {
+        id: "showcase-scene-speech",
+        text: "Snack beacon detected.",
+        mood: "curious",
+        scope: "project",
+        persistent: true,
+        ttl_seconds: 0,
+        created_at: now,
+        controls: [],
+        speech_intent: "speech_insight",
+      }
+    : null,
   runtime_queue: [buddyRuntimeEvent],
   now_playing: null,
   pulse: buddyPulse,
@@ -473,14 +543,29 @@ const queueEventMessages: ChatMessages = [
         {},
       ],
     ] as const
-  ).map(([subkind, source, content, payload], index) => ({
-    role: "event" as const,
-    message_id: `showcase-event-${index}`,
-    content,
-    subkind,
-    source,
-    payload: { ...payload, created_at_ms: Date.parse(now) + index * 1000 },
-  })),
+  )
+    .map(([subkind, source, content, payload], index) => ({
+      role: "event" as const,
+      message_id: `showcase-event-${index}`,
+      content,
+      event: {
+        subkind,
+        source,
+        payload: { ...payload, created_at_ms: Date.parse(now) + index * 1000 },
+      },
+    }))
+    .flatMap((event) =>
+      event.event.subkind === "unknown_future_subkind"
+        ? [
+            {
+              role: "assistant" as const,
+              message_id: "queue-event-separator",
+              content: "Continuing the active step.",
+            },
+            event,
+          ]
+        : [event],
+    ),
 ] as ChatMessages;
 
 const queueItems: ChatThreadRuntime["queued_items"] = [
@@ -517,7 +602,7 @@ const queueItems: ChatThreadRuntime["queued_items"] = [
       subkind: "process_completed",
       source: "exec.process",
       payload: {
-        process_id: "exec_route_lint",
+        process_id: "exec_route_showcase",
         status: "failed",
         exit_code: 1,
       },
@@ -542,7 +627,7 @@ const queueItems: ChatThreadRuntime["queued_items"] = [
     client_request_id: "delivery-unlabeled-1",
     priority: false,
     command_type: "delivery",
-    preview: "",
+    preview: "A long single-line continuation: " + "unbroken".repeat(80),
     enqueued_at_ms: Date.parse(now) + 4000,
   },
 ] satisfies ChatThreadRuntime["queued_items"];
@@ -610,12 +695,51 @@ const queueChatRuntime: ChatThreadRuntime = {
         message_id: "queue-partial",
         content: "Partial response from the active step…",
       },
+      {
+        role: "event",
+        message_id: "queue-single-event",
+        subkind: "system_notice",
+        source: "chat.runtime",
+        content: "Waiting for the next tool result",
+      },
     ],
   },
   streaming: true,
   session_state: "generating",
   queued_items: queueItems,
+  waiting_interruptible: queueParams.get("waiting") === "1",
 };
+
+const rebuildRoute = new URLSearchParams(window.location.search).has("rebuild");
+const rebuildReport = (id: string, content: string): ChatMessages[number] => ({
+  role: "compression_report",
+  message_id: id,
+  content: "Context rebuilt",
+  compression_report: {
+    kind: "reconstructed_history",
+    schema_version: 1,
+    model: "fixture-model",
+    trigger: "manual",
+    payload: {
+      messages: [{ role: "user", message_id: `${id}-payload`, content }],
+    },
+  },
+});
+if (rebuildRoute) {
+  chatRuntime.thread.title = "Rebuilt archive fixture";
+  chatRuntime.thread.model = "openai_codex_personal/gpt-5.5";
+  chatRuntime.thread.messages = [
+    {
+      role: "user",
+      message_id: "original",
+      content: "Original archive sentinel",
+    },
+    rebuildReport("report-first", "Earlier rebuilt sentinel"),
+    { role: "user", message_id: "middle", content: "Between reports sentinel" },
+    rebuildReport("report-latest", "Latest rebuilt sentinel"),
+    { role: "user", message_id: "suffix", content: "After rebuild sentinel" },
+  ];
+}
 
 const splitChatRuntime: ChatThreadRuntime = {
   ...chatRuntime,
@@ -626,6 +750,23 @@ const splitChatRuntime: ChatThreadRuntime = {
     messages: showcaseMessages,
   },
 };
+
+if (rebuildRoute) {
+  splitChatRuntime.thread.title = "Legacy archive fixture";
+  splitChatRuntime.thread.messages = [
+    {
+      role: "user",
+      message_id: "legacy-original",
+      content: "Legacy original sentinel",
+    },
+    {
+      role: "assistant",
+      message_id: "legacy-summary",
+      content: "Legacy summary sentinel",
+      extra: { compression: { kind: "llm_segment_summary" } },
+    },
+  ];
+}
 
 const historyItem = (
   id: string,
@@ -1147,7 +1288,6 @@ const privacyInspectResponse: PrivacyInspectResponse = {
     display_name: "untrusted/model",
   },
   sendable: false,
-  would_send: [],
   records: [privacyFile],
   blocked: [{ record_index: 0, record: privacyFile }],
   refusal: "destination untrusted cannot receive message 0 path .env",
@@ -1323,6 +1463,12 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       }),
     );
   }
+  if (path === "/v1/buddy/operator/status") {
+    return Promise.resolve(jsonResponse(buddyOperatorStatus));
+  }
+  if (path === "/v1/buddy/operator/reopen") {
+    return Promise.resolve(jsonResponse(buddyOperatorStatus));
+  }
   if (path === "/v1/buddy") return Promise.resolve(jsonResponse(buddySnapshot));
   if (path === "/v1/buddy/settings") {
     if (init?.method === "POST" && init.body) {
@@ -1479,6 +1625,7 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     return Promise.resolve(jsonResponse(privacyStatusResponse));
   if (path === "/v1/privacy/inspect")
     return Promise.resolve(jsonResponse(privacyInspectResponse));
+  if (rebuildRoute) return jsonResponse({});
   return nativeFetch(input, init);
 };
 
@@ -1598,6 +1745,11 @@ const preloadedState: Partial<RootState> = {
 };
 
 const store = setUpStore(preloadedState);
+if (rebuildRoute) {
+  Object.defineProperty(window, "__rebuildFixtureState", {
+    get: () => store.getState().chat,
+  });
+}
 
 const messageCall = {
   id: "message-receipt",
@@ -2213,7 +2365,11 @@ const ShowcaseSurface = () => {
           overflow: "hidden",
         }}
       >
-        <TabBar />
+        {rebuildRoute ? (
+          <Toolbar activeTab={{ type: "chat", id: chatId }} />
+        ) : (
+          <TabBar />
+        )}
         <Flex style={{ flex: "1 1 auto", minWidth: 0, minHeight: 0 }}>
           <WorkspaceView />
         </Flex>

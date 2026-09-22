@@ -151,6 +151,10 @@ struct EditorCommand {
 
 #[derive(Debug, Clone)]
 enum CommandContextTag {
+    AnswerQuestions {
+        origin: CommandOrigin,
+        client_request_id: String,
+    },
     SendMessage {
         prompt: String,
         params: Value,
@@ -1141,6 +1145,9 @@ impl App {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppAction {
+    AnswerQuestions {
+        command: crate::client::AnswerQuestionsCommand,
+    },
     None,
     LoadProjects,
     LoadModels,

@@ -17,6 +17,182 @@ pub use refact_tool_api::{
     ToolSourceType,
 };
 
+const TOOL_CONFIG_CACHE_CAPACITY: usize = 128;
+
+type ToolConfigFingerprint = Option<(std::time::SystemTime, u64)>;
+
+struct CachedToolConfigYaml {
+    generation: u64,
+    fingerprint: ToolConfigFingerprint,
+    last_used: u64,
+    value: Arc<serde_yaml::Value>,
+}
+
+#[derive(Default)]
+struct ToolConfigYamlCache {
+    entries: std::sync::Mutex<HashMap<String, CachedToolConfigYaml>>,
+    build_locks: std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>,
+}
+
+static TOOL_CONFIG_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TOOL_CONFIG_USE_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Counts physical yaml reads *on the calling thread only*.
+///
+/// The cache itself is process-global, but the read counter must not be: every
+/// other test in the lib suite runs concurrently on its own thread and also
+/// loads tool configs, so a shared atomic makes the read-count assertions in
+/// this module's tests observe foreign reads and fail non-deterministically.
+/// `config()` is synchronous, so the read always lands on the asserting thread.
+/// Mirrors `ThreadLocalDiskReadCounter` in `crate::chat::trajectories`.
+#[cfg(test)]
+struct ThreadLocalYamlReadCounter;
+
+#[cfg(test)]
+impl ThreadLocalYamlReadCounter {
+    fn fetch_add(&self, value: u64, _ordering: std::sync::atomic::Ordering) -> u64 {
+        TOOL_CONFIG_YAML_READS_ON_THIS_THREAD.with(|reads| {
+            let previous = reads.get();
+            reads.set(previous.saturating_add(value));
+            previous
+        })
+    }
+
+    fn load(&self, _ordering: std::sync::atomic::Ordering) -> u64 {
+        TOOL_CONFIG_YAML_READS_ON_THIS_THREAD.with(std::cell::Cell::get)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TOOL_CONFIG_YAML_READS_ON_THIS_THREAD: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+static TOOL_CONFIG_YAML_READS: ThreadLocalYamlReadCounter = ThreadLocalYamlReadCounter;
+
+impl ToolConfigYamlCache {
+    fn get(
+        &self,
+        config_path: &str,
+        generation: u64,
+        fingerprint: &ToolConfigFingerprint,
+    ) -> Option<Arc<serde_yaml::Value>> {
+        if fingerprint.is_none() {
+            return None;
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = entries.get_mut(config_path)?;
+        if entry.generation != generation || entry.fingerprint != *fingerprint {
+            return None;
+        }
+        entry.last_used = TOOL_CONFIG_USE_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(entry.value.clone())
+    }
+
+    fn insert(
+        &self,
+        config_path: &str,
+        generation: u64,
+        fingerprint: ToolConfigFingerprint,
+        value: Arc<serde_yaml::Value>,
+    ) {
+        if fingerprint.is_none() {
+            return;
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if entries.len() >= TOOL_CONFIG_CACHE_CAPACITY && !entries.contains_key(config_path) {
+            let evict = entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(path, _)| path.clone());
+            if let Some(evict) = evict {
+                entries.remove(&evict);
+            }
+        }
+        entries.insert(
+            config_path.to_string(),
+            CachedToolConfigYaml {
+                generation,
+                fingerprint,
+                last_used: TOOL_CONFIG_USE_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                value,
+            },
+        );
+    }
+
+    fn acquire_build_lock(&self, config_path: &str) -> Arc<std::sync::Mutex<()>> {
+        let mut locks = self
+            .build_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if locks.len() >= TOOL_CONFIG_CACHE_CAPACITY {
+            locks.retain(|path, lock| path == config_path || Arc::strong_count(lock) > 1);
+        }
+        locks
+            .entry(config_path.to_string())
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    }
+}
+
+fn tool_config_yaml_cache() -> &'static ToolConfigYamlCache {
+    static CACHE: std::sync::OnceLock<ToolConfigYamlCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(ToolConfigYamlCache::default)
+}
+
+pub fn invalidate_tool_config_cache() {
+    TOOL_CONFIG_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn tool_config_fingerprint(config_path: &str) -> ToolConfigFingerprint {
+    let metadata = std::fs::metadata(config_path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
+fn read_tool_config_yaml(config_path: &str) -> Result<String, String> {
+    #[cfg(test)]
+    TOOL_CONFIG_YAML_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    std::fs::read_to_string(config_path).map_err(|e| format!("Error reading config file: {}", e))
+}
+
+fn load_tool_config_yaml(config_path: &str) -> Result<Arc<serde_yaml::Value>, String> {
+    let generation = TOOL_CONFIG_GENERATION.load(std::sync::atomic::Ordering::Acquire);
+    let fingerprint = tool_config_fingerprint(config_path);
+    let cache = tool_config_yaml_cache();
+    if let Some(value) = cache.get(config_path, generation, &fingerprint) {
+        return Ok(value);
+    }
+    let build_lock = cache.acquire_build_lock(config_path);
+    let _build_guard = build_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(value) = cache.get(config_path, generation, &fingerprint) {
+        return Ok(value);
+    }
+    let raw = read_tool_config_yaml(config_path)?;
+    let parsed: serde_yaml::Value =
+        serde_yaml::from_str(&raw).map_err(|e| format!("Error parsing config file: {}", e))?;
+    let value = Arc::new(parsed);
+    cache.insert(config_path, generation, fingerprint, value.clone());
+    Ok(value)
+}
+
+pub fn tool_config_from_yaml(config_path: &str, tool_name: &str) -> Result<ToolConfig, String> {
+    let yaml = load_tool_config_yaml(config_path)?;
+    match yaml.get("tools").and_then(|tools| tools.get(tool_name)) {
+        None => Ok(ToolConfig::default()),
+        Some(config) => Ok(serde_yaml::from_value(config.clone()).unwrap_or_default()),
+    }
+}
+
 pub struct ToolGroup {
     pub name: String,
     pub description: String,
@@ -112,25 +288,7 @@ pub trait Tool: Send + Sync {
 
     fn config(&self) -> Result<ToolConfig, String> {
         let tool_desc = self.tool_description();
-
-        let tool_name = tool_desc.name;
-        let config_path = tool_desc.source.config_path;
-
-        let config = std::fs::read_to_string(config_path)
-            .map_err(|e| format!("Error reading config file: {}", e))?;
-
-        let config: serde_yaml::Value = serde_yaml::from_str(&config)
-            .map_err(|e| format!("Error parsing config file: {}", e))?;
-
-        let config = config.get("tools").and_then(|tools| tools.get(&tool_name));
-
-        match config {
-            None => Ok(ToolConfig::default()),
-            Some(config) => {
-                let config: ToolConfig = serde_yaml::from_value(config.clone()).unwrap_or_default();
-                Ok(config)
-            }
-        }
+        tool_config_from_yaml(&tool_desc.source.config_path, &tool_desc.name)
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -186,6 +344,264 @@ pub async fn set_tool_config(
     tokio::fs::write(config_path, serde_yaml::to_string(&config).unwrap())
         .await
         .map_err(|e| format!("Error writing config file: {}", e))?;
+    invalidate_tool_config_cache();
 
     Ok(())
+}
+
+/// A wait-only cancellation signal; observing it never aborts the chat turn.
+#[derive(Clone)]
+pub(crate) struct WaitInterrupt {
+    pub(crate) abort_flag: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) wait_flag: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) notify: Option<Arc<tokio::sync::Notify>>,
+}
+
+impl WaitInterrupt {
+    pub(crate) async fn from_context(ccx: &Arc<AMutex<AtCommandsContext>>) -> Self {
+        let (app, chat_id, abort_flag) = {
+            let context = ccx.lock().await;
+            (
+                context.app.clone(),
+                context.chat_id.clone(),
+                context.abort_flag.clone(),
+            )
+        };
+        let session = app.chat.sessions.read().await.get(&chat_id).cloned();
+        let (wait_flag, notify) = if let Some(session) = session {
+            let session = session.lock().await;
+            (
+                session.wait_interrupt_flag.clone(),
+                Some(session.abort_notify.clone()),
+            )
+        } else {
+            (Arc::new(std::sync::atomic::AtomicBool::new(false)), None)
+        };
+        Self {
+            abort_flag,
+            wait_flag,
+            notify,
+        }
+    }
+
+    pub(crate) fn interrupted(&self) -> bool {
+        self.abort_flag.load(std::sync::atomic::Ordering::SeqCst)
+            || self.wait_flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn reason(&self, elapsed_seconds: f64) -> String {
+        let cause = if self.wait_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            "message arrived"
+        } else {
+            "user aborted"
+        };
+        format!("interrupted after {elapsed_seconds:.1}s: {cause}")
+    }
+
+    pub(crate) async fn wait(&self) {
+        loop {
+            // Polling also covers notification races and contexts without a session.
+            let notified = async {
+                if let Some(notify) = &self.notify {
+                    notify.notified().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            };
+            tokio::pin!(notified);
+            if self.interrupted() {
+                return;
+            }
+            tokio::select! {
+                _ = &mut notified => {},
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    struct FakeTool {
+        name: String,
+        config_path: String,
+    }
+
+    #[async_trait]
+    impl Tool for FakeTool {
+        async fn tool_execute(
+            &mut self,
+            _ccx: Arc<AMutex<AtCommandsContext>>,
+            _tool_call_id: &String,
+            _args: &HashMap<String, Value>,
+        ) -> Result<(bool, Vec<ContextEnum>), String> {
+            Ok((false, vec![]))
+        }
+
+        fn tool_description(&self) -> ToolDesc {
+            ToolDesc {
+                name: self.name.clone(),
+                experimental: false,
+                allow_parallel: true,
+                description: String::new(),
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                output_schema: None,
+                annotations: None,
+                display_name: self.name.clone(),
+                source: ToolSource {
+                    source_type: ToolSourceType::Builtin,
+                    config_path: self.config_path.clone(),
+                },
+            }
+        }
+    }
+
+    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn reads() -> u64 {
+        TOOL_CONFIG_YAML_READS.load(Ordering::SeqCst)
+    }
+
+    fn tool(name: &str, config_path: &str) -> FakeTool {
+        FakeTool {
+            name: name.to_string(),
+            config_path: config_path.to_string(),
+        }
+    }
+
+    fn write_config(path: &str, body: &str) {
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn path_in(dir: &tempfile::TempDir, name: &str) -> String {
+        dir.path().join(name).to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn tool_config_reads_yaml_once_for_shared_config_path() {
+        let _guard = test_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = path_in(&dir, "builtin_tools.yaml");
+        write_config(
+            &config_path,
+            "tools:\n  alpha:\n    enabled: false\n  beta:\n    enabled: true\n",
+        );
+        let tools: Vec<FakeTool> = ["alpha", "beta", "gamma", "delta", "epsilon"]
+            .iter()
+            .map(|name| tool(name, &config_path))
+            .collect();
+
+        let before = reads();
+        let configs: Vec<ToolConfig> = tools.iter().map(|t| t.config().unwrap()).collect();
+
+        assert_eq!(reads() - before, 1);
+        assert!(!configs[0].enabled);
+        assert!(configs[1].enabled);
+        assert!(configs[4].enabled);
+    }
+
+    #[test]
+    fn tool_config_cache_invalidates_on_generation_bump() {
+        let _guard = test_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = path_in(&dir, "builtin_tools.yaml");
+        write_config(&config_path, "tools:\n  alpha:\n    enabled: true\n");
+        let alpha = tool("alpha", &config_path);
+
+        let before = reads();
+        assert!(alpha.config().unwrap().enabled);
+        assert_eq!(reads() - before, 1);
+        assert!(alpha.config().unwrap().enabled);
+        assert_eq!(reads() - before, 1);
+
+        invalidate_tool_config_cache();
+        assert!(alpha.config().unwrap().enabled);
+        assert_eq!(reads() - before, 2);
+
+        write_config(&config_path, "tools:\n  alpha:\n    enabled: false\n");
+        invalidate_tool_config_cache();
+        assert!(!alpha.config().unwrap().enabled);
+        assert_eq!(reads() - before, 3);
+    }
+
+    #[test]
+    fn tool_config_picks_up_file_edits_without_restart() {
+        let _guard = test_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = path_in(&dir, "integration.yaml");
+        write_config(&config_path, "tools:\n  alpha:\n    enabled: true\n");
+        let alpha = tool("alpha", &config_path);
+
+        let before = reads();
+        assert!(alpha.config().unwrap().enabled);
+        assert_eq!(reads() - before, 1);
+
+        write_config(&config_path, "tools:\n  alpha:\n    enabled: false\n");
+        assert!(!alpha.config().unwrap().enabled);
+        assert_eq!(reads() - before, 2);
+    }
+
+    #[test]
+    fn tool_config_preserves_error_messages() {
+        let _guard = test_guard();
+        let dir = tempfile::tempdir().unwrap();
+
+        let missing_path = path_in(&dir, "missing.yaml");
+        let expected_read_error = format!(
+            "Error reading config file: {}",
+            std::fs::read_to_string(&missing_path).unwrap_err()
+        );
+        assert_eq!(
+            tool("alpha", &missing_path).config().unwrap_err(),
+            expected_read_error
+        );
+
+        let malformed_path = path_in(&dir, "malformed.yaml");
+        write_config(&malformed_path, "tools: [alpha\n");
+        let raw = std::fs::read_to_string(&malformed_path).unwrap();
+        let expected_parse_error = format!(
+            "Error parsing config file: {}",
+            serde_yaml::from_str::<serde_yaml::Value>(&raw).unwrap_err()
+        );
+        assert_eq!(
+            tool("alpha", &malformed_path).config().unwrap_err(),
+            expected_parse_error
+        );
+        assert_eq!(
+            tool("alpha", &malformed_path).config().unwrap_err(),
+            expected_parse_error
+        );
+    }
+
+    #[test]
+    fn tool_config_handles_empty_config_path() {
+        let _guard = test_guard();
+        let expected = format!(
+            "Error reading config file: {}",
+            std::fs::read_to_string("").unwrap_err()
+        );
+        assert_eq!(tool("alpha", "").config().unwrap_err(), expected);
+    }
+
+    #[test]
+    fn tool_config_cache_stays_bounded() {
+        let _guard = test_guard();
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..(TOOL_CONFIG_CACHE_CAPACITY + 16) {
+            let config_path = path_in(&dir, &format!("tools_{i}.yaml"));
+            write_config(&config_path, "tools:\n  alpha:\n    enabled: true\n");
+            assert!(tool("alpha", &config_path).config().unwrap().enabled);
+        }
+        let entries = tool_config_yaml_cache()
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(entries.len() <= TOOL_CONFIG_CACHE_CAPACITY);
+    }
 }

@@ -54,10 +54,30 @@ pub fn snapshot_with_agents(
     app: AppState,
     session: &ChatSession,
 ) -> impl std::future::Future<Output = (ChatEvent, Vec<BackgroundAgentSummary>)> + Send + 'static {
+    snapshot_with_agents_mode(app, session, true)
+}
+
+pub fn snapshot_with_agents_mode(
+    app: AppState,
+    session: &ChatSession,
+    include_messages: bool,
+) -> impl std::future::Future<Output = (ChatEvent, Vec<BackgroundAgentSummary>)> + Send + 'static {
+    let snapshot = if include_messages {
+        session.snapshot()
+    } else {
+        session.snapshot_without_messages()
+    };
+    snapshot_event_with_agents(app, session, snapshot)
+}
+
+fn snapshot_event_with_agents(
+    app: AppState,
+    session: &ChatSession,
+    mut snapshot: ChatEvent,
+) -> impl std::future::Future<Output = (ChatEvent, Vec<BackgroundAgentSummary>)> + Send + 'static {
     let chat_id = session.chat_id.clone();
     let base_background_agents: HashMap<String, BackgroundAgentSummary> =
         session.background_agents.clone();
-    let mut snapshot = session.snapshot();
     async move {
         let browser =
             crate::integrations::browser_runtime::browser_snapshot_for_chat(app.clone(), &chat_id)
@@ -113,6 +133,33 @@ async fn migrate_legacy_frozen_prefix_on_open(
         }
     };
     if installed {
+        super::trajectories::maybe_save_trajectory_with_intent(
+            app,
+            session_arc,
+            TrajectoryCommitIntent::Required,
+        )
+        .await;
+    }
+}
+
+async fn compact_reconstruction_privacy_on_open(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+) {
+    let compacted = {
+        let mut session = session_arc.lock().await;
+        let compacted =
+            crate::privacy::records::compact_stored_reconstruction_privacy(&mut session.messages);
+        if compacted {
+            info!(
+                "Compacted reconstruction privacy records for chat {}",
+                session.chat_id
+            );
+            session.increment_version();
+        }
+        compacted
+    };
+    if compacted {
         super::trajectories::maybe_save_trajectory_with_intent(
             app,
             session_arc,
@@ -199,8 +246,11 @@ pub async fn get_or_create_session_with_trajectory(
         }
         session.merge_dropped_deliveries(dropped_deliveries);
         session.set_goal_ledger(loaded.goal_ledger);
+        session.pending_questions = loaded.pending_questions;
+        if let Some(pending) = loaded.pending_browser_decision {
+            super::browser_decisions::expire_restored_browser_decision(&mut session, pending);
+        }
         session.goal_verification_blocked_until_ms = loaded.goal_verification_blocked_until_ms;
-        session.compression_retry_after_ms = loaded.compression_retry_after_ms;
         if transition_identity_repaired {
             session.increment_version();
         }
@@ -295,6 +345,7 @@ pub async fn get_or_create_session_with_trajectory(
                 session.complete_trajectory_commit(repaired_version);
             }
         }
+        compact_reconstruction_privacy_on_open(app.clone(), session_arc.clone()).await;
     }
 
     session_arc
@@ -627,6 +678,168 @@ mod tests {
             .with_short_description("cleanup order".to_string())
     }
 
+    fn legacy_reconstruction_trajectory(chat_id: &str) -> serde_json::Value {
+        let record = serde_json::json!({
+            "path": "a.rs",
+            "zone": "secrets",
+            "attribution": "declared",
+        });
+        let union = serde_json::json!({"files": [record]});
+        let payload = ["user", "event", "goal", "user"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, role)| {
+                let mut message = serde_json::json!({
+                    "message_id": format!("payload-{index}"),
+                    "role": role,
+                    "content": format!("{role} {index}"),
+                    "privacy": union.clone(),
+                });
+                match role {
+                    "goal" => {
+                        message["goal"] = serde_json::json!({"version": 1, "mode": "agent"});
+                    }
+                    "event" => {
+                        message["event"] = serde_json::json!({
+                            "subkind": "system_notice",
+                            "source": "test",
+                            "payload": {},
+                        });
+                    }
+                    _ => {}
+                }
+                message
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "id": chat_id,
+            "title": "Legacy reconstruction",
+            "model": "model",
+            "mode": "agent",
+            "tool_use": "agent",
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:01Z",
+            "include_project_info": true,
+            "checkpoints_enabled": true,
+            "messages": [
+                {
+                    "message_id": "archived",
+                    "role": "user",
+                    "content": "archived",
+                },
+                {
+                    "message_id": "boundary",
+                    "role": "compression_report",
+                    "content": "Conversation context reconstructed.",
+                    "compression_report": {
+                        "kind": "reconstructed_history",
+                        "schema_version": 1,
+                        "payload": {"messages": payload},
+                    },
+                },
+            ],
+        })
+    }
+
+    fn payload_roles_carrying_privacy(messages: &[ChatMessage]) -> Vec<String> {
+        refact_core::active_context::active_context(messages)
+            .unwrap()
+            .messages
+            .into_iter()
+            .filter(|message| message.extra.contains_key("privacy"))
+            .map(|message| message.role)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn opening_a_legacy_reconstruction_trajectory_compacts_and_rewrites_it() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_root =
+            crate::files_correction::canonicalize_normalized_path(workspace.path().to_path_buf());
+        let (app, _config_dir) = test_app_with_workspace(&workspace_root).await;
+        let chat_id = "legacy-reconstruction-open";
+        let path = workspace_root
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &path,
+            serde_json::to_string(&legacy_reconstruction_trajectory(chat_id)).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let session_arc =
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id).await;
+
+        let loaded_roles = {
+            let session = session_arc.lock().await;
+            payload_roles_carrying_privacy(&session.messages)
+        };
+        assert_eq!(loaded_roles, vec!["user", "user"]);
+
+        let rewritten = serde_json::from_str::<serde_json::Value>(
+            &tokio::fs::read_to_string(&path).await.unwrap(),
+        )
+        .unwrap();
+        let stored = crate::call_validation::deserialize_messages_from_post(
+            rewritten["messages"].as_array().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            payload_roles_carrying_privacy(&stored),
+            vec!["user", "user"]
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_a_transition_trajectory_needing_identity_repair_still_compacts() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_root =
+            crate::files_correction::canonicalize_normalized_path(workspace.path().to_path_buf());
+        let (app, _config_dir) = test_app_with_workspace(&workspace_root).await;
+        let chat_id = "legacy-reconstruction-transition";
+        let path = workspace_root
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        let mut trajectory = legacy_reconstruction_trajectory(chat_id);
+        trajectory["link_type"] = serde_json::json!("mode_transition");
+        trajectory["previous_response_id"] = serde_json::json!("resp-1");
+        tokio::fs::write(&path, serde_json::to_string(&trajectory).unwrap())
+            .await
+            .unwrap();
+
+        let session_arc =
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id).await;
+
+        let loaded_roles = {
+            let session = session_arc.lock().await;
+            payload_roles_carrying_privacy(&session.messages)
+        };
+        assert_eq!(loaded_roles, vec!["user", "user"]);
+
+        let rewritten = serde_json::from_str::<serde_json::Value>(
+            &tokio::fs::read_to_string(&path).await.unwrap(),
+        )
+        .unwrap();
+        assert!(rewritten.get("previous_response_id").is_none());
+        let stored = crate::call_validation::deserialize_messages_from_post(
+            rewritten["messages"].as_array().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            payload_roles_carrying_privacy(&stored),
+            vec!["user", "user"]
+        );
+    }
+
     #[tokio::test]
     async fn cleanup_saves_before_session_removal() {
         let workspace = tempfile::tempdir().unwrap();
@@ -905,6 +1118,8 @@ mod tests {
         {
             let mut session = session_arc.lock().await;
             session.enqueue_priority_command(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "queued-before-removal".to_string(),
                 priority: false,
                 command: ChatCommand::Regenerate {},
@@ -942,6 +1157,8 @@ mod tests {
         {
             let mut session = delayed_enqueue_ref.lock().await;
             session.enqueue_priority_command(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "queued-from-outstanding-ref".to_string(),
                 priority: false,
                 command: ChatCommand::Regenerate {},

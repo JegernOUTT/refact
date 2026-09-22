@@ -8,6 +8,22 @@
   border-color: var(--rf-border-strong);
 }
 
+.disclosure {
+  margin: 0;
+}
+
+.disclosure > summary {
+  list-style: none;
+}
+
+.disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.disclosure[open] > summary .toggle {
+  transform: rotate(180deg);
+}
+
 .header {
   display: flex;
   align-items: center;

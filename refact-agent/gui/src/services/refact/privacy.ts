@@ -1,6 +1,5 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
-import type { ChatMessage } from "./types";
 import { buildApiUrlFromState } from "./apiUrl";
 
 export type PrivacyShellBehavior = "withhold" | "ask" | "deny";
@@ -90,7 +89,6 @@ export type PrivacyInspectResponse = {
   chat_id: string;
   destination: PrivacyDestination;
   sendable: boolean;
-  would_send: ChatMessage[];
   records: PrivacyFileRecord[];
   blocked: PrivacyBlockedRecord[];
   refusal: string | null;
@@ -242,6 +240,7 @@ export const privacyApi = createApi({
           body: {
             chat_id: request.chat_id,
             destination: request.destination,
+            include_messages: false,
           },
           ...extraOptions,
         });

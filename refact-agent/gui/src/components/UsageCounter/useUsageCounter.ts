@@ -4,14 +4,13 @@ import {
   selectLastAssistantMessageById,
   selectLastAssistantMessageWithTokensById,
   selectMessagesCountById,
+  selectThreadTotalUsageById,
   useThreadId,
 } from "../../features/Chat/Thread";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import {
-  calculateUsageInputTokens,
   getCacheCreationTokens,
   getCacheReadTokens,
-  mergeUsages,
 } from "../../utils/calculateUsageInputTokens";
 
 export function useUsageCounter() {
@@ -29,9 +28,8 @@ export function useUsageCounter() {
     selectLastAssistantMessageWithTokensById(state, chatId),
   );
 
-  const currentThreadUsage = useMemo(
-    () => mergeUsages(lastAssistantMessage ? [lastAssistantMessage.usage] : []),
-    [lastAssistantMessage],
+  const totalThreadUsage = useAppSelector((state) =>
+    selectThreadTotalUsageById(state, chatId),
   );
 
   // Check if the last message has server-executed tools (like web_search)
@@ -50,17 +48,6 @@ export function useUsageCounter() {
     }
     return false;
   }, [lastAssistantMessage]);
-
-  const totalInputTokens = useMemo(() => {
-    return calculateUsageInputTokens({
-      usage: currentThreadUsage,
-      keys: [
-        "prompt_tokens",
-        "cache_creation_input_tokens",
-        "cache_read_input_tokens",
-      ],
-    });
-  }, [currentThreadUsage]);
 
   // The newest assistant message reports no usage until its stream ends, so read the last message
   // that actually reported input tokens instead of dropping to zero between turns.
@@ -117,8 +104,7 @@ export function useUsageCounter() {
 
   return {
     shouldShow,
-    currentThreadUsage,
-    totalInputTokens,
+    totalThreadUsage,
     currentSessionTokens,
     isOverflown,
     isWarning,

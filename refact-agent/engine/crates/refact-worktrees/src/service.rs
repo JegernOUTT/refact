@@ -18,6 +18,9 @@ use crate::types::{
     WorktreeStatus,
 };
 
+#[path = "housekeeping.rs"]
+mod housekeeping;
+
 const DEFAULT_MAX_PATCH_BYTES: usize = 200_000;
 
 static REGISTRY_WRITE_LOCK: OnceLock<AMutex<()>> = OnceLock::new();
@@ -588,6 +591,33 @@ impl WorktreeService {
         id: &str,
         request: MergeWorktreeRequest,
     ) -> Result<MergeWorktreeResponse, String> {
+        self.merge_worktree_checked_inner(id, request, None).await
+    }
+
+    pub async fn merge_worktree_checked(
+        &self,
+        id: &str,
+        request: MergeWorktreeRequest,
+        expected: crate::types::CheckedMergeIdentity,
+    ) -> Result<MergeWorktreeResponse, String> {
+        if request.include_uncommitted
+            || request.delete_after_merge
+            || request.target_branch.as_deref() != Some(expected.target_branch.as_str())
+        {
+            return Err(
+                "Checked landing requires explicit target and retained clean source".into(),
+            );
+        }
+        self.merge_worktree_checked_inner(id, request, Some(expected))
+            .await
+    }
+
+    async fn merge_worktree_checked_inner(
+        &self,
+        id: &str,
+        request: MergeWorktreeRequest,
+        expected: Option<crate::types::CheckedMergeIdentity>,
+    ) -> Result<MergeWorktreeResponse, String> {
         let service = self.clone();
         let id = id.to_string();
         tokio::spawn(async move {
@@ -599,6 +629,9 @@ impl WorktreeService {
             let _merge_guard = merge_lock.lock().await;
             let _registry_guard = registry_write_lock().lock().await;
             let registry = service.load_registry_unlocked().await?;
+            if let Some(expected) = &expected {
+                service.validate_checked_merge(&id, expected).await?;
+            }
             let blocking_service = service.clone();
             let blocking_id = id.clone();
             let (response, updated_registry) = tokio::task::spawn_blocking(move || {
@@ -621,6 +654,93 @@ impl WorktreeService {
         })
         .await
         .map_err(|e| format!("Worktree merge task failed: {}", e))?
+    }
+
+    pub async fn validate_checked_merge(
+        &self,
+        id: &str,
+        expected: &crate::types::CheckedMergeIdentity,
+    ) -> Result<(), String> {
+        let view = self.get_worktree(id).await?;
+        let diff = self.diff_worktree(id).await?;
+        let root = self.source_workspace_root.clone();
+        let target = tokio::task::spawn_blocking(move || git::status_for_path(&root))
+            .await
+            .map_err(|e| e.to_string())?;
+        if expected.target_files.is_empty()
+            || expected.target_files.len() > 100
+            || view.status.dirty
+            || view.status.conflicted
+            || view.status.error.is_some()
+            || target.dirty
+            || target.conflicted
+            || target.error.is_some()
+            || target.branch.as_deref() != Some(expected.target_branch.as_str())
+            || target.head_commit.as_deref() != Some(expected.target_head.as_str())
+            || view.status.head_commit.as_deref() != Some(expected.source_head.as_str())
+            || view.meta.base_commit.as_deref() != Some(expected.target_head.as_str())
+            || view.meta.base_branch.as_deref() != Some(expected.target_branch.as_str())
+            || diff.patch_truncated
+            || diff.files.is_empty()
+            || diff
+                .files
+                .iter()
+                .any(|file| !expected.target_files.contains(&file.path))
+            || format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&diff).map_err(|e| e.to_string())?)
+            ) != expected.patch_digest
+        {
+            return Err(
+                "Checked landing source, exact patch, target head or clean precondition changed"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn recover_checked_landing(
+        &self,
+        id: &str,
+        expected: crate::types::CheckedMergeIdentity,
+        expected_post: String,
+    ) -> Result<String, String> {
+        let service = self.clone();
+        let id = id.to_string();
+        tokio::spawn(async move {
+            let merge_lock = merge_lock_for(service.source_workspace_root());
+            let _merge_guard = merge_lock.lock().await;
+            let _registry_guard = registry_write_lock().lock().await;
+            let view = service.get_worktree(&id).await?;
+            if view.status.dirty || view.status.conflicted || view.status.error.is_some()
+                || view.status.head_commit.as_deref() != Some(expected.source_head.as_str()) {
+                return Err("Retained landing source changed; recovery blocked".into());
+            }
+            tokio::task::spawn_blocking(move || {
+                let root = service.source_workspace_root();
+                git::ensure_checkout_on_branch(root, "Recovery target", &expected.target_branch)?;
+                git::ensure_clean_worktree(root, "Recovery target")?;
+                git::ensure_no_merge_in_progress(root, "Recovery target")?;
+                if git::head_rev(root)? != expected_post {
+                    return Err("Recovery target differs from expected landing post-image".into());
+                }
+                let repo = git2::Repository::open(root).map_err(|e| e.to_string())?;
+                let post = repo.find_commit(git2::Oid::from_str(&expected_post).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                let source = repo.find_commit(git2::Oid::from_str(&expected.source_head).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                if post.parent_count() != 1 || post.parent_id(0).map_err(|e| e.to_string())?.to_string() != expected.target_head || post.tree_id() != source.tree_id() {
+                    return Err("Recovery material is not the exact native squash landing".into());
+                }
+                git::run_git_with_refact_author(root, &["revert", "--no-edit", "--no-gpg-sign", &expected_post])?;
+                let recovered = git::head_rev(root)?;
+                let current = repo.find_commit(git2::Oid::from_str(&recovered).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                let previous = post.parent(0).map_err(|e| e.to_string())?;
+                if current.tree_id() != previous.tree_id() {
+                    return Err("Recovery post-image is not the previous known-good tree; inspect, never replay".into());
+                }
+                git::ensure_clean_worktree(root, "Recovered target")?;
+                Ok(recovered)
+            }).await.map_err(|e| e.to_string())?
+        }).await.map_err(|e| e.to_string())?
     }
 
     fn merge_worktree_inner_blocking(
@@ -2408,6 +2528,107 @@ mod worktree_registry_tests {
         std::fs::write(root.join("file.txt"), "hello\n").unwrap();
         run_git(root, &["add", "file.txt"]);
         run_git(root, &["commit", "-m", "initial"]);
+    }
+
+    #[tokio::test]
+    async fn checked_landing_rejects_drift_and_preserves_source_and_unrelated_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        init_repo(&root);
+        let service = WorktreeService::new(temp.path().join("cache"), root.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/checked".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let id = &created.worktree.meta.id;
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "reviewed\n",
+            "candidate",
+        );
+        let diff = service.diff_worktree(id).await.unwrap();
+        let exact = crate::types::CheckedMergeIdentity {
+            source_head: diff.status.head_commit.clone().unwrap(),
+            target_head: created.worktree.meta.base_commit.clone().unwrap(),
+            target_branch: "main".into(),
+            patch_digest: format!("{:x}", Sha256::digest(serde_json::to_vec(&diff).unwrap())),
+            target_files: vec!["file.txt".into()],
+        };
+        let request = MergeWorktreeRequest {
+            target_branch: Some("main".into()),
+            delete_after_merge: false,
+            include_uncommitted: false,
+            ..Default::default()
+        };
+        for field in ["source", "target", "patch", "files"] {
+            let mut stale = exact.clone();
+            match field {
+                "source" => stale.source_head = "0".repeat(40),
+                "target" => stale.target_head = "0".repeat(40),
+                "patch" => stale.patch_digest = "0".repeat(64),
+                _ => stale.target_files = vec!["unrelated.txt".into()],
+            }
+            assert!(service
+                .merge_worktree_checked(id, request.clone(), stale)
+                .await
+                .is_err());
+            assert_eq!(
+                std::fs::read_to_string(root.join("file.txt")).unwrap(),
+                "hello\n"
+            );
+        }
+        std::fs::write(root.join("unrelated.txt"), "retain\n").unwrap();
+        assert!(service
+            .merge_worktree_checked(id, request.clone(), exact.clone())
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.join("unrelated.txt")).unwrap(),
+            "retain\n"
+        );
+        std::fs::remove_file(root.join("unrelated.txt")).unwrap();
+        let result = service
+            .merge_worktree_checked(id, request.clone(), exact.clone())
+            .await
+            .unwrap();
+        assert!(result.merged);
+        assert!(created.worktree.meta.root.exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("file.txt")).unwrap(),
+            "reviewed\n"
+        );
+        assert!(service
+            .merge_worktree_checked(id, request, exact.clone())
+            .await
+            .is_err());
+        let post = result.merge_commit.unwrap();
+        std::fs::write(root.join("unrelated.txt"), "retain recovery\n").unwrap();
+        assert!(service
+            .recover_checked_landing(id, exact.clone(), post.clone())
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.join("unrelated.txt")).unwrap(),
+            "retain recovery\n"
+        );
+        std::fs::remove_file(root.join("unrelated.txt")).unwrap();
+        service
+            .recover_checked_landing(id, exact.clone(), post.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("file.txt")).unwrap(),
+            "hello\n"
+        );
+        assert!(service
+            .recover_checked_landing(id, exact, post)
+            .await
+            .is_err());
     }
 
     fn unset_user_config(root: &Path) {

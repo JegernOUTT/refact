@@ -4,6 +4,7 @@ import { useAppDispatch } from "./useAppDispatch";
 import { selectConfig, selectApiKey } from "../features/Config/configSlice";
 import {
   selectThreadById,
+  selectContextRebuildRequiredById,
   selectThreadImagesById,
   selectSendImmediatelyById,
   selectMessagesById,
@@ -83,6 +84,9 @@ export function useChatActions(explicitChatId?: string) {
   const apiKey = useAppSelector(selectApiKey);
   const contextId = useThreadId();
   const chatId = explicitChatId ?? contextId;
+  const contextRebuildRequired = useAppSelector((state) =>
+    selectContextRebuildRequiredById(state, chatId),
+  );
   const thread = useAppSelector((state) => selectThreadById(state, chatId));
   const attachedImages = useAppSelector((state) =>
     selectThreadImagesById(state, chatId),
@@ -133,6 +137,8 @@ export function useChatActions(explicitChatId?: string) {
 
   const submit = useCallback(
     async (question: string, priority?: boolean) => {
+      if (contextRebuildRequired)
+        throw new Error("Rebuild context before sending.");
       if (!chatId) return;
 
       const content = buildMessageContent(question);
@@ -178,6 +184,7 @@ export function useChatActions(explicitChatId?: string) {
       chatId,
       config,
       apiKey,
+      contextRebuildRequired,
       buildMessageContent,
       dispatch,
       sendImmediately,
@@ -286,6 +293,8 @@ export function useChatActions(explicitChatId?: string) {
    */
   const retryFromIndex = useCallback(
     async (index: number, newContent: UserMessage["content"]) => {
+      if (contextRebuildRequired)
+        throw new Error("Rebuild context before retrying.");
       if (!chatId) return;
 
       const content = convertUserMessageContent(newContent);
@@ -298,7 +307,7 @@ export function useChatActions(explicitChatId?: string) {
         apiKey ?? undefined,
       );
     },
-    [chatId, config, apiKey],
+    [chatId, config, apiKey, contextRebuildRequired],
   );
 
   const updateMessage = useCallback(
@@ -308,6 +317,8 @@ export function useChatActions(explicitChatId?: string) {
       regenerate?: boolean,
     ) => {
       if (!chatId) return;
+      if (regenerate && contextRebuildRequired)
+        throw new Error("Rebuild context before regenerating.");
       await updateMessageApi(
         chatId,
         messageId,
@@ -317,12 +328,14 @@ export function useChatActions(explicitChatId?: string) {
         regenerate,
       );
     },
-    [chatId, config, apiKey],
+    [chatId, config, apiKey, contextRebuildRequired],
   );
 
   const removeMessage = useCallback(
     async (messageId: string, regenerate?: boolean) => {
       if (!chatId) return;
+      if (regenerate && contextRebuildRequired)
+        throw new Error("Rebuild context before regenerating.");
       await removeMessageApi(
         chatId,
         messageId,
@@ -331,13 +344,15 @@ export function useChatActions(explicitChatId?: string) {
         regenerate,
       );
     },
-    [chatId, config, apiKey],
+    [chatId, config, apiKey, contextRebuildRequired],
   );
 
   const regenerate = useCallback(async () => {
     if (!chatId) return;
+    if (contextRebuildRequired)
+      throw new Error("Rebuild context before regenerating.");
     await regenerateApi(chatId, config, apiKey ?? undefined);
-  }, [chatId, config, apiKey]);
+  }, [chatId, config, apiKey, contextRebuildRequired]);
 
   const cancelQueued = useCallback(
     async (clientRequestId: string) => {

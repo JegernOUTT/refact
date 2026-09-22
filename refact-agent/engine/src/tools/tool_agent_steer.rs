@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use refact_chat_history::history_limit::remove_invalid_tool_calls_and_tool_calls_results;
-
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
@@ -13,7 +11,7 @@ use crate::tasks::storage;
 use crate::tools::planner_delivery::{self, CardGuard, CardTarget, DeliveryReport};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use refact_core::chat_types::PushMode;
-use refact_runtime_api::{ChatSessionUpdate, SessionState};
+use refact_runtime_api::SessionState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentSteerPriority {
@@ -112,7 +110,7 @@ fn tool_output(
     report: &DeliveryReport,
 ) -> String {
     let compaction_note = if compacted {
-        "\nAuto-compaction: applied before steering."
+        "\nContext rebuild: queued before resumed generation."
     } else {
         ""
     };
@@ -138,17 +136,6 @@ fn should_autocompact_before_steer(
 ) -> bool {
     thread.auto_compact_enabled_effective()
         && matches!(state, SessionState::Completed | SessionState::Error)
-}
-
-fn autocompact_messages_for_resume(messages: &mut Vec<ChatMessage>) -> bool {
-    let before = serde_json::to_string(messages).ok();
-    let summarized = crate::chat::summarization::summarize_oldest_segment_with_static_summary(
-        messages,
-        "Previous non-user task-agent activity was summarized before planner steering.",
-        "agent_steer",
-    );
-    remove_invalid_tool_calls_and_tool_calls_results(messages);
-    summarized || serde_json::to_string(messages).ok() != before
 }
 
 fn validate_agent_snapshot(
@@ -266,20 +253,21 @@ impl Tool for ToolAgentSteer {
         validate_agent_snapshot(&snapshot, &task_id, &card_id, card.assignee.as_deref())?;
         let session_state = snapshot.session_state;
         let compacted = if should_autocompact_before_steer(session_state, &snapshot.thread) {
-            let mut messages = snapshot.messages.clone();
-            let compacted = autocompact_messages_for_resume(&mut messages);
-            if compacted {
-                chat_facade
-                    .update_session(
-                        &agent_chat_id,
-                        ChatSessionUpdate {
-                            messages,
-                            previous_response_id: None,
-                        },
-                    )
-                    .await?;
-            }
-            compacted
+            let session = gcx
+                .chat_sessions
+                .read()
+                .await
+                .get(&agent_chat_id)
+                .cloned()
+                .ok_or("Agent session not found")?;
+            crate::chat::context_rebuild::request_rebuild(
+                &mut *session.lock().await,
+                crate::chat::context_rebuild::PendingContextRebuild {
+                    model: None,
+                    trigger: "agent_steer".into(),
+                },
+            )?;
+            true
         } else {
             false
         };
@@ -591,6 +579,33 @@ mod tests {
         gcx
     }
 
+    /// Register a real `ChatSession` under `chat_id`, because main's
+    /// `context_rebuild::request_rebuild` path operates on the live session in
+    /// `gcx.chat_sessions` rather than through the `ChatSessionFacade`.
+    async fn register_agent_session(
+        gcx: &Arc<crate::global_context::GlobalContext>,
+        chat_id: &str,
+    ) {
+        let session = crate::chat::types::ChatSession::new(chat_id.to_string());
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), Arc::new(AMutex::new(session)));
+    }
+
+    /// Trigger of the rebuild queued on the live session, if any.
+    async fn pending_rebuild_trigger(
+        gcx: &Arc<crate::global_context::GlobalContext>,
+        chat_id: &str,
+    ) -> Option<String> {
+        let session = gcx.chat_sessions.read().await.get(chat_id).cloned()?;
+        let session = session.lock().await;
+        session
+            .pending_context_rebuild
+            .as_ref()
+            .map(|pending| pending.trigger.clone())
+    }
+
     async fn planner_ccx(
         gcx: Arc<crate::global_context::GlobalContext>,
         facade: Arc<dyn ChatSessionFacade>,
@@ -876,11 +891,12 @@ mod tests {
             SessionState::Completed,
             messages,
         ));
-        let ccx = planner_ccx(gcx, mock.clone(), "planner").await;
+        register_agent_session(&gcx, "agent-chat-1").await;
+        let ccx = planner_ccx(gcx.clone(), mock.clone(), "planner").await;
         let mut tool = ToolAgentSteer::new();
 
-        let output = tool_output_text(
-            tool.tool_execute(
+        let result = tool
+            .tool_execute(
                 ccx,
                 &"call".to_string(),
                 &args(&[
@@ -889,17 +905,29 @@ mod tests {
                 ]),
             )
             .await
-            .unwrap(),
-        );
+            .unwrap();
+        let receipt = match &result.1[0] {
+            ContextEnum::ChatMessage(message) => message.extra["delivery_receipt"].clone(),
+            _ => panic!("expected chat message"),
+        };
+        let output = tool_output_text(result);
 
-        let updates = mock.updates();
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].previous_response_id, None);
-        assert!(updates[0]
-            .messages
-            .iter()
-            .any(crate::chat::summarization::is_segment_summary));
-        assert!(output.contains("Auto-compaction: applied before steering."));
+        // Steering a Completed agent must compact before resuming. Under main's
+        // mechanism that means a context rebuild is queued on the live session
+        // (raw history stays append-only; no `update_session` rewrite happens).
+        assert_eq!(
+            pending_rebuild_trigger(&gcx, "agent-chat-1")
+                .await
+                .as_deref(),
+            Some("agent_steer"),
+            "steering a completed agent must queue a context rebuild"
+        );
+        assert!(
+            mock.updates().is_empty(),
+            "context_rebuild must not statically rewrite the session history"
+        );
+        assert_eq!(receipt["compacted_before_steer"], true);
+        assert!(output.contains("Context rebuild: queued before resumed generation."));
         assert_eq!(mock.deliveries().len(), 1);
     }
 
@@ -960,7 +988,8 @@ mod tests {
             auto_compact_enabled: None,
             ..test_agent_thread()
         };
-        let ccx = planner_ccx(gcx, mock.clone(), "planner").await;
+        register_agent_session(&gcx, "agent-chat-1").await;
+        let ccx = planner_ccx(gcx.clone(), mock.clone(), "planner").await;
         let mut tool = ToolAgentSteer::new();
 
         let output = tool_output_text(
@@ -976,12 +1005,17 @@ mod tests {
             .unwrap(),
         );
 
-        assert_eq!(mock.updates().len(), 1);
-        assert!(mock.updates()[0]
-            .messages
-            .iter()
-            .any(crate::chat::summarization::is_segment_summary));
-        assert!(output.contains("Auto-compaction: applied before steering."));
+        // `auto_compact_enabled: None` must still be treated as enabled, so the
+        // rebuild is queued on the live session exactly as in the explicit case.
+        assert_eq!(
+            pending_rebuild_trigger(&gcx, "agent-chat-1")
+                .await
+                .as_deref(),
+            Some("agent_steer"),
+            "unset auto_compact must still queue a context rebuild"
+        );
+        assert!(mock.updates().is_empty());
+        assert!(output.contains("Context rebuild: queued before resumed generation."));
         assert_eq!(mock.deliveries().len(), 1);
     }
 
@@ -1041,7 +1075,8 @@ mod tests {
             auto_compact_enabled: Some(false),
             ..test_agent_thread()
         };
-        let ccx = planner_ccx(gcx, mock.clone(), "planner").await;
+        register_agent_session(&gcx, "agent-chat-1").await;
+        let ccx = planner_ccx(gcx.clone(), mock.clone(), "planner").await;
         let mut tool = ToolAgentSteer::new();
 
         let output = tool_output_text(
@@ -1058,7 +1093,13 @@ mod tests {
         );
 
         assert!(mock.updates().is_empty());
-        assert!(!output.contains("Auto-compaction: applied before steering."));
+        assert!(
+            pending_rebuild_trigger(&gcx, "agent-chat-1")
+                .await
+                .is_none(),
+            "auto_compact disabled must not queue a context rebuild"
+        );
+        assert!(!output.contains("Context rebuild: queued before resumed generation."));
         assert_eq!(mock.deliveries().len(), 1);
     }
 

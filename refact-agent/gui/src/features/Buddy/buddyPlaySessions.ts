@@ -223,6 +223,184 @@ export interface BuddyPlayBodyTarget {
   pose: BuddyScenePose;
 }
 
+/* ------------------------------------------------------------------ */
+/* B35: interruption / resume, real completion state, keyboard targets. */
+/* Additive only — no existing phase timing or drawing behavior changes. */
+/* ------------------------------------------------------------------ */
+
+export interface BuddyPlaySuspension {
+  session: BuddyPlaySession;
+  /** Elapsed time inside the current phase, frozen at suspend time. */
+  phaseElapsedMs: number;
+  /** Elapsed time since the phase was armed, frozen at suspend time. */
+  armedElapsedMs: number;
+  suspendedAtMs: number;
+  reason: BuddyPlayInterruptReason;
+}
+
+export type BuddyPlayInterruptReason =
+  | "user_paused"
+  | "hidden"
+  | "unmounted"
+  | "work_took_over";
+
+/**
+ * Freeze a running session. The session is preserved exactly; only the clock is
+ * captured, so resuming never skips or replays a phase.
+ */
+export function suspendPlaySession(
+  session: BuddyPlaySession,
+  nowMs: number,
+  reason: BuddyPlayInterruptReason,
+): BuddyPlaySuspension {
+  const safeNow = finiteOr(nowMs, 0);
+  return {
+    session,
+    phaseElapsedMs: Math.max(0, safeNow - session.phaseStartedAtMs),
+    armedElapsedMs: Math.max(0, safeNow - session.armedAtMs),
+    suspendedAtMs: safeNow,
+    reason,
+  };
+}
+
+/** Restore a suspended session so the current phase continues where it stopped. */
+export function resumePlaySession(
+  suspension: BuddyPlaySuspension,
+  nowMs: number,
+): BuddyPlaySession {
+  const safeNow = finiteOr(nowMs, 0);
+  return {
+    ...suspension.session,
+    phaseStartedAtMs: safeNow - suspension.phaseElapsedMs,
+    armedAtMs: safeNow - suspension.armedElapsedMs,
+  };
+}
+
+export type BuddyPlayOutcome = "completed" | "interrupted" | "abandoned";
+
+export interface BuddyPlayCompletion {
+  kind: BuddyPlaySessionKind;
+  outcome: BuddyPlayOutcome;
+  /** Successful rounds actually played; never inflated by interruption. */
+  rounds: number;
+  /** Rounds the game asks for before it reports completion. */
+  roundsTarget: number;
+  /** Always false: play never grants rights or changes project work. */
+  affectsWork: false;
+  label: string;
+}
+
+function playRounds(session: BuddyPlaySession): number {
+  return session.kind === "fetch" ? session.throwCount : session.catches;
+}
+
+function playRoundsTarget(kind: BuddyPlaySessionKind): number {
+  return kind === "fetch" ? FETCH_MAX_THROWS : FIREFLY_MAX_CATCHES;
+}
+
+/**
+ * Real completion state for a play session. `interrupted` means the user or the
+ * host stopped a session that had progress; `abandoned` means it never started.
+ */
+export function playSessionCompletion(
+  session: BuddyPlaySession,
+  ended: "finished" | "interrupted",
+): BuddyPlayCompletion {
+  const rounds = playRounds(session);
+  const roundsTarget = playRoundsTarget(session.kind);
+  const completed = ended === "finished" && session.phase === "done";
+  const outcome: BuddyPlayOutcome = completed
+    ? "completed"
+    : rounds > 0
+      ? "interrupted"
+      : "abandoned";
+  const noun = session.kind === "fetch" ? "throws" : "catches";
+  const label = completed
+    ? `Play finished: ${rounds} of ${roundsTarget} ${noun}.`
+    : outcome === "interrupted"
+      ? `Play stopped early after ${rounds} of ${roundsTarget} ${noun}.`
+      : "Play stopped before it started.";
+  return {
+    kind: session.kind,
+    outcome,
+    rounds,
+    roundsTarget,
+    affectsWork: false,
+    label,
+  };
+}
+
+export interface BuddyPlayKeyboardTarget {
+  id: string;
+  /** Single-key shortcut, also usable as a visible DOM button. */
+  key: string;
+  label: string;
+  x: number;
+  y: number;
+}
+
+const FETCH_KEYBOARD_TARGETS: readonly BuddyPlayKeyboardTarget[] = [
+  { id: "left", key: "1", label: "Throw left", x: PLAY_MIN_X + 3, y: 78 },
+  { id: "centre", key: "2", label: "Throw ahead", x: 50, y: PLAY_MAX_Y - 2 },
+  { id: "right", key: "3", label: "Throw right", x: PLAY_MAX_X - 3, y: 78 },
+];
+
+const FIREFLY_KEYBOARD_TARGETS: readonly BuddyPlayKeyboardTarget[] = [
+  {
+    id: "low",
+    key: "1",
+    label: "Pounce on the low glow",
+    x: 40,
+    y: PLAY_MAX_Y - 1,
+  },
+  { id: "mid", key: "2", label: "Pounce on the middle glow", x: 50, y: 77 },
+  {
+    id: "high",
+    key: "3",
+    label: "Pounce on the high glow",
+    x: 60,
+    y: PLAY_MIN_Y + 1,
+  },
+];
+
+/**
+ * Discrete named targets so every pointer action in play has a keyboard and DOM
+ * equivalent. Coordinates stay inside the same play bounds as pointer input.
+ */
+export function playKeyboardTargets(
+  kind: BuddyPlaySessionKind,
+): readonly BuddyPlayKeyboardTarget[] {
+  return kind === "fetch" ? FETCH_KEYBOARD_TARGETS : FIREFLY_KEYBOARD_TARGETS;
+}
+
+export function playKeyboardTargetForKey(
+  kind: BuddyPlaySessionKind,
+  key: string,
+): BuddyPlayKeyboardTarget | null {
+  return playKeyboardTargets(kind).find((target) => target.key === key) ?? null;
+}
+
+/** Screen-reader sentence for the current session; states facts only. */
+export function describePlaySessionForScreenReader(
+  session: BuddyPlaySession | null,
+  suspended: boolean,
+): string {
+  if (!session) return "No play session is running.";
+  const rounds = playRounds(session);
+  const target = playRoundsTarget(session.kind);
+  const game = session.kind === "fetch" ? "Fetch" : "Firefly";
+  if (suspended) {
+    return `${game} paused at ${session.phase}, ${rounds} of ${target} rounds. Resume to continue.`;
+  }
+  if (session.phase === "armed") {
+    return `${game} ready. Choose a target. ${rounds} of ${target} rounds done.`;
+  }
+  if (session.phase === "done") {
+    return `${game} finished with ${rounds} of ${target} rounds.`;
+  }
+  return `${game} in progress: ${session.phase}. ${rounds} of ${target} rounds done.`;
+}
+
 export function playSessionBodyTarget(
   session: BuddyPlaySession | null,
 ): BuddyPlayBodyTarget | null {

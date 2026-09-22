@@ -1103,16 +1103,12 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
         }
     }
 
+    @Volatile private var decisionsDisposed = false
+
     private fun handleAskQuestions(payload: Events.AskQuestionsPayload) {
-        val count = payload.questions.size
-        val text = when (count) {
-            0 -> "your input"
-            1 -> "1 question"
-            else -> "$count questions"
-        }
-        ApplicationManager.getApplication().invokeLater {
-            emitChat(project, "AI needs $text to continue", payload.chatId)
-        }
+        val decisions = com.smallcloud.refactai.notifications.ProjectDecisionNotifications.getInstance(project)
+        val scope = decisions.currentScope() ?: return
+        decisions.ask(payload, scope) { !decisionsDisposed }
     }
 
     private suspend fun handleRequestLogs(payload: Events.RequestLogsPayload) {
@@ -1184,6 +1180,11 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
                 handleAskQuestions(event.payload)
             }
 
+            is Events.DecisionResolved -> {
+                val decisions = com.smallcloud.refactai.notifications.ProjectDecisionNotifications.getInstance(project)
+                decisions.currentScope()?.let { decisions.resolve(event.payload, it) { !decisionsDisposed } }
+            }
+
             is Events.RequestLogs -> {
                 handleRequestLogs(event.payload)
             }
@@ -1218,6 +1219,7 @@ class SharedChatPane(val project: Project) : JPanel(), Disposable {
     }
 
     override fun dispose() {
+        decisionsDisposed = true
         activationListener?.let { listener ->
             val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
             focusManager.removePropertyChangeListener("activeWindow", listener)

@@ -110,9 +110,8 @@ use crate::http::routers::v1::tasks::{
     handle_delete_task_document, handle_pin_task_document, handle_history_task_document,
 };
 use crate::http::routers::v1::trajectory_ops::{
-    handle_transform_preview, handle_transform_apply, handle_handoff_preview, handle_handoff_apply,
-    handle_mode_transition_apply, handle_planner_from_transition, handle_llm_compress_preview,
-    handle_llm_compress_apply,
+    handle_transform_preview, handle_transform_apply, handle_mode_transition_apply,
+    handle_planner_from_transition, handle_llm_compress_preview, handle_llm_compress_apply,
 };
 use crate::http::routers::v1::project_configs::{
     handle_v1_project_configs_get, handle_v1_project_configs_rescan,
@@ -140,10 +139,18 @@ mod attention;
 mod background_agents;
 pub mod browser_settings;
 pub mod buddy;
+pub mod buddy_decisions;
 pub mod buddy_drafts;
+pub mod buddy_editorial;
 pub mod buddy_frontend_error;
+pub mod buddy_improvement;
+pub mod buddy_native_approvals;
+pub mod buddy_native_work;
+pub mod buddy_observability;
+pub mod buddy_operator;
 pub mod buddy_opportunities;
 pub mod buddy_pulse;
+pub mod buddy_supervision;
 pub mod bug_report;
 pub mod caps;
 mod causal;
@@ -155,7 +162,7 @@ pub mod code_intel;
 pub mod code_lens;
 mod commands_marketplace;
 pub mod customization;
-mod customization_editor;
+pub(crate) mod customization_editor;
 pub mod exec;
 pub mod ext_management;
 mod ext_marketplace_sources;
@@ -184,7 +191,7 @@ mod privacy;
 mod project_configs;
 pub mod project_information;
 pub mod scheduler;
-mod settings_config;
+pub(crate) mod settings_config;
 mod setup_status;
 mod shell_policy;
 pub mod sidebar;
@@ -737,14 +744,6 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             post(handle_transform_apply),
         )
         .route(
-            "/chats/:chat_id/trajectory/handoff/preview",
-            post(handle_handoff_preview),
-        )
-        .route(
-            "/chats/:chat_id/trajectory/handoff/apply",
-            post(handle_handoff_apply),
-        )
-        .route(
             "/chats/:chat_id/trajectory/mode-transition/apply",
             post(handle_mode_transition_apply),
         )
@@ -1160,6 +1159,261 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route(
             "/buddy/drafts/pulse_report",
             post(buddy_drafts::handle_v1_buddy_draft_create_pulse_report),
+        )
+        .route(
+            "/buddy/operator/status",
+            get(buddy_operator::handle_operator_status),
+        )
+        .route(
+            "/buddy/operator/reopen",
+            post(buddy_operator::handle_operator_reopen),
+        )
+        .route(
+            "/buddy/operator/legacy-drafts/:id/work",
+            get(buddy_operator::handle_legacy_draft_work),
+        )
+        .route(
+            "/buddy/work",
+            get(buddy_operator::handle_v1_buddy_operator_work_list),
+        )
+        .route(
+            "/buddy/decisions/current",
+            get(buddy_decisions::handle_current_decisions),
+        )
+        .route(
+            "/buddy/approvals/current",
+            get(buddy_native_approvals::handle_current_approvals),
+        )
+        .route(
+            "/buddy/approvals/:chat_id/response",
+            post(buddy_native_approvals::handle_approval_response),
+        )
+        .route(
+            "/buddy/editorial/claim",
+            post(buddy_editorial::handle_claim),
+        )
+        .route(
+            "/buddy/editorial/feedback",
+            post(buddy_editorial::handle_feedback),
+        )
+        .route(
+            "/buddy/editorial/metrics",
+            get(buddy_editorial::handle_metrics),
+        )
+        .route(
+            "/buddy/supervision/context",
+            get(buddy_supervision::context),
+        )
+        .route(
+            "/buddy/supervision/mandates",
+            post(buddy_supervision::create_mandate),
+        )
+        .route(
+            "/buddy/supervision/mandates/:id",
+            get(buddy_supervision::get_mandate),
+        )
+        .route(
+            "/buddy/supervision/mandates/:id/revoke",
+            post(buddy_supervision::revoke_mandate),
+        )
+        .route(
+            "/buddy/supervision/mandates/:id/intake",
+            post(buddy_supervision::intake_goal),
+        )
+        .route(
+            "/buddy/supervision/mandates/:id/spawn",
+            post(buddy_supervision::spawn_worker),
+        )
+        .route(
+            "/buddy/supervision/mandates/:id/status",
+            get(buddy_supervision::get_status),
+        )
+        .route(
+            "/buddy/supervision/mandates/:id/reconcile",
+            post(buddy_supervision::reconcile),
+        )
+        .route(
+            "/buddy/supervision/mandates/:id/routine-question",
+            post(buddy_supervision::routine_question),
+        )
+        .route(
+            "/buddy/supervision/mandates/:id/message",
+            post(buddy_supervision::message_worker),
+        )
+        .route(
+            "/buddy/supervision/mandates/:id/pause",
+            post(buddy_supervision::pause_worker),
+        )
+        .route(
+            "/buddy/supervision/mandates/:id/resume",
+            post(buddy_supervision::resume_worker),
+        )
+        .route(
+            "/buddy/supervision/mandates/:id/cancel",
+            post(buddy_supervision::cancel_worker),
+        )
+        .route(
+            "/buddy/supervision/mandates/:id/assess-candidate",
+            post(buddy_supervision::assess_candidate),
+        )
+        .route(
+            "/buddy/improvement/candidates",
+            get(buddy_improvement::handle_list).post(buddy_improvement::handle_create),
+        )
+        .route(
+            "/buddy/improvement/candidates/:id",
+            get(buddy_improvement::handle_get),
+        )
+        .route(
+            "/buddy/improvement/specs",
+            post(buddy_improvement::handle_spec_create),
+        )
+        .route(
+            "/buddy/improvement/candidates/:id/proofs",
+            post(buddy_improvement::handle_proof),
+        )
+        .route(
+            "/buddy/improvement/candidates/:id/spawn",
+            post(buddy_improvement::handle_spawn),
+        )
+        .route(
+            "/buddy/improvement/candidates/:id/activation-check",
+            post(buddy_improvement::handle_activation_check),
+        )
+        .route(
+            "/buddy/improvement/candidates/:id/activate",
+            post(buddy_improvement::handle_activate),
+        )
+        .route(
+            "/buddy/improvement/attempts",
+            get(buddy_improvement::handle_attempts),
+        )
+        .route(
+            "/buddy/improvement/inspect",
+            post(buddy_improvement::handle_inspect),
+        )
+        .route(
+            "/buddy/improvement/artifacts/inspect",
+            post(buddy_improvement::handle_artifact_inspect),
+        )
+        .route(
+            "/buddy/improvement/candidates/:id/evaluate",
+            post(buddy_improvement::handle_evaluate),
+        )
+        .route(
+            "/buddy/improvement/evaluations",
+            get(buddy_improvement::handle_evaluations),
+        )
+        .route(
+            "/buddy/operator/diagnostics",
+            get(buddy_observability::handle_summary),
+        )
+        .route(
+            "/buddy/operator/retention/preview",
+            get(buddy_observability::handle_retention_preview),
+        )
+        .route(
+            "/buddy/operator/policy/preview",
+            post(buddy_observability::handle_policy_preview),
+        )
+        .route(
+            "/buddy/operator/policy/confirm",
+            post(buddy_observability::handle_policy_confirm),
+        )
+        .route(
+            "/buddy/improvement/evaluations/:id",
+            get(buddy_improvement::handle_evaluation_get),
+        )
+        .route(
+            "/buddy/improvement/evaluations/:id/cancel",
+            post(buddy_improvement::handle_evaluation_cancel),
+        )
+        .route(
+            "/buddy/actions/preview",
+            post(buddy_operator::handle_resource_preview),
+        )
+        .route(
+            "/buddy/actions/draft",
+            post(buddy_operator::handle_resource_draft),
+        )
+        .route(
+            "/buddy/actions/rights",
+            post(buddy_operator::handle_resource_rights),
+        )
+        .route(
+            "/buddy/actions/prepare",
+            post(buddy_operator::handle_resource_prepare),
+        )
+        .route(
+            "/buddy/actions/grant",
+            post(buddy_operator::handle_resource_grant),
+        )
+        .route(
+            "/buddy/actions/execute",
+            post(buddy_operator::handle_resource_execute),
+        )
+        .route(
+            "/buddy/executions/:id/recover",
+            post(buddy_operator::handle_resource_recover),
+        )
+        .route(
+            "/buddy/grants/:id/revoke",
+            post(buddy_operator::handle_resource_grant_revoke),
+        )
+        .route(
+            "/buddy/native-work",
+            get(buddy_native_work::handle_native_work),
+        )
+        .route(
+            "/buddy/decisions/questions/:chat_id/:tool_call_id",
+            get(buddy_decisions::handle_question_state)
+                .post(buddy_decisions::handle_question_answer),
+        )
+        .route(
+            "/buddy/work/:id",
+            get(buddy_operator::handle_v1_buddy_operator_work_get),
+        )
+        .route(
+            "/buddy/work/:id/actions",
+            get(buddy_operator::handle_v1_buddy_operator_actions),
+        )
+        .route(
+            "/buddy/work/:id/actions/attach",
+            post(buddy_operator::handle_resource_attach),
+        )
+        .route(
+            "/buddy/work/:id/outcomes",
+            get(buddy_operator::handle_v1_buddy_operator_work_outcomes),
+        )
+        .route(
+            "/buddy/work/:id/read",
+            get(buddy_operator::handle_v1_buddy_operator_read_get)
+                .post(buddy_operator::handle_v1_buddy_operator_read_mark),
+        )
+        .route(
+            "/buddy/work/:id/snooze",
+            get(buddy_operator::handle_v1_buddy_operator_snooze_get)
+                .post(buddy_operator::handle_v1_buddy_operator_snooze_set),
+        )
+        .route(
+            "/buddy/work/:id/actions/:action_id/execute",
+            post(buddy_operator::handle_v1_buddy_operator_action_execute),
+        )
+        .route(
+            "/buddy/artifacts/:id",
+            get(buddy_operator::handle_v1_buddy_operator_artifact_get),
+        )
+        .route(
+            "/buddy/artifacts/:id/revisions",
+            get(buddy_operator::handle_v1_buddy_operator_artifact_history),
+        )
+        .route(
+            "/buddy/outcomes/:id",
+            get(buddy_operator::handle_v1_buddy_operator_outcome_get),
+        )
+        .route(
+            "/buddy/executions/:id",
+            get(buddy_operator::handle_v1_buddy_operator_execution_get),
         )
         .route(
             "/buddy/drafts/:id",

@@ -78,6 +78,22 @@ impl BuddyJob for StatsWatcherJob {
 
         for &m in WORKFLOW_MILESTONES {
             if prev_runs < m && runs >= m {
+                if crate::buddy::editorial::enabled(&gcx).await {
+                    return BuddyJobResult {
+                        activity: Some(BuddyActivity {
+                            icon: "🎉".into(),
+                            title: format!("Milestone: {} tasks completed!", m),
+                            description: format!("{} workflows have finished successfully.", m),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            activity_type: "milestone".into(),
+                            chat_id: None,
+                            failure_category: None,
+                            failure_summary: None,
+                        }),
+                        last_result: Some(runs.to_string()),
+                        ..Default::default()
+                    };
+                }
                 let fallback_text = format!("We've completed {} tasks together!", m);
                 let mut speech = match crate::buddy::actor::buddy_snapshot(gcx.clone()).await {
                     Some(snapshot) => {
@@ -99,6 +115,7 @@ impl BuddyJob for StatsWatcherJob {
                             .await
                     }
                     None => BuddySpeechItem {
+                        editorial_delivery_required: false,
                         id: format!("stats-milestone-{}", m),
                         text: fallback_text,
                         mood: "happy".to_string(),

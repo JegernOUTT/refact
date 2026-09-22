@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use futures::stream::{self, StreamExt};
 use tracing::{error, info, warn};
 
-use refact_codegraph::{lang_from_path, CodeGraphService, Counts, QueuedPath, WalCheckpointMode};
+use refact_codegraph::{
+    lang_from_path, CodeGraphService, Counts, DatabaseRecovery, QueuedPath, WalCheckpointMode,
+};
 
 use crate::global_context::GlobalContext;
 
@@ -148,6 +150,11 @@ async fn prepare_index_entry_or_remove_path(
     }
 }
 
+fn database_is_gone(err: &str) -> bool {
+    err.contains(refact_codegraph::DB_UNAVAILABLE_ERROR)
+        || err.contains(refact_codegraph::store::DB_IN_USE_ERROR)
+}
+
 async fn submit_index_entries(
     gcx: &Arc<GlobalContext>,
     service: &Arc<CodeGraphService>,
@@ -157,6 +164,18 @@ async fn submit_index_entries(
     for chunk in entries.chunks(BATCH_TX_SIZE) {
         let chunk_entries = chunk.to_vec();
         if let Err(err) = service.index_files_batch(&chunk_entries).await {
+            // Splitting the batch only helps when one file is at fault. A replaced or unavailable
+            // database fails every single-file retry too, so re-queue the chunk and give up now.
+            if database_is_gone(&err) || service.database_replaced() {
+                error!("codegraph: index batch abandoned, database unavailable: {err}");
+                *gcx.codegraph_error.lock().unwrap() = err;
+                let paths = chunk_entries
+                    .iter()
+                    .map(|(path, _, _)| path.clone())
+                    .collect::<Vec<_>>();
+                service.enqueue_files(&paths);
+                return false;
+            }
             error!("codegraph: index batch failed: {err}");
             for entry in chunk_entries {
                 let single = vec![entry];
@@ -294,8 +313,28 @@ pub fn sweep_stale_codegraph_stores(
         let stale = newest_mtime_in_dir(&path)
             .and_then(|modified| now.duration_since(modified).ok())
             .is_some_and(|age| age > STALE_STORE_MAX_AGE);
-        if stale && std::fs::remove_dir_all(&path).is_ok() {
-            removed.push(path);
+        if !stale {
+            continue;
+        }
+        // Another engine holding the shared lease is still writing into this store, and unlinking
+        // its files would leave it indexing a deleted inode.
+        let db_file = path.join(CODEGRAPH_DB_FILE);
+        match refact_codegraph::store::try_acquire_exclusive_lease(&db_file) {
+            Ok(Some(lease)) => {
+                // The lease stays alive across the removal: dropping it first would let another
+                // engine open the store between the probe and the unlink.
+                let deleted = std::fs::remove_dir_all(&path).is_ok();
+                drop(lease);
+                if deleted {
+                    removed.push(path);
+                }
+            }
+            Ok(None) => {
+                info!("codegraph: stale store {path:?} is in use by another engine, keeping it");
+            }
+            Err(err) => {
+                warn!("codegraph: stale store {path:?} lease probe failed: {err}");
+            }
         }
     }
     removed
@@ -331,6 +370,44 @@ pub async fn codegraph_init(gcx: Arc<GlobalContext>) {
     }
 }
 
+/// Another engine bumping the schema deletes and recreates the sqlite files, which would leave
+/// this process writing into an unlinked inode forever. Reopen both connections on the file that
+/// now exists and replay the workspace into it; the pending queue is kept as-is.
+async fn recover_if_database_replaced(
+    gcx: &Arc<GlobalContext>,
+    service: &Arc<CodeGraphService>,
+) -> bool {
+    match service.recover_replaced_database().await {
+        DatabaseRecovery::NotNeeded | DatabaseRecovery::Deferred => false,
+        DatabaseRecovery::Recovered => {
+            info!("codegraph: database was replaced on disk, reopened both connections");
+            gcx.codegraph_error.lock().unwrap().clear();
+            crate::files_in_workspace::enqueue_all_files_from_workspace_folders(
+                gcx.clone(),
+                true,
+                false,
+            )
+            .await;
+            match reconcile_deleted_paths(service.clone()).await {
+                Ok(removed) if removed > 0 => {
+                    info!("codegraph: removed {removed} stale stored files after recovery");
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    error!("codegraph: deletion reconciliation after recovery failed: {err}");
+                    *gcx.codegraph_error.lock().unwrap() = err;
+                }
+            }
+            true
+        }
+        DatabaseRecovery::Failed(err) => {
+            error!("codegraph: reopen after replacement failed: {err}");
+            *gcx.codegraph_error.lock().unwrap() = err;
+            true
+        }
+    }
+}
+
 pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
     let service = match gcx.codegraph.lock().await.clone() {
         Some(service) => service,
@@ -361,6 +438,22 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
     loop {
         if gcx.shutdown_flag.load(Ordering::Relaxed) {
             break;
+        }
+
+        recover_if_database_replaced(&gcx, &service).await;
+        if !service.is_available() {
+            // A failed reopen must not turn into a busy loop: wait out the idle cadence and let
+            // the next pass retry, keeping the queue intact meanwhile.
+            let shutdown_flag = gcx.shutdown_flag.clone();
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+                _ = async move {
+                    while !shutdown_flag.load(Ordering::Relaxed) {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                } => break,
+            }
+            continue;
         }
 
         let remaining = service.queue_len();
@@ -786,5 +879,43 @@ mod tests {
         assert!(fresh.exists());
         assert!(no_db.exists());
         assert!(!old.exists());
+    }
+
+    #[test]
+    fn stale_store_sweep_skips_a_directory_whose_lease_is_held() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("codegraph");
+        let active = root.join("active-hash");
+        let held = root.join("held-hash");
+        let unheld = root.join("unheld-hash");
+        for dir in [&active, &held, &unheld] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(CODEGRAPH_DB_FILE), b"db").unwrap();
+        }
+        let lease =
+            refact_codegraph::store::try_acquire_shared_lease(&held.join(CODEGRAPH_DB_FILE))
+                .unwrap()
+                .expect("the shared lease must be grantable");
+        let now = std::time::SystemTime::now();
+        let ancient = now - STALE_STORE_MAX_AGE - Duration::from_secs(60 * 60);
+        for dir in [&active, &held, &unheld] {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                filetime::set_file_mtime(
+                    entry.path(),
+                    filetime::FileTime::from_system_time(ancient),
+                )
+                .unwrap();
+            }
+        }
+
+        let removed = sweep_stale_codegraph_stores(&active.join(CODEGRAPH_DB_FILE), now);
+
+        assert_eq!(removed, vec![unheld.clone()]);
+        assert!(
+            held.exists(),
+            "a store another engine still holds must never be swept"
+        );
+        assert!(!unheld.exists());
+        drop(lease);
     }
 }

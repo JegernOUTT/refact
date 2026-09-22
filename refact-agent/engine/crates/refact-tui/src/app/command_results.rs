@@ -65,7 +65,8 @@ impl App {
         result: Result<(), String>,
     ) -> AppAction {
         let origin = match &context {
-            CommandContextTag::Abort { origin }
+            CommandContextTag::AnswerQuestions { origin, .. }
+            | CommandContextTag::Abort { origin }
             | CommandContextTag::BrowserContextDecision { origin, .. }
             | CommandContextTag::RetryFromIndex { origin, .. }
             | CommandContextTag::ToolDecisions { origin, .. }
@@ -85,6 +86,7 @@ impl App {
 
     fn handle_command_success(&mut self, context: CommandContextTag) -> AppAction {
         match context {
+            CommandContextTag::AnswerQuestions { .. } => AppAction::None,
             CommandContextTag::SendMessage { correlation, .. } => {
                 self.clear_in_flight_send(&correlation.client_request_id);
                 AppAction::None
@@ -126,6 +128,19 @@ impl App {
 
     fn handle_command_failure(&mut self, context: CommandContextTag, error: String) -> AppAction {
         match context {
+            CommandContextTag::AnswerQuestions {
+                client_request_id, ..
+            } => {
+                if self.native_answer_request_id.as_deref() == Some(client_request_id.as_str())
+                    && !self.native_answer_accepted
+                {
+                    self.native_answer_request_id = None;
+                    self.add_notice(format!(
+                        "Answer submission failed: {error}; answers remain in the form"
+                    ));
+                }
+                AppAction::None
+            }
             CommandContextTag::SendMessage {
                 prompt,
                 params,

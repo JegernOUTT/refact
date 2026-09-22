@@ -78,6 +78,7 @@ import {
 import { setUpStore } from "../app/store";
 import { trajectoriesApi } from "../services/refact";
 import { buddyApi, type BuddyErrorReport } from "../services/refact/buddy";
+import { buddyOperatorApi } from "../services/refact/buddyOperator";
 import type {
   BuddySnapshot,
   BuddyState,
@@ -171,8 +172,10 @@ function isCreateWithModeAction(action: unknown, mode: string): boolean {
   return payload.mode === mode;
 }
 
-function makeThunkDispatch() {
-  const innerDispatch = vi.fn<TestDispatch>(() => undefined);
+function makeThunkDispatch(authorityResponse?: unknown) {
+  const innerDispatch = vi.fn<TestDispatch>((action) =>
+    typeof action === "function" ? authorityResponse : undefined,
+  );
   const dispatch = vi.fn<TestDispatch>((action) => {
     if (typeof action === "function") {
       return (action as CapturedThunk)(
@@ -1063,9 +1066,15 @@ describe("Buddy chat notification freshness", () => {
     expect(source).toContain(
       "dispatch(dismissRuntimeEvent(notification.sourceId))",
     );
-    expect(source).toContain(
-      "await dismissMutation(notification.sourceId).unwrap()",
-    );
+    expect(source).toContain("await dismissSuggestion(notification.sourceId)");
+    // Suggestion dismissal must use the central authority-aware handler and
+    // restore the notification if that handler does not acknowledge success.
+    expect(source).toContain("useBuddyControlAction(chatId)");
+    expect(source).toContain("const result = await executeControl(");
+    expect(source).toContain('action: "dismiss_suggestion"');
+    expect(source).toContain("action_param: id");
+    expect(source).toContain('if (result.status !== "success")');
+    expect(source).toContain("restoreNotification(notification.id)");
   });
 
   test("dismissing a bubble starts cooldown and blocks another candidate before five minutes", async () => {
@@ -4383,7 +4392,7 @@ describe("executeBuddyAction setup controls", () => {
         },
         dispatch as never,
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ status: "ok" });
 
     expect(dispatch).toHaveBeenCalledTimes(3);
     expect(dispatch.mock.calls[0][0]).toEqual(dismissRuntimeEvent(eventId));
@@ -4393,10 +4402,10 @@ describe("executeBuddyAction setup controls", () => {
     ).toBe(true);
   });
 
-  test("runtime dismiss without event id no-ops", async () => {
+  test("runtime dismiss without event id reports an unavailable action", async () => {
     for (const actionParam of [undefined, " "]) {
       const dispatch = vi.fn();
-      await executeBuddyAction(
+      const outcome = await executeBuddyAction(
         {
           id: "dismiss-runtime",
           label: "Dismiss",
@@ -4407,7 +4416,11 @@ describe("executeBuddyAction setup controls", () => {
         dispatch as never,
       );
 
-      expect(dispatch).not.toHaveBeenCalled();
+      expect(outcome.status).toBe("unsupported");
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(
+        isActionWithType(dispatch.mock.calls[0][0], "buddy/setActiveSpeech"),
+      ).toBe(true);
     }
   });
 
@@ -4488,38 +4501,124 @@ describe("executeBuddyAction setup controls", () => {
   });
 
   test("acting on a suggestion resolves it so the same bubble cannot return", async () => {
+    const authorityQuery = vi.spyOn(
+      buddyOperatorApi.endpoints.getBuddyOperatorStatus,
+      "initiate",
+    );
+    const unwrap = vi.fn().mockResolvedValue({});
+    const mutation = vi
+      .spyOn(buddyApi.endpoints.dismissBuddySuggestion, "initiate")
+      .mockReturnValue((() => ({ unwrap })) as never);
     const cases = [
       "open_worktrees",
       "review_worktree_cleanup",
       "open_worktree_cleanup",
-      "create_worktrees_pulse",
       "open_buddy",
     ];
 
     for (const action of cases) {
-      const { dispatch, innerDispatch } = makeThunkDispatch();
+      // Only an authoritative disabled rollout permits legacy suggestion work.
+      const { dispatch, innerDispatch } = makeThunkDispatch({
+        data: { mode: "disabled" },
+      });
       const control: BuddyControl = {
         id: action,
         label: action,
         action,
         style: "secondary",
       };
-      await executeBuddyAction(control, dispatch as never, {
+      authorityQuery.mockClear();
+      mutation.mockClear();
+      unwrap.mockClear();
+      const outcome = await executeBuddyAction(control, dispatch as never, {
         triggerText: "4 clean abandoned worktrees",
         triggerSource: "suggestion",
         suggestionId: "worktree-cleanup-1",
       });
-      const actions = [
-        ...dispatch.mock.calls.map(([dispatched]) => dispatched),
-        ...innerDispatch.mock.calls.map(([dispatched]) => dispatched),
-      ];
-      const resolved = actions.some(
-        (dispatched) =>
-          isActionWithType(dispatched, dismissBuddySuggestion.type) &&
-          (dispatched as { payload?: unknown }).payload ===
-            "worktree-cleanup-1",
+      // innerDispatch records each plain action once, unlike combining both
+      // dispatch layers, which duplicates forwarded reducer actions.
+      const actions = innerDispatch.mock.calls.map(
+        ([dispatched]) => dispatched,
       );
-      expect(resolved).toBe(true);
+      const resolved = actions.filter(dismissBuddySuggestion.match);
+      expect(outcome).toEqual({ status: "ok" });
+      expect(authorityQuery).toHaveBeenCalledTimes(1);
+      expect(authorityQuery).toHaveBeenCalledWith(expect.any(String), {
+        subscribe: false,
+        forceRefetch: true,
+      });
+      expect(resolved).toEqual([dismissBuddySuggestion("worktree-cleanup-1")]);
+      expect(mutation).toHaveBeenCalledExactlyOnceWith("worktree-cleanup-1");
+      expect(unwrap).toHaveBeenCalledTimes(1);
+      expect(actions).toContainEqual(clearActiveSpeech());
+      expect(actions).toContainEqual(
+        push({ name: action === "open_buddy" ? "buddy" : "tasks list" }),
+      );
+      const state = reducer(
+        reducer(
+          undefined,
+          setBuddySnapshot(
+            makeSnapshot({
+              state: {
+                ...makeState(),
+                suggestion_state: [
+                  makeSuggestion("worktree-cleanup-1"),
+                  makeSuggestion("unrelated-suggestion"),
+                ],
+              },
+            }),
+          ),
+        ),
+        resolved[0],
+      );
+      expect(state.snapshot?.state.suggestion_state).toMatchObject([
+        { id: "worktree-cleanup-1", dismissed: true },
+        { id: "unrelated-suggestion", dismissed: false },
+      ]);
+    }
+  });
+
+  test("unavailable operator authority leaves suggestions unresolved without mutation", async () => {
+    const mutation = vi.spyOn(
+      buddyApi.endpoints.dismissBuddySuggestion,
+      "initiate",
+    );
+    const authorities = [
+      {},
+      { error: { status: "FETCH_ERROR", error: "unavailable" } },
+      { data: { mode: "enabled" } },
+    ];
+    for (const authority of authorities) {
+      for (const action of ["open_worktrees", "dismiss_suggestion"]) {
+        const { dispatch, innerDispatch } = makeThunkDispatch(authority);
+        const outcome = await executeBuddyAction(
+          {
+            id: action,
+            label: action,
+            action,
+            action_param: "worktree-cleanup-1",
+            style: "secondary",
+          },
+          dispatch as never,
+          {
+            triggerText: "4 clean abandoned worktrees",
+            triggerSource: "suggestion",
+            suggestionId: "worktree-cleanup-1",
+          },
+        );
+        expect(outcome.status).toBe("unsupported");
+        expect(mutation).not.toHaveBeenCalled();
+        const actions = innerDispatch.mock.calls
+          .map(([dispatched]) => dispatched)
+          .filter((dispatched) => typeof dispatched !== "function");
+        expect(actions).toHaveLength(1);
+        expect(isActionWithType(actions[0], setActiveSpeech.type)).toBe(true);
+        expect(
+          actions.some((dispatched) =>
+            isActionWithType(dispatched, dismissBuddySuggestion.type),
+          ),
+        ).toBe(false);
+      }
     }
   });
 

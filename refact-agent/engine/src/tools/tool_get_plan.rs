@@ -126,9 +126,9 @@ impl Tool for ToolGetPlan {
             .get(&chat_id)
             .cloned()
             .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
-        let session = session_arc.lock().await.accepted_control_projection();
-        let plan = match plan_role::current_base_plan(&session) {
-            Some(message) => plan_value(&session, message, include_history)?,
+        let session = session_arc.lock().await.try_accepted_control_projection()?;
+        let plan = match plan_role::try_current_base_plan(&session)? {
+            Some(message) => plan_value(&session, &message, include_history)?,
             None => Value::Null,
         };
         Ok((

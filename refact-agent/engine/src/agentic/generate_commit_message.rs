@@ -14,6 +14,48 @@ use crate::files_in_workspace::detect_vcs_for_a_file_path;
 
 const SUBAGENT_ID: &str = "commit_message";
 
+fn commit_message_input_fingerprint(diff: &str, prompt: &Option<String>) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update(b"commit-message-proposal-v1");
+    digest.update((diff.len() as u64).to_be_bytes());
+    digest.update(diff.as_bytes());
+    match prompt {
+        Some(prompt) => {
+            digest.update([1]);
+            digest.update((prompt.len() as u64).to_be_bytes());
+            digest.update(prompt.as_bytes());
+        }
+        None => digest.update([0]),
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
+fn commit_message_report(
+    result: &Result<String, String>,
+) -> crate::buddy::workflows::WorkflowReport {
+    use crate::buddy::outcome_runtime::{terminal_from_workflow_result, WorkflowTerminal};
+
+    let (body, terminal) = match result {
+        Ok(message) if !message.trim().is_empty() => (message.clone(), WorkflowTerminal::Completed),
+        Ok(_) => (
+            "No readable commit-message proposal was generated.".to_string(),
+            WorkflowTerminal::Inconclusive,
+        ),
+        Err(error) => (
+            crate::buddy::workflows::workflow_failure_report(SUBAGENT_ID, error, None).summary,
+            terminal_from_workflow_result(&Err(error.clone())),
+        ),
+    };
+    crate::buddy::workflows::WorkflowReport {
+        title: "Commit-message proposal".to_string(),
+        body,
+        terminal,
+        evidence: Vec::new(),
+    }
+}
+
 pub async fn generate_commit_message_by_diff(
     gcx: Arc<GlobalContext>,
     diff: &String,
@@ -44,7 +86,8 @@ pub async fn generate_commit_message_by_diff_with_abort(
     let commit_message_prompt = commit_message_prompt.clone();
     let gcx2 = gcx.clone();
     let parent_chat_id = parent_chat_id.map(|id| id.to_string());
-    crate::buddy::workflows::buddy_wrap_workflow(
+    let input_fingerprint = commit_message_input_fingerprint(&diff, &commit_message_prompt);
+    crate::buddy::workflows::buddy_wrap_workflow_report(
         crate::app_state::AppState::from_gcx(gcx).await,
         "commit_message",
         "📦",
@@ -53,6 +96,11 @@ pub async fn generate_commit_message_by_diff_with_abort(
             let short: String = msg.lines().next().unwrap_or("").chars().take(50).collect();
             format!("Commit message: {}", short)
         },
+        crate::buddy::workflows::WorkflowReportScope {
+            observed_scope: "Commit-message proposal generation only from the supplied diff and custom prompt; no commit created, no changes applied, and no verification performed.".into(),
+            input_fingerprint,
+        },
+        commit_message_report,
         move || async move {
             let subagent_config = get_subagent_config(gcx2.clone(), SUBAGENT_ID, None)
                 .await
@@ -115,9 +163,13 @@ pub async fn generate_commit_message_by_diff_with_abort(
             .await
             .map_err(|e| format!("Error: {}", e))?;
 
+            if result.aborted {
+                return Err("Commit-message generation cancelled".into());
+            }
             let commit_message = result
                 .messages
                 .last()
+                .filter(|message| message.role == "assistant")
                 .and_then(|last_m| match &last_m.content {
                     ChatContent::SimpleText(text) => Some(text.clone()),
                     _ => None,
@@ -125,10 +177,15 @@ pub async fn generate_commit_message_by_diff_with_abort(
                 .ok_or("No commit message was generated".to_string())?;
 
             let code_blocks = remove_fencing(&commit_message);
-            if !code_blocks.is_empty() {
-                Ok(code_blocks[0].clone())
+            let proposal = if !code_blocks.is_empty() {
+                code_blocks[0].clone()
             } else {
-                Ok(commit_message)
+                commit_message
+            };
+            if proposal.trim().is_empty() {
+                Err("No readable commit-message proposal was generated".into())
+            } else {
+                Ok(proposal)
             }
         },
     )
@@ -187,4 +244,46 @@ pub async fn _generate_commit_message_for_projects(
     }
 
     Ok(commit_messages)
+}
+
+#[cfg(test)]
+mod operator_report_tests {
+    use super::*;
+    use crate::buddy::outcome_runtime::WorkflowTerminal;
+
+    #[test]
+    fn proposal_fingerprint_binds_exact_diff_and_optional_prompt() {
+        let original = commit_message_input_fingerprint("diff", &None);
+        assert_eq!(original, commit_message_input_fingerprint("diff", &None));
+        assert_ne!(original, commit_message_input_fingerprint("diff\n", &None));
+        assert_ne!(
+            original,
+            commit_message_input_fingerprint("diff", &Some(String::new()))
+        );
+        assert_ne!(
+            commit_message_input_fingerprint("ab", &Some("c".into())),
+            commit_message_input_fingerprint("a", &Some("bc".into())),
+        );
+        assert!(original.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn completed_proposal_retains_body_without_claiming_a_commit() {
+        let message = "Subject\n\nFull proposal body".to_string();
+        let report = commit_message_report(&Ok(message.clone()));
+        assert_eq!(report.terminal, WorkflowTerminal::Completed);
+        assert_eq!(report.body, message);
+        assert_eq!(report.title, "Commit-message proposal");
+        assert!(report.evidence.is_empty());
+        assert_eq!(
+            commit_message_report(&Ok(" \n".into())).terminal,
+            WorkflowTerminal::Inconclusive
+        );
+        let cancelled = commit_message_report(&Err("cancelled token=private-token".into()));
+        assert!(matches!(
+            cancelled.terminal,
+            WorkflowTerminal::Cancelled { .. }
+        ));
+        assert!(!cancelled.body.contains("private-token"));
+    }
 }

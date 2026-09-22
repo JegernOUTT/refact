@@ -48,6 +48,7 @@ interface ParsedNodeHeader {
   name: string | null;
   states: string[];
   reference: string | null;
+  box: BrowserSnapshotBox | null;
   text: string | null;
 }
 
@@ -190,6 +191,7 @@ function parseNodeHeader(value: string): ParsedNodeHeader | null {
   }
 
   let reference: string | null = null;
+  let box: BrowserSnapshotBox | null = null;
   const states: string[] = [];
   for (const attribute of attributes) {
     const separator = attribute.indexOf("=");
@@ -197,12 +199,25 @@ function parseNodeHeader(value: string): ParsedNodeHeader | null {
     const valuePart = separator >= 0 ? attribute.slice(separator + 1) : null;
     if (key === "ref" && valuePart) {
       reference = valuePart;
+    } else if (key === "box" && valuePart) {
+      const coordinates = valuePart.split(",").map(Number);
+      if (
+        coordinates.length === 4 &&
+        coordinates.every((coordinate) => Number.isFinite(coordinate))
+      ) {
+        box = {
+          x: coordinates[0],
+          y: coordinates[1],
+          width: coordinates[2],
+          height: coordinates[3],
+        };
+      }
     } else if (SUPPORTED_STATES.has(key)) {
       states.push(valuePart ? `${key}=${valuePart}` : key);
     }
   }
 
-  return { role, name, states, reference, text };
+  return { role, name, states, reference, box, text };
 }
 
 function buildSearchText(node: MutableTreeNode): string {
@@ -253,7 +268,7 @@ function parseSnapshot(yaml: string): AriaTreeNode[] | null {
       name: header.name,
       states: header.states,
       reference: header.reference,
-      box: null,
+      box: header.box,
       properties: header.text === null ? {} : { text: header.text },
       children: [],
     };

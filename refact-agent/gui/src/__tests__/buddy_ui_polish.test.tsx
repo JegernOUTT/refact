@@ -411,23 +411,58 @@ describe("buddy UI polish", () => {
       preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
     });
 
+    expect(screen.getByTestId("buddy-presence")).toBeInTheDocument();
+    const world = await screen.findByTestId("buddy-world");
+    expect(screen.getByTestId("buddy-world-canvas")).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-world-character")).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
+    expect(world.compareDocumentPosition(screen.getByRole("tablist"))).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
+      "data-compact-bubble",
+      "true",
+    );
+
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "Pulse",
+      "Opportunities",
+      "Recent errors",
+      "Activity",
+      "Play",
+      "Settings",
+    ]);
+
+    await user.click(screen.getByRole("tab", { name: "Play" }));
     await waitFor(() => {
-      expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
-      expect(screen.getByTestId("buddy-world-canvas")).toBeInTheDocument();
-      expect(screen.getByTestId("buddy-world-character")).toBeInTheDocument();
-      expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
+      expect(screen.getByTestId("buddy-world-character")).toHaveAttribute(
+        "data-compact-bubble",
+        "false",
+      );
+    });
+    expect(screen.getByTestId("buddy-world")).toBe(world);
+    expect(screen.getByTestId("buddy-world-canvas")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Close Play" }));
+    await waitFor(() => {
+      expect(screen.queryByTestId("buddy-world")).not.toBeInTheDocument();
     });
 
-    // The former grid panels are now individual tabs after Buddy's world.
-    await user.click(screen.getByRole("tab", { name: "Personality" }));
+    await user.click(screen.getByRole("button", { name: "Open Play" }));
+    expect(await screen.findByTestId("buddy-world")).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
     expect(
       await screen.findByTestId("buddy-personality-panel"),
     ).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Personality" })).toBeNull();
 
     await user.click(screen.getByRole("tab", { name: "Activity" }));
     expect(
       await screen.findByTestId("buddy-activity-panel"),
     ).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-recent-chats")).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Recent errors" }));
     expect(
@@ -577,6 +612,54 @@ describe("buddy UI polish", () => {
     expect(section).toHaveTextContent("No job runs recorded yet");
   });
 
+  it.each([
+    ["missing", undefined, "Emitted 0, skipped 0."],
+    ["partial", { emitted: 4 }, "Emitted 4, skipped 0."],
+    ["zero", { emitted: 0, skipped: 0 }, "Emitted 0, skipped 0."],
+  ] as const)(
+    "settings_never_renders_undefined when counts_by_result is %s",
+    async (_, countsByResult, expectedStatus) => {
+      const store = setUpStore({ ...CONFIG_STATE });
+      const snapshot = makeSnapshot();
+      snapshot.chat_reaction_debug = {
+        recent_attempts: [],
+        ...(countsByResult === undefined
+          ? {}
+          : { counts_by_result: countsByResult }),
+      } as NonNullable<BuddySnapshot["chat_reaction_debug"]>;
+      store.dispatch(setBuddySnapshot(snapshot));
+
+      render(<BuddySettingsPanel />, {
+        preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
+      });
+
+      const diagnostics = await screen.findByTestId(
+        "buddy-chat-reaction-diagnostics",
+      );
+      expect(diagnostics).not.toHaveTextContent("undefined");
+      expect(diagnostics).toHaveTextContent(expectedStatus);
+    },
+  );
+
+  it("settings_uses_the_live_buddy_name", async () => {
+    const store = setUpStore({ ...CONFIG_STATE });
+    const snapshot = makeSnapshot();
+    snapshot.state.identity = { ...snapshot.state.identity, name: "Spark" };
+    store.dispatch(setBuddySnapshot(snapshot));
+
+    render(<BuddySettingsPanel />, {
+      preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
+    });
+
+    expect(
+      await screen.findByText(
+        "Tune Spark's autonomy, observations, and tiny-chaos operating hours.",
+      ),
+    ).toBeVisible();
+    expect(screen.getByText(/Spark reacts to your messages/)).toBeVisible();
+    expect(screen.queryByText(/Pixel/)).not.toBeInTheDocument();
+  });
+
   it("BuddySettingsPanel_shows_chat_observation_and_reactions_as_independent", async () => {
     const store = setUpStore({ ...CONFIG_STATE });
     const snapshot = makeSnapshot();
@@ -625,7 +708,7 @@ describe("buddy UI polish", () => {
     expect(
       screen.getByText(/Independent from live chat reactions/i),
     ).toBeVisible();
-    expect(screen.getByText(/Pixel reacts to your messages/i)).toBeVisible();
+    expect(screen.getByText(/Buddy reacts to your messages/i)).toBeVisible();
     expect(patternToggle).toHaveAttribute("data-state", "unchecked");
     expect(reactionsToggle).toHaveAttribute("data-state", "checked");
 

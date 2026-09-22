@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { BuddyControl, BuddyPetState } from "../types";
+import {
+  buddyPresenceMotion,
+  useBuddyPresencePreferences,
+} from "../buddyPresenceMotion";
 import type {
   BuddySpeechMemory,
   BuddyWorldSpeechCandidate,
@@ -20,6 +24,9 @@ import {
   pounceFirefly,
   shouldOfferBuddyRequest,
   throwFetchBall,
+  suspendPlaySession,
+  resumePlaySession,
+  type BuddyPlaySuspension,
   type BuddyGiftMoment,
   type BuddyPlaySession,
 } from "../buddyPlaySessions";
@@ -50,6 +57,9 @@ export interface UseBuddyPlaySessionResult {
   handleSceneClick: (xPercent: number, yPercent: number) => boolean;
   handleLocalControl: (control: BuddyControl) => boolean;
   cancelPlay: () => void;
+  suspension: BuddyPlaySuspension | null;
+  pausePlay: () => void;
+  resumePlay: () => void;
 }
 
 const REQUEST_CHECK_MS = 30_000;
@@ -84,6 +94,39 @@ export function useBuddyPlaySession(
     speechMemory,
   } = args;
   const [session, setSession] = useState<BuddyPlaySession | null>(null);
+  const presence = useBuddyPresencePreferences();
+  const [suspension, setSuspension] = useState<BuddyPlaySuspension | null>(
+    null,
+  );
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+  const workBusy =
+    presence.enabled && buddyPresenceMotion(presence.workState).ownsAttention;
+  const suspend = useCallback(
+    (reason: BuddyPlaySuspension["reason"]) => {
+      if (!presence.enabled || !sessionRef.current) return;
+      setSuspension(suspendPlaySession(sessionRef.current, Date.now(), reason));
+      sessionRef.current = null;
+      setSession(null);
+    },
+    [presence.enabled],
+  );
+  const pausePlay = useCallback(() => suspend("user_paused"), [suspend]);
+  const resumePlay = useCallback(() => {
+    if (!presence.enabled || !suspension || document.hidden || busy || workBusy)
+      return;
+    setSession(resumePlaySession(suspension, Date.now()));
+    setSuspension(null);
+  }, [presence.enabled, suspension, busy, workBusy]);
+  useEffect(() => {
+    if (!presence.enabled) return;
+    const hide = () => {
+      if (document.hidden) suspend("hidden");
+    };
+    hide();
+    document.addEventListener("visibilitychange", hide);
+    return () => document.removeEventListener("visibilitychange", hide);
+  }, [presence.enabled, suspend]);
   const [sessionLine, setSessionLine] =
     useState<BuddyWorldSpeechCandidate | null>(null);
   const [gift, setGift] = useState<BuddyGiftMoment | null>(null);
@@ -111,6 +154,7 @@ export function useBuddyPlaySession(
   );
 
   const cancelPlay = useCallback(() => {
+    setSuspension(null);
     setSession(null);
     setSessionLine(null);
     setGift(null);
@@ -118,26 +162,35 @@ export function useBuddyPlaySession(
   }, []);
 
   const startFetch = useCallback(() => {
+    if (presence.enabled && (document.hidden || busy || workBusy || suspension))
+      return;
     setRequestPrompt(null);
     setGift(null);
     setSession(createFetchSession(Date.now()));
     speakPhase("fetch:armed");
-  }, [speakPhase]);
+  }, [speakPhase, presence.enabled, busy, workBusy, suspension]);
 
   const startFirefly = useCallback(() => {
+    if (presence.enabled && (document.hidden || busy || workBusy || suspension))
+      return;
     setRequestPrompt(null);
     setGift(null);
     setSession(createFireflySession(Date.now()));
     speakPhase("firefly:armed");
-  }, [speakPhase]);
+  }, [speakPhase, presence.enabled, busy, workBusy, suspension]);
 
   useEffect(() => {
+    if (presence.enabled && (busy || workBusy)) {
+      suspend("work_took_over");
+      setRequestPrompt(null);
+      return;
+    }
     if (busy && (session || requestPrompt)) {
       setSession(null);
       setSessionLine(null);
       setRequestPrompt(null);
     }
-  }, [busy, session, requestPrompt]);
+  }, [busy, session, requestPrompt, presence.enabled, workBusy, suspend]);
 
   useEffect(() => {
     if (!session) return;
@@ -149,6 +202,10 @@ export function useBuddyPlaySession(
     const elapsed = Date.now() - session.phaseStartedAtMs;
     const timer = window.setTimeout(
       () => {
+        if (presence.enabled && document.hidden) {
+          suspend("hidden");
+          return;
+        }
         setSession((current) => {
           if (!current || current.phase !== session.phase) return current;
           const settledNow = Math.max(
@@ -175,7 +232,7 @@ export function useBuddyPlaySession(
       Math.max(16, duration - elapsed),
     );
     return () => window.clearTimeout(timer);
-  }, [session, speakPhase]);
+  }, [session, speakPhase, presence.enabled, suspend]);
 
   const handleSceneClick = useCallback(
     (xPercent: number, yPercent: number): boolean => {
@@ -227,7 +284,14 @@ export function useBuddyPlaySession(
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (session || requestPrompt || gift) return;
+      if (
+        session ||
+        requestPrompt ||
+        gift ||
+        suspension ||
+        (presence.enabled && (document.hidden || workBusy))
+      )
+        return;
       if (
         !shouldOfferBuddyRequest({
           pet,
@@ -250,11 +314,22 @@ export function useBuddyPlaySession(
       });
     }, REQUEST_CHECK_MS);
     return () => window.clearInterval(timer);
-  }, [gift, offerBusy, name, pet, requestPrompt, session, speechMemory]);
+  }, [
+    gift,
+    offerBusy,
+    name,
+    pet,
+    requestPrompt,
+    session,
+    speechMemory,
+    suspension,
+    presence.enabled,
+    workBusy,
+  ]);
 
   useEffect(() => {
     if (!directorIntentKind || directorIntentStartedAtMs <= 0) return;
-    if (session) return;
+    if (session || suspension || workBusy) return;
     const beats = DIRECTOR_SPEECH_BEATS[directorIntentKind];
     const payoffAtMs =
       beats && beats.length > 0
@@ -289,6 +364,8 @@ export function useBuddyPlaySession(
     name,
     session,
     speechMemory,
+    suspension,
+    workBusy,
   ]);
 
   useEffect(() => {
@@ -304,6 +381,9 @@ export function useBuddyPlaySession(
   }, [gift]);
 
   return {
+    suspension,
+    pausePlay,
+    resumePlay,
     session,
     sessionLine: session || gift || requestPrompt ? sessionLine : null,
     gift,

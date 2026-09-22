@@ -1,8 +1,8 @@
 use crate::app_state::AppState;
 
-use super::super::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
+use super::super::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult, SpeechCandidate};
 use super::super::types::{BuddyControl, BuddySpeechItem};
-use crate::buddy::voice_service::{SpeechIntent, VoiceCtx, voice_service};
+use crate::buddy::voice_service::SpeechIntent;
 
 fn greeting_fallback_text(ctx: &BuddyJobContext) -> String {
     if !ctx.onboarding.greeted {
@@ -73,54 +73,50 @@ impl BuddyJob for GreetingJob {
         0
     }
 
+    fn records_empty_result(&self) -> bool {
+        false
+    }
+
     async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
         !ctx.onboarding.greeted || ctx.job_state.last_run.is_none()
     }
 
-    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
+    async fn execute(&self, _gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let fallback_text = greeting_fallback_text(&ctx);
         let controls = greeting_controls(&ctx);
-        let mut speech = match crate::buddy::actor::buddy_snapshot(gcx.clone()).await {
-            Some(snapshot) => {
-                let pulse_one_liner = format!(
+        let mut candidate = SpeechCandidate::from_context(
+            &ctx,
+            SpeechIntent::Greeting,
+            Some("greeting".into()),
+            greeting_workflow_summary(
+                &ctx,
+                &format!(
                     "{} pending ops, {} recent stuck task alerts",
-                    snapshot.pulse.memory.pending_ops,
-                    snapshot.pulse.tasks.recent_stuck_alert_count_1h()
-                );
-                let workflow_summary =
-                    greeting_workflow_summary(&ctx, &pulse_one_liner, &fallback_text);
-                let voice_ctx = VoiceCtx {
-                    persona: &snapshot.state.personality,
-                    identity_name: snapshot.state.identity.name.as_str(),
-                    pulse_one_liner,
-                    workflow_id: Some("greeting"),
-                    workflow_summary: Some(&workflow_summary),
-                };
-                voice_service()
-                    .await
-                    .render_speech(gcx, voice_ctx, SpeechIntent::Greeting)
-                    .await
-            }
-            None => BuddySpeechItem {
-                id: format!("greeting-{}", chrono::Utc::now().timestamp()),
-                text: fallback_text,
-                mood: "happy".to_string(),
-                scope: "global".to_string(),
-                persistent: false,
-                ttl_seconds: if ctx.onboarding.greeted { 8 } else { 15 },
-                dedupe_key: Some("greeting".to_string()),
-                created_at: chrono::Utc::now().to_rfc3339(),
-                controls: vec![],
-                chat_id: None,
-                speech_intent: None,
-            },
-        };
-        speech.ttl_seconds = if ctx.onboarding.greeted { 8 } else { 15 };
-        speech.dedupe_key = Some("greeting".to_string());
-        speech.controls = controls;
+                    ctx.pulse.memory.pending_ops,
+                    ctx.pulse.tasks.recent_stuck_alert_count_1h()
+                ),
+                &fallback_text,
+            ),
+            fallback_text.clone(),
+            "Buddy greeting".into(),
+            None,
+        );
+        candidate.template = Some(BuddySpeechItem {
+            editorial_delivery_required: false,
+            id: format!("greeting-{}", chrono::Utc::now().timestamp()),
+            text: fallback_text,
+            mood: "happy".to_string(),
+            scope: "global".to_string(),
+            persistent: false,
+            ttl_seconds: if ctx.onboarding.greeted { 8 } else { 15 },
+            dedupe_key: Some("greeting".to_string()),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            controls,
+            chat_id: None,
+            speech_intent: None,
+        });
         BuddyJobResult {
-            speech: Some(speech),
-            speech_intent: Some(SpeechIntent::Greeting),
+            speech_candidate: Some(candidate),
             mark_greeted: true,
             ..Default::default()
         }
@@ -188,9 +184,15 @@ mod tests {
         let gcx = make_gcx_with_buddy().await;
         let job = GreetingJob;
 
-        let result = job.execute(gcx, test_context()).await;
+        let result = job.execute(gcx.clone(), test_context()).await;
 
-        let speech = result.speech.unwrap();
+        assert_eq!(renderer.calls(), 0);
+        assert!(result.speech.is_none());
+        let speech = crate::buddy::scheduler::render_candidate(
+            gcx,
+            result.speech_candidate.as_ref().unwrap(),
+        )
+        .await;
         assert_eq!(speech.text, "voice hello");
         assert_eq!(speech.dedupe_key.as_deref(), Some("greeting"));
         assert!(result.mark_greeted);

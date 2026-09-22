@@ -206,6 +206,16 @@ impl WorktreeMergeStrategy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CheckedMergeIdentity {
+    pub source_head: String,
+    pub target_head: String,
+    pub target_branch: String,
+    pub patch_digest: String,
+    pub target_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MergeWorktreeRequest {
     #[serde(default)]
     pub strategy: WorktreeMergeStrategy,
@@ -520,6 +530,15 @@ pub struct WorktreeCleanupResult {
     pub deleted: Vec<WorktreeCleanupDeleted>,
     pub skipped: Vec<WorktreeCleanupSkipped>,
     pub warnings: Vec<String>,
+}
+
+/// Exact read-only preimage for recoverable checkout quarantine. Branches are never deleted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeArchiveIdentity {
+    pub record: WorktreeRegistryRecord,
+    pub head: String,
+    pub version: String,
 }
 
 #[cfg(test)]

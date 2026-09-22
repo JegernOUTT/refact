@@ -2,6 +2,9 @@ use super::super::*;
 
 impl App {
     pub(super) fn handle_ask_questions_key(&mut self, key: KeyEvent) -> AppAction {
+        if self.native_answer_request_id.is_some() {
+            return AppAction::None;
+        }
         let Some(form) = self.ask_questions_form.as_mut() else {
             return AppAction::None;
         };
@@ -25,6 +28,12 @@ impl App {
         let dispatch = self.keymap.dispatch(KeyContext::AskForm, key);
         match dispatch.action {
             Some(KeyAction::Cancel) => {
+                if form.request().asked_at_ms.is_some() {
+                    self.add_notice(
+                        "Questions remain pending; answer in this form or press Ctrl+C to abort",
+                    );
+                    return AppAction::None;
+                }
                 let request = form.request().clone();
                 form.cancel();
                 self.handled_ask_questions_tool_ids
@@ -40,6 +49,18 @@ impl App {
                 let tool_call_id = form.tool_call_id().to_string();
                 match form.accept() {
                     AskQuestionsOutcome::Submitted(prompt) => {
+                        if let Some(asked_at_ms) = form.request().asked_at_ms {
+                            let command = crate::client::AnswerQuestionsCommand {
+                                tool_call_id,
+                                asked_at_ms,
+                                answers: form.native_answers(),
+                                client_request_id: crate::client::request_id("answer-questions"),
+                            };
+                            self.native_answer_request_id = Some(command.client_request_id.clone());
+                            self.native_answer_accepted = false;
+                            self.add_notice("Submitting answers; question resolution is pending");
+                            return AppAction::AnswerQuestions { command };
+                        }
                         self.handled_ask_questions_tool_ids.insert(tool_call_id);
                         self.pending_manual_ask_questions = None;
                         self.ask_questions_form = None;
@@ -97,6 +118,9 @@ impl App {
     }
 
     pub(super) fn handle_ask_questions_paste(&mut self, text: &str) {
+        if self.native_answer_request_id.is_some() {
+            return;
+        }
         if let Some(form) = self.ask_questions_form.as_mut() {
             form.insert_text(text);
         }

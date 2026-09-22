@@ -3,6 +3,7 @@ import type {
   BackgroundAgentSummary,
   ChatMessage,
   GoalSnapshot,
+  PendingQuestionSet,
   GoalStatus,
 } from "./types";
 import type { ExecStatus } from "./exec";
@@ -92,8 +93,8 @@ export type PauseReason = {
 export type PushMode = "preempt" | "append" | "when_idle";
 
 export type QueuedEvent = {
-  subkind: string;
-  source: string;
+  subkind?: string;
+  source?: string;
   payload?: unknown;
 };
 
@@ -114,6 +115,7 @@ export function isPushMode(value: unknown): value is PushMode {
 }
 
 export type RuntimeState = {
+  waiting_interruptible?: boolean;
   state: SessionState;
   paused: boolean;
   error: string | null;
@@ -238,6 +240,10 @@ export type EventEnvelope =
       runtime: RuntimeState;
       messages: ChatMessage[];
       background_agents: BackgroundAgentSummary[];
+      snapshot_chunked?: boolean;
+      chunk_count?: number;
+      message_count?: number;
+      pending_questions?: PendingQuestionSet[];
       goal?: GoalSnapshot | null;
       browser?: {
         runtime_id: string;
@@ -247,6 +253,21 @@ export type EventEnvelope =
         title?: string | null;
         tabs?: { tab_id: string; url: string; title: string }[];
       } | null;
+    }
+  | {
+      chat_id: string;
+      seq: string;
+      type: "snapshot_chunk";
+      chunk_index: number;
+      chunk_count: number;
+      messages: ChatMessage[];
+    }
+  | {
+      chat_id: string;
+      seq: string;
+      type: "snapshot_end";
+      chunk_count: number;
+      message_count: number;
     }
   | {
       chat_id: string;
@@ -369,6 +390,7 @@ export type EventEnvelope =
       chat_id: string;
       seq: string;
       type: "runtime_updated";
+      waiting_interruptible?: boolean;
       state: string;
       error?: string;
       goal_active?: boolean;
@@ -472,7 +494,10 @@ export function subscribeToChatEvents(
   apiKey?: string,
   options: SubscriptionOptions = {},
 ): () => void {
-  const url = buildApiUrl(config, "/v1/chats/subscribe", { chat_id: chatId });
+  const url = buildApiUrl(config, "/v1/chats/subscribe", {
+    chat_id: chatId,
+    snapshot_chunks: 1,
+  });
 
   const connectTimeoutMs =
     options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
@@ -486,6 +511,15 @@ export function subscribeToChatEvents(
   let terminalErrorEmitted = false;
   let connectTimer: ReturnType<typeof setTimeout> | null = null;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let chunkedSnapshot:
+    | {
+        snapshot: Extract<EventEnvelope, { type: "snapshot" }>;
+        chunks: ChatMessage[][];
+        chunkCount: number;
+        messageCount: number;
+        receivedMessageCount: number;
+      }
+    | undefined;
 
   const headers: Record<string, string> = {};
   if (apiKey) {
@@ -618,13 +652,87 @@ export function subscribeToChatEvents(
               continue;
             }
             normalizeSeq(parsed);
-            normalizeBackgroundAgentFields(parsed);
-            normalizeExecProcessSpawnedFields(parsed);
             if (parsed.chat_id !== chatId) {
               continue;
             }
+            if (parsed.type === "snapshot" && parsed.snapshot_chunked) {
+              const chunkCount = parsed.chunk_count;
+              const messageCount = parsed.message_count;
+              if (
+                chunkedSnapshot !== undefined ||
+                typeof chunkCount !== "number" ||
+                !Number.isSafeInteger(chunkCount) ||
+                chunkCount < 0 ||
+                typeof messageCount !== "number" ||
+                !Number.isSafeInteger(messageCount) ||
+                messageCount < 0
+              ) {
+                throw new Error("Invalid chunked snapshot metadata");
+              }
+              normalizeBackgroundAgentFields(parsed);
+              chunkedSnapshot = {
+                snapshot: { ...parsed, messages: [] },
+                chunks: [],
+                chunkCount,
+                messageCount,
+                receivedMessageCount: 0,
+              };
+              continue;
+            }
+            if (parsed.type === "snapshot_chunk") {
+              if (
+                !chunkedSnapshot ||
+                parsed.seq !== chunkedSnapshot.snapshot.seq ||
+                parsed.chunk_count !== chunkedSnapshot.chunkCount ||
+                parsed.chunk_index !== chunkedSnapshot.chunks.length ||
+                !Array.isArray(parsed.messages) ||
+                chunkedSnapshot.receivedMessageCount + parsed.messages.length >
+                  chunkedSnapshot.messageCount
+              ) {
+                throw new Error("Invalid snapshot chunk sequence");
+              }
+              chunkedSnapshot.chunks.push(parsed.messages);
+              chunkedSnapshot.receivedMessageCount += parsed.messages.length;
+              continue;
+            }
+            if (parsed.type === "snapshot_end") {
+              if (
+                !chunkedSnapshot ||
+                parsed.seq !== chunkedSnapshot.snapshot.seq ||
+                parsed.chunk_count !== chunkedSnapshot.chunkCount ||
+                parsed.message_count !== chunkedSnapshot.messageCount ||
+                chunkedSnapshot.chunks.length !== chunkedSnapshot.chunkCount ||
+                chunkedSnapshot.receivedMessageCount !==
+                  chunkedSnapshot.messageCount
+              ) {
+                throw new Error("Invalid snapshot end marker");
+              }
+              const messages = chunkedSnapshot.chunks.flat();
+              if (messages.length !== chunkedSnapshot.messageCount) {
+                throw new Error("Chunked snapshot message count mismatch");
+              }
+              const snapshot = {
+                ...chunkedSnapshot.snapshot,
+                messages,
+              };
+              chunkedSnapshot = undefined;
+              callbacks.onEvent(snapshot);
+              continue;
+            }
+            if (chunkedSnapshot !== undefined) {
+              throw new Error("Unexpected event during chunked snapshot");
+            }
+            normalizeBackgroundAgentFields(parsed);
+            normalizeExecProcessSpawnedFields(parsed);
             callbacks.onEvent(parsed);
           } catch (e) {
+            if (
+              chunkedSnapshot !== undefined ||
+              dataStr.includes('"type":"snapshot_chunk"') ||
+              dataStr.includes('"type":"snapshot_end"')
+            ) {
+              throw e;
+            }
             if (process.env.NODE_ENV === "development") {
               // eslint-disable-next-line no-console
               console.warn("[SSE] Parse error:", e, dataStr.slice(0, 200));
@@ -634,6 +742,11 @@ export function subscribeToChatEvents(
         }
       }
 
+      if (chunkedSnapshot !== undefined) {
+        abortWithTerminalError(
+          "SSE stream ended before chunked snapshot completed; reconnecting",
+        );
+      }
       clearTimers();
       if (abortController.signal.aborted) {
         if (abortReason) {

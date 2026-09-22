@@ -27,12 +27,12 @@ async fn create_warning_chat(gcx: Arc<GlobalContext>, reason: &str) -> Result<St
     let model =
         crate::buddy::actor::resolve_buddy_chat_model(AppState::from_gcx(gcx.clone()).await).await;
     let snapshot = TrajectorySnapshot {
+        pending_browser_decision: None,
         pending_deliveries: Vec::new(),
         dropped_deliveries: Vec::new(),
         goal: None,
         goal_ledger: Vec::new(),
         goal_verification_blocked_until_ms: None,
-        compression_retry_after_ms: Default::default(),
         chat_id: chat_id.clone(),
         title: "Privacy observation degraded".to_string(),
         model,
@@ -47,6 +47,7 @@ async fn create_warning_chat(gcx: Arc<GlobalContext>, reason: &str) -> Result<St
         checkpoints_enabled: false,
         context_tokens_cap: None,
         auto_compression_cap: None,
+        auto_compression_cap_pending: true,
         include_project_info: false,
         is_title_generated: true,
         auto_approve_editing_tools: false,
@@ -78,6 +79,7 @@ async fn create_warning_chat(gcx: Arc<GlobalContext>, reason: &str) -> Result<St
         reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
+        pending_questions: Vec::new(),
     };
     crate::chat::trajectories::save_trajectory_snapshot(gcx, snapshot).await?;
     Ok(chat_id)

@@ -68,7 +68,19 @@ import {
 import { useBuddyWorldArcs } from "./hooks/useBuddyWorldArcs";
 import { useBuddyCompanions } from "./hooks/useBuddyCompanions";
 import { useBuddyPlaySession } from "./hooks/useBuddyPlaySession";
-import { playSessionBodyTarget } from "./buddyPlaySessions";
+import {
+  playSessionBodyTarget,
+  playKeyboardTargets,
+  playKeyboardTargetForKey,
+  describePlaySessionForScreenReader,
+} from "./buddyPlaySessions";
+import {
+  resolveBuddyPresenceLoop,
+  shouldDrawPresenceFrame,
+  buddyPresenceMotion,
+  useBuddyPresencePreferences,
+  useBuddySurfaceVisible,
+} from "./buddyPresenceMotion";
 import {
   buildBuddyPlayDrawState,
   drawBuddyPlayEffects,
@@ -78,6 +90,7 @@ import { pickBuddyDream } from "./buddyDreams";
 import { BuddyDreamCanvas } from "./BuddyDreamCanvas";
 import { bubblePositionForSceneX } from "./buddyWorldUtils";
 import styles from "./BuddyWorld.module.css";
+import previewStyles from "./BuddyOperatorPlayPreview.module.css";
 
 interface BuddyWorldProps {
   palette: Palette;
@@ -409,6 +422,14 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   verdictReaction = null,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const presence = useBuddyPresencePreferences();
+  const surfaceVisible = useBuddySurfaceVisible(canvasRef);
+  const presenceMotion = presence.enabled
+    ? buddyPresenceMotion(presence.workState)
+    : null;
+  const attentionBusy = presenceMotion?.ownsAttention ?? false;
+  const playStartRef = useRef<HTMLButtonElement>(null);
+  const restorePlayFocusRef = useRef(false);
   const foregroundCanvasRef = useRef<HTMLCanvasElement>(null);
   const animationStartMsRef = useRef<number | null>(null);
   const lastDrawMsRef = useRef(0);
@@ -449,7 +470,9 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   const [recentDirectorIntents, setRecentDirectorIntents] = useState<
     RecentDirectorIntent[]
   >([]);
-  const [reducedMotion, setReducedMotion] = useState(prefersReducedMotion);
+  const [systemReducedMotion, setReducedMotion] =
+    useState(prefersReducedMotion);
+  const reducedMotion = presence.reducedMotion ?? systemReducedMotion;
   const [careActivity, setCareActivity] = useState<BuddyCareActivity | null>(
     null,
   );
@@ -590,6 +613,9 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     handleSceneClick,
     handleLocalControl,
     cancelPlay,
+    suspension,
+    pausePlay,
+    resumePlay,
   } = useBuddyPlaySession({
     name: state.name,
     pet,
@@ -605,12 +631,27 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     directorIntentStartedAtMs,
     speechMemory: speechMemoryRef.current,
   });
+  useEffect(() => {
+    if (
+      restorePlayFocusRef.current &&
+      playSession === null &&
+      suspension === null &&
+      !attentionBusy
+    ) {
+      restorePlayFocusRef.current = false;
+      playStartRef.current?.focus();
+    }
+  }, [attentionBusy, playSession, suspension]);
   const { arcRun, arcStep, arcLine, arcLanternLitCount, cancelArc } =
     useBuddyWorldArcs({
       world,
       name: state.name,
       busy:
-        careActivity !== null || activeSpeech !== null || playSession !== null,
+        attentionBusy ||
+        suspension !== null ||
+        careActivity !== null ||
+        activeSpeech !== null ||
+        playSession !== null,
       showcaseActive: showcaseRun !== null,
       showcaseIsRuntime,
       reducedMotion,
@@ -621,6 +662,8 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   const playBody = playSessionBodyTarget(playSession);
   const giftBody = playGift !== null && playBody === null;
   const effectiveDirectorIntent =
+    presenceMotion?.ownsAttention ||
+    suspension ||
     activeSpeech !== null ||
     showcaseRun !== null ||
     careActivity !== null ||
@@ -685,6 +728,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       : null;
   const directorPose = effectiveDirectorIntent?.pose ?? null;
   const characterPose: BuddyScenePose =
+    (presenceMotion?.ownsAttention ? presenceMotion.pose : null) ??
     carePose ??
     playPose ??
     arcPose ??
@@ -762,12 +806,16 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     session:
       playSessionLine ??
       (requestPrompt ? { text: requestPrompt.text, style: "say" } : null),
-    arc: arcLine,
-    showcase: showcaseRun
-      ? showcaseLine ?? { text: showcaseRun.speech, style: "say" }
-      : null,
+    arc: presenceMotion?.ownsAttention ? null : arcLine,
+    showcase:
+      !presenceMotion?.ownsAttention && showcaseRun
+        ? showcaseLine ?? { text: showcaseRun.speech, style: "say" }
+        : null,
     director: directorCandidate,
-    reaction: reaction !== null ? { text: reaction, style: "say" } : null,
+    reaction:
+      !presenceMotion?.ownsAttention && reaction !== null
+        ? { text: reaction, style: "say" }
+        : null,
   });
   const speechOverride = speechResolution.text;
   const speechSource = speechResolution.source;
@@ -970,7 +1018,8 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       setDirectorIntent(null);
       setLastWaypoint(null);
       cancelArc();
-      cancelPlay();
+      if (presence.enabled) pausePlay();
+      else cancelPlay();
       setCareActivity({
         action,
         toy,
@@ -992,7 +1041,15 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       });
       onCare(action, toy);
     },
-    [cancelArc, cancelPlay, onCare, reducedMotion, state.name],
+    [
+      cancelArc,
+      cancelPlay,
+      pausePlay,
+      presence.enabled,
+      onCare,
+      reducedMotion,
+      state.name,
+    ],
   );
 
   useEffect(() => {
@@ -1044,6 +1101,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
 
   const startShowcase = useCallback(
     (strongRuntimeTrigger: boolean) => {
+      if (attentionBusy || suspension) return false;
       if (showcaseRun) return false;
       if (careActivity) return false;
       if (playSession || playGift || requestPrompt) return false;
@@ -1101,6 +1159,8 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       return true;
     },
     [
+      attentionBusy,
+      suspension,
       activeSpeech,
       arcRun,
       careActivity,
@@ -1125,6 +1185,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   );
 
   useEffect(() => {
+    if (attentionBusy || suspension) return;
     if (activeSpeech ?? reaction ?? showcaseRun ?? directorIntent) return;
     if (careActivity || arcRun || playSession || playGift || requestPrompt) {
       return;
@@ -1151,6 +1212,8 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     }, delay);
     return () => window.clearTimeout(timer);
   }, [
+    attentionBusy,
+    suspension,
     activeSpeech,
     arcRun,
     careActivity,
@@ -1167,6 +1230,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
   ]);
 
   useEffect(() => {
+    if (attentionBusy || suspension) return;
     if (activeSpeech ?? reaction ?? showcaseRun ?? directorIntent) return;
     if (careActivity || arcRun || playSession || playGift || requestPrompt) {
       return;
@@ -1180,6 +1244,8 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
     }, 2200);
     return () => window.clearTimeout(timer);
   }, [
+    attentionBusy,
+    suspension,
     activeSpeech,
     activeWaypoint,
     arcRun,
@@ -1369,20 +1435,27 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
 
   useEffect(() => {
     let raf = 0;
+    let mounted = true;
     const render = (timestampMs: number) => {
-      if (document.hidden) {
-        raf = window.requestAnimationFrame(render);
-        return;
-      }
       {
-        const { showcaseRun, playSession, playGift, travel } =
+        const { showcaseRun, playSession, playGift, travel, reducedMotion } =
           renderStateRef.current;
         const interactive = Boolean(
           showcaseRun ?? playSession ?? playGift ?? travel,
         );
+        const policy = resolveBuddyPresenceLoop({
+          mounted,
+          documentHidden: document.hidden,
+          surfaceVisible,
+          enabled: !presence.textOnly,
+          reducedMotion: presence.enabled && reducedMotion,
+          lowPower: presence.lowPower,
+          interactive,
+          ambientFrameIntervalMs: AMBIENT_FRAME_INTERVAL_MS,
+        });
+        if (!policy.running) return;
         if (
-          !interactive &&
-          timestampMs - lastDrawMsRef.current < AMBIENT_FRAME_INTERVAL_MS
+          !shouldDrawPresenceFrame(policy, timestampMs, lastDrawMsRef.current)
         ) {
           raf = window.requestAnimationFrame(render);
           return;
@@ -1514,12 +1587,26 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       }
       raf = window.requestAnimationFrame(render);
     };
-    raf = window.requestAnimationFrame(render);
+    const sync = () => {
+      window.cancelAnimationFrame(raf);
+      if (!document.hidden && surfaceVisible && !presence.textOnly)
+        raf = window.requestAnimationFrame(render);
+    };
+    sync();
+    document.addEventListener("visibilitychange", sync);
     return () => {
+      mounted = false;
+      document.removeEventListener("visibilitychange", sync);
       window.cancelAnimationFrame(raf);
       animationStartMsRef.current = null;
     };
-  }, []);
+  }, [
+    surfaceVisible,
+    presence.enabled,
+    presence.textOnly,
+    presence.lowPower,
+    reducedMotion,
+  ]);
 
   const handleCelestialClick = () => {
     if (!showcaseRun) {
@@ -1594,7 +1681,11 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
 
   return (
     <section
-      className={classNames(styles.scene, { [styles.compact]: compact })}
+      className={classNames(styles.scene, {
+        [styles.compact]: compact,
+        [previewStyles.presenceScene]: presence.enabled,
+        [previewStyles.textScene]: presence.textOnly,
+      })}
       data-phase={world.phase}
       data-weather={world.weather}
       data-atmosphere-mood={world.atmosphere.mood}
@@ -1617,6 +1708,31 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       data-speech-style={speechStyle}
       data-speech-text={speechOverride ?? undefined}
       data-testid="buddy-world"
+      data-presence-enabled={presence.enabled}
+      data-work-state={presenceMotion?.state}
+      data-play-suspended={Boolean(suspension)}
+      onKeyDown={(event) => {
+        if (
+          !presence.enabled ||
+          event.repeat ||
+          event.altKey ||
+          event.ctrlKey ||
+          event.metaKey
+        )
+          return;
+        if (event.key === "Escape" && playSession) {
+          event.preventDefault();
+          pausePlay();
+        }
+        const target =
+          playSession?.phase === "armed"
+            ? playKeyboardTargetForKey(playSession.kind, event.key)
+            : null;
+        if (target) {
+          event.preventDefault();
+          handleSceneClick(target.x, target.y);
+        }
+      }}
       aria-label={`${state.name} virtual scene: ${world.phaseLabel}. ${world.vitalityLabel}.`}
       onMouseMove={(event) =>
         cursorBridgeRef.current?.move(event.clientX, event.clientY)
@@ -1627,6 +1743,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         ref={canvasRef}
         className={styles.canvas}
         data-testid="buddy-world-canvas"
+        style={presence.textOnly ? { visibility: "hidden" } : undefined}
       />
 
       <button
@@ -1732,49 +1849,56 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         />
       )}
 
-      <BuddyCharacter
-        state={state}
-        stage={stage}
-        palette={palette}
-        displaySize={compact ? 230 : 282}
-        bubblePosition={bubblePosition}
-        randomizeBubblePosition={false}
-        compactBubble={compact}
-        sceneXPercent={characterSceneX}
-        sceneYPercent={characterSceneY}
-        sceneDepthScale={characterDepthScale}
-        scenePose={characterPose}
-        traveling={travelPhase === "traveling"}
-        arrived={travelPhase === "arrived"}
-        travelDirection={travelDirection}
-        spritePointer
-        cursorBridgeRef={cursorBridgeRef}
-        envContext={{
-          phase: world.phase,
-          weather: world.weather,
-          season: world.season,
-        }}
-        speechText={speechOverride}
-        speechStyle={speechStyle}
-        speechMedia={
-          dreamKind !== null && speechStyle === "think" ? (
-            <BuddyDreamCanvas kind={dreamKind} reducedMotion={reducedMotion} />
-          ) : undefined
-        }
-        speechControls={
-          activeSpeech ? activeSpeech.controls : requestPrompt?.controls
-        }
-        speechIntent={activeSpeech?.speech_intent}
-        onCanvasEvent={onCanvasEvent}
-        onSpeechControl={
-          activeSpeech || requestPrompt ? handleSpeechControlAll : undefined
-        }
-      />
+      {!presence.textOnly && (
+        <BuddyCharacter
+          state={state}
+          stage={stage}
+          palette={palette}
+          displaySize={compact ? 230 : 282}
+          bubblePosition={bubblePosition}
+          randomizeBubblePosition={false}
+          compactBubble={compact}
+          sceneXPercent={characterSceneX}
+          sceneYPercent={characterSceneY}
+          sceneDepthScale={characterDepthScale}
+          scenePose={characterPose}
+          traveling={travelPhase === "traveling"}
+          arrived={travelPhase === "arrived"}
+          travelDirection={travelDirection}
+          spritePointer
+          cursorBridgeRef={cursorBridgeRef}
+          envContext={{
+            phase: world.phase,
+            weather: world.weather,
+            season: world.season,
+          }}
+          speechText={speechOverride}
+          speechStyle={speechStyle}
+          speechMedia={
+            dreamKind !== null && speechStyle === "think" ? (
+              <BuddyDreamCanvas
+                kind={dreamKind}
+                reducedMotion={reducedMotion}
+                visible={surfaceVisible}
+              />
+            ) : undefined
+          }
+          speechControls={
+            activeSpeech ? activeSpeech.controls : requestPrompt?.controls
+          }
+          speechIntent={activeSpeech?.speech_intent}
+          onCanvasEvent={onCanvasEvent}
+          onSpeechControl={
+            activeSpeech || requestPrompt ? handleSpeechControlAll : undefined
+          }
+        />
+      )}
 
       <canvas
         ref={foregroundCanvasRef}
         className={styles.foregroundCanvas}
         data-testid="buddy-world-foreground"
+        style={presence.textOnly ? { visibility: "hidden" } : undefined}
       />
 
       {setupNeeded && (
@@ -1813,10 +1937,81 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
       )}
 
       <div
-        className={styles.careDock}
+        className={classNames(styles.careDock, {
+          [previewStyles.sceneControls]: presence.enabled,
+        })}
         aria-label={`${state.name} scene care actions`}
       >
+        {presence.enabled && (
+          <>
+            <span role="status">
+              {presenceMotion?.label}{" "}
+              {describePlaySessionForScreenReader(
+                playSession ?? suspension?.session ?? null,
+                suspension !== null,
+              )}
+            </span>
+            {presence.textOnly && activeSpeech && (
+              <span>
+                {activeSpeech.text}
+                {activeSpeech.controls.map((control) => (
+                  <button
+                    key={control.id}
+                    onClick={() => onSpeechControl(control)}
+                  >
+                    {control.label}
+                  </button>
+                ))}
+              </span>
+            )}
+            {playSession?.phase === "armed" &&
+              playKeyboardTargets(playSession.kind).map((target) => (
+                <button
+                  type="button"
+                  key={target.id}
+                  className={styles.sceneButton}
+                  onClick={() => handleSceneClick(target.x, target.y)}
+                >
+                  {target.key}: {target.label}
+                </button>
+              ))}
+            {playSession && (
+              <button type="button" onClick={pausePlay}>
+                Pause play
+              </button>
+            )}
+            {suspension && (
+              <button
+                type="button"
+                disabled={
+                  presenceMotion?.ownsAttention ||
+                  activeSpeech !== null ||
+                  careActivity !== null
+                }
+                onClick={resumePlay}
+              >
+                Resume play
+              </button>
+            )}
+            {(playSession || suspension) && (
+              <button
+                type="button"
+                onClick={() => {
+                  restorePlayFocusRef.current = true;
+                  cancelPlay();
+                }}
+              >
+                Stop play
+              </button>
+            )}
+          </>
+        )}
         <button
+          ref={playStartRef}
+          disabled={
+            presence.enabled &&
+            (attentionBusy || Boolean(playSession || suspension))
+          }
           type="button"
           className={styles.sceneButton}
           aria-label={`Play fetch with ${state.name}`}
@@ -1837,7 +2032,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         <button
           type="button"
           className={styles.sceneButton}
-          aria-label={`Water ${state.name}'s garden`}
+          aria-label={`Feed ${state.name}`}
           onClick={() => runCareActivity("feed")}
         >
           🍜

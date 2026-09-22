@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,6 +20,9 @@ use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::daemon::events::EventBus;
+use crate::daemon::lock::{
+    probe_workspace_lease, WorkspaceLeaseConflict, WORKSPACE_BUSY_EXIT_CODE, WORKSPACE_BUSY_MARKER,
+};
 use crate::daemon::ports::PortPair;
 use crate::daemon::projects::{ProjectEntry, ProjectSettings};
 use crate::daemon::state::{now_ms, ProxyActivity};
@@ -31,9 +34,35 @@ const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_ALL_CONCURRENCY: usize = 8;
 const CRASH_WINDOW_MS: u64 = 10 * 60 * 1000;
+/// How long `spawn_worker` keeps waiting for a lease still held by a child this supervisor owns.
+/// A worker that outlived `KILL_WAIT_TIMEOUT` is being reaped in the background, so the lease is
+/// about to be released; latching `Failed { workspace busy }` here would lock the daemon out of
+/// its own project until an external `ensure_worker` arrived.
+const SELF_HELD_LEASE_WAIT: Duration = Duration::from_secs(15);
+const SELF_HELD_LEASE_POLL: Duration = Duration::from_millis(100);
 const MAX_PORT_BUSY_RETRIES: usize = 3;
 const MAX_RESTART_DELAY_MS: u64 = 8_000;
 const MAX_RESTART_JITTER_MS: u64 = 500;
+
+fn observed_identity(
+    record: &WorkerRecord,
+) -> Option<crate::daemon::buddy_reconciliation::ObservedIdentity> {
+    use sha2::{Digest, Sha256};
+    if !matches!(
+        record.info.state,
+        WorkerState::Ready | WorkerState::Starting
+    ) {
+        return None;
+    }
+    Some(crate::daemon::buddy_reconciliation::ObservedIdentity {
+        pid: record.info.pid?,
+        generation: record.generation,
+        instance_digest: format!(
+            "{:x}",
+            Sha256::digest(record.instance_token.as_ref()?.as_bytes())
+        ),
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,6 +73,19 @@ pub enum WorkerState {
     Stopping,
     Crashed,
     Failed { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceBusyInfo {
+    pub project_id: String,
+    pub root: PathBuf,
+    pub holder: String,
+    pub lease_path: PathBuf,
+    pub observed_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_http_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +123,7 @@ struct WorkerRecord {
     child: Option<Child>,
     instance_token: Option<String>,
     generation: u64,
+    wake_only: bool,
     crash_history: VecDeque<u64>,
     monitor_task: Option<JoinHandle<()>>,
 }
@@ -111,7 +154,13 @@ struct WorkerSlot {
 }
 
 pub struct Supervisor {
+    pub(crate) native_exec: Arc<crate::exec::ExecRegistry>,
+    pub(crate) native_shutdown: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) native_lifecycle: Arc<tokio::sync::Mutex<()>>,
     workers: RwLock<HashMap<String, Arc<WorkerSlot>>>,
+    wake_fences: SyncMutex<HashMap<String, u64>>,
+    wake_shutdown: std::sync::atomic::AtomicBool,
+    installation_fence: Arc<tokio::sync::RwLock<()>>,
     events: EventBus,
     daemon_dir: PathBuf,
     daemon_auth_token: Option<String>,
@@ -119,9 +168,17 @@ pub struct Supervisor {
     cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
     reserved_ports: Arc<SyncMutex<HashSet<u16>>>,
     project_liveness: RwLock<HashMap<String, WorkerLiveness>>,
+    busy_workspaces: Arc<SyncRwLock<HashMap<String, WorkspaceBusyInfo>>>,
     proxy_activity: Arc<SyncRwLock<HashMap<String, ProxyActivity>>>,
     proxy_restarts: Mutex<ProxyRestartTracker>,
     child_reap_tasks: Mutex<JoinSet<()>>,
+    /// Pids of children this supervisor started and is still reaping. A worker that outlived
+    /// `KILL_WAIT_TIMEOUT` keeps its workspace lease until the kernel actually tears it down, so
+    /// `spawn_worker` must be able to tell "my own dying worker" from "a foreign engine".
+    reaping_child_pids: Arc<SyncRwLock<HashSet<u32>>>,
+    /// Lets regression tests hold the lease until the restart actually waits at the probe.
+    #[cfg(test)]
+    self_held_lease_wait_started: tokio::sync::Notify,
     idle_timeout_secs: u64,
     worker_executable: Result<PathBuf, String>,
     client: reqwest::Client,
@@ -154,7 +211,13 @@ impl Supervisor {
     ) -> Arc<Self> {
         let (shutdown_tx, _) = watch::channel(None);
         Arc::new(Self {
+            native_exec: Arc::new(crate::exec::ExecRegistry::new()),
+            native_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            native_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             workers: RwLock::new(HashMap::new()),
+            wake_fences: SyncMutex::new(HashMap::new()),
+            wake_shutdown: std::sync::atomic::AtomicBool::new(false),
+            installation_fence: Arc::new(tokio::sync::RwLock::new(())),
             events,
             daemon_dir,
             daemon_auth_token,
@@ -162,9 +225,13 @@ impl Supervisor {
             cron_pending,
             reserved_ports: Arc::new(SyncMutex::new(HashSet::new())),
             project_liveness: RwLock::new(HashMap::new()),
+            busy_workspaces: Arc::new(SyncRwLock::new(HashMap::new())),
             proxy_activity,
             proxy_restarts: Mutex::new(ProxyRestartTracker::default()),
             child_reap_tasks: Mutex::new(JoinSet::new()),
+            reaping_child_pids: Arc::new(SyncRwLock::new(HashSet::new())),
+            #[cfg(test)]
+            self_held_lease_wait_started: tokio::sync::Notify::new(),
             idle_timeout_secs,
             worker_executable,
             client: reqwest::Client::builder()
@@ -177,7 +244,115 @@ impl Supervisor {
     }
 
     pub fn request_shutdown(&self, reason: String) {
+        self.native_shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let _fence = self.wake_fences.lock();
+        self.wake_shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.shutdown_tx.send_replace(Some(reason));
+    }
+
+    /// No candidate may drain its own evaluator. A user must stop workers first;
+    /// this fence blocks every native spawn until installation consumption ends.
+    pub(crate) async fn installation_drained(
+        &self,
+    ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>, String> {
+        let guard = self
+            .installation_fence
+            .clone()
+            .try_write_owned()
+            .map_err(|_| "worker startup active; drain first")?;
+        for slot in self.workers.read().await.values() {
+            let record = slot.record.lock().await;
+            if record.child.is_some()
+                || record.info.pid.is_some()
+                || record.info.state != WorkerState::Stopped
+            {
+                return Err(
+                    "native installation requires all managed workers already stopped".into(),
+                );
+            }
+        }
+        if !self.child_reap_tasks.lock().await.is_empty() {
+            return Err("native installation requires all child reapers drained".into());
+        }
+        Ok(guard)
+    }
+
+    pub fn workspace_busy(&self, project_id: &str) -> Option<WorkspaceBusyInfo> {
+        self.busy_workspaces.read().get(project_id).cloned()
+    }
+
+    pub fn busy_workspaces(&self) -> Vec<WorkspaceBusyInfo> {
+        let mut rows = self
+            .busy_workspaces
+            .read()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.sort_by(|a, b| a.project_id.cmp(&b.project_id));
+        rows
+    }
+
+    fn clear_workspace_busy(&self, project_id: &str) {
+        self.busy_workspaces.write().remove(project_id);
+    }
+
+    fn record_workspace_busy(
+        &self,
+        project_id: &str,
+        conflict: &WorkspaceLeaseConflict,
+    ) -> WorkspaceBusyInfo {
+        let info = WorkspaceBusyInfo {
+            project_id: project_id.to_string(),
+            root: conflict.root.clone(),
+            holder: conflict.holder_description(),
+            lease_path: conflict.path.clone(),
+            observed_at_ms: now_ms(),
+            holder_pid: conflict.holder.as_ref().map(|holder| holder.pid),
+            holder_http_port: conflict
+                .holder
+                .as_ref()
+                .map(|holder| holder.http_port)
+                .filter(|port| *port != 0),
+        };
+        self.busy_workspaces
+            .write()
+            .insert(project_id.to_string(), info.clone());
+        info
+    }
+
+    async fn mark_workspace_busy(
+        &self,
+        slot: &Arc<WorkerSlot>,
+        spec: &WorkerLaunchSpec,
+        conflict: &WorkspaceLeaseConflict,
+    ) -> WorkerInfo {
+        let busy = self.record_workspace_busy(&spec.project_id, conflict);
+        let reason = format!("{WORKSPACE_BUSY_MARKER}: {}", busy.holder);
+        let info = self.mark_failed(slot, &spec.project_id, reason).await;
+        let _ = self
+            .events
+            .emit(
+                "worker_workspace_busy",
+                Some(spec.project_id.clone()),
+                json!({
+                    "root": busy.root.to_string_lossy(),
+                    "holder": busy.holder,
+                    "holder_pid": busy.holder_pid,
+                    "holder_http_port": busy.holder_http_port,
+                    "lease_path": busy.lease_path.to_string_lossy(),
+                    "observed_at_ms": busy.observed_at_ms,
+                }),
+            )
+            .await;
+        tracing::warn!(
+            "not spawning a worker for {}: {} is already served by {}",
+            spec.project_id,
+            busy.root.display(),
+            busy.holder
+        );
+        info
     }
 
     pub async fn set_daemon_port(&self, port: u16) {
@@ -199,6 +374,98 @@ impl Supervisor {
             }
         }
         self.spawn_worker(slot.clone(), spec, "ensure").await
+    }
+
+    pub(crate) fn invalidate_buddy_wake(&self, id: &str) {
+        let mut fences = self.wake_fences.lock();
+        let value = fences.entry(id.into()).or_default();
+        *value = value.saturating_add(1);
+    }
+
+    pub(crate) fn buddy_wake_fence(&self, id: &str) -> u64 {
+        self.wake_fences.lock().get(id).copied().unwrap_or(0)
+    }
+
+    /// Single native start. No port retries or crash-budget auto restarts.
+    pub(crate) async fn buddy_wake<F, Fut>(
+        self: &Arc<Self>,
+        entry: &ProjectEntry,
+        fence: u64,
+        expires_at_ms: u64,
+        consume: F,
+    ) -> Result<Option<WorkerInfo>, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<bool, String>>,
+    {
+        let _installation = self.installation_fence.read().await;
+        let slot = self.slot_for(&entry.id).await;
+        let reservation = self.reserve_port_pair()?;
+        let ports = reservation.ports();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let spec = WorkerLaunchSpec::from(entry);
+        let (pid, generation) = {
+            let _op = slot.op_lock.lock().await;
+            if self.buddy_wake_fence(&entry.id) != fence {
+                return Ok(None);
+            }
+            if matches!(
+                slot.record.lock().await.info.state,
+                WorkerState::Ready | WorkerState::Starting | WorkerState::Stopping
+            ) {
+                return Ok(None);
+            }
+            if !consume().await? {
+                return Ok(None);
+            }
+            let child = self
+                .spawn_child_fenced(&spec, ports, &nonce, Some((fence, expires_at_ms)))
+                .await?;
+            let pid = child.id();
+            let mut record = slot.record.lock().await;
+            abort_task(&mut record.monitor_task);
+            record.generation = record.generation.saturating_add(1);
+            record.wake_only = true;
+            record.child = Some(child);
+            record.instance_token = Some(nonce.clone());
+            record.info = WorkerInfo {
+                project_id: entry.id.clone(),
+                pid,
+                http_port: ports.http_port,
+                lsp_port: ports.lsp_port,
+                state: WorkerState::Starting,
+                last_error: None,
+            };
+            (pid, record.generation)
+        };
+        match self
+            .wait_until_ready_or_exit(
+                &slot,
+                generation,
+                pid,
+                ports.http_port,
+                ports.lsp_port,
+                &nonce,
+            )
+            .await?
+        {
+            ReadinessOutcome::Ready => {
+                let mut record = slot.record.lock().await;
+                if record.generation == generation {
+                    record.info.state = WorkerState::Ready;
+                    record.monitor_task = Some(self.monitor_handle(slot.clone(), spec, generation));
+                }
+                Ok(Some(record.info.clone()))
+            }
+            ReadinessOutcome::Superseded(info) => Ok(Some(info)),
+            _ => {
+                let _op = slot.op_lock.lock().await;
+                if slot.record.lock().await.generation == generation {
+                    self.stop_slot_locked(&slot, &entry.id, false).await?;
+                }
+                Err("wake startup unconfirmed or failed; budget consumed".into())
+            }
+        }
     }
 
     pub async fn ensure_ready_worker(
@@ -258,6 +525,7 @@ impl Supervisor {
     }
 
     pub async fn stop_worker(&self, project_id: &str) -> Result<Option<WorkerInfo>, String> {
+        self.invalidate_buddy_wake(project_id);
         let Some(slot) = self.get_slot(project_id).await else {
             return Ok(None);
         };
@@ -287,6 +555,7 @@ impl Supervisor {
     }
 
     pub(crate) async fn forget_worker(&self, project_id: &str) -> Result<(), String> {
+        self.invalidate_buddy_wake(project_id);
         if let Some(slot) = self.get_slot(project_id).await {
             let _guard = slot.op_lock.lock().await;
             let _ = self.stop_slot_locked(&slot, project_id, false).await?;
@@ -298,6 +567,12 @@ impl Supervisor {
     }
 
     pub async fn stop_all(self: &Arc<Self>) {
+        self.native_shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.native_exec
+            .cleanup_shutdown(Duration::from_secs(5))
+            .await;
+        let _native_drained = self.native_lifecycle.lock().await;
         self.abort_proxy_restart_tasks().await;
         let ids: Vec<String> = self.workers.read().await.keys().cloned().collect();
         stream::iter(ids)
@@ -363,6 +638,63 @@ impl Supervisor {
             WorkerState::Ready | WorkerState::Starting
         ) && record.info.pid == Some(pid)
             && record.instance_token.as_deref() == Some(instance_token)
+    }
+
+    pub(crate) async fn observed_worker_identity(
+        &self,
+        project_id: &str,
+    ) -> Option<crate::daemon::buddy_reconciliation::ObservedIdentity> {
+        let slot = self.get_slot(project_id).await?;
+        let record = slot.record.lock().await;
+        observed_identity(&record)
+    }
+
+    pub(crate) async fn with_observed_worker_identity<F, Fut, T>(
+        &self,
+        project_id: &str,
+        consume: F,
+    ) -> T
+    where
+        F: FnOnce(Option<crate::daemon::buddy_reconciliation::ObservedIdentity>) -> Fut,
+        Fut: Future<Output = T>,
+    {
+        let slot = self.slot_for(project_id).await;
+        let _guard = slot.op_lock.lock().await;
+        let record = slot.record.lock().await;
+        let result = consume(observed_identity(&record)).await;
+        drop(record);
+        result
+    }
+
+    /// Hold both owner fences through the observation commit. A monitor exit,
+    /// restart, or stop cannot replace the identity between check and commit.
+    pub(crate) async fn with_worker_identity<F, Fut, T>(
+        &self,
+        project_id: &str,
+        pid: u32,
+        instance_token: &str,
+        consume: F,
+    ) -> Result<T, String>
+    where
+        F: FnOnce(crate::daemon::buddy_reconciliation::ObservedIdentity) -> Fut,
+        Fut: Future<Output = Result<T, String>>,
+    {
+        let slot = self
+            .get_slot(project_id)
+            .await
+            .ok_or("worker unavailable")?;
+        let _operation = slot.op_lock.lock().await;
+        let record = slot.record.lock().await;
+        if instance_token.is_empty()
+            || record.info.pid != Some(pid)
+            || record.instance_token.as_deref() != Some(instance_token)
+        {
+            return Err("projection does not match the current worker".into());
+        }
+        let identity = observed_identity(&record).ok_or("worker is offline")?;
+        let result = consume(identity).await;
+        drop(record);
+        result
     }
 
     #[cfg(test)]
@@ -584,12 +916,69 @@ impl Supervisor {
         }
     }
 
+    /// True when the lease holder is a child this supervisor started and is still reaping.
+    ///
+    /// Only `handoff_generation_child_to_reaper` publishes into `reaping_child_pids`, and the reap
+    /// task removes the pid the moment `child.wait()` returns, so a pid is present exactly while
+    /// the OS process (and therefore its flock) can still be alive.
+    fn lease_holder_is_our_dying_child(&self, conflict: &WorkspaceLeaseConflict) -> bool {
+        let Some(holder_pid) = conflict.holder.as_ref().map(|holder| holder.pid) else {
+            // An unreadable or absent holder record could be anyone's; treat it as foreign.
+            return false;
+        };
+        self.reaping_child_pids.read().contains(&holder_pid)
+    }
+
+    /// Probes the workspace lease, but does not report a conflict while the holder is a worker this
+    /// supervisor is still tearing down.
+    ///
+    /// `stop_slot_locked` returns `Ok` as soon as a child that outlived `KILL_WAIT_TIMEOUT` is
+    /// handed to the background reaper, so `restart_worker` can reach this probe while the previous
+    /// generation is still alive and still holding the lease. Without this wait the restart would
+    /// mark the worker `Failed { workspace busy }` with no retry scheduled, and the daemon would
+    /// stay locked out of its own project until an unrelated `ensure_worker` arrived.
+    async fn probe_foreign_workspace_lease(&self, root: &Path) -> Option<WorkspaceLeaseConflict> {
+        let lease_root = workspace_lease_root(root);
+        let deadline = Instant::now() + SELF_HELD_LEASE_WAIT;
+        loop {
+            let conflict = probe_workspace_lease(&lease_root)?;
+            if !self.lease_holder_is_our_dying_child(&conflict) {
+                return Some(conflict);
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    "workspace lease for {} is still held by our own exiting worker (pid {:?}) \
+                     after {:?}; reporting it as busy",
+                    lease_root.display(),
+                    conflict.holder.as_ref().map(|holder| holder.pid),
+                    SELF_HELD_LEASE_WAIT
+                );
+                return Some(conflict);
+            }
+            #[cfg(test)]
+            self.self_held_lease_wait_started.notify_one();
+            tokio::time::sleep(SELF_HELD_LEASE_POLL).await;
+        }
+    }
+
     async fn spawn_worker(
         self: &Arc<Self>,
         slot: Arc<WorkerSlot>,
         spec: WorkerLaunchSpec,
         reason: &str,
     ) -> Result<WorkerInfo, String> {
+        let _installation = self.installation_fence.read().await;
+        if self.wake_shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("worker start rejected during daemon shutdown".into());
+        }
+        if let Some(conflict) = self.probe_foreign_workspace_lease(&spec.root).await {
+            let _guard = slot.op_lock.lock().await;
+            if let Some(info) = self.reusable_info(&slot).await {
+                return Ok(info);
+            }
+            return Ok(self.mark_workspace_busy(&slot, &spec, &conflict).await);
+        }
+        self.clear_workspace_busy(&spec.project_id);
         for attempt in 1..=MAX_PORT_BUSY_RETRIES {
             let reservation = self.reserve_port_pair()?;
             let ports = reservation.ports();
@@ -611,6 +1000,7 @@ impl Supervisor {
                 let mut record = slot.record.lock().await;
                 abort_task(&mut record.monitor_task);
                 record.generation = record.generation.saturating_add(1);
+                record.wake_only = false;
                 record.child = Some(child);
                 record.instance_token = Some(nonce.clone());
                 record.info = WorkerInfo {
@@ -677,6 +1067,10 @@ impl Supervisor {
                         )
                         .await;
                     return Ok(info);
+                }
+                ReadinessOutcome::Exited(exit_code) if is_workspace_busy_exit(exit_code) => {
+                    let conflict = workspace_busy_conflict(&spec.root);
+                    return Ok(self.mark_workspace_busy(&slot, &spec, &conflict).await);
                 }
                 ReadinessOutcome::Exited(exit_code) if is_port_busy_exit(exit_code) => {
                     let retrying_ports = attempt < MAX_PORT_BUSY_RETRIES;
@@ -844,6 +1238,16 @@ impl Supervisor {
         ports: PortPair,
         nonce: &str,
     ) -> Result<Child, String> {
+        self.spawn_child_fenced(spec, ports, nonce, None).await
+    }
+
+    async fn spawn_child_fenced(
+        &self,
+        spec: &WorkerLaunchSpec,
+        ports: PortPair,
+        nonce: &str,
+        fence: Option<(u64, u64)>,
+    ) -> Result<Child, String> {
         let mut command = self.worker_command(spec, ports, nonce).await?;
         let log_path = self
             .daemon_dir
@@ -870,6 +1274,15 @@ impl Supervisor {
         }
         command.stdin(Stdio::null());
         command.kill_on_drop(true);
+        // Revocation and stop fence changes linearize against the actual OS spawn.
+        let fences = self.wake_fences.lock();
+        if fence.is_some_and(|(expected_epoch, expires_at_ms)| {
+            self.wake_shutdown.load(std::sync::atomic::Ordering::SeqCst)
+                || fences.get(&spec.project_id).copied().unwrap_or(0) != expected_epoch
+                || now_ms() >= expires_at_ms
+        }) {
+            return Err("wake cancelled before spawn; budget consumed".into());
+        }
         command
             .spawn()
             .map_err(|error| format!("failed to spawn worker command: {error}"))
@@ -1040,6 +1453,11 @@ impl Supervisor {
             {
                 return;
             }
+            if is_workspace_busy_exit(exit_code) {
+                let conflict = workspace_busy_conflict(&spec.root);
+                self.mark_workspace_busy(&slot, &spec, &conflict).await;
+                return;
+            }
             let (info, delay) = self
                 .record_unexpected_exit(
                     &slot,
@@ -1119,6 +1537,7 @@ impl Supervisor {
             Some(code) => format!("{reason} (exit code {code})"),
             None => format!("{reason} (signal)"),
         });
+        let wants_alive = wants_alive && !record.wake_only;
         if delay.is_some() && wants_alive {
             record.info.state = WorkerState::Starting;
         } else if delay.is_none() {
@@ -1308,6 +1727,14 @@ impl Supervisor {
         let Some(mut child) = child else {
             return false;
         };
+        // The child keeps its workspace lease until it actually dies. Publish its pid so
+        // `spawn_worker` recognises the holder as one of ours and waits instead of latching
+        // `Failed { workspace busy }` and blaming a foreign engine.
+        let reaping_pid = child.id();
+        if let Some(pid) = reaping_pid {
+            self.reaping_child_pids.write().insert(pid);
+        }
+        let reaping_child_pids = self.reaping_child_pids.clone();
         let slot = slot.clone();
         let project_id = project_id.to_string();
         let events = self.events.clone();
@@ -1315,6 +1742,9 @@ impl Supervisor {
         drain_child_reap_tasks(&mut tasks);
         tasks.spawn(async move {
             let _ = child.wait().await;
+            if let Some(pid) = reaping_pid {
+                reaping_child_pids.write().remove(&pid);
+            }
             let stopped = {
                 let mut record = slot.record.lock().await;
                 if record.generation != generation {
@@ -1403,6 +1833,7 @@ impl WorkerSlot {
                 child: None,
                 instance_token: None,
                 generation: 0,
+                wake_only: false,
                 crash_history: VecDeque::new(),
                 monitor_task: None,
             }),
@@ -1628,6 +2059,29 @@ fn drain_child_reap_tasks(tasks: &mut JoinSet<()>) {
 
 fn is_port_busy_exit(exit_code: Option<i32>) -> bool {
     matches!(exit_code, Some(48) | Some(98) | Some(10048))
+}
+
+fn is_workspace_busy_exit(exit_code: Option<i32>) -> bool {
+    exit_code == Some(WORKSPACE_BUSY_EXIT_CODE)
+}
+
+fn workspace_lease_root(root: &Path) -> PathBuf {
+    crate::daemon::lock::normalize_workspace_roots(
+        &crate::daemon::paths::cache_root(),
+        std::slice::from_ref(&root.to_path_buf()),
+    )
+    .into_iter()
+    .next()
+    .unwrap_or_else(|| root.to_path_buf())
+}
+
+fn workspace_busy_conflict(root: &Path) -> WorkspaceLeaseConflict {
+    let root = workspace_lease_root(root);
+    probe_workspace_lease(&root).unwrap_or_else(|| WorkspaceLeaseConflict {
+        path: crate::daemon::lock::workspace_lease_path(&root),
+        root,
+        holder: None,
+    })
 }
 
 fn push_crash(history: &mut VecDeque<u64>, now: u64) {
@@ -2120,6 +2574,192 @@ mod tests {
         );
     }
 
+    struct EngineLocksDirGuard {
+        previous: Option<std::ffi::OsString>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl EngineLocksDirGuard {
+        fn set() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let previous = std::env::var_os(crate::daemon::lock::ENGINE_LOCKS_DIR_ENV);
+            std::env::set_var(
+                crate::daemon::lock::ENGINE_LOCKS_DIR_ENV,
+                dir.path().join("engine-locks"),
+            );
+            Self {
+                previous,
+                _dir: dir,
+            }
+        }
+    }
+
+    impl Drop for EngineLocksDirGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(crate::daemon::lock::ENGINE_LOCKS_DIR_ENV, value),
+                None => std::env::remove_var(crate::daemon::lock::ENGINE_LOCKS_DIR_ENV),
+            }
+        }
+    }
+
+    /// Takes the workspace lease and records `holder_pid` as its owner, exactly as a worker
+    /// process that is still shutting down would leave it behind.
+    fn hold_lease_as(root: &Path, holder_pid: u32) -> crate::daemon::lock::WorkspaceLease {
+        let mut info =
+            crate::daemon::lock::WorkspaceLeaseInfo::for_current_process(9101, 9102, "refact-lsp");
+        info.pid = holder_pid;
+        crate::daemon::lock::try_acquire_workspace_lease(root, &info)
+            .expect("the test must be able to take the workspace lease")
+    }
+
+    /// Regression for the daemon locking itself out of its own project.
+    ///
+    /// When a worker outlives `KILL_WAIT_TIMEOUT`, `stop_slot_locked` hands the child to the
+    /// background reaper and returns `Ok` while that child is still alive and still holding the
+    /// workspace lease. `restart_worker` then reaches `spawn_worker`'s probe, which used to see
+    /// the lease, mark the worker `Failed { workspace busy: ... }` blaming a foreign engine, and
+    /// schedule no retry at all — a permanent lockout until an unrelated `ensure_worker` arrived.
+    ///
+    /// This reproduces that exact post-handoff state (pid published in `reaping_child_pids`, lease
+    /// held and attributed to that pid) and asserts the restart now waits for our own child and
+    /// ends with a running worker.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(daemon)]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows artifact runners can starve fake worker shutdown"
+    )]
+    async fn restart_waits_out_a_child_that_outlived_the_kill_timeout() {
+        let Some(_env) = EnvGuard::fake_worker() else {
+            return;
+        };
+        let _locks = EngineLocksDirGuard::set();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let supervisor = Supervisor::new(
+            EventBus::new(dir.path().join("events.jsonl")),
+            dir.path().join("daemon"),
+            8488,
+        );
+        let entry = test_entry(root.clone());
+
+        let ready = supervisor.ensure_worker(&entry).await.unwrap();
+        assert_eq!(ready.state, WorkerState::Ready);
+        let dying_pid = ready.pid.expect("a ready worker must report a pid");
+
+        // The state `handoff_generation_child_to_reaper` leaves behind: our own child is still
+        // being reaped and still owns the lease.
+        supervisor.reaping_child_pids.write().insert(dying_pid);
+        let lease = hold_lease_as(&workspace_lease_root(&root), dying_pid);
+
+        let mut restart = tokio::spawn({
+            let supervisor = supervisor.clone();
+            let entry = entry.clone();
+            async move { supervisor.restart_worker(&entry).await }
+        });
+
+        // Stopping the old worker can take seconds. A sleep/is_finished check could pass
+        // during graceful shutdown and release the lease before the probe ever sees it.
+        // Keep the flock held until the probe has recognized our pid and begun waiting.
+        // Starting is too late to observe: spawn_worker sets it only after the probe returns.
+        let reached_wait = tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::select! {
+                _ = supervisor.self_held_lease_wait_started.notified() => {}
+                result = &mut restart => {
+                    panic!("restart completed before waiting for its own lease: {result:?}");
+                }
+            }
+        })
+        .await;
+        if reached_wait.is_err() {
+            restart.abort();
+            let _ = restart.await;
+            panic!("restart never reached the self-held lease wait");
+        }
+        assert!(
+            !restart.is_finished(),
+            "restart must wait for our own dying child instead of failing immediately"
+        );
+        assert!(
+            supervisor.workspace_busy(&entry.id).is_none(),
+            "our own exiting worker must never be recorded as a foreign engine"
+        );
+
+        // The child finally dies: the reap task drops the pid and the flock is released.
+        supervisor.reaping_child_pids.write().remove(&dying_pid);
+        drop(lease);
+
+        let info = tokio::time::timeout(Duration::from_secs(30), restart)
+            .await
+            .expect("restart must not hang")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            info.state,
+            WorkerState::Ready,
+            "restart must end with a running worker, got {:?} / {:?}",
+            info.state,
+            info.last_error
+        );
+        assert_ne!(info.pid, Some(dying_pid));
+        assert!(supervisor.workspace_busy(&entry.id).is_none());
+
+        supervisor.stop_all().await;
+    }
+
+    /// Sensitivity control for the fix above: a lease held by a pid this supervisor does *not* own
+    /// must still latch `Failed { workspace busy }`. Without this, the fix could silently degrade
+    /// into "never report a busy workspace", which would let two engines write one codegraph store.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(daemon)]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows artifact runners can starve fake worker shutdown"
+    )]
+    async fn restart_still_reports_a_foreign_lease_holder_as_busy() {
+        let Some(_env) = EnvGuard::fake_worker() else {
+            return;
+        };
+        let _locks = EngineLocksDirGuard::set();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let supervisor = Supervisor::new(
+            EventBus::new(dir.path().join("events.jsonl")),
+            dir.path().join("daemon"),
+            8488,
+        );
+        let entry = test_entry(root.clone());
+
+        let ready = supervisor.ensure_worker(&entry).await.unwrap();
+        assert_eq!(ready.state, WorkerState::Ready);
+
+        // A foreign engine's pid: never published into `reaping_child_pids`.
+        let foreign_pid = 424_242;
+        assert!(!supervisor.reaping_child_pids.read().contains(&foreign_pid));
+        let lease = hold_lease_as(&workspace_lease_root(&root), foreign_pid);
+
+        let info = tokio::time::timeout(Duration::from_secs(30), supervisor.restart_worker(&entry))
+            .await
+            .expect("a foreign holder must be reported promptly, not waited out")
+            .unwrap();
+
+        let WorkerState::Failed { ref reason } = info.state else {
+            panic!("expected a busy failure, got {:?}", info.state);
+        };
+        assert!(
+            reason.contains(WORKSPACE_BUSY_MARKER),
+            "reason was {reason}"
+        );
+        let busy = supervisor
+            .workspace_busy(&entry.id)
+            .expect("a foreign holder must be recorded as busy");
+        assert_eq!(busy.holder_pid, Some(foreign_pid));
+
+        drop(lease);
+        supervisor.stop_all().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial_test::serial(daemon)]
     #[cfg_attr(
@@ -2159,5 +2799,58 @@ mod tests {
             info.last_error.as_deref(),
             Some("worker startup cancelled by daemon shutdown")
         );
+    }
+    #[tokio::test]
+    async fn installation_fence_requires_stopped_workers_and_blocks_spawn_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = Supervisor::new(
+            EventBus::new(dir.path().join("events.jsonl")),
+            dir.path().join("daemon"),
+            0,
+        );
+        let drained = owner.installation_drained().await.unwrap();
+        assert!(owner.installation_fence.try_read().is_err());
+        drop(drained);
+        let start = owner.installation_fence.read().await;
+        assert!(owner.installation_drained().await.is_err());
+        drop(start);
+        owner
+            .set_test_worker_info("project", 42, WorkerState::Ready, "fixture")
+            .await;
+        assert!(owner.installation_drained().await.is_err());
+        assert_eq!(owner.worker_info("project").await.unwrap().pid, Some(42));
+    }
+
+    #[tokio::test]
+    async fn buddy_wake_stop_fence_and_ready_starting_do_not_consume() {
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = Supervisor::new(
+            EventBus::new(dir.path().join("events.jsonl")),
+            dir.path().join("daemon"),
+            0,
+        );
+        let entry = test_entry(dir.path().to_path_buf());
+        let queued_fence = supervisor.buddy_wake_fence(&entry.id);
+        supervisor.stop_worker(&entry.id).await.unwrap();
+        assert!(supervisor
+            .buddy_wake(&entry, queued_fence, u64::MAX, || async {
+                panic!("stopped queued start must not consume")
+            })
+            .await
+            .unwrap()
+            .is_none());
+        for state in [WorkerState::Ready, WorkerState::Starting] {
+            supervisor
+                .set_test_worker_info(&entry.id, 42, state, "fake-identity")
+                .await;
+            let fence = supervisor.buddy_wake_fence(&entry.id);
+            assert!(supervisor
+                .buddy_wake(&entry, fence, u64::MAX, || async {
+                    panic!("active worker must not consume or spawn")
+                })
+                .await
+                .unwrap()
+                .is_none());
+        }
     }
 }

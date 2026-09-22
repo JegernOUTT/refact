@@ -755,6 +755,9 @@ async fn render_chat_reaction_text(
 }
 
 pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMessage) {
+    if super::editorial::enabled(&app).await {
+        return;
+    }
     let raw_text = accepted.content.content_text_only();
 
     let plan = {
@@ -912,6 +915,9 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
 }
 
 pub async fn maybe_enqueue_chat_activity_reaction(app: AppState, activity: ChatActivityCompletion) {
+    if super::editorial::enabled(&app).await {
+        return;
+    }
     let title = activity.thread.title.trim();
     let analysis_text = if title.is_empty() {
         CHAT_ACTIVITY_ANALYSIS_TEXT.to_string()

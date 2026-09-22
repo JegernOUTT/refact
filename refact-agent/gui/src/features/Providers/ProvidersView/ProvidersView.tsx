@@ -10,7 +10,7 @@ import type { ProviderListItem } from "../../../services/refact";
 import { ProviderPreview } from "../ProviderPreview";
 import { ErrorCallout, InformationCallout } from "../../../components/Callout";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
-import { clearError, getErrorMessage } from "../../Errors/errorsSlice";
+import { clearError, getRouteErrorMessage } from "../../Errors/errorsSlice";
 import {
   clearInformation,
   getInformationMessage,
@@ -36,7 +36,7 @@ export const ProvidersView: React.FC<ProvidersViewProps> = ({
 
   const currentConfig = useAppSelector(selectConfig);
   const currentHost = currentConfig.host;
-  const globalError = useAppSelector(getErrorMessage);
+  const globalError = useAppSelector(getRouteErrorMessage);
   const information = useAppSelector(getInformationMessage);
 
   const [currentProvider, setCurrentProvider] =

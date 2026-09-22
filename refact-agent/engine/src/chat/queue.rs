@@ -150,6 +150,135 @@ async fn aborted_before_start_generation(
     true
 }
 
+pub(crate) fn reject_guard(session: &mut ChatSession, request_id: &str, error: String) {
+    session.emit(ChatEvent::Ack {
+        client_request_id: request_id.to_string(),
+        accepted: false,
+        result: Some(serde_json::json!({"error": error})),
+    });
+    let snapshot = session.snapshot();
+    session.emit(snapshot);
+}
+
+pub(crate) fn prepare_guarded_command(
+    session: &mut ChatSession,
+    request: &CommandRequest,
+) -> Result<(), String> {
+    if let Some(guard) = &request.supervision_guard {
+        if request.native_approval_guard.is_some() || request.priority {
+            return Err("supervision cannot carry native approval or priority authority".into());
+        }
+        crate::buddy::supervision_authority::validate_chat_command(
+            guard,
+            &session.chat_id,
+            &request.command,
+        )?;
+    }
+    if request.native_approval_guard.is_some()
+        && (request.priority
+            || !matches!(
+                request.command,
+                ChatCommand::ToolDecision { .. }
+                    | ChatCommand::ToolDecisions { .. }
+                    | ChatCommand::BrowserContextDecision { .. }
+            ))
+    {
+        return Err("native approval guard is not valid for this command".into());
+    }
+    if request.supervision_guard.is_none()
+        && matches!(
+            request.command,
+            ChatCommand::UserMessage { .. }
+                | ChatCommand::RetryFromIndex { .. }
+                | ChatCommand::Abort { .. }
+                | ChatCommand::SetParams { .. }
+                | ChatCommand::GoalControl { .. }
+                | ChatCommand::SetGoal { .. }
+                | ChatCommand::AnswerQuestions { .. }
+                | ChatCommand::UpdateMessage { .. }
+                | ChatCommand::RemoveMessage { .. }
+        )
+    {
+        crate::buddy::supervision_authority::invalidate_chat(&session.chat_id)?;
+    }
+    Ok(())
+}
+
+fn consume_native_guard(
+    session: &mut ChatSession,
+    guard: Option<&refact_chat_api::NativeApprovalGuard>,
+    root: Option<&str>,
+    request_id: &str,
+) -> bool {
+    let Some(guard) = guard else {
+        return true;
+    };
+    let result = if root != Some(guard.project_root.as_str()) {
+        Err("Native project changed; refresh before responding".into())
+    } else {
+        crate::http::routers::v1::buddy_native_approvals::validate_native_approval(
+            session,
+            root.unwrap_or_default(),
+            &guard.engine_identity,
+            &guard.source_version,
+        )
+    };
+    if let Err(error) = result {
+        reject_guard(session, request_id, error);
+        return false;
+    }
+    true
+}
+
+fn consume_tool_guard(
+    session: &mut ChatSession,
+    guard: Option<&refact_chat_api::NativeApprovalGuard>,
+    root: Option<&str>,
+    request_id: &str,
+    decisions: &[ToolDecisionItem],
+) -> bool {
+    if !consume_native_guard(session, guard, root, request_id) {
+        return false;
+    }
+    if guard.is_some() {
+        let mut ids = BTreeSet::new();
+        if session.runtime.state != SessionState::Paused
+            || decisions.is_empty()
+            || decisions.iter().any(|decision| {
+                !ids.insert(&decision.tool_call_id)
+                    || session
+                        .runtime
+                        .accepted_tool_ids
+                        .contains(&decision.tool_call_id)
+                    || !session.runtime.pause_reasons.iter().any(|reason| {
+                        reason.reason_type == "confirmation"
+                            && reason.tool_call_id == decision.tool_call_id
+                    })
+            })
+        {
+            reject_guard(
+                session,
+                request_id,
+                "Native tool approval is not pending".into(),
+            );
+            return false;
+        }
+    }
+    true
+}
+
+async fn native_guard_root(
+    app: &AppState,
+    guard: Option<&refact_chat_api::NativeApprovalGuard>,
+) -> Option<String> {
+    if guard.is_none() {
+        return None;
+    }
+    crate::http::routers::v1::buddy_decisions::decision_root(app)
+        .await
+        .ok()
+}
+
 fn command_triggers_generation(cmd: &ChatCommand) -> bool {
     matches!(
         cmd,
@@ -157,6 +286,71 @@ fn command_triggers_generation(cmd: &ChatCommand) -> bool {
             | ChatCommand::RetryFromIndex { .. }
             | ChatCommand::Regenerate {}
     )
+}
+
+fn answer_questions_content(tool_call_id: &str, answers: &[QuestionAnswer]) -> String {
+    serde_json::json!({"type":"ask_questions_answer","tool_call_id":tool_call_id,"answers":answers})
+        .to_string()
+}
+
+fn next_state_after_released_answer(session: &ChatSession) -> SessionState {
+    if !session.runtime.pause_reasons.is_empty() {
+        SessionState::Paused
+    } else if session
+        .pending_questions
+        .iter()
+        .any(|set| set.status == PendingQuestionStatus::Pending)
+    {
+        SessionState::WaitingUserInput
+    } else {
+        SessionState::Idle
+    }
+}
+
+fn reject_question_answers(session: &mut ChatSession, client_request_id: &str, error: String) {
+    if session.runtime.state == SessionState::Generating {
+        session.set_runtime_state(next_state_after_released_answer(session), None);
+    }
+    session.emit(ChatEvent::Ack {
+        client_request_id: client_request_id.to_string(),
+        accepted: false,
+        result: Some(serde_json::json!({ "error": error })),
+    });
+    let snapshot = session.snapshot();
+    session.emit(snapshot);
+    session.queue_notify.notify_one();
+}
+
+fn release_answer_questions_failure(
+    session: &mut ChatSession,
+    client_request_id: &str,
+    error: String,
+    emit_snapshot: bool,
+) {
+    session.emit(ChatEvent::Ack {
+        client_request_id: client_request_id.to_string(),
+        accepted: false,
+        result: Some(serde_json::json!({ "error": error.clone() })),
+    });
+    if emit_snapshot {
+        let snapshot = session.snapshot();
+        session.emit(snapshot);
+    }
+    if session.runtime.state == SessionState::Generating {
+        session.set_runtime_state(SessionState::Error, Some(error));
+    } else {
+        let compression_phase = session.compression_phase;
+        let compression_reason = session.compression_reason;
+        let event = session.runtime_update_event(
+            SessionState::Error,
+            Some(error),
+            false,
+            compression_phase,
+            compression_reason,
+        );
+        session.emit(event);
+    }
+    session.queue_notify.notify_one();
 }
 
 fn note_user_turn_resets_goal_pursuit(session: &mut ChatSession) {
@@ -292,6 +486,7 @@ pub fn find_allowed_command_while_paused(queue: &VecDeque<CommandRequest>) -> Op
         match &req.command {
             ChatCommand::ToolDecision { .. }
             | ChatCommand::ToolDecisions { .. }
+            | ChatCommand::AnswerQuestions { .. }
             | ChatCommand::Abort {} => {
                 return Some(i);
             }
@@ -498,6 +693,20 @@ pub fn apply_setparams_patch(
         // Invalid type (not null, not number) - ignore, keep current value
     }
     if let Some(cap) = patch.get("auto_compression_cap") {
+        // A user-supplied value (including null/zero) settles initialization.
+        if (cap.is_null() || cap.as_u64().is_some()) && thread.auto_compression_cap_pending {
+            thread.auto_compression_cap_pending = false;
+            changed = true;
+        }
+        // Null is an explicit reset; defer recomputation until the model is known.
+        // Invalid patches must not change initialization provenance.
+        if cap.is_null() || cap.as_u64().is_some() {
+            let pending = cap.is_null();
+            if thread.auto_compression_cap_pending != pending {
+                thread.auto_compression_cap_pending = pending;
+                changed = true;
+            }
+        }
         if cap.is_null() {
             if thread.auto_compression_cap.is_some() {
                 thread.auto_compression_cap = None;
@@ -761,7 +970,7 @@ pub(crate) async fn add_mode_switch_event_and_plan_if_changed(
         source, old_mode, &new_mode, reason, diff,
     ));
 
-    if plan_role::current_base_plan(session).is_none() {
+    if plan_role::try_current_base_plan(session).is_ok_and(|plan| plan.is_none()) {
         if let Some(mode_config) = to_config {
             let plan_template = mode_config.plan_template.trim();
             if !plan_template.is_empty() {
@@ -872,8 +1081,10 @@ fn handle_set_goal_budget_command(
         return Err("no goal to set budget for; call set_goal first".to_string());
     }
 
-    let Some((base_index, _, _)) = session
-        .messages
+    let view = refact_core::active_context::active_context(&session.messages)
+        .map_err(|e| e.to_string())?;
+    let mut messages = view.messages.clone();
+    let Some((base_index, _, _)) = messages
         .iter()
         .enumerate()
         .filter_map(|(index, message)| {
@@ -887,13 +1098,16 @@ fn handle_set_goal_budget_command(
     budget.explicit = true;
     let serialized_budget = serde_json::to_value(&budget)
         .map_err(|error| format!("failed to serialize goal budget: {error}"))?;
-    let goal_meta = session.messages[base_index]
+    let goal_meta = messages[base_index]
         .extra
         .get_mut("goal")
         .and_then(|value| value.as_object_mut())
         .ok_or_else(|| "no goal to set budget for; call set_goal first".to_string())?;
     goal_meta.insert("budget".to_string(), serialized_budget.clone());
 
+    session.messages =
+        refact_core::active_context::writeback_active_context(&session.messages, &view, &messages)
+            .map_err(|e| e.to_string())?;
     session.rebuild_goal_projection_from_messages();
     session.goal_ledger_append(GoalLedgerOp::BudgetSet {
         budget: budget.clone(),
@@ -1242,10 +1456,26 @@ async fn process_command_queue_inner(
             let mut waiter = Box::pin(session.queue_notify.clone().notified_owned());
             let _ = Pin::as_mut(&mut waiter).enable();
 
+            let mut index = 0;
+            while index < session.command_queue.len() {
+                let request = session.command_queue[index].clone();
+                if request.supervision_guard.is_some() || request.native_approval_guard.is_some() {
+                    if let Err(error) = prepare_guarded_command(&mut session, &request) {
+                        session.command_queue.remove(index);
+                        session.clear_queue_timestamp(&request.client_request_id);
+                        reject_guard(&mut session, &request.client_request_id, error);
+                        session.emit_queue_update();
+                        continue;
+                    }
+                }
+                index += 1;
+            }
+
             let state = session.runtime.state;
             let is_busy = state == SessionState::Generating
                 || state == SessionState::ExecutingTools
-                || session.turn_depth > 0;
+                || session.turn_depth > 0
+                || crate::chat::context_rebuild::compression_attempt_active(&session);
 
             if is_busy {
                 session
@@ -1287,9 +1517,11 @@ async fn process_command_queue_inner(
                 session.delivery_wake_sources.clear();
                 session.abort_flag.store(false, Ordering::SeqCst);
                 session.user_interrupt_flag.store(false, Ordering::SeqCst);
-                session.set_runtime_state(SessionState::Generating, None);
+                session.set_runtime_state(SessionState::Idle, None);
                 (
                     Some(CommandRequest {
+                        native_approval_guard: None,
+                        supervision_guard: None,
                         client_request_id: format!("delivery-wake-{}", uuid::Uuid::new_v4()),
                         priority: false,
                         command: ChatCommand::Regenerate {},
@@ -1314,7 +1546,7 @@ async fn process_command_queue_inner(
                         }
                     }
                     if command_triggers_generation(&req.command) {
-                        session.set_runtime_state(SessionState::Generating, None);
+                        session.set_runtime_state(SessionState::Idle, None);
                     }
                 }
                 session.emit_queue_update();
@@ -1336,6 +1568,15 @@ async fn process_command_queue_inner(
             continue;
         };
 
+        {
+            let mut session = session_arc.lock().await;
+            if let Err(error) = prepare_guarded_command(&mut session, &request) {
+                reject_guard(&mut session, &request.client_request_id, error);
+                continue;
+            }
+        }
+        let native_guard = request.native_approval_guard.as_ref();
+        let supervision_guard = request.supervision_guard.as_ref();
         match request.command {
             ChatCommand::SetGoal {
                 content,
@@ -1344,7 +1585,25 @@ async fn process_command_queue_inner(
             } => {
                 let result = {
                     let mut session = session_arc.lock().await;
-                    handle_set_goal_command(&mut session, content, budget, criteria)
+                    let chat_id = session.chat_id.clone();
+                    match crate::buddy::supervision_authority::with_command_guard(
+                        supervision_guard,
+                        &chat_id,
+                        || {
+                            Ok(handle_set_goal_command(
+                                &mut session,
+                                content,
+                                budget,
+                                criteria,
+                            ))
+                        },
+                    ) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            reject_guard(&mut session, &request.client_request_id, error);
+                            continue;
+                        }
+                    }
                 };
                 match result {
                     Ok(_) => {
@@ -1407,7 +1666,18 @@ async fn process_command_queue_inner(
             ChatCommand::GoalControl { action } => {
                 let result = {
                     let mut session = session_arc.lock().await;
-                    handle_goal_control_command(&mut session, action)
+                    let chat_id = session.chat_id.clone();
+                    match crate::buddy::supervision_authority::with_command_guard(
+                        supervision_guard,
+                        &chat_id,
+                        || Ok(handle_goal_control_command(&mut session, action)),
+                    ) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            reject_guard(&mut session, &request.client_request_id, error);
+                            continue;
+                        }
+                    }
                 };
                 match result {
                     Ok(_) => {
@@ -1655,6 +1925,26 @@ async fn process_command_queue_inner(
                                     skill_activation_name: skill_activation_name.clone(),
                                     skill_context_msg: skill_context_msg.clone(),
                                 });
+                                session.mark_persisted_runtime_changed();
+                                drop(session);
+                                if let Err(error) =
+                                    super::trajectories::try_save_trajectory_with_intent(
+                                        app.clone(),
+                                        session_arc.clone(),
+                                        TrajectoryCommitIntent::Required,
+                                    )
+                                    .await
+                                {
+                                    let mut session = session_arc.lock().await;
+                                    session.pending_browser_message = None;
+                                    session.mark_persisted_runtime_changed();
+                                    session.set_runtime_state(
+                                        SessionState::Error,
+                                        Some(format!("Could not save the browser-context decision: {error}. Resend your message to try again.")),
+                                    );
+                                    return false;
+                                }
+                                let mut session = session_arc.lock().await;
                                 session.emit(ChatEvent::BrowserContextOversize {
                                     total_bytes: action_bytes
                                         + console_bytes
@@ -1676,8 +1966,10 @@ async fn process_command_queue_inner(
                     }
 
                     let mut accepted_user_messages = Vec::new();
+                    let questions_cancelled;
                     {
                         let mut session = session_arc.lock().await;
+                        questions_cancelled = session.cancel_pending_questions();
 
                         if let Some((ctx_messages, _)) = browser_ctx_result {
                             session.add_message(ctx_messages.event);
@@ -1778,11 +2070,33 @@ async fn process_command_queue_inner(
                             maybe_enqueue_chat_reaction(app.clone(), accepted_user_message).await;
                     }
 
-                    maybe_save_trajectory_background_with_intent(
-                        app.clone(),
-                        session_arc.clone(),
-                        TrajectoryCommitIntent::Checkpoint,
-                    );
+                    if questions_cancelled {
+                        if let Err(error) = super::trajectories::try_save_trajectory_with_intent(
+                            app.clone(),
+                            session_arc.clone(),
+                            TrajectoryCommitIntent::Required,
+                        )
+                        .await
+                        {
+                            let mut session = session_arc.lock().await;
+                            let error =
+                                format!("failed to persist cancelled question answers: {error}");
+                            session.emit(ChatEvent::Ack {
+                                client_request_id: request.client_request_id.clone(),
+                                accepted: false,
+                                result: Some(serde_json::json!({ "error": error.clone() })),
+                            });
+                            session.set_runtime_state(SessionState::Error, Some(error));
+                            session.queue_notify.notify_one();
+                            return false;
+                        }
+                    } else {
+                        maybe_save_trajectory_background_with_intent(
+                            app.clone(),
+                            session_arc.clone(),
+                            TrajectoryCommitIntent::Checkpoint,
+                        );
+                    }
                     true
                 })
                 .await;
@@ -1939,15 +2253,139 @@ async fn process_command_queue_inner(
                 let mut session = session_arc.lock().await;
                 session.suppress_delivery_wakes();
                 session.abort_stream();
+                let questions_cancelled = session.cancel_pending_questions();
+                let browser_cancelled = super::browser_decisions::cancel_pending_browser_message(
+                    &mut session.pending_browser_message,
+                )
+                .is_some();
+                if browser_cancelled {
+                    session.mark_persisted_runtime_changed();
+                }
                 let goal_stopped = session.stop_goal_on_manual_abort();
                 drop(session);
-                if goal_stopped || session_arc.lock().await.trajectory_dirty {
+                if goal_stopped
+                    || questions_cancelled
+                    || browser_cancelled
+                    || session_arc.lock().await.trajectory_dirty
+                {
                     maybe_save_trajectory_with_intent(
                         app.clone(),
                         session_arc.clone(),
                         TrajectoryCommitIntent::Required,
                     )
                     .await;
+                }
+            }
+            ChatCommand::AnswerQuestions {
+                tool_call_id,
+                answers,
+                asked_at_ms,
+            } => {
+                let content = answer_questions_content(&tool_call_id, &answers);
+                let resolution_id = request.client_request_id.clone();
+                let mut staged_message_id: Option<String> = None;
+                let resolved = {
+                    let mut session = session_arc.lock().await;
+                    let chat_id = session.chat_id.clone();
+                    match crate::buddy::supervision_authority::with_command_guard(
+                        supervision_guard,
+                        &chat_id,
+                        || {
+                            session.answer_pending_questions_at(
+                                &tool_call_id,
+                                answers,
+                                resolution_id.clone(),
+                                asked_at_ms,
+                            )
+                        },
+                    ) {
+                        Ok(resolved) => {
+                            if resolved {
+                                let message = user_message_with_client_message_id(
+                                    ChatContent::SimpleText(content),
+                                    Vec::new(),
+                                    Some(request.client_request_id.clone()),
+                                );
+                                staged_message_id = Some(message.message_id.clone());
+                                session.add_message(message);
+                            }
+                            resolved
+                                || session.pending_questions.iter().any(|set| {
+                                    set.tool_call_id == tool_call_id
+                                        && set.status == PendingQuestionStatus::Answered
+                                        && set.resolution_id.as_deref()
+                                            == Some(resolution_id.as_str())
+                                })
+                        }
+                        Err(error) => {
+                            reject_question_answers(&mut session, &resolution_id, error);
+                            continue;
+                        }
+                    }
+                };
+                if resolved {
+                    if let Err(error) = super::trajectories::try_save_trajectory_with_intent(
+                        app.clone(),
+                        session_arc.clone(),
+                        TrajectoryCommitIntent::Required,
+                    )
+                    .await
+                    {
+                        let mut session = session_arc.lock().await;
+                        let rolled_back = session.rollback_answered_questions(
+                            &tool_call_id,
+                            &resolution_id,
+                            staged_message_id.as_deref(),
+                        );
+                        let error = if rolled_back {
+                            format!(
+                                "failed to persist question answers: {error}; the answer was not applied, please answer again"
+                            )
+                        } else {
+                            format!("failed to persist question answers: {error}")
+                        };
+                        release_answer_questions_failure(
+                            &mut session,
+                            &resolution_id,
+                            error,
+                            rolled_back,
+                        );
+                        continue;
+                    }
+                    {
+                        let mut session = session_arc.lock().await;
+                        let chat_id = session.chat_id.clone();
+                        if let Err(error) = crate::buddy::supervision_authority::with_command_guard(
+                            supervision_guard,
+                            &chat_id,
+                            || {
+                                note_user_turn_resets_goal_pursuit(&mut session);
+                                session.set_runtime_state(SessionState::Generating, None);
+                                Ok(())
+                            },
+                        ) {
+                            reject_guard(&mut session, &resolution_id, error);
+                            continue;
+                        }
+                    }
+                    prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
+                    {
+                        let session = session_arc.lock().await;
+                        if !session.user_interrupt_flag.load(Ordering::SeqCst) {
+                            session.abort_flag.store(false, Ordering::SeqCst);
+                        }
+                    }
+                    if aborted_before_start_generation(&session_arc).await {
+                        continue;
+                    }
+                    start_generation(app.clone(), session_arc.clone()).await;
+                } else {
+                    let mut session = session_arc.lock().await;
+                    if session.runtime.state == SessionState::Generating {
+                        let state = next_state_after_released_answer(&session);
+                        session.set_runtime_state(state, None);
+                    }
+                    session.queue_notify.notify_one();
                 }
             }
             ChatCommand::CleanBackgroundProcesses { include_services } => {
@@ -1998,10 +2436,24 @@ async fn process_command_queue_inner(
                     tool_call_id: tool_call_id.clone(),
                     accepted,
                 }];
-                handle_tool_decisions(app.clone(), session_arc.clone(), &decisions).await;
+                handle_tool_decisions_guarded(
+                    app.clone(),
+                    session_arc.clone(),
+                    &decisions,
+                    native_guard,
+                    &request.client_request_id,
+                )
+                .await;
             }
             ChatCommand::ToolDecisions { decisions } => {
-                handle_tool_decisions(app.clone(), session_arc.clone(), &decisions).await;
+                handle_tool_decisions_guarded(
+                    app.clone(),
+                    session_arc.clone(),
+                    &decisions,
+                    native_guard,
+                    &request.client_request_id,
+                )
+                .await;
             }
             ChatCommand::IdeToolResult {
                 tool_call_id,
@@ -2012,7 +2464,7 @@ async fn process_command_queue_inner(
                 let completed = session.record_ide_tool_result(tool_call_id, content, tool_failed);
                 if completed {
                     session.release_turn_only_state();
-                    session.set_runtime_state(SessionState::Generating, None);
+                    session.set_runtime_state(SessionState::Idle, None);
                 }
                 drop(session);
                 if !completed {
@@ -2044,7 +2496,7 @@ async fn process_command_queue_inner(
                     session.update_message(&message_id, updated_msg);
                     if regenerate && idx + 1 < session.messages.len() {
                         session.truncate_messages(idx + 1);
-                        session.set_runtime_state(SessionState::Generating, None);
+                        session.set_runtime_state(SessionState::Idle, None);
                         session.reactivate_goal_stopped_by_manual_abort();
                         drop(session);
                         maybe_save_trajectory_background_with_intent(
@@ -2072,7 +2524,7 @@ async fn process_command_queue_inner(
                 if let Some(idx) = session.remove_message(&message_id) {
                     if regenerate && idx < session.messages.len() {
                         session.truncate_messages(idx);
-                        session.set_runtime_state(SessionState::Generating, None);
+                        session.set_runtime_state(SessionState::Idle, None);
                         session.reactivate_goal_stopped_by_manual_abort();
                         drop(session);
                         maybe_save_trajectory_background_with_intent(
@@ -2213,22 +2665,37 @@ async fn process_command_queue_inner(
                 last_n_console,
                 last_n_network,
             } => {
+                let root = native_guard_root(&app, native_guard).await;
                 let pending = {
                     let mut session = session_arc.lock().await;
-                    session.pending_browser_message.take()
+                    if !consume_native_guard(
+                        &mut session,
+                        native_guard,
+                        root.as_deref(),
+                        &request.client_request_id,
+                    ) {
+                        continue;
+                    }
+                    super::browser_decisions::take_matching_browser_message(
+                        &mut session.pending_browser_message,
+                        &pending_message_id,
+                    )
                 };
-                let Some(pending) = pending else {
-                    warn!("BrowserContextDecision: no pending message found");
-                    let mut session = session_arc.lock().await;
-                    session.set_runtime_state(SessionState::Idle, None);
-                    continue;
+                let pending = match pending {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        warn!(?error, "BrowserContextDecision: stale response rejected");
+                        let mut session = session_arc.lock().await;
+                        session.emit(ChatEvent::Ack {
+                            client_request_id: request.client_request_id.clone(),
+                            accepted: false,
+                            result: Some(serde_json::json!({"error": "browser context decision is no longer current"})),
+                        });
+                        let snapshot = session.snapshot();
+                        session.emit(snapshot);
+                        continue;
+                    }
                 };
-                if pending.pending_message_id != pending_message_id {
-                    warn!("BrowserContextDecision: pending_message_id mismatch");
-                    let mut session = session_arc.lock().await;
-                    session.set_runtime_state(SessionState::Idle, None);
-                    continue;
-                }
 
                 let browser_chat_id = {
                     let session = session_arc.lock().await;
@@ -2302,7 +2769,7 @@ async fn process_command_queue_inner(
                     if let Some(ref skill_name) = pending.skill_activation_name {
                         session.set_active_skill(skill_name.clone());
                     }
-                    session.set_runtime_state(SessionState::Generating, None);
+                    session.set_runtime_state(SessionState::Idle, None);
                 }
 
                 browser_context::commit_browser_cursors(app.gcx.clone(), &browser_chat_id).await;
@@ -2503,11 +2970,14 @@ fn is_allowed_for_branch(msg: &ChatMessage) -> bool {
         || is_goal_hidden_event(msg)
 }
 
-pub(crate) async fn handle_tool_decisions(
+pub(crate) async fn handle_tool_decisions_guarded(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
     decisions: &[ToolDecisionItem],
+    native_guard: Option<&refact_chat_api::NativeApprovalGuard>,
+    request_id: &str,
 ) {
+    let root = native_guard_root(&app, native_guard).await;
     let is_shell_privacy_pause = {
         let session = session_arc.lock().await;
         session
@@ -2520,6 +2990,15 @@ pub(crate) async fn handle_tool_decisions(
     if is_shell_privacy_pause {
         let should_continue = {
             let mut session = session_arc.lock().await;
+            if !consume_tool_guard(
+                &mut session,
+                native_guard,
+                root.as_deref(),
+                request_id,
+                decisions,
+            ) {
+                return;
+            }
             let privacy_ids = session
                 .runtime
                 .pause_reasons
@@ -2585,7 +3064,7 @@ pub(crate) async fn handle_tool_decisions(
             if remaining.is_empty() {
                 session.complete_confirmation_wait();
                 session.release_turn_only_state();
-                session.set_runtime_state(SessionState::Generating, None);
+                session.set_runtime_state(SessionState::Idle, None);
                 true
             } else {
                 session.set_paused_with_reasons_and_auto_approved(remaining, Vec::new(), None);
@@ -2612,6 +3091,15 @@ pub(crate) async fn handle_tool_decisions(
 
         {
             let mut session = session_arc.lock().await;
+            if !consume_tool_guard(
+                &mut session,
+                native_guard,
+                root.as_deref(),
+                request_id,
+                decisions,
+            ) {
+                return;
+            }
             if accepted_any {
                 session.reset_cache_guard_snapshot();
             }
@@ -2635,7 +3123,7 @@ pub(crate) async fn handle_tool_decisions(
             session.complete_confirmation_wait();
             if accepted_any {
                 session.release_turn_only_state();
-                session.set_runtime_state(SessionState::Generating, None);
+                session.set_runtime_state(SessionState::Idle, None);
             } else {
                 session.set_runtime_state(SessionState::Idle, None);
                 session.release_turn_only_state();
@@ -2666,6 +3154,15 @@ pub(crate) async fn handle_tool_decisions(
         any_rejected,
     ) = {
         let mut session = session_arc.lock().await;
+        if !consume_tool_guard(
+            &mut session,
+            native_guard,
+            root.as_deref(),
+            request_id,
+            decisions,
+        ) {
+            return;
+        }
         let auto_approved = session.runtime.auto_approved_tool_ids.clone();
         let paused_msg_idx = session.runtime.paused_message_index;
         let outcome = session.process_tool_decisions(decisions);
@@ -3012,7 +3509,7 @@ pub(crate) async fn handle_tool_decisions(
                 session.release_turn_only_state();
             } else {
                 session.release_turn_only_state();
-                session.set_runtime_state(SessionState::Generating, None);
+                session.set_runtime_state(SessionState::Idle, None);
             }
         }
 
@@ -3152,6 +3649,182 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
+    #[tokio::test]
+    async fn guarded_tool_decision_rechecks_source_after_waiting_for_session_lock() {
+        let workspace = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            workspace.path().join("cache"),
+            workspace.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx).await;
+        let root = crate::http::routers::v1::buddy_decisions::decision_root(&app)
+            .await
+            .unwrap();
+        let session_arc = Arc::new(AMutex::new(ChatSession::new("guard-toctou".into())));
+        let mut session = session_arc.lock().await;
+        session.runtime.state = SessionState::Paused;
+        session.runtime.pause_reasons.push(PauseReason {
+            reason_type: "confirmation".into(),
+            tool_name: "shell".into(),
+            command: "shell".into(),
+            rule: "ask".into(),
+            tool_call_id: "pending".into(),
+            integr_config_path: None,
+        });
+        let guard = refact_chat_api::NativeApprovalGuard {
+            project_root: root.clone(),
+            engine_identity:
+                crate::http::routers::v1::buddy_native_approvals::native_engine_identity().into(),
+            source_version: crate::http::routers::v1::buddy_native_approvals::source_version(
+                &session, &root,
+            ),
+        };
+        assert!(consume_native_guard(
+            &mut session,
+            Some(&guard),
+            Some(&root),
+            "preflight"
+        ));
+        let mut events = session.subscribe();
+        let worker_session = session_arc.clone();
+        let task = tokio::spawn(async move {
+            handle_tool_decisions_guarded(
+                app,
+                worker_session,
+                &[ToolDecisionItem {
+                    tool_call_id: "pending".into(),
+                    accepted: true,
+                }],
+                Some(&guard),
+                "stale",
+            )
+            .await;
+        });
+        session.runtime.pause_reasons[0].command = "replacement command".into();
+        drop(session);
+        task.await.unwrap();
+        let session = session_arc.lock().await;
+        assert_eq!(session.runtime.state, SessionState::Paused);
+        assert_eq!(
+            session.runtime.pause_reasons[0].command,
+            "replacement command"
+        );
+        assert!(session.runtime.accepted_tool_ids.is_empty());
+        assert!(session.messages.is_empty());
+        let ack: serde_json::Value = serde_json::from_str(&events.try_recv().unwrap()).unwrap();
+        assert_eq!(ack["accepted"], false);
+        assert!(events.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn queued_browser_approval_preserves_replaced_pending_request() {
+        let workspace = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            workspace.path().join("cache"),
+            workspace.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx).await;
+        let root = crate::http::routers::v1::buddy_decisions::decision_root(&app)
+            .await
+            .unwrap();
+        let session_arc = Arc::new(AMutex::new(ChatSession::new("guard-browser".into())));
+        let mut session = session_arc.lock().await;
+        session.runtime.state = SessionState::WaitingUserInput;
+        session.pending_browser_message = Some(PendingBrowserMessage {
+            pending_message_id: "old-browser".into(),
+            content: json!("pending message"),
+            attachments: vec![],
+            client_message_id: None,
+            checkpoints: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
+            skill_activation_name: None,
+            skill_context_msg: None,
+        });
+        let guard = refact_chat_api::NativeApprovalGuard {
+            project_root: root.clone(),
+            engine_identity:
+                crate::http::routers::v1::buddy_native_approvals::native_engine_identity().into(),
+            source_version: crate::http::routers::v1::buddy_native_approvals::source_version(
+                &session, &root,
+            ),
+        };
+        let mut request = make_request(ChatCommand::BrowserContextDecision {
+            pending_message_id: "old-browser".into(),
+            include_actions: false,
+            include_console: false,
+            include_network: false,
+            include_mutations: false,
+            include_screenshot: false,
+            last_n_actions: None,
+            last_n_console: None,
+            last_n_network: None,
+        });
+        request.native_approval_guard = Some(guard);
+        assert_eq!(
+            session.enqueue_command(request),
+            EnqueueCommandOutcome::Accepted
+        );
+        session
+            .pending_browser_message
+            .as_mut()
+            .unwrap()
+            .pending_message_id = "new-browser".into();
+        let mut events = session.subscribe();
+        let running = session.queue_processor_running.clone();
+        running.store(true, Ordering::SeqCst);
+        drop(session);
+        let worker = tokio::spawn(process_command_queue(app, session_arc.clone(), running));
+        loop {
+            let event: serde_json::Value =
+                serde_json::from_str(&events.recv().await.unwrap()).unwrap();
+            if event["client_request_id"] == "req-1" {
+                assert_eq!(event["accepted"], false);
+                break;
+            }
+        }
+        let mut session = session_arc.lock().await;
+        assert_eq!(
+            session
+                .pending_browser_message
+                .as_ref()
+                .unwrap()
+                .pending_message_id,
+            "new-browser"
+        );
+        assert!(session.messages.is_empty());
+        assert_eq!(session.runtime.state, SessionState::WaitingUserInput);
+        session.close_event_channel();
+        drop(session);
+        worker.await.unwrap();
+    }
+
+    #[test]
+    fn guarded_command_wire_roundtrip_and_wrong_kind_fail_closed() {
+        let mut request = make_request(ChatCommand::Abort {});
+        request.native_approval_guard = Some(refact_chat_api::NativeApprovalGuard {
+            project_root: "p".into(),
+            engine_identity: "e".into(),
+            source_version: "v".into(),
+        });
+        let decoded: CommandRequest =
+            serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+        assert_eq!(decoded.native_approval_guard, request.native_approval_guard);
+        let mut session = ChatSession::new("guard-kind".into());
+        assert!(prepare_guarded_command(&mut session, &decoded).is_err());
+        assert!(session.command_queue.is_empty());
+        let legacy: CommandRequest =
+            serde_json::from_value(json!({"client_request_id":"legacy", "type":"abort"})).unwrap();
+        assert!(legacy.native_approval_guard.is_none());
+        assert!(legacy.supervision_guard.is_none());
+    }
+
     fn test_mode_config(id: &str) -> ModeConfig {
         ModeConfig {
             schema_version: 1,
@@ -3177,6 +3850,8 @@ mod tests {
 
     fn make_request(cmd: ChatCommand) -> CommandRequest {
         CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-1".into(),
             priority: false,
             command: cmd,
@@ -3185,6 +3860,8 @@ mod tests {
 
     fn abort_request(request_id: &str) -> CommandRequest {
         CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: request_id.to_string(),
             priority: false,
             command: ChatCommand::Abort {},
@@ -3414,6 +4091,8 @@ mod tests {
             let mut session = session_arc.lock().await;
             assert_eq!(
                 session.enqueue_accepted_command(CommandRequest {
+                    native_approval_guard: None,
+                    supervision_guard: None,
                     client_request_id: "paused-decision".to_string(),
                     priority: false,
                     command: ChatCommand::ToolDecision {
@@ -3469,6 +4148,8 @@ mod tests {
             let mut session = session_arc.lock().await;
             assert_eq!(
                 session.enqueue_accepted_command(CommandRequest {
+                    native_approval_guard: None,
+                    supervision_guard: None,
                     client_request_id: "ide-result".to_string(),
                     priority: false,
                     command: ChatCommand::IdeToolResult {
@@ -3504,6 +4185,8 @@ mod tests {
             let mut session = session_arc.lock().await;
             for index in 0..COMMAND_COUNT {
                 session.command_queue.push_back(CommandRequest {
+                    native_approval_guard: None,
+                    supervision_guard: None,
                     client_request_id: format!("rapid-{index}"),
                     priority: false,
                     command: ChatCommand::Regenerate {},
@@ -3528,16 +4211,22 @@ mod tests {
     fn redundant_regenerates_coalesce_until_next_command_boundary() {
         let mut queue = VecDeque::from([
             CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "regen-1".to_string(),
                 priority: true,
                 command: ChatCommand::Regenerate {},
             },
             CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "regen-2".to_string(),
                 priority: true,
                 command: ChatCommand::Regenerate {},
             },
             CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "user-1".to_string(),
                 priority: false,
                 command: ChatCommand::UserMessage {
@@ -3549,6 +4238,8 @@ mod tests {
                 },
             },
             CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "regen-3".to_string(),
                 priority: false,
                 command: ChatCommand::Regenerate {},
@@ -3790,6 +4481,8 @@ mod tests {
             let mut session = session_arc.lock().await;
             let rx = session.subscribe();
             session.command_queue.push_back(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "clean-background".to_string(),
                 priority: false,
                 command: ChatCommand::CleanBackgroundProcesses {
@@ -4004,6 +4697,7 @@ mod tests {
             apply_setparams_patch(&mut thread, &json!({"auto_compression_cap": 4096}));
         assert!(changed);
         assert_eq!(thread.auto_compression_cap, Some(4096));
+        assert!(!thread.auto_compression_cap_pending);
 
         let (changed, _) =
             apply_setparams_patch(&mut thread, &json!({"auto_compression_cap": "invalid"}));
@@ -4014,6 +4708,9 @@ mod tests {
             apply_setparams_patch(&mut thread, &json!({"auto_compression_cap": null}));
         assert!(changed);
         assert_eq!(thread.auto_compression_cap, None);
+        assert!(thread.auto_compression_cap_pending);
+        assert!(thread.resolve_pending_compression_cap(Some(1000)));
+        assert_eq!(thread.auto_compression_cap, Some(900));
     }
 
     #[test]
@@ -4462,6 +5159,8 @@ mod tests {
     fn test_priority_insertion_before_non_priority() {
         let mut queue = VecDeque::new();
         queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-1".into(),
             priority: false,
             command: ChatCommand::UserMessage {
@@ -4473,6 +5172,8 @@ mod tests {
             },
         });
         queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-2".into(),
             priority: false,
             command: ChatCommand::UserMessage {
@@ -4484,6 +5185,8 @@ mod tests {
             },
         });
         let priority_req = CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-priority".into(),
             priority: true,
             command: ChatCommand::UserMessage {
@@ -4508,6 +5211,8 @@ mod tests {
     fn test_priority_insertion_after_existing_priority() {
         let mut queue = VecDeque::new();
         queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-p1".into(),
             priority: true,
             command: ChatCommand::UserMessage {
@@ -4519,6 +5224,8 @@ mod tests {
             },
         });
         queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-1".into(),
             priority: false,
             command: ChatCommand::UserMessage {
@@ -4530,6 +5237,8 @@ mod tests {
             },
         });
         let priority_req = CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-p2".into(),
             priority: true,
             command: ChatCommand::UserMessage {
@@ -4554,6 +5263,8 @@ mod tests {
     fn test_priority_insertion_into_empty_queue() {
         let mut queue: VecDeque<CommandRequest> = VecDeque::new();
         let priority_req = CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-p".into(),
             priority: true,
             command: ChatCommand::Abort {},
@@ -4571,11 +5282,15 @@ mod tests {
     fn test_priority_insertion_all_priority() {
         let mut queue = VecDeque::new();
         queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-p1".into(),
             priority: true,
             command: ChatCommand::Abort {},
         });
         let priority_req = CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-p2".into(),
             priority: true,
             command: ChatCommand::Abort {},
@@ -4593,6 +5308,8 @@ mod tests {
     fn test_drain_priority_user_messages_extracts_only_priority() {
         let mut queue = VecDeque::new();
         queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-p1".into(),
             priority: true,
             command: ChatCommand::UserMessage {
@@ -4604,6 +5321,8 @@ mod tests {
             },
         });
         queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-1".into(),
             priority: false,
             command: ChatCommand::UserMessage {
@@ -4615,6 +5334,8 @@ mod tests {
             },
         });
         queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-p2".into(),
             priority: true,
             command: ChatCommand::UserMessage {
@@ -4626,6 +5347,8 @@ mod tests {
             },
         });
         queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-abort".into(),
             priority: true,
             command: ChatCommand::Abort {},
@@ -4651,6 +5374,8 @@ mod tests {
             session.install_goal("agent", "ship it", true, GoalBudget::default());
             session.goal.as_mut().unwrap().progress.no_progress_turns = 3;
             session.command_queue.push_back(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "priority-user".to_string(),
                 priority: true,
                 command: ChatCommand::UserMessage {
@@ -4687,6 +5412,8 @@ mod tests {
             let mut session = session_arc.lock().await;
             session.thread.checkpoints_enabled = false;
             session.command_queue.push_back(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "priority-user".to_string(),
                 priority: true,
                 command: user_message_command("same content", Some("optimistic-priority")),
@@ -4720,11 +5447,15 @@ mod tests {
             let mut session = session_arc.lock().await;
             session.thread.checkpoints_enabled = false;
             session.command_queue.push_back(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "ordinary-first".to_string(),
                 priority: false,
                 command: user_message_command("same content", Some("optimistic-1")),
             });
             session.command_queue.push_back(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "ordinary-second".to_string(),
                 priority: false,
                 command: user_message_command("same content", Some("optimistic-2")),
@@ -4791,6 +5522,8 @@ mod tests {
             let mut session = session_arc.lock().await;
             session.thread.checkpoints_enabled = false;
             session.command_queue.push_back(CommandRequest {
+                native_approval_guard: None,
+                supervision_guard: None,
                 client_request_id: "priority-user".to_string(),
                 priority: true,
                 command: ChatCommand::UserMessage {
@@ -4828,6 +5561,8 @@ mod tests {
             let mut session = session_arc.lock().await;
             session.thread.checkpoints_enabled = false;
             session.command_queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
                 client_request_id: "multimodal-user".to_string(),
                 priority: false,
                 command: ChatCommand::UserMessage {
@@ -4865,6 +5600,8 @@ mod tests {
     fn test_drain_non_priority_user_messages_extracts_all_non_priority() {
         let mut queue = VecDeque::new();
         queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-1".into(),
             priority: false,
             command: ChatCommand::UserMessage {
@@ -4876,6 +5613,8 @@ mod tests {
             },
         });
         queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-p".into(),
             priority: true,
             command: ChatCommand::UserMessage {
@@ -4887,6 +5626,8 @@ mod tests {
             },
         });
         queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-2".into(),
             priority: false,
             command: ChatCommand::UserMessage {
@@ -4898,6 +5639,8 @@ mod tests {
             },
         });
         queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-3".into(),
             priority: false,
             command: ChatCommand::UserMessage {
@@ -4922,11 +5665,15 @@ mod tests {
     fn test_drain_priority_skips_non_user_messages() {
         let mut queue = VecDeque::new();
         queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-abort".into(),
             priority: true,
             command: ChatCommand::Abort {},
         });
         queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-params".into(),
             priority: true,
             command: ChatCommand::SetParams { patch: json!({}) },
@@ -4982,8 +5729,10 @@ mod tests {
 
     #[test]
     fn test_skill_activation_sets_context_marker() {
-        assert_eq!(SKILLS_CONTEXT_MARKER, "skills_context",
-            "SKILLS_CONTEXT_MARKER must equal 'skills_context' so prompts.rs detects existing skills context");
+        assert_eq!(
+            SKILLS_CONTEXT_MARKER, "skills_context",
+            "SKILLS_CONTEXT_MARKER must equal 'skills_context' so prompts.rs detects existing skills context"
+        );
     }
 
     fn make_plan_message(content: &str) -> ChatMessage {
@@ -5056,6 +5805,344 @@ mod tests {
             events.push(envelope.event);
         }
         events
+    }
+
+    fn answer_question_set(tool_call_id: &str) -> PendingQuestionSet {
+        PendingQuestionSet {
+            tool_call_id: tool_call_id.to_string(),
+            questions: vec![PendingQuestion {
+                id: "proceed".into(),
+                question_type: "yes_no".into(),
+                text: "Proceed?".into(),
+                options: None,
+            }],
+            asked_at_ms: 1,
+            status: PendingQuestionStatus::Pending,
+            answers: Vec::new(),
+            resolution_id: None,
+        }
+    }
+
+    #[test]
+    fn answer_questions_generation_trigger_releases_queue_on_invalid_answer() {
+        let mut session = ChatSession::new("answer-release".to_string());
+        session
+            .register_pending_questions(answer_question_set("ask-release"))
+            .unwrap();
+        session.set_runtime_state(SessionState::Generating, None);
+        let mut rx = session.subscribe();
+
+        reject_question_answers(
+            &mut session,
+            "req-invalid",
+            "invalid answer for question id: proceed".to_string(),
+        );
+
+        assert_eq!(session.runtime.state, SessionState::WaitingUserInput);
+        assert!(session.runtime.error.is_none());
+        assert_eq!(
+            session.pending_questions[0].status,
+            PendingQuestionStatus::Pending
+        );
+        let events = drain_events(&mut rx);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatEvent::Ack {
+                client_request_id,
+                accepted: false,
+                result: Some(result),
+            } if client_request_id == "req-invalid"
+                && result["error"].as_str().is_some_and(|error| error.contains("invalid answer"))
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatEvent::RuntimeUpdated {
+                state: SessionState::WaitingUserInput,
+                ..
+            }
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            ChatEvent::RuntimeUpdated {
+                state: SessionState::Generating,
+                ..
+            }
+        )));
+        assert!(!matches!(session.runtime.state, SessionState::Generating));
+    }
+
+    #[test]
+    fn answer_questions_save_failure_rolls_back_and_emits_snapshot_with_pending_set() {
+        let mut session = ChatSession::new("answer-save-failure".to_string());
+        session
+            .register_pending_questions(answer_question_set("ask-save"))
+            .unwrap();
+        session
+            .answer_pending_questions(
+                "ask-save",
+                vec![QuestionAnswer {
+                    id: "proceed".into(),
+                    answer: serde_json::json!(true),
+                }],
+                "req-save".into(),
+            )
+            .unwrap();
+        let staged = user_message_with_client_message_id(
+            ChatContent::SimpleText("answer".into()),
+            Vec::new(),
+            Some("req-save".to_string()),
+        );
+        let staged_id = staged.message_id.clone();
+        session.add_message(staged);
+        session.set_runtime_state(SessionState::Generating, None);
+        let mut rx = session.subscribe();
+
+        let rolled_back =
+            session.rollback_answered_questions("ask-save", "req-save", Some(&staged_id));
+        assert!(rolled_back);
+        release_answer_questions_failure(
+            &mut session,
+            "req-save",
+            "failed to persist question answers: disk full".to_string(),
+            rolled_back,
+        );
+
+        assert_eq!(
+            session.pending_questions[0].status,
+            PendingQuestionStatus::Pending
+        );
+        assert!(session.messages.is_empty());
+        assert_eq!(session.runtime.state, SessionState::Error);
+        let events = drain_events(&mut rx);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatEvent::Ack {
+                client_request_id,
+                accepted: false,
+                ..
+            } if client_request_id == "req-save"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatEvent::Snapshot {
+                pending_questions,
+                messages,
+                ..
+            } if messages.is_empty()
+                && pending_questions
+                    .iter()
+                    .all(|set| set.status == PendingQuestionStatus::Pending)
+        )));
+    }
+
+    #[test]
+    fn answer_questions_conflict_preserves_new_pending_question() {
+        let mut session = ChatSession::new("answer-conflict".to_string());
+        session
+            .register_pending_questions(answer_question_set("old"))
+            .unwrap();
+        session
+            .answer_pending_questions(
+                "old",
+                vec![QuestionAnswer {
+                    id: "proceed".into(),
+                    answer: json!(true),
+                }],
+                "first-answer".into(),
+            )
+            .unwrap();
+        session
+            .register_pending_questions(answer_question_set("current"))
+            .unwrap();
+        session.set_runtime_state(SessionState::Generating, None);
+        let mut rx = session.subscribe();
+        let before = session.pending_questions.clone();
+        let error = session
+            .answer_pending_questions(
+                "old",
+                vec![QuestionAnswer {
+                    id: "proceed".into(),
+                    answer: json!(false),
+                }],
+                "second-answer".into(),
+            )
+            .unwrap_err();
+
+        reject_question_answers(&mut session, "second-answer", error);
+
+        assert_eq!(session.pending_questions, before);
+        assert_eq!(session.runtime.state, SessionState::WaitingUserInput);
+        assert!(session.runtime.error.is_none());
+        let events = drain_events(&mut rx);
+        assert!(events.iter().any(|event| matches!(event,
+            ChatEvent::Ack { client_request_id, accepted: false, .. }
+                if client_request_id == "second-answer"
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            ChatEvent::RuntimeUpdated {
+                state: SessionState::Error,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn answer_questions_rejection_preserves_paused_runtime() {
+        let mut session = ChatSession::new("answer-paused-rejection".to_string());
+        session.set_runtime_state(SessionState::Paused, None);
+        let mut rx = session.subscribe();
+
+        reject_question_answers(&mut session, "stale", "unknown question".into());
+
+        assert_eq!(session.runtime.state, SessionState::Paused);
+        assert!(session.runtime.error.is_none());
+        assert!(!drain_events(&mut rx).iter().any(|event| matches!(
+            event,
+            ChatEvent::RuntimeUpdated {
+                state: SessionState::Error,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn abort_command_cancels_pending_browser_message() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new("browser-abort".into())));
+        let processor_running = {
+            let mut session = session_arc.lock().await;
+            session.pending_browser_message = Some(PendingBrowserMessage {
+                pending_message_id: "pending-browser".into(),
+                content: json!("message waiting for browser context"),
+                attachments: vec![],
+                client_message_id: None,
+                checkpoints: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
+                skill_activation_name: None,
+                skill_context_msg: None,
+            });
+            session.set_runtime_state(SessionState::WaitingUserInput, None);
+            session
+                .command_queue
+                .push_back(abort_request("browser-stop"));
+            session.queue_processor_running.clone()
+        };
+        processor_running.store(true, Ordering::SeqCst);
+        let handle = tokio::spawn(process_command_queue(
+            app,
+            session_arc.clone(),
+            processor_running,
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if session_arc.lock().await.pending_browser_message.is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("abort did not cancel pending browser message");
+        assert_eq!(session_arc.lock().await.runtime.state, SessionState::Idle);
+        close_processor(&session_arc, handle).await;
+    }
+
+    #[test]
+    fn answer_questions_retry_after_rollback_adds_single_message_and_answer() {
+        let mut session = ChatSession::new("answer-retry".to_string());
+        session
+            .register_pending_questions(answer_question_set("ask-retry"))
+            .unwrap();
+        let answers = vec![QuestionAnswer {
+            id: "proceed".into(),
+            answer: serde_json::json!(true),
+        }];
+        session
+            .answer_pending_questions("ask-retry", answers.clone(), "req-1".into())
+            .unwrap();
+        let staged = user_message_with_client_message_id(
+            ChatContent::SimpleText(answer_questions_content("ask-retry", &answers)),
+            Vec::new(),
+            Some("req-1".to_string()),
+        );
+        let staged_id = staged.message_id.clone();
+        session.add_message(staged);
+        assert!(session.rollback_answered_questions("ask-retry", "req-1", Some(&staged_id)));
+
+        assert!(session
+            .answer_pending_questions("ask-retry", answers.clone(), "req-2".into())
+            .unwrap());
+        session.add_message(user_message_with_client_message_id(
+            ChatContent::SimpleText(answer_questions_content("ask-retry", &answers)),
+            Vec::new(),
+            Some("req-2".to_string()),
+        ));
+
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.pending_questions[0].resolution_id.as_deref(),
+            Some("req-2")
+        );
+        assert!(!session
+            .answer_pending_questions("ask-retry", answers, "req-3".into())
+            .unwrap());
+        assert_eq!(session.messages.len(), 1);
+    }
+
+    #[test]
+    fn answer_questions_failure_release_when_not_generating_reports_error_only() {
+        let mut session = ChatSession::new("answer-paused".to_string());
+        session
+            .register_pending_questions(answer_question_set("ask-paused"))
+            .unwrap();
+
+        release_answer_questions_failure(
+            &mut session,
+            "req-paused",
+            "unknown question tool_call_id".to_string(),
+            false,
+        );
+
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(
+            session.pending_questions[0].status,
+            PendingQuestionStatus::Pending
+        );
+    }
+
+    #[test]
+    fn stale_question_instance_rejects_before_answering_or_changing_runtime() {
+        let mut session = ChatSession::new("instance-guard".into());
+        let mut set = answer_question_set("ask-instance");
+        set.asked_at_ms = 20;
+        session.register_pending_questions(set).unwrap();
+        let before = session.pending_questions.clone();
+        let answer = vec![QuestionAnswer {
+            id: "proceed".into(),
+            answer: json!(true),
+        }];
+        assert!(session
+            .answer_pending_questions_at("ask-instance", answer.clone(), "stale".into(), Some(19))
+            .is_err());
+        assert_eq!(session.pending_questions, before);
+        assert!(session.messages.is_empty());
+        assert!(session
+            .answer_pending_questions_at("ask-instance", answer, "current".into(), Some(20))
+            .unwrap());
+    }
+
+    #[test]
+    fn answer_questions_waits_for_required_save_before_generating() {
+        assert!(!command_triggers_generation(
+            &ChatCommand::AnswerQuestions {
+                tool_call_id: "ask".into(),
+                answers: Vec::new(),
+                asked_at_ms: None,
+            }
+        ));
     }
 
     #[test]
@@ -5367,16 +6454,22 @@ mod tests {
         let mut session = ChatSession::new("goal-command".to_string());
         handle_set_goal_command(&mut session, "Base".to_string(), None, None).unwrap();
         session.command_queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "goal-nudge-1".to_string(),
             priority: true,
             command: ChatCommand::Regenerate {},
         });
         session.command_queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "goal-verifier-regenerate-1".to_string(),
             priority: true,
             command: ChatCommand::Regenerate {},
         });
         session.command_queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "user-regenerate".to_string(),
             priority: false,
             command: ChatCommand::Regenerate {},

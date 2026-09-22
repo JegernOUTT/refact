@@ -335,7 +335,10 @@ impl App {
                 client_request_id,
                 accepted,
                 ..
-            } => self.handle_send_ack(&client_request_id, accepted),
+            } => {
+                self.handle_native_answer_ack(&client_request_id, accepted);
+                self.handle_send_ack(&client_request_id, accepted);
+            }
             SseEvent::ProcessCompleted { event } => {
                 self.inbound_event_state.set_process_completed(event);
             }
@@ -563,6 +566,10 @@ impl App {
     }
 
     pub(super) fn maybe_open_pending_ask_questions_form(&mut self) {
+        if self.native_pending_questions.is_some() {
+            self.reconcile_native_questions();
+            return;
+        }
         if self.session_state != SessionState::WaitingUserInput || self.ask_questions_form.is_some()
         {
             return;
@@ -577,6 +584,47 @@ impl App {
             .cloned();
         if let Some(message) = pending.as_ref() {
             self.maybe_open_ask_questions_form(message);
+        }
+    }
+
+    pub(super) fn reconcile_native_questions(&mut self) {
+        let Some(pending) = self.native_pending_questions.as_ref() else {
+            return;
+        };
+        self.pending_manual_ask_questions = None;
+        if self
+            .ask_questions_form
+            .as_ref()
+            .is_some_and(|form| pending.contains(form.request()))
+        {
+            return;
+        }
+        let next = pending.first().cloned();
+        self.native_answer_request_id = None;
+        self.native_answer_accepted = false;
+        self.ask_questions_form = next.map(AskQuestionsForm::new);
+        if let Some(tool_call_id) = self
+            .ask_questions_form
+            .as_ref()
+            .map(|form| form.tool_call_id().to_string())
+        {
+            self.collapse_tool_card(&tool_call_id);
+        }
+    }
+
+    pub(super) fn handle_native_answer_ack(&mut self, request_id: &str, accepted: bool) {
+        if self.native_answer_request_id.as_deref() != Some(request_id) {
+            return;
+        }
+        if accepted {
+            if !self.native_answer_accepted {
+                self.native_answer_accepted = true;
+                self.add_notice("Question answers accepted; waiting for authoritative resolution");
+            }
+        } else {
+            self.native_answer_request_id = None;
+            self.native_answer_accepted = false;
+            self.add_notice("Question answers rejected; your draft is retained for correction");
         }
     }
 
@@ -631,6 +679,9 @@ impl App {
     }
 
     pub(super) fn maybe_open_ask_questions_form(&mut self, message: &TranscriptMessage) {
+        if self.native_pending_questions.is_some() {
+            return;
+        }
         if self.session_state != SessionState::WaitingUserInput {
             return;
         }
@@ -985,6 +1036,18 @@ impl App {
 
 impl App {
     pub(super) fn handle_snapshot(&mut self, raw: &Value) -> AppAction {
+        match AskQuestionsRequest::from_native_snapshot(raw) {
+            Ok(Some(pending)) => self.native_pending_questions = Some(pending),
+            Ok(None) if self.native_pending_questions.is_some() => {
+                self.native_pending_questions = Some(Vec::new());
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.native_pending_questions = Some(Vec::new());
+                self.add_notice(format!("Rejected native question state: {error}"));
+            }
+        }
+        self.reconcile_native_questions();
         if let Some(thread) = raw.get("thread") {
             self.worktree_meta = parse_worktree_meta(thread.get("worktree"), self);
             if let Some(title) = thread
@@ -1523,6 +1586,144 @@ mod tests {
             worker: None,
             cron_pending: None,
         }
+    }
+
+    fn native_snapshot(status: &str, asked_at_ms: u64) -> Value {
+        let questions = json!([{"id":"yes","type":"yes_no","text":"Continue?"}]);
+        json!({
+            "runtime": {"state":"waiting_user_input"},
+            "messages": [{"role":"tool","tool_call_id":"ask-native","content":json!({
+                "type":"ask_questions","tool_call_id":"ask-native","questions":questions
+            }).to_string()}],
+            "pending_questions": [{"tool_call_id":"ask-native","asked_at_ms":asked_at_ms,
+                "status":status,"questions":questions}]
+        })
+    }
+
+    #[test]
+    fn native_snapshot_resolution_cannot_reopen_from_stale_transcript() {
+        for status in ["answered", "cancelled"] {
+            let mut app = App::new(project());
+            app.handle_snapshot(&native_snapshot("pending", 42));
+            assert_eq!(
+                app.ask_questions_form().unwrap().request().asked_at_ms,
+                Some(42)
+            );
+            app.handle_snapshot(&native_snapshot(status, 42));
+            assert!(app.ask_questions_form().is_none());
+            app.handle_runtime_updated(&json!({"state":"waiting_user_input"}));
+            assert!(app.ask_questions_form().is_none());
+            let mut restarted = App::new(project());
+            restarted.handle_snapshot(&native_snapshot(status, 42));
+            assert!(restarted.ask_questions_form().is_none());
+        }
+    }
+
+    #[test]
+    fn native_snapshot_present_absent_and_malformed_are_distinct() {
+        let mut absent = native_snapshot("pending", 42);
+        absent.as_object_mut().unwrap().remove("pending_questions");
+        let mut legacy = App::new(project());
+        legacy.handle_snapshot(&absent);
+        assert_eq!(
+            legacy.ask_questions_form().unwrap().request().asked_at_ms,
+            None
+        );
+        for invalid in [
+            Value::Null,
+            json!({}),
+            json!([{"status":"pending"}]),
+            json!([]),
+        ] {
+            let mut app = App::new(project());
+            app.handle_snapshot(&native_snapshot("pending", 42));
+            let mut snapshot = absent.clone();
+            snapshot["pending_questions"] = invalid;
+            app.handle_snapshot(&snapshot);
+            assert!(app.ask_questions_form().is_none());
+            app.handle_snapshot(&absent);
+            assert!(app.ask_questions_form().is_none());
+        }
+    }
+
+    #[test]
+    fn native_answer_ack_does_not_resolve_and_new_identity_discards_draft() {
+        let mut app = App::new(project());
+        app.handle_snapshot(&native_snapshot("pending", 42));
+        app.ask_questions_form.as_mut().unwrap().choose_yes_no(true);
+        let AppAction::AnswerQuestions { command } =
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+        else {
+            panic!("expected native answer command");
+        };
+        assert_eq!(command.tool_call_id, "ask-native");
+        assert_eq!(command.asked_at_ms, 42);
+        assert_eq!(
+            serde_json::to_value(&command.answers).unwrap(),
+            json!([{"id":"yes","answer":true}])
+        );
+        let context = CommandContextTag::AnswerQuestions {
+            origin: app.command_origin(),
+            client_request_id: command.client_request_id.clone(),
+        };
+        app.handle_command_finished(context.clone(), Ok(()));
+        app.handle_native_answer_ack(&command.client_request_id, true);
+        app.handle_command_finished(context.clone(), Err("late transport error".into()));
+        app.handle_snapshot(&native_snapshot("pending", 42));
+        assert!(app
+            .ask_questions_form()
+            .unwrap()
+            .current_question_answered());
+        assert_eq!(
+            app.native_answer_request_id.as_deref(),
+            Some(command.client_request_id.as_str())
+        );
+        app.handle_snapshot(&native_snapshot("pending", 43));
+        assert!(!app
+            .ask_questions_form()
+            .unwrap()
+            .current_question_answered());
+        assert!(app.native_answer_request_id.is_none());
+        app.handle_command_finished(context, Err("late failure".into()));
+        app.handle_native_answer_ack(&command.client_request_id, false);
+        assert_eq!(
+            app.ask_questions_form().unwrap().request().asked_at_ms,
+            Some(43)
+        );
+    }
+
+    #[test]
+    fn native_answer_rejection_preserves_draft_and_project_switch_rejects_old_result() {
+        let mut app = App::new(project());
+        app.handle_snapshot(&native_snapshot("pending", 42));
+        app.ask_questions_form
+            .as_mut()
+            .unwrap()
+            .choose_yes_no(false);
+        app.native_answer_request_id = Some("old".into());
+        app.handle_native_answer_ack("other", false);
+        assert_eq!(app.native_answer_request_id.as_deref(), Some("old"));
+        app.handle_native_answer_ack("old", false);
+        assert!(app.native_answer_request_id.is_none());
+        assert_eq!(
+            app.ask_questions_form().unwrap().current_answer_text(),
+            "No"
+        );
+        let context = CommandContextTag::AnswerQuestions {
+            origin: app.command_origin(),
+            client_request_id: "old".into(),
+        };
+        app.clear_ask_questions_state();
+        app.current_project.as_mut().unwrap().project_id = "next-project".into();
+        app.handle_snapshot(&native_snapshot("pending", 43));
+        app.native_answer_request_id = Some("new".into());
+        app.handle_command_finished(context, Err("old project failure".into()));
+        app.handle_native_answer_ack("old", false);
+        assert_eq!(app.native_answer_request_id.as_deref(), Some("new"));
+        assert_eq!(
+            app.ask_questions_form().unwrap().request().asked_at_ms,
+            Some(43)
+        );
     }
 
     #[test]

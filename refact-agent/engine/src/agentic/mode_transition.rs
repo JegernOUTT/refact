@@ -5,19 +5,25 @@ pub use refact_agentic::mode_transition::{
     count_images_in_messages, current_base_goal_message, extract_conversation_metadata,
     extract_initial_plan_text, format_annotated_messages, format_budget_summary, format_file_list,
     format_memory_list, insert_goal_messages_before_plan, is_goal_delta_event,
-    make_pinned_plan_message, message_symbols, normalize_goal_message_content, parse_llm_response,
-    push_context_file_with_budget, text_symbols, transfer_goal_ownership, GoalTransferResult,
-    truncate_utf8,
+    make_pinned_plan_message, message_symbols, normalize_control_metadata,
+    normalize_goal_message_content, parse_llm_response, push_context_file_with_budget,
+    text_symbols, transfer_goal_ownership, GoalTransferResult, truncate_utf8,
 };
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use refact_context_api::PathsAccess;
 
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::global_context::GlobalContext;
-use crate::subchat::{run_subchat_once, TraceParent};
+use crate::subchat::{
+    run_subchat, resolve_subchat_config_with_explicit_params, load_subchat_params,
+    resolve_subchat_model, ExplicitSubchatSpec, TraceParent,
+};
 use crate::yaml_configs::customization_registry::get_subagent_config;
 
 const SUBAGENT_ID: &str = "mode_transition";
@@ -53,6 +59,617 @@ impl PathsAccess for AgenticPathContext {
     }
 }
 
+pub type ReconstructionHints = ParsedDecisions;
+
+pub struct ReconstructionRequest<'a> {
+    pub messages: &'a [ChatMessage],
+    pub target_mode: &'a str,
+    pub target_mode_description: &'a str,
+    pub parent_chat_id: Option<&'a str>,
+    pub model_override: Option<String>,
+    pub chat_model: Option<String>,
+    pub abort_flag: Option<Arc<AtomicBool>>,
+    pub hints: Option<ReconstructionHints>,
+    pub target_budget_symbols: Option<usize>,
+    pub preserve_goal_messages: bool,
+}
+
+pub struct ReconstructionOutcome {
+    pub messages: Vec<ChatMessage>,
+    pub decisions: ParsedDecisions,
+    pub model: String,
+    pub budget: TransitionContextBudget,
+    pub reread_paths: Vec<String>,
+}
+
+fn check_cancelled(request: &ReconstructionRequest<'_>) -> Result<(), String> {
+    if request
+        .abort_flag
+        .as_ref()
+        .is_some_and(|f| f.load(Ordering::Acquire))
+    {
+        Err("Context reconstruction cancelled".into())
+    } else {
+        Ok(())
+    }
+}
+
+struct MessageAudit<'a>(&'a [ChatMessage]);
+impl refact_privacy::PrivacyAudited for MessageAudit<'_> {
+    fn privacy_records(
+        &self,
+    ) -> Result<Vec<(usize, refact_privacy::FileRecord)>, refact_privacy::PrivacyAuditError> {
+        refact_privacy::records_from_messages(self.0)
+    }
+}
+
+const ANALYSIS_PREVIEW_CAP: usize = 16000;
+const ANALYSIS_PREVIEW_FLOOR: usize = 250;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AnalysisRenderStep {
+    preview_cap: usize,
+    keep_recent: usize,
+    control_cap: Option<usize>,
+}
+
+/// Degradation ladder for the analysis prompt: shorten previews first, then omit the
+/// oldest non-mandatory messages, and only as a last resort truncate mandatory artifacts
+/// (the backend carries plan/goal controls verbatim regardless of what the analyzer saw).
+fn analysis_render_steps(non_mandatory: usize) -> impl Iterator<Item = AnalysisRenderStep> {
+    let previews = std::iter::successors(Some(ANALYSIS_PREVIEW_CAP), |cap| {
+        (*cap > ANALYSIS_PREVIEW_FLOOR).then(|| (cap / 2).max(ANALYSIS_PREVIEW_FLOOR))
+    })
+    .map(move |preview_cap| AnalysisRenderStep {
+        preview_cap,
+        keep_recent: non_mandatory,
+        control_cap: None,
+    });
+    let omissions = std::iter::successors(Some(non_mandatory / 2), |keep| {
+        (*keep > 0).then(|| keep / 2)
+    })
+    .map(|keep_recent| AnalysisRenderStep {
+        preview_cap: ANALYSIS_PREVIEW_FLOOR,
+        keep_recent,
+        control_cap: None,
+    });
+    let controls = std::iter::successors(Some(ANALYSIS_PREVIEW_CAP), |cap| {
+        (*cap > 0).then(|| cap / 2)
+    })
+    .map(|cap| AnalysisRenderStep {
+        preview_cap: ANALYSIS_PREVIEW_FLOOR,
+        keep_recent: 0,
+        control_cap: Some(cap),
+    });
+    previews.chain(omissions).chain(controls)
+}
+
+struct AnalysisEntry<'a> {
+    id: &'a str,
+    message: &'a ChatMessage,
+    text: String,
+    mandatory: bool,
+}
+
+fn is_control_message(message: &ChatMessage) -> bool {
+    matches!(message.role.as_str(), "plan" | "goal")
+        || message
+            .extra
+            .get("event")
+            .and_then(|e| e.get("subkind"))
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| matches!(s, "plan_delta" | "goal_delta" | "goal_pursuit"))
+}
+
+/// The current request and plan/goal controls are mandatory; everything else gets a
+/// bounded preview and may be omitted when the conversation is too long.
+fn analysis_entries(metadata: &ConversationMetadata) -> Vec<AnalysisEntry<'_>> {
+    let latest_user = metadata
+        .annotated_messages
+        .iter()
+        .rposition(|(_, m)| m.role == "user");
+    metadata
+        .annotated_messages
+        .iter()
+        .enumerate()
+        .map(|(index, (id, message))| AnalysisEntry {
+            id,
+            message,
+            text: message.content.content_text_only(),
+            mandatory: Some(index) == latest_user || is_control_message(message),
+        })
+        .collect()
+}
+
+fn render_annotated_messages(entries: &[AnalysisEntry<'_>], step: AnalysisRenderStep) -> String {
+    let first_kept = if step.keep_recent == 0 {
+        usize::MAX
+    } else {
+        entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !e.mandatory)
+            .map(|(i, _)| i)
+            .rev()
+            .nth(step.keep_recent - 1)
+            .unwrap_or(0)
+    };
+    let mut out = String::new();
+    let mut omitted: Option<(usize, usize, usize)> = None;
+    let flush = |out: &mut String, omitted: &mut Option<(usize, usize, usize)>| {
+        if let Some((first, last, count)) = omitted.take() {
+            if count == 1 {
+                out.push_str(&format!("[{}] older message omitted\n", entries[first].id));
+            } else {
+                out.push_str(&format!(
+                    "[{}..{}] {count} older messages omitted\n",
+                    entries[first].id, entries[last].id
+                ));
+            }
+        }
+    };
+    for (index, entry) in entries.iter().enumerate() {
+        if !entry.mandatory && index < first_kept {
+            omitted = Some(match omitted {
+                Some((first, _, count)) => (first, index, count + 1),
+                None => (index, index, 1),
+            });
+            continue;
+        }
+        flush(&mut out, &mut omitted);
+        let text: std::borrow::Cow<str> = match (entry.mandatory, step.control_cap) {
+            (true, None) => std::borrow::Cow::Borrowed(&entry.text),
+            (true, Some(cap)) => truncate_utf8(&entry.text, cap).into(),
+            (false, _) => truncate_utf8(&entry.text, step.preview_cap).into(),
+        };
+        out.push_str(&format!(
+            "[{}] [{}]\n{text}\n",
+            entry.id, entry.message.role
+        ));
+        for call in entry.message.tool_calls.iter().flatten() {
+            out.push_str(&format!(
+                "tool: {} {}\n",
+                call.function.name,
+                truncate_utf8(&call.function.arguments, step.preview_cap)
+            ));
+        }
+    }
+    flush(&mut out, &mut omitted);
+    out
+}
+
+/// Consumes ladder steps until one fits, leaving the iterator positioned after it so a
+/// provider rejection can resume trimming from the next step.
+fn fit_analysis_prompt(
+    steps: &mut impl Iterator<Item = AnalysisRenderStep>,
+    input_limit: usize,
+    render: impl Fn(AnalysisRenderStep) -> String,
+    mut count_tokens: impl FnMut(&str) -> Result<usize, String>,
+) -> Result<String, String> {
+    for step in steps {
+        let prompt = render(step);
+        if count_tokens(&prompt)? <= input_limit {
+            return Ok(prompt);
+        }
+    }
+    Err("Mandatory reconstruction input and instructions exceed resolved analyzer context".into())
+}
+
+const ANALYSIS_DEFAULT_BYTES_PER_TOKEN: f64 = 2.0;
+const ANALYSIS_CALIBRATION_MIN_TOKENS: usize = 50_000;
+const ANALYSIS_CALIBRATION_MARGIN: f64 = 1.25;
+const ANALYSIS_CONTEXT_REJECTION_RETRIES: usize = 3;
+
+fn usage_input_tokens(message: &ChatMessage) -> Option<usize> {
+    let usage = message
+        .usage
+        .as_ref()
+        .filter(|_| message.role == "assistant")?;
+    let input = usage
+        .prompt_tokens
+        .saturating_add(usage.cache_read_tokens.unwrap_or(0))
+        .saturating_add(usage.cache_creation_tokens.unwrap_or(0));
+    (input > 0).then_some(input)
+}
+
+fn message_bytes(message: &ChatMessage) -> usize {
+    let calls = message
+        .tool_calls
+        .as_ref()
+        .and_then(|calls| serde_json::to_string(calls).ok())
+        .map_or(0, |calls| calls.len());
+    message.content.content_text_only().len() + calls
+}
+
+/// Provider-reported usage on the conversation's own messages is the only ground truth
+/// available without a local tokenizer: bytes per token measured on the context the
+/// model actually saw, discounted because the analyzer may run on a denser tokenizer.
+fn usage_calibrated_bytes_per_token(messages: &[ChatMessage]) -> Option<f64> {
+    let start = messages
+        .iter()
+        .rposition(|m| m.role == refact_core::active_context::COMPRESSION_REPORT_KEY)
+        .map_or(0, |index| index + 1);
+    let (index, input_tokens) =
+        messages
+            .iter()
+            .enumerate()
+            .skip(start)
+            .rev()
+            .find_map(|(index, message)| {
+                usage_input_tokens(message)
+                    .filter(|input| *input >= ANALYSIS_CALIBRATION_MIN_TOKENS)
+                    .map(|input| (index, input))
+            })?;
+    let seen =
+        crate::chat::linearize::apply_summarization_linearize(messages[..index].to_vec()).ok()?;
+    let bytes = seen.iter().map(message_bytes).sum::<usize>();
+    let bytes_per_token = bytes as f64 / input_tokens as f64 / ANALYSIS_CALIBRATION_MARGIN;
+    (1.5..=6.0)
+        .contains(&bytes_per_token)
+        .then_some(bytes_per_token)
+}
+
+fn analysis_prompt_tokens(
+    tokenizer: Option<Arc<tokenizers::Tokenizer>>,
+    bytes_per_token: f64,
+    prompt: &str,
+) -> Result<usize, String> {
+    if tokenizer.is_some() {
+        return crate::tokens::count_text_tokens(tokenizer, prompt);
+    }
+    Ok((prompt.len() as f64 / bytes_per_token).ceil() as usize + 1)
+}
+
+fn is_context_rejection(error: &str) -> bool {
+    refact_core::retry_policy::classify_user_error(error)
+        == refact_core::retry_policy::UserErrorCategory::ContextTooLarge
+}
+
+async fn analyze_reconstruction(
+    gcx: Arc<GlobalContext>,
+    request: &ReconstructionRequest<'_>,
+) -> Result<(ParsedDecisions, String, TransitionContextBudget), String> {
+    check_cancelled(request)?;
+    if request.messages.is_empty() {
+        return Err("The provided chat is empty".into());
+    }
+    let subagent = get_subagent_config(gcx.clone(), SUBAGENT_ID, None)
+        .await
+        .ok_or("mode_transition config not found")?;
+    let template = subagent
+        .messages
+        .user_template
+        .as_ref()
+        .ok_or("Missing reconstruction prompt")?;
+    let params = load_subchat_params(gcx.clone(), SUBAGENT_ID).await?;
+    let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+        .await
+        .map_err(|e| e.to_string())?;
+    let candidates = analysis_model_candidates(
+        request.model_override.as_deref(),
+        request.chat_model.as_deref(),
+        &caps.defaults,
+    );
+    let mut budget = calculate_transition_context_budget(request.messages);
+    if let Some(total) = request.target_budget_symbols {
+        budget.total_symbols = total;
+        budget.files_symbols = total * 70 / 100;
+        budget.messages_symbols = total - budget.files_symbols;
+    }
+    let metadata = extract_conversation_metadata(request.messages);
+    let hints = request
+        .hints
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    let entries = analysis_entries(&metadata);
+    let non_mandatory = entries.iter().filter(|e| !e.mandatory).count();
+    let file_list = format_file_list(&metadata);
+    let memory_list = format_memory_list(&metadata);
+    let budget_summary = format_budget_summary(budget, request.messages);
+    let render = |step: AnalysisRenderStep| {
+        format!(
+            "{}\nCaller preservation hints (source-grounded only): {}",
+            template
+                .replace("{target_mode}", request.target_mode)
+                .replace("{target_mode_description}", request.target_mode_description)
+                .replace(
+                    "{annotated_message_list}",
+                    &render_annotated_messages(&entries, step)
+                )
+                .replace("{file_list}", &file_list)
+                .replace("{memory_list}", &memory_list)
+                .replace("{budget_summary}", &budget_summary),
+            hints
+        )
+    };
+    let bytes_per_token = usage_calibrated_bytes_per_token(request.messages)
+        .unwrap_or(ANALYSIS_DEFAULT_BYTES_PER_TOKEN);
+    let mut last_error = String::from("No analysis model is configured");
+    for model in candidates {
+        check_cancelled(request)?;
+        let attempt = AnalysisAttempt {
+            params: params.clone(),
+            model: &model,
+            non_mandatory,
+            bytes_per_token,
+            render: &render,
+        };
+        match analyze_with_model(gcx.clone(), request, attempt).await {
+            Ok((decisions, resolved)) => return Ok((decisions, resolved, budget)),
+            Err(error) => {
+                tracing::warn!(
+                    "reconstruction analysis with '{model}' failed: {}",
+                    refact_chat_api::diagnostics::safe_provider_error_diagnostic(&error)
+                );
+                last_error = error;
+            }
+        }
+    }
+    Err(last_error)
+}
+
+/// An explicitly requested model is used as-is; otherwise the chat's own model is tried
+/// first, then the default chat slots.
+fn analysis_model_candidates(
+    explicit: Option<&str>,
+    chat_model: Option<&str>,
+    defaults: &crate::caps::DefaultModels,
+) -> Vec<String> {
+    if let Some(explicit) = explicit.map(str::trim).filter(|model| !model.is_empty()) {
+        return vec![explicit.to_string()];
+    }
+    let mut candidates: Vec<String> = Vec::new();
+    for model in [
+        chat_model,
+        Some(defaults.chat_default_model.as_str()),
+        Some(defaults.chat_model_2.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    {
+        if !model.is_empty() && !candidates.iter().any(|known| known == model) {
+            candidates.push(model.to_string());
+        }
+    }
+    candidates
+}
+
+struct AnalysisAttempt<'a, R: Fn(AnalysisRenderStep) -> String> {
+    params: crate::call_validation::SubchatParameters,
+    model: &'a str,
+    non_mandatory: usize,
+    bytes_per_token: f64,
+    render: &'a R,
+}
+
+async fn analyze_with_model<R: Fn(AnalysisRenderStep) -> String>(
+    gcx: Arc<GlobalContext>,
+    request: &ReconstructionRequest<'_>,
+    mut attempt: AnalysisAttempt<'_, R>,
+) -> Result<(ParsedDecisions, String), String> {
+    attempt.params.subchat_model = attempt.model.to_string();
+    let model = resolve_subchat_model(gcx.clone(), &attempt.params).await?;
+    let spec = ExplicitSubchatSpec {
+        params: attempt.params,
+        model: model.clone(),
+        autonomous_no_confirm: false,
+    };
+    let mut config = resolve_subchat_config_with_explicit_params(
+        gcx.clone(),
+        SUBAGENT_ID,
+        &spec,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(vec![]),
+        1,
+        false,
+        "agent".into(),
+        None,
+        None,
+        None,
+        None,
+        request.abort_flag.clone(),
+        0,
+    )
+    .await?;
+    config.trace_parent = TraceParent::from_parts(request.parent_chat_id, None);
+    let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+        .await
+        .map_err(|e| e.to_string())?;
+    let model_rec = crate::caps::resolve_chat_model(caps, &model)?;
+    let tokenizer = crate::tokens::cached_tokenizer(gcx.clone(), &model_rec.base).await?;
+    let input_limit = config
+        .n_ctx
+        .saturating_sub(config.max_new_tokens)
+        .saturating_sub(1024);
+    let mut steps = analysis_render_steps(attempt.non_mandatory);
+    let mut rejections_left = ANALYSIS_CONTEXT_REJECTION_RETRIES;
+    let result = loop {
+        let prompt = fit_analysis_prompt(&mut steps, input_limit, attempt.render, |prompt| {
+            analysis_prompt_tokens(tokenizer.clone(), attempt.bytes_per_token, prompt)
+        })?;
+        let mut analysis = ChatMessage::new("user".into(), prompt);
+        crate::privacy::records::carry_records_into(&mut analysis, request.messages)
+            .map_err(|e| e.to_string())?;
+        crate::privacy::destinations::clear_for_model(
+            &gcx,
+            MessageAudit(std::slice::from_ref(&analysis)),
+            &model_rec.base,
+        )
+        .map_err(|e| e.to_string())?;
+        check_cancelled(request)?;
+        match run_subchat(gcx.clone(), vec![analysis], config.clone()).await {
+            Ok(result) => break result,
+            Err(error) if rejections_left > 0 && is_context_rejection(&error) => {
+                rejections_left -= 1;
+                tracing::warn!(
+                    "reconstruction analysis rejected as too long, trimming further: {}",
+                    refact_chat_api::diagnostics::safe_provider_error_diagnostic(&error)
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    check_cancelled(request)?;
+    let response = result
+        .messages
+        .last()
+        .filter(|m| m.role == "assistant" && m.tool_calls.as_ref().is_none_or(|c| c.is_empty()))
+        .ok_or("No reconstruction analysis answer generated")?;
+    let decisions = parse_llm_response(&response.content.content_text_only());
+    refact_agentic::mode_transition::validate_decisions(&decisions, request.messages)?;
+    Ok((decisions, model))
+}
+
+pub async fn reconstruct_context(
+    gcx: Arc<GlobalContext>,
+    request: ReconstructionRequest<'_>,
+) -> Result<ReconstructionOutcome, String> {
+    let (mut decisions, model, budget) = analyze_reconstruction(gcx.clone(), &request).await?;
+    let workspace_dirs = gcx.workspace_folders();
+    let metadata = extract_conversation_metadata(request.messages);
+    let allowed: std::collections::HashSet<_> = metadata
+        .context_files
+        .iter()
+        .chain(&metadata.edited_files)
+        .map(|f| f.path.clone())
+        .chain(metadata.memory_paths.iter().cloned())
+        .collect();
+    let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+        .await
+        .map_err(|e| e.to_string())?;
+    let model_rec = crate::caps::resolve_chat_model(caps, &model)?;
+    let mut reread_records = std::collections::HashMap::new();
+    let mut preloaded = std::collections::HashMap::new();
+    // Only canonical, conversation-allowlisted, runtime-cleared paths may be read by assembly.
+    for paths in [
+        &mut decisions.files_to_open,
+        &mut decisions.memories_to_include,
+    ] {
+        let mut safe = Vec::new();
+        for path in paths.iter() {
+            check_cancelled(&request)?;
+            if !allowed.contains(path) {
+                continue;
+            }
+            let full = PathBuf::from(path);
+            let full = if full.is_absolute() {
+                full
+            } else if let Some(root) = workspace_dirs.first() {
+                root.join(full)
+            } else {
+                continue;
+            };
+            let Ok(canonical) = full.canonicalize() else {
+                continue;
+            };
+            let in_workspace = workspace_dirs.iter().any(|root| {
+                root.canonicalize()
+                    .is_ok_and(|root| canonical.starts_with(root))
+            });
+            let in_refact = canonical
+                .components()
+                .any(|c| matches!(c, std::path::Component::Normal(name) if name == ".refact"));
+            if !in_workspace && !in_refact {
+                continue;
+            }
+            crate::files_in_workspace::check_file_privacy_for_model_context(
+                gcx.clone(),
+                &canonical,
+            )
+            .await?;
+            let record = crate::privacy::records::declared_file_record(&gcx, &canonical)?;
+            let mut audit = ChatMessage::default();
+            crate::privacy::records::attach_record(&mut audit, record.clone());
+            crate::privacy::destinations::clear_for_model(
+                &gcx,
+                MessageAudit(std::slice::from_ref(&audit)),
+                &model_rec.base,
+            )
+            .map_err(|e| e.to_string())?;
+            // Read the same canonical path that was cleared, once; pure assembly must
+            // never resolve the original alias again after the privacy check.
+            if tokio::fs::metadata(&canonical)
+                .await
+                .map_err(|e| e.to_string())?
+                .len()
+                > 1024 * 1024
+            {
+                continue;
+            }
+            let content = tokio::fs::read_to_string(&canonical)
+                .await
+                .map_err(|e| e.to_string())?;
+            preloaded.insert(path.clone(), content);
+            reread_records.insert(path.clone(), record);
+            safe.push(path.clone());
+        }
+        *paths = safe;
+    }
+    let mut messages = refact_agentic::mode_transition::assemble_reconstruction(
+        request.messages,
+        &decisions,
+        request.target_mode,
+        &workspace_dirs,
+        budget,
+        request.preserve_goal_messages,
+        &preloaded,
+    )
+    .await?;
+    let reread_paths = messages
+        .iter()
+        .filter_map(|m| match &m.content {
+            ChatContent::ContextFiles(f) => Some(f.iter().map(|f| f.file_name.clone())),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let carried =
+        crate::privacy::records::records_to_carry(request.messages).map_err(|e| e.to_string())?;
+    attach_reconstruction_records(&mut messages, &carried, &reread_records);
+    check_cancelled(&request)?;
+    Ok(ReconstructionOutcome {
+        messages,
+        decisions,
+        model,
+        budget,
+        reread_paths,
+    })
+}
+
+/// Fresh derived `user` messages carry the source provenance union; fresh context files
+/// carry the records of their own re-read files; cloned control messages keep their own.
+fn attach_reconstruction_records(
+    messages: &mut [ChatMessage],
+    carried: &[refact_privacy::FileRecord],
+    reread_records: &std::collections::HashMap<String, refact_privacy::FileRecord>,
+) {
+    for message in messages.iter_mut() {
+        if !message.message_id.is_empty() {
+            continue;
+        }
+        message.message_id = uuid::Uuid::new_v4().to_string();
+        let records = match &message.content {
+            ChatContent::ContextFiles(files) => files
+                .iter()
+                .filter_map(|file| reread_records.get(&file.file_name).cloned())
+                .collect::<Vec<_>>(),
+            _ if message.role == "user" => carried.to_vec(),
+            _ => Vec::new(),
+        };
+        crate::privacy::records::merge_records(message, records);
+    }
+    crate::privacy::records::compact_reconstruction_privacy(messages);
+}
+
 pub async fn analyze_mode_transition(
     gcx: Arc<GlobalContext>,
     messages: &[ChatMessage],
@@ -60,84 +677,587 @@ pub async fn analyze_mode_transition(
     target_mode_description: &str,
     parent_chat_id: Option<&str>,
 ) -> Result<ParsedDecisions, String> {
-    if messages.is_empty() {
-        return Err("The provided chat is empty".to_string());
-    }
-
-    let subagent_config = get_subagent_config(gcx.clone(), SUBAGENT_ID, None)
-        .await
-        .ok_or_else(|| format!("subagent config '{}' not found", SUBAGENT_ID))?;
-
-    let user_template = subagent_config
-        .messages
-        .user_template
-        .as_ref()
-        .ok_or_else(|| {
-            format!(
-                "messages.user_template not defined for subagent '{}'",
-                SUBAGENT_ID
-            )
-        })?;
-
-    let metadata = extract_conversation_metadata(messages);
-    let budget = calculate_transition_context_budget(messages);
-
-    let annotated_message_list = format_annotated_messages(&metadata);
-    let file_list = format_file_list(&metadata);
-    let memory_list = format_memory_list(&metadata);
-    let budget_summary = format_budget_summary(budget, messages);
-
-    let user_prompt = user_template
-        .replace("{target_mode}", target_mode)
-        .replace("{target_mode_description}", target_mode_description)
-        .replace("{annotated_message_list}", &annotated_message_list)
-        .replace("{file_list}", &file_list)
-        .replace("{memory_list}", &memory_list)
-        .replace("{budget_summary}", &budget_summary);
-
-    let mut analysis_message = ChatMessage {
-        role: "user".to_string(),
-        content: ChatContent::SimpleText(user_prompt),
-        ..Default::default()
-    };
-    crate::privacy::records::carry_records_into(&mut analysis_message, messages)
-        .map_err(|error| error.to_string())?;
-    let analysis_messages = vec![analysis_message];
-
-    let result = run_subchat_once(
+    analyze_reconstruction(
         gcx,
-        SUBAGENT_ID,
-        analysis_messages,
-        TraceParent::from_parts(parent_chat_id, None),
+        &ReconstructionRequest {
+            messages,
+            target_mode,
+            target_mode_description,
+            parent_chat_id,
+            model_override: None,
+            chat_model: None,
+            abort_flag: None,
+            hints: None,
+            target_budget_symbols: None,
+            preserve_goal_messages: false,
+        },
     )
     .await
-    .map_err(|e| format!("Error analyzing mode transition: {}", e))?;
-
-    let response_text = result
-        .messages
-        .last()
-        .and_then(|msg| match &msg.content {
-            ChatContent::SimpleText(text) => Some(text.clone()),
-            _ => None,
-        })
-        .ok_or("No analysis response was generated".to_string())?;
-
-    Ok(parse_llm_response(&response_text))
+    .map(|(decisions, _, _)| decisions)
 }
 
 pub async fn assemble_new_chat<T: PathsAccess + ?Sized>(
     context: &T,
     original_messages: &[ChatMessage],
     decisions: &ParsedDecisions,
+    target_mode: &str,
 ) -> Result<Vec<ChatMessage>, String> {
     let workspace_dirs = context.workspace_folders();
-    assemble_new_chat_pure(original_messages, decisions, &workspace_dirs).await
+    assemble_new_chat_pure(original_messages, decisions, target_mode, &workspace_dirs).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::call_validation::{ChatContent, ChatMessage, ContextFile};
+
+    #[test]
+    fn reconstruction_cancellation_is_checked_before_work() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let request = ReconstructionRequest {
+            messages: &[],
+            target_mode: "agent",
+            target_mode_description: "",
+            parent_chat_id: None,
+            model_override: None,
+            chat_model: None,
+            abort_flag: Some(flag.clone()),
+            hints: None,
+            target_budget_symbols: None,
+            preserve_goal_messages: true,
+        };
+        assert!(check_cancelled(&request).is_err());
+        flag.store(false, Ordering::Release);
+        assert!(check_cancelled(&request).is_ok());
+    }
+
+    fn text_message(role: &str, text: &str) -> ChatMessage {
+        ChatMessage::new(role.to_string(), text.to_string())
+    }
+
+    fn tool_call_message(name: &str, arguments: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            tool_calls: Some(vec![crate::call_validation::ChatToolCall {
+                id: "call-1".to_string(),
+                index: None,
+                function: crate::call_validation::ChatToolFunction {
+                    name: name.to_string(),
+                    arguments: arguments.to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
+            }]),
+            ..Default::default()
+        }
+    }
+
+    fn sample_conversation() -> Vec<ChatMessage> {
+        vec![
+            text_message("user", "first request"),
+            tool_call_message("t_cat", "{\"paths\":\"src/main.rs\"}"),
+            text_message("tool", "first tool output"),
+            text_message("plan", "PLAN BODY"),
+            text_message("assistant", "second answer"),
+            text_message("tool", "second tool output"),
+            text_message("user", "latest request"),
+            text_message("assistant", "third answer"),
+        ]
+    }
+
+    #[test]
+    fn analysis_render_steps_shrink_previews_then_omit_then_truncate_controls() {
+        let steps: Vec<_> = analysis_render_steps(10).collect();
+        assert_eq!(
+            steps[0],
+            AnalysisRenderStep {
+                preview_cap: ANALYSIS_PREVIEW_CAP,
+                keep_recent: 10,
+                control_cap: None,
+            }
+        );
+        let floor = steps
+            .iter()
+            .position(|s| s.preview_cap == ANALYSIS_PREVIEW_FLOOR)
+            .unwrap();
+        assert!(steps[..=floor]
+            .iter()
+            .all(|s| s.keep_recent == 10 && s.control_cap.is_none()));
+        assert_eq!(steps[floor + 1].keep_recent, 5);
+        let last_omission = steps.iter().rposition(|s| s.control_cap.is_none()).unwrap();
+        assert_eq!(steps[last_omission].keep_recent, 0);
+        assert_eq!(
+            steps[last_omission + 1].control_cap,
+            Some(ANALYSIS_PREVIEW_CAP)
+        );
+        assert_eq!(
+            steps.last().unwrap(),
+            &AnalysisRenderStep {
+                preview_cap: ANALYSIS_PREVIEW_FLOOR,
+                keep_recent: 0,
+                control_cap: Some(0),
+            }
+        );
+        assert!(steps.windows(2).all(|pair| {
+            pair[1].preview_cap <= pair[0].preview_cap && pair[1].keep_recent <= pair[0].keep_recent
+        }));
+        assert!(analysis_render_steps(0).all(|s| s.keep_recent == 0));
+    }
+
+    #[test]
+    fn render_annotated_messages_keeps_everything_when_it_fits() {
+        let messages = sample_conversation();
+        let metadata = extract_conversation_metadata(&messages);
+        let entries = analysis_entries(&metadata);
+        assert_eq!(entries.iter().filter(|e| !e.mandatory).count(), 6);
+        let rendered = render_annotated_messages(
+            &entries,
+            AnalysisRenderStep {
+                preview_cap: 5,
+                keep_recent: 6,
+                control_cap: None,
+            },
+        );
+        assert!(!rendered.contains("omitted"));
+        assert!(rendered.contains("[MSG_ID:0] [user]\nfirst...\n"));
+        assert!(rendered.contains("tool: t_cat {\"pat...\n"));
+        assert!(rendered.contains("[MSG_ID:3] [plan]\nPLAN BODY\n"));
+        assert!(rendered.contains("[MSG_ID:6] [user]\nlatest request\n"));
+        assert!(rendered.contains("[MSG_ID:7] [assistant]\nthird...\n"));
+    }
+
+    #[test]
+    fn render_annotated_messages_omits_oldest_but_keeps_controls_and_latest_user() {
+        let messages = sample_conversation();
+        let metadata = extract_conversation_metadata(&messages);
+        let entries = analysis_entries(&metadata);
+        let rendered = render_annotated_messages(
+            &entries,
+            AnalysisRenderStep {
+                preview_cap: ANALYSIS_PREVIEW_FLOOR,
+                keep_recent: 2,
+                control_cap: None,
+            },
+        );
+        assert!(rendered.starts_with("[MSG_ID:0..MSG_ID:2] 3 older messages omitted\n"));
+        assert!(rendered.contains("[MSG_ID:3] [plan]\nPLAN BODY\n[MSG_ID:4] older message omitted\n[MSG_ID:5] [tool]\nsecond tool output\n"));
+        assert!(rendered.contains("[MSG_ID:6] [user]\nlatest request\n"));
+        assert!(rendered.contains("[MSG_ID:7] [assistant]\nthird answer\n"));
+        assert!(!rendered.contains("first request"));
+        assert!(!rendered.contains("tool: t_cat"));
+    }
+
+    #[test]
+    fn render_annotated_messages_truncates_controls_only_as_last_resort() {
+        let messages = sample_conversation();
+        let metadata = extract_conversation_metadata(&messages);
+        let entries = analysis_entries(&metadata);
+        let rendered = render_annotated_messages(
+            &entries,
+            AnalysisRenderStep {
+                preview_cap: ANALYSIS_PREVIEW_FLOOR,
+                keep_recent: 0,
+                control_cap: Some(4),
+            },
+        );
+        assert_eq!(
+            rendered,
+            "[MSG_ID:0..MSG_ID:2] 3 older messages omitted\n[MSG_ID:3] [plan]\nPLAN...\n[MSG_ID:4..MSG_ID:5] 2 older messages omitted\n[MSG_ID:6] [user]\nlate...\n[MSG_ID:7] older message omitted\n"
+        );
+    }
+
+    #[test]
+    fn fit_analysis_prompt_resumes_after_the_fitting_step_and_fails_after_the_ladder() {
+        let render = |step: AnalysisRenderStep| {
+            format!(
+                "{}|{}|{:?}",
+                step.preview_cap, step.keep_recent, step.control_cap
+            )
+        };
+        let count = |prompt: &str| Ok(prompt.split('|').next().unwrap().parse::<usize>().unwrap());
+        let mut steps = analysis_render_steps(8);
+        assert_eq!(
+            fit_analysis_prompt(&mut steps, 5000, &render, count).unwrap(),
+            "4000|8|None"
+        );
+        assert_eq!(
+            fit_analysis_prompt(&mut steps, 5000, &render, count).unwrap(),
+            "2000|8|None"
+        );
+        let error = fit_analysis_prompt(&mut steps, 10, &render, |_| Ok(11)).unwrap_err();
+        assert!(error.contains("exceed resolved analyzer context"));
+        assert_eq!(
+            fit_analysis_prompt(&mut analysis_render_steps(8), 10, &render, |_| Err(
+                "boom".to_string()
+            ))
+            .unwrap_err(),
+            "boom"
+        );
+    }
+
+    #[test]
+    fn analysis_prompt_tokens_without_tokenizer_divides_by_calibrated_density() {
+        assert_eq!(analysis_prompt_tokens(None, 2.0, "").unwrap(), 1);
+        assert_eq!(
+            analysis_prompt_tokens(None, 2.0, &"x".repeat(1000)).unwrap(),
+            501
+        );
+        assert_eq!(
+            analysis_prompt_tokens(None, 3.0, &"x".repeat(1000)).unwrap(),
+            335
+        );
+    }
+
+    fn metered_assistant(input_tokens: usize) -> ChatMessage {
+        let mut message = text_message("assistant", "ok");
+        message.usage = Some(crate::call_validation::ChatUsage {
+            prompt_tokens: input_tokens / 4,
+            cache_read_tokens: Some(input_tokens / 2),
+            cache_creation_tokens: Some(input_tokens - input_tokens / 4 - input_tokens / 2),
+            ..Default::default()
+        });
+        message
+    }
+
+    #[test]
+    fn usage_calibration_measures_bytes_per_token_on_the_context_the_model_saw() {
+        let mut messages = vec![
+            text_message("user", &"u".repeat(100_000)),
+            text_message("tool", &"t".repeat(200_000)),
+            metered_assistant(100_000),
+            text_message("tool", &"later".repeat(100_000)),
+        ];
+        let calibrated = usage_calibrated_bytes_per_token(&messages).unwrap();
+        assert!((calibrated - 300_000.0 / 100_000.0 / ANALYSIS_CALIBRATION_MARGIN).abs() < 1e-9);
+
+        messages[2] = metered_assistant(ANALYSIS_CALIBRATION_MIN_TOKENS - 1);
+        assert_eq!(usage_calibrated_bytes_per_token(&messages), None);
+
+        messages[2] = metered_assistant(1_000_000);
+        assert_eq!(
+            usage_calibrated_bytes_per_token(&messages),
+            None,
+            "denser than 1.5 B/tok"
+        );
+
+        messages[1] = text_message("tool", &"t".repeat(700_000));
+        messages[2] = metered_assistant(ANALYSIS_CALIBRATION_MIN_TOKENS);
+        assert_eq!(
+            usage_calibrated_bytes_per_token(&messages),
+            None,
+            "sparser than 6 B/tok"
+        );
+
+        messages[2] = text_message("assistant", "no usage at all");
+        assert_eq!(usage_calibrated_bytes_per_token(&messages), None);
+    }
+
+    #[test]
+    fn usage_calibration_ignores_usage_from_before_a_compression_boundary() {
+        let messages = vec![
+            text_message("tool", &"t".repeat(200_000)),
+            metered_assistant(100_000),
+            text_message(
+                refact_core::active_context::COMPRESSION_REPORT_KEY,
+                "rebuilt",
+            ),
+            text_message("user", "after"),
+        ];
+        assert_eq!(usage_calibrated_bytes_per_token(&messages), None);
+    }
+
+    #[test]
+    fn analysis_models_prefer_the_chat_model_then_the_default_slots() {
+        let defaults = crate::caps::DefaultModels {
+            chat_default_model: "provider/default".to_string(),
+            chat_model_2: "provider/second".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            analysis_model_candidates(None, Some("provider/chat"), &defaults),
+            vec!["provider/chat", "provider/default", "provider/second"]
+        );
+        assert_eq!(
+            analysis_model_candidates(Some("provider/manual"), Some("provider/chat"), &defaults),
+            vec!["provider/manual"]
+        );
+        assert_eq!(
+            analysis_model_candidates(None, Some("provider/default"), &defaults),
+            vec!["provider/default", "provider/second"]
+        );
+        assert_eq!(
+            analysis_model_candidates(None, Some(" "), &defaults),
+            vec!["provider/default", "provider/second"]
+        );
+        assert!(analysis_model_candidates(None, None, &Default::default()).is_empty());
+    }
+
+    #[test]
+    fn context_rejections_are_recognized_across_providers() {
+        assert!(is_context_rejection(
+            "Anthropic invalid_request_error: prompt is too long: 201000 tokens > 200000 maximum context window"
+        ));
+        assert!(is_context_rejection(
+            "OpenAI BadRequestError: context_length_exceeded: Please reduce your prompt"
+        ));
+        assert!(!is_context_rejection(
+            "OpenAI API error (401 Unauthorized): bad key"
+        ));
+    }
+
+    #[test]
+    fn long_conversation_fits_analyzer_context_without_local_tokenizer() {
+        let mut messages = Vec::new();
+        for index in 0..1500 {
+            messages.push(tool_call_message(
+                "t_cat",
+                &format!("{{\"paths\":\"src/file_{index}.rs\"}}"),
+            ));
+            messages.push(text_message(
+                "tool",
+                &format!("output {index} ").repeat(150),
+            ));
+            if index == 20 {
+                messages.push(text_message("plan", &"PLAN LINE\n".repeat(7000)));
+            }
+            if index == 300 {
+                messages.push(text_message("goal", "GOAL BODY"));
+            }
+        }
+        let visible_bytes = messages.iter().map(message_bytes).sum::<usize>();
+        messages.push(metered_assistant(visible_bytes / 3));
+        messages.push(text_message("user", "latest request"));
+        let calibrated = usage_calibrated_bytes_per_token(&messages).unwrap();
+        assert!(
+            (calibrated - 3.0 / ANALYSIS_CALIBRATION_MARGIN).abs() < 0.01,
+            "{calibrated}"
+        );
+        let metadata = extract_conversation_metadata(&messages);
+        let entries = analysis_entries(&metadata);
+        let non_mandatory = entries.iter().filter(|e| !e.mandatory).count();
+        let input_limit = 200_000 - 32_000 - 1024;
+        let mut kept = Vec::new();
+        for bytes_per_token in [calibrated, ANALYSIS_DEFAULT_BYTES_PER_TOKEN] {
+            let renders = std::cell::Cell::new(0);
+            let prompt = fit_analysis_prompt(
+                &mut analysis_render_steps(non_mandatory),
+                input_limit,
+                |step| {
+                    renders.set(renders.get() + 1);
+                    render_annotated_messages(&entries, step)
+                },
+                |prompt| analysis_prompt_tokens(None, bytes_per_token, prompt),
+            )
+            .unwrap();
+            assert!(renders.get() <= 12, "took {} renders", renders.get());
+            assert!(analysis_prompt_tokens(None, bytes_per_token, &prompt).unwrap() <= input_limit);
+            assert!(prompt.contains(&"PLAN LINE\n".repeat(7000)));
+            assert!(prompt.contains("[goal]\nGOAL BODY\n"));
+            assert!(prompt.ends_with("[user]\nlatest request\n"));
+            assert!(prompt.starts_with("[MSG_ID:0..MSG_ID:"));
+            assert!(prompt.contains("older messages omitted\n"));
+            assert!(prompt.contains("[tool]\noutput 1499 "));
+            kept.push(prompt.matches("\n[MSG_ID:").count());
+        }
+        assert!(
+            kept[0] >= kept[1],
+            "calibrated density never keeps less: {kept:?}"
+        );
+    }
+
+    #[test]
+    fn reconstruction_audit_keeps_source_records() {
+        let mut source = ChatMessage::new("user".into(), "source".into());
+        crate::privacy::records::attach_record(
+            &mut source,
+            refact_privacy::FileRecord {
+                path: "secret.rs".into(),
+                zone: "private".into(),
+                attribution: refact_privacy::Attribution::Declared,
+            },
+        );
+        let mut narrative = ChatMessage::new("user".into(), "summary".into());
+        crate::privacy::records::carry_records_into(&mut narrative, &[source]).unwrap();
+        let records = refact_privacy::records_from_messages(&[narrative]).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].1.zone, "private");
+    }
+
+    fn guarded_record(path: &str, zone: &str) -> refact_privacy::FileRecord {
+        refact_privacy::FileRecord {
+            path: path.to_string(),
+            zone: zone.to_string(),
+            attribution: refact_privacy::Attribution::Declared,
+        }
+    }
+
+    fn message_records(message: &ChatMessage) -> Vec<refact_privacy::FileRecord> {
+        message
+            .extra
+            .get("privacy")
+            .map(|value| {
+                serde_json::from_value::<refact_privacy::PrivacyRecord>(value.clone())
+                    .unwrap()
+                    .files
+            })
+            .unwrap_or_default()
+    }
+
+    fn context_file_message(file_name: &str) -> ChatMessage {
+        ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::ContextFiles(vec![ContextFile {
+                file_name: file_name.to_string(),
+                file_content: "fn main() {}\n".to_string(),
+                line1: 1,
+                line2: 1,
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }
+    }
+
+    fn cloned_control(
+        id: &str,
+        role: &str,
+        records: Vec<refact_privacy::FileRecord>,
+    ) -> ChatMessage {
+        let mut message = ChatMessage {
+            message_id: id.to_string(),
+            role: role.to_string(),
+            content: ChatContent::SimpleText(format!("{role} body")),
+            ..Default::default()
+        };
+        crate::privacy::records::merge_records(&mut message, records);
+        message
+    }
+
+    #[test]
+    fn attach_reconstruction_records_stamps_union_once_per_derived_user_message() {
+        let secret = guarded_record("secret.rs", "secrets");
+        let another = guarded_record("another.rs", "secrets");
+        let other = guarded_record("other.rs", "secrets");
+        let reread = guarded_record("src/a.rs", "secrets");
+        let carried = vec![secret.clone(), another.clone()];
+        let reread_records =
+            std::collections::HashMap::from([("src/a.rs".to_string(), reread.clone())]);
+        let mut messages = vec![
+            context_file_message("src/a.rs"),
+            ChatMessage::new("user".to_string(), "narrative".to_string()),
+            ChatMessage::new("user".to_string(), "continuation".to_string()),
+            cloned_control("evt-1", "event", vec![secret.clone()]),
+            cloned_control("plan-1", "plan", vec![other.clone()]),
+        ];
+
+        attach_reconstruction_records(&mut messages, &carried, &reread_records);
+
+        assert_eq!(message_records(&messages[0]), vec![reread.clone()]);
+        assert_eq!(message_records(&messages[1]), carried);
+        assert_eq!(message_records(&messages[2]), carried);
+        assert!(messages[3].extra.get("privacy").is_none());
+        assert_eq!(message_records(&messages[4]), vec![other.clone()]);
+        assert!(messages.iter().all(|m| !m.message_id.is_empty()));
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| message_records(m) == carried)
+                .count(),
+            2
+        );
+        let attached = refact_privacy::records_from_messages(&messages)
+            .unwrap()
+            .into_iter()
+            .map(|(_, record)| record)
+            .collect::<std::collections::HashSet<_>>();
+        for record in [secret, another, reread, other] {
+            assert!(attached.contains(&record), "{record:?} must survive");
+        }
+    }
+
+    #[test]
+    fn attach_reconstruction_records_bounds_copies_by_derived_user_messages() {
+        let carried = (0..16_000)
+            .map(|index| guarded_record(&format!("src/file_{index}.rs"), "secrets"))
+            .collect::<Vec<_>>();
+        let reread = guarded_record("src/a.rs", "secrets");
+        let reread_records =
+            std::collections::HashMap::from([("src/a.rs".to_string(), reread.clone())]);
+        let mut messages = vec![
+            context_file_message("src/a.rs"),
+            ChatMessage::new("user".to_string(), "narrative".to_string()),
+            ChatMessage::new("user".to_string(), "continuation".to_string()),
+        ];
+        messages.extend(
+            (0..35).map(|index| cloned_control(&format!("evt-{index}"), "event", carried.clone())),
+        );
+
+        attach_reconstruction_records(&mut messages, &carried, &reread_records);
+
+        let total_records = messages
+            .iter()
+            .map(|message| message_records(message).len())
+            .sum::<usize>();
+        assert_eq!(total_records, 2 * carried.len() + 1);
+    }
+
+    #[test]
+    fn reconstruction_guarded_record_still_refuses_untrusted_provider() {
+        let policy = refact_privacy::PrivacyPolicy {
+            blocked: Vec::new(),
+            zones: vec![
+                refact_privacy::Zone {
+                    name: "secrets".to_string(),
+                    patterns: vec!["secret.rs".to_string()],
+                    send_to: vec!["trusted".to_string()],
+                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
+                },
+                refact_privacy::Zone {
+                    name: "normal".to_string(),
+                    patterns: vec!["*".to_string()],
+                    send_to: vec!["*".to_string()],
+                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
+                },
+            ],
+            subagents: refact_privacy::SubagentPolicy::default(),
+            ..Default::default()
+        };
+        let compiled = policy.compile().unwrap();
+        let source = cloned_control(
+            "src-1",
+            "user",
+            vec![guarded_record("secret.rs", "secrets")],
+        );
+        let carried = crate::privacy::records::records_to_carry(&[source]).unwrap();
+        let mut messages = vec![
+            context_file_message("src/a.rs"),
+            ChatMessage::new("user".to_string(), "narrative".to_string()),
+            ChatMessage::new("user".to_string(), "continuation".to_string()),
+            cloned_control("evt-1", "event", carried.clone()),
+        ];
+
+        attach_reconstruction_records(&mut messages, &carried, &std::collections::HashMap::new());
+
+        let destination = |id: &str| refact_privacy::Destination {
+            id: refact_privacy::DestinationId(id.to_string()),
+            kind: refact_privacy::DestinationKind::Provider,
+            display_name: id.to_string(),
+        };
+        assert!(
+            refact_privacy::clear(
+                MessageAudit(&messages),
+                &destination("untrusted"),
+                &compiled
+            )
+            .is_err(),
+            "compaction must not hide guarded records from the gate"
+        );
+        assert!(
+            refact_privacy::clear(MessageAudit(&messages), &destination("trusted"), &compiled)
+                .is_ok()
+        );
+    }
 
     struct TestPaths {
         workspace_folders: Vec<PathBuf>,
@@ -211,7 +1331,7 @@ mod tests {
             ..Default::default()
         };
 
-        let new_messages = assemble_new_chat(&paths, &original_messages, &decisions)
+        let new_messages = assemble_new_chat(&paths, &original_messages, &decisions, "agent")
             .await
             .unwrap();
         let message_symbols = new_messages
@@ -262,7 +1382,7 @@ mod tests {
             ..Default::default()
         };
 
-        let new_messages = assemble_new_chat(&paths, &original_messages, &decisions)
+        let new_messages = assemble_new_chat(&paths, &original_messages, &decisions, "agent")
             .await
             .unwrap();
         let file_symbols = new_messages

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Replaced iframe</title>
+</head>
+<body>
+  <iframe id="f" title="Sandbox" src="iframe-replace-inner.html"></iframe>
+  <button id="replace" type="button">Replace frame</button>
+  <button id="remove" type="button">Remove frame</button>
+  <script>
+    let generation = 0;
+    function dropFrame() {
+      const existing = document.querySelector('#f');
+      if (existing) {
+        existing.remove();
+      }
+    }
+    document.querySelector('#replace').addEventListener('click', () => {
+      dropFrame();
+      generation += 1;
+      const frame = document.createElement('iframe');
+      frame.id = 'f';
+      frame.title = 'Sandbox';
+      frame.src = 'iframe-replace-inner.html?generation=' + generation;
+      document.body.insertBefore(frame, document.querySelector('#replace'));
+    });
+    document.querySelector('#remove').addEventListener('click', dropFrame);
+  </script>
+</body>
+</html>

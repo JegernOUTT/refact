@@ -10,6 +10,7 @@ use refact_core::ast_types::AstDefinition;
 use refact_core::custom_error::{first_n_chars, last_n_chars};
 use refact_core::chunk_utils::count_text_tokens_with_fallback;
 use crate::config::limits;
+use crate::line_truncation::truncate_context_line;
 use crate::pp_context_provider::PPContextTrait;
 use crate::pp_utils::{
     color_with_gradient_type, colorize_comments_up, colorize_if_more_useful, colorize_minus_one,
@@ -50,24 +51,12 @@ fn collect_lines_from_files(
     settings: &PostprocessSettings,
 ) -> IndexMap<String, Vec<FileLine>> {
     let mut lines_in_files = IndexMap::new();
-    let max_line_length = limits().max_line_length_chars;
     for file_ref in files {
         for (line_n, line) in file_ref.file_content.lines().enumerate() {
-            let truncated_line = if line.len() > max_line_length {
-                let boundary = line.floor_char_boundary(max_line_length);
-                format!(
-                    "{}... (line truncated: {} of {} chars; raise pp_max_line_length_chars in settings)",
-                    &line[..boundary],
-                    boundary,
-                    line.len()
-                )
-            } else {
-                line.to_string()
-            };
             let a = FileLine {
                 file_ref: file_ref.clone(),
                 line_n,
-                line_content: truncated_line,
+                line_content: truncate_context_line(line),
                 useful: 0.0,
                 color: "".to_string(),
                 take: false,

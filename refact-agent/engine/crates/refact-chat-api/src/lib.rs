@@ -553,6 +553,9 @@ pub struct ThreadParams {
     pub context_tokens_cap: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compression_cap: Option<usize>,
+    /// Only new chats opt in; missing persisted fields must remain legacy/unset.
+    #[serde(default)]
+    pub auto_compression_cap_pending: bool,
     pub include_project_info: bool,
     pub checkpoints_enabled: bool,
     #[serde(default)]
@@ -599,7 +602,51 @@ impl refact_core::worktree_meta::WorktreeThread for ThreadParams {
     }
 }
 
+/// Ninety percent of the smallest known positive context window. Unknown windows
+/// remain unset; integer arithmetic avoids rounding and overflow surprises.
+pub fn default_auto_compression_cap(
+    model_window: Option<usize>,
+    request_window: Option<usize>,
+) -> Option<usize> {
+    [model_window, request_window]
+        .into_iter()
+        .flatten()
+        .filter(|window| *window > 0)
+        .min()
+        .map(|window| window / 10 * 9 + window % 10 * 9 / 10)
+}
+
 impl ThreadParams {
+    /// Call only for NEW chats once their model/request windows are known. Never
+    /// call while loading persisted chats. Explicit values (including zero) win;
+    /// model switches leave the cap unchanged, and an explicit reset can call this
+    /// again after clearing the cap.
+    pub fn initialize_new_chat_compression_cap(
+        &mut self,
+        model_window: Option<usize>,
+        request_window: Option<usize>,
+    ) {
+        if self.auto_compression_cap.is_none() {
+            self.auto_compression_cap = default_auto_compression_cap(
+                model_window,
+                request_window.or(self.context_tokens_cap),
+            );
+        }
+    }
+    /// Resolve the new-chat default once, after the actual model is selected.
+    /// Legacy loaded chats never opt in, even if their history is empty.
+    pub fn resolve_pending_compression_cap(&mut self, model_window: Option<usize>) -> bool {
+        if !self.auto_compression_cap_pending {
+            return false;
+        }
+        if self.auto_compression_cap.is_none() && !model_window.is_some_and(|n| n > 0) {
+            return false;
+        }
+        self.initialize_new_chat_compression_cap(model_window, None);
+        self.auto_compression_cap_pending = false;
+        true
+    }
+
     pub fn auto_compact_enabled_effective(&self) -> bool {
         self.auto_compact_enabled.unwrap_or(true)
     }
@@ -622,6 +669,7 @@ impl Default for ThreadParams {
             parallel_tool_calls: None,
             context_tokens_cap: None,
             auto_compression_cap: None,
+            auto_compression_cap_pending: true,
             include_project_info: true,
             checkpoints_enabled: true,
             is_title_generated: false,
@@ -660,7 +708,8 @@ pub struct QueuedItem {
     /// Delivery rows only: producer that enqueued this batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// Delivery rows only: the pending event payload, for richer UI rendering.
+    /// Delivery rows only: the event descriptor `{ subkind, source, payload? }`
+    /// of the delivered event message, absent when the batch carries no event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -680,24 +729,42 @@ impl QueuedItem {
             content: extract_full_text_capped(&preview),
             push: Some(delivery.push),
             source: Some(delivery.source.clone()),
-            event: Some(serde_json::json!({
-                "kind": "delivery",
-                "id": delivery.id,
-                "source": delivery.source,
-                "push": delivery.push,
-                "wake": delivery.wake,
-                "message_count": delivery.messages.len(),
-                "enqueued_at_ms": delivery.enqueued_at_ms,
-                "expires_at_ms": delivery.expires_at_ms,
-                "supersede_key": delivery.supersede_key,
-            })),
+            event: delivery_event_descriptor(delivery),
             enqueued_at_ms: Some(delivery.enqueued_at_ms),
         }
     }
 }
 
+fn delivery_event_descriptor(delivery: &PendingDelivery) -> Option<serde_json::Value> {
+    delivery
+        .messages
+        .iter()
+        .filter(|message| message.role == internal_roles::EVENT_ROLE)
+        .find_map(|message| {
+            let event = message.extra.get("event")?;
+            let subkind = event
+                .get("subkind")
+                .and_then(serde_json::Value::as_str)
+                .filter(|subkind| !subkind.is_empty())?;
+            let source = event
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(delivery.source.as_str());
+            let mut descriptor = serde_json::json!({
+                "subkind": subkind,
+                "source": source,
+            });
+            if let Some(payload) = event.get("payload") {
+                descriptor["payload"] = payload.clone();
+            }
+            Some(descriptor)
+        })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeState {
+    #[serde(default)]
+    pub waiting_interruptible: bool,
     pub state: SessionState,
     pub paused: bool,
     pub error: Option<String>,
@@ -737,6 +804,7 @@ impl Default for RuntimeState {
             paused: false,
             error: None,
             queue_size: 0,
+            waiting_interruptible: false,
             goal_active: false,
             goal_status: None,
             goal_turns_used: 0,
@@ -849,6 +917,8 @@ pub enum ChatEvent {
         browser: Option<BrowserSnapshot>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         goal: Option<GoalSnapshot>,
+        #[serde(default)]
+        pending_questions: Vec<PendingQuestionSet>,
     },
     BackgroundAgentUpdated {
         chat_id: String,
@@ -916,6 +986,8 @@ pub enum ChatEvent {
         attached_files: Vec<String>,
     },
     RuntimeUpdated {
+        #[serde(default)]
+        waiting_interruptible: bool,
         state: SessionState,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
@@ -1096,6 +1168,12 @@ pub enum ChatCommand {
         action: String,
     },
     Abort {},
+    AnswerQuestions {
+        tool_call_id: String,
+        answers: Vec<QuestionAnswer>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        asked_at_ms: Option<u64>,
+    },
     CleanBackgroundProcesses {
         #[serde(default)]
         include_services: bool,
@@ -1169,14 +1247,73 @@ pub enum ChatCommand {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingQuestion {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub question_type: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionAnswer {
+    pub id: String,
+    pub answer: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingQuestionStatus {
+    Pending,
+    Answered,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingQuestionSet {
+    pub tool_call_id: String,
+    pub questions: Vec<PendingQuestion>,
+    pub asked_at_ms: u64,
+    pub status: PendingQuestionStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<QuestionAnswer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDecisionItem {
     pub tool_call_id: String,
     pub accepted: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeApprovalGuard {
+    pub project_root: String,
+    pub engine_identity: String,
+    pub source_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisionCommandGuard {
+    pub mandate_id: String,
+    pub project_id: String,
+    pub worker_id: String,
+    pub engine_instance_id: String,
+    pub worker_epoch: u64,
+    pub owner_epoch: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_approval_guard: Option<NativeApprovalGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervision_guard: Option<SupervisionCommandGuard>,
     pub client_request_id: String,
     #[serde(default)]
     pub priority: bool,
@@ -1225,6 +1362,15 @@ impl CommandRequest {
                 ("goal_control".to_string(), action.clone(), String::new())
             }
             ChatCommand::Abort {} => ("abort".to_string(), String::new(), String::new()),
+            ChatCommand::AnswerQuestions {
+                tool_call_id,
+                answers,
+                ..
+            } => (
+                "answer_questions".to_string(),
+                format!("{} answers", answers.len()),
+                tool_call_id.clone(),
+            ),
             ChatCommand::CleanBackgroundProcesses { include_services } => (
                 "clean_background_processes".to_string(),
                 format!("include_services={include_services}"),
@@ -1751,6 +1897,140 @@ mod tests {
     }
 
     #[test]
+    fn new_chat_cap_is_90_percent_of_smallest_positive_window() {
+        assert_eq!(
+            default_auto_compression_cap(Some(1000), Some(800)),
+            Some(720)
+        );
+        assert_eq!(default_auto_compression_cap(Some(0), Some(1000)), Some(900));
+        assert_eq!(default_auto_compression_cap(None, Some(0)), None);
+        assert_eq!(default_auto_compression_cap(Some(1), None), Some(0));
+        let mut params = ThreadParams::default();
+        params.initialize_new_chat_compression_cap(Some(1000), None);
+        assert_eq!(params.auto_compression_cap, Some(900));
+        params.initialize_new_chat_compression_cap(Some(2000), None);
+        assert_eq!(
+            params.auto_compression_cap,
+            Some(900),
+            "model switch preserves stored cap"
+        );
+        params.auto_compression_cap = None;
+        params.initialize_new_chat_compression_cap(Some(2000), None);
+        assert_eq!(
+            params.auto_compression_cap,
+            Some(1800),
+            "explicit reset recomputes"
+        );
+        params.auto_compression_cap = Some(0);
+        params.initialize_new_chat_compression_cap(Some(2000), None);
+        assert_eq!(
+            params.auto_compression_cap,
+            Some(0),
+            "explicit zero is preserved"
+        );
+        let old: ThreadParams =
+            serde_json::from_value(serde_json::to_value(ThreadParams::default()).unwrap()).unwrap();
+        assert_eq!(
+            old.auto_compression_cap, None,
+            "loading does not initialize defaults"
+        );
+    }
+
+    #[test]
+    fn pending_new_chat_cap_waits_for_model_and_survives_restore() {
+        let mut fresh = ThreadParams {
+            context_tokens_cap: Some(800),
+            ..Default::default()
+        };
+        assert!(!fresh.resolve_pending_compression_cap(None));
+        assert_eq!(fresh.auto_compression_cap, None);
+        let mut restored: ThreadParams =
+            serde_json::from_value(serde_json::to_value(&fresh).unwrap()).unwrap();
+        assert!(restored.auto_compression_cap_pending);
+        assert!(restored.resolve_pending_compression_cap(Some(1000)));
+        assert_eq!(restored.auto_compression_cap, Some(720));
+        assert!(!restored.resolve_pending_compression_cap(Some(2000)));
+        assert_eq!(restored.auto_compression_cap, Some(720));
+    }
+
+    #[test]
+    fn legacy_unset_cap_never_initializes_even_when_model_arrives() {
+        let mut value = serde_json::to_value(ThreadParams::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap_pending");
+        let mut legacy: ThreadParams = serde_json::from_value(value).unwrap();
+        assert!(!legacy.auto_compression_cap_pending);
+        assert!(!legacy.resolve_pending_compression_cap(Some(1000)));
+        assert_eq!(legacy.auto_compression_cap, None);
+    }
+
+    #[test]
+    fn pending_cap_preserves_explicit_values_including_zero() {
+        for cap in [0, 400, 2000] {
+            let mut fresh = ThreadParams {
+                auto_compression_cap: Some(cap),
+                ..Default::default()
+            };
+            assert!(fresh.resolve_pending_compression_cap(None));
+            assert_eq!(fresh.auto_compression_cap, Some(cap));
+            assert!(!fresh.auto_compression_cap_pending);
+        }
+    }
+
+    #[test]
+    fn new_chat_compression_cap_waits_for_model_and_resolves_once() {
+        let mut params = ThreadParams {
+            context_tokens_cap: Some(800),
+            ..Default::default()
+        };
+        assert!(params.auto_compression_cap_pending);
+        assert!(!params.resolve_pending_compression_cap(None));
+        assert_eq!(params.auto_compression_cap, None);
+        // A restart before the model is known retains new-chat provenance.
+        let mut params: ThreadParams =
+            serde_json::from_value(serde_json::to_value(params).unwrap()).unwrap();
+        assert!(params.resolve_pending_compression_cap(Some(1000)));
+        assert_eq!(params.auto_compression_cap, Some(720));
+        assert!(!params.auto_compression_cap_pending);
+        assert!(!params.resolve_pending_compression_cap(Some(2000)));
+        assert_eq!(params.auto_compression_cap, Some(720));
+        assert_eq!(default_auto_compression_cap(Some(19), None), Some(17));
+        assert_eq!(
+            default_auto_compression_cap(Some(usize::MAX), None),
+            Some(usize::MAX / 10 * 9 + usize::MAX % 10 * 9 / 10)
+        );
+    }
+
+    #[test]
+    fn restored_legacy_no_cap_is_not_a_new_chat() {
+        let mut old = serde_json::to_value(ThreadParams::default()).unwrap();
+        old.as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap_pending");
+        let mut restored: ThreadParams = serde_json::from_value(old).unwrap();
+        assert!(!restored.auto_compression_cap_pending);
+        assert!(!restored.resolve_pending_compression_cap(Some(1000)));
+        assert_eq!(restored.auto_compression_cap, None);
+    }
+
+    #[test]
+    fn new_chat_compression_cap_preserves_explicit_including_zero() {
+        for cap in [0, 123, 2000] {
+            let mut params = ThreadParams {
+                auto_compression_cap: Some(cap),
+                ..Default::default()
+            };
+            assert!(params.resolve_pending_compression_cap(None));
+            assert_eq!(params.auto_compression_cap, Some(cap));
+            assert!(!params.auto_compression_cap_pending);
+            assert!(!params.resolve_pending_compression_cap(Some(1000)));
+            assert_eq!(params.auto_compression_cap, Some(cap));
+        }
+    }
+
+    #[test]
     fn test_thread_params_default() {
         let params = ThreadParams::default();
         assert_eq!(params.title, "New Chat");
@@ -1878,6 +2158,57 @@ mod tests {
         assert_eq!(runtime.goal_tokens_used, 0);
         assert_eq!(runtime.goal_no_progress_turns, 0);
         assert!(!runtime.is_compressing);
+    }
+
+    fn delivery_with(messages: Vec<ChatMessage>) -> PendingDelivery {
+        PendingDelivery::with_id(
+            "delivery-1",
+            messages,
+            PushMode::Append,
+            "agents.push",
+            false,
+        )
+    }
+
+    #[test]
+    fn delivery_queue_row_carries_the_event_descriptor() {
+        let delivery = delivery_with(vec![internal_roles::event(
+            internal_roles::EventSubkind::SystemNotice,
+            "agents.push",
+            json!({"status": "completed"}),
+            "background subagent finished",
+        )]);
+
+        let item = QueuedItem::from_pending_delivery(&delivery);
+        let event = item.event.expect("delivery event descriptor missing");
+
+        assert_eq!(event["subkind"], json!("system_notice"));
+        assert_eq!(event["source"], json!("agents.push"));
+        assert_eq!(event["payload"], json!({"status": "completed"}));
+    }
+
+    #[test]
+    fn delivery_queue_row_without_event_message_has_no_descriptor() {
+        let delivery = delivery_with(vec![ChatMessage::new(
+            "user".to_string(),
+            "carry on".to_string(),
+        )]);
+
+        assert!(QueuedItem::from_pending_delivery(&delivery).event.is_none());
+    }
+
+    #[test]
+    fn delivery_queue_row_ignores_event_message_without_subkind() {
+        let mut message = ChatMessage::new("event".to_string(), "legacy note".to_string());
+        message
+            .extra
+            .insert("event".to_string(), json!({"source": "agents.push"}));
+
+        assert!(
+            QueuedItem::from_pending_delivery(&delivery_with(vec![message]))
+                .event
+                .is_none()
+        );
     }
 
     #[test]
@@ -2102,12 +2433,16 @@ mod tests {
             background_agents: vec![],
             browser: None,
             goal: None,
+            pending_questions: vec![],
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "snapshot");
         assert!(json.get("goal").is_none());
+        assert_eq!(json["pending_questions"], serde_json::json!([]));
         let parsed: ChatEvent = serde_json::from_value(json).unwrap();
-        matches!(parsed, ChatEvent::Snapshot { .. });
+        assert!(
+            matches!(parsed, ChatEvent::Snapshot { pending_questions, .. } if pending_questions.is_empty())
+        );
     }
 
     #[test]
@@ -2120,6 +2455,7 @@ mod tests {
             background_agents: vec![],
             browser: None,
             goal: Some(goal.clone()),
+            pending_questions: vec![],
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "snapshot");
@@ -2159,13 +2495,19 @@ mod tests {
 
         let event: ChatEvent = serde_json::from_str(json).unwrap();
         match event {
-            ChatEvent::Snapshot { runtime, goal, .. } => {
+            ChatEvent::Snapshot {
+                runtime,
+                goal,
+                pending_questions,
+                ..
+            } => {
                 assert!(!runtime.goal_active);
                 assert_eq!(runtime.goal_status, None);
                 assert_eq!(runtime.goal_turns_used, 0);
                 assert_eq!(runtime.goal_tokens_used, 0);
                 assert_eq!(runtime.goal_no_progress_turns, 0);
                 assert_eq!(goal, None);
+                assert!(pending_questions.is_empty());
             }
             _ => panic!("Expected Snapshot"),
         }
@@ -2210,6 +2552,7 @@ mod tests {
             background_agents: vec![background_agent_summary()],
             browser: None,
             goal: None,
+            pending_questions: vec![],
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: ChatEvent = serde_json::from_str(&json).unwrap();
@@ -2241,6 +2584,7 @@ mod tests {
                 }],
             }),
             goal: None,
+            pending_questions: vec![],
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["browser"]["runtime_id"], "rt-1");
@@ -2376,6 +2720,8 @@ mod tests {
     #[test]
     fn test_command_request_flattens_command() {
         let req = CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-1".into(),
             priority: false,
             command: ChatCommand::Abort {},
@@ -2423,6 +2769,8 @@ mod tests {
             explicit: false,
         };
         let req = CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "req-budget".into(),
             priority: false,
             command: ChatCommand::SetGoalBudget {
@@ -2448,6 +2796,7 @@ mod tests {
     #[test]
     fn test_runtime_updated_serde() {
         let event = ChatEvent::RuntimeUpdated {
+            waiting_interruptible: false,
             state: SessionState::Completed,
             error: None,
             goal_active: false,
@@ -2466,6 +2815,7 @@ mod tests {
         assert_eq!(json["is_compressing"], false);
 
         let event_with_error = ChatEvent::RuntimeUpdated {
+            waiting_interruptible: false,
             state: SessionState::Error,
             error: Some("test error".into()),
             goal_active: true,
@@ -2512,7 +2862,9 @@ mod tests {
                 is_compressing,
                 compression_phase,
                 compression_reason,
+                waiting_interruptible,
             } => {
+                assert!(!waiting_interruptible);
                 assert_eq!(state, SessionState::Completed);
                 assert_eq!(error, None);
                 assert!(!goal_active);

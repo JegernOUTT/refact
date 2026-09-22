@@ -308,6 +308,9 @@ impl Tool for ToolSubagent {
         .await?;
         let mut spawn_tools = match frozen {
             crate::subchat::ToolsPolicy::Only(names) => names,
+            // A supervised ceiling is already a concrete, bounded set; the
+            // exact names it carries are the only ones this child may get.
+            crate::subchat::ToolsPolicy::Supervised { tools, .. } => tools,
             crate::subchat::ToolsPolicy::None => Vec::new(),
             crate::subchat::ToolsPolicy::All => {
                 return Err("concrete child authority unavailable".into())
@@ -367,6 +370,7 @@ impl Tool for ToolSubagent {
             &handoff_limits,
         );
         let req = SpawnRequest {
+            native_supervision_guard: None,
             kind: BgAgentKind::Subagent,
             parent_chat_id: parent_chat_id.clone(),
             parent_root_chat_id: Some(parent_root_chat_id.clone()),

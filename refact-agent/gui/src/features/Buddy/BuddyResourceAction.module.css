@@ -1,0 +1,18 @@
+.action {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  overflow-wrap: anywhere;
+}
+
+.action dd {
+  margin-inline-start: var(--rf-space-3);
+}
+
+.preview {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+}

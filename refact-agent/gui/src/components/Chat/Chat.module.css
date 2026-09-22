@@ -56,6 +56,10 @@
   position: relative;
 }
 
+.queueDock {
+  margin-bottom: var(--rf-space-2);
+}
+
 .terminalWorkbench {
   margin-bottom: var(--rf-space-2);
   overflow: hidden;

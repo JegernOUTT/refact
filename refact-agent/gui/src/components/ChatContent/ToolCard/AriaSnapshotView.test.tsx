@@ -96,6 +96,18 @@ describe("AriaSnapshotView", () => {
     );
   });
 
+  test("renders box chips directly from the YAML tree", () => {
+    render(
+      <AriaSnapshotView
+        yaml={`- button "Save" [ref=e9] [box=120,340,24,18]`}
+      />,
+    );
+
+    const box = screen.getByTestId("aria-box-badge");
+    expect(box).toHaveTextContent("24×18@120,340");
+    expect(box).toHaveAttribute("title", "x 120, y 340, 24×18");
+  });
+
   test("omits box chips and the generation header when absent", () => {
     render(
       <AriaSnapshotView

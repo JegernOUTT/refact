@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Replaced iframe content</title>
+</head>
+<body>
+  <div class="inner" id="inner">ready</div>
+  <div id="clicked" role="status">idle</div>
+  <script>
+    document.querySelector('.inner').addEventListener('click', () => {
+      document.querySelector('#clicked').textContent = 'clicked';
+    });
+  </script>
+</body>
+</html>

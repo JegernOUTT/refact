@@ -4,7 +4,15 @@ use refact_chat_api::{
 };
 use refact_core::chat_types::{ChatMessage, DeliveryStatusRecord, PendingDelivery};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingBrowserDecisionSnapshot {
+    pub version: u8,
+    pub pending_message_id: String,
+    pub client_message_id: Option<String>,
+    pub browser_runtime_id: Option<String>,
+    pub requires_revalidation: bool,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TrajectorySnapshot {
@@ -20,6 +28,8 @@ pub struct TrajectorySnapshot {
     pub context_tokens_cap: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compression_cap: Option<usize>,
+    #[serde(default)]
+    pub auto_compression_cap_pending: bool,
     pub include_project_info: bool,
     pub is_title_generated: bool,
     pub auto_approve_editing_tools: bool,
@@ -49,6 +59,8 @@ pub struct TrajectorySnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waiting_for_card_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_questions: Vec<refact_chat_api::PendingQuestionSet>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_deliveries: Vec<PendingDelivery>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped_deliveries: Vec<DeliveryStatusRecord>,
@@ -62,8 +74,8 @@ pub struct TrajectorySnapshot {
     pub goal_ledger: Vec<GoalLedgerEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_verification_blocked_until_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub compression_retry_after_ms: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_browser_decision: Option<PendingBrowserDecisionSnapshot>,
 }
 
 fn tolerant_goal_ledger<'de, D>(deserializer: D) -> Result<Vec<GoalLedgerEntry>, D::Error>
@@ -97,6 +109,7 @@ impl TrajectorySnapshot {
             checkpoints_enabled: thread.checkpoints_enabled,
             context_tokens_cap: thread.context_tokens_cap,
             auto_compression_cap: thread.auto_compression_cap,
+            auto_compression_cap_pending: thread.auto_compression_cap_pending,
             include_project_info: thread.include_project_info,
             is_title_generated: thread.is_title_generated,
             auto_approve_editing_tools: thread.auto_approve_editing_tools,
@@ -124,12 +137,13 @@ impl TrajectorySnapshot {
             reactive_compact_attempts: thread.reactive_compact_attempts,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
+            pending_questions: Vec::new(),
             pending_deliveries: Vec::new(),
             dropped_deliveries: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
-            compression_retry_after_ms: BTreeMap::new(),
+            pending_browser_decision: None,
         }
     }
 }
@@ -191,6 +205,10 @@ mod tests {
         let decoded: TrajectorySnapshot = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(decoded.pending_deliveries, vec![delivery]);
         value.as_object_mut().unwrap().remove("pending_deliveries");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap_pending");
         let legacy: TrajectorySnapshot = serde_json::from_value(value).unwrap();
         assert!(legacy.pending_deliveries.is_empty());
         assert!(serde_json::to_value(legacy)
@@ -247,6 +265,11 @@ mod tests {
         let mut value = serde_json::to_value(&snapshot).unwrap();
         let decoded: TrajectorySnapshot = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(decoded.auto_compression_cap, Some(4096));
+        assert!(decoded.auto_compression_cap_pending);
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap_pending");
 
         value
             .as_object_mut()
@@ -254,24 +277,18 @@ mod tests {
             .remove("auto_compression_cap");
         let legacy: TrajectorySnapshot = serde_json::from_value(value).unwrap();
         assert_eq!(legacy.auto_compression_cap, None);
+        assert!(!legacy.auto_compression_cap_pending);
     }
 
     #[test]
-    fn compression_retry_cooldown_roundtrips_and_legacy_absence_defaults_empty() {
-        let mut snapshot = snapshot();
-        snapshot
-            .compression_retry_after_ms
-            .insert("source-hash".to_string(), 123_456);
-        let mut value = serde_json::to_value(&snapshot).unwrap();
-        let decoded: TrajectorySnapshot = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(decoded.compression_retry_after_ms["source-hash"], 123_456);
-
-        value
-            .as_object_mut()
+    fn obsolete_compression_cooldown_is_ignored_on_load() {
+        let mut value = serde_json::to_value(snapshot()).unwrap();
+        value["compression_retry_after_ms"] = serde_json::json!({"old-hash": 123_456});
+        let decoded: TrajectorySnapshot = serde_json::from_value(value).unwrap();
+        assert!(serde_json::to_value(decoded)
             .unwrap()
-            .remove("compression_retry_after_ms");
-        let legacy: TrajectorySnapshot = serde_json::from_value(value).unwrap();
-        assert!(legacy.compression_retry_after_ms.is_empty());
+            .get("compression_retry_after_ms")
+            .is_none());
     }
 
     #[test]
@@ -314,6 +331,53 @@ mod tests {
         assert!(value.get("goal").is_none());
         let decoded: TrajectorySnapshot = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.goal, None);
+    }
+
+    #[test]
+    fn pending_questions_roundtrip_and_legacy_absence() {
+        let mut value = serde_json::to_value(snapshot()).unwrap();
+        assert!(value.get("pending_questions").is_none());
+        let legacy: TrajectorySnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert!(legacy.pending_questions.is_empty());
+        value["pending_questions"] = serde_json::json!([{
+            "tool_call_id": "ask-1",
+            "questions": [{ "id": "choice", "type": "yes_no", "text": "Continue?" }],
+            "asked_at_ms": 100,
+            "status": "pending",
+            "answers": []
+        }]);
+        let snapshot: TrajectorySnapshot = serde_json::from_value(value).unwrap();
+        let saved = serde_json::to_string(&snapshot).unwrap();
+        let restored: TrajectorySnapshot = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.pending_questions, snapshot.pending_questions);
+        assert_eq!(restored.pending_questions[0].tool_call_id, "ask-1");
+        assert_eq!(
+            restored.pending_questions[0].status,
+            refact_chat_api::PendingQuestionStatus::Pending
+        );
+    }
+
+    #[test]
+    fn pending_browser_decision_roundtrips_without_proposed_message_payload() {
+        let mut snapshot = snapshot();
+        snapshot.pending_browser_decision = Some(PendingBrowserDecisionSnapshot {
+            version: 1,
+            pending_message_id: "browser-pending".to_string(),
+            client_message_id: Some("optimistic-browser".to_string()),
+            browser_runtime_id: Some("browser-runtime".to_string()),
+            requires_revalidation: true,
+        });
+
+        let value = serde_json::to_value(&snapshot).unwrap();
+        assert!(value["pending_browser_decision"].get("content").is_none());
+        assert!(value["pending_browser_decision"]
+            .get("attachments")
+            .is_none());
+        let restored: TrajectorySnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            restored.pending_browser_decision,
+            snapshot.pending_browser_decision
+        );
     }
 
     #[test]

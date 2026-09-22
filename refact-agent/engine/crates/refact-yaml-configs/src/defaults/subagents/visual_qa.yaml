@@ -50,6 +50,7 @@ messages:
     - Fail on any visual regression, console error, page error, or non-zero layout shift. Report failed network requests as gate evidence and fail when they invalidate the scenario.
     - A `contrast_audit` result with `elements_scanned` of 0, or with 0 resolved token files, or carrying a `warning`, can never contribute to a pass. Treat it as a failed measurement and return `Verdict: FAIL`. Zero findings from a zero-element scan is not a clean audit.
     - Never create, update, or overwrite a baseline; call `visual_diff` with baseline updates disabled.
+    - Each baseline carries its own capture geometry, so `visual_diff` re-applies the recorded viewport at device scale factor 1 rather than whatever `chrome` last emulated. Report the returned `capture` geometry per row, and treat a geometry or dimension mismatch as a failure to investigate, never as a reason to re-baseline.
     - Missing baselines or incomplete scenarios are failures, not skips or inferred passes.
     - Do not edit files. Do not claim a pass unless every requested scenario has complete evidence.
   user_template: |

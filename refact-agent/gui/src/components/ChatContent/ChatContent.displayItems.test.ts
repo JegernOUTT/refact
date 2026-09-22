@@ -480,7 +480,13 @@ describe("ChatContent display items", () => {
     expect(reportItem.message.content).not.toContain(
       "Original messages remain visible",
     );
-    expect(reportItem.message.compression_report?.insert_mode).toBeUndefined();
+    expect(
+      (
+        reportItem.message.compression_report as
+          | { insert_mode?: string }
+          | undefined
+      )?.insert_mode,
+    ).toBeUndefined();
   });
 
   it("matching_llm_report_and_summary_render_single_report_card", () => {
@@ -859,7 +865,7 @@ describe("ChatContent display items", () => {
     expectIncrementalAppendMatchesFull(eventMessage());
   });
 
-  it("keeps unrelated events and plan deltas hidden", () => {
+  it("renders ordinary events inline while plan messages stay hidden", () => {
     const messages: ChatMessages = [
       eventMessage({
         message_id: "unrelated-system-notice",
@@ -875,11 +881,122 @@ describe("ChatContent display items", () => {
         source: "tool.update_plan",
         content: "Context compression failed: not a summarizer notice",
       }),
+      { role: "plan", content: "hidden plan body", message_id: "plan-1" },
     ];
 
     const items = buildDisplayItems(messages, false);
 
-    expect(items).toHaveLength(0);
+    expect(items.map((item) => item.type)).toEqual(["event", "event", "event"]);
+    expect(
+      items.map((item) => (item.type === "event" ? item.run : null)),
+    ).toEqual(["start", "middle", "end"]);
+  });
+
+  it("computes run positions from rendered adjacency, not message indices", () => {
+    const messages: ChatMessages = [
+      eventMessage({ message_id: "lonely-event", content: "Agent woke up" }),
+      assistantMessage({ message_id: "assistant-between" }),
+      eventMessage({ message_id: "run-first", content: "Agent woke up" }),
+      { role: "plan", content: "hidden plan", message_id: "plan-between" },
+      eventMessage({ message_id: "run-second", content: "Agent woke up" }),
+      userMessage({ message_id: "user-after" }),
+    ];
+
+    const items = buildDisplayItems(messages, false);
+
+    expect(
+      items.map((item) => (item.type === "event" ? item.run : item.type)),
+    ).toEqual(["single", "assistant", "start", "end", "user"]);
+  });
+
+  it("promotes the previous event from single to start when an event is appended", () => {
+    const previousMessages: ChatMessages = [
+      assistantMessage({ message_id: "assistant-before" }),
+      eventMessage({ message_id: "event-first", content: "Agent woke up" }),
+    ];
+    const nextMessages: ChatMessages = [
+      ...previousMessages,
+      eventMessage({ message_id: "event-second", subkind: "tick" }),
+    ];
+    const previousItems = buildDisplayItems(previousMessages, false);
+
+    expect(previousItems.at(-1)).toMatchObject({
+      type: "event",
+      run: "single",
+    });
+
+    const incrementalItems = tryIncrementalDisplayItemsUpdate(
+      previousMessages,
+      nextMessages,
+      previousItems,
+      false,
+    );
+
+    expect(incrementalItems).toEqual(buildDisplayItems(nextMessages, false));
+    expect(
+      (incrementalItems ?? []).map((item) =>
+        item.type === "event" ? item.run : item.type,
+      ),
+    ).toEqual(["assistant", "start", "end"]);
+  });
+
+  it("promotes the previous event from end to middle when a third event is appended", () => {
+    const previousMessages: ChatMessages = [
+      eventMessage({ message_id: "event-first", content: "Agent woke up" }),
+      eventMessage({ message_id: "event-second", subkind: "tick" }),
+    ];
+    const nextMessages: ChatMessages = [
+      ...previousMessages,
+      eventMessage({ message_id: "event-third", subkind: "cron_fire" }),
+    ];
+    const previousItems = buildDisplayItems(previousMessages, false);
+
+    const incrementalItems = tryIncrementalDisplayItemsUpdate(
+      previousMessages,
+      nextMessages,
+      previousItems,
+      false,
+    );
+
+    expect(incrementalItems).toEqual(buildDisplayItems(nextMessages, false));
+    expect(
+      (incrementalItems ?? []).map((item) =>
+        item.type === "event" ? item.run : item.type,
+      ),
+    ).toEqual(["start", "middle", "end"]);
+  });
+
+  it("matches full rebuild when appending an event after an assistant message", () => {
+    expectIncrementalAppendMatchesFull(
+      eventMessage({ message_id: "appended-event", subkind: "tick" }),
+    );
+  });
+
+  it("normalizes backend event metadata onto the display item", () => {
+    const messages: ChatMessages = [
+      {
+        role: "event",
+        content: "Mode switched",
+        message_id: "backend-event",
+        extra: {
+          event: {
+            subkind: "mode_switch",
+            source: "chat.session",
+            payload: { from: "agent", to: "task_planner" },
+          },
+        },
+      } as unknown as EventMessage,
+    ];
+
+    const items = buildDisplayItems(messages, false);
+
+    expect(items[0]?.type).toBe("event");
+    if (items[0]?.type !== "event") throw new Error("Expected event item");
+    expect(items[0].event).toMatchObject({
+      subkind: "mode_switch",
+      source: "chat.session",
+      payload: { from: "agent", to: "task_planner" },
+    });
   });
 
   it("renders compression failure content once when appended incrementally", () => {
@@ -918,5 +1035,132 @@ describe("ChatContent display items", () => {
 
     expect(items).toHaveLength(1);
     expect(items[0]?.type).toBe("skill_activated");
+  });
+
+  describe("ask_questions answer replies", () => {
+    const toolCallId = "toolu_01K3TWmB6ooX36c3eEXQkVWB";
+
+    function askQuestionsExchange(answerContent: string): ChatMessages {
+      return [
+        assistantMessage({
+          message_id: "assistant-ask",
+          content: "",
+          tool_calls: [
+            {
+              id: toolCallId,
+              index: 0,
+              type: "function",
+              function: { name: "ask_questions", arguments: "{}" },
+            },
+          ],
+        }),
+        {
+          role: "tool",
+          message_id: "tool-ask",
+          tool_call_id: toolCallId,
+          content: JSON.stringify({
+            type: "ask_questions",
+            tool_call_id: toolCallId,
+            questions: [],
+          }),
+        },
+        userMessage({ message_id: "user-answer", content: answerContent }),
+      ];
+    }
+
+    it("hides the native ask_questions_answer reply so only the tool card renders", () => {
+      const messages = askQuestionsExchange(
+        JSON.stringify({
+          type: "ask_questions_answer",
+          tool_call_id: toolCallId,
+          answers: [
+            { id: "count_method", answer: "A) Crown-lobe clustering" },
+            { id: "delete_scope", answer: true },
+          ],
+        }),
+      );
+
+      const items = buildDisplayItems(messages, false);
+
+      expect(items.some((item) => item.type === "user")).toBe(false);
+    });
+
+    it("still hides the legacy [QA:] marker reply", () => {
+      const messages = askQuestionsExchange(
+        `[QA:${toolCallId}] answered via form`,
+      );
+
+      const items = buildDisplayItems(messages, false);
+
+      expect(items.some((item) => item.type === "user")).toBe(false);
+    });
+
+    it("keeps an answer reply addressed to a different tool call visible", () => {
+      const messages = askQuestionsExchange(
+        JSON.stringify({
+          type: "ask_questions_answer",
+          tool_call_id: "some-other-tool-call",
+          answers: [{ id: "count_method", answer: "nope" }],
+        }),
+      );
+
+      const items = buildDisplayItems(messages, false);
+
+      expect(items.some((item) => item.type === "user")).toBe(true);
+    });
+
+    it("keeps an ordinary user reply visible", () => {
+      const messages = askQuestionsExchange("just a normal follow-up message");
+
+      const items = buildDisplayItems(messages, false);
+
+      expect(items.some((item) => item.type === "user")).toBe(true);
+    });
+
+    it("hides the appended native answer on the incremental live path", () => {
+      const answered = askQuestionsExchange(
+        JSON.stringify({
+          type: "ask_questions_answer",
+          tool_call_id: toolCallId,
+          answers: [{ id: "delete_scope", answer: true }],
+        }),
+      );
+      const base = answered.slice(0, 2);
+      const previousItems = buildDisplayItems(base, false);
+
+      const incremental = tryIncrementalDisplayItemsUpdate(
+        base,
+        answered,
+        previousItems,
+        false,
+      );
+      const full = buildDisplayItems(answered, false);
+
+      expect(full.some((item) => item.type === "user")).toBe(false);
+      expect(incremental?.some((item) => item.type === "user") ?? false).toBe(
+        false,
+      );
+    });
+
+    it("hides the native answer carried in a multimodal text block", () => {
+      const messages = askQuestionsExchange("placeholder");
+      messages[2] = userMessage({
+        message_id: "user-answer",
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              type: "ask_questions_answer",
+              tool_call_id: toolCallId,
+              answers: [{ id: "delete_scope", answer: true }],
+            }),
+          },
+        ],
+      });
+
+      const items = buildDisplayItems(messages, false);
+
+      expect(items.some((item) => item.type === "user")).toBe(false);
+    });
   });
 });

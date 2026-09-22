@@ -1375,6 +1375,31 @@ pub(super) async fn run_action(
         AppAction::CopyToClipboard { .. } => {}
         AppAction::OpenExternalEditor { .. } => {}
         AppAction::OpenImageExternally { .. } => {}
+        AppAction::AnswerQuestions { command } => {
+            let context = CommandContextTag::AnswerQuestions {
+                origin: app.command_origin(),
+                client_request_id: command.client_request_id.clone(),
+            };
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let chat_id = app.chat_id().to_string();
+                let generation = subscriptions.command_generation();
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .send_answer_questions(&project_id, &chat_id, command)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx
+                        .send(RuntimeEvent::CommandFinished {
+                            generation,
+                            context,
+                            result,
+                        })
+                        .await;
+                });
+            }
+        }
         AppAction::SendToolDecisions {
             client_request_id,
             decisions,

@@ -174,6 +174,7 @@ mod tests {
     fn snapshot_roundtrips_with_background_agents() {
         let event = ChatEvent::Snapshot {
             goal: None,
+            pending_questions: Vec::new(),
             thread: ThreadParams::default(),
             runtime: RuntimeState::default(),
             messages: vec![],
@@ -1674,7 +1675,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_roles_compression_preserves_plan_and_summarizes_assistant_segment() {
+    fn hidden_roles_reconstruction_preserves_plan_and_archive() {
         let plan_content = "Keep this plan exactly intact.";
         let mut messages = vec![crate::chat::internal_roles::plan(
             "agent",
@@ -1704,12 +1705,23 @@ mod tests {
             ..Default::default()
         });
 
-        assert!(
-            crate::chat::summarization::summarize_oldest_segment_with_static_summary(
-                &mut messages,
-                "summary",
-                "test",
+        let archive = serde_json::to_value(&messages).unwrap();
+        let continuation = ChatMessage {
+            message_id: "continuation".to_string(),
+            role: "user".to_string(),
+            content: ChatContent::SimpleText("Continue the approved work".to_string()),
+            ..Default::default()
+        };
+        messages.push(
+            refact_core::active_context::make_reconstruction_report(
+                vec![messages[0].clone(), continuation],
+                refact_core::active_context::ReconstructionMetadata::default(),
             )
+            .unwrap(),
+        );
+        assert_eq!(
+            serde_json::to_value(&messages[..messages.len() - 1]).unwrap(),
+            archive
         );
 
         let plans: Vec<_> = messages
@@ -1724,9 +1736,10 @@ mod tests {
             .map(|message| message.content.content_text_only())
             .collect();
         assert_eq!(users, vec!["first", "second"]);
-        assert!(messages
-            .iter()
-            .any(crate::chat::summarization::is_segment_summary));
+        let active = refact_core::active_context::active_context(&messages).unwrap();
+        assert_eq!(active.messages.len(), 2);
+        assert_eq!(active.messages[0].role, "plan");
+        assert_eq!(active.messages[0].content.content_text_only(), plan_content);
     }
 
     #[tokio::test]

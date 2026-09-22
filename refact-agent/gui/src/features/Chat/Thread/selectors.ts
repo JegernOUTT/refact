@@ -4,6 +4,7 @@ import { isToolName } from "../../../utils/toolNameAliases";
 import {
   getCacheCreationTokens,
   getCacheReadTokens,
+  mergeUsages,
 } from "../../../utils/calculateUsageInputTokens";
 import {
   isAssistantMessage,
@@ -38,6 +39,7 @@ import type { WorktreeMeta } from "../../../services/refact/worktrees";
 import type {
   AgentQuestion,
   BackgroundAgentSummary,
+  PendingQuestionSet,
 } from "../../../services/refact/types";
 import type {
   CompressionPhase,
@@ -47,6 +49,12 @@ import {
   extractPrivacyFiles,
   type PrivacyFileRecord,
 } from "../../../services/refact/privacy";
+import {
+  computeActiveContext,
+  isGenerationGatedByContext,
+  describeActiveContextGate,
+  type ActiveContext,
+} from "../../../utils/activeContext";
 
 const EMPTY_MESSAGES: ChatMessages = [];
 const EMPTY_EVENT_MESSAGES: EventMessage[] = [];
@@ -200,6 +208,30 @@ export const selectCurrentRuntime = (
 
 export const selectThreadById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.thread ?? null;
+
+const EMPTY_PENDING_QUESTION_SETS: PendingQuestionSet[] = [];
+
+export const selectPendingQuestionSetsById = (
+  state: RootState,
+  chatId: string,
+): PendingQuestionSet[] =>
+  state.chat.threads[chatId]?.thread.pending_questions ??
+  EMPTY_PENDING_QUESTION_SETS;
+
+export const selectHasPendingQuestionsCapabilityById = (
+  state: RootState,
+  chatId: string,
+): boolean =>
+  state.chat.threads[chatId]?.thread.pending_questions !== undefined;
+
+export const selectCommandAckByThreadAndId = (
+  state: RootState,
+  chatId: string,
+  clientRequestId: string | null,
+) =>
+  clientRequestId
+    ? state.chat.threads[chatId]?.command_acks?.[clientRequestId]
+    : undefined;
 
 export const selectBackgroundAgentsByThread = (
   state: RootState,
@@ -404,20 +436,80 @@ export const selectMessagesById = (state: RootState, chatId: string) =>
 export const selectMessages = (state: RootState) =>
   selectMessagesById(state, state.chat.current_thread_id);
 
+/**
+ * Unified context rebuild selectors.
+ *
+ * `selectMessagesById` stays the full stored transcript — the archive and every
+ * browsing surface keep rendering all of it. These selectors expose the derived
+ * "active context" (what the model sees) so plan/context consumers stop
+ * guessing. Memoized per thread so the derived array identity is stable and
+ * does not thrash downstream reselect inputs.
+ */
+const activeContextSelectors = new Map<
+  string,
+  ReturnType<typeof createSelector<[typeof selectMessagesById], ActiveContext>>
+>();
+
+function getActiveContextSelector(threadId: string) {
+  let selector = activeContextSelectors.get(threadId);
+  if (!selector) {
+    selector = createSelector([selectMessagesById], computeActiveContext);
+    activeContextSelectors.set(threadId, selector);
+  }
+  return selector;
+}
+
+export const selectActiveContextById = (
+  state: RootState,
+  chatId: string,
+): ActiveContext => getActiveContextSelector(chatId)(state, chatId);
+
+export const selectActiveContext = (state: RootState): ActiveContext =>
+  selectActiveContextById(state, state.chat.current_thread_id);
+
+/** Messages the model actually sees; empty when the context needs a rebuild. */
+export const selectActiveContextMessagesById = (
+  state: RootState,
+  chatId: string,
+): ChatMessages => selectActiveContextById(state, chatId).active;
+
+export const selectActiveContextStatusById = (
+  state: RootState,
+  chatId: string,
+) => selectActiveContextById(state, chatId).status;
+
+/**
+ * True when the server-side gate says this chat cannot generate until the user
+ * rebuilds. The transcript stays fully visible; only sending is disabled.
+ */
+export const selectContextRebuildRequiredById = (
+  state: RootState,
+  chatId: string,
+): boolean =>
+  isGenerationGatedByContext(selectActiveContextById(state, chatId));
+
+export const selectContextRebuildRequired = (state: RootState): boolean =>
+  selectContextRebuildRequiredById(state, state.chat.current_thread_id);
+
+export const selectContextRebuildMessageById = (
+  state: RootState,
+  chatId: string,
+): string | null =>
+  describeActiveContextGate(selectActiveContextById(state, chatId));
+
+export const selectContextRebuildMessage = (state: RootState): string | null =>
+  selectContextRebuildMessageById(state, state.chat.current_thread_id);
+
 export const selectPrivacyFilesById = createSelector(
   [selectMessagesById],
   (messages): PrivacyFileRecord[] => {
     const files: PrivacyFileRecord[] = [];
+    const seen = new Set<string>();
     for (const message of messages) {
       for (const file of extractPrivacyFiles(message.extra)) {
-        if (
-          !files.some(
-            (candidate) =>
-              candidate.path === file.path &&
-              candidate.zone === file.zone &&
-              candidate.attribution === file.attribution,
-          )
-        ) {
+        const key = JSON.stringify([file.path, file.zone, file.attribution]);
+        if (!seen.has(key)) {
+          seen.add(key);
           files.push(file);
         }
       }
@@ -491,42 +583,6 @@ export const selectVisibleMessages = (
   threadId: string,
 ): ChatMessages => getVisibleMessagesSelector(threadId)(state, threadId);
 
-const eventLogSelectors = new Map<
-  string,
-  ReturnType<typeof createSelector<[typeof selectMessagesById], EventMessage[]>>
->();
-
-function getEventLogSelector(threadId: string) {
-  let selector = eventLogSelectors.get(threadId);
-  if (!selector) {
-    selector = createSelector(
-      [selectMessagesById],
-      (messages): EventMessage[] => {
-        const eventMessages = messages.flatMap((message) => {
-          if (!isEventMessage(message)) return EMPTY_EVENT_MESSAGES;
-          const metadata = getEventMetadata(message);
-          if (!metadata) return EMPTY_EVENT_MESSAGES;
-          return [normalizeEventMessageMetadata(message)];
-        });
-        return eventMessages.length > 0 ? eventMessages : EMPTY_EVENT_MESSAGES;
-      },
-    );
-    eventLogSelectors.set(threadId, selector);
-  }
-  return selector;
-}
-
-/**
- * Normalized event history for EventLog surfaces. Every subkind is included,
- * including plan/goal deltas and pursuit, because the event history is the one
- * place users can audit what the agent did; PlanBanner and the goal widget keep
- * owning their own dedicated presentation.
- */
-export const selectEventLog = (
-  state: RootState,
-  threadId: string,
-): EventMessage[] => getEventLogSelector(threadId)(state, threadId);
-
 export const selectMessagesCountById = createSelector(
   [selectMessagesById],
   (messages) => messages.length,
@@ -579,6 +635,17 @@ export const selectLastAssistantMessageWithTokensById = createSelector(
   },
 );
 
+// Cumulative usage billed across the whole thread. Every assistant turn resends
+// the context, so summing per-turn usage is what "total tokens" means — reading
+// only the newest turn reports one request instead of the session.
+export const selectThreadTotalUsageById = createSelector(
+  [selectMessagesById],
+  (messages) =>
+    mergeUsages(
+      messages.filter(isAssistantMessage).map((message) => message.usage),
+    ),
+);
+
 const SERVER_EXECUTED_TOOL_NAMES = new Set([
   "web",
   "web_search",
@@ -609,7 +676,7 @@ export const selectHasServerExecutedToolsInLastAssistantById = createSelector(
  * returned a different result" warning on every render (audit N-37/L-20).
  */
 const selectBasePlanMessages = createSelector(
-  [selectMessagesById],
+  [selectActiveContextMessagesById],
   (messages): PlanMessage[] => {
     const planMessages = messages
       .map((message, index) => ({ message, index }))
@@ -669,7 +736,7 @@ export const selectCurrentPlan = (
 ): PlanMessage | undefined => selectBasePlanMessages(state, threadId)[0];
 
 export const selectPlanDeltaEvents = createSelector(
-  [selectMessagesById],
+  [selectActiveContextMessagesById],
   (messages): EventMessage[] => collectPlanDeltaEvents(messages),
 );
 
@@ -1645,3 +1712,8 @@ export const selectThreadWorktreeById = (
 
 export const selectIsBuddyChat = (state: RootState, chatId: string): boolean =>
   !!state.chat.threads[chatId]?.thread.buddy_meta?.is_buddy_chat;
+
+export const selectWaitingInterruptibleById = (
+  state: RootState,
+  chatId: string,
+): boolean => state.chat.threads[chatId]?.waiting_interruptible ?? false;

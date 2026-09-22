@@ -1528,10 +1528,10 @@ mod tests {
         planner_chat_id: Option<&str>,
     ) -> TrajectorySnapshot {
         TrajectorySnapshot {
+            pending_browser_decision: None,
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
-            compression_retry_after_ms: Default::default(),
             chat_id: chat_id.to_string(),
             title: chat_id.to_string(),
             model: "test-model".to_string(),
@@ -1543,6 +1543,7 @@ mod tests {
             checkpoints_enabled: false,
             context_tokens_cap: None,
             auto_compression_cap: None,
+            auto_compression_cap_pending: true,
             include_project_info: false,
             is_title_generated: false,
             auto_approve_editing_tools: false,
@@ -1578,6 +1579,7 @@ mod tests {
             reactive_compact_attempts: None,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
+            pending_questions: Vec::new(),
             pending_deliveries: Vec::new(),
             dropped_deliveries: Vec::new(),
         }

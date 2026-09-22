@@ -1,4 +1,5 @@
 pub mod browser_context;
+pub(crate) mod browser_decisions;
 pub mod cache_diagnostics;
 pub mod cache_guard;
 #[cfg(test)]
@@ -6,6 +7,7 @@ mod cache_stability_tests;
 pub mod cloud_token_count;
 pub mod config;
 mod content;
+pub mod context_rebuild;
 pub mod delivery;
 pub mod diagnostics;
 mod generation;
@@ -51,6 +53,7 @@ mod tool_call_recovery;
 mod tool_call_recovery_oss;
 pub mod tools;
 pub mod trajectories;
+pub mod trajectory_archive;
 pub mod trajectory_index;
 pub mod trajectory_ops;
 pub mod types;
@@ -61,11 +64,11 @@ pub(crate) mod verify_cmd;
 pub use session::{
     SessionsMap, create_sessions_map, start_session_cleanup_task,
     get_or_create_session_with_trajectory, close_all_chat_sessions,
-    try_restore_session_if_trajectory_exists, snapshot_with_agents,
+    try_restore_session_if_trajectory_exists, snapshot_with_agents, snapshot_with_agents_mode,
 };
 pub use queue::process_command_queue;
 #[cfg(test)]
-pub(crate) use queue::handle_tool_decisions;
+pub(crate) use queue::handle_tool_decisions_guarded;
 pub use delivery::{deliver_to_chat, drain_deliveries_at_boundary, update_pending_delivery_in_chat};
 pub use trajectories::{
     start_trajectory_watcher, TrajectoryEvent, TrajectoryMeta, handle_v1_trajectories_list,

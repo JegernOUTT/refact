@@ -1,4 +1,9 @@
 .scene {
+  --buddy-scene-ink: var(--rf-color-fg);
+  --buddy-scene-ink-muted: var(--rf-color-fg);
+  --buddy-scene-control-bg: var(--rf-surface-overlay);
+  --buddy-scene-control-border: var(--rf-border-strong);
+  --buddy-scene-tooltip-bg: var(--rf-surface-overlay);
   position: relative;
   height: 280px;
   min-height: 220px;
@@ -53,9 +58,9 @@
   justify-content: center;
   transform: translate(-50%, -50%);
   border: 1px solid transparent;
-  border-radius: 9999px;
+  border-radius: var(--rf-radius-pill);
   background: transparent;
-  color: rgba(255, 255, 255, 0.82);
+  color: var(--buddy-scene-ink);
   transition:
     transform 0.12s ease,
     background 0.12s ease,
@@ -80,7 +85,7 @@
   position: absolute;
   width: 6px;
   height: 6px;
-  border-radius: 9999px;
+  border-radius: var(--rf-radius-pill);
   background: rgba(255, 255, 255, 0.85);
   box-shadow: 0 0 6px 2px rgba(255, 255, 255, 0.35);
   opacity: 0;
@@ -137,9 +142,10 @@
   min-width: 88px;
   max-width: 122px;
   padding: 4px 7px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid var(--buddy-scene-control-border);
   border-radius: var(--rf-radius-card);
-  background: rgba(17, 24, 39, 0.64);
+  background: var(--buddy-scene-tooltip-bg);
+  color: var(--buddy-scene-ink);
   opacity: 0;
   pointer-events: none;
   transform: translateX(-50%) translateY(4px);
@@ -168,8 +174,8 @@
 .objectValue {
   max-width: 96px;
   overflow: hidden;
-  color: rgba(255, 255, 255, 0.72);
-  font-size: 9px;
+  color: var(--buddy-scene-ink-muted);
+  font-size: var(--rf-text-1);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -294,7 +300,7 @@
   height: 10px;
   pointer-events: none;
   border: 2px solid rgba(255, 255, 255, 0.72);
-  border-radius: 9999px;
+  border-radius: var(--rf-radius-pill);
   transform: translate(-50%, -50%);
   animation: buddyWaypointPing 1.4s ease-out forwards;
 }
@@ -303,9 +309,9 @@
   margin-top: -10px;
   padding: 3px 9px;
   border: 1px solid;
-  border-radius: 9999px;
+  border-radius: var(--rf-radius-pill);
   background: rgba(17, 24, 39, 0.58);
-  font-size: 10px;
+  font-size: var(--rf-text-1);
   font-weight: var(--rf-weight-bold);
   backdrop-filter: blur(6px);
 }
@@ -353,11 +359,11 @@
   min-width: 24px;
   height: 24px;
   padding: 0 7px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 9999px;
-  background: rgba(17, 24, 39, 0.28);
-  color: rgba(255, 255, 255, 0.9);
-  font-size: 11px;
+  border: 1px solid var(--buddy-scene-control-border);
+  border-radius: var(--rf-radius-pill);
+  background: var(--buddy-scene-control-bg);
+  color: var(--buddy-scene-ink);
+  font-size: var(--rf-text-1);
   backdrop-filter: blur(4px);
   transition:
     background 0.12s ease,
@@ -366,15 +372,15 @@
 }
 
 .sceneButtonGhost {
-  color: rgba(255, 255, 255, 0.68);
+  color: var(--buddy-scene-ink-muted);
 }
 
 .sceneButton:hover,
 .sceneButton:focus-visible,
 .sceneButtonGhost:hover,
 .sceneButtonGhost:focus-visible {
-  background: rgba(17, 24, 39, 0.64);
-  border-color: rgba(255, 255, 255, 0.36);
+  background: var(--rf-surface-overlay);
+  border-color: var(--rf-color-accent);
   transform: translateY(-1px);
   outline: none;
 }

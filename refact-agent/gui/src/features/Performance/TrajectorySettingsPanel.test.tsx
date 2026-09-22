@@ -103,6 +103,12 @@ const NEW_LIMIT_FIELDS: {
     label: "Pp max line length chars",
   },
   {
+    name: "tool_max_line_chars",
+    group: "Tool output budgets",
+    value: 2000,
+    label: "Tool max line chars",
+  },
+  {
     name: "pp_tokens_for_text_percent",
     group: "Tool output budgets",
     value: 70,

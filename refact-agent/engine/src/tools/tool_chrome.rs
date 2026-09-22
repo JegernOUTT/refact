@@ -22,9 +22,10 @@ use crate::integrations::browser_actions::{self, BrowserAction, DeviceType};
 use crate::integrations::browser_controller;
 use crate::integrations::browser_models::{ExecutionReport, parse_browser_action_request};
 use crate::integrations::browser_runtime::{
-    BrowserLaunchOptions, BrowserProxyOptions, BrowserRuntime, find_runtime_by_chat_id,
-    register_browser_runtime, get_browser_profile_dir, remove_browser_runtime,
-    setup_recording_for_runtime, setup_recording_for_tab,
+    BrowserGpuMode, BrowserLaunchOptions, BrowserProxyOptions, BrowserRuntime,
+    clear_stale_profile_lock, describe_launch_failure, find_runtime_by_chat_id,
+    register_browser_runtime, get_browser_profile_dir, relaunch_lock_for_chat,
+    remove_browser_runtime, setup_recording_for_runtime, setup_recording_for_tab,
 };
 
 use chrono::DateTime;
@@ -81,11 +82,16 @@ pub struct SettingsChrome {
     pub downloads_dir: String,
     #[serde(default)]
     pub ignore_https_errors: String,
+    #[serde(default)]
+    pub gpu: String,
 }
 
 impl SettingsChrome {
     pub fn launch_options(&self) -> BrowserLaunchOptions {
-        let base = browser_settings::current().to_launch_options();
+        self.launch_options_over(browser_settings::current().to_launch_options())
+    }
+
+    pub fn launch_options_over(&self, base: BrowserLaunchOptions) -> BrowserLaunchOptions {
         BrowserLaunchOptions {
             headless: self.headless.parse().unwrap_or(base.headless),
             chrome_path: (!self.chrome_path.is_empty())
@@ -121,8 +127,96 @@ impl SettingsChrome {
                 .ignore_https_errors
                 .parse()
                 .unwrap_or(base.ignore_https_errors),
+            gpu: if self.gpu.trim().is_empty() {
+                base.gpu
+            } else {
+                BrowserGpuMode::parse(&self.gpu).unwrap_or(base.gpu)
+            },
             ..base
         }
+    }
+}
+
+#[cfg(test)]
+mod launch_options_tests {
+    use super::*;
+
+    fn base_with_gpu(gpu: BrowserGpuMode) -> BrowserLaunchOptions {
+        BrowserLaunchOptions {
+            gpu,
+            ..BrowserLaunchOptions::default()
+        }
+    }
+
+    fn merged_gpu(gpu: &str, base: BrowserGpuMode) -> BrowserGpuMode {
+        SettingsChrome {
+            gpu: gpu.to_string(),
+            ..SettingsChrome::default()
+        }
+        .launch_options_over(base_with_gpu(base))
+        .gpu
+    }
+
+    #[test]
+    fn unset_gpu_defers_to_base() {
+        assert_eq!(
+            merged_gpu("", BrowserGpuMode::Hardware),
+            BrowserGpuMode::Hardware
+        );
+        assert_eq!(
+            merged_gpu("", BrowserGpuMode::Software),
+            BrowserGpuMode::Software
+        );
+        assert_eq!(
+            merged_gpu("   ", BrowserGpuMode::Hardware),
+            BrowserGpuMode::Hardware
+        );
+    }
+
+    #[test]
+    fn explicit_gpu_overrides_base() {
+        assert_eq!(
+            merged_gpu("disabled", BrowserGpuMode::Hardware),
+            BrowserGpuMode::Disabled
+        );
+        assert_eq!(
+            merged_gpu("software", BrowserGpuMode::Hardware),
+            BrowserGpuMode::Software
+        );
+        assert_eq!(
+            merged_gpu("hardware", BrowserGpuMode::Disabled),
+            BrowserGpuMode::Hardware
+        );
+    }
+
+    #[test]
+    fn unparseable_gpu_falls_back_to_base() {
+        assert_eq!(
+            merged_gpu("metal", BrowserGpuMode::Hardware),
+            BrowserGpuMode::Hardware
+        );
+    }
+
+    #[test]
+    fn unset_fields_defer_to_base() {
+        let base = BrowserLaunchOptions {
+            headless: true,
+            chrome_path: Some(PathBuf::from("/usr/bin/chromium")),
+            downloads_dir: Some(PathBuf::from("/tmp/downloads")),
+            proxy: Some(BrowserProxyOptions {
+                server: "http://127.0.0.1:8080".to_string(),
+                bypass: Some("localhost".to_string()),
+            }),
+            extra_args: vec!["--mute-audio".to_string()],
+            chromium_sandbox: false,
+            ignore_https_errors: false,
+            idle_timeout: Some(Duration::from_secs(42)),
+            ..BrowserLaunchOptions::default()
+        };
+
+        let merged = SettingsChrome::default().launch_options_over(base.clone());
+
+        assert_eq!(merged, base);
     }
 }
 
@@ -227,11 +321,11 @@ fn locator_regex_schema() -> serde_json::Value {
 fn browser_locator_schema() -> serde_json::Value {
     let mut schema = serde_json::json!({
         "type": "object",
-        "description": "Ref-first element address; see help topic 'locators' for the fallback vocabulary and composition rules.",
+        "description": "Ref-first element address; see help topic 'locators'",
         "required": ["by"],
         "properties": {
             "by": {"type": "string", "enum": ["ref", "css", "id", "name", "text", "label", "role", "xpath", "placeholder", "alt_text", "title", "autocomplete", "test_id"]},
-            "value": {"type": "string", "description": "Snapshot ref such as e12, or selector value for non-role strategies"},
+            "value": {"type": "string", "description": "Snapshot ref such as e12, or a selector value"},
             "frames": {"type": "array", "items": {"type": "object"}, "description": "Outermost-first iframe-owner locator chain"},
             "nth": {"type": "integer", "description": "Zero-based match index; -1 selects the last match"},
             "within": {"type": "string", "description": "Deprecated CSS scope; use locator for chaining"},
@@ -276,7 +370,7 @@ fn browser_locator_schema() -> serde_json::Value {
 fn browser_locator_alias_schema(role: &str) -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "description": format!("{role}: same shape as `locator`; see help topic 'locators'")
+        "description": format!("{role}; same shape as `locator`")
     })
 }
 
@@ -369,11 +463,11 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "topic".to_string(),
-        serde_json::json!({"type": "string", "description": "help section name; omitted returns the topic index plus the overview"}),
+        serde_json::json!({"type": "string", "description": "help section; omitted returns the index plus the overview"}),
     );
     properties.insert(
         "url".to_string(),
-        serde_json::json!({"type": "string", "description": "Target URL for navigate and open_tab, or the asset URL for add_script_tag and add_style_tag"}),
+        serde_json::json!({"type": "string", "description": "navigate and open_tab URL, or the asset URL for add_script_tag and add_style_tag"}),
     );
     properties.insert(
         "device".to_string(),
@@ -423,7 +517,7 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "value".to_string(),
-        serde_json::json!({"type": "string", "description": "Option value for select_option; locator values live inside locator"}),
+        serde_json::json!({"type": "string", "description": "select_option value; locator values live inside locator"}),
     );
     properties.insert(
         "attribute".to_string(),
@@ -455,15 +549,15 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "delay".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0, "description": "mouse_click_xy hold time in milliseconds between press and release"}),
+        serde_json::json!({"type": "integer", "minimum": 0, "description": "mouse_click_xy hold time in ms between press and release"}),
     );
     properties.insert(
         "delay_ms".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0, "description": "press_sequentially per-character delay in milliseconds; defaults to 0"}),
+        serde_json::json!({"type": "integer", "minimum": 0, "description": "press_sequentially per-character delay in ms; defaults to 0"}),
     );
     properties.insert(
         "timeout_ms".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0, "description": "Timeout in ms where accepted (waits/navigate/expect/click/hover default 5000; eval 30000)"}),
+        serde_json::json!({"type": "integer", "minimum": 0, "description": "Timeout in ms (waits/navigate/expect/click/hover default 5000; eval 30000)"}),
     );
     properties.insert(
         "ticks".to_string(),
@@ -490,7 +584,7 @@ fn browser_step_schema_with_actions(
             "oneOf": [
                 {
                     "type": "object",
-                    "description": "Expectation matcher. Use type plus expected/name/ignore_case as required. Text expectations accept a string or {source,flags} regex; to_have_text and to_contain_text also accept an array of them.",
+                    "description": "type plus expected/name/ignore_case; text accepts a string, a {source,flags} regex, or an array of them",
                     "required": ["type"],
                     "properties": {
                         "type": {
@@ -509,15 +603,15 @@ fn browser_step_schema_with_actions(
                         "expected": {},
                         "name": {"type": "string"},
                         "ignore_case": {"type": "boolean"},
-                        "checked": {"type": "boolean", "description": "to_be_checked expected checked state; defaults to true"},
-                        "indeterminate": {"type": "boolean", "description": "to_be_checked mixed state; cannot be combined with checked"},
-                        "pseudo": {"type": "string", "enum": ["before", "after"], "description": "to_have_css pseudo-element to read the computed style from"},
-                        "ratio": {"type": "number", "minimum": 0, "maximum": 1, "description": "to_be_in_viewport minimum intersection ratio of the element area"}
+                        "checked": {"type": "boolean", "description": "to_be_checked state; defaults to true"},
+                        "indeterminate": {"type": "boolean", "description": "to_be_checked mixed state; excludes checked"},
+                        "pseudo": {"type": "string", "enum": ["before", "after"], "description": "to_have_css pseudo-element"},
+                        "ratio": {"type": "number", "minimum": 0, "maximum": 1, "description": "to_be_in_viewport minimum intersection ratio"}
                     }
                 },
                 {
                     "type": "string",
-                    "description": "expect_poll comparator applied to the evaluated value against `expected`.",
+                    "description": "expect_poll comparator against `expected`",
                     "enum": ["equals", "contains", "gt", "lt", "matches_regex"]
                 }
             ]
@@ -526,7 +620,7 @@ fn browser_step_schema_with_actions(
     properties.insert(
         "expected".to_string(),
         serde_json::json!({
-            "description": "expect_poll expectation compared against the evaluated value. matches_regex takes a regex string or {source,flags}."
+            "description": "expect_poll expected value; matches_regex takes a regex string or {source,flags}"
         }),
     );
     properties.insert(
@@ -534,7 +628,7 @@ fn browser_step_schema_with_actions(
         serde_json::json!({
             "type": "integer",
             "minimum": 0,
-            "description": "wait_for_function fixed poll interval; defaults to 100/250/500/1000ms repeating the last"
+            "description": "wait_for_function poll interval; defaults to 100/250/500/1000ms repeating the last"
         }),
     );
     properties.insert(
@@ -559,11 +653,11 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "js".to_string(),
-        serde_json::json!({"type": "boolean", "description": "Collect JavaScript coverage in start_coverage; defaults to true"}),
+        serde_json::json!({"type": "boolean", "description": "start_coverage JavaScript coverage; defaults to true"}),
     );
     properties.insert(
         "css".to_string(),
-        serde_json::json!({"type": "boolean", "description": "Collect CSS coverage in start_coverage; defaults to true"}),
+        serde_json::json!({"type": "boolean", "description": "start_coverage CSS coverage; defaults to true"}),
     );
     properties.insert(
         "reset_on_navigation".to_string(),
@@ -575,11 +669,11 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "frame_count".to_string(),
-        serde_json::json!({"type": "integer", "minimum": MIN_FRAME_COUNT, "maximum": MAX_FRAME_COUNT, "description": "capture_frames frame count; defaults to 8, mutually exclusive with interval_ms"}),
+        serde_json::json!({"type": "integer", "minimum": MIN_FRAME_COUNT, "maximum": MAX_FRAME_COUNT, "description": "capture_frames frame count; defaults to 8, excludes interval_ms"}),
     );
     properties.insert(
         "interval_ms".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 1, "description": "capture_frames spacing; mutually exclusive with frame_count"}),
+        serde_json::json!({"type": "integer", "minimum": 1, "description": "capture_frames spacing; excludes frame_count"}),
     );
     properties.insert(
         "compose".to_string(),
@@ -588,7 +682,7 @@ fn browser_step_schema_with_actions(
                 {"type": "boolean"},
                 {"type": "string", "enum": ["grid", "separate"]}
             ],
-            "description": "screencast_stop: bool, compose a filmstrip (default true). screenshot_elements: grid = one labeled sheet, separate = one image per locator"
+            "description": "screencast_stop: compose a filmstrip (default true). screenshot_elements: grid = one labeled sheet, separate = one image each"
         }),
     );
     properties.insert(
@@ -623,7 +717,7 @@ fn browser_step_schema_with_actions(
         "id".to_string(),
         serde_json::json!({
             "type": "string",
-            "description": "Server-minted id returned by a previous step. Virtual authenticator id from add_virtual_authenticator, required by remove_virtual_authenticator, list_credentials, add_credential, clear_credentials, and set_user_verified; init script id from add_init_script, required by remove_init_script. Sending it to the minting action is an error."
+            "description": "Server-minted id from add_virtual_authenticator or add_init_script; sending it to the minting action is an error"
         }),
     );
     properties.insert(
@@ -648,15 +742,15 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "max_chars".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0, "description": "Character cap for dom_snapshot and accessibility_snapshot output"}),
+        serde_json::json!({"type": "integer", "minimum": 0, "description": "dom_snapshot and accessibility_snapshot character cap"}),
     );
     properties.insert(
         "property_filter".to_string(),
-        serde_json::json!({"type": "string"}),
+        serde_json::json!({"type": "string", "description": "case-sensitive substring test against each `property: value` line"}),
     );
     properties.insert(
         "mode".to_string(),
-        serde_json::json!({"type": "string", "enum": ["ai", "default", "inner_text", "text_content"], "description": "Accessibility snapshot mode ai or default, defaulting to ai; all_texts mode inner_text or text_content, defaulting to inner_text"}),
+        serde_json::json!({"type": "string", "enum": ["ai", "default", "inner_text", "text_content"], "description": "accessibility_snapshot ai (default) or default; all_texts inner_text (default) or text_content"}),
     );
     properties.insert(
         "refs".to_string(),
@@ -668,18 +762,18 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "depth".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 1, "description": "Limit accessibility_snapshot nesting; deeper children collapse into a truncated-count marker"}),
+        serde_json::json!({"type": "integer", "minimum": 1, "description": "Limit accessibility_snapshot nesting; deeper children collapse to a count marker"}),
     );
     properties.insert(
         "paths".to_string(),
-        serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Absolute file paths for set_input_files, drop_files, and expect_file_chooser"}),
+        serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Absolute paths for set_input_files, drop_files, expect_file_chooser"}),
     );
     properties.insert(
         "state".to_string(),
         serde_json::json!({
             "type": "string",
             "enum": ["domcontentloaded", "load", "networkidle", "attached", "detached", "visible", "hidden"],
-            "description": "Load state for wait_for_load_state, or element state for wait_for_selector (attached by default)"
+            "description": "wait_for_load_state load state, or wait_for_selector element state (attached by default)"
         }),
     );
     properties.insert(
@@ -704,19 +798,19 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "content".to_string(),
-        serde_json::json!({"type": "string", "description": "Inline source for add_script_tag, add_style_tag, and add_init_script; mutually exclusive with url on the tag actions"}),
+        serde_json::json!({"type": "string", "description": "Inline source for add_script_tag, add_style_tag, add_init_script; excludes url"}),
     );
     properties.insert(
         "script_type".to_string(),
-        serde_json::json!({"type": "string", "description": "Optional type attribute for add_script_tag, for example module"}),
+        serde_json::json!({"type": "string", "description": "add_script_tag type attribute, for example module"}),
     );
     properties.insert(
         "event_type".to_string(),
-        serde_json::json!({"type": "string", "description": "DOM event name for dispatch_event; the event class is inferred from it"}),
+        serde_json::json!({"type": "string", "description": "dispatch_event DOM event name; the class is inferred from it"}),
     );
     properties.insert(
         "event_init".to_string(),
-        serde_json::json!({"type": "object", "description": "dispatch_event init properties; bubbles, cancelable, and composed default to true"}),
+        serde_json::json!({"type": "object", "description": "dispatch_event init; bubbles, cancelable, composed default to true"}),
     );
     let mut pattern_schema = url_pattern_schema();
     pattern_schema["description"] = serde_json::json!(
@@ -725,7 +819,7 @@ fn browser_step_schema_with_actions(
     properties.insert("pattern".to_string(), pattern_schema);
     properties.insert(
         "aggressive".to_string(),
-        serde_json::json!({"type": "boolean", "description": "dismiss_overlays only: also delete large fixed overlays instead of just clicking dismiss buttons"}),
+        serde_json::json!({"type": "boolean", "description": "dismiss_overlays: also delete large fixed overlays, not just click dismiss buttons"}),
     );
     properties.insert(
         "save_as".to_string(),
@@ -782,7 +876,7 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "style".to_string(),
-        serde_json::json!({"type": "string", "description": "Inline CSS applied by highlight, or extra stylesheet for screenshots"}),
+        serde_json::json!({"type": "string", "description": "highlight inline CSS, or an extra screenshot stylesheet"}),
     );
     properties.insert(
         "locators".to_string(),
@@ -838,14 +932,14 @@ fn browser_step_schema_with_actions(
         "width".to_string(),
         serde_json::json!({
             "anyOf": [{"type": "integer", "minimum": 1}, {"type": "string"}],
-            "description": "integer pixels (set_viewport/set_window_bounds) or CSS length string (pdf)"
+            "description": "pixels (set_viewport/set_window_bounds) or a CSS length (pdf)"
         }),
     );
     properties.insert(
         "height".to_string(),
         serde_json::json!({
             "anyOf": [{"type": "integer", "minimum": 1}, {"type": "string"}],
-            "description": "integer pixels (set_viewport/set_window_bounds) or CSS length string (pdf)"
+            "description": "pixels (set_viewport/set_window_bounds) or a CSS length (pdf)"
         }),
     );
     properties.insert(
@@ -912,7 +1006,7 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "method".to_string(),
-        serde_json::json!({"type": "string", "description": "HTTP method for http_request (GET by default), a method filter for wait_for_request and wait_for_response, or a CDP method such as Runtime.evaluate for cdp_send"}),
+        serde_json::json!({"type": "string", "description": "http_request method (GET by default), wait_for_request and wait_for_response filter, or cdp_send CDP method"}),
     );
     properties.insert(
         "params".to_string(),
@@ -936,11 +1030,11 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "fail_on_status".to_string(),
-        serde_json::json!({"type": "boolean", "description": "Fail the http_request step when the status is not 2xx"}),
+        serde_json::json!({"type": "boolean", "description": "Fail http_request when the status is not 2xx"}),
     );
     properties.insert(
         "full_headers".to_string(),
-        serde_json::json!({"type": "boolean", "description": "Return every http_request response header instead of content-type and content-length only"}),
+        serde_json::json!({"type": "boolean", "description": "Return all http_request response headers, not just content-type and content-length"}),
     );
     properties.insert(
         "urls".to_string(),
@@ -953,7 +1047,7 @@ fn browser_step_schema_with_actions(
     properties.insert("domain".to_string(), serde_json::json!({"type": "string"}));
     properties.insert(
         "path".to_string(),
-        serde_json::json!({"type": "string", "description": "File path for route_from_har, HAR recording, and cookie path filters"}),
+        serde_json::json!({"type": "string", "description": "route_from_har, HAR recording, and cookie path filters"}),
     );
     properties.insert(
         "kind".to_string(),
@@ -988,7 +1082,7 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "name".to_string(),
-        serde_json::json!({"type": "string", "description": "Locator handler name, device name, cookie name, or matcher property name"}),
+        serde_json::json!({"type": "string", "description": "Locator handler, device, cookie, or matcher property name"}),
     );
     properties.insert(
         "times".to_string(),
@@ -1000,7 +1094,7 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "accept".to_string(),
-        serde_json::json!({"type": "boolean", "description": "handle_dialog acceptance: true accepts, false dismisses"}),
+        serde_json::json!({"type": "boolean", "description": "handle_dialog: true accepts, false dismisses"}),
     );
     properties.insert(
         "prompt_text".to_string(),
@@ -1031,10 +1125,10 @@ fn route_handler_schema() -> serde_json::Value {
                     "status": {"type": "integer", "minimum": 100, "maximum": 599, "description": "Defaults to 200"},
                     "headers": {"type": "object", "additionalProperties": {"type": "string"}},
                     "content_type": {"type": "string"},
-                    "body": {"type": "string", "description": "UTF-8 text by default; set body_base64=true when this string contains base64-encoded binary response bytes"},
-                    "path": {"type": "string", "description": "Serve this file as the response body; relative paths resolve inside the runtime artifact directory and may not escape it. Content type is inferred from the extension unless content_type is set"},
-                    "json": {"description": "Serialize this value as the response body with content type application/json"},
-                    "body_base64": {"type": "boolean", "description": "Treat body as already-base64-encoded binary bytes instead of UTF-8 text"}
+                    "body": {"type": "string", "description": "UTF-8 text unless body_base64 marks it as base64 binary bytes"},
+                    "path": {"type": "string", "description": "Response body file; relative paths resolve inside the runtime artifact directory and may not escape it; content type is inferred from the extension"},
+                    "json": {"description": "Response body serialized as application/json"},
+                    "body_base64": {"type": "boolean", "description": "Treat body as base64 binary bytes"}
                 }
             },
             {
@@ -1060,7 +1154,7 @@ fn route_handler_schema() -> serde_json::Value {
                 "type": "object",
                 "required": ["type"],
                 "properties": {
-                    "type": {"type": "string", "enum": ["fallback"], "description": "Hand the request to the next older route registered for a matching pattern, then the HAR replay, then the network"}
+                    "type": {"type": "string", "enum": ["fallback"], "description": "Hand the request to the next older matching route, then the HAR replay, then the network"}
                 }
             },
             {
@@ -1068,14 +1162,14 @@ fn route_handler_schema() -> serde_json::Value {
                 "required": ["type"],
                 "properties": {
                     "type": {"type": "string", "enum": ["fetch_and_fulfill"], "description": "Perform the real request from the engine, then fulfill the page with the response"},
-                    "url": {"type": "string", "description": "Request URL override; defaults to the intercepted URL"},
+                    "url": {"type": "string", "description": "Request URL override"},
                     "method": {"type": "string", "description": "Request method override"},
-                    "headers": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Request header overrides merged over the intercepted headers"},
+                    "headers": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Request header overrides"},
                     "post_data": {"type": "string", "description": "UTF-8 request body replacement"},
-                    "status": {"type": "integer", "minimum": 100, "maximum": 599, "description": "Response status override; defaults to the real status"},
-                    "response_headers": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Response header overrides merged over the real response headers"},
-                    "body": {"type": "string", "description": "Response body replacement; defaults to the real response body"},
-                    "body_base64": {"type": "boolean", "description": "Treat body as already-base64-encoded binary bytes instead of UTF-8 text"}
+                    "status": {"type": "integer", "minimum": 100, "maximum": 599, "description": "Response status override"},
+                    "response_headers": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Response header overrides"},
+                    "body": {"type": "string", "description": "Response body replacement"},
+                    "body_base64": {"type": "boolean", "description": "Treat body as base64 binary bytes"}
                 }
             }
         ]
@@ -1105,7 +1199,7 @@ fn locator_handler_schema() -> serde_json::Value {
                         "type": "array",
                         "items": {
                             "type": "object",
-                            "description": "A browser step: same shape as request.steps items minus handler-forbidden actions; see help topic 'handlers'"
+                            "description": "Same shape as request.steps items; see help topic 'handlers'"
                         }
                     }
                 }
@@ -1121,11 +1215,11 @@ fn browser_request_schema() -> serde_json::Value {
         "required": ["steps"],
         "properties": {
             "session": {"type": "string", "enum": ["shared_default"]},
-            "page_context": {"type": "string", "enum": ["snapshot", "screenshot", "both", "none"], "description": "What to attach as page-changed context. snapshot (default) attaches the ref-annotated aria snapshot and no image, screenshot attaches a policy-sized PNG instead, both attaches each, none attaches only the page header"},
-            "attach_screenshot": {"type": "boolean", "description": "Screenshot override: true = always attach, false = never attach, omitted = follow page_context"},
-            "network": {"type": "string", "enum": ["none", "summary", "full"], "description": "Per-request report volume. summary (default) emits one `method url status bytes ms` line per request, full keeps request and response headers, none drops per-request entries"},
+            "page_context": {"type": "string", "enum": ["snapshot", "screenshot", "both", "none"], "description": "snapshot (default) attaches the aria snapshot and no image; screenshot attaches a PNG; both; none = page header only"},
+            "attach_screenshot": {"type": "boolean", "description": "Screenshot override: true = always, false = never, omitted = follow page_context"},
+            "network": {"type": "string", "enum": ["none", "summary", "full"], "description": "summary (default) = one `method url status bytes ms` line per request, full keeps headers, none drops entries"},
             "block_service_workers": {"type": "boolean", "description": "Block service workers for this context (sticky until reset)"},
-            "continue_on_error": {"type": "boolean", "description": "Run later steps after a failure instead of skipping them (default false); ok stays false"},
+            "continue_on_error": {"type": "boolean", "description": "Run later steps after a failure (default false); ok stays false"},
             "target": tab_target_schema(),
             "steps": {
                 "type": "array",
@@ -1787,6 +1881,10 @@ mod tests {
             "chrome description + schema is {total} chars (description {description_len}, schema {schema_len}), budget is 32000"
         );
         assert!(
+            total < 30_500,
+            "chrome description + schema is {total} chars (description {description_len}, schema {schema_len}), reclaimed headroom ceiling is 30500"
+        );
+        assert!(
             description_len < 4_500,
             "chrome description is {description_len} chars, budget is 4500"
         );
@@ -1866,6 +1964,52 @@ mod tests {
     }
 
     #[test]
+    fn help_pins_the_wait_for_function_argument_shape() {
+        for phrase in [
+            "write `expression` as a function",
+            "only a function is handed the element",
+            "a plain expression is evaluated without the element being passed to",
+            "both a plain expression and a zero-argument function work",
+        ] {
+            assert!(CHROME_HELP.contains(phrase), "waits help lost {phrase:?}");
+        }
+    }
+
+    #[test]
+    fn help_pins_the_styles_property_filter_substring_semantics() {
+        for phrase in [
+            "the first 50 followed by a `... (N more)` marker",
+            "case-sensitive substring test against each whole `property: value` line",
+            "also matches `background-color`",
+        ] {
+            assert!(
+                CHROME_HELP.contains(phrase),
+                "readouts help lost {phrase:?}"
+            );
+        }
+        assert!(chrome_input_schema()
+            .pointer(
+                "/properties/request/properties/steps/items/properties/property_filter/description"
+            )
+            .and_then(Value::as_str)
+            .is_some_and(
+                |description| description.contains("case-sensitive substring")
+                    && description.contains("property: value")
+            ));
+    }
+
+    #[test]
+    fn help_pins_the_upload_path_policy() {
+        for phrase in [
+            "is checked before the batch runs",
+            "the refact config directory, and pass the privacy rules",
+            "take regular",
+        ] {
+            assert!(CHROME_HELP.contains(phrase), "uploads help lost {phrase:?}");
+        }
+    }
+
+    #[test]
     fn chrome_schema_offers_the_gallery_and_element_state_captures() {
         let schema = chrome_input_schema();
         let properties = schema
@@ -1905,7 +2049,9 @@ mod tests {
             schema
                 .pointer("/properties/request/properties/attach_screenshot/description")
                 .and_then(Value::as_str),
-            Some("Screenshot override: true = always attach, false = never attach, omitted = follow page_context")
+            Some(
+                "Screenshot override: true = always, false = never, omitted = follow page_context"
+            )
         );
         let description = ToolChrome::default().tool_description().description;
         assert!(description.contains("`attach_screenshot` is the tri-state override"));
@@ -2287,6 +2433,8 @@ async fn setup_chrome_session(
     chat_id: &str,
 ) -> Result<Vec<String>, String> {
     let mut setup_log = vec![];
+    let launch_lock = relaunch_lock_for_chat(chat_id);
+    let _launch_guard = launch_lock.lock().await;
 
     let session_entry = {
         let integration_sessions = gcx.integration_sessions.clone();
@@ -2400,12 +2548,21 @@ async fn setup_chrome_session(
     } else {
         let cache_dir = gcx.cache_dir.clone();
         let profile_dir = get_browser_profile_dir(&cache_dir, chat_id);
+        clear_stale_profile_lock(&profile_dir).map_err(|error| {
+            format!("Cannot start chrome: {error}; the previous browser never exited")
+        })?;
 
         setup_log.push(format!(
             "Started new chrome process ({}).",
             launch_options.mode_label()
         ));
-        BrowserRuntime::launch(profile_dir, launch_options)?
+        let mode = launch_options.mode_label();
+        BrowserRuntime::launch(profile_dir.clone(), launch_options).map_err(|error| {
+            format!(
+                "Failed to start chrome in {mode} mode: {}",
+                describe_launch_failure(&error, &profile_dir)
+            )
+        })?
     };
 
     let runtime_id = {

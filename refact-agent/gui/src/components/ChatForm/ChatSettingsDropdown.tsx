@@ -25,6 +25,7 @@ import {
   selectThinkingBudgetById,
   selectMaxTokensById,
   selectAutoCompressionCapById,
+  selectContextTokensCapById,
   setReasoningEffort,
   setThinkingBudget,
   setTemperature,
@@ -172,6 +173,9 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   const threadAutoCompressionCap = useAppSelector((state) =>
     selectAutoCompressionCapById(state, chatId),
   );
+  const contextTokensCap = useAppSelector((state) =>
+    selectContextTokensCapById(state, chatId),
+  );
   const threadReasoningEffort = useAppSelector((state) =>
     selectReasoningEffortById(state, chatId),
   );
@@ -289,8 +293,15 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
     Math.max(effectiveMaxTokens, MIN_OUTPUT_TOKENS),
     maxOutputTokens,
   );
+  const modelContextTokens =
+    selectedModelDetail?.nCtx ?? MIN_COMPRESSION_TOKENS;
+  const effectiveContextTokens =
+    contextTokensCap != null && contextTokensCap > 0
+      ? Math.min(modelContextTokens, contextTokensCap)
+      : modelContextTokens;
+  const defaultCompressionCap = Math.floor(0.9 * effectiveContextTokens);
   const maxCompressionTokens = Math.max(
-    selectedModelDetail?.nCtx ?? MIN_COMPRESSION_TOKENS,
+    effectiveContextTokens,
     MIN_COMPRESSION_TOKENS,
   );
   const displayAutoCompressionCap =
@@ -363,9 +374,9 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   }, [dispatch, chatId]);
 
   const handleAutoCompressionCapReset = useCallback(() => {
-    dispatch(setAutoCompressionCap({ chatId, value: null }));
+    dispatch(setAutoCompressionCap({ chatId, value: defaultCompressionCap }));
     setLocalAutoCompressionCap(null);
-  }, [dispatch, chatId]);
+  }, [dispatch, chatId, defaultCompressionCap]);
 
   // Loading state
   if (caps.loading || !areCapsInitialized) {
@@ -652,11 +663,8 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                             Auto-compression cap
                           </Text>
                           <Text size="1" weight="medium">
-                            {displayAutoCompressionCap == null
-                              ? `${formatTokens(
-                                  maxCompressionTokens,
-                                )} (model maximum)`
-                              : clampedAutoCompressionCap}
+                            {displayAutoCompressionCap ??
+                              `${formatTokens(maxCompressionTokens)} (no cap)`}
                           </Text>
                         </div>
                         <Text
@@ -664,14 +672,17 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                           color="gray"
                           className={styles.helperText}
                         >
-                          Reset or unset uses the selected model&apos;s maximum
-                          context window.
+                          New chats and Reset use 90% of the effective
+                          model/request context window (
+                          {formatTokens(defaultCompressionCap)}). Existing caps
+                          are retained; unset means no cap.
                         </Text>
                         <div
                           className={classNames(
                             styles.sliderContainer,
                             styles.sliderTrack,
-                            threadAutoCompressionCap != null &&
+                            threadAutoCompressionCap !==
+                              defaultCompressionCap &&
                               styles.sliderTrackWithReset,
                           )}
                         >
@@ -702,7 +713,8 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                           <Text size="1" color="gray">
                             {formatTokens(maxCompressionTokens)}
                           </Text>
-                          {threadAutoCompressionCap != null && (
+                          {threadAutoCompressionCap !==
+                            defaultCompressionCap && (
                             <button
                               type="button"
                               className={styles.resetButton}

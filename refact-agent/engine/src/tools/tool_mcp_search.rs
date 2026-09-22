@@ -7,10 +7,7 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
-use crate::tools::tools_description::{
-    Tool, ToolConfig, ToolDesc, ToolGroupCategory, ToolSource, ToolSourceType,
-};
-use crate::tools::tools_list::get_integration_tools;
+use crate::tools::tools_description::{Tool, ToolConfig, ToolDesc, ToolSource, ToolSourceType};
 
 pub struct ToolMcpSearch {}
 
@@ -85,60 +82,45 @@ impl Tool for ToolMcpSearch {
                 ccx.tool_access_bypass,
             )
         };
-        let mut integration_groups = get_integration_tools(gcx.clone()).await;
-        for group in &mut integration_groups {
-            let mut allowed = Vec::new();
-            for tool in group.tools.drain(..) {
-                if crate::agents::tool_authority::ensure_context_tool(
-                    &ccx,
-                    &tool.tool_description().name,
-                )
-                .await
-                .is_ok()
-                {
-                    allowed.push(tool);
-                }
+        let mcp_tools = crate::tools::tools_list::get_integration_mcp_tools(gcx.clone()).await;
+        // Child tool authority must narrow the list that is actually reported.
+        // Searching is discovery, and discovery of a tool the child may not call
+        // is already an authority leak, so this filter runs before any other.
+        let mut allowed_mcp_tools = Vec::with_capacity(mcp_tools.len());
+        for tool in mcp_tools {
+            if crate::agents::tool_authority::ensure_context_tool(
+                &ccx,
+                &tool.tool_description().name,
+            )
+            .await
+            .is_ok()
+            {
+                allowed_mcp_tools.push(tool);
             }
-            group.tools = allowed;
         }
+        let mut mcp_tools = allowed_mcp_tools;
         let policy = crate::tools::tools_list::tool_access_policy(gcx).await;
         if !bypass && !policy.tool_access.providers.is_empty() {
             let provider = crate::tools::tools_list::provider_of_model(&model_id);
-            for group in integration_groups
-                .iter_mut()
-                .filter(|g| matches!(g.category, ToolGroupCategory::MCP))
-            {
-                group.tools.retain(|tool| {
-                    crate::tools::tools_list::mcp_tool_allowed(
-                        &policy,
-                        provider,
-                        &tool.tool_description(),
-                    )
-                });
-            }
+            mcp_tools.retain(|tool| {
+                crate::tools::tools_list::mcp_tool_allowed(
+                    &policy,
+                    provider,
+                    &tool.tool_description(),
+                )
+            });
         }
 
-        let matched: Vec<(String, String, Value)> = integration_groups
+        let matched: Vec<(String, String, Value)> = mcp_tools
             .iter()
-            .filter(|g| matches!(g.category, ToolGroupCategory::MCP))
-            .flat_map(|g| g.tools.iter())
             .filter(|tool| tool.config().unwrap_or_default().enabled)
-            .filter(|tool| {
-                let d = tool.tool_description();
-                re.is_match(&d.name) || re.is_match(&d.description)
-            })
+            .map(|tool| tool.tool_description())
+            .filter(|d| re.is_match(&d.name) || re.is_match(&d.description))
             .take(max_results)
-            .map(|tool| {
-                let d = tool.tool_description();
-                (d.name, d.description, d.input_schema)
-            })
+            .map(|d| (d.name, d.description, d.input_schema))
             .collect();
 
-        let total_mcp: usize = integration_groups
-            .iter()
-            .filter(|g| matches!(g.category, ToolGroupCategory::MCP))
-            .map(|g| g.tools.len())
-            .sum();
+        let total_mcp: usize = mcp_tools.len();
 
         if matched.is_empty() {
             let text = format!(

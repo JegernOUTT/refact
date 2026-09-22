@@ -100,19 +100,19 @@
   gap: var(--rf-space-1);
   max-width: 100%;
   color: var(--rf-color-fg);
-  font-size: 12px;
+  font-size: var(--rf-text-1);
 }
 
 .listSubtitle,
 .listMeta,
 .emptyText {
   color: var(--rf-color-muted);
-  font-size: 11px;
+  font-size: var(--rf-text-1);
 }
 
 .listMeta {
   flex: 0 0 auto;
-  font-size: 10px;
+  font-size: var(--rf-text-1);
   max-width: 100%;
 }
 

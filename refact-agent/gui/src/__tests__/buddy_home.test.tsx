@@ -6,11 +6,12 @@ import {
   within,
 } from "../utils/test-utils";
 import { http, HttpResponse } from "msw";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 import { Provider } from "react-redux";
+import { QueryStatus } from "@reduxjs/toolkit/query";
 import { Theme } from "@radix-ui/themes";
 import { server } from "../utils/mockServer";
 import { setUpStore } from "../app/store";
@@ -30,6 +31,7 @@ import { BuddyOpportunitiesFeed } from "../features/Buddy/BuddyOpportunitiesFeed
 import { BuddyWorkshop } from "../features/Buddy/BuddyWorkshop";
 import { BuddyDraftPreview } from "../features/Buddy/BuddyDraftPreview";
 import { BuddySettingsPanel } from "../features/Buddy/BuddySettingsPanel";
+import { BuddyChatCompanion } from "../features/Buddy/BuddyChatCompanion";
 import { BuddyPanel } from "../features/Buddy/BuddyPanel";
 import { BuddyDashboardScene } from "../features/Buddy/BuddyDashboardScene";
 import { BuddyHome } from "../features/Buddy/BuddyHome";
@@ -53,6 +55,7 @@ import { formatFailureLabel } from "../features/Buddy/buddyUtils";
 import { useExecuteBuddyAction } from "../features/Buddy/hooks/useExecuteBuddyAction";
 import { executeBuddyNavigation } from "../features/Buddy/executeBuddyAction";
 import { PALETTES, STAGES } from "../features/Buddy/constants";
+import { SETUP_MODES } from "../features/Setup/setupModes";
 import type {
   BuddyOpportunity,
   BuddySuggestion,
@@ -66,6 +69,291 @@ import type {
   BuddySpeechItem,
 } from "../features/Buddy/types";
 import type React from "react";
+
+const operatorStatus = (
+  mode: "disabled" | "enabled" | "unavailable",
+  unavailableReason?: {
+    kind: string;
+    detail: string;
+    retry_in_seconds?: number;
+  },
+) => ({
+  schema_version: 1,
+  mode,
+  features: {
+    storage: mode !== "disabled",
+    actions: false,
+    supervision: false,
+    improvement: false,
+    editorial: false,
+  },
+  project:
+    mode === "enabled"
+      ? { project_id: "fixture", canonical_root: "/fixture" }
+      : null,
+  worker:
+    mode === "enabled"
+      ? { worker_id: "worker", engine_instance_id: "engine", epoch: 1 }
+      : null,
+  ...(mode === "unavailable" && unavailableReason
+    ? { unavailable_reason: unavailableReason }
+    : {}),
+});
+
+// Existing legacy tests explicitly exercise the disabled compatibility contract.
+beforeEach(() => {
+  server.use(
+    http.get("*/v1/buddy/operator/status", () =>
+      HttpResponse.json(operatorStatus("disabled")),
+    ),
+  );
+});
+
+describe("BuddyHome single work authority", () => {
+  it.each(["enabled", "unavailable", "disabled"] as const)(
+    "gates exact producer controls on Panel, Companion and SpeechCloud when %s",
+    async (mode) => {
+      server.use(
+        http.get("*/v1/buddy/operator/status", () =>
+          HttpResponse.json(operatorStatus(mode)),
+        ),
+        http.get("*/v1/buddy/opportunities", () =>
+          HttpResponse.json({ opportunities: [] }),
+        ),
+      );
+      const controls = [
+        {
+          id: "worktree-pulse",
+          label: "Create Worktrees pulse report",
+          action: "create_worktrees_pulse",
+          style: "secondary" as const,
+        },
+        {
+          id: "dismiss-worktree-cleanup",
+          label: "Dismiss proposal",
+          action: "dismiss_suggestion",
+          action_param: "worktree_cleanup",
+          style: "ghost" as const,
+        },
+        {
+          id: "review-worktree-cleanup",
+          label: "Review cleanup candidates",
+          action: "review_worktree_cleanup",
+          style: "primary" as const,
+        },
+      ];
+      for (const Surface of [
+        () => <BuddyPanel />,
+        () => <BuddyChatCompanion chatId="producer-fixture" />,
+        () => <BuddySpeechCloud />,
+      ]) {
+        const store = setUpStore({ ...CONFIG_STATE });
+        store.dispatch(
+          setBuddySnapshot(
+            makeSnapshot(undefined, {
+              active_speech: makeSpeech({
+                text: "Saved cleanup advice",
+                created_at: new Date().toISOString(),
+                persistent: true,
+                controls,
+              }),
+            }),
+          ),
+        );
+        const view = render(<Surface />, { store });
+        expect(
+          await screen.findByText("Review cleanup candidates"),
+        ).toBeInTheDocument();
+        if (mode === "disabled") {
+          expect(
+            await screen.findByText("Create Worktrees pulse report"),
+          ).toBeInTheDocument();
+          expect(screen.getByText("Dismiss proposal")).toBeInTheDocument();
+        } else {
+          await waitFor(() =>
+            expect(
+              Object.values(store.getState().buddyApi.queries).some(
+                (query) =>
+                  query?.endpointName === "getBuddyOperatorStatus" &&
+                  query.status === QueryStatus.fulfilled,
+              ),
+            ).toBe(true),
+          );
+          expect(
+            screen.queryByText("Create Worktrees pulse report"),
+          ).not.toBeInTheDocument();
+          expect(
+            screen.queryByText("Dismiss proposal"),
+          ).not.toBeInTheDocument();
+        }
+        // The canvas bubble animates text via requestAnimationFrame (not driven
+        // by this fixture); the advisory source must remain intact regardless.
+        expect(store.getState().buddy.snapshot?.active_speech?.text).toBe(
+          "Saved cleanup advice",
+        );
+        view.unmount();
+      }
+    },
+  );
+  it("opens the durable proposal when its legacy editing draft has expired", async () => {
+    const project = operatorStatus("enabled").project;
+    const work = {
+      schema_version: 1,
+      id: "saved-proposal",
+      project,
+      subject: {
+        resource_kind: "legacy_draft",
+        resource_id: "expired",
+        version: "1",
+      },
+      kind: "proposal",
+      title: "Preserved proposal",
+      state: "needs_attention",
+      native_sources: [],
+      current_artifact_id: "saved-report",
+      current_artifact_revision: 1,
+      last_material_change_at: "2026-01-01T00:00:00Z",
+    };
+    const record = (value: unknown) => ({ value, revision: 1, change_seq: 1 });
+    const envelope = (data: unknown) => ({
+      schema_version: 1,
+      project,
+      data,
+      next_cursor: null,
+    });
+    let legacyRequests = 0;
+    let resolved = 0;
+    server.use(
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get("*/v1/buddy/operator/legacy-drafts/expired/work", () => {
+        resolved++;
+        return HttpResponse.json(envelope(record(work)));
+      }),
+      http.get("*/v1/buddy/work", () => HttpResponse.json(envelope([]))),
+      http.get("*/v1/buddy/work/saved-proposal", () =>
+        HttpResponse.json(envelope(record(work))),
+      ),
+      http.get("*/v1/buddy/artifacts/saved-report", () =>
+        HttpResponse.json(
+          envelope(
+            record({
+              schema_version: 1,
+              artifact_id: "saved-report",
+              revision: 1,
+              project,
+              source_run_ids: [],
+              title: "Retained proposal report",
+              conclusion: "The proposal still needs a decision.",
+              delta: "",
+              body: "Durable content survives the editing session.",
+              uncertainty: null,
+              proposed_action_ids: [],
+              evidence: [],
+              provenance: {
+                source_run_ids: [],
+                evidence_refs: [],
+                contains_untrusted_source: false,
+              },
+            }),
+          ),
+        ),
+      ),
+      http.get("*/v1/buddy/work/saved-proposal/read", () =>
+        HttpResponse.json(envelope(null)),
+      ),
+      http.get("*/v1/buddy/work/saved-proposal/snooze", () =>
+        HttpResponse.json(envelope(null)),
+      ),
+      http.get("*/v1/buddy/work/saved-proposal/actions", () =>
+        HttpResponse.json(envelope([])),
+      ),
+      http.get("*/v1/buddy/work/saved-proposal/outcomes", () =>
+        HttpResponse.json(envelope([])),
+      ),
+      http.get("*/v1/buddy/artifacts/saved-report/revisions", () =>
+        HttpResponse.json(envelope([])),
+      ),
+      http.all("*/v1/buddy/drafts/expired", () => {
+        legacyRequests++;
+        return new HttpResponse(null, { status: 404 });
+      }),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+    store.dispatch(push({ name: "buddy", draftId: "expired" }));
+    render(<BuddyHome />, { store });
+    expect(
+      await screen.findByText("Retained proposal report"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Durable content survives the editing session."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("The proposal still needs a decision."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Dismiss draft" }),
+    ).not.toBeInTheDocument();
+    expect(resolved).toBe(1);
+    expect(legacyRequests).toBe(0);
+  });
+  it.each(["enabled", "unavailable"] as const)(
+    "does not mount legacy lifecycle producers when %s",
+    async (mode) => {
+      let legacyRequests = 0;
+      let workRequests = 0;
+      server.use(
+        http.get("*/v1/buddy/operator/status", () =>
+          HttpResponse.json(operatorStatus(mode)),
+        ),
+        http.get("*/v1/buddy/work", () => {
+          workRequests += 1;
+          return HttpResponse.json({
+            schema_version: 1,
+            project: operatorStatus("enabled").project,
+            data: [],
+            next_cursor: null,
+          });
+        }),
+        http.get("*/v1/buddy/briefing", () => {
+          legacyRequests += 1;
+          return HttpResponse.json({});
+        }),
+        http.get("*/v1/buddy/drafts/expired", () => {
+          legacyRequests += 1;
+          return new HttpResponse(null, { status: 404 });
+        }),
+      );
+      const store = setUpStore({ ...CONFIG_STATE });
+      store.dispatch(setBuddySnapshot(makeSnapshot()));
+      store.dispatch(push({ name: "buddy", draftId: "expired" }));
+      const { user } = render(<BuddyHome />, { store });
+      if (mode === "enabled")
+        await screen.findByRole("region", { name: "Buddy Desk" });
+      else await screen.findByRole("button", { name: "Check work authority" });
+      // Pulse and Opportunities were one-line redirects to the Desk once the
+      // operator owns the work, so they are retired outside legacy mode.
+      for (const name of ["Pulse", "Opportunities"]) {
+        expect(screen.queryByRole("tab", { name })).toBeNull();
+      }
+      for (const name of ["Recent errors", "Activity", "Settings"]) {
+        await user.click(screen.getByRole("tab", { name }));
+        expect(screen.queryByTestId("buddy-opportunities-feed")).toBeNull();
+        expect(screen.queryByTestId("buddy-briefing-card")).toBeNull();
+        expect(
+          screen.queryByRole("button", { name: "Dismiss draft" }),
+        ).toBeNull();
+      }
+      expect(
+        screen.getByText(/Draft editing sessions may expire/),
+      ).toBeTruthy();
+      expect(legacyRequests).toBe(0);
+      expect(workRequests).toBe(mode === "enabled" ? 1 : 0);
+    },
+  );
+});
 
 vi.mock("../features/Buddy/BuddyCharacter", async () => {
   const ReactModule = await vi.importActual<typeof import("react")>("react");
@@ -730,7 +1018,7 @@ describe("BuddyHome_renders_all_sections", () => {
 
     try {
       render(<BuddyHome />, { store });
-      const world = await screen.findByTestId("buddy-world");
+      const world = await screen.findByTestId("buddy-presence");
       const dismissButton = within(world)
         .getAllByRole("button", { hidden: true })
         .find((button) => button.textContent === "Shoo");
@@ -753,6 +1041,76 @@ describe("BuddyHome_renders_all_sections", () => {
       expect(unhandled).not.toHaveBeenCalled();
     } finally {
       window.removeEventListener("unhandledrejection", unhandled);
+      vi.useRealTimers();
+    }
+  });
+
+  it("failed hero opportunity action stays unseen and prevents duplicate requests", async () => {
+    // Opportunity speech intentionally stays silent in some 30-second buckets.
+    // Fix only the wall clock to a speaking bucket; keep request timers real.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2024-01-01T12:00:00Z"));
+    try {
+      const opportunity = makeOpportunity({
+        id: "hero-failed-action",
+        proposed_actions: [{ kind: "open_page", page: { type: "providers" } }],
+      });
+      let calls = 0;
+      let finish: (() => void) | undefined;
+      const responseReady = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      server.use(
+        http.get("*/v1/buddy/opportunities", () =>
+          HttpResponse.json({ opportunities: [opportunity] }),
+        ),
+        http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
+        http.get("*/v1/buddy/briefing", () => HttpResponse.json(null)),
+        http.get("*/v1/stats/llm/summary", () =>
+          HttpResponse.json({ totals: {} }),
+        ),
+        http.get("*/v1/setup/status", () =>
+          HttpResponse.json({ configured: true }),
+        ),
+        http.post("*/v1/buddy/opportunities/:id/accept", async () => {
+          calls += 1;
+          await responseReady;
+          return HttpResponse.json(
+            { detail: "hero action offline" },
+            { status: 503 },
+          );
+        }),
+      );
+      const store = setUpStore(CONFIG_STATE);
+      store.dispatch(
+        setBuddySnapshot(
+          makeSnapshot(makePulse(), {
+            opportunities: [opportunity],
+            runtime_queue: [],
+          }),
+        ),
+      );
+      render(<BuddyHome />, { store });
+      const world = await screen.findByTestId("buddy-presence");
+      const button = within(world)
+        .getAllByRole("button", { hidden: true })
+        .find((candidate) => candidate.textContent === "Open Providers");
+      if (!button) throw new Error("Expected hero opportunity control");
+      fireEvent.click(button);
+      fireEvent.click(button);
+      await waitFor(() => expect(calls).toBe(1));
+      finish?.();
+      await waitFor(() =>
+        expect(store.getState().buddy.activeSpeech?.text).toContain(
+          "hero action offline",
+        ),
+      );
+      expect(selectSeenNotificationIds(store.getState())).not.toHaveProperty(
+        `opportunity-${opportunity.id}`,
+      );
+      expect(selectHomeSnoozedUntil(store.getState())).toBeNull();
+      expect(calls).toBe(1);
+    } finally {
       vi.useRealTimers();
     }
   });
@@ -1169,6 +1527,616 @@ describe("BuddyHome_renders_all_sections", () => {
     expect(settingsSection).toBeInTheDocument();
     expect(settingsSection).not.toHaveAttribute("style");
   });
+
+  it("reaches the undo surface for applied changes through the settings tab", async () => {
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+    server.use(
+      http.get("*/v1/buddy/opportunities", () =>
+        HttpResponse.json({
+          opportunities: [
+            {
+              id: "opp-dup-guard",
+              kind: "memory_ops_batch",
+              priority: "normal",
+              summary: "Merge 12 near-duplicate memories",
+              detail: "",
+              confidence: 0.9,
+              actions: [],
+              created_at: "2026-07-03T06:00:00Z",
+            },
+          ],
+        }),
+      ),
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
+      http.get("*/v1/stats/llm/summary", () =>
+        HttpResponse.json({
+          totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
+        }),
+      ),
+      http.get("*/v1/setup/status", () =>
+        HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+      ),
+      http.get("*/v1/buddy/receipts", () =>
+        HttpResponse.json({
+          receipts: [
+            {
+              id: "receipt-1",
+              action_kind: "apply_config_patch",
+              target_path: ".refact/knowledge/handbook/testing.md",
+              pre_image: null,
+              created_at: "2026-07-03T06:00:00Z",
+              undone: false,
+            },
+          ],
+        }),
+      ),
+    );
+
+    const { user } = render(<BuddyHome />, { store });
+
+    await screen.findByTestId("buddy-home-content");
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
+
+    const settingsSection = await screen.findByTestId(
+      "buddy-home-settings-section",
+    );
+    const appliedChanges = await screen.findByTestId(
+      "buddy-applied-changes-card",
+    );
+    expect(settingsSection).toContainElement(appliedChanges);
+    expect(
+      screen.getByRole("button", {
+        name: "Undo .refact/knowledge/handbook/testing.md",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Merge 12 near-duplicate memories"),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("BuddyHome_layout_contract", () => {
+  const layoutHandlers = [
+    http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
+    http.get("*/v1/stats/llm/summary", () =>
+      HttpResponse.json({
+        totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
+      }),
+    ),
+    http.get("*/v1/setup/status", () =>
+      HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+    ),
+  ];
+
+  it("keeps the scene above the tab strip on every tab", async () => {
+    server.use(
+      ...layoutHandlers,
+      http.get("*/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [] }),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    const { user } = render(<BuddyHome />, { store });
+
+    await screen.findByTestId("buddy-home-content");
+    const hero = screen.getByTestId("buddy-home-hero");
+    expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
+    expect(hero.compareDocumentPosition(screen.getByRole("tablist"))).toBe(4);
+
+    for (const name of [
+      "Opportunities",
+      "Recent errors",
+      "Activity",
+      "Settings",
+    ]) {
+      await user.click(screen.getByRole("tab", { name }));
+      expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
+    }
+  });
+
+  it.each([
+    ["enabled", "On"],
+    ["disabled", "Local only"],
+    ["unavailable", "Not responding"],
+  ] as const)(
+    "renders the %s work authority branch with its own status pill",
+    async (mode, label) => {
+      server.use(
+        ...layoutHandlers,
+        http.get("*/v1/buddy/operator/status", () =>
+          HttpResponse.json(operatorStatus(mode)),
+        ),
+        http.get("*/v1/buddy/opportunities", () =>
+          HttpResponse.json({ opportunities: [] }),
+        ),
+        http.get("*/v1/buddy/work", () =>
+          HttpResponse.json({
+            schema_version: 1,
+            project: operatorStatus("enabled").project,
+            data: [],
+            next_cursor: null,
+          }),
+        ),
+      );
+      const store = setUpStore({ ...CONFIG_STATE });
+      store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+      render(<BuddyHome />, { store });
+
+      const pill = await screen.findByTestId("buddy-operator-status");
+      await waitFor(() => expect(pill).toHaveAttribute("data-state", mode));
+      expect(pill).toHaveTextContent(label);
+
+      if (mode === "enabled") {
+        expect(
+          await screen.findByText("Nothing needs you right now."),
+        ).toBeInTheDocument();
+        const desk = screen.getByRole("region", { name: "Buddy Desk" });
+        expect(desk).toBeInTheDocument();
+        expect(
+          within(desk).queryByRole("heading", { name: "Buddy Desk" }),
+        ).toBeNull();
+        expect(within(desk).queryByRole("searchbox")).toBeNull();
+      }
+      const retry = screen.queryByRole("button", {
+        name: "Retry work authority",
+      });
+      const check = screen.queryByRole("button", {
+        name: "Check work authority",
+      });
+      if (mode === "unavailable") {
+        expect(retry).toBeNull();
+        expect(check).toBeInTheDocument();
+      } else {
+        expect(retry).toBeNull();
+        expect(check).toBeNull();
+      }
+    },
+  );
+
+  it("renders a broken status pill and an honest check control when status fails", async () => {
+    server.use(
+      ...layoutHandlers,
+      http.get(
+        "*/v1/buddy/operator/status",
+        () => new HttpResponse(null, { status: 500 }),
+      ),
+      http.get("*/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [] }),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyHome />, { store });
+
+    const pill = await screen.findByTestId("buddy-operator-status");
+    await waitFor(() => expect(pill).toHaveAttribute("data-state", "error"));
+    expect(pill).toHaveTextContent("Broken");
+    expect(
+      await screen.findByRole("button", { name: "Check work authority" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("buddy-opportunities-feed")).toBeNull();
+  });
+
+  it("shows the opportunity list exactly once", async () => {
+    const opportunity = makeOpportunity({ id: "single-surface" });
+    server.use(
+      ...layoutHandlers,
+      http.get("*/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [opportunity] }),
+      ),
+      http.get("*/v1/buddy/briefing", () =>
+        HttpResponse.json({
+          date: "2024-01-01",
+          top_cards: [
+            {
+              id: opportunity.id,
+              priority: "high",
+              summary: opportunity.summary,
+            },
+          ],
+          receipts: [],
+          job_runs: [],
+          spend: { tokens_in: 1, tokens_out: 1 },
+          pulse: { diagnostics_last_hour: 0 },
+        }),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(makePulse(), { opportunities: [opportunity] }),
+      ),
+    );
+
+    const { user } = render(<BuddyHome />, { store });
+
+    await screen.findByTestId("buddy-home-content");
+    await user.click(screen.getByRole("tab", { name: "Opportunities" }));
+
+    const feeds = await screen.findAllByTestId("buddy-opportunities-feed");
+    expect(feeds).toHaveLength(1);
+    expect(
+      within(feeds[0]).getByText("Model config is broken"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("buddy-briefing-card")).toBeNull();
+  });
+
+  it("keeps compliance prose and unstyled elements out of the page", async () => {
+    const source = await readGuiSource("features/Buddy/BuddyHome.tsx");
+
+    expect(source).not.toContain("<p>");
+    expect(source).not.toContain("<section");
+    expect(source).not.toContain("Needs you above");
+    expect(source).not.toContain("never permissions");
+    expect(source).not.toContain("Play is optional");
+    expect(source).not.toContain("Back to Desk");
+  });
+
+  it("exposes a real heading outline instead of styled spans", async () => {
+    server.use(
+      ...layoutHandlers,
+      http.get("*/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [] }),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyHome />, { store });
+    await screen.findByTestId("buddy-home-content");
+
+    const headings = screen.getAllByRole("heading");
+    const levels = headings.map((heading) => Number(heading.tagName.slice(1)));
+
+    expect(levels.filter((level) => level === 1)).toHaveLength(1);
+    expect(levels[0]).toBe(1);
+    expect(levels).toContain(2);
+    expect(
+      screen.getByRole("heading", { level: 1 }).textContent,
+    ).not.toHaveLength(0);
+
+    let previous = 1;
+    for (const level of levels) {
+      expect(level).toBeLessThanOrEqual(previous + 1);
+      previous = level;
+    }
+  });
+
+  it("keeps every Buddy stylesheet on the shared type and radius scale", async () => {
+    const directory = resolve(process.cwd(), "src/features/Buddy");
+    const sheets = (await readdir(directory)).filter((file) =>
+      file.endsWith(".module.css"),
+    );
+    expect(sheets.length).toBeGreaterThan(20);
+
+    const offenders: string[] = [];
+    for (const sheet of sheets) {
+      const css = await readGuiSource(`features/Buddy/${sheet}`);
+      for (const [declaration, value] of css.matchAll(
+        /font-size:\s*([\d.]+)px/g,
+      )) {
+        if (Number(value) < 12) offenders.push(`${sheet}: ${declaration}`);
+      }
+      for (const dead of ["--rf-font-size-", "--rf-radius-control"]) {
+        if (css.includes(dead)) offenders.push(`${sheet}: ${dead}`);
+      }
+    }
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("gives every Buddy control a hit-area floor", async () => {
+    const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
+
+    expect(
+      readCssBlock(
+        css,
+        '.page :is(button, [role="tab"], select, input, summary)',
+      ),
+    ).toContain("min-height: var(--rf-hit-min)");
+    expect(css).toContain("--rf-hit-min: var(--rf-hit-min-touch)");
+  });
+
+  it("sizes the tab strip so narrow viewports scroll instead of truncating", async () => {
+    const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
+
+    expect(readCssBlock(css, ".tabs .tabsList")).toContain(
+      "grid-auto-columns: minmax(max-content, 1fr)",
+    );
+    const heroScene = readCssBlock(
+      css,
+      '.heroCard.heroCard [data-testid="buddy-world"]',
+    );
+    expect(heroScene).toContain("height: clamp(180px, 22vh, 240px)");
+    expect(heroScene).toContain("padding: 0");
+    expect(
+      readCssBlock(
+        css,
+        '.heroCard.heroCard [data-testid="buddy-world-canvas"]',
+      ),
+    ).toContain("height: 100%");
+    expect(
+      readCssBlock(
+        css,
+        '.heroCardExpanded.heroCardExpanded [data-testid="buddy-world"]',
+      ),
+    ).toContain("height: clamp(280px, 38vh, 430px)");
+  });
+});
+
+describe("BuddyHome_operator_surface", () => {
+  const operatorProject = operatorStatus("enabled").project;
+  const record = (value: unknown) => ({ value, revision: 1, change_seq: 1 });
+  const envelope = (data: unknown) => ({
+    schema_version: 1,
+    project: operatorProject,
+    data,
+    next_cursor: null,
+  });
+  const workItem = (id: string, title: string) => ({
+    schema_version: 1,
+    id,
+    project: operatorProject,
+    subject: { resource_kind: "legacy_draft", resource_id: id, version: "1" },
+    kind: "proposal",
+    title,
+    state: "needs_attention",
+    native_sources: [],
+    current_artifact_id: `${id}-report`,
+    current_artifact_revision: 1,
+    last_material_change_at: "2026-01-01T00:00:00Z",
+  });
+  const surfaceHandlers = [
+    http.get("*/v1/buddy/opportunities", () =>
+      HttpResponse.json({ opportunities: [] }),
+    ),
+    http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
+    http.get("*/v1/stats/llm/summary", () =>
+      HttpResponse.json({
+        totals: { total_calls: 50, successful_calls: 48, total_tokens: 900 },
+      }),
+    ),
+    http.get("*/v1/setup/status", () =>
+      HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+    ),
+  ];
+
+  it("leads with the Desk and demotes the scene when work is waiting", async () => {
+    let workRequests = 0;
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get("*/v1/buddy/work", () => {
+        workRequests += 1;
+        return HttpResponse.json(
+          envelope([
+            record(workItem("desk-a", "Flaky provider keeps retrying")),
+            record(workItem("desk-b", "Two worktrees drifted apart")),
+          ]),
+        );
+      }),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyHome />, { store });
+
+    const desk = await screen.findByRole("region", { name: "Buddy Desk" });
+    expect(
+      await within(desk).findByText("Flaky provider keeps retrying"),
+    ).toBeInTheDocument();
+    expect(
+      within(desk).getByText("Two worktrees drifted apart"),
+    ).toBeInTheDocument();
+    expect(desk.compareDocumentPosition(screen.getByRole("tablist"))).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(
+      desk.compareDocumentPosition(screen.getByTestId("buddy-presence")),
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    await waitFor(() =>
+      expect(screen.getByTestId("buddy-home-hero").className).toContain(
+        "heroCardDemoted",
+      ),
+    );
+    // The fold probe must reuse the Desk's own cache entry, never a second fetch.
+    expect(workRequests).toBe(1);
+  });
+
+  it("keeps the scene at full height when the Desk has nothing waiting", async () => {
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get("*/v1/buddy/work", () => HttpResponse.json(envelope([]))),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyHome />, { store });
+
+    expect(
+      await screen.findByText("Nothing needs you right now."),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-home-hero").className).not.toContain(
+      "heroCardDemoted",
+    );
+  });
+
+  it.each([
+    [
+      "disabled",
+      [
+        "Pulse",
+        "Opportunities",
+        "Recent errors",
+        "Activity",
+        "Play",
+        "Settings",
+      ],
+    ],
+    ["enabled", ["Recent errors", "Activity", "Play", "Settings"]],
+    ["unavailable", ["Recent errors", "Activity", "Settings"]],
+  ] as const)(
+    "renders the %s tab set with no hollow signposts",
+    async (mode, tabs) => {
+      server.use(
+        ...surfaceHandlers,
+        http.get("*/v1/buddy/operator/status", () =>
+          HttpResponse.json(operatorStatus(mode)),
+        ),
+        http.get("*/v1/buddy/work", () => HttpResponse.json(envelope([]))),
+      );
+      const store = setUpStore({ ...CONFIG_STATE });
+      store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+      render(<BuddyHome />, { store });
+
+      await screen.findByTestId("buddy-home-content");
+      await waitFor(() =>
+        expect(
+          screen.getAllByRole("tab").map((tab) => tab.textContent),
+        ).toEqual([...tabs]),
+      );
+      const selected = screen.getByRole("tab", { selected: true });
+      expect(selected).toHaveTextContent(
+        mode === "disabled" ? "Pulse" : "Activity",
+      );
+    },
+  );
+
+  it("renders the lock holder and invokes the operator reopen endpoint", async () => {
+    let reopenCalls = 0;
+    const unavailableReason = {
+      kind: "already_owned",
+      detail:
+        "operator store is already owned by another writer (pid 2810136 (refact-lsp 0.1.0) on svakhreev-work, started 2026-09-15 09:36:52 UTC, cmd: refact-lsp --http-port 8001)",
+      retry_in_seconds: 900,
+    };
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("unavailable", unavailableReason)),
+      ),
+      http.post("*/v1/buddy/operator/reopen", () => {
+        reopenCalls += 1;
+        return HttpResponse.json(
+          operatorStatus("unavailable", unavailableReason),
+        );
+      }),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    const { user } = render(<BuddyHome />, { store });
+
+    const banner = await screen.findByTestId("buddy-operator-degraded");
+    expect(banner).toHaveTextContent(
+      "Another Refact process is using saved work",
+    );
+    expect(banner).toHaveTextContent("pid 2810136");
+    expect(banner).toHaveTextContent("refact-lsp --http-port 8001");
+    expect(banner).toHaveTextContent(
+      "Buddy is already trying again in about 15 minutes.",
+    );
+    await user.click(
+      within(banner).getByRole("button", { name: "Retry work authority" }),
+    );
+    await waitFor(() => expect(reopenCalls).toBe(1));
+    expect(await within(banner).findByRole("status")).toHaveTextContent(
+      "Saved work is still unavailable.",
+    );
+  });
+
+  it("falls back safely for an unfamiliar unavailable reason", async () => {
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(
+          operatorStatus("unavailable", {
+            kind: "a-new-engine-kind",
+            detail: "The engine reported a new condition.",
+          }),
+        ),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyHome />, { store });
+
+    const banner = await screen.findByTestId("buddy-operator-degraded");
+    expect(banner).toHaveTextContent("Buddy could not open saved work");
+    expect(banner).toHaveTextContent("The engine reported a new condition.");
+  });
+
+  it("stops rendering cached progress and blocks setup runs when work authority fails", async () => {
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("unavailable")),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyHome />, { store });
+
+    const banner = await screen.findByTestId("buddy-operator-degraded");
+    expect(banner).toHaveAttribute("role", "alert");
+    expect(
+      within(banner).getByRole("button", { name: "Check work authority" }),
+    ).toBeInTheDocument();
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("buddy-world")).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("buddy-summary-strip")).not.toBeInTheDocument();
+    expect(screen.queryByText("View stats")).not.toBeInTheDocument();
+
+    const setupStrip = screen.getByTestId("buddy-setup-strip");
+    expect(setupStrip).toHaveAttribute("data-disabled", "true");
+    const setupButtons = within(setupStrip).getAllByRole("button");
+    expect(setupButtons).toHaveLength(SETUP_MODES.length);
+    for (const button of setupButtons) expect(button).toBeDisabled();
+
+    const pill = screen.getByTestId("buddy-operator-status");
+    expect(pill).toHaveAttribute("data-state", "unavailable");
+    expect(pill).toHaveTextContent("Not responding");
+  });
+
+  it("keeps the legacy surface whole when the operator is deliberately off", async () => {
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("disabled")),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyHome />, { store });
+
+    await screen.findByTestId("buddy-home-content");
+    expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("buddy-operator-degraded"),
+    ).not.toBeInTheDocument();
+    for (const button of within(
+      screen.getByTestId("buddy-setup-strip"),
+    ).getAllByRole("button")) {
+      expect(button).toBeEnabled();
+    }
+  });
 });
 
 describe("BuddyWorld_dynamic_environment", () => {
@@ -1355,7 +2323,7 @@ describe("BuddyWorld_dynamic_environment", () => {
     );
   });
 
-  it("renders world controls and routes object clicks", async () => {
+  it("ramen_control_has_a_matching_label", async () => {
     const onCare = vi.fn();
     const onOpenPage = vi.fn();
 
@@ -1413,6 +2381,9 @@ describe("BuddyWorld_dynamic_environment", () => {
 
     await user.click(screen.getByRole("button", { name: /play in sun/i }));
     expect(onCare).toHaveBeenCalledWith("play", "scroll");
+
+    await user.click(screen.getByRole("button", { name: "Feed Buddy" }));
+    expect(onCare).toHaveBeenCalledWith("feed", undefined);
 
     await user.click(screen.getByRole("button", { name: /open buddy home/i }));
     expect(onOpenPage).toHaveBeenCalledWith({ type: "buddy" });
@@ -2279,7 +3250,7 @@ describe("BuddyWorld_dynamic_environment", () => {
 
   it("honors director intent duration before replacing it", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2024-01-01T14:00:00Z"));
+    vi.setSystemTime(new Date("2024-01-01T14:00:00"));
     const quietPulse = makePulse({
       providers: { defaults_ok: true, broken_refs: 0, quota_warnings: 0 },
       diagnostics: { last_hour: 0, top_error_types: [] },
@@ -2332,7 +3303,7 @@ describe("BuddyWorld_dynamic_environment", () => {
       );
 
       await vi.advanceTimersByTimeAsync(7_100);
-      vi.setSystemTime(new Date("2024-01-01T14:00:07.101Z"));
+      vi.setSystemTime(new Date("2024-01-01T14:00:07.101"));
       rerender(
         <BuddyWorld
           palette={PALETTES[0]}
@@ -2344,7 +3315,7 @@ describe("BuddyWorld_dynamic_environment", () => {
           activeQuest={null}
           activeSpeech={null}
           setupNeeded={false}
-          now={new Date("2024-01-01T14:00:07.101Z")}
+          now={new Date("2024-01-01T14:00:07.101")}
           onCanvasEvent={vi.fn()}
           onCare={vi.fn()}
           onOpenPage={vi.fn()}
@@ -2359,7 +3330,7 @@ describe("BuddyWorld_dynamic_environment", () => {
         "rest_home",
       );
 
-      vi.setSystemTime(new Date("2024-01-01T14:00:12.101Z"));
+      vi.setSystemTime(new Date("2024-01-01T14:00:12.101"));
       rerender(
         <BuddyWorld
           palette={PALETTES[0]}
@@ -2371,7 +3342,7 @@ describe("BuddyWorld_dynamic_environment", () => {
           activeQuest={null}
           activeSpeech={null}
           setupNeeded={false}
-          now={new Date("2024-01-01T14:00:12.101Z")}
+          now={new Date("2024-01-01T14:00:12.101")}
           onCanvasEvent={vi.fn()}
           onCare={vi.fn()}
           onOpenPage={vi.fn()}
@@ -2922,6 +3893,10 @@ describe("buildBuddySceneSpeech", () => {
 });
 
 describe("BuddySettingsPanel_autosave", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("toggling a switch immediately sends partial patch to server", async () => {
     let capturedBody: unknown;
     server.use(
@@ -3149,7 +4124,7 @@ describe("BuddySettingsPanel_autosave", () => {
 
       await vi.advanceTimersByTimeAsync(750);
 
-      await waitFor(() => {
+      await vi.waitFor(() => {
         expect(capturedBody).toEqual({
           personality_prompt: "Be more chaotic",
         });
@@ -3221,7 +4196,7 @@ describe("BuddySettingsPanel_autosave", () => {
 
       await vi.advanceTimersByTimeAsync(750);
 
-      await waitFor(() => {
+      await vi.waitFor(() => {
         expect(capturedBodies).toEqual([{ clear_personality_prompt: true }]);
       });
     } finally {
@@ -3316,7 +4291,7 @@ describe("BuddySettingsPanel_autosave", () => {
 
       await vi.advanceTimersByTimeAsync(750);
 
-      await waitFor(() => {
+      await vi.waitFor(() => {
         expect(capturedBodies).toEqual([
           { personality_prompt: "Unsaved local prompt" },
         ]);
@@ -3923,7 +4898,14 @@ describe("BuddyPanel_opportunity_notifications", () => {
   it("renders unread opportunities as Buddy speech controls without a badge", async () => {
     server.use(
       http.get("*/v1/buddy/opportunities", () =>
-        HttpResponse.json({ opportunities: [] }),
+        HttpResponse.json({
+          opportunities: [
+            makeOpportunity({
+              status: "new",
+              proposed_actions: [{ kind: "dismiss" }],
+            }),
+          ],
+        }),
       ),
     );
 
@@ -4416,7 +5398,7 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     server.use(...commonHandlers);
 
     const { user } = render(<BuddyHome />, { store });
-    await user.click(screen.getByRole("tab", { name: "Recent chats" }));
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
     const panel = await screen.findByTestId("buddy-recent-chats");
     expect(panel.className).not.toContain("panelScroll");
     expect(panel.className).toContain("glass");

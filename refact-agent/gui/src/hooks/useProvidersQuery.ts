@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { RootState } from "../app/store";
 import { capsApi, providersApi } from "../services/refact";
 import { useAppSelector } from "./useAppSelector";
@@ -31,6 +31,14 @@ export function useGetConfiguredProvidersQuery() {
   });
 }
 
+function refetchIfStarted(refetch: () => Promise<unknown>): Promise<unknown> {
+  try {
+    return refetch();
+  } catch {
+    return Promise.resolve();
+  }
+}
+
 function selectCapsQueryIsReady(state: RootState) {
   const queryState = capsApi.endpoints.getCaps.select(undefined)(state);
   return queryState.isSuccess || queryState.data !== undefined;
@@ -50,6 +58,19 @@ export function useProviderBootstrapState() {
 
   const providersLoading = !providersQuery.isSuccess && !providersQuery.isError;
   const capsLoading = !capsQueryIsReady && !capsQuery.isError;
+
+  const [isRetrying, setIsRetrying] = useState(false);
+  const refetchProviders = providersQuery.refetch;
+  const refetchCaps = capsQuery.refetch;
+  const retry = useCallback(() => {
+    setIsRetrying(true);
+    void Promise.allSettled([
+      refetchIfStarted(refetchProviders),
+      refetchIfStarted(refetchCaps),
+    ]).finally(() => {
+      setIsRetrying(false);
+    });
+  }, [refetchProviders, refetchCaps]);
 
   let status: ProviderBootstrapStatus = "provider_loading";
   if (!hasReadyPluginBackend(config)) {
@@ -82,6 +103,8 @@ export function useProviderBootstrapState() {
     hasAnyActiveProvider,
     canAccessApp: status === "ready",
     canShowProviderSetup: status === "setup_required",
+    retry,
+    isRetrying,
   };
 }
 

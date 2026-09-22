@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useAppDispatch } from "./useAppDispatch";
 import { useConfig } from "./useConfig";
 import { usePostMessage } from "./usePostMessage";
@@ -60,7 +60,21 @@ import {
   chatThreadToTrajectoryData,
 } from "../services/refact/trajectories";
 import { useAppSelector } from "./useAppSelector";
-import { ideAskQuestions, ideTaskDone } from "./useEventBusForIDE";
+import {
+  ideAskQuestions,
+  ideDecisionResolved,
+  ideTaskDone,
+} from "./useEventBusForIDE";
+import type { DecisionScope } from "../events/hostDecisions";
+import {
+  announceHostDecision,
+  hostDecisionOutstanding,
+  observeHostQuestionStatuses,
+  scopeHostDecisions,
+  subscribeHostDecisions,
+} from "../events/hostDecisionTracker";
+import { buddyOperatorIdentity } from "../services/refact/buddyOperator";
+import { useGetBuddyNativeDecisionsQuery } from "../services/refact/buddyDecisions";
 import {
   resetSidebarState,
   sidebarSectionSnapshotReceived,
@@ -73,6 +87,7 @@ import {
 } from "../services/refact/apiUrl";
 
 const RECONNECT_DELAY_MS = 500;
+const NATIVE_DECISION_POLL_MS = 4000;
 const MIGRATION_KEY = "refact-trajectories-migrated";
 
 function getWorkspaceDisplayName(root: string): string {
@@ -251,6 +266,12 @@ export function useSidebarSubscription() {
     ],
   );
   const postMessage = usePostMessage();
+  const nativeDecisionQueryIdentity = useAppSelector(buddyOperatorIdentity);
+  const projectRoots = useAppSelector(
+    (state) => state.current_project.workspaceRoots,
+  );
+  const projectRootsRef = useRef(projectRoots);
+  projectRootsRef.current = projectRoots;
   const historyChats = useAppSelector((state) => state.history.chats);
   const sidebarSections = useAppSelector((state) => state.sidebar.sections);
   const historyRef = useRef(historyChats);
@@ -258,6 +279,13 @@ export function useSidebarSubscription() {
   const sidebarSectionsRef = useRef(sidebarSections);
   sidebarSectionsRef.current = sidebarSections;
   const serverWorkspaceRootsRef = useRef<string[] | undefined>(undefined);
+  // Number of native decisions this host is still showing. Mirrors the shared
+  // tracker so the resolution observer below can run only while something is
+  // actually waiting.
+  const [outstandingDecisions, setOutstandingDecisions] = useState(
+    hostDecisionOutstanding,
+  );
+  useEffect(() => subscribeHostDecisions(setOutstandingDecisions), []);
   const disconnectRef = useRef<(() => void) | null>(null);
   const activeEndpointRef = useRef<string | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
@@ -674,6 +702,13 @@ export function useSidebarSubscription() {
         if (status === "ready") {
           processWorkspaceSnapshot(workspaceRoots);
           serverWorkspaceRootsRef.current = workspaceRoots;
+          // A decision identity only means something inside one project, so a
+          // different root drops the previous project's announcements instead
+          // of leaving foreign notifications on screen.
+          scopeHostDecisions({
+            projectRoot: workspaceRoots[0] ?? "",
+            endpointIdentity,
+          });
         }
         markSectionSnapshotReceived(event);
         return;
@@ -684,6 +719,7 @@ export function useSidebarSubscription() {
     },
     [
       dispatch,
+      endpointIdentity,
       flushTaskList,
       markSectionSnapshotReceived,
       processSectionSnapshotData,
@@ -691,9 +727,28 @@ export function useSidebarSubscription() {
     ],
   );
 
+  /**
+   * Current project + engine endpoint the decision bridge is bound to.
+   *
+   * A decision identity is only meaningful inside one project on one engine, so
+   * switching either drops the previous scope's announcements instead of
+   * carrying foreign-root entries across.
+   */
+  const decisionScope = useCallback((): DecisionScope => {
+    return {
+      projectRoot:
+        serverWorkspaceRootsRef.current?.[0] ??
+        projectRootsRef.current?.[0] ??
+        "",
+      endpointIdentity,
+    };
+  }, [endpointIdentity]);
+
   const processNotification = useCallback(
     (event: NotificationEvent) => {
       if (event.type === "task_done") {
+        // task_done is a completion notice, never a decision: it must not
+        // create, resolve or acknowledge a pending native question.
         postMessage(
           ideTaskDone({
             chatId: event.chat_id,
@@ -705,16 +760,83 @@ export function useSidebarSubscription() {
         return;
       }
 
+      // The engine re-emits ask_questions on reconnect, and the chat-event
+      // producer observes the same tool message, so the host would otherwise be
+      // notified two or more times for one native decision.
+      const scope = decisionScope();
+      scopeHostDecisions(scope);
+      const askedAtMs = (event as NotificationEvent & { asked_at_ms?: number })
+        .asked_at_ms;
+      const announce = announceHostDecision(
+        {
+          chatId: event.chat_id,
+          toolCallId: event.tool_call_id,
+          questions: event.questions,
+          askedAtMs,
+          scope,
+          origin: "native_notification_stream" as const,
+        },
+        decisionScope(),
+      );
+      if (!announce) return;
+
       postMessage(
         ideAskQuestions({
           chatId: event.chat_id,
           toolCallId: event.tool_call_id,
           questions: event.questions,
+          askedAtMs,
+          scope,
+          origin: "native_notification_stream",
         }),
       );
     },
-    [postMessage],
+    [postMessage, decisionScope],
   );
+
+  /**
+   * Authoritative native listing, polled only while this host is still showing
+   * a decision. It is what lets an answer given in the Desk, the TUI, a browser
+   * tab or another IDE window clear the notification here.
+   */
+  const nativeDecisions = useGetBuddyNativeDecisionsQuery(
+    { endpoint_identity: nativeDecisionQueryIdentity },
+    {
+      skip: !hasEndpoint || outstandingDecisions === 0,
+      pollingInterval: NATIVE_DECISION_POLL_MS,
+      refetchOnMountOrArgChange: true,
+    },
+  );
+
+  useEffect(() => {
+    // currentData (not data) prevents a previous endpoint's cached response
+    // from being interpreted under the new endpoint identity.
+    const snapshot = nativeDecisions.currentData;
+    if (
+      !nativeDecisions.isSuccess ||
+      nativeDecisions.isFetching ||
+      snapshot === undefined ||
+      snapshot.truncated
+    )
+      return;
+    const scope = decisionScope();
+    if (scope.projectRoot !== snapshot.project_root) return;
+    for (const entry of snapshot.questions) {
+      if (entry.project_root !== scope.projectRoot) continue;
+      for (const payload of observeHostQuestionStatuses(scope, entry.chat_id, [
+        entry.question,
+      ])) {
+        postMessage(ideDecisionResolved(payload));
+      }
+    }
+  }, [
+    nativeDecisions.isSuccess,
+    nativeDecisions.isFetching,
+    nativeDecisions.currentData,
+    nativeDecisions.fulfilledTimeStamp,
+    decisionScope,
+    postMessage,
+  ]);
 
   const processBuddyEvent = useCallback(
     (event: Extract<SidebarSectionUpdate, { event_type: string }>) => {
@@ -887,6 +1009,12 @@ export function useSidebarSubscription() {
     if (!reconnectingSameEndpoint) {
       dispatch(resetSidebarState({ lspPort: config.lspPort }));
       serverWorkspaceRootsRef.current = undefined;
+      // Retain tombstones on same-endpoint reconnects, including React effect
+      // restarts caused by credential/config refresh.
+      scopeHostDecisions({
+        projectRoot: projectRootsRef.current?.[0] ?? "",
+        endpointIdentity,
+      });
       void prepareInitialHistory(generation);
     }
 
@@ -966,7 +1094,6 @@ export function useSidebarSubscription() {
       if (disconnectRef.current) {
         disconnectRef.current();
       }
-      activeEndpointRef.current = null;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }

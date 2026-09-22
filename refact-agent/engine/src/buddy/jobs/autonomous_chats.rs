@@ -72,6 +72,13 @@ pub struct AutonomousBuddyChatSpec {
     pub icon: String,
     pub badge: String,
     pub priority: String,
+    /// The engine's own typed observation of the source that produced `evidence`, when the
+    /// workflow has one. Its scope, fingerprint, and evidence refs are what the durable outcome
+    /// records; the model's prose never replaces them.
+    pub(crate) source_check: Option<crate::buddy::workflow_deliverables::SourceCheck>,
+    pub(crate) memory_operation_evidence: Vec<refact_buddy_core::operator_types::EvidenceRef>,
+    pub(crate) candidate_binding:
+        Option<crate::buddy::workflow_deliverables::NativeCandidateBinding>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -97,7 +104,37 @@ impl AutonomousBuddyChatSpec {
             icon: String::new(),
             badge: String::new(),
             priority: "normal".to_string(),
+            source_check: None,
+            memory_operation_evidence: Vec::new(),
+            candidate_binding: None,
         }
+    }
+
+    /// Attach an engine-minted candidate binding. Only `supervision::assess_candidate` calls
+    /// this after re-validating the user's explicit engineering grant.
+    pub(crate) fn with_candidate_binding(
+        mut self,
+        bound: crate::buddy::workflow_deliverables::NativeCandidateBinding,
+    ) -> Self {
+        self.signal_hash = signal_hash([
+            self.workflow_id.as_str(),
+            bound.run_id.as_str(),
+            bound.candidate_version.as_str(),
+        ]);
+        self.candidate_binding = Some(bound);
+        self
+    }
+
+    /// Attach the typed source observation behind this spec. The signal hash becomes the
+    /// observation's input fingerprint so identical observed inputs dedupe as one signal.
+    pub(crate) fn with_source_check(
+        mut self,
+        check: crate::buddy::workflow_deliverables::SourceCheck,
+    ) -> Self {
+        self.signal_hash =
+            signal_hash([self.workflow_id.as_str(), check.input_fingerprint.as_str()]);
+        self.source_check = Some(check);
+        self
     }
 
     pub fn with_project_root(mut self, project_root: impl Into<String>) -> Self {
@@ -292,7 +329,7 @@ enum MemoryRouting {
 
 const MEMORY_COOLDOWN_SECS: u64 = 6 * 60 * 60;
 const BEHAVIOR_COOLDOWN_SECS: u64 = 4 * 60 * 60;
-const AUTONOMOUS_SUCCESS_XP: u64 = 4;
+const AUTONOMOUS_SUCCESS_XP: u64 = 0;
 const MAX_FACT_EVIDENCE_ITEMS: usize = 12;
 const MAX_TRAJECTORY_SNIPPETS: usize = 12;
 const MAX_BEHAVIOR_PREFERENCE_WRITES: usize = 2;
@@ -312,6 +349,7 @@ fn fact_kind_name(kind: BuddyFactKind) -> &'static str {
         BuddyFactKind::AgentsMdGapDetected => "agents_md_gap_detected",
         BuddyFactKind::DefaultModelMissing => "default_model_missing",
         BuddyFactKind::BrokenModelReference => "broken_model_reference",
+        BuddyFactKind::ProviderRateLimited => "provider_rate_limited",
         BuddyFactKind::McpAuthExpired => "mcp_auth_expired",
         BuddyFactKind::IntegrationFailing => "integration_failing",
         BuddyFactKind::DiagnosticCluster => "diagnostic_cluster",
@@ -552,7 +590,7 @@ async fn autonomous_runtime_event(
 ) -> BuddyRuntimeEvent {
     let fallback_title = format!("{} report ready", spec.title);
     let fallback_description = format!(
-        "Open {}'s saved chat for {} details.",
+        "{}'s {} assessment is ready in Buddy Desk; the saved chat is supporting evidence.",
         identity_name, spec.title
     );
     let (title, description) = match crate::buddy::actor::buddy_snapshot(gcx.clone()).await {
@@ -733,9 +771,12 @@ fn default_autonomous_activity(
 pub(crate) async fn execute_autonomous_spec(
     gcx: AppState,
     ctx: &BuddyJobContext,
-    spec: AutonomousBuddyChatSpec,
+    mut spec: AutonomousBuddyChatSpec,
     cooldown_seconds: u64,
 ) -> BuddyJobResult {
+    if spec.project_root.trim().is_empty() {
+        spec.project_root = ctx.project_root.to_string_lossy().into_owned();
+    }
     if same_signal_or_failed_backoff(ctx, &spec.signal_hash, cooldown_seconds) {
         return preserve_last_result(ctx);
     }
@@ -762,6 +803,13 @@ async fn autonomous_success_result(
     spec: AutonomousBuddyChatSpec,
     chat_id: String,
 ) -> BuddyJobResult {
+    let operator_storage = gcx
+        .buddy
+        .buddy
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|svc| svc.operator_features.storage);
     let last = AutonomousLastResult::new(spec.signal_hash.clone(), chat_id.clone());
     let activity = autonomous_activity(gcx.clone(), &spec, &chat_id, &ctx.identity_name).await;
     let runtime_event = autonomous_runtime_event(gcx, &spec, &chat_id, &ctx.identity_name).await;
@@ -770,7 +818,11 @@ async fn autonomous_success_result(
         runtime_event: Some(runtime_event),
         last_result: Some(serialize_last_autonomous_result(&last)),
         xp: AUTONOMOUS_SUCCESS_XP,
-        opportunities: job_finding_opportunities(&spec, &chat_id),
+        opportunities: if operator_storage {
+            Vec::new()
+        } else {
+            job_finding_opportunities(&spec, &chat_id)
+        },
         ..Default::default()
     }
 }
@@ -2202,28 +2254,349 @@ pub fn sum_llm_usage(messages: &[ChatMessage]) -> (u64, u64, u64) {
     (llm_calls, tokens_in, tokens_out)
 }
 
-pub async fn run_autonomous_buddy_chat(
-    gcx: AppState,
-    spec: AutonomousBuddyChatSpec,
+const AUTONOMOUS_PARTIAL_REPORT_CAP_CHARS: usize = 4_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutonomousRunStage {
+    Blocked,
+    Failed,
+    Ran,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AutonomousRunObservation {
+    stage: AutonomousRunStage,
+    chat_id: Option<String>,
+    report: String,
+    successful: bool,
+    aborted: bool,
+    error: Option<String>,
+    record_outcome: bool,
+    called_runtime_report: bool,
+}
+
+impl AutonomousRunObservation {
+    fn blocked(error: String, record_outcome: bool) -> Self {
+        Self {
+            stage: AutonomousRunStage::Blocked,
+            chat_id: None,
+            report: String::new(),
+            successful: false,
+            aborted: false,
+            error: Some(error),
+            record_outcome,
+            called_runtime_report: false,
+        }
+    }
+
+    fn failed(error: String) -> Self {
+        Self {
+            stage: AutonomousRunStage::Failed,
+            chat_id: None,
+            report: String::new(),
+            successful: false,
+            aborted: false,
+            error: Some(error),
+            record_outcome: true,
+            called_runtime_report: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AutonomousFinalization {
+    terminal: crate::buddy::outcome_runtime::WorkflowTerminal,
+    title: String,
+    report: String,
+    evidence_chat_id: Option<String>,
+    successful: bool,
+}
+
+async fn autonomous_evidence_refs(
+    spec: &AutonomousBuddyChatSpec,
+    chat_id: Option<&str>,
+) -> Vec<refact_buddy_core::operator_types::EvidenceRef> {
+    let mut refs = spec
+        .source_check
+        .as_ref()
+        .map(|check| check.evidence.clone())
+        .unwrap_or_default();
+    if let Some(chat_id) = chat_id {
+        refs.push(refact_buddy_core::operator_types::EvidenceRef {
+            evidence_id: chat_id.to_string(),
+            source: refact_buddy_core::operator_types::NativeSourceIdentity {
+                source_kind: refact_buddy_core::operator_types::NativeSourceKind::Chat,
+                source_id: chat_id.to_string(),
+                source_version: spec.signal_hash.clone(),
+            },
+            locator: format!("refact://chat/{chat_id}"),
+            observed_at: Utc::now().to_rfc3339(),
+            digest: None,
+        });
+    }
+    refs.extend(spec.memory_operation_evidence.clone());
+    if let Some(binding) = spec.candidate_binding.as_ref() {
+        refs.push(refact_buddy_core::operator_types::EvidenceRef {
+            evidence_id: format!("candidate:{}", binding.worktree_id),
+            source: refact_buddy_core::operator_types::NativeSourceIdentity {
+                source_kind: refact_buddy_core::operator_types::NativeSourceKind::Workflow,
+                source_id: format!("supervision:{}", binding.mandate_id),
+                source_version: binding.candidate_version.clone(),
+            },
+            locator: format!(
+                "refact://worktree/{}/chat/{}",
+                binding.worktree_id, binding.candidate_chat_id
+            ),
+            observed_at: binding.admitted_at.clone(),
+            digest: Some(binding.candidate_version.clone()),
+        });
+    }
+    refs
+}
+
+fn autonomous_finalization(
+    spec: &AutonomousBuddyChatSpec,
+    observation: &AutonomousRunObservation,
+) -> Option<AutonomousFinalization> {
+    use crate::buddy::outcome_runtime::{terminal_from_workflow_result, WorkflowTerminal};
+
+    if !observation.record_outcome {
+        return None;
+    }
+    if observation.successful && !observation.aborted {
+        let report = if observation.report.trim().is_empty() {
+            "The workflow reported through Buddy tools without a written summary.".to_string()
+        } else {
+            observation.report.clone()
+        };
+        return Some(AutonomousFinalization {
+            terminal: WorkflowTerminal::Inconclusive,
+            title: spec.title.clone(),
+            report: crate::buddy::workflow_deliverables::assessment_body(
+                &spec.workflow_id,
+                &spec.evidence,
+                &report,
+                spec.source_check.as_ref(),
+            ),
+            evidence_chat_id: observation.chat_id.clone(),
+            successful: true,
+        });
+    }
+
+    let has_partial_report = !observation.report.trim().is_empty();
+    let terminal = match observation.stage {
+        AutonomousRunStage::Blocked => WorkflowTerminal::Blocked {
+            failure_class: Some("precondition".to_string()),
+        },
+        AutonomousRunStage::Failed => terminal_from_workflow_result(&Err(observation
+            .error
+            .clone()
+            .unwrap_or_else(|| "workflow error".to_string()))),
+        AutonomousRunStage::Ran if observation.aborted => WorkflowTerminal::Cancelled {
+            failure_class: Some("cancelled".to_string()),
+        },
+        AutonomousRunStage::Ran if has_partial_report || observation.chat_id.is_some() => {
+            WorkflowTerminal::Partial {
+                failure_class: Some("no_successful_report".to_string()),
+            }
+        }
+        AutonomousRunStage::Ran => WorkflowTerminal::Failed {
+            failure_class: Some("empty_output".to_string()),
+        },
+    };
+
+    let mut lines = vec![format!(
+        "Workflow {} did not produce a verified report.",
+        spec.workflow_id
+    )];
+    if let Some(check) = spec.source_check.as_ref() {
+        lines.push(format!("Observed scope: {}", check.coverage()));
+        lines.push(format!("Source completion: {}", check.completion_summary()));
+    }
+    if let Some(error) = observation.error.as_deref() {
+        lines.push(format!("Error: {}", redact_and_cap_text(error, 1_000)));
+    }
+    if has_partial_report {
+        lines.push("Partial assistant output (unverified):".to_string());
+        lines.push(redact_and_cap_text(
+            &observation.report,
+            AUTONOMOUS_PARTIAL_REPORT_CAP_CHARS,
+        ));
+    } else {
+        lines.push("No assistant output was retained for this run.".to_string());
+    }
+    if let Some(chat_id) = observation.chat_id.as_deref() {
+        lines.push(format!("Chat evidence: refact://chat/{chat_id}"));
+    }
+    Some(AutonomousFinalization {
+        terminal,
+        title: format!("{} — run outcome", spec.title),
+        report: lines.join("\n"),
+        evidence_chat_id: observation.chat_id.clone(),
+        successful: false,
+    })
+}
+
+fn autonomous_outcome_start(
+    runtime: &crate::buddy::outcome_runtime::OutcomeRuntime,
+    spec: &AutonomousBuddyChatSpec,
+    run_chat_id: &str,
+    started_at: &str,
+) -> crate::buddy::outcome_runtime::WorkflowOutcomeStart {
+    let mut start = runtime.start_workflow(&spec.workflow_id, started_at.to_string());
+    start.run_id = run_chat_id.to_string();
+    start.input_fingerprint = spec.signal_hash.clone();
+    start.coverage = match spec.source_check.as_ref() {
+        Some(check) => check.coverage(),
+        None => format!("Assessment of workflow signal {}", spec.workflow_id),
+    };
+    start
+}
+
+async fn publish_autonomous_finalization(
+    runtime: &crate::buddy::outcome_runtime::OutcomeRuntime,
+    spec: &AutonomousBuddyChatSpec,
+    run_chat_id: &str,
+    started_at: &str,
+    finalization: &AutonomousFinalization,
+) -> Result<(), String> {
+    let start = autonomous_outcome_start(runtime, spec, run_chat_id, started_at);
+    let evidence = autonomous_evidence_refs(spec, finalization.evidence_chat_id.as_deref()).await;
+    if let Err(error) = runtime
+        .checkpoint_workflow(
+            start.clone(),
+            crate::buddy::outcome_runtime::WorkflowOutcomeCheckpoint::from_evidence(
+                evidence.clone(),
+            ),
+        )
+        .await
+    {
+        tracing::warn!(workflow_id = %spec.workflow_id, error = %error, "autonomous run checkpoint was not persisted; attempting terminal publication");
+    }
+    if finalization.successful {
+        runtime
+            .publish_assessment(
+                start,
+                finalization.title.clone(),
+                finalization.report.clone(),
+                evidence,
+            )
+            .await
+            .map(|_| ())
+    } else {
+        runtime
+            .publish_report(
+                start,
+                finalization.title.clone(),
+                finalization.report.clone(),
+                evidence,
+                finalization.terminal.clone(),
+            )
+            .await
+            .map(|_| ())
+    }
+}
+
+async fn finalize_autonomous_run(
+    runtime: Option<&crate::buddy::outcome_runtime::OutcomeRuntime>,
+    spec: &AutonomousBuddyChatSpec,
+    run_chat_id: &str,
+    started_at: &str,
+    observation: &AutonomousRunObservation,
 ) -> Result<String, String> {
-    if !validate_workflow_id(&spec.workflow_id) {
+    let mut persistence_error = None;
+    if let (Some(runtime), Some(finalization)) =
+        (runtime, autonomous_finalization(spec, observation))
+    {
+        if let Err(error) =
+            publish_autonomous_finalization(runtime, spec, run_chat_id, started_at, &finalization)
+                .await
+        {
+            tracing::warn!(
+                "buddy: autonomous outcome for {} could not be saved to Buddy Desk: {}",
+                spec.workflow_id,
+                error
+            );
+            persistence_error = Some(error);
+        }
+    }
+    if let Some(error) = observation.error.clone() {
+        return Err(error);
+    }
+    if observation.aborted {
+        return Err("autonomous buddy subchat cancelled".into());
+    }
+    if let Some(error) = persistence_error {
         return Err(format!(
-            "invalid autonomous buddy workflow id: {}",
-            spec.workflow_id
+            "Assessment could not be saved to Buddy Desk: {error}"
         ));
     }
+    observation
+        .chat_id
+        .clone()
+        .ok_or_else(|| "autonomous buddy chat did not return a chat_id".to_string())
+}
 
-    if !autonomous_chats_enabled(gcx.clone()).await? {
-        return Err("autonomous chats disabled".to_string());
+async fn autonomous_outcome_runtime(
+    gcx: &AppState,
+) -> Option<crate::buddy::outcome_runtime::OutcomeRuntime> {
+    let buddy = gcx.buddy.buddy.lock().await;
+    buddy
+        .as_ref()
+        .and_then(|service| service.outcome_runtime.clone())
+}
+
+async fn observe_autonomous_run(
+    gcx: AppState,
+    spec: &AutonomousBuddyChatSpec,
+    run_chat_id: &str,
+    started_at: &str,
+    outcome_runtime: Option<&crate::buddy::outcome_runtime::OutcomeRuntime>,
+) -> AutonomousRunObservation {
+    if !validate_workflow_id(&spec.workflow_id) {
+        return AutonomousRunObservation::blocked(
+            format!("invalid autonomous buddy workflow id: {}", spec.workflow_id),
+            true,
+        );
     }
 
-    let (messages, max_steps, tools) = build_autonomous_messages(gcx.clone(), &spec).await?;
+    match autonomous_chats_enabled(gcx.clone()).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return AutonomousRunObservation::blocked(
+                "autonomous chats disabled".to_string(),
+                false,
+            )
+        }
+        Err(err) => return AutonomousRunObservation::blocked(err, true),
+    }
 
-    let mut config = crate::subchat::resolve_subchat_config(
+    if let Some(runtime) = outcome_runtime {
+        if let Err(error) = runtime
+            .begin_workflow(autonomous_outcome_start(
+                runtime,
+                spec,
+                run_chat_id,
+                started_at,
+            ))
+            .await
+        {
+            return AutonomousRunObservation::blocked(
+                format!("Autonomous workflow start could not be saved: {error}"),
+                true,
+            );
+        }
+    }
+    let (messages, max_steps, tools) =
+        match build_autonomous_messages(gcx.clone(), spec, run_chat_id).await {
+            Ok(built) => built,
+            Err(err) => return AutonomousRunObservation::blocked(err, true),
+        };
+    let mut config = match crate::subchat::resolve_subchat_config(
         gcx.gcx.clone(),
         &spec.workflow_id,
         true,
-        Some(format!("buddy-{}-{}", spec.workflow_id, Uuid::new_v4())),
+        Some(run_chat_id.to_string()),
         Some(spec.title.clone()),
         None,
         None,
@@ -2234,7 +2607,11 @@ pub async fn run_autonomous_buddy_chat(
         None,
         pick_available_buddy_mode(gcx.clone()).await,
     )
-    .await?;
+    .await
+    {
+        Ok(config) => config,
+        Err(err) => return AutonomousRunObservation::blocked(err, true),
+    };
 
     config.autonomous_no_confirm = true;
     config.mode = "buddy".to_string();
@@ -2244,31 +2621,227 @@ pub async fn run_autonomous_buddy_chat(
         workflow_id: Some(spec.workflow_id.clone()),
     });
 
-    let result = crate::subchat::run_subchat(gcx.gcx.clone(), messages, config).await?;
+    let result = match crate::subchat::run_subchat(gcx.gcx.clone(), messages, config).await {
+        Ok(result) => result,
+        Err(err) => return AutonomousRunObservation::failed(err),
+    };
     let (llm_calls, tokens_in, tokens_out) = sum_llm_usage(&result.messages);
-    let success = autonomous_subchat_successful(&result.messages);
+    let successful = !result.aborted && autonomous_subchat_successful(&result.messages);
     crate::buddy::actor::buddy_record_workflow_telemetry(
         gcx.clone(),
         &spec.workflow_id,
         llm_calls,
         tokens_in,
         tokens_out,
-        success,
+        successful,
     )
     .await;
-    if !success {
-        return Err("autonomous buddy subchat completed without a successful report".to_string());
+    let report = last_assistant_text(&result.messages);
+    let error = if result.aborted {
+        Some("autonomous buddy subchat cancelled".to_string())
+    } else if !successful {
+        Some("autonomous buddy subchat completed without a successful report".to_string())
+    } else if result.chat_id.is_none() {
+        Some("autonomous buddy chat did not return a chat_id".to_string())
+    } else {
+        None
+    };
+    AutonomousRunObservation {
+        stage: AutonomousRunStage::Ran,
+        chat_id: result.chat_id.clone(),
+        report,
+        successful: successful && error.is_none(),
+        aborted: result.aborted,
+        error,
+        record_outcome: true,
+        called_runtime_report: called_buddy_runtime_report(&result.messages),
     }
-    let chat_id = result
-        .chat_id
-        .clone()
-        .ok_or_else(|| "autonomous buddy chat did not return a chat_id".to_string())?;
-    if !called_buddy_runtime_report(&result.messages) {
-        let report_text = last_assistant_text(&result.messages);
+}
+
+pub(crate) async fn run_candidate_assessment(
+    app: AppState,
+    runtime: crate::buddy::outcome_runtime::OutcomeRuntime,
+    spec: AutonomousBuddyChatSpec,
+) -> Result<String, String> {
+    use crate::buddy::outcome_runtime::{WorkflowOutcomeCheckpoint, WorkflowTerminal};
+    use crate::buddy::supervision::validate_candidate_assessment;
+    use crate::buddy::workflow_deliverables::{attach_local_proposal, parse_local_proposal};
+
+    let binding = spec
+        .candidate_binding
+        .as_ref()
+        .ok_or("native candidate binding required")?;
+    if spec.workflow_id != binding.workflow_id
+        || spec.project_root != binding.project.canonical_root
+        || binding.run_id == binding.candidate_chat_id
+        || spec.source_check.is_some()
+        || !spec.memory_operation_evidence.is_empty()
+    {
+        return Err("candidate assessment does not match its native binding".into());
+    }
+    let retained = validate_candidate_assessment(&app, &runtime, binding).await?;
+    let proposal_json = serde_json::json!({
+        "family": "isolated_candidate_checkpoint",
+        "worktree_id": binding.worktree_id,
+        "chat_id": binding.candidate_chat_id,
+    });
+    let report = format!(
+        "Retained native evidence only. No new model, tool, security, dependency, documentation or code investigation was run; no new tests or verification were performed. This proposal requests review of the existing isolated candidate. It grants no consent and applies, checkpoints, merges and publishes nothing.\n\n```json\n{proposal_json}\n```"
+    );
+    let proposal = parse_local_proposal(&spec.workflow_id, &report)
+        .ok_or("native candidate proposal is unavailable for this workflow")?;
+    let mut start =
+        autonomous_outcome_start(&runtime, &spec, &binding.run_id, &binding.admitted_at);
+    start.origin = "native_candidate_evidence_delivery".into();
+    start.coverage = format!(
+        "Retained native engineering proof for isolated worktree {} at candidate version {}; current source identity comparison only, not a new investigation, test run or verification.",
+        binding.worktree_id, binding.candidate_version,
+    );
+    let evidence = autonomous_evidence_refs(&spec, Some(&binding.candidate_chat_id)).await;
+    runtime
+        .begin_workflow(start.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    runtime
+        .checkpoint_workflow(
+            start.clone(),
+            WorkflowOutcomeCheckpoint::from_evidence(evidence.clone()),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let body = format!(
+        "## Retained native candidate evidence\n\n### Scope and limitations\n{}\n\n### Retained verification evidence\n{}\n\n### Local checkpoint proposal (requires confirmation)\n{}",
+        start.coverage,
+        redact_and_cap_text(&retained, 4_000),
+        report,
+    );
+    if let Err(error) = validate_candidate_assessment(&app, &runtime, binding).await {
+        runtime
+            .publish_report(
+                start,
+                format!("Retained candidate evidence — {}", spec.workflow_id),
+                format!(
+                    "{body}\n\n### Proposal unavailable\nThe native candidate or its authority changed before publication: {}. Retained evidence is historical only; no action was prepared.",
+                    redact_and_cap_text(&error, 240),
+                ),
+                evidence,
+                WorkflowTerminal::Blocked {
+                    failure_class: Some("candidate_precondition_changed".into()),
+                },
+            )
+            .await?;
+        return Ok(binding.run_id.clone());
+    }
+    let work = runtime
+        .publish_assessment(
+            start,
+            format!("Retained candidate evidence — {}", spec.workflow_id),
+            body,
+            evidence,
+        )
+        .await?;
+    if let Err(error) =
+        attach_local_proposal(app, &runtime, work, &binding.run_id, &report, proposal).await
+    {
+        tracing::warn!(workflow_id = %spec.workflow_id, error = %error, "native candidate evidence retained without a prepared action");
+    }
+    Ok(binding.run_id.clone())
+}
+
+pub async fn run_autonomous_buddy_chat(
+    gcx: AppState,
+    mut spec: AutonomousBuddyChatSpec,
+) -> Result<String, String> {
+    let started_at = Utc::now().to_rfc3339();
+    if spec.candidate_binding.is_some() {
+        return Err(
+            "bound candidate delivery requires the explicit native assessment entry".into(),
+        );
+    }
+    let run_chat_id = format!("buddy-{}-{}", spec.workflow_id, Uuid::new_v4());
+    let outcome_runtime = autonomous_outcome_runtime(&gcx).await;
+    capture_memory_proposal_input(&mut spec).await;
+    if gcx
+        .buddy
+        .buddy
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|svc| svc.operator_features.storage)
+        && outcome_runtime.is_none()
+    {
+        return Err("Buddy operator store unavailable; autonomous run not admitted".into());
+    }
+
+    let observation = observe_autonomous_run(
+        gcx.clone(),
+        &spec,
+        &run_chat_id,
+        &started_at,
+        outcome_runtime.as_ref(),
+    )
+    .await;
+    let chat_id = finalize_autonomous_run(
+        outcome_runtime.as_ref(),
+        &spec,
+        &run_chat_id,
+        &started_at,
+        &observation,
+    )
+    .await?;
+    if observation.successful {
+        if let (Some(runtime), Some(proposal)) = (
+            outcome_runtime.as_ref(),
+            crate::buddy::workflow_deliverables::parse_local_proposal(
+                &spec.workflow_id,
+                &observation.report,
+            ),
+        ) {
+            match runtime.get_run_outcome(run_chat_id.clone()).await {
+                Ok(Some(outcome)) => match runtime.get_work_item(outcome.value.work_id).await {
+                    Ok(Some(work)) => {
+                        if let Err(error) =
+                            crate::buddy::workflow_deliverables::attach_local_proposal(
+                                gcx.clone(),
+                                runtime,
+                                work,
+                                &run_chat_id,
+                                &observation.report,
+                                proposal,
+                            )
+                            .await
+                        {
+                            // Publishing the readable assessment is the durable outcome. A
+                            // malformed, stale, or unavailable native proposal must not erase
+                            // that report or falsely turn it into an available action.
+                            tracing::warn!(workflow_id = %spec.workflow_id, error = %error, "local proposal was retained only; resource action was not attached");
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::warn!(workflow_id = %spec.workflow_id, "local proposal was retained only; saved workflow item was unavailable")
+                    }
+                    Err(error) => {
+                        tracing::warn!(workflow_id = %spec.workflow_id, error = %error, "local proposal was retained only; saved workflow item could not be read")
+                    }
+                },
+                Ok(None) => {
+                    tracing::warn!(workflow_id = %spec.workflow_id, "local proposal was retained only; saved workflow outcome was unavailable")
+                }
+                Err(error) => {
+                    tracing::warn!(workflow_id = %spec.workflow_id, error = %error, "local proposal was retained only; saved workflow outcome could not be read")
+                }
+            }
+        }
+    }
+    if !observation.called_runtime_report {
         buddy_apply(
             gcx,
             BuddyMutation {
-                activity: Some(default_autonomous_activity(&spec, &chat_id, &report_text)),
+                activity: Some(default_autonomous_activity(
+                    &spec,
+                    &chat_id,
+                    &observation.report,
+                )),
                 ..Default::default()
             },
         )
@@ -2281,6 +2854,7 @@ pub async fn run_autonomous_buddy_chat(
 async fn build_autonomous_messages(
     gcx: AppState,
     spec: &AutonomousBuddyChatSpec,
+    run_chat_id: &str,
 ) -> Result<(Vec<ChatMessage>, usize, Vec<String>), String> {
     let subagent_config = crate::yaml_configs::customization_registry::get_subagent_config(
         gcx.gcx.clone(),
@@ -2309,7 +2883,7 @@ async fn build_autonomous_messages(
     let max_steps = subagent_config.subchat.max_steps.unwrap_or(1).max(1);
     if system_prompt.contains("%BUDDY_PERSONALITY%") {
         system_prompt = crate::chat::prompts::system_prompt_add_extra_instructions(
-            gcx,
+            gcx.clone(),
             system_prompt,
             subagent_config
                 .tools
@@ -2328,12 +2902,143 @@ async fn build_autonomous_messages(
             );
         }
     }
+    if let Some(contract) =
+        refact_buddy_core::autonomous_workflows::workflow_deliverable_contract(&spec.workflow_id)
+    {
+        system_prompt.push_str(&format!(
+            "\nDeliverable: {}. Include: {}. Coverage limit: {}. Provide a directly readable local proposal, with observed evidence, uncertainty, and next checks. Do not claim no-change without a completed check of its stated scope. Do not claim application or verification from a summary or tool-call count. Issue-disabled runs must retain the local proposal without publication.",
+            contract.kind, contract.local_proposal, contract.coverage_limit,
+        ));
+    }
+    // The candidate vocabulary is offered only when a native isolated checkout is already
+    // registered to this exact report chat. Nothing is created here: an absent candidate simply
+    // leaves the deliverable an honest read-only assessment.
+    let native_candidate =
+        registered_candidate_for_report_chat(gcx.clone(), &spec.project_root, run_chat_id).await;
+    if let Some(protocol) = crate::buddy::workflow_deliverables::local_proposal_protocol_instruction(
+        &spec.workflow_id,
+        native_candidate.as_deref(),
+    ) {
+        system_prompt.push('\n');
+        system_prompt.push_str(&protocol);
+    }
+    if matches!(
+        refact_buddy_core::autonomous_workflows::workflow_action_family(&spec.workflow_id),
+        refact_buddy_core::autonomous_workflows::WorkflowActionFamily::MemoryLifecycle
+    ) {
+        let operation_ids: Vec<_> = spec
+            .memory_operation_evidence
+            .iter()
+            .filter_map(|evidence| evidence.source.source_id.strip_prefix("memory-lifecycle:"))
+            .map(str::to_string)
+            .collect();
+        if operation_ids.is_empty() {
+            system_prompt.push_str("\nNo engine-recorded memory lifecycle operation is eligible for a proposal in this run.");
+        } else {
+            system_prompt.push_str(
+                "\nThe only eligible engine-recorded memory operation ids for this run are: ",
+            );
+            system_prompt.push_str(&operation_ids.join(", "));
+            system_prompt.push('.');
+        }
+    }
     let user_prompt = render_autonomous_template(&user_template, spec);
     let messages = vec![
         ChatMessage::new("system".to_string(), system_prompt),
         ChatMessage::new("user".to_string(), user_prompt),
     ];
     Ok((messages, max_steps, subagent_config.tools))
+}
+
+async fn capture_memory_proposal_input(spec: &mut AutonomousBuddyChatSpec) {
+    if matches!(
+        refact_buddy_core::autonomous_workflows::workflow_action_family(&spec.workflow_id),
+        refact_buddy_core::autonomous_workflows::WorkflowActionFamily::MemoryLifecycle
+    ) {
+        spec.memory_operation_evidence =
+            eligible_memory_operation_evidence(&spec.project_root).await;
+    }
+}
+
+async fn eligible_memory_operation_evidence(
+    project_root: &str,
+) -> Vec<refact_buddy_core::operator_types::EvidenceRef> {
+    use crate::buddy::memory_lifecycle::{MemoryOpStatus, MemoryOpType};
+    if project_root.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut evidence: Vec<_> = crate::buddy::storage::load_memory_ops(Path::new(project_root))
+        .await
+        .ops
+        .into_iter()
+        .filter(|operation| {
+            matches!(
+                operation.status,
+                MemoryOpStatus::Pending | MemoryOpStatus::Approved
+            ) && matches!(
+                operation.op_type,
+                MemoryOpType::CreateMemory | MemoryOpType::Archive | MemoryOpType::MergeArchive
+            )
+        })
+        .filter_map(|operation| {
+            let digest =
+                crate::buddy::workflow_deliverables::memory_operation_digest(&operation).ok()?;
+            Some(refact_buddy_core::operator_types::EvidenceRef {
+                evidence_id: format!("memory-lifecycle:{}", operation.op_id),
+                source: refact_buddy_core::operator_types::NativeSourceIdentity {
+                    source_kind: refact_buddy_core::operator_types::NativeSourceKind::Workflow,
+                    source_id: format!("memory-lifecycle:{}", operation.op_id),
+                    source_version: digest.clone(),
+                },
+                locator: format!("refact://memory-lifecycle/{}", operation.op_id),
+                observed_at: Utc::now().to_rfc3339(),
+                digest: Some(digest),
+            })
+        })
+        .collect();
+    evidence.sort_by(|left, right| left.evidence_id.cmp(&right.evidence_id));
+    evidence.dedup_by(|left, right| left.evidence_id == right.evidence_id);
+    evidence
+}
+
+/// Id of an isolated worktree that is *already registered* to this exact report chat, if any.
+///
+/// This never creates, registers, or adopts a worktree: it only reports what the native worktree
+/// service already records for this chat. When nothing is registered the caller must not offer the
+/// candidate vocabulary, so the deliverable stays an honest read-only assessment.
+#[cfg_attr(not(test), allow(dead_code))]
+async fn registered_candidate_for_report_chat(
+    gcx: AppState,
+    project_root: &str,
+    run_chat_id: &str,
+) -> Option<String> {
+    let project_root = PathBuf::from(project_root);
+    if project_root.as_os_str().is_empty()
+        || !crate::files_correction::get_project_dirs(gcx.gcx.clone())
+            .await
+            .iter()
+            .any(|root| root == &project_root)
+    {
+        return None;
+    }
+    let service = crate::worktrees::service::WorktreeService::new_async(
+        gcx.paths.cache_dir.clone(),
+        project_root,
+    )
+    .await
+    .ok()?;
+    let listed = service.list_worktrees().await.ok()?;
+    listed
+        .worktrees
+        .into_iter()
+        .find(|view| {
+            view.meta.source_workspace_root == *service.source_workspace_root()
+                && view
+                    .references
+                    .iter()
+                    .any(|reference| reference.chat_id.as_deref() == Some(run_chat_id))
+        })
+        .map(|view| view.meta.id)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2433,6 +3138,255 @@ struct LocalGitEvidence {
     additions: usize,
     deletions: usize,
     security_findings: Vec<SecurityFinding>,
+    /// HEAD commit id (or "unborn"), part of the input fingerprint.
+    head: String,
+    /// Digest of bounded, actually observed staged/worktree text for changed paths. This keeps
+    /// same-path, same-line-count edits from folding into one source signal without retaining
+    /// source content in the observation.
+    observation_digest: String,
+    /// Every changed path git reported, before `changed_paths` was capped.
+    total_changed_paths: usize,
+    /// Parts of the stated scope that were not read: caps hit, unreadable files, missing
+    /// diff stats. Empty means the whole scope was read.
+    uncovered: Vec<String>,
+}
+
+/// What the engine learned when it tried to read the local git state.
+///
+/// A missing repository, a read error, and an observed (possibly capped) working tree are
+/// three different answers, and the producers must not collapse them into "no changes".
+#[derive(Debug, Clone)]
+enum LocalGitObservation {
+    NotRepository { reason: String },
+    Failed { error: String },
+    Observed(LocalGitEvidence),
+}
+
+impl LocalGitObservation {
+    fn evidence(&self) -> Option<&LocalGitEvidence> {
+        match self {
+            LocalGitObservation::Observed(evidence) => Some(evidence),
+            _ => None,
+        }
+    }
+
+    fn from_scan_task(
+        result: Result<LocalGitObservation, tokio::task::JoinError>,
+        workflow_id: &str,
+    ) -> LocalGitObservation {
+        match result {
+            Ok(observation) => observation,
+            Err(err) => {
+                tracing::warn!("buddy {workflow_id} scan task failed: {err}");
+                LocalGitObservation::Failed {
+                    error: format!("scan task did not complete: {err}"),
+                }
+            }
+        }
+    }
+}
+
+const MAX_UNCOVERED_ENTRIES: usize = 12;
+
+/// A bounded directory walk result: what was counted and whether the walk finished.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct WalkCount<T> {
+    value: T,
+    /// Files visited before the walk stopped.
+    scanned: usize,
+    /// `Some(reason)` when the walk stopped before visiting every candidate.
+    stopped: Option<String>,
+}
+
+/// Builds the typed observation for one git-backed producer from what was actually read.
+///
+/// `scope` names exactly what the producer looked at; `extra_uncovered` lists any parts of the
+/// producer's own (non-git) scope it could not finish; `findings` are the engine's own
+/// observations, already redacted, or empty when the read scope had nothing in it.
+fn git_source_check(
+    workflow_id: &str,
+    scope: String,
+    git: &LocalGitObservation,
+    extra_fingerprint: &[String],
+    extra_uncovered: Vec<String>,
+    findings: Vec<String>,
+) -> crate::buddy::workflow_deliverables::SourceCheck {
+    use crate::buddy::workflow_deliverables::{SourceCheck, SourceCompletion};
+    let observed_at = Utc::now().to_rfc3339();
+    let (fingerprint, completion) = match git {
+        LocalGitObservation::NotRepository { reason } => (
+            signal_hash([workflow_id, "no-repository"]),
+            SourceCompletion::NotApplicable {
+                reason: reason.clone(),
+            },
+        ),
+        LocalGitObservation::Failed { error } => (
+            signal_hash([workflow_id, "read-failed", error.as_str()]),
+            SourceCompletion::Failed {
+                error: error.clone(),
+            },
+        ),
+        LocalGitObservation::Observed(evidence) => {
+            let mut parts = vec![
+                workflow_id.to_string(),
+                evidence.head.clone(),
+                evidence.observation_digest.clone(),
+            ];
+            parts.extend(
+                evidence
+                    .changed_paths
+                    .iter()
+                    .map(|path| format!("{}:{}", path.status, path.path)),
+            );
+            parts.push(format!("+{}/-{}", evidence.additions, evidence.deletions));
+            parts.extend(extra_fingerprint.iter().cloned());
+            // The engine's rendered findings and coverage state are observed input too. Hash
+            // them so changes that preserve path/count metadata cannot be incorrectly deduped.
+            parts.extend(findings.iter().map(|finding| format!("finding:{finding}")));
+            let mut uncovered = evidence.uncovered.clone();
+            uncovered.extend(extra_uncovered.iter().cloned());
+            let completion = if uncovered.is_empty() {
+                SourceCompletion::Complete
+            } else {
+                SourceCompletion::Partial {
+                    uncovered: uncovered.join("; "),
+                }
+            };
+            match &completion {
+                SourceCompletion::Complete => parts.push("completion:complete".to_string()),
+                SourceCompletion::Partial { uncovered } => {
+                    parts.push(format!("completion:partial:{uncovered}"))
+                }
+                SourceCompletion::Failed { error } => {
+                    parts.push(format!("completion:failed:{error}"))
+                }
+                SourceCompletion::NotApplicable { reason } => {
+                    parts.push(format!("completion:not-applicable:{reason}"))
+                }
+            }
+            (signal_hash(parts), completion)
+        }
+    };
+    // A source that was never checked cannot carry findings; keep the observation grounded.
+    let findings = if matches!(completion, SourceCompletion::NotApplicable { .. }) {
+        Vec::new()
+    } else {
+        findings
+    };
+    let evidence = vec![SourceCheck::check_evidence(
+        workflow_id,
+        &fingerprint,
+        &format!("refact://check/{workflow_id}"),
+        observed_at,
+    )];
+    SourceCheck {
+        scope,
+        input_fingerprint: fingerprint,
+        evidence,
+        completion,
+        findings,
+    }
+}
+
+/// Publishes a producer's own observation as a durable typed outcome without running a model.
+///
+/// Used when there is nothing for a model to assess: the source was clean, absent, partially
+/// read with nothing found, or could not be read. The terminal comes from the observation, so
+/// `NoChange` is only possible for a fully read, grounded, finding-free scope.
+async fn publish_source_check_outcome(
+    gcx: &AppState,
+    ctx: &BuddyJobContext,
+    definition: AutonomousJobDefinition,
+    check: crate::buddy::workflow_deliverables::SourceCheck,
+) -> BuddyJobResult {
+    let spec =
+        build_autonomous_job_spec(definition, String::new()).with_source_check(check.clone());
+    if same_signal_or_failed_backoff(ctx, &spec.signal_hash, definition.cooldown_seconds) {
+        return preserve_last_result(ctx);
+    }
+    let report = check.into_report(definition.meta.id);
+    let Some(runtime) = autonomous_outcome_runtime(gcx).await else {
+        tracing::debug!(
+            "buddy: {} source check not persisted; outcome runtime unavailable",
+            definition.meta.id
+        );
+        return preserve_last_result(ctx);
+    };
+    let run_id = format!("buddy-check-{}-{}", definition.meta.id, Uuid::new_v4());
+    let started_at = Utc::now().to_rfc3339();
+    let start = autonomous_outcome_start(&runtime, &spec, &run_id, &started_at);
+    let terminal = report.terminal.clone();
+    if let Err(error) = runtime
+        .publish_report(
+            start,
+            format!("{} — source check", definition.meta.title),
+            report.body,
+            report.evidence,
+            terminal.clone(),
+        )
+        .await
+    {
+        tracing::warn!(
+            "buddy: {} source check could not be saved to Buddy Desk: {}",
+            definition.meta.id,
+            error
+        );
+        return preserve_last_result(ctx);
+    }
+    let status = match terminal {
+        crate::buddy::outcome_runtime::WorkflowTerminal::NoChange => "no_change",
+        crate::buddy::outcome_runtime::WorkflowTerminal::Partial { .. } => "partial",
+        crate::buddy::outcome_runtime::WorkflowTerminal::Blocked { .. } => "blocked",
+        crate::buddy::outcome_runtime::WorkflowTerminal::Failed { .. } => "source_failed",
+        _ => "inconclusive",
+    };
+    let last = AutonomousLastResult {
+        signal_hash: spec.signal_hash.clone(),
+        chat_id: run_id,
+        completed_at: Utc::now().to_rfc3339(),
+        status: Some(status.to_string()),
+        failure_category: None,
+        consecutive_failures: None,
+    };
+    BuddyJobResult {
+        last_result: Some(serialize_last_autonomous_result(&last)),
+        ..Default::default()
+    }
+}
+
+/// Runs the model over a grounded observation that has findings, or publishes the typed
+/// observation directly when there is nothing for a model to add.
+async fn execute_source_check_job(
+    gcx: AppState,
+    ctx: &BuddyJobContext,
+    definition: AutonomousJobDefinition,
+    check: crate::buddy::workflow_deliverables::SourceCheck,
+    rendered_evidence: String,
+) -> BuddyJobResult {
+    if !check.needs_assessment() {
+        return publish_source_check_outcome(&gcx, ctx, definition, check).await;
+    }
+    let spec = build_autonomous_job_spec(definition, rendered_evidence).with_source_check(check);
+    execute_built_autonomous_job(gcx, ctx, definition, spec).await
+}
+
+async fn observe_local_git_task(
+    root: PathBuf,
+    scan_security: bool,
+    workflow_id: &str,
+) -> LocalGitObservation {
+    LocalGitObservation::from_scan_task(
+        tokio::task::spawn_blocking(move || observe_local_git(&root, scan_security)).await,
+        workflow_id,
+    )
+}
+
+fn push_uncovered(uncovered: &mut Vec<String>, skipped_count: &mut usize, entry: String) {
+    if uncovered.len() < MAX_UNCOVERED_ENTRIES {
+        uncovered.push(entry);
+    } else {
+        *skipped_count += 1;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2807,23 +3761,52 @@ fn has_root_file_case_insensitive(project_root: &Path, stem: &str) -> bool {
     })
 }
 
-fn collect_local_git_evidence(
-    project_root: &Path,
-    scan_security: bool,
-) -> Option<LocalGitEvidence> {
+fn observe_local_git(project_root: &Path, scan_security: bool) -> LocalGitObservation {
     track_local_git_evidence_scan(project_root);
-    let repo = git2::Repository::discover(project_root).ok()?;
-    let repo_root = repo.workdir()?.to_path_buf();
+    let repo = match git2::Repository::discover(project_root) {
+        Ok(repo) => repo,
+        Err(err) if err.code() == git2::ErrorCode::NotFound => {
+            return LocalGitObservation::NotRepository {
+                reason: format!("no git repository at or above {}", project_root.display()),
+            }
+        }
+        Err(err) => {
+            return LocalGitObservation::Failed {
+                error: format!("git repository discovery failed: {}", err.message()),
+            }
+        }
+    };
+    let Some(repo_root) = repo.workdir().map(Path::to_path_buf) else {
+        return LocalGitObservation::NotRepository {
+            reason: "bare git repository has no working tree to observe".to_string(),
+        };
+    };
     let mut opts = git2::StatusOptions::new();
     opts.include_untracked(true)
         .recurse_untracked_dirs(true)
         .include_ignored(false)
         .show(git2::StatusShow::IndexAndWorkdir);
-    let statuses = repo.statuses(Some(&mut opts)).ok()?;
+    let statuses = match repo.statuses(Some(&mut opts)) {
+        Ok(statuses) => statuses,
+        Err(err) => {
+            return LocalGitObservation::Failed {
+                error: format!("git status failed: {}", err.message()),
+            }
+        }
+    };
+    let head = repo
+        .head()
+        .ok()
+        .and_then(|head| head.target())
+        .map(|oid| oid.to_string())
+        .unwrap_or_else(|| "unborn".to_string());
     let mut changed_paths = Vec::new();
     let mut seen = HashSet::new();
     let mut security_findings = Vec::new();
     let mut seen_security_findings = HashSet::new();
+    let mut uncovered = Vec::new();
+    let mut uncovered_overflow = 0usize;
+    let mut observed_content = Sha256::new();
     let mut status_entries = statuses
         .iter()
         .filter_map(|entry| {
@@ -2835,39 +3818,134 @@ fn collect_local_git_evidence(
         })
         .collect::<Vec<_>>();
     status_entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let unnamed_entries = statuses.len().saturating_sub(status_entries.len());
+    if unnamed_entries > 0 {
+        push_uncovered(
+            &mut uncovered,
+            &mut uncovered_overflow,
+            format!("{unnamed_entries} status entries had no UTF-8 path and were not listed"),
+        );
+    }
 
-    for (path, status) in status_entries {
+    let mut security_scan_stopped_at: Option<String> = None;
+    for (entry_index, (path, status)) in status_entries.into_iter().enumerate() {
         if seen.insert(path.clone()) {
             changed_paths.push(PathStatus {
                 path: path.clone(),
                 status: git_status_label(status).to_string(),
             });
         }
-        if scan_security && security_findings.len() < MAX_SECURITY_FINDINGS {
-            for scan_content in git_security_scan_contents(&repo, &repo_root, &path, status) {
-                push_security_findings(
-                    &mut security_findings,
-                    &mut seen_security_findings,
-                    &path,
-                    scan_content.source,
-                    &scan_content.content,
+        if entry_index >= MAX_PATH_EVIDENCE {
+            if entry_index == MAX_PATH_EVIDENCE {
+                push_uncovered(
+                    &mut uncovered,
+                    &mut uncovered_overflow,
+                    format!(
+                        "bounded content observation stopped after {MAX_PATH_EVIDENCE} changed paths"
+                    ),
                 );
-                if security_findings.len() >= MAX_SECURITY_FINDINGS {
-                    break;
-                }
+            }
+            continue;
+        }
+        // Reuse the capped, symlink-safe readers used by the security scanner, but retain only
+        // a digest. This is bounded per source and never leaks project text into outcomes.
+        let (contents, observation_skips) =
+            git_security_scan_contents(&repo, &repo_root, &path, status);
+        for skip in observation_skips {
+            push_uncovered(&mut uncovered, &mut uncovered_overflow, skip);
+        }
+        for content in &contents {
+            observed_content.update(content.source.as_bytes());
+            observed_content.update(b"\0");
+            observed_content.update(path.as_bytes());
+            observed_content.update(b"\0");
+            observed_content.update(content.content.as_bytes());
+            observed_content.update(b"\0");
+        }
+        if !scan_security {
+            continue;
+        }
+        if security_findings.len() >= MAX_SECURITY_FINDINGS {
+            security_scan_stopped_at.get_or_insert(path.clone());
+            continue;
+        }
+        for scan_content in contents {
+            push_security_findings(
+                &mut security_findings,
+                &mut seen_security_findings,
+                &path,
+                scan_content.source,
+                &scan_content.content,
+            );
+            if security_findings.len() >= MAX_SECURITY_FINDINGS {
+                break;
             }
         }
     }
+    if let Some(path) = security_scan_stopped_at {
+        push_uncovered(
+            &mut uncovered,
+            &mut uncovered_overflow,
+            format!(
+                "security scan stopped at {MAX_SECURITY_FINDINGS} findings; changed paths from {path} onward were not scanned"
+            ),
+        );
+    }
 
-    let (additions, deletions) = diff_stats(&repo).unwrap_or((0, 0));
+    let (additions, deletions) = match diff_stats(&repo) {
+        Ok(stats) => {
+            for skip in stats.uncovered {
+                push_uncovered(&mut uncovered, &mut uncovered_overflow, skip);
+            }
+            (stats.additions, stats.deletions)
+        }
+        Err(error) => {
+            push_uncovered(
+                &mut uncovered,
+                &mut uncovered_overflow,
+                format!("line counts unavailable: {error}"),
+            );
+            (0, 0)
+        }
+    };
     changed_paths.sort_by(|a, b| a.path.cmp(&b.path));
-    changed_paths.truncate(MAX_PATH_EVIDENCE);
-    Some(LocalGitEvidence {
+    let total_changed_paths = changed_paths.len();
+    if total_changed_paths > MAX_PATH_EVIDENCE {
+        changed_paths.truncate(MAX_PATH_EVIDENCE);
+        push_uncovered(
+            &mut uncovered,
+            &mut uncovered_overflow,
+            format!(
+                "{} of {total_changed_paths} changed paths were not listed (cap {MAX_PATH_EVIDENCE})",
+                total_changed_paths - MAX_PATH_EVIDENCE
+            ),
+        );
+    }
+    if uncovered_overflow > 0 {
+        uncovered.push(format!(
+            "{uncovered_overflow} further uncovered items not listed"
+        ));
+    }
+    LocalGitObservation::Observed(LocalGitEvidence {
         changed_paths,
         additions,
         deletions,
         security_findings,
+        head,
+        observation_digest: hex::encode(observed_content.finalize()),
+        total_changed_paths,
+        uncovered,
     })
+}
+
+#[cfg(test)]
+fn collect_local_git_evidence(
+    project_root: &Path,
+    scan_security: bool,
+) -> Option<LocalGitEvidence> {
+    observe_local_git(project_root, scan_security)
+        .evidence()
+        .cloned()
 }
 
 #[cfg(test)]
@@ -2958,27 +4036,36 @@ fn git_security_scan_contents(
     repo_root: &Path,
     path: &str,
     status: git2::Status,
-) -> Vec<SecurityScanContent> {
+) -> (Vec<SecurityScanContent>, Vec<String>) {
     let mut contents = Vec::new();
+    let mut skipped = Vec::new();
     if should_scan_index_status(status) {
-        if let Ok(Some(content)) = git_index_content(repo, path) {
-            contents.push(SecurityScanContent {
+        match git_index_content(repo, path) {
+            Ok(Some(content)) => contents.push(SecurityScanContent {
                 source: "index",
                 content,
-            });
+            }),
+            Ok(None) => skipped.push(format!(
+                "{path} (index): not scanned; binary, oversized, or missing from the index"
+            )),
+            Err(error) => skipped.push(format!("{path} (index): read failed: {error}")),
         }
     }
 
     if should_scan_worktree_status(status) {
-        if let Ok(Some(content)) = git_workdir_content(repo_root, path) {
-            contents.push(SecurityScanContent {
+        match git_workdir_content(repo_root, path) {
+            Ok(Some(content)) => contents.push(SecurityScanContent {
                 source: "worktree",
                 content,
-            });
+            }),
+            Ok(None) => skipped.push(format!(
+                "{path} (worktree): not scanned; binary, oversized, symlink, or not a regular file"
+            )),
+            Err(error) => skipped.push(format!("{path} (worktree): read failed: {error}")),
         }
     }
 
-    contents
+    (contents, skipped)
 }
 
 fn git_workdir_content(repo_root: &Path, path: &str) -> Result<Option<String>, String> {
@@ -3019,35 +4106,59 @@ fn read_file_to_string_capped(path: &Path, max_bytes: u64) -> Result<Option<Stri
     Ok(Some(content))
 }
 
-fn diff_stats(repo: &git2::Repository) -> Option<(usize, usize)> {
-    let root = repo.workdir()?;
-    let staged_numstat =
-        crate::worktrees::git::run_git_lossy(root, &["diff", "--cached", "--numstat"]);
-    let unstaged_numstat = crate::worktrees::git::run_git_lossy(root, &["diff", "--numstat"]);
-    let untracked_numstat =
-        crate::worktrees::git::run_git_lossy(root, &["ls-files", "--others", "--exclude-standard"]);
-    let mut additions = 0usize;
-    let mut deletions = 0usize;
-    accumulate_numstat(&staged_numstat, &mut additions, &mut deletions);
-    accumulate_numstat(&unstaged_numstat, &mut additions, &mut deletions);
-    let mut untracked_paths = untracked_numstat
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DiffStats {
+    additions: usize,
+    deletions: usize,
+    uncovered: Vec<String>,
+}
+
+fn diff_stats(repo: &git2::Repository) -> Result<DiffStats, String> {
+    let root = repo
+        .workdir()
+        .ok_or_else(|| "bare repository has no working tree".to_string())?;
+    let staged_numstat = crate::worktrees::git::run_git(root, &["diff", "--cached", "--numstat"])
+        .map_err(|error| format!("git diff --cached --numstat: {error}"))?;
+    let unstaged_numstat = crate::worktrees::git::run_git(root, &["diff", "--numstat"])
+        .map_err(|error| format!("git diff --numstat: {error}"))?;
+    let untracked_listing =
+        crate::worktrees::git::run_git(root, &["ls-files", "--others", "--exclude-standard"])
+            .map_err(|error| format!("git ls-files --others: {error}"))?;
+    let mut stats = DiffStats::default();
+    accumulate_numstat(&staged_numstat, &mut stats.additions, &mut stats.deletions);
+    accumulate_numstat(
+        &unstaged_numstat,
+        &mut stats.additions,
+        &mut stats.deletions,
+    );
+    let mut untracked_paths = untracked_listing
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect::<Vec<_>>();
     untracked_paths.sort_unstable();
-    for rel in untracked_paths.into_iter().take(MAX_PATH_EVIDENCE) {
+    let untracked_total = untracked_paths.len();
+    let mut untracked_unread = 0usize;
+    for rel in untracked_paths.iter().take(MAX_PATH_EVIDENCE) {
         let path = root.join(rel);
-        if let Some(content) = read_untracked_diffstat_content(&path) {
-            additions = additions.saturating_add(content.lines().count());
+        match read_file_to_string_capped(&path, MAX_UNTRACKED_CONTENT_BYTES) {
+            Ok(Some(content)) => {
+                stats.additions = stats.additions.saturating_add(content.lines().count());
+            }
+            Ok(None) | Err(_) => untracked_unread += 1,
         }
     }
-    Some((additions, deletions))
-}
-
-fn read_untracked_diffstat_content(path: &Path) -> Option<String> {
-    read_file_to_string_capped(path, MAX_UNTRACKED_CONTENT_BYTES)
-        .ok()
-        .flatten()
+    if untracked_unread > 0 {
+        stats.uncovered.push(format!(
+            "{untracked_unread} untracked files were not line-counted (binary, oversized, or unreadable)"
+        ));
+    }
+    if untracked_total > MAX_PATH_EVIDENCE {
+        stats.uncovered.push(format!(
+            "{} of {untracked_total} untracked files were not line-counted (cap {MAX_PATH_EVIDENCE})",
+            untracked_total - MAX_PATH_EVIDENCE
+        ));
+    }
+    Ok(stats)
 }
 
 fn accumulate_numstat(output: &str, additions: &mut usize, deletions: &mut usize) {
@@ -3241,7 +4352,7 @@ fn render_security_evidence(findings: &[SecurityFinding]) -> String {
 fn dependency_manifest_evidence(
     git: Option<&LocalGitEvidence>,
     project_root: &Path,
-) -> DependencyManifestEvidence {
+) -> (DependencyManifestEvidence, WalkCount<()>) {
     let changed_manifests = git
         .map(|evidence| {
             evidence
@@ -3253,13 +4364,45 @@ fn dependency_manifest_evidence(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let manifest_counts = count_dependency_manifests(project_root);
-    let total_manifest_count = manifest_counts.values().copied().sum();
-    DependencyManifestEvidence {
-        changed_manifests,
-        manifest_counts,
-        total_manifest_count,
+    let walk = count_dependency_manifests(project_root);
+    let total_manifest_count = walk.value.values().copied().sum();
+    (
+        DependencyManifestEvidence {
+            changed_manifests,
+            manifest_counts: walk.value,
+            total_manifest_count,
+        },
+        WalkCount {
+            value: (),
+            scanned: walk.scanned,
+            stopped: walk.stopped,
+        },
+    )
+}
+
+fn dependency_findings(evidence: &DependencyManifestEvidence) -> Vec<String> {
+    if !dependency_manifest_trigger(evidence) {
+        return Vec::new();
     }
+    let mut findings: Vec<String> = evidence
+        .changed_manifests
+        .iter()
+        .map(|path| {
+            format!(
+                "dependency manifest {} is {}",
+                clean_evidence_value(&path.path),
+                clean_evidence_value(&path.status)
+            )
+        })
+        .collect();
+    if evidence.total_manifest_count >= 12 {
+        findings.push(format!(
+            "{} dependency manifests across {} ecosystems",
+            evidence.total_manifest_count,
+            evidence.manifest_counts.len()
+        ));
+    }
+    findings
 }
 
 fn dependency_manifest_trigger(evidence: &DependencyManifestEvidence) -> bool {
@@ -3306,17 +4449,25 @@ fn classify_dependency_manifest(path: &str) -> Option<&'static str> {
     }
 }
 
-fn count_dependency_manifests(project_root: &Path) -> BTreeMap<String, usize> {
+fn count_dependency_manifests(project_root: &Path) -> WalkCount<BTreeMap<String, usize>> {
     let mut counts = BTreeMap::new();
     let mut stack = vec![project_root.to_path_buf()];
     let mut scanned = 0usize;
+    let mut unreadable_dirs = 0usize;
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
+            unreadable_dirs += 1;
             continue;
         };
         for entry in entries.flatten() {
             if scanned >= MAX_MANIFEST_WALK_FILES {
-                return counts;
+                return WalkCount {
+                    value: counts,
+                    scanned,
+                    stopped: Some(format!(
+                        "manifest walk stopped after {MAX_MANIFEST_WALK_FILES} files; remaining directories were not counted"
+                    )),
+                };
             }
             let path = entry.path();
             let name = entry.file_name();
@@ -3346,10 +4497,19 @@ fn count_dependency_manifests(project_root: &Path) -> BTreeMap<String, usize> {
             }
         }
     }
-    counts
+    WalkCount {
+        value: counts,
+        scanned,
+        stopped: (unreadable_dirs > 0).then(|| {
+            format!("{unreadable_dirs} directories could not be read during the manifest walk")
+        }),
+    }
 }
 
-fn docs_evidence(git: Option<&LocalGitEvidence>, project_root: &Path) -> DocsEvidence {
+fn docs_evidence(
+    git: Option<&LocalGitEvidence>,
+    project_root: &Path,
+) -> (DocsEvidence, WalkCount<()>) {
     let changed_paths = git
         .map(|evidence| evidence.changed_paths.as_slice())
         .unwrap_or_default();
@@ -3365,13 +4525,44 @@ fn docs_evidence(git: Option<&LocalGitEvidence>, project_root: &Path) -> DocsEvi
         .take(MAX_PATH_EVIDENCE)
         .cloned()
         .collect();
-    DocsEvidence {
-        changed_code_paths,
-        changed_doc_paths,
-        has_readme: has_root_file_case_insensitive(project_root, "readme"),
-        has_agents: project_root.join("AGENTS.md").exists(),
-        docs_file_count: count_docs_files(project_root),
+    let walk = count_docs_files(project_root);
+    (
+        DocsEvidence {
+            changed_code_paths,
+            changed_doc_paths,
+            has_readme: has_root_file_case_insensitive(project_root, "readme"),
+            has_agents: project_root.join("AGENTS.md").exists(),
+            docs_file_count: walk.value,
+        },
+        WalkCount {
+            value: (),
+            scanned: walk.scanned,
+            stopped: walk.stopped,
+        },
+    )
+}
+
+fn docs_findings(evidence: &DocsEvidence) -> Vec<String> {
+    if !docs_trigger(evidence) {
+        return Vec::new();
     }
+    let mut findings = Vec::new();
+    if !evidence.changed_code_paths.is_empty() && evidence.changed_doc_paths.is_empty() {
+        findings.push(format!(
+            "{} changed code paths with no changed documentation path",
+            evidence.changed_code_paths.len()
+        ));
+    }
+    if !evidence.has_readme {
+        findings.push("no README at the project root".to_string());
+    }
+    if !evidence.has_agents {
+        findings.push("no AGENTS.md at the project root".to_string());
+    }
+    if evidence.docs_file_count == 0 {
+        findings.push("no documentation files found in the walked tree".to_string());
+    }
+    findings
 }
 
 fn docs_trigger(evidence: &DocsEvidence) -> bool {
@@ -3468,17 +4659,25 @@ fn is_code_path(path: &str) -> bool {
     )
 }
 
-fn count_docs_files(project_root: &Path) -> usize {
+fn count_docs_files(project_root: &Path) -> WalkCount<usize> {
     let mut count = 0;
     let mut stack = vec![project_root.to_path_buf()];
     let mut scanned = 0usize;
+    let mut unreadable_dirs = 0usize;
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
+            unreadable_dirs += 1;
             continue;
         };
         for entry in entries.flatten() {
             if scanned >= MAX_MANIFEST_WALK_FILES {
-                return count;
+                return WalkCount {
+                    value: count,
+                    scanned,
+                    stopped: Some(format!(
+                        "docs walk stopped after {MAX_MANIFEST_WALK_FILES} files; remaining directories were not counted"
+                    )),
+                };
             }
             let path = entry.path();
             let name = entry.file_name();
@@ -3508,7 +4707,13 @@ fn count_docs_files(project_root: &Path) -> usize {
             }
         }
     }
-    count
+    WalkCount {
+        value: count,
+        scanned,
+        stopped: (unreadable_dirs > 0).then(|| {
+            format!("{unreadable_dirs} directories could not be read during the docs walk")
+        }),
+    }
 }
 
 fn should_skip_dir(name: &str) -> bool {
@@ -3532,6 +4737,24 @@ fn architecture_evidence(git: &LocalGitEvidence) -> ArchitectureEvidence {
         deletions: git.deletions,
         path_groups,
     }
+}
+
+fn architecture_findings(evidence: &ArchitectureEvidence) -> Vec<String> {
+    if !architecture_trigger(evidence) {
+        return Vec::new();
+    }
+    let mut findings = vec![format!(
+        "{} changed code/docs files, +{} / -{} lines",
+        evidence.changed_file_count, evidence.additions, evidence.deletions
+    )];
+    for group in evidence.path_groups.iter().take(5) {
+        findings.push(format!(
+            "{}: {} files",
+            clean_evidence_value(&group.group),
+            group.count
+        ));
+    }
+    findings
 }
 
 fn architecture_trigger(evidence: &ArchitectureEvidence) -> bool {
@@ -3675,26 +4898,80 @@ impl BuddyJob for SecurityWhispererJob {
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
-        let root = ctx.project_root.clone();
-        let mut findings = tokio::task::spawn_blocking(move || {
-            collect_local_git_evidence(&root, true)
-                .map(|evidence| evidence.security_findings)
-                .unwrap_or_default()
-        })
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!("buddy security whisperer scan task failed: {err}");
-            Vec::new()
-        });
-        findings.extend(diagnostic_security_findings(&ctx.recent_diagnostics));
+        let git = observe_local_git_task(
+            ctx.project_root.clone(),
+            true,
+            SECURITY_WHISPERER_WORKFLOW_ID,
+        )
+        .await;
+        let mut findings = git
+            .evidence()
+            .map(|evidence| evidence.security_findings.clone())
+            .unwrap_or_default();
+        let diagnostic_findings = diagnostic_security_findings(&ctx.recent_diagnostics);
+        findings.extend(diagnostic_findings.iter().cloned());
+        let total = findings.len();
         findings.truncate(MAX_SECURITY_FINDINGS);
-        if findings.is_empty() {
-            return BuddyJobResult::default();
+        let mut extra_uncovered = Vec::new();
+        if total > MAX_SECURITY_FINDINGS {
+            extra_uncovered.push(format!(
+                "{} findings beyond the {MAX_SECURITY_FINDINGS} retained were dropped",
+                total - MAX_SECURITY_FINDINGS
+            ));
         }
-        execute_autonomous_job(
+        let scope = format!(
+            "Secret-pattern scan of staged and working-tree contents of every changed path under {} (text files up to {} bytes), plus {} recent diagnostics",
+            ctx.project_root.display(),
+            MAX_UNTRACKED_CONTENT_BYTES,
+            ctx.recent_diagnostics.len()
+        );
+        let mut check = git_source_check(
+            SECURITY_WHISPERER_WORKFLOW_ID,
+            scope,
+            &git,
+            &[format!("diagnostic-findings:{}", diagnostic_findings.len())],
+            extra_uncovered,
+            findings
+                .iter()
+                .map(|finding| {
+                    format!(
+                        "{} ({}): {} {}",
+                        clean_evidence_value(&finding.path),
+                        clean_evidence_value(&finding.source),
+                        clean_evidence_value(&finding.kind),
+                        finding.preview
+                    )
+                })
+                .collect(),
+        );
+        // Diagnostics are read even when git is not; keep them on a failed read, clearly
+        // labelled by `SourceCheck` as pre-failure findings, but never on an absent source.
+        if matches!(
+            check.completion,
+            crate::buddy::workflow_deliverables::SourceCompletion::NotApplicable { .. }
+        ) && !diagnostic_findings.is_empty()
+        {
+            check.completion = crate::buddy::workflow_deliverables::SourceCompletion::Partial {
+                uncovered: "no git repository; only recent diagnostics were scanned".to_string(),
+            };
+            check.findings = diagnostic_findings
+                .iter()
+                .map(|finding| {
+                    format!(
+                        "{} ({}): {} {}",
+                        clean_evidence_value(&finding.path),
+                        clean_evidence_value(&finding.source),
+                        clean_evidence_value(&finding.kind),
+                        finding.preview
+                    )
+                })
+                .collect();
+        }
+        execute_source_check_job(
             gcx,
             &ctx,
             security_whisperer_definition(),
+            check,
             render_security_evidence(&findings),
         )
         .await
@@ -3755,22 +5032,42 @@ impl BuddyJob for DependencyRadarJob {
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let root = ctx.project_root.clone();
-        let evidence = tokio::task::spawn_blocking(move || {
-            let git = collect_local_git_evidence(&root, false);
-            dependency_manifest_evidence(git.as_ref(), &root)
+        let (git, evidence, walk) = match tokio::task::spawn_blocking(move || {
+            let git = observe_local_git(&root, false);
+            let (evidence, walk) = dependency_manifest_evidence(git.evidence(), &root);
+            (git, evidence, walk)
         })
         .await
-        .unwrap_or_else(|err| {
-            tracing::warn!("buddy dependency radar scan task failed: {err}");
-            DependencyManifestEvidence::default()
-        });
-        if !dependency_manifest_trigger(&evidence) {
-            return BuddyJobResult::default();
-        }
-        execute_autonomous_job(
+        {
+            Ok(observed) => observed,
+            Err(err) => {
+                let git =
+                    LocalGitObservation::from_scan_task(Err(err), DEPENDENCY_RADAR_WORKFLOW_ID);
+                (
+                    git,
+                    DependencyManifestEvidence::default(),
+                    WalkCount::default(),
+                )
+            }
+        };
+        let scope = format!(
+            "Changed dependency manifest paths from git status plus a manifest walk of {} ({} files visited, cap {MAX_MANIFEST_WALK_FILES}); no package registry data",
+            ctx.project_root.display(),
+            walk.scanned
+        );
+        let check = git_source_check(
+            DEPENDENCY_RADAR_WORKFLOW_ID,
+            scope,
+            &git,
+            &[format!("manifests:{}", evidence.total_manifest_count)],
+            walk.stopped.into_iter().collect(),
+            dependency_findings(&evidence),
+        );
+        execute_source_check_job(
             gcx,
             &ctx,
             dependency_radar_definition(),
+            check,
             render_dependency_evidence(&evidence),
         )
         .await
@@ -3797,25 +5094,40 @@ impl BuddyJob for DocsGardenerJob {
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let root = ctx.project_root.clone();
-        let evidence = match tokio::task::spawn_blocking(move || {
-            let git = collect_local_git_evidence(&root, false);
-            docs_evidence(git.as_ref(), &root)
+        let (git, evidence, walk) = match tokio::task::spawn_blocking(move || {
+            let git = observe_local_git(&root, false);
+            let (evidence, walk) = docs_evidence(git.evidence(), &root);
+            (git, evidence, walk)
         })
         .await
         {
-            Ok(evidence) => evidence,
+            Ok(observed) => observed,
             Err(err) => {
-                tracing::warn!("buddy docs gardener scan task failed: {err}");
-                return BuddyJobResult::default();
+                let git = LocalGitObservation::from_scan_task(Err(err), DOCS_GARDENER_WORKFLOW_ID);
+                (git, DocsEvidence::default(), WalkCount::default())
             }
         };
-        if !docs_trigger(&evidence) {
-            return BuddyJobResult::default();
-        }
-        execute_autonomous_job(
+        let scope = format!(
+            "Changed code and documentation paths from git status, README/AGENTS.md presence at {}, and a docs walk ({} files visited, cap {MAX_MANIFEST_WALK_FILES})",
+            ctx.project_root.display(),
+            walk.scanned
+        );
+        let check = git_source_check(
+            DOCS_GARDENER_WORKFLOW_ID,
+            scope,
+            &git,
+            &[format!(
+                "readme:{} agents:{} docs:{}",
+                evidence.has_readme, evidence.has_agents, evidence.docs_file_count
+            )],
+            walk.stopped.into_iter().collect(),
+            docs_findings(&evidence),
+        );
+        execute_source_check_job(
             gcx,
             &ctx,
             docs_gardener_definition(),
+            check,
             render_docs_evidence(&evidence),
         )
         .await
@@ -3841,29 +5153,52 @@ impl BuddyJob for ArchitectureDriftWatcherJob {
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
-        let root = ctx.project_root.clone();
-        let evidence = tokio::task::spawn_blocking(move || {
-            collect_local_git_evidence(&root, false).map(|git| architecture_evidence(&git))
-        })
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!("buddy architecture drift scan task failed: {err}");
-            None
-        });
-        let Some(evidence) = evidence else {
-            return BuddyJobResult::default();
-        };
-        if !architecture_trigger(&evidence) {
-            return BuddyJobResult::default();
-        }
-        execute_autonomous_job(
+        let git = observe_local_git_task(
+            ctx.project_root.clone(),
+            false,
+            ARCHITECTURE_DRIFT_WORKFLOW_ID,
+        )
+        .await;
+        let evidence = git
+            .evidence()
+            .map(architecture_evidence)
+            .unwrap_or_default();
+        let scope = format!(
+            "Changed code/docs paths from git status grouped by top-level subsystem, with staged, unstaged, and untracked line counts under {}",
+            ctx.project_root.display()
+        );
+        let check = git_source_check(
+            ARCHITECTURE_DRIFT_WORKFLOW_ID,
+            scope,
+            &git,
+            &[],
+            Vec::new(),
+            architecture_findings(&evidence),
+        );
+        execute_source_check_job(
             gcx,
             &ctx,
             architecture_drift_definition(),
+            check,
             render_architecture_evidence(&evidence),
         )
         .await
     }
+}
+
+#[cfg(test)]
+fn dependency_radar_check_for(
+    git: &LocalGitObservation,
+    evidence: &DependencyManifestEvidence,
+) -> crate::buddy::workflow_deliverables::SourceCheck {
+    git_source_check(
+        DEPENDENCY_RADAR_WORKFLOW_ID,
+        "test manifest scope".to_string(),
+        git,
+        &[format!("manifests:{}", evidence.total_manifest_count)],
+        Vec::new(),
+        dependency_findings(evidence),
+    )
 }
 
 #[cfg(test)]
@@ -3872,17 +5207,16 @@ async fn execute_dependency_radar_with_evidence(
     ctx: &BuddyJobContext,
     evidence: DependencyManifestEvidence,
 ) -> BuddyJobResult {
-    if !dependency_manifest_trigger(&evidence) {
-        return BuddyJobResult::default();
-    }
-    execute_built_autonomous_job(
+    let git = LocalGitObservation::Observed(LocalGitEvidence {
+        head: "test-head".to_string(),
+        ..Default::default()
+    });
+    execute_source_check_job(
         gcx,
         ctx,
         dependency_radar_definition(),
-        build_autonomous_job_spec(
-            dependency_radar_definition(),
-            render_dependency_evidence(&evidence),
-        ),
+        dependency_radar_check_for(&git, &evidence),
+        render_dependency_evidence(&evidence),
     )
     .await
 }
@@ -4013,9 +5347,9 @@ mod tests {
             BuddyFactKind::ModePromptOverlap
             | BuddyFactKind::SkillTriggerWeak
             | BuddyFactKind::AgentsMdGapDetected => "customization_drift",
-            BuddyFactKind::DefaultModelMissing | BuddyFactKind::BrokenModelReference => {
-                "provider_health"
-            }
+            BuddyFactKind::DefaultModelMissing
+            | BuddyFactKind::BrokenModelReference
+            | BuddyFactKind::ProviderRateLimited => "provider_health",
             BuddyFactKind::McpAuthExpired | BuddyFactKind::IntegrationFailing => "mcp_auth",
             BuddyFactKind::DiagnosticCluster | BuddyFactKind::FrontendErrorBurst => {
                 "diagnostic_cluster"
@@ -4307,7 +5641,7 @@ mod tests {
         assert_eq!(event.title, "Memory Gardener report ready");
         assert_eq!(
             event.description.as_deref(),
-            Some("Open Pixel's saved chat for Memory Gardener details.")
+            Some("Pixel's Memory Gardener assessment is ready in Buddy Desk; the saved chat is supporting evidence.")
         );
     }
 
@@ -5284,7 +6618,7 @@ mod tests {
             return;
         }
 
-        let counts = count_dependency_manifests(dir.path());
+        let counts = count_dependency_manifests(dir.path()).value;
 
         assert_eq!(counts.get("rust"), Some(&1));
     }
@@ -5301,7 +6635,7 @@ mod tests {
             return;
         }
 
-        let count = count_docs_files(dir.path());
+        let count = count_docs_files(dir.path()).value;
 
         assert_eq!(count, 1);
     }
@@ -5545,7 +6879,11 @@ mod tests {
         )
         .unwrap();
 
-        let (additions, deletions) = diff_stats(&repo).unwrap();
+        let DiffStats {
+            additions,
+            deletions,
+            ..
+        } = diff_stats(&repo).unwrap();
 
         assert_eq!(additions, 3);
         assert_eq!(deletions, 0);
@@ -5559,7 +6897,11 @@ mod tests {
         std::fs::write(root.join("notes.txt"), "hello\nworld\n").unwrap();
 
         let evidence = collect_local_git_evidence(root, true).unwrap();
-        let (additions, deletions) = diff_stats(&repo).unwrap();
+        let DiffStats {
+            additions,
+            deletions,
+            ..
+        } = diff_stats(&repo).unwrap();
 
         assert_eq!(additions, 2);
         assert_eq!(deletions, 0);
@@ -5616,6 +6958,359 @@ mod tests {
         assert!(same_signal(&ctx, &spec.signal_hash));
     }
 
+    /// The four git-backed producers must report what they actually read: a missing repo is
+    /// `NotApplicable`, a task failure is `Failed`, a capped read is `Partial`, and only a fully
+    /// read scope can be `Complete`. None of these can ever be a bare "no findings".
+    #[test]
+    fn git_source_check_maps_each_observation_to_a_typed_completion() {
+        use crate::buddy::outcome_runtime::WorkflowTerminal;
+        use crate::buddy::workflow_deliverables::SourceCompletion;
+
+        let absent = git_source_check(
+            SECURITY_WHISPERER_WORKFLOW_ID,
+            "scope".into(),
+            &LocalGitObservation::NotRepository {
+                reason: "no git repository".into(),
+            },
+            &[],
+            Vec::new(),
+            vec!["must be dropped: nothing was checked".into()],
+        );
+        assert!(matches!(
+            absent.completion,
+            SourceCompletion::NotApplicable { .. }
+        ));
+        assert!(absent.findings.is_empty());
+        assert!(!absent.needs_assessment());
+        assert_eq!(
+            absent
+                .clone()
+                .into_report(SECURITY_WHISPERER_WORKFLOW_ID)
+                .terminal,
+            WorkflowTerminal::Blocked {
+                failure_class: Some("source_absent".into())
+            }
+        );
+
+        let failed = git_source_check(
+            DEPENDENCY_RADAR_WORKFLOW_ID,
+            "scope".into(),
+            &LocalGitObservation::Failed {
+                error: "git status failed: index locked".into(),
+            },
+            &[],
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(!failed.needs_assessment());
+        assert_eq!(
+            failed.into_report(DEPENDENCY_RADAR_WORKFLOW_ID).terminal,
+            WorkflowTerminal::Failed {
+                failure_class: Some("source_read_failed".into())
+            }
+        );
+
+        let observed = LocalGitObservation::Observed(LocalGitEvidence {
+            head: "abc".into(),
+            ..Default::default()
+        });
+        let clean = git_source_check(
+            DOCS_GARDENER_WORKFLOW_ID,
+            "scope".into(),
+            &observed,
+            &[],
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(clean.completion, SourceCompletion::Complete);
+        assert!(!clean.needs_assessment());
+        assert_eq!(
+            clean
+                .clone()
+                .into_report(DOCS_GARDENER_WORKFLOW_ID)
+                .terminal,
+            WorkflowTerminal::NoChange
+        );
+
+        let capped = git_source_check(
+            DOCS_GARDENER_WORKFLOW_ID,
+            "scope".into(),
+            &observed,
+            &[],
+            vec!["docs walk stopped after 5000 files".into()],
+            Vec::new(),
+        );
+        assert!(matches!(
+            capped.completion,
+            SourceCompletion::Partial { .. }
+        ));
+        let report = capped.into_report(DOCS_GARDENER_WORKFLOW_ID);
+        assert_eq!(
+            report.terminal,
+            WorkflowTerminal::Partial {
+                failure_class: Some("partial_source_coverage".into())
+            }
+        );
+        assert!(report.body.contains("docs walk stopped after 5000 files"));
+
+        let mut with_uncovered = LocalGitEvidence {
+            head: "abc".into(),
+            ..Default::default()
+        };
+        with_uncovered
+            .uncovered
+            .push("3 of 43 changed paths were not listed".into());
+        let git_capped = git_source_check(
+            ARCHITECTURE_DRIFT_WORKFLOW_ID,
+            "scope".into(),
+            &LocalGitObservation::Observed(with_uncovered),
+            &[],
+            Vec::new(),
+            vec!["src/a: 9 files".into()],
+        );
+        assert!(git_capped.needs_assessment());
+        assert!(matches!(
+            git_capped.completion,
+            SourceCompletion::Partial { .. }
+        ));
+    }
+
+    #[test]
+    fn source_check_fingerprint_is_stable_for_identical_inputs_and_moves_with_head() {
+        let evidence = LocalGitEvidence {
+            head: "abc".into(),
+            changed_paths: vec![PathStatus {
+                path: "Cargo.toml".into(),
+                status: "modified".into(),
+            }],
+            ..Default::default()
+        };
+        let a = git_source_check(
+            DEPENDENCY_RADAR_WORKFLOW_ID,
+            "scope".into(),
+            &LocalGitObservation::Observed(evidence.clone()),
+            &[],
+            Vec::new(),
+            Vec::new(),
+        );
+        let b = git_source_check(
+            DEPENDENCY_RADAR_WORKFLOW_ID,
+            "scope".into(),
+            &LocalGitObservation::Observed(evidence.clone()),
+            &[],
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(a.input_fingerprint, b.input_fingerprint);
+        let mut moved = evidence;
+        moved.head = "def".into();
+        let c = git_source_check(
+            DEPENDENCY_RADAR_WORKFLOW_ID,
+            "scope".into(),
+            &LocalGitObservation::Observed(moved),
+            &[],
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_ne!(a.input_fingerprint, c.input_fingerprint);
+
+        let spec = build_autonomous_job_spec(dependency_radar_definition(), "x".into())
+            .with_source_check(a.clone());
+        assert_eq!(
+            spec.signal_hash,
+            signal_hash([DEPENDENCY_RADAR_WORKFLOW_ID, a.input_fingerprint.as_str()])
+        );
+        assert!(spec.source_check.is_some());
+    }
+
+    #[test]
+    fn bounded_git_observation_digest_moves_for_same_path_same_length_edit_and_is_stable() {
+        let (dir, _repo) = init_temp_git_repo();
+        let root = dir.path();
+        std::fs::write(root.join("Cargo.toml"), "name = \"alpha\"\n").unwrap();
+        let first = collect_local_git_evidence(root, false).unwrap();
+        let first_check = git_source_check(
+            DEPENDENCY_RADAR_WORKFLOW_ID,
+            "bounded manifest observation".into(),
+            &LocalGitObservation::Observed(first.clone()),
+            &[],
+            Vec::new(),
+            vec!["manifest content observed".into()],
+        );
+        let stable = collect_local_git_evidence(root, false).unwrap();
+        let stable_check = git_source_check(
+            DEPENDENCY_RADAR_WORKFLOW_ID,
+            "bounded manifest observation".into(),
+            &LocalGitObservation::Observed(stable),
+            &[],
+            Vec::new(),
+            vec!["manifest content observed".into()],
+        );
+        assert_eq!(
+            first_check.evidence[0].source.source_version,
+            first_check.input_fingerprint
+        );
+        assert_eq!(
+            first_check.input_fingerprint,
+            stable_check.input_fingerprint
+        );
+
+        std::fs::write(root.join("Cargo.toml"), "name = \"bravo\"\n").unwrap();
+        let edited = collect_local_git_evidence(root, false).unwrap();
+        let edited_check = git_source_check(
+            DEPENDENCY_RADAR_WORKFLOW_ID,
+            "bounded manifest observation".into(),
+            &LocalGitObservation::Observed(edited.clone()),
+            &[],
+            Vec::new(),
+            vec!["manifest content observed".into()],
+        );
+        assert_eq!(first.changed_paths, edited.changed_paths);
+        assert_eq!(first.additions, edited.additions);
+        assert_eq!(first.deletions, edited.deletions);
+        assert_ne!(first.observation_digest, edited.observation_digest);
+        assert_ne!(
+            first_check.input_fingerprint,
+            edited_check.input_fingerprint
+        );
+    }
+
+    #[test]
+    fn observe_local_git_distinguishes_missing_repo_from_clean_repo() {
+        let plain = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            observe_local_git(plain.path(), false),
+            LocalGitObservation::NotRepository { .. }
+        ));
+        let (dir, _repo) = init_temp_git_repo();
+        match observe_local_git(dir.path(), true) {
+            LocalGitObservation::Observed(evidence) => {
+                assert!(evidence.changed_paths.is_empty());
+                assert!(evidence.uncovered.is_empty(), "{:?}", evidence.uncovered);
+                assert_ne!(evidence.head, "");
+            }
+            other => panic!("expected observed repo, got {other:?}"),
+        }
+    }
+
+    /// A clean, fully read scope must not open a model chat: it is published as the engine's
+    /// own `NoChange` (or preserved when no outcome store exists), never as LLM prose.
+    #[tokio::test]
+    async fn clean_dependency_scope_does_not_run_a_model() {
+        let ctx = context_with_last_result(None);
+        let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let result = execute_dependency_radar_with_evidence(
+            gcx,
+            &ctx,
+            DependencyManifestEvidence::default(),
+        )
+        .await;
+        assert!(result.activity.is_none());
+        assert!(result.runtime_event.is_none());
+        assert!(result.workflow_failure.is_none());
+    }
+
+    #[tokio::test]
+    async fn both_memory_workflows_retain_only_their_pre_generation_operation_snapshot() {
+        use crate::buddy::memory_lifecycle::{MemoryLifecycleOp, MemoryOpType, MemorySource};
+        let root = tempfile::tempdir().unwrap();
+        let operation = MemoryLifecycleOp::pending(
+            "first",
+            MemorySource::MemoryGarden,
+            MemoryOpType::Archive,
+            vec![root.path().join("memory.md").to_string_lossy().into_owned()],
+            "fixture",
+            0.9,
+            "2026-01-01T00:00:00Z",
+        );
+        crate::buddy::storage::enqueue_memory_op(root.path(), operation)
+            .await
+            .unwrap();
+        let mut specs = Vec::new();
+        for workflow in [MEMORY_GARDENER_WORKFLOW_ID, KNOWLEDGE_CONFLICT_WORKFLOW_ID] {
+            let mut spec = AutonomousBuddyChatSpec::new(workflow, "Fixture", "Inspect", "Observed")
+                .with_project_root(root.path().to_string_lossy());
+            capture_memory_proposal_input(&mut spec).await;
+            assert_eq!(spec.memory_operation_evidence.len(), 1);
+            assert_eq!(
+                spec.memory_operation_evidence[0].source.source_id,
+                "memory-lifecycle:first"
+            );
+            specs.push(spec);
+        }
+        let later = MemoryLifecycleOp::pending(
+            "later",
+            MemorySource::MemoryGarden,
+            MemoryOpType::Archive,
+            vec![root.path().join("other.md").to_string_lossy().into_owned()],
+            "later input",
+            0.9,
+            "2026-01-01T00:00:01Z",
+        );
+        crate::buddy::storage::enqueue_memory_op(root.path(), later)
+            .await
+            .unwrap();
+        assert_eq!(
+            eligible_memory_operation_evidence(&root.path().to_string_lossy())
+                .await
+                .len(),
+            2
+        );
+        for spec in specs {
+            assert_eq!(
+                autonomous_evidence_refs(&spec, None).await,
+                spec.memory_operation_evidence
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn finalization_records_observed_scope_and_typed_evidence() {
+        use crate::buddy::outcome_runtime::WorkflowTerminal;
+        let evidence = LocalGitEvidence {
+            head: "abc".into(),
+            ..Default::default()
+        };
+        let check = git_source_check(
+            SECURITY_WHISPERER_WORKFLOW_ID,
+            "Secret-pattern scan of changed paths".into(),
+            &LocalGitObservation::Observed(evidence),
+            &[],
+            vec!["security scan stopped at 20 findings".into()],
+            vec!["src/a.rs (worktree): github_token [REDACTED]".into()],
+        );
+        let spec = build_autonomous_job_spec(security_whisperer_definition(), "evidence".into())
+            .with_source_check(check);
+        let observation = AutonomousRunObservation {
+            stage: AutonomousRunStage::Ran,
+            chat_id: Some("chat-9".into()),
+            report: "Everything is fine, no changes needed.".into(),
+            successful: true,
+            aborted: false,
+            error: None,
+            record_outcome: true,
+            called_runtime_report: false,
+        };
+        let finalization = autonomous_finalization(&spec, &observation).unwrap();
+        assert_eq!(finalization.terminal, WorkflowTerminal::Inconclusive);
+        assert!(finalization
+            .report
+            .contains("Observed scope: Secret-pattern scan of changed paths"));
+        assert!(finalization.report.contains(
+            "Source completion: partial; not covered: security scan stopped at 20 findings"
+        ));
+
+        let refs = autonomous_evidence_refs(&spec, Some("chat-9")).await;
+        assert_eq!(refs.len(), 2);
+        assert_eq!(
+            refs[0].source.source_kind,
+            refact_buddy_core::operator_types::NativeSourceKind::Check
+        );
+        assert_eq!(refs[0].source.source_id, SECURITY_WHISPERER_WORKFLOW_ID);
+        assert_eq!(refs[1].locator, "refact://chat/chat-9");
+        assert_eq!(autonomous_evidence_refs(&spec, None).await.len(), 1);
+    }
+
     #[tokio::test]
     async fn dependency_radar_should_run_does_not_scan_git() {
         let job = DependencyRadarJob;
@@ -5658,10 +7353,15 @@ mod tests {
             total_manifest_count: 12,
             ..Default::default()
         };
+        let git = LocalGitObservation::Observed(LocalGitEvidence {
+            head: "test-head".to_string(),
+            ..Default::default()
+        });
         let spec = build_autonomous_job_spec(
             dependency_radar_definition(),
             render_dependency_evidence(&evidence),
-        );
+        )
+        .with_source_check(dependency_radar_check_for(&git, &evidence));
         let stored = serialize_last_autonomous_result(&AutonomousLastResult {
             signal_hash: spec.signal_hash.clone(),
             chat_id: "chat-a".to_string(),
@@ -5738,10 +7438,11 @@ mod tests {
         assert_eq!(event.dedupe_key.as_deref(), Some(expected_key.as_str()));
         assert_eq!(event.chat_id.as_deref(), Some("chat-success"));
         assert_eq!(event.ttl_ms, Some(30_000));
-        assert!(event
-            .speech_text
-            .as_deref()
-            .is_some_and(|text| { text.contains("Dependency Radar") && text.contains("details") }));
+        assert!(event.speech_text.as_deref().is_some_and(|text| {
+            text.contains("Dependency Radar")
+                && text.contains("Buddy Desk")
+                && text.contains("supporting evidence")
+        }));
         assert!(result.activity.is_some());
         assert!(result.last_result.is_some());
     }
@@ -5786,11 +7487,17 @@ mod tests {
             "Check token=promptsecret",
             "Found password=evidencesecret",
         );
-        let (messages, max_steps, tools) = build_autonomous_messages(gcx, &spec).await.unwrap();
+        let (messages, max_steps, tools) = build_autonomous_messages(gcx, &spec, "report-run")
+            .await
+            .unwrap();
 
         assert_eq!(max_steps, 10);
         assert!(tools.contains(&"buddy_runtime_event".to_string()));
         assert_eq!(messages.len(), 2);
+        let ChatContent::SimpleText(system_prompt) = &messages[0].content else {
+            panic!("expected simple system prompt");
+        };
+        assert!(!system_prompt.contains("markdown_extension"));
         let ChatContent::SimpleText(user_prompt) = &messages[1].content else {
             panic!("expected simple text user prompt");
         };
@@ -5800,11 +7507,418 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skill_author_messages_include_the_canonical_untrusted_proposal_protocol() {
+        let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let spec = AutonomousBuddyChatSpec::new(
+            refact_buddy_core::autonomous_workflows::BUDDY_SKILL_AUTHOR_WORKFLOW_ID,
+            "Skill Author",
+            "Draft a skill",
+            "Retained local evidence",
+        );
+        let (messages, _, _) = build_autonomous_messages(gcx, &spec, "report-run")
+            .await
+            .unwrap();
+        let ChatContent::SimpleText(system_prompt) = &messages[0].content else {
+            panic!("expected simple system prompt");
+        };
+        assert!(system_prompt.contains("```json\n"));
+        assert!(system_prompt.contains("\"family\":\"markdown_extension\""));
+        assert!(system_prompt.contains("grants no authority"));
+    }
+
+    #[tokio::test]
     async fn run_autonomous_buddy_chat_rejects_invalid_workflow_id() {
         let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
         let spec = AutonomousBuddyChatSpec::new("../bad", "Bad", "Prompt", "Evidence");
         let err = run_autonomous_buddy_chat(gcx, spec).await.unwrap_err();
 
         assert!(err.contains("invalid autonomous buddy workflow id"));
+    }
+
+    mod outcome_finalization {
+        use super::*;
+        use crate::buddy::outcome_runtime::{OutcomeRuntime, WorkflowTerminal};
+        use refact_buddy_core::operator_types::{
+            ProjectIdentity, RunStatus, WorkerIdentity, WorkItemState,
+        };
+
+        fn finalization_spec() -> AutonomousBuddyChatSpec {
+            AutonomousBuddyChatSpec::new(
+                MEMORY_GARDENER_WORKFLOW_ID,
+                "Memory Gardener",
+                "Review memory signals",
+                "memory evidence",
+            )
+        }
+
+        fn ran(
+            chat_id: Option<&str>,
+            report: &str,
+            successful: bool,
+            aborted: bool,
+            error: Option<&str>,
+        ) -> AutonomousRunObservation {
+            AutonomousRunObservation {
+                stage: AutonomousRunStage::Ran,
+                chat_id: chat_id.map(ToString::to_string),
+                report: report.to_string(),
+                successful,
+                aborted,
+                error: error.map(ToString::to_string),
+                record_outcome: true,
+                called_runtime_report: false,
+            }
+        }
+
+        fn test_runtime(root: &Path) -> OutcomeRuntime {
+            OutcomeRuntime::open(
+                root,
+                ProjectIdentity {
+                    project_id: "project".to_string(),
+                    canonical_root: std::fs::canonicalize(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                },
+                WorkerIdentity {
+                    worker_id: "worker".to_string(),
+                    engine_instance_id: "engine".to_string(),
+                    epoch: 1,
+                },
+            )
+            .unwrap()
+        }
+
+        #[test]
+        fn successful_run_stays_inconclusive_and_keeps_chat_evidence() {
+            let spec = finalization_spec();
+            let observation = ran(Some("chat-1"), "All clean.", true, false, None);
+            let finalization = autonomous_finalization(&spec, &observation).unwrap();
+
+            assert!(finalization.successful);
+            assert_eq!(finalization.terminal, WorkflowTerminal::Inconclusive);
+            assert!(finalization.report.contains("All clean."));
+            assert!(finalization.report.contains("(unverified)"));
+            assert_eq!(finalization.evidence_chat_id.as_deref(), Some("chat-1"));
+        }
+
+        #[test]
+        fn subchat_error_is_recorded_as_failed_with_the_error_text() {
+            let spec = finalization_spec();
+            let observation = AutonomousRunObservation::failed("provider returned 500".to_string());
+            let finalization = autonomous_finalization(&spec, &observation).unwrap();
+
+            assert!(!finalization.successful);
+            // The shared classifier does not recognise this free-form string, so
+            // "unknown" is the honest category. What matters is that it is no
+            // longer flattened to "workflow_error"; see the test below for a
+            // string the classifier does recognise.
+            assert_eq!(
+                finalization.terminal,
+                WorkflowTerminal::Failed {
+                    failure_class: Some("unknown".to_string())
+                }
+            );
+            assert!(finalization.report.contains("provider returned 500"));
+            assert!(finalization
+                .report
+                .contains("did not produce a verified report"));
+        }
+
+        #[test]
+        fn recognised_provider_errors_keep_their_specific_failure_class() {
+            let spec = finalization_spec();
+            for (error, expected) in [
+                (
+                    "OpenAI API error (503 Service Unavailable): The server is overloaded",
+                    "provider_transient",
+                ),
+                (
+                    "LLM error (429 Too Many Requests): \"The usage limit has been reached\"",
+                    "provider_rate_limit",
+                ),
+            ] {
+                let observation = AutonomousRunObservation::failed(error.to_string());
+                let finalization = autonomous_finalization(&spec, &observation).unwrap();
+                assert_eq!(
+                    finalization.terminal,
+                    WorkflowTerminal::Failed {
+                        failure_class: Some(expected.to_string())
+                    },
+                    "{error} should classify as {expected}, not be flattened"
+                );
+            }
+        }
+
+        #[test]
+        fn cancellation_is_classified_from_the_error_and_from_the_abort_flag() {
+            let spec = finalization_spec();
+            let cancelled_error =
+                AutonomousRunObservation::failed("run was cancelled by user".to_string());
+            let cancelled_flag = ran(
+                Some("chat-2"),
+                "half a report",
+                false,
+                true,
+                Some("stopped"),
+            );
+            let misleading_success = ran(Some("chat-3"), "Done.", true, true, None);
+
+            for observation in [cancelled_error, cancelled_flag, misleading_success] {
+                let finalization = autonomous_finalization(&spec, &observation).unwrap();
+                assert!(matches!(
+                    finalization.terminal,
+                    WorkflowTerminal::Cancelled { .. }
+                ));
+                assert!(!finalization.successful);
+            }
+        }
+
+        #[test]
+        fn partial_output_is_retained_bounded_and_redacted_without_claiming_success() {
+            let spec = finalization_spec();
+            let long_report = format!(
+                "token=supersecretvalue123 {}",
+                "partial detail ".repeat(1_000)
+            );
+            let observation = ran(
+                Some("chat-3"),
+                &long_report,
+                false,
+                false,
+                Some("autonomous buddy subchat completed without a successful report"),
+            );
+            let finalization = autonomous_finalization(&spec, &observation).unwrap();
+
+            assert_eq!(
+                finalization.terminal,
+                WorkflowTerminal::Partial {
+                    failure_class: Some("no_successful_report".to_string())
+                }
+            );
+            assert!(!finalization.successful);
+            assert!(finalization.report.contains("Partial assistant output"));
+            assert!(finalization.report.contains("partial detail"));
+            assert!(!finalization.report.contains("supersecretvalue123"));
+            assert!(finalization.report.len() < long_report.len());
+            assert_eq!(finalization.evidence_chat_id.as_deref(), Some("chat-3"));
+        }
+
+        #[test]
+        fn empty_output_without_a_chat_is_failed_not_partial() {
+            let spec = finalization_spec();
+            let observation = ran(None, "   ", false, false, Some("no output"));
+            let finalization = autonomous_finalization(&spec, &observation).unwrap();
+
+            assert_eq!(
+                finalization.terminal,
+                WorkflowTerminal::Failed {
+                    failure_class: Some("empty_output".to_string())
+                }
+            );
+            assert!(finalization
+                .report
+                .contains("No assistant output was retained"));
+            assert!(finalization.evidence_chat_id.is_none());
+        }
+
+        #[test]
+        fn disabled_autonomous_chats_are_not_recorded_as_an_outcome() {
+            let spec = finalization_spec();
+            let observation =
+                AutonomousRunObservation::blocked("autonomous chats disabled".to_string(), false);
+
+            assert!(autonomous_finalization(&spec, &observation).is_none());
+        }
+
+        #[test]
+        fn precondition_failures_are_recorded_as_blocked() {
+            let spec = finalization_spec();
+            let observation =
+                AutonomousRunObservation::blocked("subagent config not found".to_string(), true);
+            let finalization = autonomous_finalization(&spec, &observation).unwrap();
+
+            assert_eq!(
+                finalization.terminal,
+                WorkflowTerminal::Blocked {
+                    failure_class: Some("precondition".to_string())
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn failed_run_reaches_the_durable_store_and_still_returns_its_error() {
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = test_runtime(dir.path());
+            let spec = finalization_spec();
+            let observation = AutonomousRunObservation::failed("provider exploded".to_string());
+
+            let error = finalize_autonomous_run(
+                Some(&runtime),
+                &spec,
+                "run-failed",
+                "2026-09-05T00:00:00Z",
+                &observation,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error, "provider exploded");
+
+            let stored = runtime
+                .get_run_outcome("run-failed".to_string())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.value.status, RunStatus::Failed);
+            runtime.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn partial_run_is_stored_as_partial_needing_attention_with_chat_evidence() {
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = test_runtime(dir.path());
+            let spec = finalization_spec();
+            runtime
+                .begin_workflow(autonomous_outcome_start(
+                    &runtime,
+                    &spec,
+                    "run-partial",
+                    "2026-09-05T00:00:00Z",
+                ))
+                .await
+                .unwrap();
+            let observation = ran(
+                Some("chat-partial"),
+                "I inspected two files but could not finish.",
+                false,
+                false,
+                Some("autonomous buddy subchat completed without a successful report"),
+            );
+
+            assert!(finalize_autonomous_run(
+                Some(&runtime),
+                &spec,
+                "run-partial",
+                "2026-09-05T00:00:00Z",
+                &observation,
+            )
+            .await
+            .is_err());
+
+            let stored = runtime
+                .get_run_outcome("run-partial".to_string())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.value.status, RunStatus::Partial);
+            assert_eq!(stored.value.evidence.len(), 1);
+            assert_eq!(
+                stored.value.evidence[0].locator,
+                "refact://chat/chat-partial"
+            );
+            let work = runtime
+                .get_work_item(stored.value.work_id.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(work.value.state, WorkItemState::NeedsAttention);
+            let artifact = runtime
+                .get_artifact_revision(work.value.current_artifact_id.clone().unwrap(), None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(artifact.value.body.contains("could not finish"));
+            assert!(artifact.value.conclusion.contains("Run incomplete"));
+            runtime.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn successful_run_is_stored_as_inconclusive_and_returns_the_chat_id() {
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = test_runtime(dir.path());
+            let spec = finalization_spec();
+            let observation = ran(Some("chat-ok"), "Memory garden is tidy.", true, false, None);
+
+            let chat_id = finalize_autonomous_run(
+                Some(&runtime),
+                &spec,
+                "run-ok",
+                "2026-09-05T00:00:00Z",
+                &observation,
+            )
+            .await
+            .unwrap();
+            assert_eq!(chat_id, "chat-ok");
+
+            let stored = runtime
+                .get_run_outcome("run-ok".to_string())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.value.status, RunStatus::Inconclusive);
+            runtime.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn store_failure_on_a_successful_run_prevents_the_saved_report_signal() {
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = test_runtime(dir.path());
+            runtime.shutdown().await;
+            let spec = finalization_spec();
+            let observation = ran(Some("chat-ok"), "Memory garden is tidy.", true, false, None);
+
+            let error = finalize_autonomous_run(
+                Some(&runtime),
+                &spec,
+                "run-store-failure",
+                "2026-09-05T00:00:00Z",
+                &observation,
+            )
+            .await
+            .unwrap_err();
+
+            assert!(error.contains("could not be saved to Buddy Desk"));
+        }
+
+        #[tokio::test]
+        async fn store_failure_never_masks_the_original_execution_error() {
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = test_runtime(dir.path());
+            runtime.shutdown().await;
+            let spec = finalization_spec();
+            let observation = AutonomousRunObservation::failed("provider exploded".to_string());
+
+            let error = finalize_autonomous_run(
+                Some(&runtime),
+                &spec,
+                "run-both-failed",
+                "2026-09-05T00:00:00Z",
+                &observation,
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(error, "provider exploded");
+        }
+
+        #[tokio::test]
+        async fn absent_runtime_preserves_the_legacy_return_behavior() {
+            let spec = finalization_spec();
+            let success = ran(Some("chat-legacy"), "Report", true, false, None);
+            let failure = AutonomousRunObservation::failed("boom".to_string());
+
+            assert_eq!(
+                finalize_autonomous_run(None, &spec, "run-a", "2026-09-05T00:00:00Z", &success)
+                    .await
+                    .unwrap(),
+                "chat-legacy"
+            );
+            assert_eq!(
+                finalize_autonomous_run(None, &spec, "run-b", "2026-09-05T00:00:00Z", &failure)
+                    .await
+                    .unwrap_err(),
+                "boom"
+            );
+        }
     }
 }

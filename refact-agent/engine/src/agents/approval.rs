@@ -574,6 +574,7 @@ mod tests {
                 final_step_force_answer: false,
                 buddy_meta: None,
                 step_progress: None,
+                activity_stamp: None,
                 trace_parent: crate::subchat::TraceParent::rooted("parent", "parent"),
             },
         );
@@ -1059,14 +1060,23 @@ mod tests {
             tool_call_id: wrapper.id.clone(),
             accepted: true,
         };
-        crate::chat::handle_tool_decisions(
+        crate::chat::handle_tool_decisions_guarded(
             fixture.app.clone(),
             parent.clone(),
             std::slice::from_ref(&decision),
+            None,
+            "approval-test",
         )
         .await;
         assert!(waiting.await.unwrap());
-        crate::chat::handle_tool_decisions(fixture.app.clone(), parent.clone(), &[decision]).await;
+        crate::chat::handle_tool_decisions_guarded(
+            fixture.app.clone(),
+            parent.clone(),
+            &[decision],
+            None,
+            "approval-test",
+        )
+        .await;
         let session = parent.lock().await;
         let results: Vec<_> = session
             .messages
@@ -1129,13 +1139,15 @@ mod tests {
                     .user_interrupt_flag
                     .store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            crate::chat::handle_tool_decisions(
+            crate::chat::handle_tool_decisions_guarded(
                 fixture.app.clone(),
                 parent.clone(),
                 &[crate::chat::types::ToolDecisionItem {
                     tool_call_id: "wrapper".into(),
                     accepted: changed,
                 }],
+                None,
+                "approval-test",
             )
             .await;
             if changed {
@@ -1349,10 +1361,12 @@ mod tests {
                 tool_call_id: wrappers[0].id.clone(),
                 accepted: true,
             };
-            crate::chat::handle_tool_decisions(
+            crate::chat::handle_tool_decisions_guarded(
                 fixture.app.clone(),
                 parent.clone(),
                 &[decision.clone(), decision.clone()],
+                None,
+                "approval-test",
             )
             .await;
             assert_eq!(
@@ -1386,13 +1400,15 @@ mod tests {
                     _ => {}
                 }
             }
-            crate::chat::handle_tool_decisions(
+            crate::chat::handle_tool_decisions_guarded(
                 fixture.app.clone(),
                 parent.clone(),
                 &[crate::chat::types::ToolDecisionItem {
                     tool_call_id: wrappers[1].id.clone(),
                     accepted: true,
                 }],
+                None,
+                "approval-test",
             )
             .await;
             assert_eq!(
@@ -1408,8 +1424,14 @@ mod tests {
                 Ok(ApprovalDecision::Approved)
             );
             assert_eq!(waiting.await.unwrap(), mutation == "unchanged");
-            crate::chat::handle_tool_decisions(fixture.app.clone(), parent.clone(), &[decision])
-                .await;
+            crate::chat::handle_tool_decisions_guarded(
+                fixture.app.clone(),
+                parent.clone(),
+                &[decision],
+                None,
+                "approval-test",
+            )
+            .await;
             let session = parent.lock().await;
             for wrapper in &wrappers {
                 let count = session
@@ -1443,8 +1465,14 @@ mod tests {
                     accepted,
                 })
                 .collect();
-            crate::chat::handle_tool_decisions(fixture.app.clone(), parent.clone(), &decisions)
-                .await;
+            crate::chat::handle_tool_decisions_guarded(
+                fixture.app.clone(),
+                parent.clone(),
+                &decisions,
+                None,
+                "approval-test",
+            )
+            .await;
             assert_eq!(
                 fixture.app.agent_approvals.wait_now(&pending.id, now_ms()),
                 Ok(ApprovalDecision::Rejected)
@@ -1492,13 +1520,15 @@ mod tests {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             *session = restored;
         }
-        crate::chat::handle_tool_decisions(
+        crate::chat::handle_tool_decisions_guarded(
             fixture.app.clone(),
             parent.clone(),
             &[crate::chat::types::ToolDecisionItem {
                 tool_call_id: wrappers[0].id.clone(),
                 accepted: true,
             }],
+            None,
+            "approval-test",
         )
         .await;
         assert_eq!(

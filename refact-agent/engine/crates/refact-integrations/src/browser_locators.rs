@@ -6,12 +6,14 @@ if (!window.__refact_inspect_element) {
     var rect = el.getBoundingClientRect();
     var tag = el.tagName.toLowerCase();
     var visibility = window.getComputedStyle(el).visibility;
-    var inputType = (tag === 'input') ? (el.type || 'text').toLowerCase() : null;
+    var target = (tag === 'label' && el.control) ? el.control : el;
+    var targetTag = target.tagName.toLowerCase();
+    var inputType = (targetTag === 'input') ? (target.type || 'text').toLowerCase() : null;
     var fieldKind = 'unknown';
-    if (tag === 'textarea') { fieldKind = 'textarea'; }
-    else if (tag === 'select') { fieldKind = 'select'; }
-    else if (el.isContentEditable) { fieldKind = 'content_editable'; }
-    else if (tag === 'input') {
+    if (targetTag === 'textarea') { fieldKind = 'textarea'; }
+    else if (targetTag === 'select') { fieldKind = 'select'; }
+    else if (target.isContentEditable) { fieldKind = 'content_editable'; }
+    else if (targetTag === 'input') {
       var typeMap = {
         'text': 'text_input', 'password': 'password_input',
         'email': 'email_input', 'search': 'search_input',
@@ -33,9 +35,9 @@ if (!window.__refact_inspect_element) {
       role: el.getAttribute('role') || null,
       visible: rect.width > 0 && rect.height > 0 && visibility !== 'hidden' && visibility !== 'collapse',
       enabled: !el.disabled,
-      readonly: !!el.readOnly,
-      content_editable: !!el.isContentEditable,
-      value: (el.value !== undefined) ? String(el.value) : null,
+      readonly: !!target.readOnly,
+      content_editable: !!target.isContentEditable,
+      value: (target.value !== undefined) ? String(target.value) : null,
       inner_text: (el.innerText || '').substring(0, 500),
       bbox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       field_kind: fieldKind
@@ -361,6 +363,22 @@ mod tests {
         assert_eq!(info.tag, "input");
         assert_eq!(info.field_kind, FieldKind::TextInput);
         assert!(info.visible);
+    }
+
+    #[test]
+    fn inspect_element_classifies_labels_by_their_control() {
+        assert!(INSPECT_ELEMENT_JS
+            .contains("var target = (tag === 'label' && el.control) ? el.control : el;"));
+        for read in [
+            "target.tagName.toLowerCase()",
+            "target.isContentEditable",
+            "readonly: !!target.readOnly",
+            "value: (target.value !== undefined)",
+        ] {
+            assert!(INSPECT_ELEMENT_JS.contains(read), "missing {read}");
+        }
+        assert!(INSPECT_ELEMENT_JS.contains("enabled: !el.disabled,"));
+        assert!(!INSPECT_ELEMENT_JS.contains("enabled: !target.disabled"));
     }
 
     #[test]

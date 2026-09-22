@@ -29,8 +29,8 @@ export interface BuddySpeechBubbleProps {
 }
 
 type BubbleVars = React.CSSProperties & {
-  "--bb-bg"?: string;
-  "--bb-ink"?: string;
+  "--bb-bg"?: "var(--rf-surface-overlay)";
+  "--bb-ink"?: "var(--rf-color-fg)";
   "--bb-border"?: string;
   "--bb-accent"?: string;
   "--bb-accent-soft"?: string;
@@ -117,8 +117,8 @@ export const BuddySpeechBubble: React.FC<BuddySpeechBubbleProps> = ({
     pointerEvents: hasControls && !closing ? "auto" : "none",
     visibility: visible ? "visible" : "hidden",
     opacity,
-    "--bb-bg": "#FBF6EA",
-    "--bb-ink": "#33302A",
+    "--bb-bg": "var(--rf-surface-overlay)",
+    "--bb-ink": "var(--rf-color-fg)",
     "--bb-border": palette.dark,
     "--bb-accent": palette.body,
     "--bb-accent-soft": `${palette.body}55`,
@@ -128,6 +128,7 @@ export const BuddySpeechBubble: React.FC<BuddySpeechBubbleProps> = ({
   return (
     <div
       ref={anchorRef}
+      data-testid="buddy-speech-bubble"
       data-bubble-position={position}
       data-compact={String(compact)}
       data-style={bubbleStyle}

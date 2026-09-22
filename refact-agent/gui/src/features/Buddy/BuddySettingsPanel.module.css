@@ -24,9 +24,7 @@
 }
 
 .label {
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 10px;
+  font-size: var(--rf-text-1);
 }
 
 .headerDescription,

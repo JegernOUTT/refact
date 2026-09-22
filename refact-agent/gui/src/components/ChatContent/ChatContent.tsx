@@ -1,3 +1,4 @@
+import { ContextRebuildBanner } from "./ContextRebuildBanner";
 import React, {
   useCallback,
   useMemo,
@@ -25,15 +26,15 @@ import {
   selectIsStreamingById,
   selectIsWaitingById,
   selectMessagesById,
-  selectQueuedItemsById,
   selectSnapshotReceivedById,
-  selectThreadById,
+  selectThreadModeById,
   selectThreadPauseById,
+  selectThreadTitleById,
+  selectThreadWorktreeById,
   selectIsCompressingById,
   selectCompressionPhaseById,
   selectCompressionReasonById,
   selectCompressionPulseSeqById,
-  selectEventLog,
 } from "../../features/Chat/Thread/selectors";
 import {
   createChatWithId,
@@ -50,8 +51,8 @@ import {
   DisplayItem,
   tryIncrementalDisplayItemsUpdate,
 } from "./ChatContentDisplayItems";
-import { QueuePanel } from "./QueuePanel";
-import { EventLog } from "./EventLog";
+import { EventRow } from "./EventRow";
+import { revealProcessOutput } from "./revealProcessOutput";
 import { selectSseStatusForChat } from "../../features/Connection";
 import { LogoAnimation } from "../LogoAnimation/LogoAnimation.tsx";
 import { ChatLoading } from "./ChatLoading";
@@ -123,10 +124,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const switching = chatId !== renderChatId;
 
   const messages = useAppSelector((s) => selectMessagesById(s, renderChatId));
-  const queuedItems = useAppSelector((s) =>
-    selectQueuedItemsById(s, renderChatId),
-  );
-  const eventLog = useAppSelector((s) => selectEventLog(s, renderChatId));
   const isStreaming = useAppSelector((s) =>
     selectIsStreamingById(s, renderChatId),
   );
@@ -146,12 +143,20 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const snapshotReceived = useAppSelector((s) =>
     selectSnapshotReceivedById(s, renderChatId),
   );
-  const thread = useAppSelector((s) => selectThreadById(s, renderChatId));
+  const threadMode = useAppSelector((s) =>
+    selectThreadModeById(s, renderChatId),
+  );
+  const threadTitle = useAppSelector((s) =>
+    selectThreadTitleById(s, renderChatId),
+  );
+  const threadWorktree = useAppSelector((s) =>
+    selectThreadWorktreeById(s, renderChatId),
+  );
   const sseStatus = useAppSelector((s) =>
     selectSseStatusForChat(s, renderChatId),
   );
 
-  const isConfig = thread !== null && thread.mode === "configurator";
+  const isConfig = threadMode === "configurator";
   const isWaiting = useAppSelector((s) => selectIsWaitingById(s, renderChatId));
   const integrationMeta = useAppSelector((s) =>
     selectIntegrationById(s, renderChatId),
@@ -235,7 +240,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const handleBranch = useCallback(
     (messageId: string) => {
       const newChatId = uuidv4();
-      const title = `[branched] ${thread?.title ?? "Chat"}`;
+      const title = `[branched] ${threadTitle ?? "Chat"}`;
 
       dispatch(
         createChatWithId({
@@ -243,7 +248,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
           title,
           parentId: renderChatId,
           linkType: "branch",
-          worktree: thread?.worktree,
+          worktree: threadWorktree ?? undefined,
         }),
       );
 
@@ -260,7 +265,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         console.error("Failed to branch chat:", err);
       });
     },
-    [dispatch, thread?.title, thread?.worktree, renderChatId, config, apiKey],
+    [dispatch, threadTitle, threadWorktree, renderChatId, config, apiKey],
   );
 
   const handleDelete = useCallback(
@@ -290,18 +295,18 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     dispatch(
       popBackTo({
         name: "integrations page",
-        projectPath: thread?.integration?.project,
-        integrationName: thread?.integration?.name,
-        integrationPath: thread?.integration?.path,
+        projectPath: integrationMeta?.project,
+        integrationName: integrationMeta?.name,
+        integrationPath: integrationMeta?.path,
         wasOpenedThroughChat: true,
       }),
     );
   }, [
     onStopStreaming,
     dispatch,
-    thread?.integration?.project,
-    thread?.integration?.name,
-    thread?.integration?.path,
+    integrationMeta?.project,
+    integrationMeta?.name,
+    integrationMeta?.path,
   ]);
 
   const shouldConfigButtonBeVisible = useMemo(() => {
@@ -345,21 +350,13 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   }, [displayItems]);
 
   const handleProcessCompletedClick = useCallback((processId: string) => {
-    const card = Array.from(
-      document.querySelectorAll("[data-exec-process-id]"),
-    ).find((item) => item.getAttribute("data-exec-process-id") === processId);
-    card?.scrollIntoView({ block: "center", behavior: "smooth" });
+    revealProcessOutput(processId);
   }, []);
 
   const virtuosoFooter = useMemo(
     () => (
       <>
         <Container>
-          <EventLog
-            events={eventLog}
-            threadId={renderChatId}
-            onProcessCompletedClick={handleProcessCompletedClick}
-          />
           <UncommittedChangesWarning />
         </Container>
         <Flex
@@ -395,12 +392,9 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     ),
     [
       compressionStatusText,
-      eventLog,
-      handleProcessCompletedClick,
       isStreaming,
       isWaiting,
       isWaitingForConfirmation,
-      renderChatId,
       visibleCompression,
     ],
   );
@@ -512,6 +506,16 @@ export const ChatContent: React.FC<ChatContentProps> = ({
             <SummarizationMessageCard key={item.key} message={item.message} />
           );
 
+        case "event":
+          return (
+            <EventRow
+              key={item.key}
+              event={item.event}
+              run={item.run}
+              onOpenProcessOutput={handleProcessCompletedClick}
+            />
+          );
+
         default:
           return null;
       }
@@ -519,6 +523,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     [
       handleBranch,
       handleDelete,
+      handleProcessCompletedClick,
       onRetryWrapper,
       collapsibleState,
       renderChatId,
@@ -574,6 +579,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
               footer={virtuosoFooter}
               header={
                 <Flex direction="column" gap="2">
+                  <ContextRebuildBanner chatId={renderChatId} />
                   <ChatShield threadId={renderChatId} />
                   <PlanBanner threadId={renderChatId} />
                 </Flex>
@@ -599,14 +605,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
               </ScrollArea>
             </Box>
           </Box>
-          {queuedItems.length > 0 && (
-            <Box className={styles.queuedMessagesContainer}>
-              <QueuePanel
-                queuedItems={queuedItems}
-                isBusy={isStreaming || isWaiting}
-              />
-            </Box>
-          )}
         </Flex>
       </CollapsibleStoreProvider>
     </ChatThreadProvider>

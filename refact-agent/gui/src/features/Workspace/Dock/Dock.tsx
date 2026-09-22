@@ -21,6 +21,7 @@ import { switchToThread } from "../../Chat/Thread";
 import { selectCapabilities } from "../../Config/configSlice";
 import { FilesPanel } from "../FilesPanel";
 import { GitDock } from "../GitPanel";
+import { WORKSPACE_NARROW_QUERY } from "../workspaceBreakpoints";
 import {
   normalizeDockWidth,
   selectFocusedWorkspaceChatId,
@@ -34,8 +35,6 @@ import {
 import styles from "./Dock.module.css";
 import { TasksSection } from "./TasksSection";
 
-const narrowQuery = "(max-width: 767px)";
-
 type DockStyle = CSSProperties & {
   "--workspace-dock-w": string;
 };
@@ -46,7 +45,7 @@ export function Dock() {
   const panelsForced = useAppSelector(selectPanelsForced);
   const dock = useAppSelector(selectWorkspaceDock);
   const focusedChatId = useAppSelector(selectFocusedWorkspaceChatId);
-  const isNarrow = useMediaQuery(narrowQuery);
+  const isNarrow = useMediaQuery(WORKSPACE_NARROW_QUERY);
   const dockRef = useRef<HTMLElement>(null);
   const liveWidthRef = useRef(dock.width);
   const dragCleanupRef = useRef<(() => void) | null>(null);

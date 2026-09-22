@@ -13,6 +13,8 @@ const MODE_TRANSITION_FILES_BUDGET_PERCENT: usize = 70;
 const MODE_TRANSITION_MAX_IMAGES: usize = 8;
 const MODE_TRANSITION_INITIAL_PLAN_SYMBOL_CAP: usize = 120_000;
 
+pub const RECONSTRUCTION_PROVENANCE_KEY: &str = "reconstruction";
+
 lazy_static! {
     static ref MEMORY_PATH_REGEX: Regex = Regex::new(
         r"(?:^|[\s\n])(/[^\s]+\.refact/(?:knowledge|trajectories|tasks/[^/]+/memories)/[^\s\n,)]+\.(?:md|json))"
@@ -455,6 +457,122 @@ pub fn parse_llm_response(response: &str) -> ParsedDecisions {
             .filter(|s| !s.is_empty()),
         handoff_message,
     }
+}
+
+/// Reject malformed/empty analysis instead of silently installing an empty context.
+pub fn validate_decisions(
+    decisions: &ParsedDecisions,
+    messages: &[ChatMessage],
+) -> Result<(), String> {
+    if decisions.summary.trim().is_empty() || decisions.handoff_message.trim().is_empty() {
+        return Err("Reconstruction requires a nonempty summary and next-action handoff".into());
+    }
+    for reference in decisions
+        .messages_to_preserve
+        .iter()
+        .chain(&decisions.tool_outputs_to_include)
+        .chain(decisions.plan_source.iter())
+    {
+        let index = reference
+            .strip_prefix("MSG_ID:")
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|index| *index < messages.len());
+        if index.is_none() {
+            return Err(format!("Invalid reconstruction reference: {reference}"));
+        }
+    }
+    Ok(())
+}
+
+/// Strict reconstruction keeps control artifacts whole and reserves their cost first.
+pub async fn assemble_reconstruction(
+    messages: &[ChatMessage],
+    decisions: &ParsedDecisions,
+    target_mode: &str,
+    workspace_dirs: &[PathBuf],
+    budget: TransitionContextBudget,
+    preserve_goal_messages: bool,
+    preloaded_files: &std::collections::HashMap<String, String>,
+) -> Result<Vec<ChatMessage>, String> {
+    let mut controls = if let Some(base) = current_base_plan_message(messages) {
+        let mut controls = vec![base.clone()];
+        controls.extend(messages.iter().filter(|m| is_plan_delta_event(m)).cloned());
+        controls
+    } else {
+        resolve_pinned_plan_text(messages, decisions)
+            .map(|text| {
+                vec![make_pinned_plan_message(
+                    &text,
+                    text_symbols(&text),
+                    target_mode,
+                )]
+            })
+            .unwrap_or_default()
+    };
+    if preserve_goal_messages {
+        if let Some(base) = current_base_goal_message(messages) {
+            let mut goal_controls = vec![base.clone()];
+            goal_controls.extend(
+                messages
+                    .iter()
+                    .filter(|m| is_goal_delta_event(m) || is_goal_pursuit_event(m))
+                    .cloned(),
+            );
+            goal_controls.extend(controls);
+            controls = goal_controls;
+        }
+    }
+    for control in &mut controls {
+        normalize_control_metadata(control, target_mode);
+    }
+    let mandatory = controls.iter().map(message_symbols).sum::<usize>();
+    if mandatory >= budget.total_symbols {
+        return Err(format!("Mandatory plan/goal context ({mandatory} symbols) does not fit reconstruction budget ({})", budget.total_symbols));
+    }
+    let continuation = format!(
+        "## Summary\n\n{}\n\n## Pending Tasks\n\n{}\n\n## Next Action\n\n{}",
+        decisions.summary,
+        decisions.pending_tasks.join("\n"),
+        decisions.handoff_message
+    );
+    let continuation_symbols = text_symbols(&continuation);
+    if mandatory + continuation_symbols > budget.total_symbols {
+        return Err("Mandatory controls and continuation exceed reconstruction budget".into());
+    }
+    let available = budget.total_symbols - mandatory - continuation_symbols;
+    let narrative_budget = TransitionContextBudget {
+        total_symbols: available,
+        files_symbols: budget.files_symbols.min(available / 2),
+        messages_symbols: available - budget.files_symbols.min(available / 2),
+        ..budget
+    };
+    let mut selected = decisions.clone();
+    selected.summary.clear();
+    selected.handoff_message.clear();
+    selected.pending_tasks.clear();
+    let mut result = assemble_with_budget(
+        messages,
+        &selected,
+        target_mode,
+        workspace_dirs,
+        narrative_budget,
+        false,
+        Some(preloaded_files),
+    )
+    .await?;
+    result.push(ChatMessage::new("user".into(), continuation));
+    result.extend(controls);
+    let size = result.iter().map(message_symbols).sum::<usize>();
+    if size > budget.total_symbols {
+        return Err("Reconstruction exceeded its output budget".into());
+    }
+    if !result
+        .iter()
+        .any(|m| m.role == "user" && !m.content.content_text_only().trim().is_empty())
+    {
+        return Err("Reconstruction budget leaves no meaningful continuation".into());
+    }
+    Ok(result)
 }
 
 pub fn format_annotated_messages(metadata: &ConversationMetadata) -> String {
@@ -1238,6 +1356,7 @@ pub fn transfer_goal_ownership(
         at_ms,
         target_supersedes,
     );
+    normalize_control_metadata(&mut target_base, target_mode);
     let mut target_messages = vec![target_base];
     target_messages.extend(
         source_messages
@@ -1351,7 +1470,7 @@ fn resolve_pinned_plan_text(
 
 /// Build a fresh `plan`-role message (the PlanBanner artifact) from pinned plan text,
 /// capping its size to keep new-chat context bounded.
-pub fn make_pinned_plan_message(text: &str, symbol_cap: usize) -> ChatMessage {
+pub fn make_pinned_plan_message(text: &str, symbol_cap: usize, mode: &str) -> ChatMessage {
     let normalized_text = normalize_plan_report_text(text);
     let text = normalized_text.as_str();
     let body: String = if text_symbols(text) > symbol_cap {
@@ -1363,7 +1482,7 @@ pub fn make_pinned_plan_message(text: &str, symbol_cap: usize) -> ChatMessage {
     extra.insert(
         "plan".to_string(),
         serde_json::json!({
-            "mode": "",
+            "mode": fallback_control_mode(mode),
             "version": 1,
             "created_at_ms": now_ms(),
             "supersedes": null,
@@ -1378,12 +1497,64 @@ pub fn make_pinned_plan_message(text: &str, symbol_cap: usize) -> ChatMessage {
     }
 }
 
+fn fallback_control_mode(mode: &str) -> &str {
+    let mode = mode.trim();
+    if mode.is_empty() {
+        "agent"
+    } else {
+        mode
+    }
+}
+
+pub fn normalize_control_metadata(message: &mut ChatMessage, mode: &str) {
+    if !matches!(message.role.as_str(), "goal" | "plan") {
+        return;
+    }
+    let role = message.role.clone();
+    let mut meta = match message.extra.remove(&role) {
+        Some(serde_json::Value::Object(meta)) => meta,
+        _ => serde_json::Map::new(),
+    };
+    if !meta
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|v| v > 0 && v <= u32::MAX as u64)
+    {
+        meta.insert("version".to_string(), serde_json::json!(1));
+    }
+    if !meta
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|v| !v.is_empty())
+    {
+        meta.insert(
+            "mode".to_string(),
+            serde_json::json!(fallback_control_mode(mode)),
+        );
+    }
+    if meta.get("active").is_some_and(|v| !v.is_boolean()) {
+        meta.remove("active");
+    }
+    if meta.get("budget").is_some_and(|v| !v.is_object()) {
+        meta.remove("budget");
+    }
+    if meta
+        .get("supersedes")
+        .is_some_and(|v| !v.is_null() && !v.is_string())
+    {
+        meta.remove("supersedes");
+    }
+    message.extra.insert(role, serde_json::Value::Object(meta));
+}
+
 /// Plan messages to carry into a new chat for paths that have no analysis model
 /// (handoff, deterministic tool paths): an existing pinned plan plus its deltas, or a
 /// single deterministic plan-like report pinned as a fresh plan banner.
-pub fn carried_plan_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+pub fn carried_plan_messages(messages: &[ChatMessage], mode: &str) -> Vec<ChatMessage> {
     if let Some(existing_plan) = current_base_plan_message(messages) {
-        let mut carried = vec![normalize_plan_message_content(existing_plan.clone())];
+        let mut base = normalize_plan_message_content(existing_plan.clone());
+        normalize_control_metadata(&mut base, mode);
+        let mut carried = vec![base];
         carried.extend(
             messages
                 .iter()
@@ -1396,14 +1567,17 @@ pub fn carried_plan_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
         return vec![make_pinned_plan_message(
             &text,
             MODE_TRANSITION_INITIAL_PLAN_SYMBOL_CAP,
+            mode,
         )];
     }
     Vec::new()
 }
 
-pub fn carried_goal_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+pub fn carried_goal_messages(messages: &[ChatMessage], mode: &str) -> Vec<ChatMessage> {
     if let Some(existing_goal) = current_base_goal_message(messages) {
-        let mut carried = vec![normalize_goal_message_content(existing_goal.clone())];
+        let mut base = normalize_goal_message_content(existing_goal.clone());
+        normalize_control_metadata(&mut base, mode);
+        let mut carried = vec![base];
         carried.extend(
             messages
                 .iter()
@@ -1446,10 +1620,31 @@ pub fn insert_goal_messages_before_plan(
 pub async fn assemble_new_chat(
     original_messages: &[ChatMessage],
     decisions: &ParsedDecisions,
+    target_mode: &str,
     workspace_dirs: &[PathBuf],
 ) -> Result<Vec<ChatMessage>, String> {
+    assemble_with_budget(
+        original_messages,
+        decisions,
+        target_mode,
+        workspace_dirs,
+        calculate_transition_context_budget(original_messages),
+        true,
+        None,
+    )
+    .await
+}
+
+async fn assemble_with_budget(
+    original_messages: &[ChatMessage],
+    decisions: &ParsedDecisions,
+    target_mode: &str,
+    workspace_dirs: &[PathBuf],
+    budget: TransitionContextBudget,
+    include_plan: bool,
+    preloaded_files: Option<&std::collections::HashMap<String, String>>,
+) -> Result<Vec<ChatMessage>, String> {
     let metadata = extract_conversation_metadata(original_messages);
-    let budget = calculate_transition_context_budget(original_messages);
     let mut remaining_files_symbols = budget.files_symbols;
     let mut remaining_messages_symbols = budget.messages_symbols;
     let mut remaining_images = budget.max_images;
@@ -1470,7 +1665,7 @@ pub async fn assemble_new_chat(
             tracing::warn!("Skipping file {} - not in conversation allowlist", path);
             continue;
         }
-        match read_file_content_safe(path, workspace_dirs).await {
+        match assembly_file_content(path, workspace_dirs, preloaded_files).await {
             Ok(content) => {
                 push_context_file_with_budget(
                     &mut file_contents,
@@ -1501,7 +1696,7 @@ pub async fn assemble_new_chat(
             );
             continue;
         }
-        match read_file_content_safe(memory_path, workspace_dirs).await {
+        match assembly_file_content(memory_path, workspace_dirs, preloaded_files).await {
             Ok(content) => {
                 push_context_file_with_budget(
                     &mut memory_contents,
@@ -1635,26 +1830,31 @@ pub async fn assemble_new_chat(
         }
     }
 
-    if let Some(existing_plan) = current_base_plan_message(original_messages) {
-        new_messages.push(normalize_plan_message_content(existing_plan.clone()));
-        new_messages.extend(
-            original_messages
-                .iter()
-                .filter(|message| is_plan_delta_event(message))
-                .cloned(),
-        );
-    } else if let Some(pinned_plan_text) = resolve_pinned_plan_text(original_messages, decisions) {
-        let initial_plan = pinned_plan_text.trim();
-        if !initial_plan.is_empty() {
-            let plan_budget = remaining_messages_symbols
-                .max(MODE_TRANSITION_INITIAL_PLAN_SYMBOL_CAP.min(text_symbols(initial_plan)));
-            let plan_message = make_pinned_plan_message(initial_plan, plan_budget);
-            let used = text_symbols(&plan_message.content.content_text_only());
-            new_messages.push(plan_message);
-            remaining_messages_symbols = remaining_messages_symbols.saturating_sub(used);
+    if include_plan {
+        if let Some(existing_plan) = current_base_plan_message(original_messages) {
+            let mut base = normalize_plan_message_content(existing_plan.clone());
+            normalize_control_metadata(&mut base, target_mode);
+            new_messages.push(base);
+            new_messages.extend(
+                original_messages
+                    .iter()
+                    .filter(|message| is_plan_delta_event(message))
+                    .cloned(),
+            );
+        } else if let Some(pinned_plan_text) =
+            resolve_pinned_plan_text(original_messages, decisions)
+        {
+            let initial_plan = pinned_plan_text.trim();
+            if !initial_plan.is_empty() {
+                let plan_budget = remaining_messages_symbols
+                    .max(MODE_TRANSITION_INITIAL_PLAN_SYMBOL_CAP.min(text_symbols(initial_plan)));
+                let plan_message = make_pinned_plan_message(initial_plan, plan_budget, target_mode);
+                let used = text_symbols(&plan_message.content.content_text_only());
+                new_messages.push(plan_message);
+                remaining_messages_symbols = remaining_messages_symbols.saturating_sub(used);
+            }
         }
     }
-
     let finish_report = find_finish_report(original_messages);
     if let Some(report) = &finish_report {
         let prefix = "## Task Completion Report\n\n";
@@ -1699,6 +1899,20 @@ pub async fn assemble_new_chat(
     }
 
     Ok(new_messages)
+}
+
+async fn assembly_file_content(
+    path: &str,
+    workspace_dirs: &[PathBuf],
+    preloaded: Option<&std::collections::HashMap<String, String>>,
+) -> Result<String, String> {
+    match preloaded {
+        Some(files) => files
+            .get(path)
+            .cloned()
+            .ok_or_else(|| "File was not runtime-cleared".into()),
+        None => read_file_content_safe(path, workspace_dirs).await,
+    }
 }
 
 async fn read_file_content_safe(path: &str, workspace_dirs: &[PathBuf]) -> Result<String, String> {
@@ -1761,6 +1975,127 @@ async fn read_file_content_safe(path: &str, workspace_dirs: &[PathBuf]) -> Resul
 mod tests {
     use super::*;
     use refact_core::chat_types::{ChatToolCall, ChatToolFunction, ContextFile};
+
+    #[test]
+    fn reconstruction_rejects_empty_and_invalid_decisions() {
+        let messages = vec![ChatMessage::new("user".into(), "task".into())];
+        assert!(validate_decisions(&parse_llm_response("not XML"), &messages).is_err());
+        let mut decisions = ParsedDecisions {
+            summary: "Task state".into(),
+            handoff_message: "Run tests".into(),
+            ..Default::default()
+        };
+        assert!(validate_decisions(&decisions, &messages).is_ok());
+        decisions.messages_to_preserve.push("MSG_ID:99".into());
+        assert!(validate_decisions(&decisions, &messages).is_err());
+    }
+
+    #[tokio::test]
+    async fn reconstruction_preserves_control_bytes_and_budget() {
+        let mut goal = ChatMessage::new("goal".into(), " exact goal bytes ".into());
+        goal.extra.insert(
+            "goal".into(),
+            serde_json::json!({"version": 1, "mode": "agent", "active": true}),
+        );
+        let mut delta = ChatMessage::new("event".into(), "retain update".into());
+        delta
+            .extra
+            .insert("event".into(), serde_json::json!({"subkind":"plan_delta"}));
+        let messages = vec![plan_role_message(1, " exact plan bytes "), delta, goal];
+        let decisions = ParsedDecisions {
+            summary: "Implement approved plan".into(),
+            handoff_message: "Run the verification command".into(),
+            ..Default::default()
+        };
+        let budget = TransitionContextBudget {
+            previous_symbols: 1000,
+            total_symbols: 800,
+            files_symbols: 400,
+            messages_symbols: 400,
+            max_images: 2,
+        };
+        let rebuilt = assemble_reconstruction(
+            &messages,
+            &decisions,
+            "agent",
+            &[],
+            budget,
+            true,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+        assert!(rebuilt.iter().map(message_symbols).sum::<usize>() <= 800);
+        for control in &messages {
+            assert!(rebuilt.iter().any(|m| m.role == control.role
+                && m.content.content_text_only() == control.content.content_text_only()
+                && m.extra == control.extra));
+        }
+        let without_goal = assemble_reconstruction(
+            &messages,
+            &decisions,
+            "agent",
+            &[],
+            budget,
+            false,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!without_goal.iter().any(|m| m.role == "goal"));
+        assert!(assemble_reconstruction(
+            &messages,
+            &decisions,
+            "agent",
+            &[],
+            TransitionContextBudget {
+                total_symbols: 10,
+                ..budget
+            },
+            true,
+            &Default::default()
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn reconstruction_does_not_read_unapproved_files() {
+        let messages = vec![ChatMessage {
+            role: "context_file".into(),
+            content: ChatContent::ContextFiles(vec![ContextFile {
+                file_name: "/etc/hosts".into(),
+                file_content: "old".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }];
+        let decisions = ParsedDecisions {
+            summary: "Task state".into(),
+            handoff_message: "Next action".into(),
+            files_to_open: vec!["/etc/hosts".into()],
+            ..Default::default()
+        };
+        let budget = TransitionContextBudget {
+            previous_symbols: 10000,
+            total_symbols: 3000,
+            files_symbols: 2100,
+            messages_symbols: 900,
+            max_images: 0,
+        };
+        let rebuilt = assemble_reconstruction(
+            &messages,
+            &decisions,
+            "agent",
+            &[],
+            budget,
+            false,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!rebuilt.iter().any(|m| m.role == "context_file"));
+    }
 
     #[test]
     fn test_parse_xml_tag() {
@@ -2304,7 +2639,9 @@ MSG_ID:2
             ..Default::default()
         };
 
-        let new_messages = assemble_new_chat(&messages, &decisions, &[]).await.unwrap();
+        let new_messages = assemble_new_chat(&messages, &decisions, "agent", &[])
+            .await
+            .unwrap();
         let plan_messages: Vec<_> = new_messages
             .iter()
             .filter(|msg| msg.role == "plan")
@@ -2315,7 +2652,7 @@ MSG_ID:2
         assert_eq!(plan_messages[0].preserve, Some(true));
         assert_eq!(
             plan_messages[0].extra["plan"]["mode"],
-            serde_json::json!("")
+            serde_json::json!("agent")
         );
         assert_eq!(
             plan_messages[0].extra["plan"]["version"],
@@ -2428,7 +2765,9 @@ MSG_ID:2
             ..Default::default()
         };
 
-        let new_messages = assemble_new_chat(&messages, &decisions, &[]).await.unwrap();
+        let new_messages = assemble_new_chat(&messages, &decisions, "agent", &[])
+            .await
+            .unwrap();
         let hidden_messages: Vec<_> = new_messages
             .iter()
             .filter(|message| message.role == "plan" || message.role == "event")
@@ -2507,7 +2846,7 @@ MSG_ID:2
                 ..Default::default()
             },
         ];
-        let new_messages = assemble_new_chat(&messages, &ParsedDecisions::default(), &[])
+        let new_messages = assemble_new_chat(&messages, &ParsedDecisions::default(), "agent", &[])
             .await
             .unwrap();
         let text = new_messages
@@ -2667,7 +3006,9 @@ MSG_ID:2
             ..Default::default()
         };
 
-        let new_messages = assemble_new_chat(&messages, &decisions, &[]).await.unwrap();
+        let new_messages = assemble_new_chat(&messages, &decisions, "agent", &[])
+            .await
+            .unwrap();
         let plan_messages: Vec<_> = new_messages
             .iter()
             .filter(|msg| msg.role == "plan")
@@ -2696,7 +3037,9 @@ MSG_ID:2
             ..Default::default()
         };
 
-        let new_messages = assemble_new_chat(&messages, &decisions, &[]).await.unwrap();
+        let new_messages = assemble_new_chat(&messages, &decisions, "agent", &[])
+            .await
+            .unwrap();
         let plan_messages: Vec<_> = new_messages
             .iter()
             .filter(|msg| msg.role == "plan")
@@ -2723,7 +3066,9 @@ MSG_ID:2
             ..Default::default()
         };
 
-        let new_messages = assemble_new_chat(&messages, &decisions, &[]).await.unwrap();
+        let new_messages = assemble_new_chat(&messages, &decisions, "agent", &[])
+            .await
+            .unwrap();
         let plan_messages: Vec<_> = new_messages
             .iter()
             .filter(|msg| msg.role == "plan")
@@ -2747,7 +3092,7 @@ MSG_ID:2
         .to_string();
         let messages = vec![plan_role_message(1, &task_done_payload)];
 
-        let new_messages = assemble_new_chat(&messages, &ParsedDecisions::default(), &[])
+        let new_messages = assemble_new_chat(&messages, &ParsedDecisions::default(), "agent", &[])
             .await
             .unwrap();
         let plan_messages: Vec<_> = new_messages
@@ -2782,7 +3127,9 @@ MSG_ID:2
         ];
         let decisions = ParsedDecisions::default();
 
-        let new_messages = assemble_new_chat(&messages, &decisions, &[]).await.unwrap();
+        let new_messages = assemble_new_chat(&messages, &decisions, "agent", &[])
+            .await
+            .unwrap();
         let plan_messages: Vec<_> = new_messages
             .iter()
             .filter(|msg| msg.role == "plan")
@@ -2802,7 +3149,9 @@ MSG_ID:2
         ];
         let decisions = ParsedDecisions::default();
 
-        let new_messages = assemble_new_chat(&messages, &decisions, &[]).await.unwrap();
+        let new_messages = assemble_new_chat(&messages, &decisions, "agent", &[])
+            .await
+            .unwrap();
         assert!(!new_messages.iter().any(|msg| msg.role == "plan"));
     }
 
@@ -2827,7 +3176,7 @@ MSG_ID:2
         };
         let messages = vec![plan_role_message(2, "BASE"), delta];
 
-        let carried = carried_plan_messages(&messages);
+        let carried = carried_plan_messages(&messages, "agent");
         assert_eq!(carried.len(), 2);
         assert_eq!(carried[0].role, "plan");
         assert_eq!(carried[0].content.content_text_only(), "BASE");
@@ -2845,7 +3194,7 @@ MSG_ID:2
         .to_string();
         let messages = vec![plan_role_message(2, &task_done_payload)];
 
-        let carried = carried_plan_messages(&messages);
+        let carried = carried_plan_messages(&messages, "agent");
         assert_eq!(carried.len(), 1);
         assert_eq!(carried[0].role, "plan");
         let plan_text = carried[0].content.content_text_only();
@@ -2864,7 +3213,7 @@ MSG_ID:2
             tool_result("call_plan", "REPORT BODY"),
         ];
 
-        let carried = carried_plan_messages(&messages);
+        let carried = carried_plan_messages(&messages, "agent");
         assert_eq!(carried.len(), 1);
         assert_eq!(carried[0].role, "plan");
         assert_eq!(carried[0].content.content_text_only(), "REPORT BODY");
@@ -2885,7 +3234,7 @@ MSG_ID:2
             tool_result("call_task_done", &task_done_payload),
         ];
 
-        let carried = carried_plan_messages(&messages);
+        let carried = carried_plan_messages(&messages, "agent");
         assert_eq!(carried.len(), 1);
         assert_eq!(carried[0].role, "plan");
         let plan_text = carried[0].content.content_text_only();
@@ -2903,7 +3252,268 @@ MSG_ID:2
             content: ChatContent::SimpleText("hi".to_string()),
             ..Default::default()
         }];
-        assert!(carried_plan_messages(&messages).is_empty());
+        assert!(carried_plan_messages(&messages, "agent").is_empty());
+    }
+
+    fn plan_delta_event(id: &str, seq: u64) -> ChatMessage {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "event".to_string(),
+            serde_json::json!({
+                "subkind": "plan_delta",
+                "source": "tool.update_plan",
+                "payload": {"seq": seq},
+            }),
+        );
+        ChatMessage {
+            role: "event".to_string(),
+            message_id: id.to_string(),
+            content: ChatContent::SimpleText(format!("Plan updated (delta {seq})")),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    fn assign_ids(messages: &mut [ChatMessage]) {
+        for (index, message) in messages.iter_mut().enumerate() {
+            if message.message_id.is_empty() {
+                message.message_id = format!("generated-{index}");
+            }
+        }
+    }
+
+    #[test]
+    fn pinned_plan_message_passes_reconstruction_validation() {
+        for mode in ["agent", "ultra_agent", "", "  "] {
+            let mut plan = make_pinned_plan_message("# Plan\n- step", 1000, mode);
+            plan.message_id = "pinned".to_string();
+            assert!(
+                refact_core::active_context::validate_reconstruction_payload(&[plan.clone()])
+                    .is_ok(),
+                "mode {mode:?}: {:?}",
+                plan.extra["plan"]
+            );
+            let expected = if mode.trim().is_empty() {
+                "agent"
+            } else {
+                mode
+            };
+            assert_eq!(plan.extra["plan"]["mode"], serde_json::json!(expected));
+        }
+    }
+
+    #[test]
+    fn legacy_empty_mode_plan_is_rejected_by_validator_but_repaired_by_normalization() {
+        let mut legacy = plan_role_message(1, "legacy body");
+        legacy.extra.get_mut("plan").unwrap()["mode"] = serde_json::json!("");
+        assert_eq!(
+            refact_core::active_context::validate_reconstruction_payload(&[legacy.clone()]),
+            Err(
+                refact_core::active_context::ActiveContextError::InvalidPayload(
+                    "malformed goal or plan metadata".into()
+                )
+            )
+        );
+        let mut repaired = legacy.clone();
+        normalize_control_metadata(&mut repaired, "ultra_agent");
+        assert!(
+            refact_core::active_context::validate_reconstruction_payload(&[repaired.clone()])
+                .is_ok()
+        );
+        assert_eq!(
+            repaired.extra["plan"]["mode"],
+            serde_json::json!("ultra_agent")
+        );
+        assert_eq!(repaired.extra["plan"]["version"], serde_json::json!(1));
+        assert_eq!(
+            repaired.extra["plan"]["created_at_ms"],
+            serde_json::json!(1000)
+        );
+        assert_eq!(repaired.content, legacy.content);
+    }
+
+    #[test]
+    fn normalize_control_metadata_repairs_each_malformed_field() {
+        let mut goal = ChatMessage {
+            role: "goal".to_string(),
+            message_id: "goal".to_string(),
+            content: ChatContent::SimpleText("goal body".to_string()),
+            ..Default::default()
+        };
+        goal.extra.insert(
+            "goal".to_string(),
+            serde_json::json!({
+                "mode": null,
+                "version": 0,
+                "active": "yes",
+                "budget": null,
+                "supersedes": 7,
+                "status": "active",
+            }),
+        );
+        assert!(
+            refact_core::active_context::validate_reconstruction_payload(&[goal.clone()]).is_err()
+        );
+        normalize_control_metadata(&mut goal, "agent");
+        assert!(
+            refact_core::active_context::validate_reconstruction_payload(&[goal.clone()]).is_ok()
+        );
+        let meta = &goal.extra["goal"];
+        assert_eq!(meta["mode"], serde_json::json!("agent"));
+        assert_eq!(meta["version"], serde_json::json!(1));
+        assert!(meta.get("active").is_none());
+        assert!(meta.get("budget").is_none());
+        assert!(meta.get("supersedes").is_none());
+        assert_eq!(meta["status"], serde_json::json!("active"));
+
+        let mut valid = plan_role_message(3, "valid");
+        let before = valid.extra.clone();
+        normalize_control_metadata(&mut valid, "other");
+        assert_eq!(valid.extra, before);
+
+        let mut user = ChatMessage::new("user".into(), "not a control".into());
+        normalize_control_metadata(&mut user, "agent");
+        assert!(user.extra.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconstruction_over_legacy_plan_with_deltas_and_goal_validates() {
+        let mut plan = plan_role_message(1, "# Plan\n\n## Tasks\n- do it");
+        plan.extra.get_mut("plan").unwrap()["mode"] = serde_json::json!("");
+        let mut goal = ChatMessage {
+            role: "goal".to_string(),
+            message_id: "goal-1".to_string(),
+            content: ChatContent::SimpleText("finish the plan".to_string()),
+            ..Default::default()
+        };
+        goal.extra.insert(
+            "goal".to_string(),
+            serde_json::json!({"version": 1, "mode": "", "active": true, "budget": null}),
+        );
+        let mut messages = vec![
+            ChatMessage::new("user".into(), "start the work".into()),
+            plan,
+        ];
+        for seq in 1..=65 {
+            messages.push(plan_delta_event(&format!("delta-{seq}"), seq));
+        }
+        messages.push(goal);
+        messages.push(ChatMessage::new("user".into(), "continue".into()));
+        let decisions = ParsedDecisions {
+            summary: "Plan in progress".into(),
+            handoff_message: "Continue with the next delta".into(),
+            ..Default::default()
+        };
+        let budget = TransitionContextBudget {
+            previous_symbols: 100_000,
+            total_symbols: 30_000,
+            files_symbols: 10_000,
+            messages_symbols: 20_000,
+            max_images: 0,
+        };
+        for preserve_goal in [true, false] {
+            let mut rebuilt = assemble_reconstruction(
+                &messages,
+                &decisions,
+                "agent",
+                &[],
+                budget,
+                preserve_goal,
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+            assign_ids(&mut rebuilt);
+            assert_eq!(
+                refact_core::active_context::validate_reconstruction_payload(&rebuilt),
+                Ok(())
+            );
+            let plan = rebuilt.iter().find(|m| m.role == "plan").unwrap();
+            assert_eq!(plan.message_id, "plan-1");
+            assert_eq!(plan.extra["plan"]["mode"], serde_json::json!("agent"));
+            assert_eq!(
+                rebuilt.iter().filter(|m| is_plan_delta_event(m)).count(),
+                65
+            );
+            assert_eq!(rebuilt.iter().any(|m| m.role == "goal"), preserve_goal);
+        }
+
+        let mut handed_off = assemble_new_chat(&messages, &decisions, "agent", &[])
+            .await
+            .unwrap();
+        assign_ids(&mut handed_off);
+        assert_eq!(
+            refact_core::active_context::validate_reconstruction_payload(&handed_off),
+            Ok(())
+        );
+
+        let mut carried = carried_plan_messages(&messages, "agent");
+        carried.extend(carried_goal_messages(&messages, "agent"));
+        assign_ids(&mut carried);
+        assert_eq!(
+            refact_core::active_context::validate_reconstruction_payload(&carried),
+            Ok(())
+        );
+
+        let transfer =
+            transfer_goal_ownership(&messages, None, &[], "source", "target", "agent", 5);
+        assert!(transfer.transferred());
+        let mut target = transfer.target_messages.clone();
+        assign_ids(&mut target);
+        assert_eq!(
+            refact_core::active_context::validate_reconstruction_payload(&target),
+            Ok(())
+        );
+        assert_eq!(target[0].extra["goal"]["mode"], serde_json::json!("agent"));
+    }
+
+    #[tokio::test]
+    async fn restart_over_compressed_chat_carries_plan_from_report_payload() {
+        let mut payload = vec![
+            ChatMessage::new("user".into(), "start the work".into()),
+            plan_role_message(1, "# Plan\n\n## Tasks\n- do it"),
+        ];
+        for seq in 1..=19 {
+            payload.push(plan_delta_event(&format!("delta-{seq}"), seq));
+        }
+        assign_ids(&mut payload);
+        let report = refact_core::active_context::make_reconstruction_report(
+            payload,
+            refact_core::active_context::ReconstructionMetadata::default(),
+        )
+        .unwrap();
+        let mut stored = vec![report, ChatMessage::new("user".into(), "continue".into())];
+        assign_ids(&mut stored);
+        assert!(carried_plan_messages(&stored, "agent").is_empty());
+
+        let expanded = refact_core::active_context::legacy_rebuild_input(&stored).unwrap();
+        let carried = carried_plan_messages(&expanded, "agent");
+        assert_eq!(carried[0].message_id, "plan-1");
+        assert_eq!(
+            carried.iter().filter(|m| is_plan_delta_event(m)).count(),
+            19
+        );
+
+        let decisions = ParsedDecisions {
+            summary: "Plan in progress".into(),
+            handoff_message: "Continue".into(),
+            ..Default::default()
+        };
+        let mut rebuilt = assemble_new_chat(&expanded, &decisions, "agent", &[])
+            .await
+            .unwrap();
+        assign_ids(&mut rebuilt);
+        assert_eq!(
+            refact_core::active_context::validate_reconstruction_payload(&rebuilt),
+            Ok(())
+        );
+        let plan = rebuilt.iter().find(|m| m.role == "plan").unwrap();
+        assert_eq!(plan.message_id, "plan-1");
+        assert_eq!(plan.extra["plan"]["mode"], serde_json::json!("agent"));
+        assert_eq!(
+            rebuilt.iter().filter(|m| is_plan_delta_event(m)).count(),
+            19
+        );
     }
 
     #[test]

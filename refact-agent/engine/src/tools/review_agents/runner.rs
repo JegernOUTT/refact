@@ -60,6 +60,7 @@ pub struct StageCtx {
     pub worktree: Option<WorktreeMeta>,
     pub chat_id: String,
     pub root_chat_id: String,
+    pub activity: Option<Arc<AtomicU64>>,
 }
 
 pub struct StageJob {
@@ -92,6 +93,7 @@ pub fn monitor_ctx(
 ) -> (StageCtx, tokio::task::JoinHandle<()>) {
     let (monitor_tx, mut monitor_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     let parent_tx = ctx.subchat_tx.clone();
+    let stamp = activity.clone();
     let forwarder = tokio::spawn(async move {
         while let Some(message) = monitor_rx.recv().await {
             activity.store(now_ms(), Ordering::Relaxed);
@@ -101,6 +103,7 @@ pub fn monitor_ctx(
     });
     let mut monitored = ctx.clone();
     monitored.subchat_tx = Arc::new(AMutex::new(monitor_tx));
+    monitored.activity = Some(stamp);
     (monitored, forwarder)
 }
 
@@ -178,6 +181,7 @@ async fn run_stage_inner(gcx: Arc<GlobalContext>, ctx: StageCtx, job: StageJob) 
         }
     };
     config.soft_abort = true;
+    config.activity_stamp = ctx.activity.clone();
 
     let messages = vec![
         ChatMessage {
@@ -410,6 +414,7 @@ mod tests {
             worktree,
             chat_id: "chat".to_string(),
             root_chat_id: "chat".to_string(),
+            activity: None,
         }
     }
 

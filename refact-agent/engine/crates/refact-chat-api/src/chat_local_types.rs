@@ -87,6 +87,7 @@ pub enum EnqueueCommandOutcome {
     Accepted,
     Duplicate,
     Full,
+    Rejected,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]

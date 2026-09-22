@@ -21,6 +21,7 @@ import { FimDebugData } from 'refact-chat-js/dist/events/index.js';
 import { code_lens_execute } from './codeLens';
 import { registerRefactDiffContentProvider } from './nativeDiff';
 import { installIdeConsoleCapture } from './ideLogBuffer';
+import { registerNativeHostRelease } from './nativeHostRelease';
 
 
 declare global {
@@ -200,6 +201,7 @@ export async function inline_accepted(this_completion_serial_number: number)
 
 export function activate(context: vscode.ExtensionContext)
 {
+    registerNativeHostRelease(context);
     global.ide_log_capture_uninstall = installIdeConsoleCapture();
     global.global_context = context;
     global.enable_longthink_completion = false;

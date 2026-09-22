@@ -65,6 +65,18 @@ impl ImagePolicy {
             ..Self::default()
         }
     }
+
+    /// Keeps the native pixel geometry and encodes lossless PNG, for captures whose dimensions
+    /// carry meaning (visual baselines) and must not be rescaled or re-encoded lossily.
+    pub fn lossless_native() -> Self {
+        Self {
+            max_side: 0,
+            preferred_side: 0,
+            format: ImageFormat::Png,
+            quality: None,
+            ..Self::default()
+        }
+    }
 }
 
 pub fn resize_to_policy(
@@ -173,6 +185,23 @@ mod tests {
         assert_eq!(
             image::load_from_memory(&large).unwrap().dimensions(),
             (1568, 1176)
+        );
+    }
+
+    #[test]
+    fn lossless_native_keeps_native_geometry_and_encodes_png() {
+        let policy = ImagePolicy::lossless_native();
+        assert_eq!(policy.max_side, 0);
+        assert_eq!(policy.preferred_side, 0);
+        assert_eq!(policy.format, ImageFormat::Png);
+        assert_eq!(policy.quality, None);
+
+        let (encoded, mime) =
+            resize_to_policy(&encoded_png(4000, 3000), "image/png", &policy).unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(
+            image::load_from_memory(&encoded).unwrap().dimensions(),
+            (4000, 3000)
         );
     }
 

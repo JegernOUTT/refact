@@ -205,10 +205,20 @@ impl Tool for ToolProcessStart {
         };
         crate::privacy::load_privacy_if_needed(gcx.clone()).await;
         let destination = crate::privacy::records::provider_destination(&current_model);
-        let observe = crate::privacy::records::shell_observation_needed_for_session(
+        let observe_reason = crate::privacy::records::shell_observation_reason_for_session(
             &gcx,
             &destination,
             &derived_privacy_zones,
+        );
+        let observe = observe_reason.needed();
+        tracing::debug!(
+            "process observation {} for destination {}: {} blocked patterns, {} zones excluding \
+             it, {} derived labels",
+            if observe { "on" } else { "off" },
+            destination.id.0,
+            observe_reason.blocked_patterns,
+            observe_reason.guarded_zones,
+            observe_reason.derived_labels
         );
         let parsed = parse_start_args(gcx.clone(), args, execution_scope.as_ref()).await?;
         let mut error_log = Vec::new();
@@ -825,7 +835,7 @@ impl Tool for ToolProcessWait {
             source: source(&self.config_path),
             experimental: false,
             allow_parallel: true,
-            description: "Wait for a runtime-owned process to complete, or return the current snapshot when timeout_ms expires.".to_string(),
+            description: "Wait for a runtime-owned process to complete, or return the current snapshot when timeout_ms expires. Incoming messages interrupt only the wait, not the underlying work.".to_string(),
             input_schema: json_schema_from_params(
                 &[
                     ("process_id", "string", "Runtime-owned process ID returned by process_start."),

@@ -2,8 +2,10 @@ use crate::app_state::AppState;
 
 use serde::{Deserialize, Serialize};
 
-use super::super::scheduler::{BuddyJob, BuddyJobContext, BuddyJobResult};
-use super::super::voice_service::{voice_service, SpeechIntent, VoiceCtx};
+use super::super::scheduler::{
+    planned_speech_runtime_event, BuddyJob, BuddyJobContext, BuddyJobResult, SpeechCandidate,
+};
+use super::super::voice_service::SpeechIntent;
 
 const CARE_MILESTONES: &[u64] = &[100, 200];
 const WORKFLOW_RUN_MILESTONES: &[u64] = &[10, 50, 100];
@@ -34,34 +36,22 @@ impl BuddyJob for SpeakerWinJob {
         crossed_milestone(ctx).is_some()
     }
 
-    async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
+    async fn execute(&self, _gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
         let Some(summary) = crossed_milestone(&ctx) else {
             return BuddyJobResult::default();
         };
-        let voice = voice_service().await;
-        let speech = voice
-            .render_speech(
-                gcx,
-                VoiceCtx {
-                    persona: &ctx.personality,
-                    identity_name: &ctx.identity_name,
-                    pulse_one_liner: pulse_summary(&ctx),
-                    workflow_id: None,
-                    workflow_summary: Some(&summary),
-                },
-                SpeechIntent::Win,
-            )
-            .await;
+        let candidate = SpeechCandidate::from_context(
+            &ctx,
+            SpeechIntent::Win,
+            None,
+            summary.clone(),
+            summary,
+            "Buddy win ready".to_string(),
+            None,
+        );
         BuddyJobResult {
-            speech_intent: Some(SpeechIntent::Win),
-            runtime_event: Some(super::super::scheduler::speech_runtime_event(
-                self.id(),
-                SpeechIntent::Win,
-                &speech,
-                "Buddy win ready".to_string(),
-                Some(summary),
-            )),
-            speech: Some(speech),
+            runtime_event: Some(planned_speech_runtime_event(self.id(), &candidate)),
+            speech_candidate: Some(candidate),
             last_result: serde_json::to_string(&current_state(&ctx)).ok(),
             ..Default::default()
         }
@@ -100,11 +90,4 @@ fn previous_state(ctx: &BuddyJobContext) -> SpeakerWinLastResult {
         .as_deref()
         .and_then(|value| serde_json::from_str(value).ok())
         .unwrap_or_default()
-}
-
-fn pulse_summary(ctx: &BuddyJobContext) -> String {
-    format!(
-        "care:{}, workflows:{}",
-        ctx.pet.evolution.care_score, ctx.total_workflow_runs
-    )
 }

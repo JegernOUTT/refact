@@ -145,6 +145,7 @@ async fn voice_quest_speech(
 ) -> BuddySpeechItem {
     let Some(snapshot) = crate::buddy::actor::buddy_snapshot(gcx.clone()).await else {
         return BuddySpeechItem {
+            editorial_delivery_required: false,
             id: format!("quest-prompt-{}-{}", kind, chrono::Utc::now().timestamp()),
             text: fallback.to_string(),
             mood: "excited".to_string(),
@@ -208,6 +209,11 @@ impl BuddyJob for QuestPromptJob {
         let Some(mut quest) = make_quest(&ctx, kind) else {
             return BuddyJobResult::default();
         };
+        if crate::buddy::editorial::enabled(&gcx).await {
+            // Suppress this optional legacy offer until it enters the arbiter.
+            // Existing accepted quests and native decisions remain independent.
+            return BuddyJobResult::default();
+        }
         let speech = voice_quest_speech(gcx, &ctx, kind, quest.description.as_str()).await;
         quest.description = speech.text.clone();
 

@@ -213,7 +213,15 @@ fn task_card_from_mapping(
     }
 }
 
-pub fn format_related_memories_section(
+pub fn format_related_memories_section(cards: &[KnowledgeCard]) -> String {
+    format_related_memories_section_excluding(cards, None)
+}
+
+/// Same rendering as [`format_related_memories_section`], but skips the card whose
+/// `file_path` equals `exclude_path`. Callers that already show a specific memory
+/// (for example the one they just wrote) use this so the "related" list never
+/// echoes the current card back at the caller.
+pub fn format_related_memories_section_excluding(
     cards: &[KnowledgeCard],
     exclude_path: Option<&Path>,
 ) -> String {
@@ -654,7 +662,7 @@ mod tests {
             .file_path
             .clone();
 
-        let section = format_related_memories_section(&cards, Some(&current_path));
+        let section = format_related_memories_section_excluding(&cards, Some(&current_path));
 
         assert!(section.contains("Other Card"));
         assert!(!section.contains("Current Root"));

@@ -1,11 +1,9 @@
-import React, { useRef, useState } from "react";
+import React, { useState } from "react";
 import { Text } from "../../components/ui";
 import { Badge, Button, Surface } from "../../components/ui";
 import type { BuddyOpportunity } from "./types";
-import {
-  formatOpportunityActionError,
-  useExecuteBuddyAction,
-} from "./hooks/useExecuteBuddyAction";
+import { buddyActionResultMessage } from "./hooks/useExecuteBuddyAction";
+import { useBuddyControlAction } from "./hooks/useBuddyControlAction";
 import { actionLabel } from "./buddyOpportunityActions";
 import styles from "./BuddyOpportunityCard.module.css";
 
@@ -14,12 +12,12 @@ interface Props {
 }
 
 export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
-  const executeAction = useExecuteBuddyAction();
+  const { opportunity: runOpportunity, pendingActionIds } =
+    useBuddyControlAction();
   const [pendingActionIndex, setPendingActionIndex] = useState<number | null>(
     null,
   );
   const [actionError, setActionError] = useState<string | null>(null);
-  const pendingRef = useRef(false);
   const isActive =
     opportunity.status === "new" || opportunity.status === "shown";
 
@@ -31,26 +29,22 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
   }[opportunity.priority];
 
   const handleActionClick = async (idx: number, never?: boolean) => {
-    if (pendingRef.current || !isActive) return;
-    pendingRef.current = true;
+    if (!isActive) return;
+    if (idx < 0 || idx >= opportunity.proposed_actions.length) return;
+    const action = opportunity.proposed_actions[idx];
     setPendingActionIndex(idx);
     setActionError(null);
-    try {
-      if (idx < 0 || idx >= opportunity.proposed_actions.length) return;
-      const action = opportunity.proposed_actions[idx];
-      await executeAction(action, opportunity, idx, { never });
-    } catch (error) {
-      setActionError(formatOpportunityActionError(error));
-    } finally {
-      pendingRef.current = false;
-      setPendingActionIndex(null);
-    }
+    const result = await runOpportunity(action, opportunity, idx, { never });
+    if (result.status === "ignored") return;
+    setPendingActionIndex(null);
+    setActionError(buddyActionResultMessage(result));
   };
 
   const dismissIndex = opportunity.proposed_actions.findIndex(
     (action) => action.kind === "dismiss",
   );
   const isQuest = opportunity.kind === "quest";
+  const busy = pendingActionIds.size > 0;
 
   return (
     <Surface className={styles.card} radius="control" variant="plain">
@@ -84,7 +78,7 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
               size="sm"
               type="button"
               variant={action.kind === "dismiss" ? "ghost" : "primary"}
-              disabled={!isActive || pendingActionIndex !== null}
+              disabled={!isActive || busy}
               aria-label={actionLabel(action)}
               aria-busy={pendingActionIndex === idx}
               loading={pendingActionIndex === idx}
@@ -98,7 +92,7 @@ export const BuddyOpportunityCard: React.FC<Props> = ({ opportunity }) => {
               size="sm"
               type="button"
               variant="ghost"
-              disabled={!isActive || pendingActionIndex !== null}
+              disabled={!isActive || busy}
               aria-label="Never show this again"
               onClick={() => void handleActionClick(dismissIndex, true)}
             >

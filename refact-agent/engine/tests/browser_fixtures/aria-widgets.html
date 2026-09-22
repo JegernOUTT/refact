@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ARIA widgets</title>
+  <style>
+    #spin { border: 1px solid; padding: 0.5rem; width: 6rem; }
+    #note { min-height: 3rem; border: 1px solid; padding: 0.5rem; }
+  </style>
+</head>
+<body>
+  <div id="spin" role="spinbutton" tabindex="0" aria-valuenow="12" aria-label="Day">12</div>
+  <button id="go">Go</button>
+  <label for="name">Name</label>
+  <input id="name">
+  <div id="note" contenteditable="true"></div>
+</body>
+</html>

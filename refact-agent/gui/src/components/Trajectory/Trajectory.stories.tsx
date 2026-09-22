@@ -65,7 +65,7 @@ export const OpenPopover: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await userEvent.click(
-      canvas.getByRole("button", { name: "Compress or Handoff" }),
+      canvas.getByRole("button", { name: "Compress or rebuild context" }),
     );
   },
 };

@@ -12,6 +12,10 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType
 use crate::attention::{AttentionPriority, AttentionRequest};
 use crate::http::routers::v1::sidebar::{NotificationEvent, NotificationQuestion};
 use refact_chat_api::{QuestionContract, QuestionKind};
+use crate::chat::trajectories::try_save_trajectory_with_intent;
+use crate::chat::types::{
+    PendingQuestion, PendingQuestionSet, PendingQuestionStatus, TrajectoryCommitIntent,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct QuestionItem {
@@ -144,14 +148,28 @@ impl Tool for ToolAskQuestions {
             }
         }
 
-        {
-            let ccx_lock = ccx.lock().await;
-            ccx_lock.abort_flag.store(true, Ordering::SeqCst);
-        }
-
         let (chat_id, app) = {
             let ccx_lock = ccx.lock().await;
             (ccx_lock.chat_id.clone(), ccx_lock.app.clone())
+        };
+
+        let session_arc = app.chat.sessions.read().await.get(&chat_id).cloned();
+        let asked_at_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let pending = PendingQuestionSet {
+            tool_call_id: tool_call_id.clone(),
+            questions: questions
+                .iter()
+                .map(|q| PendingQuestion {
+                    id: q.id.clone(),
+                    question_type: q.question_type.clone(),
+                    text: q.text.clone(),
+                    options: q.options.clone(),
+                })
+                .collect(),
+            asked_at_ms,
+            status: PendingQuestionStatus::Pending,
+            answers: Vec::new(),
+            resolution_id: None,
         };
         let asked_at = chrono::Utc::now();
         let scope = crate::attention::scope_for_chat(&app, &chat_id).await;
@@ -190,10 +208,36 @@ impl Tool for ToolAskQuestions {
                     .ok_or("admitted question is missing from the question service")?,
             );
         }
+        if let Some(session_arc) = session_arc {
+            {
+                let mut session = session_arc.lock().await;
+                session.register_pending_questions(pending)?;
+            }
+            if let Err(error) = try_save_trajectory_with_intent(
+                app.clone(),
+                session_arc.clone(),
+                TrajectoryCommitIntent::Required,
+            )
+            .await
+            {
+                let mut session = session_arc.lock().await;
+                session.rollback_pending_question_registration(tool_call_id);
+                return Err(format!("failed to persist pending questions: {error}"));
+            }
+            {
+                let mut session = session_arc.lock().await;
+                let snapshot = session.snapshot();
+                session.emit(snapshot);
+            }
+        }
 
         {
             let ccx_lock = ccx.lock().await;
-            let gcx = ccx_lock.global_context.clone();
+            ccx_lock.abort_flag.store(true, Ordering::SeqCst);
+        }
+
+        {
+            let gcx = app.gcx.clone();
             if let Some(ref tx) = gcx.notification_events_tx {
                 let notification_questions: Vec<NotificationQuestion> = unasked
                     .iter()
@@ -209,6 +253,7 @@ impl Tool for ToolAskQuestions {
                         chat_id: chat_id.clone(),
                         tool_call_id: tool_call_id.clone(),
                         questions: notification_questions,
+                        asked_at_ms: Some(asked_at_ms),
                     });
                 }
             }
@@ -219,6 +264,7 @@ impl Tool for ToolAskQuestions {
             "tool_call_id": tool_call_id,
             "questions": questions,
             "contracts": contracts,
+            "asked_at_ms": asked_at_ms,
         });
 
         Ok((

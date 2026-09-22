@@ -13,7 +13,7 @@ const CACHE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 use crate::global_context::GlobalContext;
 use crate::knowledge_index::{build_knowledge_index, knowledge_index_watcher_background_task};
 
-async fn wait_for_shutdown(gcx: Arc<GlobalContext>) {
+pub async fn wait_for_shutdown(gcx: Arc<GlobalContext>) {
     while !gcx.shutdown_flag.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -61,18 +61,26 @@ async fn cache_maintenance_background_task(
 }
 
 pub struct BackgroundTasksHolder {
+    gcx: Option<Arc<GlobalContext>>,
     tasks: Vec<JoinHandle<()>>,
 }
 
 impl Default for BackgroundTasksHolder {
     fn default() -> Self {
-        BackgroundTasksHolder { tasks: vec![] }
+        BackgroundTasksHolder::new(vec![])
     }
 }
 
 impl BackgroundTasksHolder {
     pub fn new(tasks: Vec<JoinHandle<()>>) -> Self {
-        BackgroundTasksHolder { tasks }
+        BackgroundTasksHolder { gcx: None, tasks }
+    }
+
+    pub fn with_gcx(gcx: Arc<GlobalContext>, tasks: Vec<JoinHandle<()>>) -> Self {
+        BackgroundTasksHolder {
+            gcx: Some(gcx),
+            tasks,
+        }
     }
 
     pub fn push_back(&mut self, task: JoinHandle<()>) {
@@ -87,6 +95,18 @@ impl BackgroundTasksHolder {
     }
 
     pub async fn abort(&mut self) {
+        // Closing spawn-owner admission is a SHUTDOWN action, not an "abort this
+        // holder" action: `abort` is also how a holder is recycled while the
+        // process keeps running (see `vecdb_background_reload`). Only latch the
+        // process-global gate when this engine is genuinely shutting down.
+        let close_admission = self
+            .gcx
+            .as_ref()
+            .is_some_and(|gcx| gcx.shutdown_flag.load(std::sync::atomic::Ordering::Relaxed));
+        crate::agents::spawn::drain_spawn_owners(close_admission).await;
+        if let Some(gcx) = &self.gcx {
+            crate::integrations::operator_probe::drain_cleanup(gcx).await;
+        }
         for task in self.tasks.iter_mut() {
             task.abort();
         }
@@ -96,6 +116,12 @@ impl BackgroundTasksHolder {
                 "background_tasks: some tasks did not finish within {:?} after abort, continuing shutdown",
                 ABORT_TIMEOUT
             );
+        }
+        // Aborting callers may have queued rollback finalizers after the first
+        // drain; creation admission is already closed when shutting down.
+        crate::agents::spawn::drain_spawn_owners(close_admission).await;
+        if let Some(gcx) = &self.gcx {
+            crate::integrations::operator_probe::drain_cleanup(gcx).await;
         }
     }
 }
@@ -112,52 +138,55 @@ pub async fn start_full_soak_background_tasks(gcx: Arc<GlobalContext>) -> Backgr
     let background_agent_monitor_shutdown = gcx.shutdown_flag.clone();
     let trajectory_index_coordinator = gcx.trajectory_index_coordinator.clone();
     let trajectory_index_shutdown = gcx.shutdown_flag.clone();
-    let mut bg = BackgroundTasksHolder::new(vec![
-        tokio::spawn(crate::files_in_workspace::files_in_workspace_init_task(
-            gcx.clone(),
-        )),
-        tokio::spawn(crate::codegraph::cg_highlev::codegraph_background_task(
-            gcx.clone(),
-        )),
-        tokio::spawn(
-            crate::integrations::sessions::remove_expired_sessions_background_task(gcx.clone()),
-        ),
-        tokio::spawn(crate::chat::start_agent_monitor(app_state)),
-        tokio::spawn(crate::chat::start_goal_monitor(goal_monitor_app)),
-        tokio::spawn(
-            crate::chat::trajectory_index::trajectory_index_coordinator_background_task(
-                trajectory_index_coordinator,
-                trajectory_index_shutdown,
+    let mut bg = BackgroundTasksHolder::with_gcx(
+        gcx.clone(),
+        vec![
+            tokio::spawn(crate::files_in_workspace::files_in_workspace_init_task(
+                gcx.clone(),
+            )),
+            tokio::spawn(crate::codegraph::cg_highlev::codegraph_background_task(
+                gcx.clone(),
+            )),
+            tokio::spawn(
+                crate::integrations::sessions::remove_expired_sessions_background_task(gcx.clone()),
             ),
-        ),
-        tokio::spawn(crate::agents::monitor::run_background_agent_monitor(
-            background_agent_monitor_app,
-            background_agent_monitor_shutdown,
-        )),
-        tokio::spawn(
-            crate::coordination::outbox::outbox_recovery_background_task(
-                outbox_app,
-                outbox_shutdown,
+            tokio::spawn(crate::chat::start_agent_monitor(app_state)),
+            tokio::spawn(crate::chat::start_goal_monitor(goal_monitor_app)),
+            tokio::spawn(
+                crate::chat::trajectory_index::trajectory_index_coordinator_background_task(
+                    trajectory_index_coordinator,
+                    trajectory_index_shutdown,
+                ),
             ),
-        ),
-        tokio::spawn(
-            crate::coordination::file_provenance::file_provenance_background_task(
-                provenance_app,
-                provenance_shutdown,
+            tokio::spawn(crate::agents::monitor::run_background_agent_monitor(
+                background_agent_monitor_app,
+                background_agent_monitor_shutdown,
+            )),
+            tokio::spawn(
+                crate::coordination::outbox::outbox_recovery_background_task(
+                    outbox_app,
+                    outbox_shutdown,
+                ),
             ),
-        ),
-        tokio::spawn(cache_maintenance_background_task(
-            gcx.clone(),
-            cache_maintenance_app,
-        )),
-        tokio::spawn({
-            let gcx = gcx.clone();
-            async move {
-                let app = crate::app_state::AppState::from_gcx(gcx).await;
-                crate::buddy::actor::buddy_background_task(app).await
-            }
-        }),
-    ]);
+            tokio::spawn(
+                crate::coordination::file_provenance::file_provenance_background_task(
+                    provenance_app,
+                    provenance_shutdown,
+                ),
+            ),
+            tokio::spawn(cache_maintenance_background_task(
+                gcx.clone(),
+                cache_maintenance_app,
+            )),
+            tokio::spawn({
+                let gcx = gcx.clone();
+                async move {
+                    let app = crate::app_state::AppState::from_gcx(gcx).await;
+                    crate::buddy::actor::buddy_background_task(app).await
+                }
+            }),
+        ],
+    );
     bg.push_back(crate::scheduler::runner::spawn(
         crate::scheduler::runner::session_cron_store(),
         gcx,
@@ -169,6 +198,7 @@ pub async fn start_background_tasks(
     gcx: Arc<GlobalContext>,
     _config_dir: &PathBuf,
 ) -> BackgroundTasksHolder {
+    crate::http::routers::v1::browser_settings::init_from_disk(&gcx.config_dir).await;
     let (stats_tx, stats_rx) = tokio::sync::mpsc::channel(1000);
     {
         *gcx.llm_stats_sender.lock().unwrap() = Some(stats_tx);
@@ -186,84 +216,87 @@ pub async fn start_background_tasks(
     let background_agent_monitor_shutdown = gcx.shutdown_flag.clone();
     let trajectory_index_coordinator = gcx.trajectory_index_coordinator.clone();
     let trajectory_index_shutdown = gcx.shutdown_flag.clone();
-    let mut bg = BackgroundTasksHolder::new(vec![
-        tokio::spawn(crate::files_in_workspace::files_in_workspace_init_task(
-            gcx.clone(),
-        )),
-        tokio::spawn(crate::vecdb::vdb_highlev::vecdb_background_reload(
-            gcx.clone(),
-        )),
-        tokio::spawn(crate::codegraph::cg_highlev::codegraph_background_task(
-            gcx.clone(),
-        )),
-        tokio::spawn(
-            crate::integrations::sessions::remove_expired_sessions_background_task(gcx.clone()),
-        ),
-        tokio::spawn(crate::git::cleanup::git_shadow_cleanup_background_task(
-            gcx.clone(),
-        )),
-        tokio::spawn(crate::knowledge_graph::knowledge_cleanup_background_task(
-            gcx.clone(),
-        )),
-        tokio::spawn(crate::knowledge_graph::cleanup_inactive_memories_on_startup(gcx.clone())),
-        tokio::spawn(cache_maintenance_background_task(
-            gcx.clone(),
-            cache_maintenance_app,
-        )),
-        tokio::spawn(crate::trajectory_memos::trajectory_memos_background_task(
-            gcx.clone(),
-        )),
-        crate::chat::notifications::spawn_notification_subscriber(gcx.clone()),
-        tokio::spawn(crate::chat::start_agent_monitor(app_state)),
-        tokio::spawn(crate::chat::start_goal_monitor(goal_monitor_app)),
-        tokio::spawn(
-            crate::chat::trajectory_index::trajectory_index_coordinator_background_task(
-                trajectory_index_coordinator,
-                trajectory_index_shutdown,
+    let mut bg = BackgroundTasksHolder::with_gcx(
+        gcx.clone(),
+        vec![
+            tokio::spawn(crate::files_in_workspace::files_in_workspace_init_task(
+                gcx.clone(),
+            )),
+            tokio::spawn(crate::vecdb::vdb_highlev::vecdb_background_reload(
+                gcx.clone(),
+            )),
+            tokio::spawn(crate::codegraph::cg_highlev::codegraph_background_task(
+                gcx.clone(),
+            )),
+            tokio::spawn(
+                crate::integrations::sessions::remove_expired_sessions_background_task(gcx.clone()),
             ),
-        ),
-        tokio::spawn(crate::agents::monitor::run_background_agent_monitor(
-            background_agent_monitor_app,
-            background_agent_monitor_shutdown,
-        )),
-        tokio::spawn(
-            crate::coordination::outbox::outbox_recovery_background_task(
-                outbox_app,
-                outbox_shutdown,
+            tokio::spawn(crate::git::cleanup::git_shadow_cleanup_background_task(
+                gcx.clone(),
+            )),
+            tokio::spawn(crate::knowledge_graph::knowledge_cleanup_background_task(
+                gcx.clone(),
+            )),
+            tokio::spawn(crate::knowledge_graph::cleanup_inactive_memories_on_startup(gcx.clone())),
+            tokio::spawn(cache_maintenance_background_task(
+                gcx.clone(),
+                cache_maintenance_app,
+            )),
+            tokio::spawn(crate::trajectory_memos::trajectory_memos_background_task(
+                gcx.clone(),
+            )),
+            crate::chat::notifications::spawn_notification_subscriber(gcx.clone()),
+            tokio::spawn(crate::chat::start_agent_monitor(app_state)),
+            tokio::spawn(crate::chat::start_goal_monitor(goal_monitor_app)),
+            tokio::spawn(
+                crate::chat::trajectory_index::trajectory_index_coordinator_background_task(
+                    trajectory_index_coordinator,
+                    trajectory_index_shutdown,
+                ),
             ),
-        ),
-        tokio::spawn(
-            crate::coordination::file_provenance::file_provenance_background_task(
-                provenance_app,
-                provenance_shutdown,
+            tokio::spawn(crate::agents::monitor::run_background_agent_monitor(
+                background_agent_monitor_app,
+                background_agent_monitor_shutdown,
+            )),
+            tokio::spawn(
+                crate::coordination::outbox::outbox_recovery_background_task(
+                    outbox_app,
+                    outbox_shutdown,
+                ),
             ),
-        ),
-        tokio::spawn(
-            crate::providers::oauth_refresh::oauth_token_refresh_background_task(gcx.clone()),
-        ),
-        tokio::spawn(
-            crate::integrations::browser_runtime::browser_monitor_background_task(
-                crate::app_state::AppState::from_gcx(gcx.clone()).await,
+            tokio::spawn(
+                crate::coordination::file_provenance::file_provenance_background_task(
+                    provenance_app,
+                    provenance_shutdown,
+                ),
             ),
-        ),
-        tokio::spawn(crate::stats::writer::stats_writer_task(
-            gcx_for_stats,
-            stats_rx,
-        )),
-        tokio::spawn(async move {
-            let index = build_knowledge_index(gcx_for_knowledge_index.clone()).await;
-            *gcx_for_knowledge_index.knowledge_index.lock().await = index;
-            tracing::info!("knowledge_index: built");
-            knowledge_index_watcher_background_task(gcx_for_knowledge_index).await;
-        }),
-        tokio::spawn({
-            let gcx = gcx.clone();
-            async move {
-                let app = crate::app_state::AppState::from_gcx(gcx).await;
-                crate::buddy::actor::buddy_background_task(app).await
-            }
-        }),
-    ]);
+            tokio::spawn(
+                crate::providers::oauth_refresh::oauth_token_refresh_background_task(gcx.clone()),
+            ),
+            tokio::spawn(
+                crate::integrations::browser_runtime::browser_monitor_background_task(
+                    crate::app_state::AppState::from_gcx(gcx.clone()).await,
+                ),
+            ),
+            tokio::spawn(crate::stats::writer::stats_writer_task(
+                gcx_for_stats,
+                stats_rx,
+            )),
+            tokio::spawn(async move {
+                let index = build_knowledge_index(gcx_for_knowledge_index.clone()).await;
+                *gcx_for_knowledge_index.knowledge_index.lock().await = index;
+                tracing::info!("knowledge_index: built");
+                knowledge_index_watcher_background_task(gcx_for_knowledge_index).await;
+            }),
+            tokio::spawn({
+                let gcx = gcx.clone();
+                async move {
+                    let app = crate::app_state::AppState::from_gcx(gcx).await;
+                    crate::buddy::actor::buddy_background_task(app).await
+                }
+            }),
+        ],
+    );
     bg.extend(crate::scheduler::runner::spawn_from_active_project(gcx.clone()).await);
     if !gcx.cmdline.daemon_endpoint.is_empty() {
         bg.push_back(tokio::spawn(crate::daemon_link::daemon_link_task(
@@ -283,6 +316,37 @@ pub async fn start_background_tasks(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    fn start_background_tasks_body() -> &'static str {
+        include_str!("background_tasks.rs")
+            .split_once("pub async fn start_background_tasks(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn browser_settings_are_loaded_before_the_browser_monitor_starts() {
+        let body = start_background_tasks_body();
+        let init = body
+            .find("browser_settings::init_from_disk(&gcx.config_dir)")
+            .expect("startup must load browser settings from disk");
+        let monitor = body
+            .find("browser_monitor_background_task(")
+            .expect("startup must spawn the browser monitor");
+        assert!(
+            init < monitor,
+            "browser settings must be published before the browser monitor is spawned"
+        );
+    }
+
+    #[test]
+    fn browser_settings_init_is_awaited_at_startup() {
+        assert!(start_background_tasks_body()
+            .contains("browser_settings::init_from_disk(&gcx.config_dir).await;"));
+    }
 
     fn wiring_body<'a>(source: &'a str, signature: &str) -> &'a str {
         let start = source

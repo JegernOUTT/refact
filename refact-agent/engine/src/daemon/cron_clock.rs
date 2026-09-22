@@ -103,6 +103,9 @@ impl CronClock {
     }
 
     pub(crate) async fn tick_at(&mut self, now: u64) {
+        // Bounded observation only: retained supervision is never cron authority.
+        self.state.reconcile_buddy_batch(now).await;
+        self.state.tick_buddy_wakes(now).await;
         let projects = {
             let registry = self.state.projects.read().await;
             registry.list()

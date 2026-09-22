@@ -86,6 +86,12 @@
   transform: translateY(var(--rf-motion-distance-none));
 }
 
+@media (max-width: 767px) {
+  .unsplitSplitAffordance {
+    display: none;
+  }
+}
+
 @media (hover: hover) and (pointer: fine) {
   .unsplitSplitAffordance {
     opacity: var(--rf-motion-opacity-hidden);

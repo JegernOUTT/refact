@@ -48,7 +48,6 @@ export function clinginessFromAffection(affection: number): number {
 export interface BuddyStateHandle {
   state: BuddySemanticState;
   signal: (signalType: string) => void;
-  addXP: (amount: number) => void;
   pet: () => void;
   rename: (name: string) => void;
   nextPalette: () => void;
@@ -249,10 +248,6 @@ export function useBuddyState(
     (signalType: string) => dispatch({ kind: "signal", signalType }),
     [],
   );
-  const addXP = useCallback(
-    (amount: number) => dispatch({ kind: "add_xp", amount }),
-    [],
-  );
   const pet = useCallback(() => dispatch({ kind: "pet" }), []);
   const rename = useCallback(
     (name: string) => dispatch({ kind: "rename", name }),
@@ -266,9 +261,7 @@ export function useBuddyState(
   const reset = useCallback(() => dispatch({ kind: "reset" }), []);
 
   const handleCanvasEvent = useCallback((event: BuddyEvent) => {
-    if (event.type === "xp_gained") {
-      dispatch({ kind: "add_xp", amount: event.amount });
-    } else if (event.type === "semantic_update") {
+    if (event.type === "semantic_update") {
       dispatch({ kind: "patch", patch: event.patch });
     } else if (event.type === "petted") {
       dispatch({ kind: "pet" });
@@ -278,7 +271,6 @@ export function useBuddyState(
   return {
     state,
     signal,
-    addXP,
     pet,
     rename,
     nextPalette,

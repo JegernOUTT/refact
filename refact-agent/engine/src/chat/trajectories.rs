@@ -27,10 +27,17 @@ use crate::yaml_configs::customization_registry::get_subagent_config;
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeMeta;
 
-use refact_chat_api::{GoalLedgerEntry, GoalSnapshot, GoalStatus};
+use refact_chat_api::{GoalLedgerEntry, GoalSnapshot, GoalStatus, PendingQuestionSet};
 use super::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 
 pub async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
+    super::trajectory_archive::with_trajectory_mutation_lock(atomic_write_file_coordinated(
+        tmp_path, dest_path,
+    ))
+    .await
+}
+
+async fn atomic_write_file_coordinated(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
         if fs::try_exists(dest_path)
@@ -78,21 +85,93 @@ async fn atomic_write_json_with_tmp_path(
     write_error_prefix: Option<&str>,
     self_write_source: Option<TrajectorySourceIdentity>,
 ) -> Result<(), String> {
-    let result = async {
+    let write_result = async {
         let json = json_result?;
+        fs::write(tmp_path, &json).await.map_err(|error| {
+            write_error_prefix
+                .map(|prefix| format!("{}: {}", prefix, error))
+                .unwrap_or_else(|| error.to_string())
+        })?;
+        Ok(TrajectoryPrettyWrite {
+            byte_len: json.len() as u64,
+            content_hash: md5::compute(&json).0,
+        })
+    }
+    .await;
+    atomic_finish_trajectory_write(path, tmp_path, write_result, self_write_source).await
+}
+
+struct TrajectoryPrettyWrite {
+    byte_len: u64,
+    content_hash: [u8; 16],
+}
+
+struct TrajectoryPrettyWriter {
+    inner: std::io::BufWriter<std::fs::File>,
+    context: md5::Context,
+    byte_len: u64,
+}
+
+impl std::io::Write for TrajectoryPrettyWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.context.consume(&buf[..written]);
+        self.byte_len += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl TrajectoryPrettyWriter {
+    fn finish(mut self) -> Result<TrajectoryPrettyWrite, String> {
+        use std::io::Write;
+        self.inner
+            .flush()
+            .map_err(|error| format!("Failed to write trajectory: {}", error))?;
+        Ok(TrajectoryPrettyWrite {
+            byte_len: self.byte_len,
+            content_hash: self.context.compute().0,
+        })
+    }
+}
+
+/// Byte-identical to `serde_json::to_string_pretty` (same `PrettyFormatter`), without
+/// materialising the whole document as a `String` first. The pretty on-disk layout is a hard
+/// product constraint; `pretty_output_bytes_are_unchanged` pins it.
+fn write_pretty_json_to_tmp_file(
+    tmp_path: &Path,
+    value: &serde_json::Value,
+) -> Result<TrajectoryPrettyWrite, String> {
+    let file = std::fs::File::create(tmp_path)
+        .map_err(|error| format!("Failed to write trajectory: {}", error))?;
+    let mut writer = TrajectoryPrettyWriter {
+        inner: std::io::BufWriter::new(file),
+        context: md5::Context::new(),
+        byte_len: 0,
+    };
+    serde_json::to_writer_pretty(&mut writer, value)
+        .map_err(|error| format!("Failed to serialize trajectory: {}", error))?;
+    writer.finish()
+}
+
+async fn atomic_finish_trajectory_write(
+    path: &Path,
+    tmp_path: &Path,
+    write_result: Result<TrajectoryPrettyWrite, String>,
+    self_write_source: Option<TrajectorySourceIdentity>,
+) -> Result<(), String> {
+    let result = async {
+        let write = write_result?;
         let self_write = match self_write_source {
             Some(source) if trajectory_watcher_self_write_rollout_enabled() => {
-                register_trajectory_self_write(path, source, &json).await
+                register_trajectory_self_write(path, source, write.byte_len, write.content_hash)
+                    .await
             }
-            None => None,
-            Some(_) => None,
+            _ => None,
         };
-        if let Err(error) = fs::write(tmp_path, &json).await {
-            discard_trajectory_self_write(self_write);
-            return Err(write_error_prefix
-                .map(|prefix| format!("{}: {}", prefix, error))
-                .unwrap_or_else(|| error.to_string()));
-        }
         if let Err(error) = atomic_write_file(tmp_path, path).await {
             discard_trajectory_self_write(self_write);
             return Err(error);
@@ -122,6 +201,10 @@ pub const TRAJECTORY_WRITER_ENV: &str = "REFACT_TRAJECTORY_WRITER";
 pub const TRAJECTORY_WATCHER_SELF_WRITE_ENV: &str = "REFACT_TRAJECTORY_WATCHER_SELF_WRITE";
 const TRAJECTORY_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 const TRAJECTORY_COMMIT_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a `Checkpoint` save may sit in the pending slot before it is written. Every save
+/// rewrites the whole trajectory, so batching a burst into one physical write is what keeps the
+/// cost from growing quadratically with conversation length. Durability-critical intents bypass it.
+const TRAJECTORY_CHECKPOINT_COALESCE_WINDOW: Duration = Duration::from_millis(400);
 #[cfg(test)]
 const TITLE_GENERATION_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 #[cfg(not(test))]
@@ -240,12 +323,13 @@ struct TrajectoryWriteFingerprint {
 struct TrajectorySelfWriteHandle {
     key: (PathBuf, TrajectorySourceIdentity),
     nonce: Uuid,
+    byte_len: u64,
+    content_hash: [u8; 16],
 }
 
 struct TrajectorySelfWriteRecord {
     nonce: Uuid,
     created_at: Instant,
-    expected_content_hash: [u8; 16],
     fingerprint: Option<TrajectoryWriteFingerprint>,
 }
 
@@ -315,38 +399,41 @@ async fn canonical_trajectory_write_path(path: &Path) -> Option<PathBuf> {
     Some(dunce::simplified(&parent).join(file_name))
 }
 
-async fn trajectory_write_fingerprint(path: &Path) -> Option<TrajectoryWriteFingerprint> {
-    let before = fs::symlink_metadata(path).await.ok()?;
-    if before.file_type().is_symlink() || !before.is_file() {
-        return None;
+/// Per-path self-write content-read counters, used only by tests. Keyed by path for the same
+/// reason as the metadata-read counters below: the reads happen on detached writer and watcher
+/// tasks, where a task-local scope would never observe them.
+#[cfg(test)]
+fn test_trajectory_self_write_read_counters(
+) -> &'static StdMutex<std::collections::HashMap<PathBuf, Weak<AtomicUsize>>> {
+    static COUNTERS: OnceLock<StdMutex<std::collections::HashMap<PathBuf, Weak<AtomicUsize>>>> =
+        OnceLock::new();
+    COUNTERS.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn count_test_trajectory_self_write_reads(path: &Path) -> Arc<AtomicUsize> {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut counters = test_trajectory_self_write_read_counters()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counters.retain(|_, counter| counter.strong_count() > 0);
+    counters.insert(trajectory_metadata_cache_key(path), Arc::downgrade(&reads));
+    reads
+}
+
+/// The only place the self-write machinery reads trajectory bytes back off disk, and it sits on
+/// the watcher side: the write path fingerprints from the hash streamed while writing.
+async fn read_trajectory_file_for_fingerprint(path: &Path) -> Option<Vec<u8>> {
+    #[cfg(test)]
+    if let Some(reads) = test_trajectory_self_write_read_counters()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&trajectory_metadata_cache_key(path))
+        .and_then(Weak::upgrade)
+    {
+        reads.fetch_add(1, Ordering::Relaxed);
     }
-    let before_modified = before
-        .modified()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_millis();
-    let before_modified = i64::try_from(before_modified).ok()?;
-    let content = fs::read(path).await.ok()?;
-    let after = fs::symlink_metadata(path).await.ok()?;
-    if after.file_type().is_symlink() || !after.is_file() || after.len() != before.len() {
-        return None;
-    }
-    let after_modified = after
-        .modified()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_millis();
-    let after_modified = i64::try_from(after_modified).ok()?;
-    if after_modified != before_modified || content.len() as u64 != after.len() {
-        return None;
-    }
-    Some(TrajectoryWriteFingerprint {
-        file_len: after.len(),
-        file_modified_unix_ms: after_modified,
-        content_hash: md5::compute(content).0,
-    })
+    fs::read(path).await.ok()
 }
 
 async fn trajectory_fingerprint_matches(
@@ -369,8 +456,8 @@ async fn trajectory_fingerprint_matches(
     if before.len() != expected.file_len || before_modified != expected.file_modified_unix_ms {
         return false;
     }
-    let content = match fs::read(path).await {
-        Ok(content) if md5::compute(&content).0 == expected.content_hash => content,
+    let content = match read_trajectory_file_for_fingerprint(path).await {
+        Some(content) if md5::compute(&content).0 == expected.content_hash => content,
         _ => return false,
     };
     let after = match fs::symlink_metadata(path).await {
@@ -394,7 +481,8 @@ async fn trajectory_fingerprint_matches(
 async fn register_trajectory_self_write(
     path: &Path,
     source: TrajectorySourceIdentity,
-    content: &str,
+    byte_len: u64,
+    content_hash: [u8; 16],
 ) -> Option<TrajectorySelfWriteHandle> {
     let key = (
         canonical_trajectory_write_path(path).await?,
@@ -411,11 +499,15 @@ async fn register_trajectory_self_write(
         .push_back(TrajectorySelfWriteRecord {
             nonce,
             created_at: Instant::now(),
-            expected_content_hash: md5::compute(content).0,
             fingerprint: None,
         });
     prune_trajectory_self_writes(&mut registry, Instant::now());
-    Some(TrajectorySelfWriteHandle { key, nonce })
+    Some(TrajectorySelfWriteHandle {
+        key,
+        nonce,
+        byte_len,
+        content_hash,
+    })
 }
 
 fn discard_trajectory_self_write(handle: Option<TrajectorySelfWriteHandle>) {
@@ -433,11 +525,22 @@ fn discard_trajectory_self_write(handle: Option<TrajectorySelfWriteHandle>) {
     }
 }
 
+/// Stamps the renamed file with a single `stat`. The content hash was computed once while the
+/// bytes streamed to the temp file, so nothing has to be read back here; a size that disagrees
+/// with what we wrote means somebody replaced the file already, and that record is dropped rather
+/// than left able to suppress their change.
 async fn complete_trajectory_self_write(handle: Option<TrajectorySelfWriteHandle>) {
     let Some(handle) = handle else {
         return;
     };
-    let fingerprint = trajectory_write_fingerprint(&handle.key.0).await;
+    let fingerprint = trajectory_file_stamp(&handle.key.0)
+        .await
+        .filter(|stamp| stamp.len == handle.byte_len)
+        .map(|stamp| TrajectoryWriteFingerprint {
+            file_len: stamp.len,
+            file_modified_unix_ms: stamp.modified_unix_ms,
+            content_hash: handle.content_hash,
+        });
     let mut registry = trajectory_self_writes()
         .lock()
         .expect("trajectory self-write registry poisoned");
@@ -445,19 +548,16 @@ async fn complete_trajectory_self_write(handle: Option<TrajectorySelfWriteHandle
     let Some(records) = registry.get_mut(&handle.key) else {
         return;
     };
-    let Some(record) = records
-        .iter_mut()
-        .find(|record| record.nonce == handle.nonce)
-    else {
-        return;
-    };
-    if fingerprint
-        .as_ref()
-        .is_some_and(|fingerprint| fingerprint.content_hash == record.expected_content_hash)
-    {
-        record.fingerprint = fingerprint;
-    } else {
-        records.retain(|record| record.nonce != handle.nonce);
+    match fingerprint {
+        Some(fingerprint) => {
+            if let Some(record) = records
+                .iter_mut()
+                .find(|record| record.nonce == handle.nonce)
+            {
+                record.fingerprint = Some(fingerprint);
+            }
+        }
+        None => records.retain(|record| record.nonce != handle.nonce),
     }
     if records.is_empty() {
         registry.remove(&handle.key);
@@ -718,7 +818,8 @@ pub struct LoadedTrajectory {
     pub goal: Option<GoalSnapshot>,
     pub goal_ledger: Vec<GoalLedgerEntry>,
     pub goal_verification_blocked_until_ms: Option<u64>,
-    pub compression_retry_after_ms: std::collections::BTreeMap<String, u64>,
+    pub pending_questions: Vec<PendingQuestionSet>,
+    pub pending_browser_decision: Option<super::browser_decisions::PendingBrowserDecisionSnapshot>,
     pub created_at: String,
     pub updated_at: String,
     pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -780,7 +881,17 @@ pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> Traject
     snapshot.goal = session.goal.clone();
     snapshot.goal_ledger = session.goal_ledger.clone();
     snapshot.goal_verification_blocked_until_ms = session.goal_verification_blocked_until_ms;
-    snapshot.compression_retry_after_ms = session.compression_retry_after_ms.clone();
+    snapshot.pending_questions = session.pending_questions.clone();
+    snapshot.pending_browser_decision = session.pending_browser_message.as_ref().map(|pending| {
+        super::browser_decisions::snapshot_pending_browser_decision(
+            pending,
+            session
+                .thread
+                .browser_meta
+                .as_ref()
+                .and_then(|meta| meta.browser_runtime_id.clone()),
+        )
+    });
     snapshot.pending_deliveries = session.pending_deliveries_for_snapshot();
     snapshot.dropped_deliveries = session.dropped_deliveries_for_snapshot();
     span.finish(
@@ -1015,12 +1126,36 @@ impl<'de> Visitor<'de> for TopLevelInternalTraceVisitor {
                 }
                 link_type_seen = true;
                 link_type = map.next_value::<Option<String>>()?;
+                if !is_internal_trace_link_type(link_type.as_deref()) {
+                    // Early-out: the answer is already pinned to `false` and nothing later in the
+                    // document can change it. A well-formed remainder still yields `false`, and a
+                    // malformed remainder yields a parse error that the caller also maps to
+                    // `false`. So we can stop reading bytes here without changing the result.
+                    //
+                    // We deliberately do NOT early-out on an *internal* link_type: there the
+                    // remainder still matters, because a truncated or otherwise malformed file
+                    // must stay classified as "not an internal trace" so that pruning never
+                    // deletes a torn write. See
+                    // `internal_trace_pruning_ignores_message_content_and_invalid_json`.
+                    return Ok(false);
+                }
             } else {
                 map.next_value::<IgnoredAny>()?;
             }
         }
         Ok(is_internal_trace_link_type(link_type.as_deref()))
     }
+}
+
+fn top_level_link_type_is_internal_from_reader<R: std::io::Read>(reader: R) -> bool {
+    // `serde_json`'s `IoRead` pulls the document through `Read::bytes()`, i.e. one `read()`
+    // syscall per byte consumed. Buffering is what makes scanning a multi-megabyte trajectory
+    // affordable; without it a single 144 MB folder costs ~144 million syscalls per scan.
+    let mut deserializer = serde_json::Deserializer::from_reader(std::io::BufReader::new(reader));
+    (&mut deserializer)
+        .deserialize_map(TopLevelInternalTraceVisitor)
+        .and_then(|is_internal| deserializer.end().map(|_| is_internal))
+        .unwrap_or(false)
 }
 
 fn parsed_top_level_link_type_is_internal(path: PathBuf) -> bool {
@@ -1032,11 +1167,7 @@ fn parsed_top_level_link_type_is_internal(path: PathBuf) -> bool {
         Ok(file) => file,
         Err(_) => return false,
     };
-    let mut deserializer = serde_json::Deserializer::from_reader(file);
-    (&mut deserializer)
-        .deserialize_map(TopLevelInternalTraceVisitor)
-        .and_then(|is_internal| deserializer.end().map(|_| is_internal))
-        .unwrap_or(false)
+    top_level_link_type_is_internal_from_reader(file)
 }
 
 pub fn is_internal_trace_link_type(link_type: Option<&str>) -> bool {
@@ -1827,6 +1958,11 @@ pub fn ensure_frozen_prefix(
     }
 }
 
+fn parse_stored_messages(value: serde_json::Value) -> Result<Vec<ChatMessage>, serde_json::Error> {
+    // Reconstruction payloads deliberately remain opaque extras for archive browsing.
+    serde_json::from_value(value)
+}
+
 fn fix_tool_call_indexes(messages: &mut [ChatMessage]) {
     for msg in messages.iter_mut() {
         if let Some(ref mut tool_calls) = msg.tool_calls {
@@ -1860,7 +1996,7 @@ async fn indexed_candidate_paths_in_dirs(
     let mut paths = Vec::new();
     let app = AppState::from_gcx(gcx.clone()).await;
     for dir in dirs {
-        let entries = match trajectory_index::list_trajectory_entries_with_rollout_for(
+        let entries = match trajectory_index::list_trajectory_entries_with_rollout_shared_for(
             &app.chat.trajectory_index_coordinator,
             dir,
             None,
@@ -1874,17 +2010,49 @@ async fn indexed_candidate_paths_in_dirs(
                 continue;
             }
         };
-        for entry in entries {
+        for entry in entries.iter() {
             if entry.id == chat_id
-                && trajectory_index::trajectory_index_entry_is_fresh(dir, &entry).await
+                && trajectory_index::trajectory_index_entry_is_fresh(dir, entry).await
             {
-                paths.push(trajectory_index::trajectory_file_path_for_entry(
-                    dir, &entry,
-                ));
+                paths.push(trajectory_index::trajectory_file_path_for_entry(dir, entry));
             }
         }
     }
     paths
+}
+
+// O(1) in the number of trajectory directories: the coordinator resolves the chat id through its
+// cross-directory id map instead of listing every directory. A miss returns nothing and the caller
+// falls back to the full scan below, so this can only ever save work. Hits arrive in
+// coordinator-load order rather than `list_trajectory_dirs` order, so an id duplicated across
+// directories can resolve to a different (still valid) file than the full scan would pick first.
+async fn indexed_candidate_paths_by_id(
+    gcx: &Arc<GlobalContext>,
+    chat_id: &str,
+    caller: trajectory_index::TrajectoryIndexListingCaller,
+) -> Vec<PathBuf> {
+    let app = AppState::from_gcx(gcx.clone()).await;
+    let mut paths = Vec::new();
+    for (dir, entry) in app
+        .chat
+        .trajectory_index_coordinator
+        .find_entries_by_id(chat_id, caller)
+        .await
+    {
+        if trajectory_index::trajectory_index_entry_is_fresh(&dir, &entry).await {
+            paths.push(trajectory_index::trajectory_file_path_for_entry(
+                &dir, &entry,
+            ));
+        }
+    }
+    paths
+}
+
+async fn unsynced_trajectory_dirs(gcx: &Arc<GlobalContext>, dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let app = AppState::from_gcx(gcx.clone()).await;
+    app.chat
+        .trajectory_index_coordinator
+        .unsynced_directories(dirs)
 }
 
 async fn normal_trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &str) -> Vec<PathBuf> {
@@ -2040,16 +2208,46 @@ async fn find_trajectory_file(
     if let Some(found) = first_valid_trajectory_candidate(normal, chat_id).await {
         return Some(found);
     }
+    let mut direct = Vec::new();
+    extend_unique_paths(
+        &mut direct,
+        &mut seen,
+        indexed_candidate_paths_by_id(
+            &gcx,
+            chat_id,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        )
+        .await,
+    );
+    if let Some(found) = first_valid_trajectory_candidate(direct, chat_id).await {
+        return Some(found);
+    }
     let mut candidates = Vec::new();
+    // The id-map probe above is a replacement for sweeping every directory, not an extra attempt
+    // before one: for a directory the coordinator has fully listed, the probe already asked a
+    // complete index and came back empty. Only directories it has never listed still owe us an
+    // answer, so those are the only ones worth a listing here.
+    let task_dirs = list_task_trajectory_dirs(&gcx).await;
+    let mut all_dirs = get_all_trajectories_dirs(gcx.clone()).await;
+    all_dirs.extend(task_dirs.iter().cloned());
+    let unsynced = unsynced_trajectory_dirs(&gcx, &all_dirs).await;
     let indexed = indexed_candidate_paths_in_dirs(
         &gcx,
-        &list_trajectory_dirs(&gcx).await,
+        &unsynced,
         chat_id,
         trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
     )
     .await;
     extend_unique_paths(&mut candidates, &mut seen, indexed);
-    let task_scoped = trajectory_candidate_paths(gcx.clone(), chat_id).await;
+    // `trajectory_candidate_paths` would re-derive the normal candidates computed above, and
+    // `seen` already discards every one of them. Probing the task directories is the only part
+    // that can still contribute, and it is what resolves a file created since the last listing.
+    let mut task_scoped = Vec::new();
+    for dir in &task_dirs {
+        if let Some(path) = safe_trajectory_file_in_dir(dir, chat_id).await {
+            task_scoped.push(path);
+        }
+    }
     extend_unique_paths(&mut candidates, &mut seen, task_scoped);
     if let Some(found) = first_valid_trajectory_candidate(candidates, chat_id).await {
         return Some(found);
@@ -2205,7 +2403,16 @@ async fn read_existing_trajectory_object(
     chat_id: &str,
 ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, String> {
     #[cfg(test)]
-    TRAJECTORY_METADATA_DISK_READS.fetch_add(1, Ordering::Relaxed);
+    if let Some(reads) = test_trajectory_metadata_read_counters()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&trajectory_metadata_cache_key(path))
+        .and_then(Weak::upgrade)
+    {
+        reads.fetch_add(1, Ordering::Relaxed);
+    }
+    #[cfg(test)]
+    record_trajectory_metadata_disk_read(chat_id);
     match fs::symlink_metadata(path).await {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -2245,6 +2452,85 @@ async fn read_existing_trajectory_object(
 /// its own thread and a `#[tokio::test]` runtime is driven on that thread, so a
 /// test that asserts on read counts observes only the reads it caused instead of
 /// a process-wide total that unrelated concurrent tests inflate.
+/// Per-path metadata disk-read counters, used only by tests.
+///
+/// This intentionally is *not* a single process-wide counter. The read it counts happens inside
+/// the detached trajectory writer, i.e. on a `tokio::spawn`ed task on some other worker thread,
+/// so a thread-local/task-local scope (the `TrajectoryIndexListingCounterScope::local()` pattern
+/// in `trajectory_index.rs`) would never observe it. Keying by trajectory path lets a test count
+/// exactly the file it cares about and ignore reads of any other trajectory.
+#[cfg(test)]
+fn test_trajectory_metadata_read_counters(
+) -> &'static StdMutex<std::collections::HashMap<PathBuf, Weak<AtomicUsize>>> {
+    static COUNTERS: OnceLock<StdMutex<std::collections::HashMap<PathBuf, Weak<AtomicUsize>>>> =
+        OnceLock::new();
+    COUNTERS.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn count_test_trajectory_metadata_reads(path: &Path) -> Arc<AtomicUsize> {
+    // Count the real read path, including detached writers, but not unrelated tests
+    // that can make progress while this save awaits archive mutation coordination.
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut counters = test_trajectory_metadata_read_counters()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counters.retain(|_, counter| counter.strong_count() > 0);
+    counters.insert(trajectory_metadata_cache_key(path), Arc::downgrade(&reads));
+    reads
+}
+
+/// Per-chat metadata disk-read counters, used only by tests.
+///
+/// Same detached-writer reasoning as the per-path counters above, but keyed by `chat_id`: every
+/// test already uses a unique chat id, so concurrently running tests can no longer inflate one
+/// another's deltas even when they never learn the on-disk path.
+#[cfg(test)]
+fn trajectory_metadata_disk_reads_by_chat(
+) -> &'static StdMutex<std::collections::HashMap<String, usize>> {
+    static READS: OnceLock<StdMutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
+    READS.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn record_trajectory_metadata_disk_read(chat_id: &str) {
+    *trajectory_metadata_disk_reads_by_chat()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(chat_id.to_string())
+        .or_insert(0) += 1;
+}
+
+#[cfg(test)]
+fn trajectory_metadata_disk_reads_for_chat(chat_id: &str) -> usize {
+    trajectory_metadata_disk_reads_by_chat()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(chat_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Per-chat physical full-file rewrite counters, used only by tests.
+///
+/// Keyed by `chat_id` for the same reason as the metadata read counters above: the write happens
+/// on a detached writer task, so a task-local scope would never observe it.
+#[cfg(test)]
+fn trajectory_physical_writes_by_chat(
+) -> &'static StdMutex<std::collections::HashMap<String, usize>> {
+    static WRITES: OnceLock<StdMutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
+    WRITES.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn record_trajectory_physical_write(chat_id: &str) {
+    *trajectory_physical_writes_by_chat()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(chat_id.to_string())
+        .or_insert(0) += 1;
+}
+
 #[cfg(test)]
 struct ThreadLocalDiskReadCounter;
 
@@ -2271,6 +2557,17 @@ thread_local! {
 
 #[cfg(test)]
 static TRAJECTORY_METADATA_DISK_READS: ThreadLocalDiskReadCounter = ThreadLocalDiskReadCounter;
+
+#[cfg(test)]
+fn trajectory_physical_writes_for_chat(chat_id: &str) -> usize {
+    trajectory_physical_writes_by_chat()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(chat_id)
+        .copied()
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 fn reset_test_trajectory_watcher_task() {
     let mut guard = TRAJECTORY_WATCHER_TASK
@@ -2296,6 +2593,7 @@ fn is_known_trajectory_top_level_key(key: &str) -> bool {
             | "checkpoints_enabled"
             | "context_tokens_cap"
             | "auto_compression_cap"
+            | "auto_compression_cap_pending"
             | "include_project_info"
             | "isTitleGenerated"
             | "auto_approve_editing_tools"
@@ -2317,6 +2615,8 @@ fn is_known_trajectory_top_level_key(key: &str) -> bool {
             | "reactive_compact_attempts"
             | "wake_up_at"
             | "waiting_for_card_ids"
+            | "pending_questions"
+            | "pending_browser_decision"
             | "pending_deliveries"
             | "dropped_deliveries"
             | "worktree"
@@ -2327,7 +2627,6 @@ fn is_known_trajectory_top_level_key(key: &str) -> bool {
             | "goal"
             | "goal_ledger"
             | "goal_verification_blocked_until_ms"
-            | "compression_retry_after_ms"
             | "browser_meta"
     )
 }
@@ -2875,23 +3174,28 @@ async fn load_trajectory_candidate(
         .and_then(|object| object.remove("pending_deliveries"))
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default();
-    let dropped_deliveries = t
+    let dropped_deliveries: Vec<refact_core::chat_types::DeliveryStatusRecord> = t
         .as_object_mut()
         .and_then(|object| object.remove("dropped_deliveries"))
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default();
-    let compression_retry_after_ms = t
-        .as_object_mut()
-        .and_then(|object| object.remove("compression_retry_after_ms"))
-        .and_then(|value| serde_json::from_value(value).ok())
+        .and_then(|value| {
+            serde_json::from_value::<Vec<refact_core::chat_types::DeliveryStatusRecord>>(value).ok()
+        })
         .unwrap_or_default();
     let (messages, goal_ledger, goal): (
         Vec<ChatMessage>,
         Vec<GoalLedgerEntry>,
         Option<GoalSnapshot>,
     ) = tokio::task::spawn_blocking(move || {
-        let mut messages: Vec<ChatMessage> =
-            serde_json::from_value(messages_value).unwrap_or_default();
+        // Nested reconstruction payloads stay opaque in `extra` during load.
+        // Invalid boundaries remain browsable and are rejected only by the send
+        // projection. Never replace a failed transcript parse with empty history.
+        let mut messages: Vec<ChatMessage> = match parse_stored_messages(messages_value) {
+            Ok(messages) => messages,
+            Err(error) => {
+                tracing::warn!(%error, "Invalid stored trajectory messages; refusing empty-history fallback");
+                return None;
+            }
+        };
         fix_tool_call_indexes(&mut messages);
 
         for (message_index, msg) in messages.iter_mut().enumerate() {
@@ -2966,7 +3270,7 @@ async fn load_trajectory_candidate(
         let goal = super::session::goal_snapshot_from_messages(&messages, goal_prior.as_ref())
             .or(goal_prior)
             .map(clamp_goal_snapshot_for_load);
-        (messages, goal_ledger, goal)
+        Some((messages, goal_ledger, goal))
     })
     .await
     .map_err(|e| {
@@ -2975,7 +3279,7 @@ async fn load_trajectory_candidate(
             chat_id, e
         );
     })
-    .ok()?;
+    .ok()??;
 
     let task_meta: Option<super::types::TaskMeta> = t
         .get("task_meta")
@@ -3002,6 +3306,13 @@ async fn load_trajectory_candidate(
     let goal_verification_blocked_until_ms = t
         .get("goal_verification_blocked_until_ms")
         .and_then(|v| v.as_u64());
+    let pending_questions = t
+        .get("pending_questions")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let pending_browser_decision = t
+        .get("pending_browser_decision")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
 
     let parent_id = t
         .get("parent_id")
@@ -3070,6 +3381,10 @@ async fn load_trajectory_candidate(
             .get("context_tokens_cap")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize),
+        auto_compression_cap_pending: t
+            .get("auto_compression_cap_pending")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         auto_compression_cap: t
             .get("auto_compression_cap")
             .and_then(|v| v.as_u64())
@@ -3187,7 +3502,8 @@ async fn load_trajectory_candidate(
         dropped_deliveries,
         goal_ledger,
         goal_verification_blocked_until_ms,
-        compression_retry_after_ms,
+        pending_questions,
+        pending_browser_decision,
         source_path: traj_path,
         messages,
         thread,
@@ -3471,7 +3787,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         pending_deliveries: Vec::new(),
         dropped_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
-        compression_retry_after_ms: Default::default(),
+        pending_browser_decision: None,
         chat_id: chat_id.to_string(),
         title: String::new(),
         model: String::new(),
@@ -3487,6 +3803,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         checkpoints_enabled: true,
         context_tokens_cap: None,
         auto_compression_cap: None,
+        auto_compression_cap_pending: true,
         include_project_info: true,
         is_title_generated: false,
         auto_approve_editing_tools: true,
@@ -3514,6 +3831,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
+        pending_questions: Vec::new(),
     };
 
     save_trajectory_snapshot(gcx, snapshot).await
@@ -3547,13 +3865,31 @@ pub async fn save_trajectory_as_with_intent_checked(
     if !intent.persists() {
         return Ok(());
     }
+    let existing_session = gcx.chat_sessions.read().await.get(&thread.id).cloned();
+    let (pending_questions, pending_browser_decision) = if let Some(session) = existing_session {
+        let session = session.lock().await;
+        let browser = session.pending_browser_message.as_ref().map(|pending| {
+            super::browser_decisions::snapshot_pending_browser_decision(pending, None)
+        });
+        (session.pending_questions.clone(), browser)
+    } else {
+        load_trajectory_for_chat(gcx.clone(), &thread.id)
+            .await
+            .map(|trajectory| {
+                (
+                    trajectory.pending_questions,
+                    trajectory.pending_browser_decision,
+                )
+            })
+            .unwrap_or_default()
+    };
     let snapshot = TrajectorySnapshot {
         goal: None,
         goal_ledger: Vec::new(),
         pending_deliveries: Vec::new(),
         dropped_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
-        compression_retry_after_ms: Default::default(),
+        pending_browser_decision,
         chat_id: thread.id.clone(),
         title: thread.title.clone(),
         model: thread.model.clone(),
@@ -3565,6 +3901,7 @@ pub async fn save_trajectory_as_with_intent_checked(
         checkpoints_enabled: thread.checkpoints_enabled,
         context_tokens_cap: thread.context_tokens_cap,
         auto_compression_cap: thread.auto_compression_cap,
+        auto_compression_cap_pending: thread.auto_compression_cap_pending,
         include_project_info: thread.include_project_info,
         is_title_generated: thread.is_title_generated,
         auto_approve_editing_tools: thread.auto_approve_editing_tools,
@@ -3592,6 +3929,7 @@ pub async fn save_trajectory_as_with_intent_checked(
         reactive_compact_attempts: thread.reactive_compact_attempts,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
+        pending_questions,
     };
     persist_trajectory_snapshot_with_intent(gcx, snapshot, intent).await
 }
@@ -3626,12 +3964,15 @@ pub async fn save_trajectory_snapshot(
 
 struct DetachedTrajectoryWriterState {
     pending: Option<(u64, TrajectorySnapshot)>,
+    coalesce_deadline: Option<Instant>,
     requested_version: u64,
     committed_version: u64,
     in_flight: bool,
     error: Option<String>,
     error_version: u64,
     notify: Arc<Notify>,
+    wake: Arc<Notify>,
+    worker: Option<tokio::task::JoinHandle<()>>,
     write_cache: Arc<AMutex<DetachedTrajectoryWriteCache>>,
 }
 
@@ -3807,12 +4148,15 @@ impl Default for DetachedTrajectoryWriterState {
     fn default() -> Self {
         Self {
             pending: None,
+            coalesce_deadline: None,
             requested_version: 0,
             committed_version: 0,
             in_flight: false,
             error: None,
             error_version: 0,
             notify: Arc::new(Notify::new()),
+            wake: Arc::new(Notify::new()),
+            worker: None,
             write_cache: Arc::new(AMutex::new(Default::default())),
         }
     }
@@ -3835,9 +4179,23 @@ fn detached_trajectory_writers() -> &'static StdMutex<DetachedTrajectoryWriterRe
     WRITERS.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
 }
 
-fn detached_trajectory_writer_key(
+fn detached_trajectory_writer_source(
+    task_meta: Option<&TaskMeta>,
+    buddy_meta_present: bool,
+) -> TrajectorySourceIdentity {
+    if let Some(task_meta) = task_meta {
+        TrajectorySourceIdentity::from_task_meta(task_meta)
+    } else if buddy_meta_present {
+        TrajectorySourceIdentity::Buddy
+    } else {
+        TrajectorySourceIdentity::Normal
+    }
+}
+
+fn detached_trajectory_writer_key_for(
     gcx: &Arc<GlobalContext>,
-    snapshot: &TrajectorySnapshot,
+    chat_id: &str,
+    source: TrajectorySourceIdentity,
 ) -> DetachedTrajectoryWriterKey {
     let workspace_folders = gcx
         .documents_state
@@ -3845,18 +4203,25 @@ fn detached_trajectory_writer_key(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
-    let source = if let Some(task_meta) = snapshot.task_meta.as_ref() {
-        TrajectorySourceIdentity::from_task_meta(task_meta)
-    } else if snapshot.buddy_meta.is_some() {
-        TrajectorySourceIdentity::Buddy
-    } else {
-        TrajectorySourceIdentity::Normal
-    };
     DetachedTrajectoryWriterKey {
         workspace_folders,
         source,
-        chat_id: snapshot.chat_id.clone(),
+        chat_id: chat_id.to_string(),
     }
+}
+
+fn detached_trajectory_writer_key(
+    gcx: &Arc<GlobalContext>,
+    snapshot: &TrajectorySnapshot,
+) -> DetachedTrajectoryWriterKey {
+    detached_trajectory_writer_key_for(
+        gcx,
+        &snapshot.chat_id,
+        detached_trajectory_writer_source(
+            snapshot.task_meta.as_ref(),
+            snapshot.buddy_meta.is_some(),
+        ),
+    )
 }
 
 fn detached_trajectory_writer(
@@ -3896,7 +4261,7 @@ async fn flush_detached_trajectory_writers() -> Result<(), Vec<String>> {
                 .collect::<Vec<_>>()
         };
         futures::future::join_all(writers.into_iter().map(|writer| async move {
-            let target_version = writer.lock().await.requested_version;
+            let target_version = release_detached_trajectory_coalescing(&writer).await;
             if target_version == 0 {
                 Ok(())
             } else {
@@ -3916,13 +4281,93 @@ async fn flush_detached_trajectory_writers() -> Result<(), Vec<String>> {
     }
 }
 
+/// Drops the coalescing window of a writer and wakes it, returning its latest requested version.
+async fn release_detached_trajectory_coalescing(
+    writer: &Arc<AMutex<DetachedTrajectoryWriterState>>,
+) -> u64 {
+    let (requested_version, wake) = {
+        let mut state = writer.lock().await;
+        state.coalesce_deadline = None;
+        (state.requested_version, state.wake.clone())
+    };
+    wake.notify_one();
+    requested_version
+}
+
+/// Forces any write still sitting in the coalescing window for one trajectory out to disk.
+/// Used by durability-critical session saves, which must not return while bytes are still pending.
+async fn flush_detached_trajectory_writer_for(
+    gcx: &Arc<GlobalContext>,
+    chat_id: &str,
+    source: TrajectorySourceIdentity,
+) -> Result<(), String> {
+    let key = detached_trajectory_writer_key_for(gcx, chat_id, source);
+    let writer = {
+        let mut writers = detached_trajectory_writers()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        writers.retain(|_, writer| writer.strong_count() > 0);
+        writers.get(&key).and_then(Weak::upgrade)
+    };
+    let Some(writer) = writer else {
+        return Ok(());
+    };
+    let target_version = release_detached_trajectory_coalescing(&writer).await;
+    if target_version == 0 {
+        return Ok(());
+    }
+    let result = wait_for_detached_trajectory_commit(writer, target_version).await;
+    prune_detached_trajectory_writers();
+    result
+}
+
+async fn flush_detached_trajectory_writer_for_session(
+    gcx: &Arc<GlobalContext>,
+    session_arc: &Arc<AMutex<ChatSession>>,
+) -> Result<(), String> {
+    let (chat_id, source) = {
+        let session = session_arc.lock().await;
+        (
+            session.chat_id.clone(),
+            detached_trajectory_writer_source(
+                session.thread.task_meta.as_ref(),
+                session.thread.buddy_meta.is_some(),
+            ),
+        )
+    };
+    flush_detached_trajectory_writer_for(gcx, &chat_id, source).await
+}
+
 pub(crate) async fn persist_trajectory_snapshot_with_intent(
     gcx: Arc<GlobalContext>,
     snapshot: TrajectorySnapshot,
     intent: TrajectoryCommitIntent,
 ) -> Result<(), String> {
+    let await_commit = intent.requires_durability();
+    persist_trajectory_snapshot_awaiting(gcx, snapshot, intent, await_commit).await
+}
+
+/// Schedules a save and waits for it to reach disk even when the intent only asks for a
+/// checkpoint. The session writer needs this: it owns `trajectory_committed_version` and
+/// `trajectory_save_error`, so it may only mark a version committed once the bytes landed.
+/// Coalescing still applies — the caller simply waits out the window instead of skipping it,
+/// which is what lets a burst of save requests collapse into the single queued snapshot.
+async fn persist_trajectory_snapshot_awaiting_commit(
+    gcx: Arc<GlobalContext>,
+    snapshot: TrajectorySnapshot,
+    intent: TrajectoryCommitIntent,
+) -> Result<(), String> {
+    persist_trajectory_snapshot_awaiting(gcx, snapshot, intent, true).await
+}
+
+async fn persist_trajectory_snapshot_awaiting(
+    gcx: Arc<GlobalContext>,
+    snapshot: TrajectorySnapshot,
+    intent: TrajectoryCommitIntent,
+    await_commit: bool,
+) -> Result<(), String> {
     if trajectory_writer_rollout_enabled() {
-        schedule_detached_trajectory_writer(gcx, snapshot, intent).await
+        schedule_detached_trajectory_writer(gcx, snapshot, intent, await_commit).await
     } else {
         save_trajectory_snapshot_inner(gcx, snapshot, None).await
     }
@@ -3932,23 +4377,36 @@ async fn schedule_detached_trajectory_writer(
     gcx: Arc<GlobalContext>,
     snapshot: TrajectorySnapshot,
     intent: TrajectoryCommitIntent,
+    await_commit: bool,
 ) -> Result<(), String> {
     let writer = detached_trajectory_writer(&gcx, &snapshot);
-    let target_version = {
+    let coalesce = !intent.requires_durability() && !gcx.shutdown_flag.load(Ordering::Relaxed);
+    let (target_version, wake) = {
         let mut state = writer.lock().await;
         state.requested_version = state.requested_version.saturating_add(1);
         let target_version = state.requested_version;
         state.pending = Some((target_version, snapshot));
-        if !state.in_flight {
+        state.coalesce_deadline =
+            coalesce.then(|| Instant::now() + TRAJECTORY_CHECKPOINT_COALESCE_WINDOW);
+        // Both worker exits clear `in_flight` while still holding this lock, so `in_flight`
+        // without a live handle means the task was aborted or panicked. Respawning is what keeps
+        // `in_flight` from wedging at true and stalling every later write for this trajectory.
+        let worker_alive = state
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished());
+        if !state.in_flight || !worker_alive {
             state.in_flight = true;
-            let writer = writer.clone();
-            tokio::spawn(async move {
-                run_detached_trajectory_writer(gcx, writer).await;
-            });
+            let worker_writer = writer.clone();
+            let worker_gcx = gcx.clone();
+            state.worker = Some(tokio::spawn(async move {
+                run_detached_trajectory_writer(worker_gcx, worker_writer).await;
+            }));
         }
-        target_version
+        (target_version, state.wake.clone())
     };
-    if intent.requires_durability() {
+    wake.notify_one();
+    if await_commit {
         let result = wait_for_detached_trajectory_commit(writer.clone(), target_version).await;
         prune_detached_trajectory_writers();
         result?;
@@ -3961,14 +4419,33 @@ async fn run_detached_trajectory_writer(
     writer: Arc<AMutex<DetachedTrajectoryWriterState>>,
 ) {
     loop {
-        let (version, snapshot, write_cache) = {
-            let mut state = writer.lock().await;
-            let Some((version, snapshot)) = state.pending.take() else {
-                state.in_flight = false;
-                state.notify.notify_waiters();
-                return;
+        let (version, snapshot, write_cache) = loop {
+            let (deadline, wake) = {
+                let mut state = writer.lock().await;
+                if state.pending.is_none() {
+                    state.in_flight = false;
+                    state.notify.notify_waiters();
+                    return;
+                }
+                let deadline = state
+                    .coalesce_deadline
+                    .filter(|deadline| *deadline > Instant::now())
+                    .filter(|_| !gcx.shutdown_flag.load(Ordering::Relaxed));
+                match deadline {
+                    Some(deadline) => (deadline, state.wake.clone()),
+                    None => {
+                        state.coalesce_deadline = None;
+                        let (version, snapshot) = state
+                            .pending
+                            .take()
+                            .expect("pending write was just checked");
+                        break (version, snapshot, state.write_cache.clone());
+                    }
+                }
             };
-            (version, snapshot, state.write_cache.clone())
+            let _ =
+                tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), wake.notified())
+                    .await;
         };
         #[cfg(test)]
         let hook_chat_id = snapshot.chat_id.clone();
@@ -4148,6 +4625,7 @@ async fn save_trajectory_snapshot_inner(
         && snapshot.frozen_request_prefix.is_none()
         && snapshot.goal.is_none()
         && snapshot.auto_compression_cap.is_none()
+        && !snapshot.auto_compression_cap_pending
         && snapshot.title.is_empty()
         && existing_no_meta_path.is_none()
     {
@@ -4225,19 +4703,8 @@ async fn save_trajectory_snapshot_inner(
         .then(|| perf_diagnostics::span(PerfComponent::TrajectoryMetricScan, Some(&chat_id), None));
     let metric_scan = tokio::task::spawn_blocking(move || {
         let background_messages_json = retain_background_messages.then(|| messages_json.clone());
-        let line_changes =
-            collect_metrics.then(|| calculate_line_changes_from_chat_messages(&messages));
-        let task_progress =
-            collect_metrics.then(|| calculate_task_progress_from_chat_messages(&messages));
-        let token_totals =
-            collect_metrics.then(|| calculate_token_totals_from_chat_messages(&messages));
-        (
-            messages_json,
-            background_messages_json,
-            line_changes,
-            task_progress,
-            token_totals,
-        )
+        let metrics = collect_metrics.then(|| scan_trajectory_metrics(&messages));
+        (messages_json, background_messages_json, metrics)
     })
     .await;
     if let Some(span) = metric_scan_span {
@@ -4253,20 +4720,19 @@ async fn save_trajectory_snapshot_inner(
             None,
         );
     }
-    let (messages_json, background_messages_json, line_changes, task_progress, token_totals) =
-        match metric_scan {
-            Ok(result) => result,
-            Err(error) => {
-                serialize_span.finish(
-                    PerfOutcome::Failure,
-                    None,
-                    Some(message_count as u64),
-                    Some(snapshot.version),
-                    None,
-                );
-                return Err(format!("Trajectory metric scan task failed: {}", error));
-            }
-        };
+    let (messages_json, background_messages_json, metrics) = match metric_scan {
+        Ok(result) => result,
+        Err(error) => {
+            serialize_span.finish(
+                PerfOutcome::Failure,
+                None,
+                Some(message_count as u64),
+                Some(snapshot.version),
+                None,
+            );
+            return Err(format!("Trajectory metric scan task failed: {}", error));
+        }
+    };
 
     let mut trajectory = json!({
         "id": snapshot.chat_id,
@@ -4280,6 +4746,7 @@ async fn save_trajectory_snapshot_inner(
         "checkpoints_enabled": snapshot.checkpoints_enabled,
         "context_tokens_cap": snapshot.context_tokens_cap,
         "auto_compression_cap": snapshot.auto_compression_cap,
+        "auto_compression_cap_pending": snapshot.auto_compression_cap_pending,
         "include_project_info": snapshot.include_project_info,
         "isTitleGenerated": snapshot.is_title_generated,
         "auto_approve_editing_tools": snapshot.auto_approve_editing_tools,
@@ -4334,6 +4801,14 @@ async fn save_trajectory_snapshot_inner(
     if !snapshot.waiting_for_card_ids.is_empty() {
         trajectory["waiting_for_card_ids"] = json!(snapshot.waiting_for_card_ids);
     }
+    if !snapshot.pending_questions.is_empty() {
+        trajectory["pending_questions"] = serde_json::to_value(&snapshot.pending_questions)
+            .map_err(|error| format!("failed to serialize pending questions: {error}"))?;
+    }
+    if let Some(ref pending_browser_decision) = snapshot.pending_browser_decision {
+        trajectory["pending_browser_decision"] = serde_json::to_value(pending_browser_decision)
+            .map_err(|error| format!("failed to serialize pending browser decision: {error}"))?;
+    }
     if !snapshot.pending_deliveries.is_empty() {
         trajectory["pending_deliveries"] = json!(snapshot.pending_deliveries);
     }
@@ -4348,9 +4823,6 @@ async fn save_trajectory_snapshot_inner(
     }
     if let Some(blocked_until_ms) = snapshot.goal_verification_blocked_until_ms {
         trajectory["goal_verification_blocked_until_ms"] = json!(blocked_until_ms);
-    }
-    if !snapshot.compression_retry_after_ms.is_empty() {
-        trajectory["compression_retry_after_ms"] = json!(snapshot.compression_retry_after_ms);
     }
     if let Some(ref worktree) = snapshot.worktree {
         trajectory["worktree"] = serde_json::to_value(worktree).unwrap_or_default();
@@ -4467,26 +4939,26 @@ async fn save_trajectory_snapshot_inner(
 
     let tmp_path = unique_trajectory_tmp_path(&file_path);
     serialize_span.resume();
+    let serialize_tmp_path = tmp_path.clone();
     let serialized = tokio::task::spawn_blocking(move || {
-        let json_result = serde_json::to_string_pretty(&trajectory)
-            .map_err(|e| format!("Failed to serialize trajectory: {}", e));
-        (trajectory, json_result)
+        let write_result = write_pretty_json_to_tmp_file(&serialize_tmp_path, &trajectory);
+        (trajectory, write_result)
     })
     .await;
-    let (trajectory, json_result) = match serialized {
-        Ok((trajectory, json_result)) => {
+    let (trajectory, write_result) = match serialized {
+        Ok((trajectory, write_result)) => {
             serialize_span.finish(
-                if json_result.is_ok() {
+                if write_result.is_ok() {
                     PerfOutcome::Success
                 } else {
                     PerfOutcome::Failure
                 },
-                json_result.as_ref().ok().map(|json| json.len() as u64),
+                write_result.as_ref().ok().map(|write| write.byte_len),
                 Some(message_count as u64),
                 Some(snapshot.version),
                 None,
             );
-            (trajectory, json_result)
+            (trajectory, write_result)
         }
         Err(error) => {
             serialize_span.finish(
@@ -4496,6 +4968,7 @@ async fn save_trajectory_snapshot_inner(
                 Some(snapshot.version),
                 None,
             );
+            let _ = fs::remove_file(&tmp_path).await;
             return Err(format!("Trajectory serialization task failed: {}", error));
         }
     };
@@ -4504,14 +4977,9 @@ async fn save_trajectory_snapshot_inner(
         Some(&snapshot.chat_id),
         Some(&file_path),
     );
-    let atomic_write_result = atomic_write_json_with_tmp_path(
-        &file_path,
-        &tmp_path,
-        json_result,
-        Some("Failed to write trajectory"),
-        Some(source.clone()),
-    )
-    .await;
+    let atomic_write_result =
+        atomic_finish_trajectory_write(&file_path, &tmp_path, write_result, Some(source.clone()))
+            .await;
     atomic_write_span.finish(
         if atomic_write_result.is_ok() {
             PerfOutcome::Success
@@ -4524,6 +4992,8 @@ async fn save_trajectory_snapshot_inner(
         None,
     );
     atomic_write_result?;
+    #[cfg(test)]
+    record_trajectory_physical_write(&snapshot.chat_id);
 
     let backing_stamp =
         cache_written_trajectory_metadata(&file_path, &snapshot.chat_id, &trajectory).await;
@@ -4586,11 +5056,28 @@ async fn save_trajectory_snapshot_inner(
             .unwrap_or_else(|| snapshot.chat_id.clone());
         let sessions = app.chat.sessions.clone();
         let source = TrajectorySourceIdentity::Normal;
-        let (session_state, session_error, session_worktree) =
-            get_session_runtime_for_trajectory_source(&sessions, &snapshot.chat_id, &source).await;
-        let (total_lines_added, total_lines_removed) = line_changes.unwrap_or_default();
-        let (tasks_total, tasks_done, tasks_failed) = task_progress.unwrap_or_default();
-        let token_totals = token_totals.unwrap_or_default();
+        let live_session = sessions.read().await.get(&snapshot.chat_id).cloned();
+        let runtime = live_session.as_ref().and_then(|session| {
+            let session = session.try_lock().ok()?;
+            Some(if source.matches_session(&session) {
+                (
+                    session.runtime.state.to_string(),
+                    session.runtime.error.clone(),
+                    session.thread.worktree.clone(),
+                )
+            } else {
+                (SessionState::Idle.to_string(), None, None)
+            })
+        });
+        let (session_state, session_error, session_worktree) = match runtime {
+            Some((state, error, worktree)) => (Some(state), error, worktree),
+            None if live_session.is_none() => (Some(SessionState::Idle.to_string()), None, None),
+            None => (None, None, None),
+        };
+        let metrics = metrics.unwrap_or_default();
+        let (total_lines_added, total_lines_removed) = metrics.line_changes;
+        let (tasks_total, tasks_done, tasks_failed) = metrics.task_progress;
+        let token_totals = metrics.token_totals;
         let tx = &app.chat.trajectory_events_tx;
         {
             let event = TrajectoryEvent {
@@ -4599,7 +5086,7 @@ async fn save_trajectory_snapshot_inner(
                 updated_at: Some(updated_at),
                 title: Some(trajectory_meta_title(&snapshot.title)),
                 is_title_generated: Some(snapshot.is_title_generated),
-                session_state: Some(session_state),
+                session_state,
                 error: session_error,
                 message_count: Some(message_count),
                 parent_id: snapshot.parent_id.clone(),
@@ -4692,15 +5179,20 @@ pub async fn try_save_trajectory_with_intent(
     if !trajectory_writer_rollout_enabled() {
         return try_save_trajectory_legacy_with_intent(app, session_arc, intent).await;
     }
-    {
-        let session = session_arc.lock().await;
-        if !session.trajectory_dirty {
-            return Ok(true);
+    let dirty = session_arc.lock().await.trajectory_dirty;
+    if !dirty {
+        // A clean session can still have a coalesced checkpoint sitting in the detached writer,
+        // so a durability-critical save has to drain it instead of returning straight away.
+        if intent.requires_durability() {
+            flush_detached_trajectory_writer_for_session(&app.gcx, &session_arc).await?;
         }
+        return Ok(true);
     }
-    let target_version = schedule_trajectory_writer(app, session_arc.clone(), intent).await?;
+    let target_version =
+        schedule_trajectory_writer(app.clone(), session_arc.clone(), intent).await?;
     if intent.requires_durability() {
         wait_for_trajectory_commit(session_arc.clone(), target_version).await?;
+        flush_detached_trajectory_writer_for_session(&app.gcx, &session_arc).await?;
     }
     let session = session_arc.lock().await;
     Ok(!session.trajectory_dirty)
@@ -4766,9 +5258,7 @@ async fn commit_trajectory_snapshot_for_session(
         }
     }
 
-    let result =
-        persist_trajectory_snapshot_with_intent(gcx, snapshot, TrajectoryCommitIntent::Required)
-            .await;
+    let result = persist_trajectory_snapshot_awaiting_commit(gcx, snapshot, intent).await;
     span.finish(
         if result.is_ok() {
             PerfOutcome::Success
@@ -4840,7 +5330,7 @@ async fn schedule_trajectory_writer(
                 gcx.clone(),
                 writer_session_arc.clone(),
                 snapshot,
-                TrajectoryCommitIntent::Checkpoint,
+                intent,
             )
             .await;
             let mut session = writer_session_arc.lock().await;
@@ -5229,6 +5719,8 @@ fn apply_external_delete_to_session(session: &mut ChatSession, chat_id: &str) {
     session.waiting_for_card_ids.clear();
     session.set_goal_ledger(Vec::new());
     session.goal_verification_blocked_until_ms = None;
+    session.pending_questions.clear();
+    session.pending_browser_message = None;
     session.set_goal_projection(None);
     session.reset_compaction_runtime_state();
     session.external_reload_pending = None;
@@ -5246,10 +5738,14 @@ fn apply_loaded_external_update_to_session(
     session.restore_pending_deliveries(loaded.pending_deliveries);
     session.merge_dropped_deliveries(loaded.dropped_deliveries);
     session.thread = loaded.thread;
-    session.compression_retry_after_ms = loaded.compression_retry_after_ms;
     session.reset_compaction_runtime_state();
     session.set_goal_ledger(loaded.goal_ledger);
     session.goal_verification_blocked_until_ms = loaded.goal_verification_blocked_until_ms;
+    session.pending_questions = loaded.pending_questions;
+    session.pending_browser_message = None;
+    if let Some(pending) = loaded.pending_browser_decision {
+        super::browser_decisions::expire_restored_browser_decision(session, pending);
+    }
     session.set_goal_projection(loaded.goal);
     session.created_at = loaded.created_at;
     session.wake_up_at = loaded.wake_up_at;
@@ -5739,22 +6235,22 @@ async fn refresh_trajectory_index_entry_for_path(
     .await
 }
 
+/// Drops index entries for one chat id whose backing file no longer matches. The work is scoped
+/// to that id, so it costs one id-map lookup plus a listing of each directory that actually
+/// indexes it — normally zero or one.
+///
+/// It used to resolve the chat first and sweep every trajectory directory when that missed, which
+/// is the common case here: this runs precisely when a file just disappeared. A directory the id
+/// map does not mention cannot be holding an entry the coordinator would return, and listing it
+/// would reconcile the entry away regardless, so sweeping bought nothing per watcher event.
 async fn remove_stale_trajectory_index_entries(gcx: Arc<GlobalContext>, chat_id: &str) {
     let app = AppState::from_gcx(gcx.clone()).await;
-    let dirs = match find_trajectory_file(gcx.clone(), chat_id).await {
-        Some(candidate) => index_dir_for_trajectory_file(gcx.clone(), &candidate.path)
-            .await
-            .map(|dir| vec![dir])
-            .unwrap_or_else(|| Vec::new()),
-        None => Vec::new(),
-    };
-    let dirs = if dirs.is_empty() {
-        list_trajectory_dirs(&gcx).await
-    } else {
-        dirs
-    };
+    let dirs = app
+        .chat
+        .trajectory_index_coordinator
+        .entry_dirs_for_id(chat_id);
     for dir in dirs {
-        let entries = match trajectory_index::list_trajectory_entries_with_rollout_for(
+        let entries = match trajectory_index::list_trajectory_entries_with_rollout_shared_for(
             &app.chat.trajectory_index_coordinator,
             &dir,
             None,
@@ -5769,7 +6265,7 @@ async fn remove_stale_trajectory_index_entries(gcx: Arc<GlobalContext>, chat_id:
             }
         };
         let mut should_remove = false;
-        for entry in &entries {
+        for entry in entries.iter() {
             if entry.id == chat_id
                 && !trajectory_index::trajectory_index_entry_is_fresh(&dir, entry).await
             {
@@ -7061,100 +7557,6 @@ pub(crate) fn calculate_task_progress_from_messages(
     (0, 0, 0)
 }
 
-fn calculate_line_changes_from_chat_messages(messages: &[ChatMessage]) -> (i64, i64) {
-    let mut total_added: i64 = 0;
-    let mut total_removed: i64 = 0;
-
-    for msg in messages {
-        if msg.role != "diff" {
-            continue;
-        }
-
-        let content = match &msg.content {
-            ChatContent::SimpleText(s) => s.as_str(),
-            _ => continue,
-        };
-
-        if let Ok(chunks) = serde_json::from_str::<Vec<serde_json::Value>>(content) {
-            for chunk in chunks {
-                if let Some(lines_add) = chunk.get("lines_add").and_then(|v| v.as_str()) {
-                    if !lines_add.is_empty() {
-                        total_added += lines_add.lines().count() as i64;
-                    }
-                }
-                if let Some(lines_remove) = chunk.get("lines_remove").and_then(|v| v.as_str()) {
-                    if !lines_remove.is_empty() {
-                        total_removed += lines_remove.lines().count() as i64;
-                    }
-                }
-            }
-        }
-    }
-
-    (total_added, total_removed)
-}
-
-fn calculate_task_progress_from_chat_messages(messages: &[ChatMessage]) -> (i32, i32, i32) {
-    // Build a set of successful tool call IDs (tool messages without tool_failed=true)
-    let mut successful_tool_ids: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    for msg in messages {
-        if msg.role != "tool" {
-            continue;
-        }
-        let tool_failed = msg.tool_failed.unwrap_or(false);
-        if !tool_failed && !msg.tool_call_id.is_empty() {
-            successful_tool_ids.insert(msg.tool_call_id.clone());
-        }
-    }
-
-    // Find the last successful tasks_set tool call (iterate in reverse)
-    for msg in messages.iter().rev() {
-        if msg.role != "assistant" {
-            continue;
-        }
-
-        let tool_calls = match &msg.tool_calls {
-            Some(tc) => tc,
-            None => continue,
-        };
-
-        // Iterate tool_calls in reverse to find the last tasks_set
-        for tc in tool_calls.iter().rev() {
-            if tc.function.name != "tasks_set" {
-                continue;
-            }
-
-            if tc.id.is_empty() || !successful_tool_ids.contains(&tc.id) {
-                continue;
-            }
-
-            // Parse the arguments
-            if let Ok(args) = serde_json::from_str::<serde_json::Value>(&tc.function.arguments) {
-                if let Some(tasks) = args.get("tasks").and_then(|t| t.as_array()) {
-                    let mut total = 0i32;
-                    let mut done = 0i32;
-                    let mut failed = 0i32;
-
-                    for task in tasks {
-                        total += 1;
-                        let status = task.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                        match status.to_lowercase().as_str() {
-                            "completed" | "done" | "complete" => done += 1,
-                            "failed" | "error" => failed += 1,
-                            _ => {}
-                        }
-                    }
-
-                    return (total, done, failed);
-                }
-            }
-        }
-    }
-
-    (0, 0, 0)
-}
-
 #[derive(Default)]
 pub(crate) struct TokenTotals {
     pub(crate) prompt_tokens: u64,
@@ -7218,40 +7620,117 @@ pub(crate) fn calculate_token_totals_from_messages(messages: &[serde_json::Value
     }
 }
 
-fn calculate_token_totals_from_chat_messages(messages: &[ChatMessage]) -> TokenTotals {
-    let mut prompt_tokens: u64 = 0;
-    let mut completion_tokens: u64 = 0;
-    let mut total_tokens: u64 = 0;
-    let mut cache_read_tokens: u64 = 0;
-    let mut cache_creation_tokens: u64 = 0;
-    let mut cost_usd: Option<f64> = None;
+#[derive(Default)]
+pub(crate) struct TrajectoryMetrics {
+    pub(crate) line_changes: (i64, i64),
+    pub(crate) task_progress: (i32, i32, i32),
+    pub(crate) token_totals: TokenTotals,
+}
+
+fn task_progress_from_tasks_set_arguments(arguments: &str) -> Option<(i32, i32, i32)> {
+    let args = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
+    let tasks = args.get("tasks")?.as_array()?;
+    let mut total = 0i32;
+    let mut done = 0i32;
+    let mut failed = 0i32;
+    for task in tasks {
+        total += 1;
+        match task
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .as_str()
+        {
+            "completed" | "done" | "complete" => done += 1,
+            "failed" | "error" => failed += 1,
+            _ => {}
+        }
+    }
+    Some((total, done, failed))
+}
+
+fn accumulate_line_changes(content: &str, total_added: &mut i64, total_removed: &mut i64) {
+    let Ok(chunks) = serde_json::from_str::<Vec<serde_json::Value>>(content) else {
+        return;
+    };
+    for chunk in chunks {
+        if let Some(lines_add) = chunk.get("lines_add").and_then(|v| v.as_str()) {
+            if !lines_add.is_empty() {
+                *total_added += lines_add.lines().count() as i64;
+            }
+        }
+        if let Some(lines_remove) = chunk.get("lines_remove").and_then(|v| v.as_str()) {
+            if !lines_remove.is_empty() {
+                *total_removed += lines_remove.lines().count() as i64;
+            }
+        }
+    }
+}
+
+/// Every per-save trajectory metric in one forward pass. Task progress keeps its "last successful
+/// `tasks_set` carrying a task list" semantics: candidates are collected in message order and
+/// resolved in reverse, the exact order the previous reverse scan visited them in.
+fn scan_trajectory_metrics<'a, I>(messages: I) -> TrajectoryMetrics
+where
+    I: IntoIterator<Item = &'a ChatMessage>,
+{
+    let mut total_added: i64 = 0;
+    let mut total_removed: i64 = 0;
+    let mut token_totals = TokenTotals::default();
+    let mut successful_tool_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut tasks_set_calls: Vec<(&str, &str)> = Vec::new();
 
     for msg in messages {
-        let usage = match &msg.usage {
-            Some(u) => u,
-            None => continue,
-        };
-        prompt_tokens += usage.prompt_tokens as u64;
-        completion_tokens += usage.completion_tokens as u64;
-        total_tokens += usage.total_tokens as u64;
-        if let Some(v) = usage.cache_read_tokens {
-            cache_read_tokens += v as u64;
+        if let Some(usage) = msg.usage.as_ref() {
+            token_totals.prompt_tokens += usage.prompt_tokens as u64;
+            token_totals.completion_tokens += usage.completion_tokens as u64;
+            token_totals.total_tokens += usage.total_tokens as u64;
+            if let Some(cache_read_tokens) = usage.cache_read_tokens {
+                token_totals.cache_read_tokens += cache_read_tokens as u64;
+            }
+            if let Some(cache_creation_tokens) = usage.cache_creation_tokens {
+                token_totals.cache_creation_tokens += cache_creation_tokens as u64;
+            }
+            if let Some(metering) = usage.metering_usd.as_ref() {
+                *token_totals.cost_usd.get_or_insert(0.0) += metering.total_usd;
+            }
         }
-        if let Some(v) = usage.cache_creation_tokens {
-            cache_creation_tokens += v as u64;
-        }
-        if let Some(ref m) = usage.metering_usd {
-            *cost_usd.get_or_insert(0.0) += m.total_usd;
+
+        match msg.role.as_str() {
+            "diff" => {
+                if let ChatContent::SimpleText(content) = &msg.content {
+                    accumulate_line_changes(content, &mut total_added, &mut total_removed);
+                }
+            }
+            "tool" => {
+                if !msg.tool_failed.unwrap_or(false) && !msg.tool_call_id.is_empty() {
+                    successful_tool_ids.insert(msg.tool_call_id.as_str());
+                }
+            }
+            "assistant" => {
+                for tool_call in msg.tool_calls.iter().flatten() {
+                    if tool_call.function.name == "tasks_set" && !tool_call.id.is_empty() {
+                        tasks_set_calls
+                            .push((tool_call.id.as_str(), tool_call.function.arguments.as_str()));
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
-    TokenTotals {
-        prompt_tokens,
-        completion_tokens,
-        total_tokens,
-        cache_read_tokens,
-        cache_creation_tokens,
-        cost_usd,
+    let task_progress = tasks_set_calls
+        .iter()
+        .rev()
+        .filter(|(id, _)| successful_tool_ids.contains(id))
+        .find_map(|(_, arguments)| task_progress_from_tasks_set_arguments(arguments))
+        .unwrap_or_default();
+
+    TrajectoryMetrics {
+        line_changes: (total_added, total_removed),
+        task_progress,
+        token_totals,
     }
 }
 
@@ -7388,11 +7867,10 @@ fn loaded_trajectory_to_meta(loaded: &LoadedTrajectory, task_roots: &[PathBuf]) 
     let source = loaded_trajectory_source(loaded, task_roots);
     let (task_id, task_role, agent_id, card_id) =
         task_context_from_task_meta(loaded.thread.task_meta.as_ref());
-    let (total_lines_added, total_lines_removed) =
-        calculate_line_changes_from_chat_messages(&loaded.messages);
-    let (tasks_total, tasks_done, tasks_failed) =
-        calculate_task_progress_from_chat_messages(&loaded.messages);
-    let token_totals = calculate_token_totals_from_chat_messages(&loaded.messages);
+    let metrics = scan_trajectory_metrics(&loaded.messages);
+    let (total_lines_added, total_lines_removed) = metrics.line_changes;
+    let (tasks_total, tasks_done, tasks_failed) = metrics.task_progress;
+    let token_totals = metrics.token_totals;
 
     let mut meta = TrajectoryMeta {
         id: loaded.thread.id.clone(),
@@ -7614,6 +8092,32 @@ async fn hydrate_trajectory_list_page(
     (items, has_more)
 }
 
+// Directories the coordinator already indexed and that hold no renderable chat are skipped
+// without a listing call, so a displayable-only refresh stops sweeping every task trajectory
+// directory. An unknown directory is never skipped, so the first refresh still sees everything.
+async fn list_trajectory_entries_for_listing(
+    app: &AppState,
+    dir: &Path,
+    displayable_only: bool,
+    caller: trajectory_index::TrajectoryIndexListingCaller,
+) -> Result<Option<Arc<Vec<trajectory_index::TrajectoryIndexEntry>>>, String> {
+    let coordinator = &app.chat.trajectory_index_coordinator;
+    if displayable_only && coordinator.directory_has_displayable_entries(dir) == Some(false) {
+        return Ok(None);
+    }
+    if !is_real_dir(dir).await {
+        return Ok(None);
+    }
+    trajectory_index::list_trajectory_entries_with_rollout_shared_for(
+        coordinator,
+        dir,
+        None,
+        caller,
+    )
+    .await
+    .map(Some)
+}
+
 async fn collect_trajectory_list_candidates(
     gcx: &Arc<GlobalContext>,
     cursor_filter: Option<&(String, String)>,
@@ -7625,18 +8129,16 @@ async fn collect_trajectory_list_candidates(
     let app = AppState::from_gcx(gcx.clone()).await;
 
     for trajectories_dir in list_trajectory_dirs(gcx).await {
-        if !is_real_dir(&trajectories_dir).await {
-            continue;
-        }
-        let entries = match trajectory_index::list_trajectory_entries_with_rollout_for(
-            &app.chat.trajectory_index_coordinator,
+        let entries = match list_trajectory_entries_for_listing(
+            &app,
             &trajectories_dir,
-            None,
+            displayable_only,
             caller,
         )
         .await
         {
-            Ok(entries) => entries,
+            Ok(Some(entries)) => entries,
+            Ok(None) => continue,
             Err(e) => {
                 warn!(
                     "Failed to list trajectory index {:?}: {}",
@@ -7645,7 +8147,7 @@ async fn collect_trajectory_list_candidates(
                 continue;
             }
         };
-        for entry in entries {
+        for entry in entries.iter() {
             if matches!(entry.source, trajectory_index::TrajectoryIndexSource::Buddy) {
                 continue;
             }
@@ -7665,7 +8167,7 @@ async fn collect_trajectory_list_candidates(
             }
             candidates.push(trajectory_index::list_candidate_from_entry(
                 &trajectories_dir,
-                &entry,
+                entry,
             ));
         }
     }
@@ -7955,18 +8457,16 @@ pub async fn list_all_trajectories_meta(
     let task_roots = get_all_task_roots(gcx.clone()).await;
 
     for trajectories_dir in list_trajectory_dirs(&gcx).await {
-        if !is_real_dir(&trajectories_dir).await {
-            continue;
-        }
-        let entries = match trajectory_index::list_trajectory_entries_with_rollout_for(
-            &app.chat.trajectory_index_coordinator,
+        let entries = match list_trajectory_entries_for_listing(
+            &app,
             &trajectories_dir,
-            None,
+            displayable_only,
             trajectory_index::TrajectoryIndexListingCaller::AllTrajectoriesMetadata,
         )
         .await
         {
-            Ok(entries) => entries,
+            Ok(Some(entries)) => entries,
+            Ok(None) => continue,
             Err(e) => {
                 warn!(
                     "Failed to list trajectory index {:?}: {}",
@@ -7975,7 +8475,7 @@ pub async fn list_all_trajectories_meta(
                 continue;
             }
         };
-        for entry in entries {
+        for entry in entries.iter() {
             if matches!(entry.source, trajectory_index::TrajectoryIndexSource::Buddy) {
                 continue;
             }
@@ -7983,13 +8483,13 @@ pub async fn list_all_trajectories_meta(
                 continue;
             }
             if seen_ids.insert(entry.id.clone()) {
-                let mut meta = trajectory_index::meta_from_entry(&trajectories_dir, &entry);
+                let mut meta = trajectory_index::meta_from_entry(&trajectories_dir, entry);
                 if let Some(worktree) = meta.worktree.clone() {
                     meta.worktree =
                         validate_loaded_worktree_strict(app.clone(), &meta.id, worktree).await;
                 }
                 apply_task_trajectory_context(
-                    &trajectory_index::trajectory_file_path_for_entry(&trajectories_dir, &entry),
+                    &trajectory_index::trajectory_file_path_for_entry(&trajectories_dir, entry),
                     &task_roots,
                     &mut meta,
                 );
@@ -8386,6 +8886,25 @@ pub async fn handle_v1_trajectories_subscribe(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn malformed_nested_report_remains_browsable_without_emptying_archive() {
+        let raw = serde_json::json!([
+            {"role":"user", "content":"ARCHIVED_LOAD_SENTINEL"},
+            {"role":"compression_report", "content":"invalid boundary", "compression_report":{
+                "kind":"reconstructed_history", "schema_version":1,
+                "payload":{"messages":"not an array"}
+            }}
+        ]);
+        let messages = super::parse_stored_messages(raw).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0].content.content_text_only(),
+            "ARCHIVED_LOAD_SENTINEL"
+        );
+        assert!(refact_core::active_context::active_context(&messages).is_err());
+        assert!(super::parse_stored_messages(serde_json::json!([{"role":42}])).is_err());
+    }
+
     use super::*;
     use crate::chat::diagnostics::{is_ui_only_message, make_ui_only_error_message};
     use crate::chat::perf_diagnostics::{self, MemoryPerfSink, PerfClock, PerfRecorder};
@@ -8893,6 +9412,7 @@ mod tests {
 
             let stale = {
                 let mut session = session_arc.lock().await;
+                session.set_title("writer paths".to_string(), true);
                 session.add_message(ChatMessage::new("user".to_string(), "older".to_string()));
                 trajectory_snapshot_from_session(&session)
             };
@@ -8953,6 +9473,10 @@ mod tests {
                     .map(|message| message.content.content_text_only())
                     .collect::<Vec<_>>(),
                 vec!["older", "newer", "shutdown"]
+            );
+            assert!(
+                loaded.thread.is_title_generated,
+                "this fixture must not leave a background title-generation save racing the flush"
             );
         }
     }
@@ -9334,6 +9858,32 @@ mod tests {
         assert_eq!(saved["external_metadata"], json!({"preserved": true}));
     }
 
+    #[tokio::test]
+    async fn metadata_read_counter_excludes_other_paths_and_tracks_spawned_reads() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("tracked.json");
+        let other_path = workspace.path().join("other.json");
+        tokio::fs::write(&path, r#"{"id":"tracked","messages":[]}"#)
+            .await
+            .unwrap();
+        tokio::fs::write(&other_path, r#"{"id":"other","messages":[]}"#)
+            .await
+            .unwrap();
+        let reads = count_test_trajectory_metadata_reads(&path);
+        read_existing_trajectory_object(&other_path, "other")
+            .await
+            .unwrap();
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        tokio::spawn(async move {
+            read_existing_trajectory_object(&path, "tracked")
+                .await
+                .unwrap();
+        })
+        .await
+        .unwrap();
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+    }
+
     #[serial(trajectory_perf)]
     #[tokio::test]
     async fn repeated_save_reuses_pretty_round_trip_metadata_without_a_second_disk_read() {
@@ -9368,7 +9918,9 @@ mod tests {
         .await
         .unwrap();
 
-        let reads_before = TRAJECTORY_METADATA_DISK_READS.load(Ordering::Relaxed);
+        let metadata_reads = count_test_trajectory_metadata_reads(&path);
+        let reads_before = metadata_reads.load(Ordering::Relaxed);
+        let chat_reads_before = trajectory_metadata_disk_reads_for_chat(chat_id);
         for title in ["First", "Second"] {
             save_trajectory_snapshot(
                 gcx.clone(),
@@ -9381,8 +9933,18 @@ mod tests {
             .await
             .unwrap();
         }
-        let reads_after = TRAJECTORY_METADATA_DISK_READS.load(Ordering::Relaxed);
-        assert_eq!(reads_after - reads_before, 1);
+        let reads_after = metadata_reads.load(Ordering::Relaxed);
+        assert_eq!(
+            reads_after - reads_before,
+            1,
+            "the second save must reuse the cached metadata instead of re-reading from disk"
+        );
+        let chat_reads_after = trajectory_metadata_disk_reads_for_chat(chat_id);
+        assert_eq!(
+            chat_reads_after - chat_reads_before,
+            1,
+            "the second save must reuse the cached metadata instead of re-reading from disk"
+        );
 
         let text = tokio::fs::read_to_string(&path).await.unwrap();
         let saved: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -9448,6 +10010,248 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
         assert_eq!(saved["id"], "other-chat");
+    }
+
+    fn coalesce_test_snapshot(chat_id: &str, index: usize) -> TrajectorySnapshot {
+        test_snapshot(
+            chat_id,
+            &format!("Title {index}"),
+            vec![ChatMessage::new(
+                "user".to_string(),
+                format!("message {index}"),
+            )],
+        )
+    }
+
+    #[test]
+    fn pretty_output_bytes_are_unchanged() {
+        let fixture = json!({
+            "id": "pretty-bytes-fixture",
+            "title": "Ünïcøde ✓ \"quoted\" \\ backslash\n\ttabbed",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "hello",
+                    "nested": {"deep": [1, 2.5, true, null, -0.125]}
+                },
+                {"role": "assistant", "content": [], "empty_object": {}}
+            ],
+            "counts": {"a": 0, "b": -17, "c": 1234567890},
+            "control_chars": "\u{1}\u{7f}"
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pretty-bytes-fixture.json.tmp");
+
+        let write = write_pretty_json_to_tmp_file(&path, &fixture).unwrap();
+        let written = std::fs::read(&path).unwrap();
+        let expected = serde_json::to_string_pretty(&fixture).unwrap();
+
+        assert_eq!(written, expected.as_bytes());
+        assert_eq!(write.byte_len, expected.len() as u64);
+        assert_eq!(write.content_hash, md5::compute(expected.as_bytes()).0);
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn checkpoint_writes_coalesce_within_window() {
+        let _lock = serial_test_guard();
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "detached-writer-coalesce-window";
+        let writer = Arc::new(AMutex::new(DetachedTrajectoryWriterState {
+            pending: Some((1, coalesce_test_snapshot(chat_id, 0))),
+            coalesce_deadline: Some(Instant::now() + TRAJECTORY_CHECKPOINT_COALESCE_WINDOW),
+            requested_version: 1,
+            in_flight: true,
+            ..Default::default()
+        }));
+        let worker = tokio::spawn(run_detached_trajectory_writer(gcx.clone(), writer.clone()));
+
+        for index in 1..5usize {
+            let wake = {
+                let mut state = writer.lock().await;
+                state.requested_version = index as u64 + 1;
+                state.pending = Some((index as u64 + 1, coalesce_test_snapshot(chat_id, index)));
+                state.coalesce_deadline =
+                    Some(Instant::now() + TRAJECTORY_CHECKPOINT_COALESCE_WINDOW);
+                state.wake.clone()
+            };
+            wake.notify_one();
+        }
+        assert_eq!(
+            trajectory_physical_writes_for_chat(chat_id),
+            0,
+            "checkpoints must not reach disk while the coalescing window is open"
+        );
+
+        let target_version = release_detached_trajectory_coalescing(&writer).await;
+        wait_for_detached_trajectory_commit(writer.clone(), target_version)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .expect("writer should stop once the pending slot is drained")
+            .unwrap();
+
+        assert_eq!(
+            trajectory_physical_writes_for_chat(chat_id),
+            1,
+            "a burst of checkpoints must collapse into a single physical write"
+        );
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(loaded.thread.title, "Title 4");
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].content.content_text_only(), "message 4");
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn durable_intent_bypasses_coalescing() {
+        let _lock = serial_test_guard();
+        let _rollout = TrajectoryWriterRolloutGuard::set(true);
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "detached-writer-durable-bypass";
+        let writer = detached_trajectory_writer(&gcx, &coalesce_test_snapshot(chat_id, 0));
+
+        persist_trajectory_snapshot_with_intent(
+            gcx.clone(),
+            coalesce_test_snapshot(chat_id, 0),
+            TrajectoryCommitIntent::Checkpoint,
+        )
+        .await
+        .unwrap();
+        assert!(
+            writer.lock().await.coalesce_deadline.is_some(),
+            "a checkpoint intent must arm the coalescing window"
+        );
+
+        persist_trajectory_snapshot_with_intent(
+            gcx.clone(),
+            coalesce_test_snapshot(chat_id, 1),
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap();
+
+        {
+            let state = writer.lock().await;
+            assert!(state.coalesce_deadline.is_none());
+            assert!(state.pending.is_none());
+            assert_eq!(state.committed_version, 2);
+        }
+        assert_eq!(trajectory_physical_writes_for_chat(chat_id), 1);
+        let path = workspace
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(chat_id)
+            .join(format!("{chat_id}.json"));
+        let saved: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        assert_eq!(saved["title"], "Title 1");
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn aborted_writer_does_not_wedge_pending_coalesced_write() {
+        let _lock = serial_test_guard();
+        let _rollout = TrajectoryWriterRolloutGuard::set(true);
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "detached-writer-worker-abort";
+        let writer = detached_trajectory_writer(&gcx, &coalesce_test_snapshot(chat_id, 0));
+
+        persist_trajectory_snapshot_with_intent(
+            gcx.clone(),
+            coalesce_test_snapshot(chat_id, 0),
+            TrajectoryCommitIntent::Checkpoint,
+        )
+        .await
+        .unwrap();
+        assert!(
+            writer.lock().await.coalesce_deadline.is_some(),
+            "a checkpoint intent must arm the coalescing window"
+        );
+        assert_eq!(trajectory_physical_writes_for_chat(chat_id), 0);
+
+        let worker = writer
+            .lock()
+            .await
+            .worker
+            .take()
+            .expect("checkpoint must have spawned a detached writer");
+        worker.abort();
+        let _ = worker.await;
+        assert!(
+            writer.lock().await.in_flight,
+            "aborting the worker leaves in_flight set, which is exactly the wedge under test"
+        );
+
+        persist_trajectory_snapshot_with_intent(
+            gcx.clone(),
+            coalesce_test_snapshot(chat_id, 1),
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap();
+
+        {
+            let state = writer.lock().await;
+            assert!(state.pending.is_none());
+            assert!(
+                !state.in_flight,
+                "in_flight must not stay stuck after the replacement worker drains the queue"
+            );
+            assert_eq!(state.committed_version, 2);
+        }
+        assert_eq!(
+            trajectory_physical_writes_for_chat(chat_id),
+            1,
+            "the pending snapshot must land exactly once after the worker was aborted"
+        );
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(loaded.thread.title, "Title 1");
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].content.content_text_only(), "message 1");
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn pending_coalesced_write_is_flushed_on_shutdown() {
+        let _lock = serial_test_guard();
+        let _rollout = TrajectoryWriterRolloutGuard::set(true);
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "detached-writer-shutdown-flush";
+        let writer = detached_trajectory_writer(&gcx, &coalesce_test_snapshot(chat_id, 0));
+
+        for index in 0..3usize {
+            persist_trajectory_snapshot_with_intent(
+                gcx.clone(),
+                coalesce_test_snapshot(chat_id, index),
+                TrajectoryCommitIntent::Checkpoint,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(trajectory_physical_writes_for_chat(chat_id), 0);
+
+        gcx.shutdown_flag.store(true, Ordering::Relaxed);
+        if let Err(errors) = flush_detached_trajectory_writers().await {
+            assert!(
+                !errors.iter().any(|error| error.contains(chat_id)),
+                "{errors:?}"
+            );
+        }
+        gcx.shutdown_flag.store(false, Ordering::Relaxed);
+
+        assert_eq!(trajectory_physical_writes_for_chat(chat_id), 1);
+        assert!(writer.lock().await.pending.is_none());
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(loaded.thread.title, "Title 2");
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].content.content_text_only(), "message 2");
     }
 
     #[serial(trajectory_perf)]
@@ -10573,6 +11377,158 @@ mod tests {
         ));
     }
 
+    fn write_temp_json(dir: &tempfile::TempDir, name: &str, contents: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn top_level_link_type_classification_preserves_semantics() {
+        let temp = tempfile::tempdir().unwrap();
+
+        // Happy path: a top-level internal link_type is classified as an internal trace.
+        assert!(parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "internal.json",
+            r#"{"id":"a","link_type":"internal:title_generation","messages":[]}"#,
+        )));
+
+        // A link_type that is not the internal one.
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "subagent.json",
+            r#"{"id":"a","link_type":"subagent","messages":[]}"#,
+        )));
+
+        // No link_type field at all.
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "missing.json",
+            r#"{"id":"a","messages":[]}"#,
+        )));
+
+        // A null link_type is treated as absent, not internal.
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "null.json",
+            r#"{"id":"a","link_type":null}"#,
+        )));
+
+        // Not valid JSON.
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "corrupt.json",
+            "{not json at all",
+        )));
+
+        // A truncated document whose link_type *is* internal must still be rejected, so that a
+        // torn write is never mistaken for a complete internal trace and pruned.
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "truncated.json",
+            r#"{"link_type":"internal:broken""#,
+        )));
+
+        // Valid JSON whose top level is not a map.
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "array.json",
+            r#"["link_type","internal:title_generation"]"#,
+        )));
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "scalar.json",
+            r#""internal:title_generation""#,
+        )));
+
+        // A nested link_type must not be read as a top-level one.
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "nested.json",
+            r#"{"messages":[{"role":"user","content":"\"link_type\": \"internal:spoof\""}]}"#,
+        )));
+
+        // A missing file, and a directory, are both "not an internal trace".
+        assert!(!parsed_top_level_link_type_is_internal(
+            temp.path().join("does-not-exist.json")
+        ));
+        assert!(!parsed_top_level_link_type_is_internal(
+            temp.path().to_path_buf()
+        ));
+    }
+
+    #[test]
+    fn top_level_link_type_stops_reading_once_a_non_internal_value_is_known() {
+        struct CountingReader<R> {
+            inner: R,
+            bytes_read: Arc<AtomicUsize>,
+        }
+
+        impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let read = self.inner.read(buf)?;
+                self.bytes_read.fetch_add(read, Ordering::Relaxed);
+                Ok(read)
+            }
+        }
+
+        // `link_type` comes first, followed by a megabyte of payload that the classifier has no
+        // reason to parse once the answer is already known.
+        let trailing = "x".repeat(1024 * 1024);
+        let document = format!(r#"{{"link_type":"subagent","messages":"{trailing}"}}"#);
+
+        let bytes_read = Arc::new(AtomicUsize::new(0));
+        let reader = CountingReader {
+            inner: std::io::Cursor::new(document.clone().into_bytes()),
+            bytes_read: bytes_read.clone(),
+        };
+
+        assert!(!top_level_link_type_is_internal_from_reader(reader));
+
+        let bytes_read = bytes_read.load(Ordering::Relaxed);
+        assert!(
+            bytes_read < 64 * 1024,
+            "expected an early exit after link_type, but read {bytes_read} of {} bytes",
+            document.len()
+        );
+    }
+
+    #[test]
+    fn top_level_link_type_reads_are_buffered() {
+        struct ChunkCountingReader<R> {
+            inner: R,
+            reads: Arc<AtomicUsize>,
+        }
+
+        impl<R: std::io::Read> std::io::Read for ChunkCountingReader<R> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                self.inner.read(buf)
+            }
+        }
+
+        // An internal trace deliberately does *not* early-exit, so the whole document is consumed.
+        // Unbuffered, serde_json's `IoRead` would issue roughly one `read()` call per byte.
+        let padding = "y".repeat(256 * 1024);
+        let document = format!(r#"{{"messages":"{padding}","link_type":"internal:test"}}"#);
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reader = ChunkCountingReader {
+            inner: std::io::Cursor::new(document.clone().into_bytes()),
+            reads: reads.clone(),
+        };
+
+        assert!(top_level_link_type_is_internal_from_reader(reader));
+
+        let reads = reads.load(Ordering::Relaxed);
+        assert!(
+            reads < document.len() / 100,
+            "expected buffered reads, but made {reads} read() calls for {} bytes",
+            document.len()
+        );
+    }
+
     #[tokio::test]
     async fn internal_trace_pruning_keeps_newest_and_preserves_displayable_files() {
         let temp = tempfile::tempdir().unwrap();
@@ -10931,6 +11887,230 @@ mod tests {
         assert_eq!(task_entries[0].id, fresh_id);
     }
 
+    fn listing_calls_for(
+        app: &AppState,
+        caller: trajectory_index::TrajectoryIndexListingCaller,
+    ) -> u64 {
+        app.chat
+            .trajectory_index_coordinator
+            .listing_counters_for_test()
+            .calls_by_caller
+            .iter()
+            .find(|(name, _)| *name == caller.as_str())
+            .map(|(_, calls)| *calls)
+            .unwrap_or(0)
+    }
+
+    async fn seed_agent_task_dirs(workspace: &Path, count: usize) -> Vec<PathBuf> {
+        let mut dirs = Vec::with_capacity(count);
+        for number in 0..count {
+            let dir = workspace
+                .join(".refact")
+                .join("tasks")
+                .join(format!("task-{number}"))
+                .join("trajectories")
+                .join("agents");
+            let id = format!("agent-chat-{number}");
+            write_trajectory_file(
+                &dir.join(format!("{id}.json")),
+                &id,
+                "Agent",
+                "2024-01-01T00:00:01Z",
+            )
+            .await;
+            dirs.push(dir);
+        }
+        dirs
+    }
+
+    async fn sync_every_trajectory_dir(gcx: &Arc<GlobalContext>, app: &AppState) -> Vec<PathBuf> {
+        let dirs = list_trajectory_dirs(gcx).await;
+        for dir in &dirs {
+            trajectory_index::list_trajectory_entries_with_rollout_shared_for(
+                &app.chat.trajectory_index_coordinator,
+                dir,
+                None,
+                trajectory_index::TrajectoryIndexListingCaller::Sidebar,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(app
+            .chat
+            .trajectory_index_coordinator
+            .unsynced_directories(&dirs)
+            .is_empty());
+        dirs
+    }
+
+    #[tokio::test]
+    async fn chat_path_lookup_does_not_sweep_when_map_is_authoritative() {
+        const TASK_DIR_COUNT: usize = 12;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+        write_trajectory_file(
+            &workspace
+                .path()
+                .join(".refact")
+                .join("trajectories")
+                .join("root-chat.json"),
+            "root-chat",
+            "Root",
+            "2024-01-01T00:00:01Z",
+        )
+        .await;
+        seed_agent_task_dirs(workspace.path(), TASK_DIR_COUNT).await;
+
+        let dirs = sync_every_trajectory_dir(&gcx, &app).await;
+        assert!(dirs.len() > TASK_DIR_COUNT);
+        let normal_dirs = get_all_trajectories_dirs(gcx.clone()).await.len() as u64;
+
+        let before = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        );
+        assert!(find_trajectory_path(gcx.clone(), "chat-that-never-existed")
+            .await
+            .is_none());
+        let swept = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        ) - before;
+
+        assert_eq!(
+            swept, normal_dirs,
+            "a miss against a fully synced map must cost the normal-dir probes only"
+        );
+        assert!(
+            swept < TASK_DIR_COUNT as u64,
+            "the cost must not grow with the number of trajectory directories"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_path_lookup_still_finds_chat_in_unsynced_dir() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+        write_trajectory_file(
+            &workspace
+                .path()
+                .join(".refact")
+                .join("trajectories")
+                .join("root-chat.json"),
+            "root-chat",
+            "Root",
+            "2024-01-01T00:00:01Z",
+        )
+        .await;
+        let chat_id = "unsynced-agent-chat";
+        let task_dir = workspace
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-1")
+            .join("trajectories")
+            .join("agents");
+        let expected = task_dir.join(format!("{chat_id}.json"));
+        write_trajectory_file(&expected, chat_id, "Agent", "2024-01-01T00:00:01Z").await;
+
+        let dirs = list_trajectory_dirs(&gcx).await;
+        assert!(!app
+            .chat
+            .trajectory_index_coordinator
+            .unsynced_directories(&dirs)
+            .is_empty());
+        let normal_dirs = get_all_trajectories_dirs(gcx.clone()).await.len() as u64;
+        let before = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        );
+
+        let found = find_trajectory_path(gcx.clone(), chat_id)
+            .await
+            .expect("an unsynced directory must still be searched");
+        let swept = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        ) - before;
+
+        assert_eq!(
+            tokio::fs::canonicalize(&found).await.unwrap(),
+            tokio::fs::canonicalize(&expected).await.unwrap()
+        );
+        assert!(
+            swept > normal_dirs,
+            "the directory the map cannot answer for must still be listed"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_entry_cleanup_is_o1_per_chat_id() {
+        const TASK_DIR_COUNT: usize = 12;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+        let root_dir = workspace.path().join(".refact").join("trajectories");
+        let stale_id = "o1-cleanup-stale-chat";
+        let stale_path = root_dir.join(format!("{stale_id}.json"));
+        write_trajectory_file(&stale_path, stale_id, "Stale", "2024-01-01T00:00:01Z").await;
+        seed_agent_task_dirs(workspace.path(), TASK_DIR_COUNT).await;
+
+        let dirs = sync_every_trajectory_dir(&gcx, &app).await;
+        assert!(dirs.len() > TASK_DIR_COUNT);
+        tokio::fs::remove_file(&stale_path).await.unwrap();
+
+        let cleanup_before = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::StaleEntryCleanup,
+        );
+        let lookup_before = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        );
+        remove_stale_trajectory_index_entries(gcx.clone(), stale_id).await;
+        let cleanup_listings = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::StaleEntryCleanup,
+        ) - cleanup_before;
+
+        assert_eq!(
+            cleanup_listings, 1,
+            "cleanup must only visit the directory that indexes the chat"
+        );
+        assert_eq!(
+            listing_calls_for(
+                &app,
+                trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+            ),
+            lookup_before,
+            "cleanup must not resolve the chat through a path-lookup sweep"
+        );
+        let entries = trajectory_index::list_trajectory_entries_with_rollout_shared_for(
+            &app.chat.trajectory_index_coordinator,
+            &root_dir,
+            None,
+            trajectory_index::TrajectoryIndexListingCaller::StaleEntryCleanup,
+        )
+        .await
+        .unwrap();
+        assert!(entries.iter().all(|entry| entry.id != stale_id));
+
+        let cleanup_before = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::StaleEntryCleanup,
+        );
+        remove_stale_trajectory_index_entries(gcx.clone(), "chat-the-map-never-saw").await;
+        assert_eq!(
+            listing_calls_for(
+                &app,
+                trajectory_index::TrajectoryIndexListingCaller::StaleEntryCleanup,
+            ),
+            cleanup_before,
+            "an id the map does not know must cost no listings at all"
+        );
+    }
+
     // Clears the process-wide metadata cache, so it must not run beside the tests that read it.
     #[serial(trajectory_perf)]
     #[test]
@@ -11026,12 +12206,13 @@ mod tests {
 
     fn test_snapshot(chat_id: &str, title: &str, messages: Vec<ChatMessage>) -> TrajectorySnapshot {
         TrajectorySnapshot {
+            pending_questions: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
             pending_deliveries: Vec::new(),
             dropped_deliveries: Vec::new(),
             goal_verification_blocked_until_ms: None,
-            compression_retry_after_ms: Default::default(),
+            pending_browser_decision: None,
             chat_id: chat_id.to_string(),
             title: title.to_string(),
             model: "model".to_string(),
@@ -11043,6 +12224,7 @@ mod tests {
             checkpoints_enabled: true,
             context_tokens_cap: None,
             auto_compression_cap: None,
+            auto_compression_cap_pending: false,
             include_project_info: true,
             is_title_generated: true,
             auto_approve_editing_tools: false,
@@ -11889,6 +13071,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_new_chat_pending_cap_survives_real_save_load_and_model_late() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "empty-pending-cap";
+        let mut snapshot = test_snapshot(chat_id, "", Vec::new());
+        snapshot.auto_compression_cap_pending = true;
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+        let mut loaded = load_trajectory_for_chat(gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        assert!(loaded.messages.is_empty());
+        assert!(loaded.thread.auto_compression_cap_pending);
+        assert!(loaded.thread.resolve_pending_compression_cap(Some(1000)));
+        assert_eq!(loaded.thread.auto_compression_cap, Some(900));
+        let path = find_trajectory_path(gcx.clone(), chat_id).await.unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap_pending");
+        tokio::fs::write(path, serde_json::to_vec(&value).unwrap())
+            .await
+            .unwrap();
+        let mut legacy = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert!(legacy.messages.is_empty());
+        assert!(!legacy.thread.resolve_pending_compression_cap(Some(1000)));
+        assert_eq!(legacy.thread.auto_compression_cap, None);
+    }
+
+    #[tokio::test]
     async fn auto_compression_cap_survives_real_trajectory_save_and_load() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, _) = make_app_with_workspace(dir.path()).await;
@@ -11915,10 +13130,80 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("auto_compression_cap");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap_pending");
         tokio::fs::write(&path, serde_json::to_vec(&value).unwrap())
             .await
             .unwrap();
-        let legacy = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        let mut legacy = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(legacy.thread.auto_compression_cap, None);
+        assert!(!legacy.thread.auto_compression_cap_pending);
+        assert!(!legacy.thread.resolve_pending_compression_cap(Some(128_000)));
+        assert_eq!(legacy.thread.auto_compression_cap, None);
+    }
+
+    #[tokio::test]
+    async fn pending_new_chat_cap_survives_empty_first_save_and_model_late_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "pending-new-chat-cap";
+        let mut snapshot = test_snapshot(chat_id, "", Vec::new());
+        snapshot.auto_compression_cap_pending = true;
+        snapshot.context_tokens_cap = Some(100_000);
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+        let mut loaded = load_trajectory_for_chat(gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        assert!(loaded.messages.is_empty());
+        assert!(loaded.thread.auto_compression_cap_pending);
+        assert!(!loaded.thread.resolve_pending_compression_cap(None));
+        assert_eq!(loaded.thread.auto_compression_cap, None);
+        assert!(loaded.thread.resolve_pending_compression_cap(Some(80_000)));
+        assert_eq!(loaded.thread.auto_compression_cap, Some(72_000));
+        save_trajectory_as(gcx.clone(), &loaded.thread, &loaded.messages).await;
+        let restored = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(restored.thread.auto_compression_cap, Some(72_000));
+        assert!(!restored.thread.auto_compression_cap_pending);
+    }
+
+    #[tokio::test]
+    async fn new_empty_chat_default_provenance_survives_restart_before_model_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "new-chat-pending-default";
+        let mut snapshot = test_snapshot(chat_id, "", Vec::new());
+        snapshot.auto_compression_cap_pending = true;
+        snapshot.context_tokens_cap = Some(80_000);
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+        let mut loaded = load_trajectory_for_chat(gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        assert!(loaded.messages.is_empty());
+        assert_eq!(loaded.thread.auto_compression_cap, None);
+        assert!(loaded.thread.auto_compression_cap_pending);
+        assert!(loaded.thread.resolve_pending_compression_cap(Some(100_000)));
+        assert_eq!(loaded.thread.auto_compression_cap, Some(72_000));
+
+        // An empty legacy file is not evidence that this is a new chat.
+        let path = find_trajectory_path(gcx.clone(), chat_id).await.unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap_pending");
+        tokio::fs::write(path, serde_json::to_vec(&value).unwrap())
+            .await
+            .unwrap();
+        let mut legacy = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert!(legacy.messages.is_empty());
+        assert!(!legacy.thread.resolve_pending_compression_cap(Some(100_000)));
         assert_eq!(legacy.thread.auto_compression_cap, None);
     }
 
@@ -15509,7 +16794,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let totals = calculate_token_totals_from_chat_messages(&messages);
+        let totals = scan_trajectory_metrics(&messages).token_totals;
         assert_eq!(totals.prompt_tokens, 300);
         assert_eq!(totals.completion_tokens, 150);
         assert_eq!(totals.total_tokens, 450);
@@ -15525,9 +16810,214 @@ mod tests {
             role: "user".to_string(),
             ..Default::default()
         }];
-        let totals = calculate_token_totals_from_chat_messages(&messages);
+        let totals = scan_trajectory_metrics(&messages).token_totals;
         assert_eq!(totals.prompt_tokens, 0);
         assert!(totals.cost_usd.is_none());
+    }
+
+    fn metric_scan_tool_call(
+        id: &str,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> crate::call_validation::ChatToolCall {
+        crate::call_validation::ChatToolCall {
+            id: id.to_string(),
+            index: None,
+            function: crate::call_validation::ChatToolFunction {
+                arguments: arguments.to_string(),
+                name: name.to_string(),
+            },
+            tool_type: "function".to_string(),
+            extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
+        }
+    }
+
+    fn metric_scan_usage(
+        prompt: usize,
+        completion: usize,
+        total: usize,
+        cache_read: Option<usize>,
+        cache_creation: Option<usize>,
+        total_usd: Option<f64>,
+    ) -> crate::call_validation::ChatUsage {
+        crate::call_validation::ChatUsage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: total,
+            cache_read_tokens: cache_read,
+            cache_creation_tokens: cache_creation,
+            metering_usd: total_usd.map(|total_usd| crate::call_validation::MeteringUsd {
+                prompt_usd: 0.0,
+                generated_usd: 0.0,
+                cache_read_usd: None,
+                cache_creation_usd: None,
+                total_usd,
+            }),
+        }
+    }
+
+    fn metric_scan_fixture_messages() -> Vec<ChatMessage> {
+        vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: ChatContent::Multimodal(vec![
+                    crate::call_validation::MultimodalElement {
+                        m_type: "text".to_string(),
+                        m_content: "please refactor".to_string(),
+                    },
+                    crate::call_validation::MultimodalElement {
+                        m_type: "image/png".to_string(),
+                        m_content: "base64".to_string(),
+                    },
+                ]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                thinking_blocks: Some(vec![json!({"type": "thinking", "thinking": "plan it"})]),
+                tool_calls: Some(vec![
+                    metric_scan_tool_call(
+                        "call-a",
+                        "tasks_set",
+                        json!({"tasks": [
+                            {"status": "completed"},
+                            {"status": "FAILED"},
+                            {"status": "in_progress"},
+                        ]}),
+                    ),
+                    metric_scan_tool_call("call-r", "cat", json!({"paths": "a.rs"})),
+                ]),
+                usage: Some(metric_scan_usage(
+                    100,
+                    50,
+                    150,
+                    Some(10),
+                    Some(5),
+                    Some(0.03),
+                )),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                tool_call_id: "call-a".to_string(),
+                usage: Some(metric_scan_usage(1, 2, 3, None, None, None)),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                tool_call_id: "call-r".to_string(),
+                tool_failed: Some(true),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "diff".to_string(),
+                content: ChatContent::SimpleText(
+                    json!([
+                        {"file_name": "a.rs", "lines_add": "a\nb\nc", "lines_remove": "y\nz"},
+                        {"file_name": "b.rs", "lines_add": "x\n", "lines_remove": ""},
+                    ])
+                    .to_string(),
+                ),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                tool_calls: Some(vec![metric_scan_tool_call(
+                    "call-b",
+                    "tasks_set",
+                    json!({"tasks": [{"status": "done"}, {"status": "done"}]}),
+                )]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                tool_call_id: "call-b".to_string(),
+                tool_failed: Some(true),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                tool_calls: Some(vec![metric_scan_tool_call(
+                    "call-c",
+                    "tasks_set",
+                    json!({"not_tasks": []}),
+                )]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                tool_call_id: "call-c".to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "diff".to_string(),
+                content: ChatContent::SimpleText("not json".to_string()),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("done".to_string()),
+                usage: Some(metric_scan_usage(200, 100, 300, None, None, None)),
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn metric_scan_results_identical_to_previous_implementation() {
+        let messages = metric_scan_fixture_messages();
+        let metrics = scan_trajectory_metrics(&messages);
+        assert_eq!(metrics.line_changes, (4, 2));
+        assert_eq!(metrics.task_progress, (3, 1, 1));
+        assert_eq!(metrics.token_totals.prompt_tokens, 301);
+        assert_eq!(metrics.token_totals.completion_tokens, 152);
+        assert_eq!(metrics.token_totals.total_tokens, 453);
+        assert_eq!(metrics.token_totals.cache_read_tokens, 10);
+        assert_eq!(metrics.token_totals.cache_creation_tokens, 5);
+        assert_eq!(metrics.token_totals.cost_usd, Some(0.03));
+    }
+
+    #[test]
+    fn metric_scan_visits_each_message_once() {
+        let messages = metric_scan_fixture_messages();
+        let visits = std::cell::Cell::new(0usize);
+        let metrics =
+            scan_trajectory_metrics(messages.iter().inspect(|_| visits.set(visits.get() + 1)));
+        assert_eq!(visits.get(), messages.len());
+        assert_eq!(metrics.line_changes, (4, 2));
+        assert_eq!(metrics.task_progress, (3, 1, 1));
+    }
+
+    #[test]
+    fn metric_scan_correct_after_history_truncation() {
+        let messages = metric_scan_fixture_messages();
+        for (tail, expected_lines, expected_progress) in [
+            (2usize, (0i64, 0i64), (0i32, 0i32, 0i32)),
+            (4, (0, 0), (3, 1, 1)),
+            (5, (4, 2), (3, 1, 1)),
+            (8, (4, 2), (3, 1, 1)),
+        ] {
+            let truncated = messages[..tail].to_vec();
+            let metrics = scan_trajectory_metrics(&truncated);
+            assert_eq!(metrics.line_changes, expected_lines, "truncated to {tail}");
+            assert_eq!(
+                metrics.task_progress, expected_progress,
+                "truncated to {tail}"
+            );
+        }
+
+        let rewritten = messages[5..].to_vec();
+        let metrics = scan_trajectory_metrics(&rewritten);
+        assert_eq!(metrics.line_changes, (0, 0));
+        assert_eq!(metrics.task_progress, (0, 0, 0));
+        assert_eq!(metrics.token_totals.prompt_tokens, 200);
+        assert_eq!(metrics.token_totals.completion_tokens, 100);
+        assert_eq!(metrics.token_totals.total_tokens, 300);
+        assert_eq!(metrics.token_totals.cache_read_tokens, 0);
+        assert_eq!(metrics.token_totals.cache_creation_tokens, 0);
+        assert_eq!(metrics.token_totals.cost_usd, None);
     }
 
     fn mark_active_compression(session: &mut ChatSession, phase: CompressionPhase) {
@@ -15884,8 +17374,6 @@ mod tests {
         assert_eq!(session.compression_reason, None);
         assert_eq!(session.runtime.compression_reason, None);
         assert_eq!(session.active_compression_attempt, None);
-        assert_eq!(session.tier1_compact_attempts, 0);
-        assert!(!session.tier1_compaction_disabled);
         drop(session);
 
         let json = chat_rx.recv().await.unwrap();
@@ -16474,9 +17962,47 @@ mod tests {
 
         let event = wait_for_trajectory_event(&mut rx, chat_id).await;
         assert_eq!(event.event_type, "updated");
-        assert_eq!(event.session_state.as_deref(), Some("idle"));
+        assert!(matches!(
+            event.session_state.as_deref(),
+            None | Some("idle")
+        ));
         assert_eq!(event.error, None);
         assert!(event.worktree.is_none());
+    }
+
+    #[tokio::test]
+    async fn normal_save_under_session_lock_does_not_reenter_or_leak_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let id = "locked-snapshot-publication";
+        let session = Arc::new(AMutex::new(ChatSession::new(id.into())));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(id.into(), session.clone());
+        let mut locked = session.lock().await;
+        locked.runtime.state = SessionState::Generating;
+        locked.runtime.error = Some("not snapshot runtime".into());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            save_trajectory_snapshot(
+                gcx,
+                test_snapshot(
+                    id,
+                    "Snapshot",
+                    vec![ChatMessage::new("user".into(), "keep".into())],
+                ),
+            ),
+        )
+        .await
+        .expect("saving must not reacquire the held session lock")
+        .unwrap();
+        let event = wait_for_trajectory_event(&mut rx, id).await;
+        assert_eq!(event.session_state, None);
+        assert_eq!(event.error, None);
+        drop(locked);
     }
 
     #[tokio::test]
@@ -18203,8 +19729,6 @@ mod tests {
                 session.trajectory_dirty = false;
                 session.wake_up_at = Some(chrono::Utc::now() + chrono::Duration::minutes(10));
                 session.waiting_for_card_ids = vec!["card-waiting".to_string()];
-                session.tier1_compact_attempts = 2;
-                session.tier1_compaction_disabled = true;
                 session.thread.reactive_compact_attempts = Some(2);
             }
             app.chat
@@ -18221,8 +19745,6 @@ mod tests {
             assert_eq!(session.thread.id, chat_id);
             assert!(session.wake_up_at.is_none());
             assert!(session.waiting_for_card_ids.is_empty());
-            assert_eq!(session.tier1_compact_attempts, 0);
-            assert!(!session.tier1_compaction_disabled);
             assert_eq!(session.thread.reactive_compact_attempts, None);
         }
     }
@@ -18243,8 +19765,6 @@ mod tests {
             session.created_at = stale_created_at.to_string();
             session.wake_up_at = Some(chrono::Utc::now() + chrono::Duration::minutes(10));
             session.waiting_for_card_ids = vec!["card-stale".to_string()];
-            session.tier1_compact_attempts = 2;
-            session.tier1_compaction_disabled = true;
             session.thread.reactive_compact_attempts = Some(2);
             session.runtime.state = SessionState::Idle;
             session.trajectory_dirty = false;
@@ -18335,8 +19855,12 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let session = ChatSession {
+            pending_questions: Vec::new(),
             chat_id: "test-123".to_string(),
             work_provenance: Default::default(),
+            interruptible_waits: 0,
+            wait_delivery_boundary: false,
+            wait_interrupt_flag: Arc::new(AtomicBool::new(false)),
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread: ThreadParams {
                 id: "test-123".to_string(),
@@ -18353,6 +19877,7 @@ mod tests {
                 parallel_tool_calls: None,
                 context_tokens_cap: Some(8000),
                 auto_compression_cap: Some(7000),
+                auto_compression_cap_pending: false,
                 include_project_info: false,
                 checkpoints_enabled: true,
                 is_title_generated: true,
@@ -18435,10 +19960,9 @@ mod tests {
             last_prompt_messages: Vec::new(),
             tool_catalog: None,
             turn_tool_pool: None,
-            tier1_compact_attempts: 0,
-            tier1_compaction_disabled: false,
-            compression_insufficient_hashes: std::collections::HashSet::new(),
-            compression_retry_after_ms: Default::default(),
+            pending_context_rebuild: None,
+            pending_mode_handoff: None,
+            last_rebuild_attempt_version: None,
             pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
             cache_guard_request_generation: 0,
@@ -18495,8 +20019,12 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let mut session = ChatSession {
+            pending_questions: Vec::new(),
             chat_id: "skill-test".to_string(),
             work_provenance: Default::default(),
+            interruptible_waits: 0,
+            wait_delivery_boundary: false,
+            wait_interrupt_flag: Arc::new(AtomicBool::new(false)),
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread: ThreadParams {
                 id: "skill-test".to_string(),
@@ -18564,10 +20092,9 @@ mod tests {
             last_prompt_messages: Vec::new(),
             tool_catalog: None,
             turn_tool_pool: None,
-            tier1_compact_attempts: 0,
-            tier1_compaction_disabled: false,
-            compression_insufficient_hashes: std::collections::HashSet::new(),
-            compression_retry_after_ms: Default::default(),
+            pending_context_rebuild: None,
+            pending_mode_handoff: None,
+            last_rebuild_attempt_version: None,
             pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
             cache_guard_request_generation: 0,
@@ -19192,6 +20719,117 @@ mod tests {
         assert_eq!(loaded.waiting_for_card_ids, card_ids);
     }
 
+    #[tokio::test]
+    async fn pending_questions_roundtrip_through_actual_trajectory_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        *app.workspace
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![dir.path().to_path_buf()];
+        let mut session = ChatSession::new("pending-questions-roundtrip".into());
+        session.thread.title = "Pending questions".into();
+        session
+            .register_pending_questions(refact_chat_api::PendingQuestionSet {
+                tool_call_id: "ask-native".into(),
+                questions: vec![refact_chat_api::PendingQuestion {
+                    id: "choice".into(),
+                    question_type: "yes_no".into(),
+                    text: "Continue?".into(),
+                    options: None,
+                }],
+                asked_at_ms: 123,
+                status: refact_chat_api::PendingQuestionStatus::Pending,
+                answers: Vec::new(),
+                resolution_id: None,
+            })
+            .unwrap();
+        save_trajectory_snapshot(gcx.clone(), trajectory_snapshot_from_session(&session))
+            .await
+            .unwrap();
+        let loaded = load_trajectory_for_chat(gcx.clone(), &session.chat_id)
+            .await
+            .unwrap();
+        assert_eq!(loaded.pending_questions, session.pending_questions);
+        session
+            .answer_pending_questions(
+                "ask-native",
+                vec![refact_chat_api::QuestionAnswer {
+                    id: "choice".into(),
+                    answer: json!(true),
+                }],
+                "resolution-1".into(),
+            )
+            .unwrap();
+        save_trajectory_snapshot(gcx.clone(), trajectory_snapshot_from_session(&session))
+            .await
+            .unwrap();
+        let answered = load_trajectory_for_chat(gcx, &session.chat_id)
+            .await
+            .unwrap();
+        assert_eq!(answered.pending_questions, session.pending_questions);
+        assert_eq!(
+            answered.pending_questions[0].resolution_id.as_deref(),
+            Some("resolution-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_decision_descriptor_roundtrips_to_disk_and_expires_on_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        *app.workspace
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![dir.path().to_path_buf()];
+        let mut session = ChatSession::new("browser-decision-roundtrip".into());
+        session.pending_browser_message = Some(crate::chat::types::PendingBrowserMessage {
+            pending_message_id: "pending-browser".into(),
+            content: json!({"secret": "must-not-persist"}),
+            attachments: vec![],
+            client_message_id: Some("optimistic-browser".into()),
+            checkpoints: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
+            skill_activation_name: None,
+            skill_context_msg: None,
+        });
+
+        save_trajectory_snapshot(gcx.clone(), trajectory_snapshot_from_session(&session))
+            .await
+            .unwrap();
+        let loaded = load_trajectory_for_chat(gcx, &session.chat_id)
+            .await
+            .unwrap();
+        let descriptor = loaded
+            .pending_browser_decision
+            .clone()
+            .expect("descriptor saved");
+        assert_eq!(descriptor.pending_message_id, "pending-browser");
+        assert!(descriptor.requires_revalidation);
+        assert_eq!(
+            crate::chat::browser_decisions::restore_browser_decision(descriptor),
+            crate::chat::browser_decisions::RestoredBrowserDecision::Expired {
+                pending_message_id: "pending-browser".into(),
+                client_message_id: Some("optimistic-browser".into()),
+            }
+        );
+        let content = tokio::fs::read_to_string(loaded.source_path).await.unwrap();
+        assert!(!content.contains("must-not-persist"));
+    }
+
     #[test]
     fn test_trajectory_load_without_active_skill_field() {
         let json_str = r#"{"id":"chat-1","title":"T","model":"m","mode":"agent","tool_use":"agent","messages":[],"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","include_project_info":true,"checkpoints_enabled":true}"#;
@@ -19457,12 +21095,13 @@ mod tests {
         let worktree = created.worktree.meta.clone();
         let chat_id = "wt-roundtrip".to_string();
         let snapshot = TrajectorySnapshot {
+            pending_questions: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
             pending_deliveries: Vec::new(),
             dropped_deliveries: Vec::new(),
             goal_verification_blocked_until_ms: None,
-            compression_retry_after_ms: Default::default(),
+            pending_browser_decision: None,
             chat_id: chat_id.clone(),
             title: "Worktree Chat".to_string(),
             model: "model".to_string(),
@@ -19474,6 +21113,7 @@ mod tests {
             checkpoints_enabled: true,
             context_tokens_cap: None,
             auto_compression_cap: None,
+            auto_compression_cap_pending: true,
             include_project_info: true,
             is_title_generated: true,
             auto_approve_editing_tools: false,
@@ -21990,6 +23630,197 @@ mod tests {
         assert_eq!(leftovers, 0);
     }
 
+    async fn engine_write_trajectory_json(path: &Path, value: &serde_json::Value) {
+        let tmp_path = unique_trajectory_tmp_path(path);
+        let write_result = write_pretty_json_to_tmp_file(&tmp_path, value);
+        atomic_finish_trajectory_write(
+            path,
+            &tmp_path,
+            write_result,
+            Some(TrajectorySourceIdentity::Normal),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn insert_idle_session_for_trajectory(
+        app: &AppState,
+        chat_id: &str,
+        title: &str,
+    ) -> Arc<AMutex<ChatSession>> {
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.title = title.to_string();
+            session
+                .messages
+                .push(ChatMessage::new("user".to_string(), "before".to_string()));
+            session.trajectory_dirty = false;
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+        session_arc
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn self_write_fingerprint_computed_without_reading_file_back() {
+        crate::runtime_settings::reset_for_test();
+        clear_all_trajectory_self_writes();
+        let dir = tempfile::tempdir().unwrap();
+        let path = canonical_trajectory_write_path(&dir.path().join("no-read-back.json"))
+            .await
+            .unwrap();
+        let on_disk = "{\"id\":\"on-disk-bytes\"}";
+        let in_memory = "{\"id\":\"in-memory-buf\"}";
+        assert_eq!(on_disk.len(), in_memory.len());
+        let reads = count_test_trajectory_self_write_reads(&path);
+
+        let handle = register_trajectory_self_write(
+            &path,
+            TrajectorySourceIdentity::Normal,
+            in_memory.len() as u64,
+            md5::compute(in_memory).0,
+        )
+        .await
+        .unwrap();
+        fs::write(&path, on_disk).await.unwrap();
+        complete_trajectory_self_write(Some(handle)).await;
+
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        let fingerprint = {
+            let registry = trajectory_self_writes()
+                .lock()
+                .expect("trajectory self-write registry poisoned");
+            registry
+                .get(&(path.clone(), TrajectorySourceIdentity::Normal))
+                .and_then(|records| records.front())
+                .and_then(|record| record.fingerprint.clone())
+                .unwrap()
+        };
+        assert_eq!(fingerprint.content_hash, md5::compute(in_memory).0);
+        assert_ne!(fingerprint.content_hash, md5::compute(on_disk).0);
+
+        assert!(!consume_trajectory_self_write(&path, &TrajectorySourceIdentity::Normal).await);
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+        clear_all_trajectory_self_writes();
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn self_write_is_suppressed() {
+        crate::runtime_settings::reset_for_test();
+        clear_all_trajectory_self_writes();
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "self-write-suppressed";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(&path, chat_id, "Before Self Write", "before")
+            .await;
+        let session_arc =
+            insert_idle_session_for_trajectory(&app, chat_id, "Before Self Write").await;
+        let mut trajectory_events = app.chat.trajectory_events_tx.subscribe();
+
+        let mut value: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        value["title"] = json!("Written By The Engine");
+        engine_write_trajectory_json(&path, &value).await;
+
+        process_trajectory_watcher_change(
+            gcx,
+            chat_id.to_string(),
+            false,
+            TrajectorySourceIdentity::Normal,
+            path,
+        )
+        .await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.thread.title, "Before Self Write");
+        assert_eq!(session.external_reload_pending, None);
+        drop(session);
+        assert!(trajectory_events.try_recv().is_err());
+        clear_all_trajectory_self_writes();
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn external_edit_is_not_suppressed() {
+        crate::runtime_settings::reset_for_test();
+        clear_all_trajectory_self_writes();
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "external-edit-detected";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(&path, chat_id, "Before Self Write", "before")
+            .await;
+        let session_arc =
+            insert_idle_session_for_trajectory(&app, chat_id, "Before Self Write").await;
+        let mut trajectory_events = app.chat.trajectory_events_tx.subscribe();
+
+        let mut value: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        value["title"] = json!("Written By The Engine");
+        engine_write_trajectory_json(&path, &value).await;
+        value["title"] = json!("Edited Outside The Engine");
+        tokio::fs::write(&path, serde_json::to_string(&value).unwrap())
+            .await
+            .unwrap();
+
+        process_trajectory_watcher_change(
+            gcx,
+            chat_id.to_string(),
+            false,
+            TrajectorySourceIdentity::Normal,
+            path,
+        )
+        .await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.thread.title, "Edited Outside The Engine");
+        drop(session);
+        assert_eq!(trajectory_events.try_recv().unwrap().id, chat_id);
+        clear_all_trajectory_self_writes();
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn suppression_respects_runtime_switch() {
+        crate::runtime_settings::reset_for_test();
+        clear_all_trajectory_self_writes();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime-switch.json");
+        let value = json!({ "id": "runtime-switch" });
+
+        let mut disabled = crate::runtime_settings::TrajectoryRuntimeSettings::default();
+        disabled.trajectory_watcher_self_write_enabled = false;
+        crate::runtime_settings::install_live(&disabled);
+        assert!(!trajectory_watcher_self_write_rollout_enabled());
+        engine_write_trajectory_json(&path, &value).await;
+        assert!(!consume_trajectory_self_write(&path, &TrajectorySourceIdentity::Normal).await);
+
+        crate::runtime_settings::install_live(
+            &crate::runtime_settings::TrajectoryRuntimeSettings::default(),
+        );
+        assert!(trajectory_watcher_self_write_rollout_enabled());
+        engine_write_trajectory_json(&path, &value).await;
+        assert!(consume_trajectory_self_write(&path, &TrajectorySourceIdentity::Normal).await);
+
+        crate::runtime_settings::reset_for_test();
+        clear_all_trajectory_self_writes();
+    }
+
     #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_watcher_self_write_consumes_exact_fingerprint_once() {
@@ -21997,10 +23828,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("self-write.json");
         let content = "{\"id\":\"self-write\"}";
-        let handle =
-            register_trajectory_self_write(&path, TrajectorySourceIdentity::Normal, content)
-                .await
-                .unwrap();
+        let handle = register_trajectory_self_write(
+            &path,
+            TrajectorySourceIdentity::Normal,
+            content.len() as u64,
+            md5::compute(content).0,
+        )
+        .await
+        .unwrap();
         fs::write(&path, content).await.unwrap();
         complete_trajectory_self_write(Some(handle)).await;
 
@@ -22018,7 +23853,8 @@ mod tests {
         let handle = register_trajectory_self_write(
             &path,
             TrajectorySourceIdentity::Normal,
-            "{\"id\":\"external-write\"}",
+            "{\"id\":\"external-write\"}".len() as u64,
+            md5::compute("{\"id\":\"external-write\"}").0,
         )
         .await
         .unwrap();
@@ -22051,9 +23887,14 @@ mod tests {
             None,
         );
         let content = "{\"id\":\"same-id\"}";
-        let handle = register_trajectory_self_write(&path, normal.clone(), content)
-            .await
-            .unwrap();
+        let handle = register_trajectory_self_write(
+            &path,
+            normal.clone(),
+            content.len() as u64,
+            md5::compute(content).0,
+        )
+        .await
+        .unwrap();
         fs::write(&path, content).await.unwrap();
         complete_trajectory_self_write(Some(handle)).await;
 
@@ -22204,14 +24045,16 @@ mod tests {
         let first_handle = register_trajectory_self_write(
             &first_path,
             TrajectorySourceIdentity::Normal,
-            "{\"id\":\"first\"}",
+            "{\"id\":\"first\"}".len() as u64,
+            md5::compute("{\"id\":\"first\"}").0,
         )
         .await
         .unwrap();
         let second_handle = register_trajectory_self_write(
             &second_path,
             TrajectorySourceIdentity::Normal,
-            "{\"id\":\"second\"}",
+            "{\"id\":\"second\"}".len() as u64,
+            md5::compute("{\"id\":\"second\"}").0,
         )
         .await
         .unwrap();

@@ -1,6 +1,16 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_PALETTE_INDEX: usize = 7;
+pub const MAX_PERSONALITY_STYLE_CHARS: usize = 240;
+
+pub fn bounded_personality_style(style: Option<&str>) -> Option<String> {
+    let style = style?.split_whitespace().collect::<Vec<_>>().join(" ");
+    let style = style.trim();
+    if style.is_empty() {
+        return None;
+    }
+    Some(style.chars().take(MAX_PERSONALITY_STYLE_CHARS).collect())
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -121,6 +131,8 @@ pub struct BuddySettings {
     pub muted_chat_ids: Vec<String>,
     #[serde(default)]
     pub daily_llm_token_budget: Option<u64>,
+    #[serde(default = "default_true")]
+    pub operator_enabled: bool,
     #[serde(default)]
     pub observers: ObserverToggles,
 }
@@ -164,6 +176,7 @@ impl Default for BuddySettings {
             muted_intents: Vec::new(),
             muted_chat_ids: Vec::new(),
             daily_llm_token_budget: None,
+            operator_enabled: true,
             observers: ObserverToggles::default(),
         }
     }
@@ -188,6 +201,21 @@ mod tests {
         assert!(settings.muted_intents.is_empty());
         assert!(settings.muted_chat_ids.is_empty());
         assert_eq!(settings.daily_llm_token_budget, None);
+        assert!(settings.operator_enabled);
+    }
+
+    #[test]
+    fn operator_enabled_defaults_on_and_round_trips_explicit_opt_out() {
+        assert!(BuddySettings::default().operator_enabled);
+        let disabled: BuddySettings = serde_json::from_str(
+            r#"{"enabled":true,"auto_diagnostics":true,"auto_issue_creation":false,"operator_enabled":false}"#,
+        )
+        .unwrap();
+        assert!(!disabled.operator_enabled);
+        let json = serde_json::to_string(&disabled).unwrap();
+        assert!(json.contains("\"operator_enabled\":false"));
+        let back: BuddySettings = serde_json::from_str(&json).unwrap();
+        assert!(!back.operator_enabled);
     }
 
     #[test]
@@ -222,5 +250,21 @@ mod tests {
         assert_eq!(settings.autonomy_level, AutonomyLevel::Propose);
         let propose_json = serde_json::to_string(&AutonomyLevel::Propose).unwrap();
         assert_eq!(propose_json, "\"propose\"");
+    }
+
+    #[test]
+    fn personality_style_is_normalized_bounded_and_clearable() {
+        assert_eq!(
+            bounded_personality_style(Some("  cozy\n  librarian  ")),
+            Some("cozy librarian".to_string())
+        );
+        assert_eq!(bounded_personality_style(Some("   \n\t ")), None);
+        assert_eq!(
+            bounded_personality_style(Some(&"x".repeat(MAX_PERSONALITY_STYLE_CHARS + 10)))
+                .unwrap()
+                .chars()
+                .count(),
+            MAX_PERSONALITY_STYLE_CHARS
+        );
     }
 }

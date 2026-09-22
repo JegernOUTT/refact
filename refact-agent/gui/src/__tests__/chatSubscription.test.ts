@@ -232,7 +232,7 @@ describe("chatSubscription", () => {
       );
 
       expect(mockFetch).toHaveBeenCalledWith(
-        `http://127.0.0.1:${port}/v1/chats/subscribe?chat_id=${chatId}`,
+        `http://127.0.0.1:${port}/v1/chats/subscribe?chat_id=${chatId}&snapshot_chunks=1`,
         expect.objectContaining({
           method: "GET",
           headers: { Authorization: "Bearer test-key" },
@@ -266,12 +266,12 @@ describe("chatSubscription", () => {
 
       expect(mockFetch).toHaveBeenNthCalledWith(
         1,
-        "/v1/chats/subscribe?chat_id=chat%2F1",
+        "/v1/chats/subscribe?chat_id=chat%2F1&snapshot_chunks=1",
         expect.objectContaining({ method: "GET" }),
       );
       expect(mockFetch).toHaveBeenNthCalledWith(
         2,
-        "/v1/chats/subscribe?chat_id=chat%2F2",
+        "/v1/chats/subscribe?chat_id=chat%2F2&snapshot_chunks=1",
         expect.objectContaining({ method: "GET" }),
       );
     });
@@ -300,7 +300,7 @@ describe("chatSubscription", () => {
       );
 
       expect(mockFetch).toHaveBeenCalledWith(
-        "https://remote.example.com/proxy/v1/chats/subscribe?chat_id=remote-chat",
+        "https://remote.example.com/proxy/v1/chats/subscribe?chat_id=remote-chat&snapshot_chunks=1",
         expect.objectContaining({ method: "GET" }),
       );
     });
@@ -341,6 +341,185 @@ describe("chatSubscription", () => {
 
       expect(onEvent).toHaveBeenCalledWith(
         expect.objectContaining({ type: "snapshot" }),
+      );
+    });
+
+    it("reassembles chunked snapshots before publishing them", async () => {
+      const onEvent = vi.fn<(event: ChatEventEnvelope) => void>();
+      const encoder = new TextEncoder();
+      const snapshot = {
+        type: "snapshot",
+        seq: "7",
+        chat_id: "test",
+        thread: {
+          id: "test",
+          title: "Chunked",
+          model: "model",
+          mode: "agent",
+          tool_use: "agent",
+          boost_reasoning: false,
+          context_tokens_cap: null,
+          include_project_info: true,
+          checkpoints_enabled: false,
+          is_title_generated: false,
+        },
+        runtime: {
+          state: "idle",
+          paused: false,
+          error: null,
+          queue_size: 0,
+          pause_reasons: [],
+          queued_items: [],
+        },
+        messages: [],
+        background_agents: [],
+        snapshot_chunked: true,
+        chunk_count: 2,
+        message_count: 2,
+      };
+      const events = [
+        snapshot,
+        {
+          type: "snapshot_chunk",
+          seq: "7",
+          chat_id: "test",
+          chunk_index: 0,
+          chunk_count: 2,
+          messages: [{ role: "user", content: "first" }],
+        },
+        {
+          type: "snapshot_chunk",
+          seq: "7",
+          chat_id: "test",
+          chunk_index: 1,
+          chunk_count: 2,
+          messages: [{ role: "assistant", content: "second" }],
+        },
+        {
+          type: "snapshot_end",
+          seq: "7",
+          chat_id: "test",
+          chunk_count: 2,
+          message_count: 2,
+        },
+      ]
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join("");
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => {
+            let called = false;
+            return {
+              read: async () => {
+                if (called) return { done: true, value: undefined };
+                called = true;
+                return { done: false, value: encoder.encode(events) };
+              },
+            };
+          },
+        },
+      });
+
+      subscribeToChatEvents(
+        "test",
+        { host: "vscode", lspPort: 8001 },
+        { onEvent, onError: vi.fn() },
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(onEvent).toHaveBeenCalledTimes(1);
+      expect(onEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "snapshot",
+          seq: "7",
+          messages: [
+            expect.objectContaining({ content: "first" }),
+            expect.objectContaining({ content: "second" }),
+          ],
+        }),
+      );
+    });
+
+    it("reports an incomplete chunked snapshot as a reconnectable error", async () => {
+      const onEvent = vi.fn<(event: ChatEventEnvelope) => void>();
+      const onError = vi.fn();
+      const onDisconnected = vi.fn();
+      const encoder = new TextEncoder();
+      const events = [
+        {
+          type: "snapshot",
+          seq: "7",
+          chat_id: "test",
+          thread: {
+            id: "test",
+            title: "Chunked",
+            model: "model",
+            mode: "agent",
+            tool_use: "agent",
+            boost_reasoning: false,
+            context_tokens_cap: null,
+            include_project_info: true,
+            checkpoints_enabled: false,
+            is_title_generated: false,
+          },
+          runtime: {
+            state: "idle",
+            paused: false,
+            error: null,
+            queue_size: 0,
+            pause_reasons: [],
+            queued_items: [],
+          },
+          messages: [],
+          background_agents: [],
+          snapshot_chunked: true,
+          chunk_count: 2,
+          message_count: 2,
+        },
+        {
+          type: "snapshot_chunk",
+          seq: "7",
+          chat_id: "test",
+          chunk_index: 0,
+          chunk_count: 2,
+          messages: [{ role: "user", content: "first" }],
+        },
+      ]
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join("");
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => {
+            let called = false;
+            return {
+              read: async () => {
+                if (called) return { done: true, value: undefined };
+                called = true;
+                return { done: false, value: encoder.encode(events) };
+              },
+            };
+          },
+        },
+      });
+
+      subscribeToChatEvents(
+        "test",
+        { host: "vscode", lspPort: 8001 },
+        { onEvent, onError, onDisconnected },
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(onEvent).not.toHaveBeenCalled();
+      expect(onDisconnected).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message:
+            "SSE stream ended before chunked snapshot completed; reconnecting",
+        }),
       );
     });
 

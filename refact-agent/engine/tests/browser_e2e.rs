@@ -21,9 +21,9 @@ use refact_lsp::integrations::browser_models::{
     BrowserHttpRequest, BrowserLoadState, BrowserLocator, BrowserPdfOptions, BrowserPollMatcher,
     BrowserPseudoElement, BrowserScreenshotAnimations, BrowserScreenshotClip,
     BrowserScreenshotOptions, BrowserStep, BrowserTextMode, CdpTarget, ClockTicks, ClockTime,
-    ExecutionReport, FillStrategy, LocatorHandlerAction, LocatorRegex, NetworkReportMode,
-    PageContextMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind,
-    WebSocketFrameDisposition, WebSocketMessageAction, WebSocketRouteMode,
+    ExecutionReport, FieldKind, FillStrategy, LocatorHandlerAction, LocatorRegex,
+    NetworkReportMode, PageContextMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern,
+    WebSocketEventKind, WebSocketFrameDisposition, WebSocketMessageAction, WebSocketRouteMode,
 };
 use refact_lsp::refact_browser::devices;
 use refact_lsp::refact_browser::{
@@ -92,6 +92,7 @@ const FIXTURE_PAGES: &[&str] = &[
     "visual-states.html",
     "poll-state.html",
     "aria-shadow.html",
+    "aria-widgets.html",
 ];
 
 fn execute_steps(
@@ -99,6 +100,20 @@ fn execute_steps(
     steps: &[BrowserStep],
 ) -> refact_lsp::integrations::browser_models::ExecutionReport {
     execute_steps_with_policy(tab, steps, &ImagePolicy::default())
+}
+
+fn snapshot_ref(yaml: &str, name: &str) -> String {
+    let quoted_name = format!("\"{name}\"");
+    yaml.lines()
+        .find_map(|line| {
+            if !line.contains(&quoted_name) {
+                return None;
+            }
+            let start = line.find("[ref=")? + "[ref=".len();
+            let end = line[start..].find(']')? + start;
+            Some(line[start..end].to_string())
+        })
+        .unwrap_or_else(|| panic!("snapshot lacks ref for {name}: {yaml}"))
 }
 
 struct WsEchoServer {
@@ -985,7 +1000,7 @@ async fn dead_cdp_transport_is_relaunched_and_the_batch_is_retried_once() {
     {
         let mut rt = live_runtime.lock().await;
         assert!(rt.check_connection());
-        assert_eq!(rt.attached_chat_id.as_deref(), Some(CHAT_ID));
+        assert_eq!(rt.attached_chat_id().as_deref(), Some(CHAT_ID));
         assert_eq!(rt.profile_dir, case._profile.path());
     }
 
@@ -1194,13 +1209,12 @@ async fn design_tools_measure_marks_contrast_and_visual_changes() {
         &ImagePolicy::browser_capture(),
     );
     assert!(report.ok, "design probe failed: {report:?}");
-    let nodes = report.steps[3].data.as_ref().unwrap()["nodes"]
-        .as_array()
+    let yaml = report.steps[3].data.as_ref().unwrap()["yaml"]
+        .as_str()
         .unwrap();
-    assert!(nodes.iter().any(|node| {
-        node["ref"].as_str().is_some()
-            && node["box"]["width"].as_i64().is_some_and(|width| width > 0)
-    }));
+    assert!(yaml
+        .lines()
+        .any(|line| line.contains("[ref=") && line.contains("[box=")));
 
     let contrast = case
         .tab
@@ -1673,7 +1687,33 @@ async fn click_obscured_waits_for_overlay() {
     case.setup_world();
     case.tab
         .evaluate(
-            "const overlay = document.createElement('div'); overlay.id = 'overlay'; overlay.textContent = 'blocking overlay'; overlay.style.cssText = 'position:fixed;inset:0;z-index:10'; document.body.append(overlay); setTimeout(() => overlay.remove(), 2500)",
+            "const fixture = document.querySelector('#overlay'); if (fixture) { fixture.style.display = 'none'; } true",
+            false,
+        )
+        .unwrap();
+    let warm_up_started = std::time::Instant::now();
+    let warm_up = execute_steps_with_runtime(
+        &mut case.runtime,
+        &[BrowserStep::Click {
+            locator: BrowserLocator::css("#target"),
+            timeout_ms: None,
+        }],
+        &ImagePolicy::browser_capture(),
+    );
+    let warm_up_ms = warm_up_started
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
+    assert!(
+        warm_up.ok,
+        "warm-up click on an unobstructed target failed: {warm_up:?}"
+    );
+    case.navigate("overlay.html");
+
+    let overlay_lifetime_ms = warm_up_ms.saturating_mul(3).clamp(2_500, 15_000);
+    case.tab
+        .evaluate(
+            &format!("const overlay = document.createElement('div'); overlay.id = 'overlay'; overlay.textContent = 'blocking overlay'; overlay.style.cssText = 'position:fixed;inset:0;z-index:10'; document.body.append(overlay); setTimeout(() => overlay.remove(), {overlay_lifetime_ms})"),
             false,
         )
         .unwrap();
@@ -1682,25 +1722,29 @@ async fn click_obscured_waits_for_overlay() {
         &[
             BrowserStep::Click {
                 locator: BrowserLocator::css("#target"),
-                timeout_ms: None,
+                timeout_ms: Some(overlay_lifetime_ms + 10_000),
             },
             BrowserStep::WaitForText {
                 text: "clicked after overlay".to_string(),
-                timeout_ms: Some(2_000),
+                timeout_ms: Some((overlay_lifetime_ms / 2).max(2_000)),
             },
         ],
         &ImagePolicy::browser_capture(),
     );
     assert!(
         report.ok,
-        "click should wait for overlay removal: {report:?}"
+        "click should wait for overlay removal (warm-up {warm_up_ms}ms, overlay {overlay_lifetime_ms}ms): {report:?}"
     );
     let diagnostics = report.steps[0]
         .actionability
         .as_ref()
         .expect("retried click should include actionability diagnostics");
-    assert!(diagnostics.attempts.unwrap_or_default() > 0);
+    assert!(
+        diagnostics.attempts.unwrap_or_default() > 0,
+        "click did not exercise the retry path (warm-up {warm_up_ms}ms, overlay {overlay_lifetime_ms}ms): {diagnostics:?}"
+    );
     assert_eq!(diagnostics.receives_events, Some(true));
+    assert!(diagnostics.intercepting_element.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3270,6 +3314,97 @@ async fn contenteditable_fill_updates_output() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn fill_refuses_aria_widgets_and_retargets_labels() {
+    let Some(case) = BrowserCase::start("aria-widgets.html").await else {
+        return;
+    };
+
+    let spinbutton = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::Fill {
+            locator: BrowserLocator::css("#spin"),
+            text: "31".to_string(),
+            clear_first: true,
+            verify: true,
+        }],
+    );
+    assert!(
+        !spinbutton.ok,
+        "spinbutton fill must be refused: {spinbutton:?}"
+    );
+    assert_eq!(spinbutton.steps[0].field_kind, Some(FieldKind::Unknown));
+    assert_eq!(spinbutton.steps[0].retries, 0);
+    assert_eq!(spinbutton.steps[0].verified, None);
+    let refusal = spinbutton.steps[0].error.as_deref().unwrap();
+    assert!(refusal.contains("role=spinbutton"), "{refusal}");
+    assert!(
+        refusal.contains("not an <input>, <textarea> or [contenteditable] element"),
+        "{refusal}"
+    );
+
+    let untouched = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::GetAttribute {
+            locator: BrowserLocator::css("#spin"),
+            attribute: "aria-valuenow".to_string(),
+        }],
+    );
+    assert!(untouched.ok, "{untouched:?}");
+    assert_eq!(untouched.steps[0].data.as_ref().unwrap()["value"], "12");
+
+    let button = execute_fixture_steps(
+        &case.tab,
+        &[BrowserStep::Fill {
+            locator: BrowserLocator::css("#go"),
+            text: "nope".to_string(),
+            clear_first: true,
+            verify: true,
+        }],
+    );
+    assert!(!button.ok, "button fill must be refused: {button:?}");
+    assert_eq!(button.steps[0].field_kind, Some(FieldKind::Unknown));
+    assert!(button.steps[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("not an <input>, <textarea> or [contenteditable] element"));
+
+    let editable = execute_fixture_steps(
+        &case.tab,
+        &[
+            BrowserStep::Fill {
+                locator: BrowserLocator::css("label[for=name]"),
+                text: "Ada".to_string(),
+                clear_first: true,
+                verify: true,
+            },
+            BrowserStep::InputValue {
+                locator: BrowserLocator::css("#name"),
+            },
+            BrowserStep::Fill {
+                locator: BrowserLocator::css("#note"),
+                text: "editable note".to_string(),
+                clear_first: true,
+                verify: true,
+            },
+        ],
+    );
+    assert!(
+        editable.ok,
+        "label/contenteditable fill failed: {editable:?}"
+    );
+    assert_eq!(editable.steps[0].field_kind, Some(FieldKind::TextInput));
+    assert_eq!(editable.steps[0].verified, Some(true));
+    assert_eq!(editable.steps[1].data.as_ref().unwrap()["value"], "Ada");
+    assert_eq!(
+        editable.steps[2].field_kind,
+        Some(FieldKind::ContentEditable)
+    );
+    assert_eq!(editable.steps[2].verified, Some(true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn keyboard_types_unicode_into_contenteditable() {
     let Some(case) = BrowserCase::start("contenteditable.html").await else {
         return;
@@ -4428,6 +4563,93 @@ async fn ambiguous_iframe_owner_reports_strict_violation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn frame_chain_survives_iframe_replacement() {
+    let Some(case) = BrowserCase::start("iframe-replace.html").await else {
+        return;
+    };
+    let frames = vec![BrowserLocator::css("iframe")];
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[
+            BrowserStep::WaitForSelector {
+                locator: BrowserLocator::css(".inner").in_frames(frames.clone()),
+                state: None,
+                timeout_ms: Some(5_000),
+            },
+            BrowserStep::Click {
+                locator: BrowserLocator::css("#replace"),
+                timeout_ms: None,
+            },
+            BrowserStep::WaitForSelector {
+                locator: BrowserLocator::css(".inner").in_frames(frames.clone()),
+                state: None,
+                timeout_ms: Some(5_000),
+            },
+            BrowserStep::Click {
+                locator: BrowserLocator::css(".inner").in_frames(frames.clone()),
+                timeout_ms: None,
+            },
+            BrowserStep::GetText {
+                locator: BrowserLocator::css("#clicked").in_frames(frames),
+            },
+        ],
+    );
+
+    assert!(
+        report.ok,
+        "frame chain did not survive iframe replacement: {report:?}"
+    );
+    assert_eq!(
+        report.steps[4].data.as_ref().unwrap()["text"],
+        json!("clicked")
+    );
+    let rendered = format!("{report:?}").to_lowercase();
+    assert!(
+        !rendered.contains("no frame for given id"),
+        "raw stale-frame CDP error surfaced: {report:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn removed_iframe_reports_a_structured_frame_detachment() {
+    let Some(case) = BrowserCase::start("iframe-replace.html").await else {
+        return;
+    };
+    let report = execute_fixture_steps(
+        &case.tab,
+        &[
+            BrowserStep::Click {
+                locator: BrowserLocator::css("#remove"),
+                timeout_ms: None,
+            },
+            BrowserStep::WaitForSelector {
+                locator: BrowserLocator::css(".inner")
+                    .in_frames(vec![BrowserLocator::css("iframe")]),
+                state: None,
+                timeout_ms: Some(1_000),
+            },
+        ],
+    );
+
+    assert!(!report.ok, "a removed iframe must fail: {report:?}");
+    let error = report.steps[1].error.as_deref().unwrap_or_default();
+    assert!(
+        error.starts_with("frame_detached: frame 0 (css=iframe) matched no iframe element"),
+        "unstructured empty frame owner error: {report:?}"
+    );
+    assert!(
+        !error.contains("detached or replaced"),
+        "an iframe that was never there must not be reported as replaced: {report:?}"
+    );
+    assert!(
+        error.ends_with("re-run the step once the iframe exists or fix the frame locator"),
+        "empty frame owner error lost its guidance: {report:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn nested_shadow_dom_button_and_input_are_actionable() {
     let Some(case) = BrowserCase::start("shadow-dom.html").await else {
         return;
@@ -5364,14 +5586,7 @@ async fn scoped_accessibility_snapshot_returns_only_the_target_subtree() {
         "boxes must compose with scoping: {yaml}"
     );
 
-    let save_ref = data["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|node| node["name"].as_str() == Some("Save"))
-        .and_then(|node| node["ref"].as_str())
-        .unwrap()
-        .to_string();
+    let save_ref = snapshot_ref(yaml, "Save");
     let click = execute_steps_with_runtime(
         &mut case.runtime,
         &[BrowserStep::Click {
@@ -5460,17 +5675,10 @@ async fn tool_contract_canonical_ref_batch_executes_end_to_end() {
         &ImagePolicy::browser_capture(),
     );
     assert!(snapshot.ok, "snapshot failed: {snapshot:?}");
-    let nodes = snapshot.steps[0].data.as_ref().unwrap()["nodes"]
-        .as_array()
+    let yaml = snapshot.steps[0].data.as_ref().unwrap()["yaml"]
+        .as_str()
         .unwrap();
-    let reference = |name: &str| {
-        nodes
-            .iter()
-            .find(|node| node["name"].as_str() == Some(name))
-            .and_then(|node| node["ref"].as_str())
-            .unwrap_or_else(|| panic!("snapshot lacks ref for {name}: {nodes:?}"))
-            .to_string()
-    };
+    let reference = |name: &str| snapshot_ref(yaml, name);
     let request: BrowserActionRequest = serde_json::from_value(json!({
         "steps": [
             {"action":"accessibility_snapshot"},
@@ -5520,14 +5728,12 @@ async fn production_ref_errors_distinguish_stale_and_navigation_generations() {
         }],
         &ImagePolicy::browser_capture(),
     );
-    let save_ref = first.steps[0].data.as_ref().unwrap()["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|node| node["name"] == "Save")
-        .and_then(|node| node["ref"].as_str())
-        .unwrap()
-        .to_string();
+    let save_ref = snapshot_ref(
+        first.steps[0].data.as_ref().unwrap()["yaml"]
+            .as_str()
+            .unwrap(),
+        "Save",
+    );
     case.tab
         .evaluate(
             "document.querySelector('button').setAttribute('aria-label', 'Save changed')",
@@ -5549,14 +5755,12 @@ async fn production_ref_errors_distinguish_stale_and_navigation_generations() {
     assert!(stale.steps[1].error.as_deref().unwrap().contains("stale"));
     assert!(stale.steps[1].error.as_deref().unwrap().contains(&save_ref));
 
-    let current_ref = stale.steps[0].data.as_ref().unwrap()["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|node| node["name"] == "Save changed")
-        .and_then(|node| node["ref"].as_str())
-        .unwrap()
-        .to_string();
+    let current_ref = snapshot_ref(
+        stale.steps[0].data.as_ref().unwrap()["yaml"]
+            .as_str()
+            .unwrap(),
+        "Save changed",
+    );
     case.navigate("delayed-button.html");
     let navigated = execute_steps_with_runtime(
         &mut case.runtime,
@@ -7177,17 +7381,61 @@ async fn dispatch_event_fires_listeners_with_the_inferred_class_and_detail() {
 
 struct DesignToolCase {
     ccx: Arc<tokio::sync::Mutex<refact_lsp::at_commands::at_commands::AtCommandsContext>>,
+    app: refact_lsp::app_state::AppState,
+    chat_id: String,
+    workspace: TempDir,
     _profile: TempDir,
     _cache_dir: TempDir,
     _config_dir: TempDir,
     _server: FixtureServer,
-    _tab: Arc<Tab>,
+    tab: Arc<Tab>,
+}
+
+impl DesignToolCase {
+    async fn set_viewport(&self, width: u32, height: u32, device_scale_factor: f64) {
+        let (_, runtime) = refact_lsp::integrations::browser_runtime::find_runtime_for_chat(
+            self.app.clone(),
+            &refact_lsp::integrations::browser_runtime::ChatRuntimeLookup::for_chat(&self.chat_id),
+        )
+        .await
+        .expect("the registered runtime must stay discoverable");
+        let mut runtime = runtime.lock().await;
+        let report = execute_steps_with_runtime(
+            &mut runtime,
+            &[BrowserStep::SetViewport {
+                width,
+                height,
+                device_scale_factor: Some(device_scale_factor),
+                is_mobile: Some(false),
+                has_touch: Some(false),
+            }],
+            &ImagePolicy::browser_capture(),
+        );
+        assert!(report.ok, "set_viewport failed: {report:?}");
+    }
+
+    fn baseline_file(&self, name: &str) -> std::path::PathBuf {
+        self.workspace
+            .path()
+            .join(".refact")
+            .join("visual_baselines")
+            .join(name)
+    }
+
+    fn viewport_readout(&self) -> serde_json::Value {
+        self.tab
+            .evaluate("[innerWidth, innerHeight].join('x')", false)
+            .unwrap()
+            .value
+            .unwrap()
+    }
 }
 
 async fn design_tool_context(case: BrowserCase, chat_id: &str) -> DesignToolCase {
     let mut case = case;
     let cache_dir = tempdir().unwrap();
     let config_dir = tempdir().unwrap();
+    let workspace = tempdir().unwrap();
     let command_line = refact_lsp::global_context::CommandLine::from_iter_safe([
         "browser-e2e",
         "--http-port",
@@ -7203,6 +7451,11 @@ async fn design_tool_context(case: BrowserCase, chat_id: &str) -> DesignToolCase
         command_line,
     )
     .await;
+    gcx.documents_state
+        .workspace_folders
+        .lock()
+        .unwrap()
+        .push(workspace.path().to_path_buf());
     let app = refact_lsp::app_state::AppState::from_gcx(gcx).await;
     case.runtime.reattach(chat_id);
     refact_lsp::integrations::browser_runtime::register_browser_runtime(app.clone(), case.runtime)
@@ -7210,7 +7463,7 @@ async fn design_tool_context(case: BrowserCase, chat_id: &str) -> DesignToolCase
     DesignToolCase {
         ccx: Arc::new(tokio::sync::Mutex::new(
             refact_lsp::at_commands::at_commands::AtCommandsContext::new_from_app(
-                app,
+                app.clone(),
                 4096,
                 10,
                 false,
@@ -7223,11 +7476,14 @@ async fn design_tool_context(case: BrowserCase, chat_id: &str) -> DesignToolCase
             )
             .await,
         )),
+        app,
+        chat_id: chat_id.to_string(),
+        workspace,
         _profile: case._profile,
         _cache_dir: cache_dir,
         _config_dir: config_dir,
         _server: case.server,
-        _tab: case.tab,
+        tab: case.tab,
     }
 }
 
@@ -7383,4 +7639,206 @@ async fn design_tools_scope_the_aria_snapshot_and_compose_with_refs() {
     .expect("a ref emitted by mark_elements must compose as a ui_probe target");
     let payload = design_tool_payload(messages);
     assert_eq!(payload["matrix"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn visual_diff_pins_css_pixel_geometry_across_dpr_changes() {
+    let Some(mut case) = BrowserCase::start("visual-states.html").await else {
+        return;
+    };
+    case.setup_world();
+    let case = design_tool_context(case, "visual-diff-geometry-e2e").await;
+    case.set_viewport(800, 600, 2.0).await;
+    let ccx = case.ccx.clone();
+    let mut diff = refact_lsp::tools::design_tools::ToolVisualDiff {
+        config_path: "builtin".to_string(),
+    };
+
+    let (_, messages) = refact_lsp::tools::tools_description::Tool::tool_execute(
+        &mut diff,
+        ccx.clone(),
+        &"visual-diff-baseline".to_string(),
+        &std::collections::HashMap::from([
+            ("baseline".to_string(), json!("geometry-e2e.png")),
+            ("update_baseline".to_string(), json!(true)),
+        ]),
+    )
+    .await
+    .expect("visual_diff must be able to create a baseline");
+    let payload = design_tool_payload(messages);
+    assert_eq!(payload["baseline_updated"], json!(true));
+    assert_eq!(
+        payload["capture"]["viewport"],
+        json!({"width": 800, "height": 600}),
+        "a sticky device_scale_factor must not change the capture geometry: {payload}"
+    );
+    assert_eq!(payload["capture"]["device_scale_factor"], json!(1.0));
+
+    let baseline = case.baseline_file("geometry-e2e.png");
+    let decoded = image::load_from_memory(&std::fs::read(&baseline).unwrap()).unwrap();
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (800, 600),
+        "baselines are DPR-1 CSS-pixel captures with no policy downscale"
+    );
+    let sidecar: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(case.baseline_file("geometry-e2e.png.meta.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(sidecar["schema"], json!(1));
+    assert_eq!(sidecar["viewport"], json!({"width": 800, "height": 600}));
+    assert_eq!(sidecar["device_scale_factor"], json!(1.0));
+    assert_eq!(sidecar["width"], json!(800));
+    assert_eq!(sidecar["height"], json!(600));
+    assert!(sidecar["url"].as_str().unwrap().contains("visual-states"));
+
+    case.set_viewport(1024, 768, 1.0).await;
+    let (_, messages) = refact_lsp::tools::tools_description::Tool::tool_execute(
+        &mut diff,
+        ccx.clone(),
+        &"visual-diff-compare".to_string(),
+        &std::collections::HashMap::from([("baseline".to_string(), json!("geometry-e2e.png"))]),
+    )
+    .await
+    .expect("the sidecar geometry must make the baseline comparable again");
+    let payload = design_tool_payload(messages);
+    assert_eq!(
+        payload["capture"]["viewport"],
+        json!({"width": 800, "height": 600}),
+        "the sidecar pins the comparison geometry: {payload}"
+    );
+    assert_eq!(payload["changed_pixels"], json!(0));
+    assert_eq!(payload["changed_percent"].as_f64().unwrap(), 0.0);
+    assert_eq!(
+        payload["baseline_meta"]["viewport"],
+        json!({"width": 800, "height": 600})
+    );
+    assert_eq!(
+        case.viewport_readout(),
+        json!("1024x768"),
+        "the session's own emulation must be restored after the capture"
+    );
+
+    let error = refact_lsp::tools::tools_description::Tool::tool_execute(
+        &mut diff,
+        ccx,
+        &"visual-diff-regeometry".to_string(),
+        &std::collections::HashMap::from([
+            ("baseline".to_string(), json!("geometry-e2e.png")),
+            (
+                "viewport".to_string(),
+                json!({"width": 1024, "height": 768}),
+            ),
+        ]),
+    )
+    .await
+    .expect_err("a geometry that differs from the baseline must be refused");
+    assert!(error.contains("was captured at 800x600"), "{error}");
+    assert!(error.contains("requested 1024x768"), "{error}");
+    assert!(error.contains("update_baseline: true"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn contrast_audit_composites_real_computed_styles() {
+    use refact_lsp::tools::design_tools::{
+        measure_contrast_sample, ContrastSampleOutcome, RawContrastSample,
+        CONTRAST_AUDIT_EXPRESSION,
+    };
+
+    let Some(mut case) = BrowserCase::start("states.html").await else {
+        return;
+    };
+    case.setup_world();
+    let html = concat!(
+        "<p id=\"plain\">Black on nothing</p>",
+        "<div style=\"background:rgba(0,0,0,0.5)\"><p id=\"veiled\" style=\"color:#fff\">White under a veil</p></div>",
+        "<div style=\"opacity:0.5;background:#000\"><p id=\"faded\" style=\"color:#fff\">White in a faded group</p></div>",
+        "<p id=\"oklab\" style=\"color:oklab(0.2 0 0);background:oklch(0.97 0.01 90)\">Color 4 text</p>",
+        "<p id=\"gradient\" style=\"background:linear-gradient(#fff,#000)\">Text on a gradient</p>",
+        "<button id=\"faint\" style=\"background:#f5f5f5;border:1px solid #cfcfcf;color:#000\">Faint</button>",
+        "<button id=\"filled\" style=\"background:#2563eb;border:0;color:#fff\">Filled</button>",
+        "<button id=\"ghost\" style=\"background:transparent;border:0;color:#000\">Ghost</button>",
+        "<button id=\"off\" disabled style=\"color:#eee;background:#fff\">Off</button>"
+    );
+    case.tab
+        .evaluate(
+            &format!(
+                "document.body.style.margin='0';document.body.style.background='';document.body.innerHTML={};true",
+                serde_json::to_string(html).unwrap()
+            ),
+            false,
+        )
+        .expect("fixture body must be replaceable");
+
+    let raw = case
+        .runtime
+        .world_manager
+        .eval_in_utility(&case.tab, CONTRAST_AUDIT_EXPRESSION)
+        .expect("sampler must run in the utility world");
+    let samples: Vec<RawContrastSample> = serde_json::from_value(raw).unwrap();
+    let find = |kind: &str, selector: &str| {
+        samples
+            .iter()
+            .find(|sample| sample.kind == kind && sample.selector == selector)
+            .unwrap_or_else(|| panic!("{kind} sample {selector} missing from {samples:?}"))
+    };
+    let ratio_of = |kind: &str, selector: &str| match measure_contrast_sample(find(kind, selector))
+    {
+        ContrastSampleOutcome::Measured { ratio, .. } => ratio,
+        other => panic!("{selector}: expected a measurement, got {other:?}"),
+    };
+
+    assert!(
+        find("text", "#plain").layers.len() >= 3,
+        "layers walk up to the root: {:?}",
+        find("text", "#plain").layers
+    );
+    assert!(
+        (ratio_of("text", "#plain") - 21.0).abs() < 0.05,
+        "black text over transparent ancestors sits on the white canvas"
+    );
+    let veiled = ratio_of("text", "#veiled");
+    assert!(
+        veiled > 3.0 && veiled < 6.0,
+        "white on a 50% black veil over white is mid-gray: {veiled}"
+    );
+    let faded = ratio_of("text", "#faded");
+    assert!(
+        faded > 3.0 && faded < 6.0,
+        "a 50% opacity black group over white is mid-gray: {faded}"
+    );
+    assert!(
+        ratio_of("text", "#oklab") > 7.0,
+        "oklab/oklch computed colors are converted"
+    );
+    assert!(
+        matches!(
+            measure_contrast_sample(find("text", "#gradient")),
+            ContrastSampleOutcome::Unmeasurable(_)
+        ),
+        "gradient backdrops are not rated"
+    );
+    assert!(
+        samples.iter().all(|sample| sample.selector != "#off"),
+        "disabled controls are exempt from the audit"
+    );
+    let faint = ratio_of("non_text", "#faint");
+    assert!(
+        faint < 3.0,
+        "a #cfcfcf border on white fails non-text contrast: {faint}"
+    );
+    assert!(
+        matches!(
+            measure_contrast_sample(find("non_text", "#filled")),
+            ContrastSampleOutcome::Measured { boundary: "fill", ratio, .. } if ratio > 3.0
+        ),
+        "a borderless filled button is rated on its fill against the page"
+    );
+    assert_eq!(
+        measure_contrast_sample(find("non_text", "#ghost")),
+        ContrastSampleOutcome::Skipped,
+        "a control with no border and no fill has no non-text boundary"
+    );
 }

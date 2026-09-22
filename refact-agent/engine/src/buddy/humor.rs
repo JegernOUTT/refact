@@ -58,6 +58,9 @@ pub enum HumorPlan {
 
 impl HumorReservation {
     pub async fn generate(&self, gcx: AppState) -> Vec<String> {
+        if super::editorial::enabled(&gcx).await {
+            return Vec::new();
+        }
         tokio::time::timeout(
             tokio::time::Duration::from_secs(HUMOR_TIMEOUT_SECS),
             self.generator

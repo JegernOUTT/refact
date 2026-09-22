@@ -58,6 +58,7 @@ fn kind_token(kind: BuddyFactKind) -> &'static str {
         BuddyFactKind::AgentsMdGapDetected => "agents-md-gap",
         BuddyFactKind::DefaultModelMissing => "missing-model",
         BuddyFactKind::BrokenModelReference => "broken-model",
+        BuddyFactKind::ProviderRateLimited => "provider-rate-limit",
         BuddyFactKind::McpAuthExpired => "mcp-auth",
         BuddyFactKind::IntegrationFailing => "integration-failing",
         BuddyFactKind::DiagnosticCluster => "diagnostic-cluster",

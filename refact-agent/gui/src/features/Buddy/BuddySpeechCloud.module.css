@@ -25,7 +25,7 @@
 }
 
 .text {
-  font-size: 12px;
+  font-size: var(--rf-text-1);
   font-family: "Courier New", Courier, monospace;
   color: var(--rf-color-fg);
   margin: 0 0 var(--rf-space-2) 0;
@@ -87,7 +87,7 @@
 }
 
 .overlayText {
-  font-size: 11px;
+  font-size: var(--rf-text-1);
   font-family: "Courier New", Courier, monospace;
   color: var(--rf-color-fg);
   line-height: 1.5;

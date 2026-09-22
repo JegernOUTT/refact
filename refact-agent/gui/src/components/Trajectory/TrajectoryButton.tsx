@@ -34,7 +34,7 @@ export const TrajectoryButton: React.FC<TrajectoryButtonProps> = ({
           <Popover.Trigger asChild>
             <IconButton
               data-testid="trajectory-button"
-              aria-label="Compress or Handoff"
+              aria-label="Compress or rebuild context"
               disabled={disabled}
               icon={Archive}
               size="sm"
@@ -44,7 +44,7 @@ export const TrajectoryButton: React.FC<TrajectoryButtonProps> = ({
         </HoverCard.Trigger>
         <HoverCard.Content size="1" side="bottom">
           <Text as="p" size="2">
-            Compress or Handoff
+            Compress or rebuild context
           </Text>
         </HoverCard.Content>
       </HoverCard.Root>

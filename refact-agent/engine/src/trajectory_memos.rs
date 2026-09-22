@@ -1,10 +1,14 @@
 use std::path::{Path, PathBuf};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::fs;
+use tokio::time::{Duration as TokioDuration, Instant};
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
@@ -29,8 +33,108 @@ const SUBAGENT_ID: &str = "memo_extraction";
 const MAX_TRAJECTORY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_MEMO_CONTENT_CHARS: usize = 4_000;
 const MAX_MEMO_EVIDENCE_CHARS: usize = 1_000;
+const MAX_TRAJECTORIES_PER_SWEEP: usize = 25;
+const MAX_EXTRACTION_ATTEMPTS: u64 = 3;
+const RATE_LIMIT_BREAKER_THRESHOLD: usize = 3;
+const BREAKER_COOLDOWNS_SECS: &[u64] = &[300, 900, 2700, 10_800, 21_600];
+
+#[derive(Debug)]
+struct TrajectoryCandidate {
+    path: PathBuf,
+    updated_at: DateTime<Utc>,
+}
+
+struct MemoBreaker {
+    consecutive_rate_limited: usize,
+    open_until: Option<Instant>,
+    escalation: usize,
+}
+
+impl Default for MemoBreaker {
+    fn default() -> Self {
+        Self {
+            consecutive_rate_limited: 0,
+            open_until: None,
+            escalation: 0,
+        }
+    }
+}
+
+impl MemoBreaker {
+    fn is_open(&self, now: Instant) -> bool {
+        self.open_until.is_some_and(|open_until| now < open_until)
+    }
+
+    fn close_if_expired(&mut self, now: Instant) -> bool {
+        if self.open_until.is_some_and(|open_until| now >= open_until) {
+            self.open_until = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn record_success(&mut self) {
+        self.consecutive_rate_limited = 0;
+        self.open_until = None;
+        self.escalation = 0;
+    }
+
+    fn record_failure(
+        &mut self,
+        category: &crate::buddy::workflows::WorkflowFailureCategory,
+        now: Instant,
+    ) -> Option<TokioDuration> {
+        if *category != crate::buddy::workflows::WorkflowFailureCategory::ProviderRateLimit {
+            self.consecutive_rate_limited = 0;
+            return None;
+        }
+
+        self.consecutive_rate_limited += 1;
+        if self.consecutive_rate_limited < RATE_LIMIT_BREAKER_THRESHOLD {
+            return None;
+        }
+
+        let cooldown = TokioDuration::from_secs(BREAKER_COOLDOWNS_SECS[self.escalation]);
+        self.open_until = Some(now + cooldown);
+        self.escalation = (self.escalation + 1).min(BREAKER_COOLDOWNS_SECS.len() - 1);
+        Some(cooldown)
+    }
+}
+
+struct MemoExtractionRequest {
+    gcx: Arc<GlobalContext>,
+    messages: Vec<ChatMessage>,
+    current_title: String,
+    is_title_generated: bool,
+    trajectory_id: String,
+    root_chat_id: String,
+}
+
+type MemoExtractionFuture = Pin<Box<dyn Future<Output = Result<ExtractionResult, String>> + Send>>;
+type MemoExtractor = dyn Fn(MemoExtractionRequest) -> MemoExtractionFuture + Send + Sync;
+
+enum MemoProcessingOutcome {
+    Extracted,
+    Skipped,
+    Failed(MemoProcessingFailure),
+}
+
+struct MemoProcessingFailure {
+    category: crate::buddy::workflows::WorkflowFailureCategory,
+    error: String,
+}
 
 pub async fn trajectory_memos_background_task(gcx: Arc<GlobalContext>) {
+    let extractor: Arc<MemoExtractor> = Arc::new(extract_memos_for_trajectory);
+    trajectory_memos_background_task_inner(gcx, MemoBreaker::default(), extractor).await;
+}
+
+async fn trajectory_memos_background_task_inner(
+    gcx: Arc<GlobalContext>,
+    mut breaker: MemoBreaker,
+    extractor: Arc<MemoExtractor>,
+) {
     loop {
         let shutdown_flag = gcx.shutdown_flag.clone();
         tokio::select! {
@@ -45,13 +149,41 @@ pub async fn trajectory_memos_background_task(gcx: Arc<GlobalContext>) {
             }
         }
 
-        if let Err(e) = process_abandoned_trajectories(gcx.clone()).await {
+        let now = Instant::now();
+        if breaker.close_if_expired(now) {
+            info!("trajectory_memos: rate-limit breaker closed");
+        }
+        if breaker.is_open(now) {
+            continue;
+        }
+
+        if let Err(e) =
+            process_abandoned_trajectories(gcx.clone(), &mut breaker, extractor.as_ref()).await
+        {
             warn!("trajectory_memos: error processing trajectories: {}", e);
         }
     }
 }
 
-async fn process_abandoned_trajectories(gcx: Arc<GlobalContext>) -> Result<(), String> {
+async fn process_abandoned_trajectories(
+    gcx: Arc<GlobalContext>,
+    breaker: &mut MemoBreaker,
+    extractor: &MemoExtractor,
+) -> Result<(), String> {
+    process_abandoned_trajectories_with_enabled(gcx, breaker, extractor, trajectory_memos_enabled())
+        .await
+}
+
+async fn process_abandoned_trajectories_with_enabled(
+    gcx: Arc<GlobalContext>,
+    breaker: &mut MemoBreaker,
+    extractor: &MemoExtractor,
+    enabled: bool,
+) -> Result<(), String> {
+    if !enabled {
+        return Ok(());
+    }
+
     let project_dirs = get_project_dirs(gcx.clone()).await;
     if project_dirs.is_empty() {
         return Ok(());
@@ -59,6 +191,71 @@ async fn process_abandoned_trajectories(gcx: Arc<GlobalContext>) -> Result<(), S
 
     let now = Utc::now();
     let threshold = now - Duration::hours(ABANDONED_THRESHOLD_HOURS);
+    let candidates = collect_trajectory_candidates(project_dirs, &threshold).await?;
+
+    for candidate in candidates.into_iter().take(MAX_TRAJECTORIES_PER_SWEEP) {
+        let Some(outcome) = process_trajectory_until_shutdown(
+            gcx.clone(),
+            candidate.path.clone(),
+            &threshold,
+            extractor,
+        )
+        .await
+        else {
+            return Ok(());
+        };
+
+        match outcome {
+            MemoProcessingOutcome::Extracted => {
+                breaker.record_success();
+                info!(
+                    "trajectory_memos: extracted memos from {}",
+                    candidate.path.display()
+                );
+            }
+            MemoProcessingOutcome::Skipped => {}
+            MemoProcessingOutcome::Failed(failure) => {
+                record_extraction_failure(&candidate.path, &failure).await?;
+                if let Some(cooldown) = breaker.record_failure(&failure.category, Instant::now()) {
+                    warn!(
+                        cooldown_secs = cooldown.as_secs(),
+                        "trajectory_memos: rate-limit breaker opened after {} consecutive provider rate-limit failures",
+                        RATE_LIMIT_BREAKER_THRESHOLD
+                    );
+                    return Ok(());
+                }
+                warn!(
+                    "trajectory_memos: failed to process {}: {}",
+                    candidate.path.display(),
+                    failure.error
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn trajectory_memos_enabled() -> bool {
+    trajectory_memos_enabled_from_env(
+        std::env::var("REFACT_DISABLE_TRAJECTORY_MEMOS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn trajectory_memos_enabled_from_env(value: Option<&str>) -> bool {
+    value.map_or(true, |value| {
+        let value = value.trim();
+        value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false")
+    })
+}
+
+async fn collect_trajectory_candidates(
+    project_dirs: Vec<PathBuf>,
+    threshold: &DateTime<Utc>,
+) -> Result<Vec<TrajectoryCandidate>, String> {
+    let mut candidates = Vec::new();
 
     for workspace_root in project_dirs {
         let trajectories_dir = workspace_root.join(TRAJECTORIES_FOLDER);
@@ -69,32 +266,205 @@ async fn process_abandoned_trajectories(gcx: Arc<GlobalContext>) -> Result<(), S
         for entry in WalkDir::new(&trajectories_dir)
             .max_depth(2)
             .into_iter()
-            .filter_map(|e| e.ok())
+            .filter_map(|entry| entry.ok())
         {
             let path = entry.path();
-            if !path.is_file() || path.extension().map(|e| e != "json").unwrap_or(true) {
+            if !entry.file_type().is_file() || !is_trajectory_path(path) || is_memo_state_path(path)
+            {
+                continue;
+            }
+            if memo_state_path(&path).exists() {
                 continue;
             }
 
-            match process_single_trajectory(gcx.clone(), path.to_path_buf(), &threshold).await {
-                Ok(true) => info!("trajectory_memos: extracted memos from {}", path.display()),
-                Ok(false) => {}
-                Err(e) => warn!(
-                    "trajectory_memos: failed to process {}: {}",
-                    path.display(),
-                    e
-                ),
+            let metadata = fs::metadata(&path)
+                .await
+                .map_err(|error| error.to_string())?;
+            if metadata.len() > MAX_TRAJECTORY_BYTES {
+                mark_oversize_trajectory(&path, metadata.len()).await?;
+                continue;
             }
+
+            let content = fs::read_to_string(&path)
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut trajectory: Value = match serde_json::from_str(&content) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let Some(updated_at) = eligible_trajectory_updated_at(&trajectory, threshold) else {
+                continue;
+            };
+
+            if is_buddy_system_trajectory(&trajectory) {
+                mark_trajectory_skipped(&path, &mut trajectory, "skipped: buddy system trajectory")
+                    .await?;
+                continue;
+            }
+            let Some(messages) = trajectory.get("messages").and_then(Value::as_array) else {
+                continue;
+            };
+            if build_chat_messages(messages).is_empty() {
+                mark_trajectory_skipped(&path, &mut trajectory, "skipped: invalid chat history")
+                    .await?;
+                continue;
+            }
+
+            candidates.push(TrajectoryCandidate {
+                path: path.to_path_buf(),
+                updated_at,
+            });
         }
     }
 
-    Ok(())
+    candidates.sort_by(|left, right| {
+        left.updated_at
+            .cmp(&right.updated_at)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(candidates)
+}
+
+fn is_trajectory_path(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension == "json")
+}
+
+fn is_memo_state_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".memo-state.json"))
+}
+
+fn memo_state_path(path: &Path) -> PathBuf {
+    path.with_extension("memo-state.json")
+}
+
+fn eligible_trajectory_updated_at(
+    trajectory: &Value,
+    threshold: &DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    if trajectory
+        .get("memo_extracted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || trajectory.get("memo_extraction_abandoned").is_some()
+    {
+        return None;
+    }
+
+    let updated_at = trajectory
+        .get("updated_at")
+        .and_then(Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))?;
+    if updated_at >= *threshold {
+        return None;
+    }
+
+    let messages = trajectory.get("messages").and_then(Value::as_array)?;
+    (messages.len() >= 10).then_some(updated_at)
+}
+
+async fn mark_oversize_trajectory(path: &Path, size_bytes: u64) -> Result<(), String> {
+    let state = json!({
+        "memo_extraction_skipped": {
+            "reason": "oversize",
+            "size_bytes": size_bytes,
+            "recorded_at": Utc::now().to_rfc3339(),
+        }
+    });
+    write_json_atomically(&memo_state_path(path), &state).await
+}
+
+async fn record_extraction_failure(
+    path: &Path,
+    failure: &MemoProcessingFailure,
+) -> Result<(), String> {
+    let content = fs::read_to_string(path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut trajectory: Value =
+        serde_json::from_str(&content).map_err(|error| error.to_string())?;
+    let trajectory_object = trajectory.as_object_mut().ok_or("Invalid trajectory")?;
+    let attempts = trajectory_object
+        .get("memo_extraction_attempt")
+        .and_then(|attempt| attempt.get("count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .saturating_add(1);
+    let attempt = json!({
+        "count": attempts,
+        "last_attempt_at": Utc::now().to_rfc3339(),
+        "last_error_class": failure.category.as_str(),
+    });
+    trajectory_object.insert("memo_extraction_attempt".to_string(), attempt.clone());
+    if attempts >= MAX_EXTRACTION_ATTEMPTS {
+        trajectory_object.insert("memo_extraction_abandoned".to_string(), attempt);
+    }
+    write_trajectory_json(path, &trajectory).await
+}
+
+async fn process_trajectory_until_shutdown(
+    gcx: Arc<GlobalContext>,
+    path: PathBuf,
+    threshold: &DateTime<Utc>,
+    extractor: &MemoExtractor,
+) -> Option<MemoProcessingOutcome> {
+    let shutdown_flag = gcx.shutdown_flag.clone();
+    tokio::select! {
+        outcome = process_single_trajectory_with_extractor(gcx, path, threshold, extractor) => Some(outcome),
+        _ = wait_for_shutdown(shutdown_flag) => None,
+    }
+}
+
+async fn wait_for_shutdown(shutdown_flag: Arc<std::sync::atomic::AtomicBool>) {
+    while !shutdown_flag.load(Ordering::SeqCst) {
+        tokio::time::sleep(TokioDuration::from_millis(200)).await;
+    }
 }
 
 async fn process_single_trajectory(
     gcx: Arc<GlobalContext>,
     path: PathBuf,
     threshold: &DateTime<Utc>,
+) -> Result<bool, String> {
+    match process_single_trajectory_with_extractor(
+        gcx,
+        path,
+        threshold,
+        &extract_memos_for_trajectory,
+    )
+    .await
+    {
+        MemoProcessingOutcome::Extracted => Ok(true),
+        MemoProcessingOutcome::Skipped => Ok(false),
+        MemoProcessingOutcome::Failed(failure) => Err(failure.error),
+    }
+}
+
+async fn process_single_trajectory_with_extractor(
+    gcx: Arc<GlobalContext>,
+    path: PathBuf,
+    threshold: &DateTime<Utc>,
+    extractor: &MemoExtractor,
+) -> MemoProcessingOutcome {
+    let result = process_single_trajectory_inner(gcx, path, threshold, extractor).await;
+    match result {
+        Ok(true) => MemoProcessingOutcome::Extracted,
+        Ok(false) => MemoProcessingOutcome::Skipped,
+        Err(error) => MemoProcessingOutcome::Failed(MemoProcessingFailure {
+            category: crate::buddy::workflows::WorkflowFailureCategory::classify(&error),
+            error,
+        }),
+    }
+}
+
+async fn process_single_trajectory_inner(
+    gcx: Arc<GlobalContext>,
+    path: PathBuf,
+    threshold: &DateTime<Utc>,
+    extractor: &MemoExtractor,
 ) -> Result<bool, String> {
     let metadata = fs::metadata(&path).await.map_err(|e| e.to_string())?;
     if metadata.len() > MAX_TRAJECTORY_BYTES {
@@ -111,6 +481,7 @@ async fn process_single_trajectory(
         .get("memo_extracted")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
+        || trajectory.get("memo_extraction_abandoned").is_some()
     {
         return Ok(false);
     }
@@ -169,28 +540,14 @@ async fn process_single_trajectory(
         return Ok(false);
     }
 
-    let gcx2 = gcx.clone();
-    let title2 = current_title.clone();
-    let trajectory_id2 = trajectory_id.clone();
-    let root_chat_id2 = root_chat_id.clone();
-    let extraction = crate::buddy::workflows::buddy_wrap_workflow(
-        crate::app_state::AppState::from_gcx(gcx.clone()).await,
-        "memo_extraction",
-        "🧠",
-        8,
-        |r: &ExtractionResult| format!("Memory extracted: {} memos", r.memos.len()),
-        move || async move {
-            extract_memos_and_meta(
-                gcx2,
-                chat_messages,
-                &title2,
-                is_title_generated,
-                Some(trajectory_id2.as_str()),
-                Some(root_chat_id2.as_str()),
-            )
-            .await
-        },
-    )
+    let extraction = extractor(MemoExtractionRequest {
+        gcx,
+        messages: chat_messages,
+        current_title: current_title.clone(),
+        is_title_generated,
+        trajectory_id: trajectory_id.clone(),
+        root_chat_id: root_chat_id.clone(),
+    })
     .await?;
 
     persist_extraction_result(
@@ -206,6 +563,42 @@ async fn process_single_trajectory(
     .await?;
 
     Ok(true)
+}
+
+fn extract_memos_for_trajectory(request: MemoExtractionRequest) -> MemoExtractionFuture {
+    Box::pin(async move {
+        let MemoExtractionRequest {
+            gcx,
+            messages,
+            current_title,
+            is_title_generated,
+            trajectory_id,
+            root_chat_id,
+        } = request;
+        let gcx2 = gcx.clone();
+        let title2 = current_title.clone();
+        let trajectory_id2 = trajectory_id.clone();
+        let root_chat_id2 = root_chat_id.clone();
+        crate::buddy::workflows::buddy_wrap_workflow(
+            crate::app_state::AppState::from_gcx(gcx).await,
+            "memo_extraction",
+            "🧠",
+            8,
+            |r: &ExtractionResult| format!("Memory extracted: {} memos", r.memos.len()),
+            move || async move {
+                extract_memos_and_meta(
+                    gcx2,
+                    messages,
+                    &title2,
+                    is_title_generated,
+                    Some(trajectory_id2.as_str()),
+                    Some(root_chat_id2.as_str()),
+                )
+                .await
+            },
+        )
+        .await
+    })
 }
 
 async fn persist_extraction_result(
@@ -255,8 +648,12 @@ async fn persist_extraction_result(
 }
 
 async fn write_trajectory_json(path: &Path, trajectory: &Value) -> Result<(), String> {
+    write_json_atomically(path, trajectory).await
+}
+
+async fn write_json_atomically(path: &Path, value: &Value) -> Result<(), String> {
     let tmp_path = path.with_extension("json.tmp");
-    let json = serde_json::to_string_pretty(trajectory).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     fs::write(&tmp_path, &json)
         .await
         .map_err(|e| e.to_string())?;
@@ -569,6 +966,19 @@ fn normalized_memo_title(title: &str) -> String {
     stripped.to_lowercase()
 }
 
+fn source_id_has_root(source_id: &str, root_chat_id: &str) -> bool {
+    if root_chat_id.is_empty() {
+        return false;
+    }
+    let Some((prefix, hash)) = source_id.rsplit_once(':') else {
+        return false;
+    };
+    let Some((trajectory_range, root)) = prefix.rsplit_once(':') else {
+        return false;
+    };
+    !hash.is_empty() && trajectory_range.contains(":memo:") && root == root_chat_id
+}
+
 fn dedupe_memo_candidates(
     candidates: Vec<MemoryCandidate>,
     existing_docs: &[MemoryDocSnapshot],
@@ -588,7 +998,7 @@ fn dedupe_memo_candidates(
                         || doc
                             .source_id
                             .as_deref()
-                            .map(|source_id| source_id.contains(root_chat_id))
+                            .map(|source_id| source_id_has_root(source_id, root_chat_id))
                             .unwrap_or(false))
             })
         })
@@ -705,7 +1115,404 @@ fn candidate_hash(parts: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+
+    fn scripted_extractor(
+        outcomes: Vec<Result<(), String>>,
+        calls: Arc<AtomicUsize>,
+    ) -> Arc<MemoExtractor> {
+        let outcomes = Arc::new(std::sync::Mutex::new(VecDeque::from(outcomes)));
+        Arc::new(move |_| {
+            let outcomes = outcomes.clone();
+            let calls = calls.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                match outcomes.lock().unwrap().pop_front().unwrap_or(Ok(())) {
+                    Ok(()) => Ok(ExtractionResult {
+                        meta: None,
+                        memos: vec![],
+                    }),
+                    Err(error) => Err(error),
+                }
+            })
+        })
+    }
+
+    async fn memo_test_workspace(count: usize) -> (tempfile::TempDir, Arc<GlobalContext>) {
+        let workspace = tempfile::tempdir().unwrap();
+        let trajectories = workspace.path().join(TRAJECTORIES_FOLDER);
+        tokio::fs::create_dir_all(&trajectories).await.unwrap();
+        for index in 0..count {
+            let trajectory = trajectory_json(&format!("trajectory-{index}"), enough_messages());
+            tokio::fs::write(
+                trajectories.join(format!("trajectory-{index}.json")),
+                serde_json::to_string(&trajectory).unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        (workspace, gcx)
+    }
+
+    fn recording_extractor(processed: Arc<std::sync::Mutex<Vec<String>>>) -> Arc<MemoExtractor> {
+        Arc::new(move |request| {
+            let processed = processed.clone();
+            Box::pin(async move {
+                processed.lock().unwrap().push(request.trajectory_id);
+                Ok(ExtractionResult {
+                    meta: None,
+                    memos: vec![],
+                })
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn sweep_processes_at_most_the_batch_cap() {
+        let (_workspace, gcx) = memo_test_workspace(100).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let extractor = scripted_extractor(vec![], calls.clone());
+        let mut breaker = MemoBreaker::default();
+
+        process_abandoned_trajectories(gcx.clone(), &mut breaker, extractor.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), MAX_TRAJECTORIES_PER_SWEEP);
+
+        process_abandoned_trajectories(gcx, &mut breaker, extractor.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), MAX_TRAJECTORIES_PER_SWEEP * 2);
+    }
+
+    #[tokio::test]
+    async fn sweep_is_oldest_first() {
+        let (workspace, gcx) = memo_test_workspace(3).await;
+        let trajectories = workspace.path().join(TRAJECTORIES_FOLDER);
+        for (id, updated_at) in [
+            ("trajectory-0", "2026-05-03T00:00:00Z"),
+            ("trajectory-1", "2026-05-01T00:00:00Z"),
+            ("trajectory-2", "2026-05-02T00:00:00Z"),
+        ] {
+            let mut trajectory = trajectory_json(id, enough_messages());
+            trajectory["updated_at"] = Value::String(updated_at.to_string());
+            tokio::fs::write(
+                trajectories.join(format!("{id}.json")),
+                serde_json::to_string(&trajectory).unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+        let processed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let extractor = recording_extractor(processed.clone());
+        let mut breaker = MemoBreaker::default();
+
+        process_abandoned_trajectories(gcx, &mut breaker, extractor.as_ref())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *processed.lock().unwrap(),
+            vec![
+                "trajectory-1".to_string(),
+                "trajectory-2".to_string(),
+                "trajectory-0".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn file_is_abandoned_after_three_failed_attempts() {
+        let (workspace, gcx) = memo_test_workspace(1).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let extractor = scripted_extractor(
+            vec![
+                Err("model unavailable".to_string()),
+                Err("model unavailable".to_string()),
+                Err("model unavailable".to_string()),
+            ],
+            calls.clone(),
+        );
+        let mut breaker = MemoBreaker::default();
+
+        for _ in 0..MAX_EXTRACTION_ATTEMPTS {
+            process_abandoned_trajectories(gcx.clone(), &mut breaker, extractor.as_ref())
+                .await
+                .unwrap();
+        }
+        process_abandoned_trajectories(gcx, &mut breaker, extractor.as_ref())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            MAX_EXTRACTION_ATTEMPTS as usize
+        );
+        let path = workspace
+            .path()
+            .join(TRAJECTORIES_FOLDER)
+            .join("trajectory-0.json");
+        let trajectory: Value =
+            serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
+        assert!(trajectory.get("memo_extracted").is_none());
+        assert_eq!(
+            trajectory["memo_extraction_abandoned"]["count"].as_u64(),
+            Some(MAX_EXTRACTION_ATTEMPTS)
+        );
+        assert_eq!(
+            trajectory["memo_extraction_abandoned"]["last_error_class"].as_str(),
+            Some("model_unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn oversize_file_is_marked_and_not_rescanned() {
+        let (workspace, gcx) = memo_test_workspace(0).await;
+        let path = workspace
+            .path()
+            .join(TRAJECTORIES_FOLDER)
+            .join("oversize.json");
+        tokio::fs::write(&path, "x".repeat(MAX_TRAJECTORY_BYTES as usize + 1))
+            .await
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let extractor = scripted_extractor(vec![], calls.clone());
+        let mut breaker = MemoBreaker::default();
+
+        process_abandoned_trajectories(gcx.clone(), &mut breaker, extractor.as_ref())
+            .await
+            .unwrap();
+        let marker_path = memo_state_path(&path);
+        let marker: Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&marker_path).await.unwrap()).unwrap();
+        assert_eq!(
+            marker["memo_extraction_skipped"]["reason"].as_str(),
+            Some("oversize")
+        );
+
+        let before = tokio::fs::read(&marker_path).await.unwrap();
+        process_abandoned_trajectories(gcx, &mut breaker, extractor.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(marker_path).await.unwrap(), before);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn disabled_setting_performs_no_work() {
+        let (_workspace, gcx) = memo_test_workspace(1).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let extractor = scripted_extractor(vec![], calls.clone());
+        let mut breaker = MemoBreaker::default();
+
+        process_abandoned_trajectories_with_enabled(gcx, &mut breaker, extractor.as_ref(), false)
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(!trajectory_memos_enabled_from_env(Some("1")));
+        assert!(trajectory_memos_enabled_from_env(Some("false")));
+        assert!(trajectory_memos_enabled_from_env(None));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_aborts_mid_sweep() {
+        let (_workspace, gcx) = memo_test_workspace(2).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let extractor: Arc<MemoExtractor> = {
+            let calls = calls.clone();
+            Arc::new(move |_| {
+                let calls = calls.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    std::future::pending::<Result<ExtractionResult, String>>().await
+                })
+            })
+        };
+        let shutdown = gcx.shutdown_flag.clone();
+        let mut breaker = MemoBreaker::default();
+        let task = tokio::spawn(async move {
+            process_abandoned_trajectories(gcx, &mut breaker, extractor.as_ref())
+                .await
+                .unwrap();
+        });
+
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        shutdown.store(true, Ordering::SeqCst);
+        tokio::time::advance(TokioDuration::from_millis(200)).await;
+        task.await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn breaker_and_cap_compose() {
+        let (_workspace, gcx) = memo_test_workspace(MAX_TRAJECTORIES_PER_SWEEP + 5).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let extractor = scripted_extractor(
+            vec![
+                Err("OpenAI API error (429): rate limit reached".to_string()),
+                Err("OpenAI API error (429): rate limit reached".to_string()),
+                Err("OpenAI API error (429): rate limit reached".to_string()),
+            ],
+            calls.clone(),
+        );
+        let mut breaker = MemoBreaker::default();
+
+        process_abandoned_trajectories(gcx, &mut breaker, extractor.as_ref())
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), RATE_LIMIT_BREAKER_THRESHOLD);
+        assert!(breaker.is_open(Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn breaker_opens_after_three_consecutive_rate_limits() {
+        let (_workspace, gcx) = memo_test_workspace(4).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let extractor = scripted_extractor(
+            vec![
+                Err("OpenAI API error (429): rate limit reached".to_string()),
+                Err("OpenAI API error (429): rate limit reached".to_string()),
+                Err("OpenAI API error (429): rate limit reached".to_string()),
+                Err("OpenAI API error (429): rate limit reached".to_string()),
+            ],
+            calls.clone(),
+        );
+        let mut breaker = MemoBreaker::default();
+
+        process_abandoned_trajectories(gcx, &mut breaker, extractor.as_ref())
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(breaker.is_open(Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn breaker_makes_no_llm_calls_while_open() {
+        let (_workspace, gcx) = memo_test_workspace(1).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let extractor = scripted_extractor(vec![Ok(())], calls.clone());
+        let mut breaker = MemoBreaker::default();
+        breaker.open_until = Some(Instant::now() + TokioDuration::from_secs(900));
+        let shutdown = gcx.shutdown_flag.clone();
+        let task = tokio::spawn(trajectory_memos_background_task_inner(
+            gcx, breaker, extractor,
+        ));
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(TokioDuration::from_secs(CHECK_INTERVAL_SECS)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(TokioDuration::from_secs(CHECK_INTERVAL_SECS)).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        shutdown.store(true, Ordering::SeqCst);
+        tokio::time::advance(TokioDuration::from_millis(200)).await;
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn success_resets_the_breaker() {
+        let mut breaker = MemoBreaker::default();
+        let now = Instant::now();
+        let rate_limit = crate::buddy::workflows::WorkflowFailureCategory::ProviderRateLimit;
+
+        assert!(breaker.record_failure(&rate_limit, now).is_none());
+        assert!(breaker.record_failure(&rate_limit, now).is_none());
+        assert_eq!(
+            breaker.record_failure(&rate_limit, now),
+            Some(TokioDuration::from_secs(300))
+        );
+        breaker.record_success();
+
+        assert_eq!(breaker.consecutive_rate_limited, 0);
+        assert_eq!(breaker.escalation, 0);
+        assert!(breaker.record_failure(&rate_limit, now).is_none());
+        assert!(breaker.record_failure(&rate_limit, now).is_none());
+        assert_eq!(
+            breaker.record_failure(&rate_limit, now),
+            Some(TokioDuration::from_secs(300))
+        );
+    }
+
+    #[test]
+    fn non_rate_limit_failure_does_not_open_the_breaker() {
+        let mut breaker = MemoBreaker::default();
+        let now = Instant::now();
+        let rate_limit = crate::buddy::workflows::WorkflowFailureCategory::ProviderRateLimit;
+        let parse_error = crate::buddy::workflows::WorkflowFailureCategory::InvalidRequest;
+
+        assert!(breaker.record_failure(&rate_limit, now).is_none());
+        assert!(breaker.record_failure(&rate_limit, now).is_none());
+        assert!(breaker.record_failure(&parse_error, now).is_none());
+
+        assert_eq!(breaker.consecutive_rate_limited, 0);
+        assert!(!breaker.is_open(now));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_is_prompt_while_the_breaker_is_open() {
+        let (_workspace, gcx) = memo_test_workspace(1).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let extractor = scripted_extractor(vec![Ok(())], calls.clone());
+        let mut breaker = MemoBreaker::default();
+        breaker.open_until = Some(Instant::now() + TokioDuration::from_secs(21_600));
+        let shutdown = gcx.shutdown_flag.clone();
+        let task = tokio::spawn(trajectory_memos_background_task_inner(
+            gcx, breaker, extractor,
+        ));
+
+        tokio::task::yield_now().await;
+        shutdown.store(true, Ordering::SeqCst);
+        tokio::time::advance(TokioDuration::from_millis(200)).await;
+        task.await.unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn cooldown_escalates_and_caps() {
+        let mut breaker = MemoBreaker::default();
+        let rate_limit = crate::buddy::workflows::WorkflowFailureCategory::ProviderRateLimit;
+        let now = Instant::now();
+        let mut cooldowns = Vec::new();
+
+        for _ in 0..RATE_LIMIT_BREAKER_THRESHOLD {
+            if let Some(cooldown) = breaker.record_failure(&rate_limit, now) {
+                cooldowns.push(cooldown.as_secs());
+            }
+        }
+        for _ in 0..5 {
+            cooldowns.push(breaker.record_failure(&rate_limit, now).unwrap().as_secs());
+        }
+
+        assert_eq!(cooldowns, vec![300, 900, 2700, 10_800, 21_600, 21_600]);
+    }
+
+    #[test]
+    fn provenance_root_matching_is_exact_not_substring() {
+        assert!(source_id_has_root(
+            "trajectory:memo:0-0:root-a:hash",
+            "root-a"
+        ));
+        assert!(!source_id_has_root(
+            "trajectory:memo:0-0:root-ab:hash",
+            "root-a"
+        ));
+        assert!(!source_id_has_root("root-a:memo:0-0:other:hash", "root-a"));
+        assert!(!source_id_has_root("malformed-root-a", "root-a"));
+        assert!(!source_id_has_root("trajectory:memo:0-0:root-a:hash", ""));
+    }
 
     fn extraction_with_memo(memo_type: &str, content: &str) -> ExtractionResult {
         ExtractionResult {

@@ -27,6 +27,8 @@ use super::tool_mcp::ToolMCP;
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Debug)]
 pub struct CommonMCPSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_tools: Option<Vec<String>>,
     #[serde(
         default = "default_init_timeout",
         serialize_with = "serialize_num_to_str",
@@ -88,6 +90,7 @@ pub fn default_reconnect_enabled() -> bool {
 impl Default for CommonMCPSettings {
     fn default() -> Self {
         Self {
+            operator_tools: None,
             init_timeout: default_init_timeout(),
             request_timeout: default_request_timeout(),
             health_check_interval: default_health_check_interval(),
@@ -208,6 +211,12 @@ fn build_mcp_tool_boxes(
     let server_prefix = tool_name_server_prefix(config_path);
     let kept: Vec<&rmcp::model::Tool> = tools
         .iter()
+        .filter(|tool| {
+            mcp_common
+                .operator_tools
+                .as_ref()
+                .is_none_or(|names| names.iter().any(|name| name == tool.name.as_ref()))
+        })
         .filter(|tool| {
             !mcp_common
                 .disabled_tools
@@ -752,6 +761,12 @@ macro_rules! impl_mcp_integration_trait {
                 self.cfg = serde_json::from_value(value.clone())?;
                 self.common = serde_json::from_value(value.clone())?;
                 self.config_path = config_path.clone();
+                // Operator-owned restricted entries are durable on disk, but a normal
+                // settings reload/restart is not authority to reconnect or republish them.
+                // Only McpSessionOwner may create their live session after a fresh grant.
+                if self.cfg.common.operator_tools.is_some() {
+                    return Ok(());
+                }
                 crate::integrations::mcp::integr_mcp_common::mcp_session_setup(
                     gcx,
                     config_path,
@@ -843,6 +858,12 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
     reconnect_max_attempts: u64,
     reconnect_enabled: bool,
 ) {
+    // Persisted operator policy is not a reusable launch grant. Only the exact-authorized
+    // owner may connect/replace these sessions. Native readers may serve its active catalog.
+    if new_cfg_value.get("operator_tools").is_some() {
+        return;
+    }
+
     let session_key = format!("{}", config_path);
 
     let session_arc = {
@@ -977,7 +998,13 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 }
             }
 
+            let operator_tools: Option<Vec<String>> = new_cfg_value
+                .get("operator_tools")
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok());
+            let restricted = operator_tools.is_some();
             let handler = McpClientHandler {
+                restricted,
                 peer_arc: peer_arc_clone.clone(),
                 session_arc: session_arc_clone.clone(),
                 logs: logs.clone(),
@@ -1002,7 +1029,11 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
             {
                 Some(client) => client,
                 None => {
-                    let probe_result = match transport_initializer.remote_probe_info() {
+                    let probe_result = match if restricted {
+                        None
+                    } else {
+                        transport_initializer.remote_probe_info()
+                    } {
                         Some((url, headers, auth))
                             if matches!(auth.auth_type, AuthType::None | AuthType::Bearer) =>
                         {
@@ -1110,6 +1141,14 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                     return;
                 }
             };
+            let tools: Vec<_> = tools
+                .into_iter()
+                .filter(|tool| {
+                    operator_tools
+                        .as_ref()
+                        .is_none_or(|names| names.iter().any(|name| name == tool.name.as_ref()))
+                })
+                .collect();
             let tools_len = tools.len();
 
             let peer = client.peer().clone();
@@ -1121,7 +1160,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 .map(|s| s.capabilities.clone())
                 .unwrap_or_default();
 
-            let resources = if capabilities.resources.is_some() {
+            let resources = if !restricted && capabilities.resources.is_some() {
                 match timeout(
                     Duration::from_secs(request_timeout),
                     client.list_all_resources(),
@@ -1143,7 +1182,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 vec![]
             };
 
-            let prompts = if capabilities.prompts.is_some() {
+            let prompts = if !restricted && capabilities.prompts.is_some() {
                 match timeout(
                     Duration::from_secs(request_timeout),
                     client.list_all_prompts(),
@@ -1223,7 +1262,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
             )
             .await;
 
-            if reconnect_enabled {
+            if reconnect_enabled && !restricted {
                 let health_task = tokio::spawn(mcp_health_monitor(
                     session_arc_clone.clone(),
                     transport_initializer.clone(),
@@ -1464,6 +1503,7 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
 
         let peer_arc: Arc<AMutex<Option<Peer<RoleClient>>>> = Arc::new(AMutex::new(None));
         let handler = McpClientHandler {
+            restricted: false,
             peer_arc: peer_arc.clone(),
             session_arc: session_arc.clone(),
             logs: logs.clone(),
@@ -1844,6 +1884,47 @@ mod tests {
 
         session.launched_cfg = serde_json::Value::Null;
         assert!(!should_skip_mcp_session_setup(session, &with_tokens));
+    }
+
+    #[tokio::test]
+    async fn persisted_operator_config_is_not_a_native_reconnect_grant() {
+        #[derive(Clone)]
+        struct CountInitializer(Arc<AtomicU32>);
+        #[async_trait::async_trait]
+        impl MCPTransportInitializer for CountInitializer {
+            async fn init_mcp_transport(
+                &self,
+                _logs: Arc<AMutex<Vec<String>>>,
+                _debug_name: String,
+                _init_timeout: u64,
+                _request_timeout: u64,
+                _session: Arc<AMutex<Box<dyn IntegrationSession>>>,
+                _handler: McpClientHandler,
+            ) -> Option<McpRunningService> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+        }
+        let cfg = serde_json::json!({
+            "operator_tools": ["read"],
+            "available": {"on_your_laptop": true, "when_isolated": false}
+        });
+        let attempts = Arc::new(AtomicU32::new(0));
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        mcp_session_setup(
+            gcx.clone(),
+            "/scratch/mcp_operator_fixture.yaml".into(),
+            cfg,
+            CountInitializer(attempts.clone()),
+            1,
+            1,
+            1,
+            1,
+            false,
+        )
+        .await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        assert!(gcx.integration_sessions.lock().await.is_empty());
     }
 
     #[tokio::test]

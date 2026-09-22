@@ -308,7 +308,7 @@ pub fn try_apply_goal_nudge(
         apply_goal_terminal_status(session, status, trigger, now_ms);
         return GoalNudgeOutcome::BudgetExhausted(status);
     }
-    if crate::chat::summarization::compression_attempt_active(session) {
+    if crate::chat::context_rebuild::compression_attempt_active(session) {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Busy);
     }
     if intentionally_waiting(execution) {
@@ -1192,6 +1192,8 @@ mod tests {
     fn goal_monitor_does_not_fire_when_user_message_queued() {
         let (mut session, now) = old_idle_session();
         session.command_queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "queued-user".to_string(),
             priority: false,
             command: ChatCommand::UserMessage {
@@ -1763,78 +1765,71 @@ mod tests {
     #[test]
     fn goal_monitor_active_compression_is_busy_and_not_interrupted() {
         let now = Instant::now();
-        let mut sessions = Vec::new();
+        for age_ms in [0, 16 * 60 * 1000] {
+            let mut session = active_goal_session();
+            let abort = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            // Rebuilds reserve an idle session, not a concurrently running stream.
+            session.active_compression_attempt = Some(7);
+            session.compression_abort_flag = Some(abort.clone());
+            session.compression_attempt_started_at_ms = Some(epoch_ms_now().saturating_sub(age_ms));
+            session.is_compressing = true;
+            session.runtime.is_compressing = true;
+            session.compression_phase = Some(CompressionPhase::Running);
+            session.runtime.compression_phase = Some(CompressionPhase::Running);
+            session.last_activity = now - Duration::from_secs(40);
 
-        let mut session_flag = active_goal_session();
-        session_flag.is_compressing = true;
-        sessions.push(("session flag", session_flag));
-
-        let mut runtime_flag = active_goal_session();
-        runtime_flag.runtime.is_compressing = true;
-        sessions.push(("runtime flag", runtime_flag));
-
-        let mut session_phase = active_goal_session();
-        session_phase.compression_phase = Some(CompressionPhase::Checking);
-        sessions.push(("session phase", session_phase));
-
-        let mut runtime_phase = active_goal_session();
-        runtime_phase.runtime.compression_phase = Some(CompressionPhase::Running);
-        sessions.push(("runtime phase", runtime_phase));
-
-        let mut active_attempt = active_goal_session();
-        active_attempt.active_compression_attempt = Some(7);
-        sessions.push(("active attempt", active_attempt));
-
-        for (source, mut session) in sessions {
-            session.start_stream();
-            match source {
-                "session flag" => session.is_compressing = true,
-                "runtime flag" => session.runtime.is_compressing = true,
-                "session phase" => session.compression_phase = Some(CompressionPhase::Checking),
-                "runtime phase" => {
-                    session.runtime.compression_phase = Some(CompressionPhase::Running)
-                }
-                "active attempt" => {
-                    session.active_compression_attempt = Some(7);
-                    session.compression_attempt_started_at_ms = Some(epoch_ms_now());
-                }
-                _ => unreachable!(),
-            }
-            session.last_activity = now - Duration::from_secs(10);
-
+            assert!(
+                session.start_stream().is_none(),
+                "live reservation must refuse generation"
+            );
             assert_eq!(
                 apply_monitor(&mut session, 10_000, now),
                 GoalNudgeOutcome::Skipped(GoalNudgeSkip::Busy),
-                "compression indicated by {source} must stay busy"
+                "live reservation must stay busy even at age {age_ms}ms"
             );
-            assert!(!session.abort_flag.load(Ordering::SeqCst), "{source}");
-            assert!(
-                !session.user_interrupt_flag.load(Ordering::SeqCst),
-                "{source}"
-            );
-            assert_eq!(session.runtime.state, SessionState::Generating, "{source}");
-            assert!(session.command_queue.is_empty(), "{source}");
+            assert!(!abort.load(Ordering::SeqCst));
+            assert!(!session.abort_flag.load(Ordering::SeqCst));
+            assert!(!session.user_interrupt_flag.load(Ordering::SeqCst));
+            assert_eq!(session.active_compression_attempt, Some(7));
+            assert_eq!(session.runtime.state, SessionState::Idle);
+            assert!(session.draft_message.is_none());
+            assert!(session.command_queue.is_empty());
+            assert!(session.delivery_wake_sources.is_empty());
+            assert!(session.pending_deliveries.is_empty());
         }
     }
 
     #[test]
-    fn goal_monitor_stale_compression_attempt_does_not_block_recovery() {
-        let mut session = active_goal_session();
+    fn goal_monitor_canceled_compression_attempt_does_not_block_recovery() {
         let now = Instant::now();
-        session.start_stream();
-        session.is_compressing = true;
-        session.runtime.is_compressing = true;
-        session.compression_phase = Some(CompressionPhase::Running);
-        session.runtime.compression_phase = Some(CompressionPhase::Running);
-        session.active_compression_attempt = Some(7);
-        session.compression_attempt_started_at_ms =
-            Some(epoch_ms_now().saturating_sub(16 * 60 * 1000));
-        session.last_activity = now - Duration::from_secs(40);
+        for age_ms in [0, 16 * 60 * 1000] {
+            let mut session = active_goal_session();
+            let abort = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            session.is_compressing = true;
+            session.runtime.is_compressing = true;
+            session.compression_phase = Some(CompressionPhase::Running);
+            session.runtime.compression_phase = Some(CompressionPhase::Running);
+            session.active_compression_attempt = Some(7);
+            session.compression_abort_flag = Some(abort.clone());
+            session.compression_attempt_started_at_ms = Some(epoch_ms_now().saturating_sub(age_ms));
+            session.last_activity = now - Duration::from_secs(40);
 
-        assert_eq!(
-            apply_monitor(&mut session, 10_000, now),
-            GoalNudgeOutcome::Nudged(GoalNudgeReason::GeneratingNoTokens)
-        );
+            // AttemptGuard cancels synchronously; same-owner status cleanup may
+            // still be waiting for the session lock. Age alone is not cancellation.
+            abort.store(true, Ordering::SeqCst);
+            assert_eq!(
+                apply_monitor(&mut session, 10_000, now),
+                GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle),
+                "canceled reservation must recover immediately at age {age_ms}ms"
+            );
+            assert!(!session.abort_flag.load(Ordering::SeqCst));
+            assert!(!session.user_interrupt_flag.load(Ordering::SeqCst));
+            assert!(!session.delivery_wake_sources.is_empty());
+            assert!(
+                session.start_stream().is_some(),
+                "canceled reservation must allow generation"
+            );
+        }
     }
 
     #[test]
@@ -1898,6 +1893,8 @@ mod tests {
     fn goal_monitor_pending_non_user_command_prevents_double_fire() {
         let (mut session, now) = old_idle_session();
         session.command_queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
             client_request_id: "queued-regenerate".to_string(),
             priority: true,
             command: ChatCommand::Regenerate {},

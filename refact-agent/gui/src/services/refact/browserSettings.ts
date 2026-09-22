@@ -3,6 +3,8 @@ import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import type { RootState } from "../../app/store";
 import { buildApiUrlFromState } from "./apiUrl";
 
+export type BrowserGpuMode = "disabled" | "software" | "hardware";
+
 export interface BrowserLaunchSettings {
   chrome_path: string;
   headless: boolean;
@@ -13,6 +15,7 @@ export interface BrowserLaunchSettings {
   downloads_dir: string;
   proxy_server: string;
   proxy_bypass: string;
+  gpu: BrowserGpuMode;
 }
 
 export interface BrowserLifecycleSettings {
@@ -48,6 +51,7 @@ export interface BrowserCaptureSettings {
   max_extract_links: number;
   max_extract_table_rows: number;
   default_all_texts: number;
+  max_eval_result_chars: number;
 }
 
 export interface BrowserSettings {

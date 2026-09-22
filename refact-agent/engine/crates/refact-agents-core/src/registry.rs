@@ -20,11 +20,149 @@ use crate::types::{
 #[cfg(test)]
 use crate::types::BgAgentKind;
 
+const MAX_INBOX_MESSAGES: usize = 100;
+/// Native steering notes are bounded by the mandate's own note capacity; a
+/// full queue rejects instead of silently discarding an earlier authorization.
+pub const MAX_NATIVE_NOTES: usize = 12;
+
 #[derive(Debug, Clone)]
 pub struct InboxMessage {
     pub from: String,
     pub text: String,
     pub queued_at: DateTime<Utc>,
+}
+
+type NativeNoteAuthorizer = Arc<dyn Fn(&str, &str) -> Result<String, String> + Send + Sync>;
+
+/// A queued native steering note. It carries no text of its own: the text is
+/// produced only by `consume`, which re-runs the native authorization the
+/// owner minted (epoch, expiry, chat and model binding) at delivery time. No
+/// Deserialize implementation exists, so HTTP bodies or model output cannot
+/// manufacture one. Ordinary `InboxMessage`s are untouched by this type.
+#[derive(Clone)]
+pub struct NativeNote {
+    pub control_id: String,
+    pub note_id: String,
+    pub queued_at: DateTime<Utc>,
+    authorize: NativeNoteAuthorizer,
+}
+
+impl std::fmt::Debug for NativeNote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeNote")
+            .field("control_id", &self.control_id)
+            .field("note_id", &self.note_id)
+            .field("queued_at", &self.queued_at)
+            .finish_non_exhaustive()
+    }
+}
+
+impl NativeNote {
+    pub fn new(
+        control_id: String,
+        note_id: String,
+        authorize: impl Fn(&str, &str) -> Result<String, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            control_id,
+            note_id,
+            queued_at: Utc::now(),
+            authorize: Arc::new(authorize),
+        }
+    }
+
+    /// Re-authorize against the consuming chat and model; a revoked, expired,
+    /// re-epoched, rebound, or model-changed grant yields no text at all.
+    pub fn consume(&self, chat_id: &str, model: &str) -> Result<String, String> {
+        (self.authorize)(chat_id, model)
+    }
+}
+
+/// Cooperative pause barrier shared between the owner and the running loop.
+/// `requested` is the owner's intent; `quiescent` is set only by the loop when
+/// it is actually parked at a model/tool boundary, so a status reader can tell
+/// "pause requested, dispatch still in flight" from "no further dispatch".
+#[derive(Default)]
+pub struct PauseGate {
+    requested: AtomicBool,
+    quiescent: AtomicBool,
+    wake: Notify,
+    quiescence: Notify,
+}
+
+impl PauseGate {
+    pub fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    pub fn is_quiescent(&self) -> bool {
+        self.quiescent.load(Ordering::SeqCst)
+    }
+
+    pub fn request(&self) {
+        self.requested.store(true, Ordering::SeqCst);
+    }
+
+    pub fn release(&self) {
+        self.requested.store(false, Ordering::SeqCst);
+        self.wake.notify_waiters();
+    }
+
+    /// Unblock a parked loop without releasing the pause; the loop observes
+    /// the abort flag and exits instead of dispatching.
+    pub fn wake_for_abort(&self) {
+        self.wake.notify_waiters();
+    }
+
+    /// Resolves once the loop has actually parked, or immediately if it is
+    /// already parked. Deterministic test hook; never used by the owner path.
+    pub async fn quiesced(&self) {
+        loop {
+            let notified = self.quiescence.notified();
+            if self.is_quiescent() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Park while a pause is requested. Returns `true` when the wait ended
+    /// because of cancellation, so the caller must not dispatch. The in-flight
+    /// outcome the caller already holds is untouched by this call.
+    pub async fn hold(&self, abort: Option<&AtomicBool>) -> bool {
+        let aborted = || abort.is_some_and(|flag| flag.load(Ordering::SeqCst));
+        loop {
+            // Register before checking state: Notify does not retain a
+            // notify_waiters permit, so reversing this order can lose a
+            // release/cancel wake between the check and await.
+            let notified = self.wake.notified();
+            if aborted() {
+                self.quiescent.store(false, Ordering::SeqCst);
+                return true;
+            }
+            if !self.is_requested() {
+                self.quiescent.store(false, Ordering::SeqCst);
+                return false;
+            }
+            if !self.quiescent.swap(true, Ordering::SeqCst) {
+                self.quiescence.notify_waiters();
+            }
+            notified.await;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PauseStatus {
+    pub requested: bool,
+    /// The loop is parked at a boundary: no model or tool dispatch will start
+    /// until release or cancellation.
+    pub quiescent: bool,
+    pub running_tool: Option<String>,
+    /// Tools run to their next await point; cancellation never interrupts a
+    /// synchronous tool body, it only prevents the next dispatch.
+    pub running_tool_cancelable: bool,
+    pub queued_native_notes: usize,
 }
 
 #[derive(Clone)]
@@ -33,6 +171,8 @@ pub struct AgentRuntime {
     pub interrupt_notify: Arc<Notify>,
     pub notify: Arc<Notify>,
     pub inbox: Arc<Mutex<VecDeque<InboxMessage>>>,
+    pub pause: Arc<PauseGate>,
+    pub native_notes: Arc<Mutex<VecDeque<NativeNote>>>,
     delivery_state: Arc<Mutex<RunnerDeliveryState>>,
 }
 
@@ -171,6 +311,8 @@ impl BackgroundAgentRegistry {
         let abort_flag = Arc::new(AtomicBool::new(false));
         let notify = Arc::new(Notify::new());
         let inbox = Arc::new(Mutex::new(VecDeque::new()));
+        let pause = Arc::new(PauseGate::default());
+        let native_notes = Arc::new(Mutex::new(VecDeque::new()));
         {
             let mut records = self.records.write().await;
             records.insert(agent_id.clone(), record.clone());
@@ -187,6 +329,8 @@ impl BackgroundAgentRegistry {
                     interrupt_notify: Arc::new(Notify::new()),
                     notify: notify.clone(),
                     inbox,
+                    pause,
+                    native_notes,
                     delivery_state: Arc::new(Mutex::new(RunnerDeliveryState::default())),
                 },
             );
@@ -408,6 +552,8 @@ impl BackgroundAgentRegistry {
                     notify: notify.clone(),
                     interrupt_notify: Arc::new(Notify::new()),
                     inbox: Arc::new(Mutex::new(VecDeque::new())),
+                    pause: Arc::new(PauseGate::default()),
+                    native_notes: Arc::new(Mutex::new(VecDeque::new())),
                     delivery_state: Arc::new(Mutex::new(RunnerDeliveryState::default())),
                 },
             );
@@ -1191,8 +1337,11 @@ impl BackgroundAgentRegistry {
         if record.status.is_terminal() {
             return Ok(record);
         }
-        if let Some(abort_flag) = self.abort_flag(agent_id).await {
-            abort_flag.store(true, Ordering::SeqCst);
+        if let Some(runtime) = self.runtime.read().await.get(agent_id).cloned() {
+            runtime.abort_flag.store(true, Ordering::SeqCst);
+            // Cancellation always unblocks a parked pause; the loop then sees
+            // the abort flag and exits without another dispatch.
+            runtime.pause.wake_for_abort();
         }
         self.mark_cancelled(agent_id, reason).await
     }
@@ -1458,6 +1607,41 @@ impl BackgroundAgentRegistry {
             .unwrap_or(DeliveryStatus::Unknown)
     }
 
+    async fn claim_pending_deliveries(
+        &self,
+        agent_id: &str,
+        seal: bool,
+        filter: impl Fn(&PendingDelivery) -> bool,
+    ) -> Result<Vec<PendingDelivery>, String> {
+        let runtime = self
+            .runtime
+            .read()
+            .await
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| "agent is not running in this process".to_string())?;
+        let mut state = runtime.delivery_state.lock().await;
+        let claimed = state.claimed.clone();
+        self.expire_deliveries(agent_id, &claimed).await;
+        let records = self.records.read().await;
+        let record = records
+            .get(agent_id)
+            .ok_or_else(|| "agent not found".to_string())?;
+        let deliveries = record
+            .pending_deliveries
+            .iter()
+            .filter(|delivery| filter(delivery) && !state.claimed.contains(&delivery.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        state
+            .claimed
+            .extend(deliveries.iter().map(|delivery| delivery.id.clone()));
+        if seal {
+            state.sealed = !deliveries.iter().any(|delivery| delivery.wake);
+        }
+        Ok(deliveries)
+    }
+
     pub async fn record_delivery_status(
         &self,
         agent_id: &str,
@@ -1524,33 +1708,10 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         idle: bool,
     ) -> Result<Vec<PendingDelivery>, String> {
-        let runtime = self
-            .runtime
-            .read()
-            .await
-            .get(agent_id)
-            .cloned()
-            .ok_or_else(|| "agent is not running in this process".to_string())?;
-        let mut state = runtime.delivery_state.lock().await;
-        let claimed = state.claimed.clone();
-        self.expire_deliveries(agent_id, &claimed).await;
-        let records = self.records.read().await;
-        let record = records
-            .get(agent_id)
-            .ok_or_else(|| "agent not found".to_string())?;
-        let deliveries = record
-            .pending_deliveries
-            .iter()
-            .filter(|delivery| {
-                (idle || delivery.push != PushMode::WhenIdle)
-                    && !state.claimed.contains(&delivery.id)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        state
-            .claimed
-            .extend(deliveries.iter().map(|delivery| delivery.id.clone()));
-        Ok(deliveries)
+        self.claim_pending_deliveries(agent_id, false, |delivery| {
+            idle || delivery.push != PushMode::WhenIdle
+        })
+        .await
     }
 
     /// Claim the final batch and atomically stop accepting if it cannot rearm the runner.
@@ -1559,31 +1720,8 @@ impl BackgroundAgentRegistry {
         &self,
         agent_id: &str,
     ) -> Result<Vec<PendingDelivery>, String> {
-        let runtime = self
-            .runtime
-            .read()
+        self.claim_pending_deliveries(agent_id, true, |_| true)
             .await
-            .get(agent_id)
-            .cloned()
-            .ok_or_else(|| "agent is not running in this process".to_string())?;
-        let mut state = runtime.delivery_state.lock().await;
-        let claimed = state.claimed.clone();
-        self.expire_deliveries(agent_id, &claimed).await;
-        let records = self.records.read().await;
-        let record = records
-            .get(agent_id)
-            .ok_or_else(|| "agent not found".to_string())?;
-        let deliveries = record
-            .pending_deliveries
-            .iter()
-            .filter(|delivery| !state.claimed.contains(&delivery.id))
-            .cloned()
-            .collect::<Vec<_>>();
-        state
-            .claimed
-            .extend(deliveries.iter().map(|delivery| delivery.id.clone()));
-        state.sealed = !deliveries.iter().any(|delivery| delivery.wake);
-        Ok(deliveries)
     }
 
     pub async fn inbox_for(&self, agent_id: &str) -> Option<Arc<Mutex<VecDeque<InboxMessage>>>> {
@@ -1623,6 +1761,97 @@ impl BackgroundAgentRegistry {
         };
         let mut inbox = inbox.lock().await;
         inbox.drain(..).collect()
+    }
+
+    pub async fn pause_gate(&self, agent_id: &str) -> Option<Arc<PauseGate>> {
+        self.runtime
+            .read()
+            .await
+            .get(agent_id)
+            .map(|runtime| runtime.pause.clone())
+    }
+
+    async fn live_runtime(&self, agent_id: &str) -> Result<AgentRuntime, String> {
+        let record = self
+            .records
+            .read()
+            .await
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| "agent not found".to_string())?;
+        if record.status.is_terminal() {
+            return Err("agent already finished".to_string());
+        }
+        self.runtime
+            .read()
+            .await
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| "agent is not running in this process".to_string())
+    }
+
+    /// Queue a native steering note. Returns `Ok(false)` when the same control
+    /// identity is already queued, so a retried request never duplicates.
+    pub async fn push_native_note(&self, agent_id: &str, note: NativeNote) -> Result<bool, String> {
+        let runtime = self.live_runtime(agent_id).await?;
+        let mut notes = runtime.native_notes.lock().await;
+        if notes
+            .iter()
+            .any(|queued| queued.control_id == note.control_id)
+        {
+            return Ok(false);
+        }
+        if notes.len() >= MAX_NATIVE_NOTES {
+            return Err("native note queue capacity reached".to_string());
+        }
+        notes.push_back(note);
+        Ok(true)
+    }
+
+    pub async fn drain_native_notes(&self, agent_id: &str) -> Vec<NativeNote> {
+        let Some(notes) = self
+            .runtime
+            .read()
+            .await
+            .get(agent_id)
+            .map(|runtime| runtime.native_notes.clone())
+        else {
+            return Vec::new();
+        };
+        let mut notes = notes.lock().await;
+        notes.drain(..).collect()
+    }
+
+    pub async fn request_pause(&self, agent_id: &str) -> Result<PauseStatus, String> {
+        self.live_runtime(agent_id).await?.pause.request();
+        self.pause_status(agent_id)
+            .await
+            .ok_or_else(|| "agent is not running in this process".to_string())
+    }
+
+    pub async fn release_pause(&self, agent_id: &str) -> Result<PauseStatus, String> {
+        self.live_runtime(agent_id).await?.pause.release();
+        self.pause_status(agent_id)
+            .await
+            .ok_or_else(|| "agent is not running in this process".to_string())
+    }
+
+    pub async fn pause_status(&self, agent_id: &str) -> Option<PauseStatus> {
+        let runtime = self.runtime.read().await.get(agent_id).cloned()?;
+        let running_tool = self
+            .records
+            .read()
+            .await
+            .get(agent_id)
+            .and_then(|record| record.current_tool.clone());
+        let queued_native_notes = runtime.native_notes.lock().await.len();
+        Some(PauseStatus {
+            requested: runtime.pause.is_requested(),
+            quiescent: runtime.pause.is_quiescent(),
+            running_tool,
+            running_tool_cancelable: false,
+            queued_native_notes,
+        })
     }
 
     pub async fn overlap_warning(
@@ -3017,5 +3246,97 @@ mod tests {
                 .unwrap_err(),
             "invalid merge status"
         );
+    }
+
+    #[tokio::test]
+    async fn pause_gate_parks_until_release_and_cancel_always_wakes() {
+        let (_temp, registry) = registry().await;
+        let (record, abort, _) = registry.create(request("parent")).await.unwrap();
+        let gate = registry.pause_gate(&record.agent_id).await.unwrap();
+        assert!(!gate.hold(Some(&abort)).await);
+        let status = registry.request_pause(&record.agent_id).await.unwrap();
+        assert!(status.requested && !status.quiescent);
+        let held = tokio::spawn({
+            let gate = gate.clone();
+            let abort = abort.clone();
+            async move { gate.hold(Some(&abort)).await }
+        });
+        gate.quiesced().await;
+        assert!(
+            registry
+                .pause_status(&record.agent_id)
+                .await
+                .unwrap()
+                .quiescent
+        );
+        registry.release_pause(&record.agent_id).await.unwrap();
+        assert!(!held.await.unwrap());
+        assert!(!gate.is_quiescent());
+        registry.request_pause(&record.agent_id).await.unwrap();
+        let held = tokio::spawn({
+            let gate = gate.clone();
+            let abort = abort.clone();
+            async move { gate.hold(Some(&abort)).await }
+        });
+        gate.quiesced().await;
+        registry
+            .cancel("parent", &record.agent_id, Some("cancel".into()))
+            .await
+            .unwrap();
+        assert!(held.await.unwrap());
+        assert!(registry.request_pause(&record.agent_id).await.is_err());
+        assert!(registry.release_pause(&record.agent_id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn native_notes_dedupe_by_control_identity_and_reject_at_capacity() {
+        let (_temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+        let note = |control: &str| {
+            NativeNote::new(control.to_string(), "n1".to_string(), |_, _| {
+                Ok("text".into())
+            })
+        };
+        assert!(registry
+            .push_native_note(&record.agent_id, note("c1"))
+            .await
+            .unwrap());
+        assert!(!registry
+            .push_native_note(&record.agent_id, note("c1"))
+            .await
+            .unwrap());
+        for index in 1..MAX_NATIVE_NOTES {
+            registry
+                .push_native_note(&record.agent_id, note(&format!("c{index}-extra")))
+                .await
+                .unwrap();
+        }
+        assert!(registry
+            .push_native_note(&record.agent_id, note("overflow"))
+            .await
+            .is_err());
+        assert_eq!(
+            registry
+                .pause_status(&record.agent_id)
+                .await
+                .unwrap()
+                .queued_native_notes,
+            MAX_NATIVE_NOTES
+        );
+        let drained = registry.drain_native_notes(&record.agent_id).await;
+        assert_eq!(drained.len(), MAX_NATIVE_NOTES);
+        assert_eq!(drained[0].control_id, "c1");
+        assert!(registry
+            .drain_native_notes(&record.agent_id)
+            .await
+            .is_empty());
+        registry
+            .mark_completed(&record.agent_id, completion())
+            .await
+            .unwrap();
+        assert!(registry
+            .push_native_note(&record.agent_id, note("late"))
+            .await
+            .is_err());
     }
 }

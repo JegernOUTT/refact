@@ -27,6 +27,8 @@ struct StatusResponse {
     pid: u32,
     version: String,
     executable_sha256: Option<String>,
+    installed_image_sha256: Option<String>,
+    running_image_sha256: Option<String>,
     port: u16,
     started_at_ms: u64,
     uptime_secs: u64,
@@ -135,6 +137,58 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
         .route("/daemon/v1/update/check", get(update_check))
         .route("/daemon/v1/update/install", post(update_install))
         .route("/daemon/v1/update/status", get(update_status))
+        .route(
+            "/daemon/v1/projects/:id/candidate-installation/:hash/observation",
+            get(observe_candidate_installation),
+        )
+        .route(
+            "/daemon/v1/projects/:id/candidate-installation/prepare",
+            post(prepare_candidate_installation).layer(DefaultBodyLimit::max(16384)),
+        )
+        .route(
+            "/daemon/v1/projects/:id/candidate-installation/grant",
+            post(grant_candidate_installation).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/daemon/v1/projects/:id/candidate-installation",
+            post(candidate_installation).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/daemon/v1/projects/:id/operator/policy/preview",
+            post(preview_operator_policy).layer(DefaultBodyLimit::max(16384)),
+        )
+        .route(
+            "/daemon/v1/projects/:id/operator/policy/confirm",
+            post(confirm_operator_policy).layer(DefaultBodyLimit::max(16384)),
+        )
+        .route(
+            "/daemon/v1/projects/:id/host-release/prepare",
+            post(prepare_host_release).layer(DefaultBodyLimit::max(16384)),
+        )
+        .route(
+            "/daemon/v1/projects/:id/host-release/grant",
+            post(grant_host_release).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/daemon/v1/projects/:id/host-release/dispatch",
+            post(dispatch_host_release).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/daemon/v1/projects/:id/host-release/artifact",
+            post(artifact_host_release).layer(DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/daemon/v1/projects/:id/host-release/receipt",
+            post(receipt_host_release).layer(DefaultBodyLimit::max(16384)),
+        )
+        .route(
+            "/daemon/v1/projects/:id/host-release/observe",
+            post(observe_host_release).layer(DefaultBodyLimit::max(16384)),
+        )
+        .route(
+            "/daemon/v1/projects/:id/gui-owner/observe",
+            post(gui_owner_observation).layer(DefaultBodyLimit::max(4096)),
+        )
         .route("/daemon/v1/shutdown", post(shutdown))
         .route("/daemon/v1/events", get(events))
         .route("/daemon/v1/workers", get(workers))
@@ -145,6 +199,21 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
             post(crate::daemon::fs_browse::browse),
         )
         .route("/daemon/v1/worker-status", post(worker_status))
+        .route(
+            "/daemon/v1/buddy/worker-projection",
+            post(buddy_worker_projection).layer(DefaultBodyLimit::max(65_536)),
+        )
+        .route(
+            "/daemon/v1/projects/:id/buddy-wake-grant",
+            get(buddy_wake_get)
+                .post(buddy_wake_issue)
+                .delete(buddy_wake_revoke)
+                .layer(DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/daemon/v1/projects/:id/buddy-projection",
+            get(buddy_project_projection),
+        )
         .route(
             "/daemon/v1/projects/open",
             post(crate::daemon::projects::open_project),
@@ -238,11 +307,19 @@ async fn status(State((state, port)): State<(Arc<DaemonState>, u16)>) -> Json<St
         tokio::task::spawn_blocking(crate::daemon::state::current_executable_sha256)
             .await
             .unwrap_or(None);
+    let running_image_sha256 = None;
+    // Health polling must not rehash the kernel and installed images on every
+    // request. Exact native-image reconciliation belongs to the authenticated
+    // candidate-installation observation endpoint; null here means unobserved,
+    // never that the installed and running images are equal.
+    let installed_image_sha256 = None;
     Json(StatusResponse {
         pid: std::process::id(),
         version: state.version.clone(),
         executable_sha256,
         port,
+        installed_image_sha256,
+        running_image_sha256,
         started_at_ms: state.started_at_ms,
         uptime_secs,
         workers: state.supervisor.worker_count().await,
@@ -385,6 +462,718 @@ async fn update_install(
         Json(json!({"started": true, "target_version": target_version})),
     )
         .into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrepareInstallationRequest {
+    spec: refact_buddy_core::operator_types::ActionSpec,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantInstallationRequest {
+    prepared_hash: String,
+    expires_in_seconds: u32,
+}
+
+async fn prepare_candidate_installation(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<PrepareInstallationRequest>,
+) -> Response {
+    installation_producer(state, id, headers, Some(request.spec), None).await
+}
+async fn grant_candidate_installation(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<GrantInstallationRequest>,
+) -> Response {
+    installation_producer(state, id, headers, None, Some(request)).await
+}
+
+async fn installation_producer(
+    state: Arc<DaemonState>,
+    id: String,
+    headers: HeaderMap,
+    spec: Option<refact_buddy_core::operator_types::ActionSpec>,
+    grant: Option<GrantInstallationRequest>,
+) -> Response {
+    if !buddy_user_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (id, spec, grant);
+        StatusCode::NOT_IMPLEMENTED.into_response()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let result: Result<serde_json::Value, String> = async {
+            use crate::buddy::{resource_execution::*, action_execution::*, improvement::installation::*};
+            use crate::buddy::resources::AsyncResourceAdapter;
+            use refact_buddy_core::operator_types::*;
+            let _execution = execution_gate().lock().await;
+            let update = state.update_state.lock().await;
+            if state.is_shutting_down() || update_phase_active(&update.phase) { return Err("daemon update/shutdown active".into()); }
+            let _drained = state.supervisor.installation_drained().await?;
+            let registry = state.projects.read().await;
+            let entry = registry.get(&id).ok_or("registered project unavailable")?;
+            let project = ProjectIdentity { project_id: entry.id.clone(), canonical_root: entry.root.to_string_lossy().into_owned() };
+            let worker = WorkerIdentity { worker_id: "daemon-native-installer".into(), engine_instance_id: format!("daemon:{}:{}", std::process::id(), state.started_at_ms), epoch: state.started_at_ms };
+            let runtime = crate::buddy::outcome_runtime::OutcomeRuntime::open(&entry.root, project, worker).map_err(|e| e.to_string())?;
+            let result = async {
+                if let Some(mut spec) = spec {
+                    let reference = spec.parameter_ref.clone().ok_or("draft missing")?;
+                    let draft = load_draft::<InstallationDraft>(&runtime, reference).await.map_err(|e| e.to_string())?.ok_or("draft missing")?;
+                    validate_spec(&spec, &draft).map_err(|e| e.to_string())?;
+                    if spec.project != runtime.project() { return Err("project changed".into()); }
+                    let adapter = DaemonInstallationAdapter { registry: state.supervisor.native_exec.clone(), shutdown: state.supervisor.native_shutdown.clone(), runtime: runtime.clone(), request: NativeRequest { prepared_hash: String::new(), grant_id: String::new() }, executable: state.relaunch_executable()?.to_path_buf(), spec: spec.clone() };
+                    let caps = adapter.capabilities();
+                    adapter.preview(&spec).await.map_err(|e| format!("{e:?}"))?;
+                    spec.capabilities = ActionCapabilities { can_preview: caps.preview, can_execute: caps.apply, can_verify: caps.verify, can_recover: caps.recover, can_cancel: false };
+                    let prepared = PreparedAction { spec_hash: action_spec_hash(&spec, &spec.parameter_ref), bound_parameter_ref: spec.parameter_ref.clone(), spec };
+                    bind_prepared_draft(&runtime, &prepared).await.map_err(|e| e.to_string())?;
+                    let value = json!({"schema_version": 1, "project": runtime.project(), "payload": prepared, "daemon_prepared_by": state.config.auth.username, "daemon_preparation_version": 1});
+                    let key = prepared.spec_hash.clone();
+                    runtime.with_store(move |s| s.put_document("prepared_action", &key, &value, None)).await.map_err(|e| e.to_string())?;
+                    Ok(json!({"prepared": prepared, "authority": "daemon_user_only", "running_upgrade_verified": false}))
+                } else {
+                    let request = grant.ok_or("request missing")?;
+                    if !(1..=3600).contains(&request.expires_in_seconds) { return Err("invalid grant duration".into()); }
+                    let prepared = load_prepared(&runtime, request.prepared_hash.clone()).await?;
+                    let key = request.prepared_hash.clone();
+                    let user = state.config.auth.username.clone().ok_or("user unavailable")?;
+                    runtime.with_store(move |s| {
+                        let value = s.get_document::<serde_json::Value>("prepared_action", &key)?.ok_or(crate::buddy::operator_store::OperatorStoreError::Conflict("preparation missing"))?.value;
+                        if value["daemon_prepared_by"].as_str() != Some(user.as_str()) || value["daemon_preparation_version"] != 1 { return Err(crate::buddy::operator_store::OperatorStoreError::Conflict("daemon user preparation required")); }
+                        Ok(())
+                    }).await.map_err(|e| e.to_string())?;
+                    validate_prepared_draft(&runtime, &prepared).await?;
+                    let draft = load_draft::<InstallationDraft>(&runtime, prepared.spec.parameter_ref.clone().ok_or("draft missing")?).await.map_err(|e| e.to_string())?.ok_or("draft missing")?;
+                    validate_spec(&prepared.spec, &draft).map_err(|e| e.to_string())?;
+                    if prepared.spec.project != runtime.project() || !prepared.spec.capabilities.can_execute { return Err("daemon preparation required".into()); }
+                    DaemonInstallationAdapter { registry: state.supervisor.native_exec.clone(), shutdown: state.supervisor.native_shutdown.clone(), runtime: runtime.clone(), request: NativeRequest { prepared_hash: prepared.spec_hash.clone(), grant_id: String::new() }, executable: state.relaunch_executable()?.to_path_buf(), spec: prepared.spec.clone() }.preview(&prepared.spec).await.map_err(|e| format!("{e:?}"))?;
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let value = ExactActionGrant {
+                        native_rights: None, recovery_execution_id: None, spec_hash: request.prepared_hash,
+                        requester: NativeSourceIdentity { source_kind: NativeSourceKind::External, source_id: state.config.auth.username.clone().ok_or("user unavailable")?, source_version: "daemon-basic-user-v1".into() },
+                        decision: Some(DecisionReference { project: runtime.project(), worker: runtime.worker(), native: NativeSourceIdentity { source_kind: NativeSourceKind::External, source_id: id.clone(), source_version: "daemon-installation-grant-v1".into() } }),
+                        expires_at: (chrono::Utc::now() + chrono::Duration::seconds(request.expires_in_seconds.into())).to_rfc3339(), revoked: false,
+                    };
+                    persist_grant(&runtime, id.clone(), value.clone()).await.map_err(|e| e.to_string())?;
+                    Ok(json!({"grant_id": id, "grant": value}))
+                }
+            }.await;
+            runtime.shutdown().await;
+            result
+        }.await;
+        match result {
+            Ok(value) => Json(value).into_response(),
+            Err(error) => (StatusCode::CONFLICT, Json(json!({"error": error}))).into_response(),
+        }
+    }
+}
+
+async fn prepare_host_release(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<PrepareInstallationRequest>,
+) -> Response {
+    host_release_producer(state, id, headers, Some(request.spec), None).await
+}
+async fn grant_host_release(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<GrantInstallationRequest>,
+) -> Response {
+    host_release_producer(state, id, headers, None, Some(request)).await
+}
+
+async fn host_release_producer(
+    state: Arc<DaemonState>,
+    id: String,
+    headers: HeaderMap,
+    spec: Option<refact_buddy_core::operator_types::ActionSpec>,
+    grant: Option<GrantInstallationRequest>,
+) -> Response {
+    if !buddy_user_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (id, spec, grant);
+        StatusCode::NOT_IMPLEMENTED.into_response()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let result: Result<serde_json::Value, String> = async {
+            use crate::buddy::{resource_execution::*, action_execution::*, improvement::installation::{NativeRequest, release::*}};
+            use crate::buddy::resources::AsyncResourceAdapter;
+            use refact_buddy_core::operator_types::*;
+            let _execution = execution_gate().lock().await;
+            let update = state.update_state.lock().await;
+            if state.is_shutting_down() || update_phase_active(&update.phase) { return Err("daemon update/shutdown active".into()); }
+            let _drained = state.supervisor.installation_drained().await?;
+            let registry = state.projects.read().await;
+            let entry = registry.get(&id).ok_or("registered project unavailable")?;
+            let project = ProjectIdentity { project_id: entry.id.clone(), canonical_root: entry.root.to_string_lossy().into_owned() };
+            let worker = WorkerIdentity { worker_id: "daemon-native-host-release".into(), engine_instance_id: format!("daemon:{}:{}", std::process::id(), state.started_at_ms), epoch: state.started_at_ms };
+            let runtime = crate::buddy::outcome_runtime::OutcomeRuntime::open(&entry.root, project, worker).map_err(|e| e.to_string())?;
+            let result = async {
+                if let Some(mut spec) = spec {
+                    let reference = spec.parameter_ref.clone().ok_or("draft missing")?;
+                    let draft = load_draft::<ReleaseDraft>(&runtime, reference).await.map_err(|e| e.to_string())?.ok_or("draft missing")?;
+                    validate_spec(&spec, &draft).map_err(|e| e.to_string())?;
+                    if spec.project != runtime.project() { return Err("project changed".into()); }
+                    let adapter = ReleaseAdapter { runtime: runtime.clone(), native: NativeRequest { prepared_hash: String::new(), grant_id: String::new() }, spec: spec.clone() };
+                    let caps = adapter.capabilities();
+                    adapter.preview(&spec).await.map_err(|e| format!("{e:?}"))?;
+                    spec.capabilities = ActionCapabilities { can_preview: caps.preview, can_execute: caps.apply, can_verify: caps.verify, can_recover: caps.recover, can_cancel: false };
+                    let prepared = PreparedAction { spec_hash: action_spec_hash(&spec, &spec.parameter_ref), bound_parameter_ref: spec.parameter_ref.clone(), spec };
+                    bind_prepared_draft(&runtime, &prepared).await.map_err(|e| e.to_string())?;
+                    let value = json!({"schema_version": 1, "project": runtime.project(), "payload": prepared, "daemon_prepared_by": state.config.auth.username, "daemon_preparation_version": 1});
+                    let key = prepared.spec_hash.clone();
+                    runtime.with_store(move |s| s.put_document("prepared_action", &key, &value, None)).await.map_err(|e| e.to_string())?;
+                    Ok(json!({"prepared": prepared, "authority": "daemon_user_only", "running_upgrade_verified": false}))
+                } else {
+                    let request = grant.ok_or("request missing")?;
+                    if !(1..=3600).contains(&request.expires_in_seconds) { return Err("invalid grant duration".into()); }
+                    let prepared = load_prepared(&runtime, request.prepared_hash.clone()).await?;
+                    let key = request.prepared_hash.clone();
+                    let user = state.config.auth.username.clone().ok_or("user unavailable")?;
+                    runtime.with_store(move |s| {
+                        let value = s.get_document::<serde_json::Value>("prepared_action", &key)?.ok_or(crate::buddy::operator_store::OperatorStoreError::Conflict("preparation missing"))?.value;
+                        if value["daemon_prepared_by"].as_str() != Some(user.as_str()) || value["daemon_preparation_version"] != 1 { return Err(crate::buddy::operator_store::OperatorStoreError::Conflict("daemon user preparation required")); }
+                        Ok(())
+                    }).await.map_err(|e| e.to_string())?;
+                    validate_prepared_draft(&runtime, &prepared).await?;
+                    let draft = load_draft::<ReleaseDraft>(&runtime, prepared.spec.parameter_ref.clone().ok_or("draft missing")?).await.map_err(|e| e.to_string())?.ok_or("draft missing")?;
+                    validate_spec(&prepared.spec, &draft).map_err(|e| e.to_string())?;
+                    if prepared.spec.project != runtime.project() || !prepared.spec.capabilities.can_execute { return Err("daemon preparation required".into()); }
+                    ReleaseAdapter { runtime: runtime.clone(), native: NativeRequest { prepared_hash: prepared.spec_hash.clone(), grant_id: String::new() }, spec: prepared.spec.clone() }.preview(&prepared.spec).await.map_err(|e| format!("{e:?}"))?;
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let value = ExactActionGrant {
+                        native_rights: None, recovery_execution_id: None, spec_hash: request.prepared_hash,
+                        requester: NativeSourceIdentity { source_kind: NativeSourceKind::External, source_id: state.config.auth.username.clone().ok_or("user unavailable")?, source_version: "daemon-basic-user-v1".into() },
+                        decision: Some(DecisionReference { project: runtime.project(), worker: runtime.worker(), native: NativeSourceIdentity { source_kind: NativeSourceKind::External, source_id: id.clone(), source_version: "daemon-installation-grant-v1".into() } }),
+                        expires_at: (chrono::Utc::now() + chrono::Duration::seconds(request.expires_in_seconds.into())).to_rfc3339(), revoked: false,
+                    };
+                    persist_grant(&runtime, id.clone(), value.clone()).await.map_err(|e| e.to_string())?;
+                    Ok(json!({"grant_id": id, "grant": value}))
+                }
+            }.await;
+            runtime.shutdown().await;
+            result
+        }.await;
+        match result {
+            Ok(value) => Json(value).into_response(),
+            Err(error) => (StatusCode::CONFLICT, Json(json!({"error": error}))).into_response(),
+        }
+    }
+}
+
+/// Reconciliation is observation only: never dispatch or replay a restart.
+async fn observe_candidate_installation(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path((id, hash)): axum::extract::Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if !buddy_user_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (id, hash);
+        StatusCode::NOT_IMPLEMENTED.into_response()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let result: Result<serde_json::Value, String> = async {
+            use crate::buddy::improvement::installation::*;
+            let _execution = crate::buddy::resource_execution::execution_gate().lock().await;
+            let _drained = state.supervisor.installation_drained().await?;
+            let registry = state.projects.read().await;
+            let entry = registry.get(&id).ok_or("registered project unavailable")?;
+            let project = refact_buddy_core::operator_types::ProjectIdentity { project_id: entry.id.clone(), canonical_root: entry.root.to_string_lossy().into_owned() };
+            let generation = format!("daemon:{}:{}", std::process::id(), state.started_at_ms);
+            let worker = refact_buddy_core::operator_types::WorkerIdentity { worker_id: "daemon-native-installer".into(), engine_instance_id: generation.clone(), epoch: state.started_at_ms };
+            let runtime = crate::buddy::outcome_runtime::OutcomeRuntime::open(&entry.root, project, worker).map_err(|e| e.to_string())?;
+            let running = refact_self_update::candidate_install::running_digest();
+            let result = match running {
+                Err(error) => Err(error),
+                Ok(running) => runtime.with_store(move |s| {
+                    let stored = s.get_document::<InstallationRecord>(NAMESPACE, &hash)?.ok_or(crate::buddy::operator_store::OperatorStoreError::Conflict("installation record missing"))?;
+                    let mut record = stored.value;
+                    if crate::buddy::improvement::installation::reconcile_running(&mut record, &generation, &running) {
+                        s.put_reserved_document("native_installation", &hash, NAMESPACE, &hash, &record, Some(stored.revision))?;
+                    }
+                    Ok(json!({"native_observation": record, "workers_upgrade_verified": false, "restart_dispatched": false}))
+                }).await.map_err(|e| e.to_string()),
+            };
+            runtime.shutdown().await;
+            result
+        }.await;
+        match result {
+            Ok(value) => Json(value).into_response(),
+            Err(error) => (StatusCode::CONFLICT, Json(json!({"error": error}))).into_response(),
+        }
+    }
+}
+
+async fn candidate_installation(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<crate::buddy::improvement::installation::NativeRequest>,
+) -> Response {
+    if !buddy_user_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (id, request);
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "Native candidate installation supports Linux only",
+        )
+            .into_response();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match consume_candidate_installation(state, id, request).await {
+            Ok(result) => Json(result).into_response(),
+            Err(error) => (StatusCode::CONFLICT, Json(json!({"error": error}))).into_response(),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn consume_candidate_installation(
+    state: Arc<DaemonState>,
+    id: String,
+    request: crate::buddy::improvement::installation::NativeRequest,
+) -> Result<serde_json::Value, String> {
+    use crate::buddy::{improvement::installation::*, resource_execution::*, action_execution::*};
+    let _execution = execution_gate().lock().await;
+    let _update = state.update_state.lock().await;
+    if state.is_shutting_down() || update_phase_active(&_update.phase) {
+        return Err("daemon update/shutdown active".into());
+    }
+    let _drained = state.supervisor.installation_drained().await?;
+    let registry = state.projects.read().await;
+    let entry = registry.get(&id).ok_or("registered project unavailable")?;
+    let project = refact_buddy_core::operator_types::ProjectIdentity {
+        project_id: entry.id.clone(),
+        canonical_root: entry.root.to_string_lossy().into_owned(),
+    };
+    let worker = refact_buddy_core::operator_types::WorkerIdentity {
+        worker_id: "daemon-native-installer".into(),
+        engine_instance_id: format!("daemon:{}:{}", std::process::id(), state.started_at_ms),
+        epoch: state.started_at_ms,
+    };
+    // Existing OperatorStore exclusive owner lock prevents opening a live evaluator.
+    let runtime =
+        crate::buddy::outcome_runtime::OutcomeRuntime::open(&entry.root, project, worker.clone())
+            .map_err(|e| e.to_string())?;
+    let result = async {
+        let prepared = load_prepared(&runtime, request.prepared_hash.clone()).await?;
+        validate_prepared_draft(&runtime, &prepared).await?;
+        let grant = load_grant(&runtime, request.grant_id.clone()).await.map_err(|e| e.to_string())?.ok_or("grant unavailable")?;
+        if !daemon_grant(&grant, &request.grant_id) || !grant.authorize(&prepared.spec, &grant.requester, grant.decision.as_ref()) { return Err("explicit exact daemon user grant unavailable".into()); }
+        let key = prepared.spec_hash.clone();
+        runtime.with_store(move |s| crate::buddy::desk_actions::validate_resource_origin(s, &key)).await.map_err(|e| e.to_string())?;
+        let action = ActionRequest {
+            execution_id: format!("native-install:{}", request.prepared_hash), idempotency_key: format!("native-install:{}", request.prepared_hash),
+            spec: prepared.spec.clone(), bound_parameter_ref: prepared.bound_parameter_ref,
+            requester: grant.requester.clone(), decision: grant.decision.clone(), worker,
+        };
+        let mut catalog = ResourceCatalog::default();
+        catalog.register(ACTION.into(), Arc::new(DaemonInstallationAdapter { registry: state.supervisor.native_exec.clone(), shutdown: state.supervisor.native_shutdown.clone(), runtime: runtime.clone(), request: request.clone(), executable: state.relaunch_executable()?.to_path_buf(), spec: action.spec.clone() })).map_err(|e| format!("{e:?}"))?;
+        let outcome = catalog.service(runtime.clone(), Arc::new(grant)).map_err(|_| "native catalog unavailable")?.execute_async(&action).await;
+        let key = request.prepared_hash.clone();
+        let record = runtime.with_store(move |s| s.get_document::<InstallationRecord>(NAMESPACE, &key)).await.map_err(|e| e.to_string())?;
+        // Restart is separate consent and happens only after ActionService persisted
+        // its terminal receipt. A response-lost duplicate must not restart again.
+        if matches!(&outcome, ActionResult::Finished(value) if value.execution.status == refact_buddy_core::operator_types::ActionExecutionState::Partial) && record.as_ref().is_some_and(|r| r.value.phase == "restart_requested_running_unverified") {
+            let key = request.prepared_hash.clone();
+            let generation = format!("daemon:{}:{}", std::process::id(), state.started_at_ms);
+            runtime.with_store(move |s| {
+                let stored = s.get_document::<InstallationRecord>(NAMESPACE, &key)?.ok_or(crate::buddy::operator_store::OperatorStoreError::Conflict("restart record missing"))?;
+                if stored.value.restart_intent_generation.is_some() { return Err(crate::buddy::operator_store::OperatorStoreError::Conflict("restart already dispatched or outcome unknown")); }
+                let mut record = stored.value;
+                record.restart_intent_generation = Some(generation);
+                record.phase = "restart_dispatch_outcome_unknown".into();
+                s.put_reserved_document("native_installation", &key, NAMESPACE, &key, &record, Some(stored.revision))?;
+                Ok(())
+            }).await.map_err(|e| e.to_string())?;
+            spawn_daemon_relaunch(&state)?;
+            state.request_shutdown("exact_candidate_restart".into());
+        }
+        let key = request.prepared_hash.clone();
+        let record = runtime.with_store(move |s| s.get_document::<InstallationRecord>(NAMESPACE, &key)).await.map_err(|e| e.to_string())?;
+        Ok(json!({"action_result": outcome, "native_observation": record.map(|r| r.value)}))
+    }.await;
+    runtime.shutdown().await;
+    result
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuiOwnerRequest {
+    gui_candidate_id: String,
+    gui_candidate_digest: String,
+    owner_candidate_id: String,
+    owner_candidate_digest: String,
+}
+
+async fn gui_owner_observation(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<GuiOwnerRequest>,
+) -> Response {
+    if !buddy_user_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (id, request);
+        StatusCode::NOT_IMPLEMENTED.into_response()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        native_control_response(async {
+        use crate::buddy::improvement::{self, artifacts};
+        let _execution = crate::buddy::resource_execution::execution_gate().lock().await;
+        let _drained = state.supervisor.installation_drained().await?;
+        let registry = state.projects.read().await;
+        let entry = registry.get(&id).ok_or("registered project unavailable")?;
+        let project = refact_buddy_core::operator_types::ProjectIdentity { project_id: entry.id.clone(), canonical_root: entry.root.to_string_lossy().into_owned() };
+        let store = crate::buddy::operator_store::OperatorStore::open(&entry.root, &project).map_err(|e| e.to_string())?;
+        let gui = improvement::candidate(&store, &request.gui_candidate_id).map_err(|e| e.to_string())?.value;
+        let owner = improvement::candidate(&store, &request.owner_candidate_id).map_err(|e| e.to_string())?.value;
+        if crate::buddy::improvement_evaluation::digest(&gui).map_err(|e| e.to_string())? != request.gui_candidate_digest || crate::buddy::improvement_evaluation::digest(&owner).map_err(|e| e.to_string())? != request.owner_candidate_digest { return Err("candidate binding changed".into()); }
+        let binding = artifacts::gui_owner_binding(&store, &gui, &owner).map_err(|e| format!("{e:?}"))?;
+        let observation = if binding.required_owner == "daemon_engine" { Some(artifacts::observe_daemon_gui(&binding).map_err(|e| format!("{e:?}"))?) } else { None };
+        Ok(json!({"binding": binding, "native_observation": observation, "browser_loaded_verified": false, "standalone_install_supported": false}))
+    }.await)
+    }
+}
+
+fn native_controller_worker(
+    state: &DaemonState,
+    worker_id: &str,
+) -> refact_buddy_core::operator_types::WorkerIdentity {
+    refact_buddy_core::operator_types::WorkerIdentity {
+        worker_id: worker_id.into(),
+        engine_instance_id: format!("daemon:{}:{}", std::process::id(), state.started_at_ms),
+        epoch: state.started_at_ms,
+    }
+}
+
+fn native_control_response(result: Result<serde_json::Value, String>) -> Response {
+    match result {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => (StatusCode::CONFLICT, Json(json!({"error": error}))).into_response(),
+    }
+}
+
+async fn preview_operator_policy(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(proposal): Json<crate::http::routers::v1::buddy_observability::PolicyProposal>,
+) -> Response {
+    if !buddy_user_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let result = async {
+        let registry = state.projects.read().await;
+        let entry = registry.get(&id).ok_or("registered project unavailable")?;
+        let project = refact_buddy_core::operator_types::ProjectIdentity {
+            project_id: entry.id.clone(),
+            canonical_root: entry.root.to_string_lossy().into_owned(),
+        };
+        let root = entry.root.clone();
+        let worker = native_controller_worker(&state, "daemon-native-policy-controller");
+        tokio::task::spawn_blocking(move || {
+            let (before, charge) = crate::buddy::operator_store::OperatorStore::read_document_policy_snapshot(&root, &project)
+                .map_err(|e| e.to_string())?;
+            let preview = crate::http::routers::v1::buddy_observability::preview_policy_control_from_snapshot(
+                before, charge, project, worker, proposal,
+            ).map_err(|e| e.to_string())?;
+            Ok(json!(preview))
+        }).await.map_err(|e| e.to_string())?
+    }.await;
+    native_control_response(result)
+}
+
+async fn confirm_operator_policy(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<crate::http::routers::v1::buddy_observability::PolicyConfirmation>,
+) -> Response {
+    if !buddy_user_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let result = async {
+        use crate::buddy::operator_store::OperatorStore;
+        use refact_buddy_core::operator_types::*;
+        let _execution = crate::buddy::resource_execution::execution_gate()
+            .lock()
+            .await;
+        let update = state.update_state.lock().await;
+        if state.is_shutting_down() || update_phase_active(&update.phase) {
+            return Err("daemon update/shutdown active".into());
+        }
+        let _drained = state.supervisor.installation_drained().await?;
+        let registry = state.projects.read().await;
+        let entry = registry.get(&id).ok_or("registered project unavailable")?;
+        let project = ProjectIdentity {
+            project_id: entry.id.clone(),
+            canonical_root: entry.root.to_string_lossy().into_owned(),
+        };
+        let root = entry.root.clone();
+        let worker = native_controller_worker(&state, "daemon-native-policy-controller");
+        let requester = NativeSourceIdentity {
+            source_kind: NativeSourceKind::External,
+            source_id: state
+                .config
+                .auth
+                .username
+                .clone()
+                .ok_or("user unavailable")?,
+            source_version: "daemon-basic-user-v1".into(),
+        };
+        if request.consent.project != project
+            || request.consent.worker != worker
+            || !request.confirm
+        {
+            return Err("exact native user policy confirmation required".into());
+        }
+        tokio::task::spawn_blocking(move || {
+            OperatorStore::read_document_policy_snapshot(&root, &project)
+                .map_err(|e| e.to_string())?;
+            let mut store = OperatorStore::open(&root, &project).map_err(|e| e.to_string())?;
+            let record = crate::http::routers::v1::buddy_observability::confirm_policy_control(
+                &mut store, &project, &worker, requester, request,
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(json!(record))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    .await;
+    native_control_response(result)
+}
+
+enum HostReleaseControl {
+    Dispatch(crate::buddy::improvement::installation::NativeRequest),
+    Artifact(crate::buddy::improvement::installation::NativeRequest),
+    Receipt(crate::buddy::improvement::installation::release::HostReleaseReceipt),
+    Observe(crate::buddy::improvement::installation::release::HostRunningObservation),
+}
+
+async fn dispatch_host_release(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<crate::buddy::improvement::installation::NativeRequest>,
+) -> Response {
+    host_release_control(state, id, headers, HostReleaseControl::Dispatch(request)).await
+}
+
+async fn artifact_host_release(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<crate::buddy::improvement::installation::NativeRequest>,
+) -> Response {
+    host_release_control(state, id, headers, HostReleaseControl::Artifact(request)).await
+}
+
+async fn receipt_host_release(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<crate::buddy::improvement::installation::release::HostReleaseReceipt>,
+) -> Response {
+    host_release_control(state, id, headers, HostReleaseControl::Receipt(request)).await
+}
+
+async fn observe_host_release(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<crate::buddy::improvement::installation::release::HostRunningObservation>,
+) -> Response {
+    host_release_control(state, id, headers, HostReleaseControl::Observe(request)).await
+}
+
+#[cfg(target_os = "linux")]
+fn host_release_user_binding(
+    store: &crate::buddy::operator_store::OperatorStore,
+    native: &crate::buddy::improvement::installation::NativeRequest,
+    user: &str,
+) -> Result<(), crate::buddy::operator_store::OperatorStoreError> {
+    use crate::buddy::operator_store::OperatorStoreError;
+    use crate::buddy::resource_execution::{ExactActionGrant, ResourceDocument};
+    let preparation = store
+        .get_document::<serde_json::Value>("prepared_action", &native.prepared_hash)?
+        .ok_or(OperatorStoreError::Conflict("native preparation missing"))?;
+    let grant = store
+        .get_document::<ResourceDocument<ExactActionGrant>>("action_grant", &native.grant_id)?
+        .ok_or(OperatorStoreError::Conflict("native grant missing"))?
+        .value
+        .payload;
+    if preparation.value["daemon_prepared_by"].as_str() != Some(user)
+        || preparation.value["daemon_preparation_version"] != 1
+        || grant.requester.source_id != user
+        || grant.spec_hash != native.prepared_hash
+        || !crate::buddy::improvement::installation::daemon_grant(&grant, &native.grant_id)
+    {
+        return Err(OperatorStoreError::Conflict(
+            "same native user preparation and grant required",
+        ));
+    }
+    Ok(())
+}
+
+async fn host_release_control(
+    state: Arc<DaemonState>,
+    id: String,
+    headers: HeaderMap,
+    control: HostReleaseControl,
+) -> Response {
+    if !buddy_user_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (id, control);
+        StatusCode::NOT_IMPLEMENTED.into_response()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let result = async {
+            use crate::buddy::improvement::installation::{NativeRequest, release};
+            use crate::buddy::operator_store::OperatorStoreError;
+            use crate::buddy::resource_execution::*;
+            let _execution = execution_gate().lock().await;
+            let update = state.update_state.lock().await;
+            if state.is_shutting_down() || update_phase_active(&update.phase) {
+                return Err("daemon update/shutdown active".into());
+            }
+            let _drained = state.supervisor.installation_drained().await?;
+            let registry = state.projects.read().await;
+            let entry = registry.get(&id).ok_or("registered project unavailable")?;
+            let project = refact_buddy_core::operator_types::ProjectIdentity {
+                project_id: entry.id.clone(), canonical_root: entry.root.to_string_lossy().into_owned(),
+            };
+            let worker = native_controller_worker(&state, "daemon-native-host-release");
+            let user = state.config.auth.username.clone().ok_or("user unavailable")?;
+            let runtime = crate::buddy::outcome_runtime::OutcomeRuntime::open(&entry.root, project, worker)
+                .map_err(|e| e.to_string())?;
+            let result = match control {
+                HostReleaseControl::Dispatch(native) => execute_host_release(&runtime, native, user).await,
+                HostReleaseControl::Artifact(native) => runtime.with_store(move |store| {
+                    use base64::Engine;
+                    host_release_user_binding(store, &native, &user)?;
+                    let retained = store.get_document::<release::ReleaseRecord>(release::NAMESPACE, &native.prepared_hash)?
+                        .ok_or(OperatorStoreError::Conflict("release not dispatched"))?.value;
+                    if retained.request.grant_id != native.grant_id || retained.receipt.is_some() {
+                        return Err(OperatorStoreError::Conflict("release already consumed or foreign grant"));
+                    }
+                    let (request, bytes) = release::prepare_request(store, &native)?;
+                    if request != retained.request {
+                        return Err(OperatorStoreError::Conflict("dispatched release changed"));
+                    }
+                    Ok(json!({"request": request, "artifact_base64": base64::prelude::BASE64_STANDARD.encode(bytes)}))
+                }).await.map_err(|e| e.to_string()),
+                HostReleaseControl::Receipt(receipt) => runtime.with_store(move |store| {
+                    let native = NativeRequest { prepared_hash: receipt.prepared_hash.clone(), grant_id: receipt.grant_id.clone() };
+                    host_release_user_binding(store, &native, &user)?;
+                    Ok(json!(release::record_receipt(store, receipt)?))
+                }).await.map_err(|e| e.to_string()),
+                HostReleaseControl::Observe(observation) => runtime.with_store(move |store| {
+                    let native = NativeRequest { prepared_hash: observation.prepared_hash.clone(), grant_id: observation.grant_id.clone() };
+                    host_release_user_binding(store, &native, &user)?;
+                    Ok(json!(release::record_running(store, observation)?))
+                }).await.map_err(|e| e.to_string()),
+            };
+            runtime.shutdown().await;
+            result
+        }.await;
+        native_control_response(result)
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn execute_host_release(
+    runtime: &crate::buddy::outcome_runtime::OutcomeRuntime,
+    native: crate::buddy::improvement::installation::NativeRequest,
+    user: String,
+) -> Result<serde_json::Value, String> {
+    use crate::buddy::action_execution::*;
+    use crate::buddy::improvement::installation::release;
+    use crate::buddy::resource_execution::*;
+    let binding = native.clone();
+    runtime
+        .with_store(move |store| host_release_user_binding(store, &binding, &user))
+        .await
+        .map_err(|e| e.to_string())?;
+    let prepared = load_prepared(runtime, native.prepared_hash.clone()).await?;
+    validate_prepared_draft(runtime, &prepared).await?;
+    let grant = load_grant(runtime, native.grant_id.clone())
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("grant unavailable")?;
+    if !grant.authorize(&prepared.spec, &grant.requester, grant.decision.as_ref()) {
+        return Err("explicit exact daemon user grant unavailable".into());
+    }
+    let key = native.prepared_hash.clone();
+    runtime
+        .with_store(move |store| crate::buddy::desk_actions::validate_resource_origin(store, &key))
+        .await
+        .map_err(|e| e.to_string())?;
+    let action = ActionRequest {
+        execution_id: format!("native-host-release:{}", native.prepared_hash),
+        idempotency_key: format!("native-host-release:{}", native.prepared_hash),
+        spec: prepared.spec.clone(),
+        bound_parameter_ref: prepared.bound_parameter_ref,
+        requester: grant.requester.clone(),
+        decision: grant.decision.clone(),
+        worker: runtime.worker(),
+    };
+    let mut catalog = ResourceCatalog::default();
+    catalog
+        .register(
+            release::ACTION.into(),
+            Arc::new(release::ReleaseAdapter {
+                runtime: runtime.clone(),
+                native: native.clone(),
+                spec: action.spec.clone(),
+            }),
+        )
+        .map_err(|e| format!("{e:?}"))?;
+    let outcome = catalog
+        .service(runtime.clone(), Arc::new(grant))
+        .map_err(|_| "native catalog unavailable")?
+        .execute_async(&action)
+        .await;
+    let record = runtime
+        .with_store(move |store| {
+            store.get_document::<release::ReleaseRecord>(release::NAMESPACE, &native.prepared_hash)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(json!({"action_result": outcome, "native_observation": record.map(|r| r.value)}))
 }
 
 async fn update_status(
@@ -744,6 +1533,137 @@ async fn read_log_tail(
     )
 }
 
+/// User credentials are deliberately distinct from daemon/worker/hook bearer tokens.
+fn buddy_user_authorized(state: &DaemonState, headers: &HeaderMap) -> bool {
+    use base64::Engine;
+    if !state.config.auth.enabled || headers.get_all("authorization").iter().count() != 1 {
+        return false;
+    }
+    let (Some(user), Some(password)) = (
+        state.config.auth.username.as_deref(),
+        state.config.auth.password.as_deref(),
+    ) else {
+        return false;
+    };
+    if user.is_empty() || password.is_empty() {
+        return false;
+    }
+    let Some(encoded) = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Basic "))
+    else {
+        return false;
+    };
+    let Ok(decoded) = base64::prelude::BASE64_STANDARD.decode(encoded) else {
+        return false;
+    };
+    let Ok(decoded) = String::from_utf8(decoded) else {
+        return false;
+    };
+    let Some((actual_user, actual_pass)) = decoded.split_once(':') else {
+        return false;
+    };
+    crate::daemon::auth::token_matches(actual_user, user)
+        && crate::daemon::auth::token_matches(actual_pass, password)
+}
+
+async fn buddy_wake_get(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !buddy_user_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match state.buddy_wake_grant(&id).await {
+        Ok(grant) => Json(json!({"grant": grant, "authority": "worker_start_only", "goal_authority": false, "tool_consent": false})).into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+async fn buddy_wake_issue(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<crate::daemon::buddy_wake::WakeGrantRequest>,
+) -> Response {
+    if !buddy_user_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if state.is_shutting_down() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    match state
+        .issue_buddy_wake_grant(&id, request, state.config.auth.username.clone().unwrap())
+        .await
+    {
+        Ok(grant) => Json(json!({"grant": grant})).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response(),
+    }
+}
+
+async fn buddy_wake_revoke(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !buddy_user_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match state.revoke_buddy_wake_grant(&id).await {
+        Ok(()) => Json(json!({"revoked": true, "running_worker_stopped": false})).into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": error})),
+        )
+            .into_response(),
+    }
+}
+
+fn buddy_transport_authorized(state: &DaemonState, headers: &HeaderMap) -> bool {
+    let expected = state
+        .auth_token
+        .as_deref()
+        .or_else(|| state.config.hooks.token.as_deref())
+        .filter(|v| !v.is_empty());
+    expected
+        .zip(crate::daemon::auth::bearer_token_from_headers(headers))
+        .is_some_and(|(expected, actual)| crate::daemon::auth::token_matches(actual, expected))
+}
+
+async fn buddy_worker_projection(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    headers: HeaderMap,
+    Json(report): Json<crate::daemon::buddy_reconciliation::WorkerProjection>,
+) -> Response {
+    if !buddy_transport_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match state.accept_buddy_projection(report).await {
+        Ok(changed) => {
+            Json(json!({"accepted": true, "changed": changed, "wake_authorized": false}))
+                .into_response()
+        }
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error": error}))).into_response(),
+    }
+}
+
+async fn buddy_project_projection(
+    State((state, _)): State<(Arc<DaemonState>, u16)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !buddy_transport_authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match state.buddy_projection(&id).await {
+        Ok(Some(observation)) => Json(json!({"observation": observation, "daemon_wake_supported": true, "coverage": "Observed references only; offline gaps are unknown, not completion. Worker must verify live mandate; no grant, goal, tool consent or question replay."})).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": error}))).into_response(),
+    }
+}
+
 async fn worker_status(
     State((state, _)): State<(Arc<DaemonState>, u16)>,
     Json(report): Json<crate::daemon_link::WorkerStatusReport>,
@@ -912,6 +1832,846 @@ mod tests {
     use crate::daemon::events::EventBus;
     use crate::daemon::projects::ProjectRegistry;
 
+    async fn native_router_fixture() -> (
+        tempfile::TempDir,
+        Arc<DaemonState>,
+        refact_buddy_core::operator_types::ProjectIdentity,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = DaemonConfig::default();
+        config.auth.enabled = true;
+        config.auth.username = Some("native-user".into());
+        config.auth.password = Some("native-password".into());
+        let state = DaemonState::new_with_daemon_dir(
+            config,
+            EventBus::new(dir.path().join("events.jsonl")),
+            Some("worker-token".into()),
+            dir.path().join("daemon"),
+            0,
+        );
+        state.load_projects(dir.path().join("projects.json")).await;
+        let root = dir.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let entry = state.projects.write().await.open(root).await.unwrap();
+        let project = refact_buddy_core::operator_types::ProjectIdentity {
+            project_id: entry.id,
+            canonical_root: entry.root.to_string_lossy().into_owned(),
+        };
+        (dir, state, project)
+    }
+
+    async fn native_post(
+        router: Router,
+        uri: &str,
+        authorization: &str,
+        body: serde_json::Value,
+    ) -> Response {
+        use tower::ServiceExt;
+        let mut request = hyper::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("authorization", authorization)
+            .body(hyper::Body::from(body.to_string()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                [127, 0, 0, 1],
+                40000,
+            ))));
+        router.oneshot(request).await.unwrap()
+    }
+
+    fn native_basic() -> String {
+        use base64::Engine;
+        format!(
+            "Basic {}",
+            base64::prelude::BASE64_STANDARD.encode("native-user:native-password")
+        )
+    }
+
+    #[tokio::test]
+    async fn policy_router_preview_no_documents_and_exact_raise_replay() {
+        use crate::buddy::operator_store::OperatorStore;
+        let (_dir, state, project) = native_router_fixture().await;
+        let root = std::path::Path::new(&project.canonical_root);
+        drop(OperatorStore::open(root, &project).unwrap());
+        let before = OperatorStore::read_document_policy_snapshot(root, &project).unwrap();
+        let router = make_router(state.clone(), 0);
+        let preview_uri = format!(
+            "/daemon/v1/projects/{}/operator/policy/preview",
+            project.project_id
+        );
+        let confirm_uri = format!(
+            "/daemon/v1/projects/{}/operator/policy/confirm",
+            project.project_id
+        );
+        let proposal = json!({"project_id": project.project_id, "policy": {"max_rows_per_namespace": 8, "replace_editorial_aggregate": false}});
+        assert_eq!(
+            native_post(
+                router.clone(),
+                &preview_uri,
+                "Bearer worker-token",
+                proposal.clone()
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, preview) = response_json(
+            native_post(router.clone(), &preview_uri, &native_basic(), proposal).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        assert_eq!(
+            OperatorStore::read_document_policy_snapshot(root, &project).unwrap(),
+            before
+        );
+        assert_eq!(
+            preview["consent"]["worker"]["worker_id"],
+            "daemon-native-policy-controller"
+        );
+        let request = json!({"consent": preview["consent"], "expected_digest": preview["digest"], "idempotency_key": "native-policy", "confirm": true});
+        assert_eq!(
+            native_post(
+                router.clone(),
+                &confirm_uri,
+                "Bearer worker-token",
+                request.clone()
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, receipt) = response_json(
+            native_post(
+                router.clone(),
+                &confirm_uri,
+                &native_basic(),
+                request.clone(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{receipt}");
+        let (status, replay) = response_json(
+            native_post(
+                router.clone(),
+                &confirm_uri,
+                &native_basic(),
+                request.clone(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(receipt, replay);
+        let mut changed = request;
+        changed["consent"]["worker"]["epoch"] = json!(state.started_at_ms + 1);
+        assert_eq!(
+            native_post(router, &confirm_uri, &native_basic(), changed)
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert!(!state.is_shutting_down());
+        assert_eq!(state.supervisor.worker_count().await, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn host_release_router_native_prepare_grant_bind_same_worker() {
+        use crate::buddy::{operator_store::OperatorStore, improvement::installation::release::*};
+        use refact_buddy_core::operator_types::*;
+        let (_dir, state, project) = native_router_fixture().await;
+        let draft = ReleaseDraft {
+            recovery_ref: None,
+            project: project.clone(),
+            candidate_id: "unproven-fixture".into(),
+            candidate_digest: "b".repeat(64),
+            proof_id: "missing-proof".into(),
+            artifact_digest: "c".repeat(64),
+            host_session_id: "native-host".into(),
+            target: HostTarget::Vscode,
+            operation: HostOperation::Install,
+            expected_installed_manifest_digest: "d".repeat(64),
+            expected_running_manifest_digest: "e".repeat(64),
+        };
+        let version = crate::buddy::improvement_evaluation::digest(&draft).unwrap();
+        let spec = ActionSpec {
+            schema_version: 1,
+            action_id: "fixture-release".into(),
+            kind: ACTION.into(),
+            adapter: ADAPTER.into(),
+            project: project.clone(),
+            resource: ResourceRef {
+                resource_kind: ADAPTER.into(),
+                resource_id: "vscode".into(),
+                version: version.clone(),
+            },
+            expected_version: version,
+            parameter_ref: Some("fixture-release-draft".into()),
+            availability: ActionAvailability::Available,
+            confirmation: ConfirmationClass::UserConfirmationRequired,
+            authority_class: AuthorityClass::Mutating,
+            capabilities: ActionCapabilities {
+                can_preview: true,
+                can_execute: false,
+                can_verify: false,
+                can_recover: false,
+                can_cancel: false,
+            },
+        };
+        {
+            let mut store =
+                OperatorStore::open(std::path::Path::new(&project.canonical_root), &project)
+                    .unwrap();
+            store
+                .put_document(
+                    "resource_draft",
+                    "fixture-release-draft",
+                    &json!({"schema_version":1,"project":project,"payload":draft}),
+                    None,
+                )
+                .unwrap();
+        }
+        let router = make_router(state.clone(), 0);
+        let base = format!("/daemon/v1/projects/{}/host-release", project.project_id);
+        assert_eq!(
+            native_post(
+                router.clone(),
+                &format!("{base}/prepare"),
+                "Bearer worker-token",
+                json!({"spec":spec})
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, prepared) = response_json(
+            native_post(
+                router.clone(),
+                &format!("{base}/prepare"),
+                &native_basic(),
+                json!({"spec":spec}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{prepared}");
+        assert_eq!(
+            prepared["prepared"]["spec"]["capabilities"]["can_execute"],
+            true
+        );
+        let hash = prepared["prepared"]["spec_hash"].as_str().unwrap();
+        let (status, grant) = response_json(
+            native_post(
+                router.clone(),
+                &format!("{base}/grant"),
+                &native_basic(),
+                json!({"prepared_hash":hash,"expires_in_seconds":60}),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{grant}");
+        assert_eq!(
+            grant["grant"]["decision"]["worker"],
+            json!(native_controller_worker(
+                &state,
+                "daemon-native-host-release"
+            ))
+        );
+        assert_eq!(grant["grant"]["requester"]["source_id"], "native-user");
+        let native = json!({"prepared_hash":hash,"grant_id":grant["grant_id"]});
+        assert_eq!(
+            native_post(
+                router.clone(),
+                &format!("{base}/artifact"),
+                &native_basic(),
+                native.clone()
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        // Preparation/consent is not compiler proof: the real ActionService must
+        // fail closed on this deliberately unproven candidate, without a release.
+        let response = native_post(
+            router.clone(),
+            &format!("{base}/dispatch"),
+            &native_basic(),
+            native.clone(),
+        )
+        .await;
+        assert!(response.status() == StatusCode::OK || response.status() == StatusCode::CONFLICT);
+        assert_eq!(
+            native_post(router, &format!("{base}/artifact"), &native_basic(), native)
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let store =
+            OperatorStore::open(std::path::Path::new(&project.canonical_root), &project).unwrap();
+        assert!(store
+            .get_document::<ReleaseRecord>(NAMESPACE, hash)
+            .unwrap()
+            .is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn host_release_router_dispatch_fence_immutable_receipt_exact_reconcile() {
+        use crate::buddy::{operator_store::OperatorStore, improvement::installation::release::*};
+        let (_dir, state, project) = native_router_fixture().await;
+        let root = std::path::Path::new(&project.canonical_root);
+        let hash = "a".repeat(64);
+        let request = HostReleaseRequest {
+            schema_version: 1,
+            prepared_hash: hash.clone(),
+            grant_id: "fixture-grant".into(),
+            project_id: project.project_id.clone(),
+            host_session_id: "old-host".into(),
+            target: HostTarget::Vscode,
+            operation: HostOperation::Install,
+            candidate_id: "candidate".into(),
+            candidate_digest: "b".repeat(64),
+            proof_id: "proof".into(),
+            artifact_digest: "c".repeat(64),
+            manifest_digest: "d".repeat(64),
+            package_version: "1.2.3".into(),
+            expected_installed_manifest_digest: "e".repeat(64),
+            expected_running_manifest_digest: "e".repeat(64),
+            files: std::collections::BTreeMap::new(),
+        };
+        {
+            let mut store = OperatorStore::open(root, &project).unwrap();
+            store
+                .put_document(
+                    "prepared_action",
+                    &hash,
+                    &json!({"schema_version":1,"project":project,"daemon_prepared_by":"native-user","daemon_preparation_version":1}),
+                    None,
+                )
+                .unwrap();
+        }
+        {
+            use refact_buddy_core::operator_types::*;
+            let mut store = OperatorStore::open(root, &project).unwrap();
+            let grant = crate::buddy::resource_execution::ExactActionGrant {
+                native_rights: None,
+                recovery_execution_id: None,
+                spec_hash: hash.clone(),
+                requester: NativeSourceIdentity {
+                    source_kind: NativeSourceKind::External,
+                    source_id: "native-user".into(),
+                    source_version: "daemon-basic-user-v1".into(),
+                },
+                decision: Some(DecisionReference {
+                    project: project.clone(),
+                    worker: native_controller_worker(&state, "daemon-native-host-release"),
+                    native: NativeSourceIdentity {
+                        source_kind: NativeSourceKind::External,
+                        source_id: "fixture-grant".into(),
+                        source_version: "daemon-installation-grant-v1".into(),
+                    },
+                }),
+                expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+                revoked: false,
+            };
+            store
+                .put_document(
+                    "action_grant",
+                    "fixture-grant",
+                    &json!({"schema_version":1,"project":project,"payload":grant}),
+                    None,
+                )
+                .unwrap();
+        }
+        let router = make_router(state.clone(), 0);
+        let base = format!("/daemon/v1/projects/{}/host-release", project.project_id);
+        let native = json!({"prepared_hash":hash,"grant_id":"fixture-grant"});
+        assert_eq!(
+            native_post(
+                router.clone(),
+                &format!("{base}/artifact"),
+                &native_basic(),
+                native.clone()
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        let receipt = HostReleaseReceipt {
+            schema_version: 1,
+            prepared_hash: hash.clone(),
+            grant_id: request.grant_id.clone(),
+            host_session_id: request.host_session_id.clone(),
+            artifact_digest: request.artifact_digest.clone(),
+            status: ReceiptStatus::InstallerReturned,
+            installed: Some(InstalledIdentity {
+                manifest_digest: request.manifest_digest.clone(),
+                version: request.package_version.clone(),
+            }),
+            running: None,
+        };
+        let observation = HostRunningObservation {
+            schema_version: 1,
+            prepared_hash: hash.clone(),
+            grant_id: request.grant_id.clone(),
+            host_session_id: request.host_session_id.clone(),
+            artifact_digest: request.artifact_digest.clone(),
+            installed: InstalledIdentity {
+                manifest_digest: request.manifest_digest.clone(),
+                version: request.package_version.clone(),
+            },
+            running: RunningIdentity {
+                manifest_digest: request.manifest_digest.clone(),
+                version: request.package_version.clone(),
+                host_session_id: "fresh-host".into(),
+            },
+        };
+        for (endpoint, body) in [
+            ("artifact", native.clone()),
+            ("dispatch", native.clone()),
+            (
+                "grant",
+                json!({"prepared_hash":hash,"expires_in_seconds":60}),
+            ),
+            ("receipt", json!(receipt)),
+            ("observe", json!(observation)),
+        ] {
+            for auth in ["Bearer worker-token", "Basic Zm9yZWlnbjpwdw=="] {
+                assert_eq!(
+                    native_post(
+                        router.clone(),
+                        &format!("{base}/{endpoint}"),
+                        auth,
+                        body.clone()
+                    )
+                    .await
+                    .status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{endpoint}"
+                );
+            }
+        }
+        {
+            let mut store = OperatorStore::open(root, &project).unwrap();
+            store
+                .reserve_native_documents("host_release", &hash, &[(NAMESPACE, hash.clone(), 3)])
+                .unwrap();
+            store
+                .put_reserved_document(
+                    "host_release",
+                    &hash,
+                    NAMESPACE,
+                    &hash,
+                    &ReleaseRecord {
+                        schema_version: 1,
+                        project: project.clone(),
+                        request,
+                        receipt: None,
+                        installed_verified: false,
+                        running_verified: false,
+                        running_observation: None,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        let (status, installed) = response_json(
+            native_post(
+                router.clone(),
+                &format!("{base}/receipt"),
+                &native_basic(),
+                json!(receipt),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{installed}");
+        assert_eq!(installed["installed_verified"], true);
+        assert_eq!(installed["running_verified"], false);
+        let mut changed = receipt.clone();
+        changed.status = ReceiptStatus::Declined;
+        assert_eq!(
+            native_post(
+                router.clone(),
+                &format!("{base}/receipt"),
+                &native_basic(),
+                json!(changed)
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            native_post(
+                router.clone(),
+                &format!("{base}/artifact"),
+                &native_basic(),
+                native
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        let mut wrong = observation.clone();
+        wrong.running.manifest_digest = "e".repeat(64);
+        assert_eq!(
+            native_post(
+                router.clone(),
+                &format!("{base}/observe"),
+                &native_basic(),
+                json!(wrong)
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        let (status, running) = response_json(
+            native_post(
+                router.clone(),
+                &format!("{base}/observe"),
+                &native_basic(),
+                json!(observation),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{running}");
+        assert_eq!(running["running_verified"], true);
+        assert_eq!(running["receipt"], json!(receipt));
+        assert!(!state.is_shutting_down());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn host_release_router_evaluated_packages_restart_and_known_good_recovery() {
+        use crate::buddy::{improvement::installation::release::*, operator_store::OperatorStore};
+        use refact_buddy_core::operator_types::*;
+        for target in [HostTarget::Vscode, HostTarget::Jetbrains] {
+            let (_dir, state, project) = native_router_fixture().await;
+            let root = std::path::Path::new(&project.canonical_root);
+            let runtime = crate::buddy::outcome_runtime::OutcomeRuntime::open(
+                root,
+                project.clone(),
+                native_controller_worker(&state, "daemon-native-host-release"),
+            )
+            .unwrap();
+            let (mut good, good_bytes) =
+                crate::buddy::improvement::installation::release::tests::evaluated_package(
+                    &runtime,
+                    target.clone(),
+                    "1.0.0",
+                )
+                .await;
+            let (mut next, next_bytes) =
+                crate::buddy::improvement::installation::release::tests::evaluated_package(
+                    &runtime,
+                    target.clone(),
+                    "2.0.0",
+                )
+                .await;
+            // Obtain the physical owner manifest from real ZIP inspection, not bundle existence.
+            let known_good = runtime
+                .with_store(move |store| {
+                    let candidate = crate::buddy::improvement::activation_gate(
+                        store,
+                        &good.candidate_id,
+                        &good.candidate_digest,
+                        &good.proof_id,
+                    )?;
+                    let manifest =
+                        crate::buddy::improvement::installation::release::tests::package_manifest(
+                            store, &candidate,
+                        );
+                    Ok((good, manifest))
+                })
+                .await
+                .unwrap();
+            good = known_good.0;
+            next.expected_installed_manifest_digest = known_good.1.clone();
+            next.expected_running_manifest_digest = known_good.1;
+            runtime.shutdown().await;
+            let base = format!("/daemon/v1/projects/{}/host-release", project.project_id);
+            let mut original: Option<(String, Option<HostReleaseReceipt>)> = None;
+            let mut install_count = 0;
+            for (index, bytes) in [next_bytes, good_bytes].into_iter().enumerate() {
+                let draft = if index == 0 {
+                    next.clone()
+                } else {
+                    good.clone()
+                };
+                let version = crate::buddy::improvement_evaluation::digest(&draft).unwrap();
+                let reference = format!("release-draft-{index}");
+                let spec = ActionSpec {
+                    schema_version: 1,
+                    action_id: format!("release-{index}"),
+                    kind: ACTION.into(),
+                    adapter: ADAPTER.into(),
+                    project: project.clone(),
+                    resource: ResourceRef {
+                        resource_kind: ADAPTER.into(),
+                        resource_id: match target {
+                            HostTarget::Vscode => "vscode",
+                            HostTarget::Jetbrains => "jetbrains",
+                        }
+                        .into(),
+                        version: version.clone(),
+                    },
+                    expected_version: version,
+                    parameter_ref: Some(reference.clone()),
+                    availability: ActionAvailability::Available,
+                    confirmation: ConfirmationClass::UserConfirmationRequired,
+                    authority_class: AuthorityClass::Mutating,
+                    capabilities: ActionCapabilities {
+                        can_preview: true,
+                        can_execute: false,
+                        can_verify: false,
+                        can_recover: false,
+                        can_cancel: false,
+                    },
+                };
+                {
+                    let mut store = OperatorStore::open(root, &project).unwrap();
+                    store
+                        .put_document(
+                            "resource_draft",
+                            &reference,
+                            &json!({"schema_version":1,"project":project,"payload":draft}),
+                            None,
+                        )
+                        .unwrap();
+                }
+                // New router for each operation also exercises reconnect with retained store.
+                let router = make_router(state.clone(), 0);
+                let (status, prepared) = response_json(
+                    native_post(
+                        router.clone(),
+                        &format!("{base}/prepare"),
+                        &native_basic(),
+                        json!({"spec":spec}),
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{prepared}");
+                let hash = prepared["prepared"]["spec_hash"].as_str().unwrap();
+                let (status, grant) = response_json(
+                    native_post(
+                        router.clone(),
+                        &format!("{base}/grant"),
+                        &native_basic(),
+                        json!({"prepared_hash":hash,"expires_in_seconds":3600}),
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{grant}");
+                assert_eq!(grant["grant"]["requester"]["source_id"], "native-user");
+                let native = json!({"prepared_hash":hash,"grant_id":grant["grant_id"]});
+                let (status, dispatch) = response_json(
+                    native_post(
+                        router.clone(),
+                        &format!("{base}/dispatch"),
+                        &native_basic(),
+                        native.clone(),
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{dispatch}");
+                assert_eq!(dispatch["native_observation"]["running_verified"], false);
+                let (status, fetched) = response_json(
+                    native_post(
+                        router.clone(),
+                        &format!("{base}/artifact"),
+                        &native_basic(),
+                        native.clone(),
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{fetched}");
+                use base64::Engine;
+                assert_eq!(
+                    base64::prelude::BASE64_STANDARD
+                        .decode(fetched["artifact_base64"].as_str().unwrap())
+                        .unwrap(),
+                    bytes
+                );
+                let request: HostReleaseRequest =
+                    serde_json::from_value(fetched["request"].clone()).unwrap();
+                assert_eq!(request.target, target);
+                assert_eq!(
+                    request.operation,
+                    if index == 0 {
+                        HostOperation::Install
+                    } else {
+                        HostOperation::Recover
+                    }
+                );
+                assert!(!request.files.is_empty());
+                // Inject only native installer return. No host API, reload or installation runs.
+                install_count += 1;
+                let receipt = HostReleaseReceipt {
+                    schema_version: 1,
+                    prepared_hash: hash.into(),
+                    grant_id: request.grant_id.clone(),
+                    host_session_id: request.host_session_id.clone(),
+                    artifact_digest: request.artifact_digest.clone(),
+                    status: ReceiptStatus::InstallerReturned,
+                    installed: Some(InstalledIdentity {
+                        manifest_digest: request.expected_installed_manifest_digest.clone(),
+                        version: "restart-required-old".into(),
+                    }),
+                    running: Some(RunningIdentity {
+                        manifest_digest: request.expected_running_manifest_digest.clone(),
+                        version: "restart-required-old".into(),
+                        host_session_id: request.host_session_id.clone(),
+                    }),
+                };
+                let (status, pending) = response_json(
+                    native_post(
+                        router.clone(),
+                        &format!("{base}/receipt"),
+                        &native_basic(),
+                        json!(receipt),
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{pending}");
+                assert_eq!(pending["installed_verified"], false);
+                assert_eq!(pending["running_verified"], false);
+                let observation = HostRunningObservation {
+                    schema_version: 1,
+                    prepared_hash: hash.into(),
+                    grant_id: request.grant_id.clone(),
+                    host_session_id: request.host_session_id.clone(),
+                    artifact_digest: request.artifact_digest.clone(),
+                    installed: InstalledIdentity {
+                        manifest_digest: request.manifest_digest.clone(),
+                        version: request.package_version.clone(),
+                    },
+                    running: RunningIdentity {
+                        manifest_digest: request.manifest_digest.clone(),
+                        version: request.package_version.clone(),
+                        host_session_id: format!("fresh-host-{index}"),
+                    },
+                };
+                for field in [
+                    "prepared_hash",
+                    "grant_id",
+                    "artifact_digest",
+                    "host_session_id",
+                    "version",
+                    "manifest",
+                    "session",
+                ] {
+                    let mut wrong = json!(observation);
+                    match field {
+                        "version" => wrong["running"]["version"] = json!("wrong"),
+                        "manifest" => wrong["installed"]["manifest_digest"] = json!("f".repeat(64)),
+                        "session" => {
+                            wrong["running"]["host_session_id"] = json!(request.host_session_id)
+                        }
+                        _ => wrong[field] = json!("foreign"),
+                    }
+                    assert_eq!(
+                        native_post(
+                            router.clone(),
+                            &format!("{base}/observe"),
+                            &native_basic(),
+                            wrong
+                        )
+                        .await
+                        .status(),
+                        StatusCode::CONFLICT,
+                        "{field}"
+                    );
+                }
+                assert_eq!(
+                    native_post(
+                        router.clone(),
+                        &format!("{base}/observe"),
+                        "Basic Zm9yZWlnbjpwdw==",
+                        json!(observation)
+                    )
+                    .await
+                    .status(),
+                    StatusCode::UNAUTHORIZED
+                );
+                let (status, final_record) = response_json(
+                    native_post(
+                        make_router(state.clone(), 0),
+                        &format!("{base}/observe"),
+                        &native_basic(),
+                        json!(observation),
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{final_record}");
+                assert_eq!(final_record["installed_verified"], true);
+                assert_eq!(final_record["running_verified"], true);
+                assert_eq!(final_record["receipt"], json!(receipt));
+                assert_eq!(
+                    native_post(
+                        router.clone(),
+                        &format!("{base}/artifact"),
+                        &native_basic(),
+                        native.clone()
+                    )
+                    .await
+                    .status(),
+                    StatusCode::CONFLICT
+                );
+                let (_, replay) = response_json(
+                    native_post(
+                        router.clone(),
+                        &format!("{base}/dispatch"),
+                        &native_basic(),
+                        native,
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(replay["native_observation"]["receipt"], json!(receipt));
+                let store = OperatorStore::open(root, &project).unwrap();
+                let retained = store
+                    .get_document::<ReleaseRecord>(NAMESPACE, hash)
+                    .unwrap()
+                    .unwrap()
+                    .value;
+                assert_eq!(retained.receipt, Some(receipt));
+                if let Some((old_hash, old_receipt)) = &original {
+                    assert_eq!(
+                        store
+                            .get_document::<ReleaseRecord>(NAMESPACE, old_hash)
+                            .unwrap()
+                            .unwrap()
+                            .value
+                            .receipt,
+                        *old_receipt
+                    );
+                } else {
+                    original = Some((hash.to_string(), retained.receipt.clone()));
+                    good.operation = HostOperation::Recover;
+                    good.recovery_ref = Some(hash.into());
+                    good.host_session_id = observation.running.host_session_id;
+                    good.expected_installed_manifest_digest = request.manifest_digest.clone();
+                    good.expected_running_manifest_digest = request.manifest_digest;
+                }
+            }
+            assert_eq!(install_count, 2);
+            assert!(!state.is_shutting_down());
+        }
+    }
+
     #[test]
     fn relaunch_command_uses_supplied_executable() {
         let executable = PathBuf::from("/stable/refact-agent");
@@ -1050,6 +2810,192 @@ mod tests {
         };
         let listener = bind_listener(&wildcard).unwrap();
         assert!(listener.local_addr().unwrap().ip().is_loopback());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn installation_producer_requires_basic_and_persisted_daemon_preparation() {
+        use crate::buddy::{resource_execution::*, action_execution::*};
+        use refact_buddy_core::operator_types::*;
+        use crate::buddy::improvement::installation::*;
+        use base64::Engine;
+        use std::os::unix::fs::PermissionsExt;
+        // The native owner rejects a shared install parent, independently of
+        // the image mode. Keep this scratch fixture private under any umask.
+        let dir = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let mut config = DaemonConfig::default();
+        config.auth.enabled = true;
+        config.auth.username = Some("fixture-user".into());
+        config.auth.password = Some("fixture-password".into());
+        let target = dir.path().join("test-owned-engine");
+        let state = DaemonState::with_test_installation_target(
+            config,
+            dir.path().join("daemon"),
+            target.clone(),
+        );
+        state
+            .load_projects(dir.path().join("daemon/projects.json"))
+            .await;
+        let entry = state.projects.write().await.open(root).await.unwrap();
+        let project = ProjectIdentity {
+            project_id: entry.id.clone(),
+            canonical_root: entry.root.to_string_lossy().into_owned(),
+        };
+        let worker = WorkerIdentity {
+            worker_id: "fixture".into(),
+            engine_instance_id: "fixture".into(),
+            epoch: 1,
+        };
+        let runtime =
+            crate::buddy::outcome_runtime::OutcomeRuntime::open(&entry.root, project, worker)
+                .unwrap();
+        let (draft, mut spec) =
+            crate::buddy::improvement::installation::tests::seed(&runtime, &target).await;
+        spec.capabilities.can_execute = false;
+        spec.capabilities.can_verify = false;
+        let generic = PreparedAction {
+            spec_hash: action_spec_hash(&spec, &spec.parameter_ref),
+            spec: spec.clone(),
+            bound_parameter_ref: spec.parameter_ref.clone(),
+        };
+        bind_prepared_draft(&runtime, &generic).await.unwrap();
+        RuntimeActionRepository(runtime.clone())
+            .prepare(generic.clone())
+            .await
+            .unwrap();
+        runtime.shutdown().await;
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer worker-bearer".parse().unwrap());
+        assert_eq!(
+            prepare_candidate_installation(
+                State((state.clone(), 0)),
+                axum::extract::Path(entry.id.clone()),
+                headers.clone(),
+                Json(PrepareInstallationRequest { spec: spec.clone() })
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        headers.insert(
+            "authorization",
+            format!(
+                "Basic {}",
+                base64::prelude::BASE64_STANDARD.encode("fixture-user:fixture-password")
+            )
+            .parse()
+            .unwrap(),
+        );
+        assert_eq!(
+            grant_candidate_installation(
+                State((state.clone(), 0)),
+                axum::extract::Path(entry.id.clone()),
+                headers.clone(),
+                Json(GrantInstallationRequest {
+                    prepared_hash: generic.spec_hash,
+                    expires_in_seconds: 60
+                })
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        let (status, body) = response_json(
+            prepare_candidate_installation(
+                State((state.clone(), 0)),
+                axum::extract::Path(entry.id.clone()),
+                headers.clone(),
+                Json(PrepareInstallationRequest { spec }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["prepared"]["spec"]["capabilities"]["can_execute"],
+            true
+        );
+        let hash = body["prepared"]["spec_hash"].as_str().unwrap().to_string();
+        let (status, body) = response_json(
+            grant_candidate_installation(
+                State((state.clone(), 0)),
+                axum::extract::Path(entry.id.clone()),
+                headers.clone(),
+                Json(GrantInstallationRequest {
+                    prepared_hash: hash.clone(),
+                    expires_in_seconds: 60,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["grant"]["requester"]["source_id"], "fixture-user");
+        assert_eq!(body["grant"]["spec_hash"], hash);
+        let request = NativeRequest {
+            prepared_hash: hash.clone(),
+            grant_id: body["grant_id"].as_str().unwrap().into(),
+        };
+        let (status, effect) = response_json(
+            candidate_installation(
+                State((state.clone(), 0)),
+                axum::extract::Path(entry.id.clone()),
+                headers.clone(),
+                Json(request.clone()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{effect}");
+        assert_eq!(effect["native_observation"]["phase"], "installed");
+        assert_eq!(
+            refact_self_update::candidate_install::Installer::open(&target)
+                .unwrap()
+                .installed_digest()
+                .unwrap(),
+            draft.artifact_digest
+        );
+        let (status, retry) = response_json(
+            candidate_installation(
+                State((state.clone(), 0)),
+                axum::extract::Path(entry.id.clone()),
+                headers.clone(),
+                Json(request),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["native_observation"], effect["native_observation"]);
+        assert!(!state.is_shutting_down());
+        assert_eq!(state.supervisor.worker_count().await, 0);
+        assert!(serde_json::from_value::<GrantInstallationRequest>(
+            json!({"prepared_hash": hash, "expires_in_seconds": 60, "requester": "forged"})
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn candidate_installer_disabled_default_does_not_open_project_or_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir).await;
+        let response = candidate_installation(
+            State((state, 0)),
+            axum::extract::Path("missing".into()),
+            HeaderMap::new(),
+            Json(crate::buddy::improvement::installation::NativeRequest {
+                prepared_hash: "a".repeat(64),
+                grant_id: "missing".into(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!dir.path().join(".refact").exists());
     }
 
     #[tokio::test]
@@ -2120,5 +4066,265 @@ mod tests {
         let status = response.status();
         let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(daemon)]
+    async fn buddy_projection_fake_workers_restart_dedup_and_no_authority_replay() {
+        use crate::daemon::buddy_reconciliation::{WorkerProjection, SupervisionRef};
+        let _env = EnvGuard::fake_worker().expect("python3 fake worker is required");
+        let dir = tempfile::tempdir().unwrap();
+        let state = DaemonState::new_with_daemon_dir(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("events.jsonl")),
+            Some("fixture-secret".into()),
+            dir.path().join("daemon"),
+            0,
+        );
+        let path = dir.path().join("daemon/projects.json");
+        state.load_projects(path.clone()).await;
+        let mut entries = Vec::new();
+        for name in ["a", "b"] {
+            let root = dir.path().join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            entries.push(state.projects.write().await.open(root).await.unwrap());
+        }
+        let mut reports = Vec::new();
+        for entry in &entries {
+            let worker = state.supervisor.ensure_ready_worker(entry).await.unwrap();
+            reports.push(WorkerProjection {
+                project_id: entry.id.clone(),
+                canonical_root: entry.root.clone(),
+                pid: worker.pid.unwrap(),
+                instance_token: state
+                    .supervisor
+                    .test_worker_instance_token(&entry.id)
+                    .await
+                    .unwrap(),
+                cursor: 1,
+                supervision: vec![SupervisionRef {
+                    mandate_id: "ref-only".into(),
+                    owner_epoch: 1,
+                    chat_id: "chat".into(),
+                    worker_agent_id: None,
+                }],
+            });
+        }
+        let mut headers = HeaderMap::new();
+        let denied = buddy_worker_projection(
+            State((state.clone(), 0)),
+            headers.clone(),
+            Json(reports[0].clone()),
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        headers.insert("authorization", "Bearer fixture-secret".parse().unwrap());
+        for report in &reports {
+            let response = buddy_worker_projection(
+                State((state.clone(), 0)),
+                headers.clone(),
+                Json(report.clone()),
+            )
+            .await;
+            let (status, body) = response_json(response).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["wake_authorized"], false);
+            assert_eq!(body["changed"], true);
+            assert!(!state.accept_buddy_projection(report.clone()).await.unwrap());
+        }
+        let before_b = state
+            .buddy_projection(&entries[1].id)
+            .await
+            .unwrap()
+            .unwrap();
+        let before_a = state
+            .buddy_projection(&entries[0].id)
+            .await
+            .unwrap()
+            .unwrap();
+        let next = state.supervisor.restart_worker(&entries[0]).await.unwrap();
+        assert!(state
+            .accept_buddy_projection(reports[0].clone())
+            .await
+            .is_err());
+        let mut stale_token = reports[0].clone();
+        stale_token.pid = next.pid.unwrap();
+        assert!(state
+            .accept_buddy_projection(stale_token.clone())
+            .await
+            .is_err());
+        stale_token.instance_token = state
+            .supervisor
+            .test_worker_instance_token(&entries[0].id)
+            .await
+            .unwrap();
+        assert!(state.accept_buddy_projection(stale_token).await.unwrap());
+        let after_a = state
+            .buddy_projection(&entries[0].id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(after_a.worker.generation > before_a.worker.generation);
+        assert_ne!(
+            after_a.worker.instance_digest,
+            before_a.worker.instance_digest
+        );
+        assert_eq!(
+            state
+                .buddy_projection(&entries[1].id)
+                .await
+                .unwrap()
+                .unwrap(),
+            before_b
+        );
+        state.supervisor.stop_all().await;
+        let restarted = DaemonState::new_with_daemon_dir(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("events2.jsonl")),
+            Some("fixture-secret".into()),
+            dir.path().join("daemon"),
+            0,
+        );
+        restarted.load_projects(path).await;
+        restarted
+            .reconcile_buddy_batch(crate::daemon::state::now_ms())
+            .await;
+        assert_eq!(restarted.supervisor.worker_count().await, 0);
+        assert!(restarted
+            .accept_buddy_projection(reports[1].clone())
+            .await
+            .is_err());
+        for entry in entries {
+            let row = restarted
+                .buddy_projection(&entry.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(row.offline_gap.unwrap().recovered_at_ms.is_none());
+        }
+        let bytes = tokio::fs::read_to_string(dir.path().join("daemon/buddy-observations.json"))
+            .await
+            .unwrap();
+        for report in reports {
+            assert!(!bytes.contains(&report.instance_token));
+        }
+        assert!(!bytes.contains("allowed_operations"));
+        assert!(!bytes.contains("tool_consent"));
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(daemon)]
+    async fn buddy_wake_user_auth_fake_worker_bound_and_revoke() {
+        use base64::Engine;
+        let _env = EnvGuard::fake_worker().expect("python3 fake worker required");
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = DaemonConfig::default();
+        config.auth.enabled = true;
+        config.auth.username = Some("fixture-user".into());
+        config.auth.password = Some("fixture-password".into());
+        let state = DaemonState::new_with_daemon_dir(
+            config,
+            EventBus::new(dir.path().join("events.jsonl")),
+            Some("worker-bearer".into()),
+            dir.path().join("daemon"),
+            0,
+        );
+        state
+            .load_projects(dir.path().join("daemon/projects.json"))
+            .await;
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let entry = state.projects.write().await.open(root).await.unwrap();
+        let request = crate::daemon::buddy_wake::WakeGrantRequest {
+            canonical_root: entry.root.clone(),
+            trigger_kind: crate::daemon::buddy_wake::WakeTriggerKind::ObservationTick,
+            trigger_id: "explicit-timer".into(),
+            expires_at_ms: crate::daemon::state::now_ms() + 600_000,
+            max_starts: 1,
+            interval_ms: 60_000,
+            wake_only: true,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer worker-bearer".parse().unwrap());
+        assert_eq!(
+            buddy_wake_issue(
+                State((state.clone(), 0)),
+                axum::extract::Path(entry.id.clone()),
+                headers.clone(),
+                Json(request.clone())
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        headers.insert(
+            "authorization",
+            format!(
+                "Basic {}",
+                base64::prelude::BASE64_STANDARD.encode("fixture-user:fixture-password")
+            )
+            .parse()
+            .unwrap(),
+        );
+        assert_eq!(
+            buddy_wake_issue(
+                State((state.clone(), 0)),
+                axum::extract::Path(entry.id.clone()),
+                headers.clone(),
+                Json(request)
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let grant = state.buddy_wake_grant(&entry.id).await.unwrap().unwrap();
+        assert_eq!(grant.authored_by, "fixture-user");
+        let due = grant.issued_at_ms + 60_000;
+        state.tick_buddy_wakes(due).await;
+        let worker = state.supervisor.worker_info(&entry.id).await.unwrap();
+        assert_eq!(worker.state, crate::daemon::supervisor::WorkerState::Ready);
+        state.tick_buddy_wakes(due + 1).await;
+        assert_eq!(
+            state.supervisor.worker_info(&entry.id).await.unwrap().pid,
+            worker.pid
+        );
+        assert_eq!(
+            state
+                .buddy_wake_grant(&entry.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .remaining_starts,
+            0
+        );
+        assert!(state.buddy_projection(&entry.id).await.unwrap().is_none());
+        assert!(!entry.root.join(".refact/buddy").exists());
+        assert_eq!(
+            buddy_wake_revoke(
+                State((state.clone(), 0)),
+                axum::extract::Path(entry.id.clone()),
+                HeaderMap::new()
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            buddy_wake_revoke(
+                State((state.clone(), 0)),
+                axum::extract::Path(entry.id.clone()),
+                headers
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        state.supervisor.stop_all().await;
+        let bytes = tokio::fs::read_to_string(dir.path().join("daemon/buddy-wake-grants.json"))
+            .await
+            .unwrap();
+        assert!(!bytes.contains("worker-bearer"));
+        assert!(!bytes.contains("fixture-password"));
+        assert!(!bytes.contains("tool_consent"));
+        assert!(!bytes.contains("mandate_id"));
     }
 }

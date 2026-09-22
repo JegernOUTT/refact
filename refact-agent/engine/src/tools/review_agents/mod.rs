@@ -412,56 +412,27 @@ mod tests {
         assert!(product.findings.is_empty());
     }
 
-    #[tokio::test]
-    async fn review_watchdog_keeps_an_actively_working_stage_alive_past_the_idle_limit() {
+    async fn assert_heartbeating_stage_survives(
+        iterations: usize,
+        beat: Duration,
+        idle_limit: Duration,
+        poll: Duration,
+    ) -> StageProduct {
         let activity = Arc::new(AtomicU64::new(now_ms()));
         let abort = Arc::new(AtomicBool::new(false));
         let heartbeat = activity.clone();
         let work: BoxedProduct = Box::pin(async move {
-            for _ in 0..10 {
-                tokio::time::sleep(Duration::from_millis(30)).await;
+            let started = now_ms();
+            for _ in 0..iterations {
+                tokio::time::sleep(beat).await;
                 heartbeat.store(now_ms(), Ordering::Relaxed);
             }
             StageProduct {
-                run: StageRun::ok("diff", Some("m".to_string()), 300),
-                findings: vec![],
-                verdicts: vec![],
-                metering: serde_json::Map::new(),
-                raw: None,
-            }
-        });
-
-        let product = watch_stage(
-            "diff".to_string(),
-            "subchat-rv-1-diff".to_string(),
-            Duration::from_millis(60),
-            Duration::from_millis(10),
-            Duration::from_millis(40),
-            activity,
-            abort.clone(),
-            None,
-            work,
-        )
-        .await;
-
-        assert_eq!(product.run.status, StageStatusKind::Ok);
-        assert!(product.run.reason.is_none());
-        assert!(abort.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn review_watchdog_never_kills_a_stage_that_stays_active_indefinitely() {
-        let activity = Arc::new(AtomicU64::new(now_ms()));
-        let abort = Arc::new(AtomicBool::new(false));
-        let heartbeat = activity.clone();
-        let idle_limit = Duration::from_millis(40);
-        let work: BoxedProduct = Box::pin(async move {
-            for _ in 0..60 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                heartbeat.store(now_ms(), Ordering::Relaxed);
-            }
-            StageProduct {
-                run: StageRun::ok("diff", Some("m".to_string()), 600),
+                run: StageRun::ok(
+                    "diff",
+                    Some("m".to_string()),
+                    now_ms().saturating_sub(started),
+                ),
                 findings: vec![],
                 verdicts: vec![],
                 metering: serde_json::Map::new(),
@@ -473,7 +444,7 @@ mod tests {
             "diff".to_string(),
             "subchat-rv-1-diff".to_string(),
             idle_limit,
-            Duration::from_millis(5),
+            poll,
             Duration::from_millis(40),
             activity,
             abort.clone(),
@@ -484,7 +455,90 @@ mod tests {
 
         assert_eq!(product.run.status, StageStatusKind::Ok);
         assert!(product.run.reason.is_none());
+        assert!(abort.load(Ordering::SeqCst));
+        product
+    }
+
+    #[tokio::test]
+    async fn review_watchdog_keeps_an_actively_working_stage_alive_past_the_idle_limit() {
+        assert_heartbeating_stage_survives(
+            10,
+            Duration::from_millis(30),
+            Duration::from_millis(60),
+            Duration::from_millis(10),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn review_watchdog_never_kills_a_stage_that_stays_active_indefinitely() {
+        let idle_limit = Duration::from_millis(40);
+        let product = assert_heartbeating_stage_survives(
+            60,
+            Duration::from_millis(10),
+            idle_limit,
+            Duration::from_millis(5),
+        )
+        .await;
         assert!(product.run.duration_ms >= 10 * idle_limit.as_millis() as u64);
+    }
+
+    #[tokio::test]
+    async fn review_watchdog_streaming_stamps_keep_a_silent_channel_stage_alive_until_the_stream_stops(
+    ) {
+        let activity = Arc::new(AtomicU64::new(now_ms()));
+        let abort = Arc::new(AtomicBool::new(false));
+        let streaming_stamp = activity.clone();
+        let stage_abort = abort.clone();
+        let idle_limit = Duration::from_millis(60);
+        let salvage_job = job("diff", "diff");
+        let work: BoxedProduct = Box::pin(async move {
+            let started = now_ms();
+            while now_ms().saturating_sub(started) < 5 * idle_limit.as_millis() as u64 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                streaming_stamp.store(now_ms(), Ordering::Relaxed);
+            }
+            while !stage_abort.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let transcript = r#"{"findings":[{"title":"t","severity":"high","file":"src/lib.rs","line_start":4,"line_end":6,"claim":"c","evidence":"e","reproduction":null,"fix":null}],"summary":"partial","coverage":{"files_read":["src/lib.rs"],"commands_run":[]}}"#;
+            let output = crate::tools::review_agents::contract::parse_stage_output(transcript)
+                .expect("the salvage transcript carries a valid contract block");
+            crate::tools::review_agents::runner::findings_product(
+                "diff",
+                &salvage_job,
+                output,
+                "m".to_string(),
+                now_ms().saturating_sub(started),
+            )
+        });
+
+        let product = watch_stage(
+            "diff".to_string(),
+            "subchat-rv-1-diff".to_string(),
+            idle_limit,
+            Duration::from_millis(5),
+            Duration::from_secs(2),
+            activity,
+            abort.clone(),
+            None,
+            work,
+        )
+        .await;
+
+        assert!(product.run.duration_ms >= 5 * idle_limit.as_millis() as u64);
+        assert_eq!(product.run.status, StageStatusKind::TimedOut);
+        assert!(product
+            .run
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("stopped responding")));
+        assert_eq!(product.findings.len(), 1);
+        assert!(product
+            .run
+            .summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("salvaged from partial run")));
         assert!(abort.load(Ordering::SeqCst));
     }
 

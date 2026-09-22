@@ -1,7 +1,10 @@
 import classNames from "classnames";
 import { FC, ReactNode } from "react";
 import { selectConfig } from "../../features/Config/configSlice";
-import { clearError, getErrorMessage } from "../../features/Errors/errorsSlice";
+import {
+  clearError,
+  getRouteErrorMessage,
+} from "../../features/Errors/errorsSlice";
 import {
   clearInformation,
   getInformationMessage,
@@ -35,7 +38,7 @@ export const IntegrationsView: FC<IntegrationViewProps> = ({
   embedded,
 }) => {
   const dispatch = useAppDispatch();
-  const globalError = useAppSelector(getErrorMessage);
+  const globalError = useAppSelector(getRouteErrorMessage);
   const information = useAppSelector(getInformationMessage);
   const config = useAppSelector(selectConfig);
 

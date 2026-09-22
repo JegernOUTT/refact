@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use refact_chat_api::GoalSnapshot;
+use refact_chat_api::{GoalSnapshot, GoalStatus};
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
@@ -135,9 +135,9 @@ impl Tool for ToolGetGoal {
             .cloned()
             .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
         let live = session_arc.lock().await;
-        let session = live.accepted_control_projection();
+        let session = live.try_accepted_control_projection()?;
         let goal = match goal_role::current_base_goal(&session) {
-            Some(message) => goal_value(&session, message, live.goal.as_ref(), include_history)?,
+            Some(message) => goal_value(&session, &message, live.goal.as_ref(), include_history)?,
             None => Value::Null,
         };
         Ok((

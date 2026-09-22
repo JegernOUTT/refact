@@ -30,6 +30,7 @@ use crate::tools::tools_description::{
 };
 use crate::knowledge_index::format_related_memories_section;
 use crate::tools::native_enrichment::{workspace_roots, NativeReferences};
+use refact_postprocessing::line_truncation::truncate_tool_line;
 
 pub struct ToolRegexSearch {
     pub config_path: String,
@@ -77,7 +78,12 @@ fn format_preview(
         let lineno = idx + 1;
         let marker = if lineno == match_line { ">" } else { " " };
         if let Some(line) = lines.get(idx) {
-            out.push_str(&format!("{}{:>6} | {}\n", marker, lineno, line));
+            out.push_str(&format!(
+                "{}{:>6} | {}\n",
+                marker,
+                lineno,
+                truncate_tool_line(line)
+            ));
         }
     }
     out.trim_end().to_string()
@@ -568,10 +574,14 @@ impl Tool for ToolRegexSearch {
             if cards.is_empty() {
                 cards = idx_guard.related_for_related_files(&matched_files, 8);
             }
-            format_related_memories_section(&cards, None)
+            format_related_memories_section(&cards)
         };
 
-        let scanned_paths = files_in_scope.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let disclosed_paths = all_search_results
+            .iter()
+            .map(|cf| PathBuf::from(&cf.file_name))
+            .unique()
+            .collect::<Vec<_>>();
         let mut results = vec_context_file_to_context_tools(all_search_results);
         let mut tool_message = ChatMessage {
             role: "tool".to_string(),
@@ -582,7 +592,7 @@ impl Tool for ToolRegexSearch {
             ..Default::default()
         };
         crate::privacy::load_privacy_if_needed(gcx.clone()).await;
-        let records = crate::privacy::records::declared_file_records(&gcx, scanned_paths)?;
+        let records = crate::privacy::records::declared_file_records(&gcx, disclosed_paths)?;
         crate::privacy::records::merge_records(&mut tool_message, records);
         references.attach(&mut tool_message);
         results.push(ContextEnum::ChatMessage(tool_message));
@@ -629,6 +639,22 @@ mod tests {
             )
             .await,
         ))
+    }
+
+    #[test]
+    fn preview_caps_a_large_minified_line() {
+        let line = format!("HEAD needle {} TAIL", "x".repeat(50_000));
+        let preview = format_preview(&[line.as_str()], 0, 1, 1);
+
+        assert!(preview.contains("HEAD needle"));
+        assert!(preview.contains("TAIL"));
+        assert!(preview.contains("chars omitted"));
+        assert!(preview.contains("tool_max_line_chars"));
+        assert!(
+            preview.chars().count() < 2_040,
+            "{}",
+            preview.chars().count()
+        );
     }
 
     #[tokio::test]
@@ -680,6 +706,61 @@ mod tests {
             Some("no_matches")
         );
         assert_eq!(message.content.content_text_only(), *text);
+    }
+
+    #[tokio::test]
+    async fn tool_execute_declares_privacy_only_for_matched_files() {
+        let gcx = make_gcx().await;
+        let temp = tempfile::Builder::new()
+            .prefix("refact-regex-privacy-scope-")
+            .tempdir()
+            .unwrap();
+        let temp_root = dunce::simplified(&fs::canonicalize(temp.path()).unwrap()).to_path_buf();
+        let matched = temp_root.join("matched.rs");
+        let scanned_only = temp_root.join("scanned_only.rs");
+        fs::write(&matched, "fn needle() {}\n").unwrap();
+        fs::write(&scanned_only, "fn unrelated() {}\n").unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp_root];
+        *gcx.documents_state.workspace_files.lock().unwrap() =
+            vec![matched.clone(), scanned_only.clone()];
+        let ccx = make_ccx(gcx).await;
+        let mut tool = ToolRegexSearch {
+            config_path: String::new(),
+        };
+        let args = HashMap::from_iter([
+            ("pattern".to_string(), Value::String("needle".to_string())),
+            ("scope".to_string(), Value::String("workspace".to_string())),
+        ]);
+
+        let (_, results) = tool
+            .tool_execute(ccx, &"search-call".to_string(), &args)
+            .await
+            .unwrap();
+
+        let message = results
+            .iter()
+            .filter_map(|result| match result {
+                ContextEnum::ChatMessage(message) => Some(message),
+                _ => None,
+            })
+            .next_back()
+            .expect("tool message must be produced");
+        let declared = refact_privacy::records_from_messages(std::slice::from_ref(message))
+            .unwrap()
+            .into_iter()
+            .map(|(_, record)| record.path)
+            .collect::<Vec<_>>();
+        let matched_name =
+            refact_core::chat_types::normalize_file_name(matched.to_string_lossy().into_owned());
+        let scanned_name = refact_core::chat_types::normalize_file_name(
+            scanned_only.to_string_lossy().into_owned(),
+        );
+
+        assert_eq!(declared, vec![matched_name]);
+        assert!(
+            !declared.contains(&scanned_name),
+            "scanned but unmatched files must not be declared"
+        );
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@ pub use refact_buddy_core::workflows::*;
 
 use crate::app_state::AppState;
 use super::types::BuddyActivity;
+use super::outcome_runtime::terminal_from_workflow_result;
 
 pub fn workflow_failure_summary(category: &WorkflowFailureCategory, error: &str) -> String {
     let detail = super::jobs::autonomous_chats::redact_and_cap_text(error, 240);
@@ -73,12 +74,80 @@ pub fn canonical_signal_type(workflow_id: &str) -> &str {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct WorkflowReport {
+    pub title: String,
+    pub body: String,
+    pub terminal: super::outcome_runtime::WorkflowTerminal,
+    pub evidence: Vec<refact_buddy_core::operator_types::EvidenceRef>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct WorkflowReportScope {
+    pub observed_scope: String,
+    pub input_fingerprint: String,
+}
+
+pub(crate) async fn buddy_wrap_workflow_report<T, F, Fut>(
+    gcx: AppState,
+    workflow_id: &str,
+    icon: &str,
+    xp: u64,
+    summary_fn: impl Fn(&T) -> String,
+    scope: WorkflowReportScope,
+    report_fn: impl FnOnce(&Result<T, String>) -> WorkflowReport,
+    workflow_fn: F,
+) -> Result<T, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    buddy_wrap_workflow_inner(
+        gcx,
+        workflow_id,
+        icon,
+        xp,
+        summary_fn,
+        Some(scope),
+        |result| Some(report_fn(result)),
+        workflow_fn,
+    )
+    .await
+}
+
 pub async fn buddy_wrap_workflow<T, F, Fut>(
     gcx: AppState,
     workflow_id: &str,
     icon: &str,
     xp: u64,
     summary_fn: impl Fn(&T) -> String,
+    workflow_fn: F,
+) -> Result<T, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    buddy_wrap_workflow_inner(
+        gcx,
+        workflow_id,
+        icon,
+        xp,
+        summary_fn,
+        None,
+        |_| None,
+        workflow_fn,
+    )
+    .await
+}
+
+async fn buddy_wrap_workflow_inner<T, F, Fut>(
+    gcx: AppState,
+    workflow_id: &str,
+    icon: &str,
+    _xp: u64,
+    summary_fn: impl Fn(&T) -> String,
+    scope: Option<WorkflowReportScope>,
+    report_fn: impl FnOnce(&Result<T, String>) -> Option<WorkflowReport>,
     workflow_fn: F,
 ) -> Result<T, String>
 where
@@ -105,6 +174,26 @@ where
     started.persistent = true;
     crate::buddy::actor::buddy_enqueue_event(gcx.clone(), started).await;
 
+    let outcome_runtime = {
+        let buddy = gcx.buddy.buddy.lock().await;
+        buddy
+            .as_ref()
+            .and_then(|service| service.outcome_runtime.clone())
+    };
+    let outcome_start = outcome_runtime.as_ref().map(|runtime| {
+        let mut start = runtime.start_workflow(workflow_id, Utc::now().to_rfc3339());
+        if let Some(scope) = scope {
+            start.coverage = scope.observed_scope;
+            start.input_fingerprint = scope.input_fingerprint;
+        }
+        start
+    });
+    if let (Some(runtime), Some(start)) = (&outcome_runtime, &outcome_start) {
+        if let Err(error) = runtime.begin_workflow(start.clone()).await {
+            tracing::error!(workflow_id, error = %error, "buddy workflow start was not persisted; crash recovery capture unavailable");
+        }
+    }
+
     let result = workflow_fn().await;
 
     let (success, summary) = match &result {
@@ -112,13 +201,41 @@ where
         Err(e) => (false, e.clone()),
     };
 
+    if let (Some(runtime), Some(start)) = (outcome_runtime, outcome_start) {
+        let publication = if let Some(report) = report_fn(&result) {
+            runtime
+                .publish_report(
+                    start,
+                    report.title,
+                    report.body,
+                    report.evidence,
+                    report.terminal,
+                )
+                .await
+        } else {
+            let terminal = match result.as_ref() {
+                Ok(_) => super::outcome_runtime::WorkflowTerminal::Inconclusive,
+                Err(error) => terminal_from_workflow_result(&Err(error.clone())),
+            };
+            runtime
+                .publish_workflow_result(start, summary.clone(), terminal)
+                .await
+        };
+        if let Err(error) = publication {
+            tracing::error!(
+                workflow_id,
+                error = %error,
+                "buddy operator outcome was not persisted; no operator delivery was recorded"
+            );
+        }
+    }
+
     let failure_report = result
         .as_ref()
         .err()
         .map(|error| workflow_failure_report(workflow_id, error, None));
 
     let buddy_arc = gcx.buddy.buddy.clone();
-    let voice_gcx = gcx.clone();
     let project_dirs = crate::files_correction::get_project_dirs(gcx.gcx.clone()).await;
     let project_root = project_dirs.into_iter().next();
     let workflow_id_owned = workflow_id.to_string();
@@ -136,16 +253,15 @@ where
             failure_summary: None,
         };
 
-        let mut completed_quest = None;
-        let mut quest_voice_state = None;
         let mut failure_write = None;
+        let mut recovery_runtime = None;
         {
             let mut buddy = buddy_arc.lock().await;
             if let Some(svc) = buddy.as_mut() {
                 svc.complete_runtime_event(&dedupe_key, "completed");
                 if success {
+                    recovery_runtime = svc.record_provider_rate_limit_recovery();
                     svc.add_activity(activity);
-                    crate::buddy::state::grant_xp(&mut svc.state, xp);
                     let now = Utc::now().to_rfc3339();
                     if let Some(ws) = svc
                         .state
@@ -171,35 +287,12 @@ where
                             },
                         );
                     }
-                    svc.refresh_active_quest();
                     svc.dirty = true;
                     let _ = svc
                         .events_tx
                         .send(crate::buddy::events::BuddyEvent::StateUpdated {
                             state: svc.state.clone(),
                         });
-                    let reward = svc
-                        .state
-                        .active_quest
-                        .as_ref()
-                        .filter(|quest| quest.status == "active" && quest.progress >= quest.goal)
-                        .map(|quest| quest.reward_xp);
-                    if let Some(reward) = reward {
-                        completed_quest =
-                            crate::buddy::state::complete_active_quest(&mut svc.state);
-                        quest_voice_state = Some((
-                            svc.state.personality.clone(),
-                            svc.state.identity.name.clone(),
-                            svc.pulse.clone(),
-                            reward,
-                        ));
-                        svc.dirty = true;
-                        let _ =
-                            svc.events_tx
-                                .send(crate::buddy::events::BuddyEvent::StateUpdated {
-                                    state: svc.state.clone(),
-                                });
-                    }
                 } else if let Some(report) = failure_report.as_ref() {
                     failure_write = svc.record_workflow_failure_report(report.clone());
                 } else {
@@ -208,6 +301,12 @@ where
                         workflow_id_owned
                     );
                 }
+            }
+        }
+
+        if let Some(runtime) = recovery_runtime {
+            if let Err(error) = runtime.clear_provider_rate_limit_work().await {
+                tracing::warn!(%error, "buddy: provider rate-limit recovery was not persisted");
             }
         }
 
@@ -232,28 +331,6 @@ where
             )
             .await;
         }
-
-        if let (Some(quest), Some((persona, identity_name, pulse, reward))) =
-            (completed_quest, quest_voice_state)
-        {
-            let completed = crate::buddy::actor::complete_quest_with_voice(
-                voice_gcx.clone(),
-                quest,
-                persona,
-                identity_name,
-                pulse,
-            )
-            .await;
-            crate::buddy::actor::buddy_update_speech(voice_gcx.clone(), completed.speech).await;
-            crate::buddy::actor::buddy_apply(voice_gcx.clone(), completed.mutation).await;
-            if reward > 0 {
-                let buddy_arc = voice_gcx.buddy.buddy.clone();
-                let mut buddy = buddy_arc.lock().await;
-                if let Some(svc) = buddy.as_mut() {
-                    svc.grant_xp(reward);
-                }
-            }
-        }
     });
 
     let untracked_handle = {
@@ -275,6 +352,247 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn isolated_app() -> (
+        tempfile::TempDir,
+        AppState,
+        super::super::outcome_runtime::OutcomeRuntime,
+    ) {
+        use refact_buddy_core::operator_types::{ProjectIdentity, WorkerIdentity};
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        let app = AppState::from_gcx(gcx).await;
+        *app.workspace
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![dir.path().to_path_buf()];
+        let runtime = super::super::outcome_runtime::OutcomeRuntime::open(
+            dir.path(),
+            ProjectIdentity {
+                project_id: "workflow-test".into(),
+                canonical_root: dir.path().to_string_lossy().into_owned(),
+            },
+            WorkerIdentity {
+                worker_id: "worker".into(),
+                engine_instance_id: "engine".into(),
+                epoch: 1,
+            },
+        )
+        .unwrap();
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let mut service = crate::buddy::actor::BuddyService::new(
+            dir.path().to_path_buf(),
+            crate::buddy::state::default_buddy_state(),
+            crate::buddy::settings::BuddySettings::default(),
+            Vec::new(),
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        );
+        service.outcome_runtime = Some(runtime.clone());
+        *app.buddy.buddy.lock().await = Some(service);
+        (dir, app, runtime)
+    }
+
+    async fn drain_side_effects(app: &AppState) {
+        let tasks = app
+            .buddy
+            .buddy
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .take_background_tasks();
+        for task in tasks {
+            task.await.unwrap();
+        }
+    }
+
+    fn typed_report(body: String) -> WorkflowReport {
+        WorkflowReport {
+            title: "Trusted proposal".into(),
+            body,
+            terminal: super::super::outcome_runtime::WorkflowTerminal::Completed,
+            evidence: vec![],
+        }
+    }
+
+    fn typed_scope() -> WorkflowReportScope {
+        WorkflowReportScope {
+            observed_scope: "Proposal only; no application or verification".into(),
+            input_fingerprint: "sha256:exact-input".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_wrapper_publishes_full_report_and_preserves_legacy_summary() {
+        use refact_buddy_core::operator_types::RunStatus;
+        let (dir, app, runtime) = isolated_app().await;
+        let message = "Subject\n\nDetailed proposal body".to_string();
+        let result = buddy_wrap_workflow_report(
+            app.clone(),
+            "commit_message",
+            "x",
+            0,
+            |_: &String| "Legacy summary".into(),
+            typed_scope(),
+            |result| typed_report(result.as_ref().unwrap().clone()),
+            || async { Ok(message.clone()) },
+        )
+        .await;
+        assert_eq!(result, Ok(message.clone()));
+        drain_side_effects(&app).await;
+        let work = runtime
+            .list_work_items(None, 10)
+            .await
+            .unwrap()
+            .entries
+            .remove(0)
+            .value;
+        let artifact = runtime
+            .get_artifact_revision(work.current_artifact_id.unwrap(), None)
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(artifact.title, "Trusted proposal");
+        assert_eq!(artifact.body, message);
+        let outcome = runtime
+            .list_work_outcomes(work.id, None, 10)
+            .await
+            .unwrap()
+            .entries
+            .remove(0)
+            .value;
+        assert_eq!(outcome.status, RunStatus::Completed);
+        assert_eq!(outcome.input_fingerprint, "sha256:exact-input");
+        assert_eq!(
+            outcome.coverage,
+            "Proposal only; no application or verification"
+        );
+        assert!(outcome.effects.is_empty());
+        assert!(artifact.proposed_action_ids.is_empty());
+        let transcript: serde_json::Value = serde_json::from_str(
+            &tokio::fs::read_to_string(
+                dir.path()
+                    .join(".refact/buddy/chats/workflows/commit_message.json"),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(transcript["entries"][0]["output_summary"], "Legacy summary");
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn workflow_volume_summaries_no_change_and_retries_preserve_saved_cosmetics() {
+        let (_dir, app, runtime) = isolated_app().await;
+        let before = {
+            let mut buddy = app.buddy.buddy.lock().await;
+            let state = &mut buddy.as_mut().unwrap().state;
+            crate::buddy::state::grant_xp(state, 65);
+            serde_json::to_value(&state.progression).unwrap()
+        };
+        for summary in ["success", "No change", "retry success", "success"] {
+            buddy_wrap_workflow(
+                app.clone(),
+                "commit_message",
+                "x",
+                1000,
+                |_| summary.into(),
+                || async { Ok::<_, String>(()) },
+            )
+            .await
+            .unwrap();
+            drain_side_effects(&app).await;
+            let buddy = app.buddy.buddy.lock().await;
+            assert_eq!(
+                serde_json::to_value(&buddy.as_ref().unwrap().state.progression).unwrap(),
+                before
+            );
+        }
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn compatibility_wrapper_never_infers_no_change_or_completed() {
+        use refact_buddy_core::operator_types::RunStatus;
+        let (_dir, app, runtime) = isolated_app().await;
+        for summary in ["", "No changes needed; completed successfully"] {
+            let result = buddy_wrap_workflow(
+                app.clone(),
+                "commit_message",
+                "x",
+                0,
+                |_| summary.into(),
+                || async { Ok::<_, String>(42) },
+            )
+            .await;
+            assert_eq!(result, Ok(42));
+            drain_side_effects(&app).await;
+        }
+        let work = runtime
+            .list_work_items(None, 10)
+            .await
+            .unwrap()
+            .entries
+            .remove(0)
+            .value;
+        let outcomes = runtime.list_work_outcomes(work.id, None, 10).await.unwrap();
+        assert_eq!(outcomes.entries.len(), 2);
+        assert!(outcomes
+            .entries
+            .iter()
+            .all(|entry| entry.value.status == RunStatus::Inconclusive));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn wrapper_publication_failure_does_not_change_callback_results_or_side_effects() {
+        let (_dir, app, runtime) = isolated_app().await;
+        runtime.shutdown().await;
+        for expected in [
+            Ok("original value".to_string()),
+            Err("original error".to_string()),
+        ] {
+            let result = buddy_wrap_workflow_report(
+                app.clone(),
+                "commit_message",
+                "x",
+                0,
+                |_| "Legacy summary".into(),
+                typed_scope(),
+                |_| typed_report("Report cannot be stored".into()),
+                || async { expected.clone() },
+            )
+            .await;
+            assert_eq!(result, expected);
+            drain_side_effects(&app).await;
+            let buddy = app.buddy.buddy.lock().await;
+            let summary = buddy
+                .as_ref()
+                .unwrap()
+                .state
+                .workflow_summaries
+                .iter()
+                .find(|summary| summary.workflow_id == "commit_message")
+                .unwrap();
+            assert_eq!(
+                summary.last_outcome.as_deref(),
+                Some(if expected.is_ok() {
+                    "success"
+                } else {
+                    "failed:unknown"
+                })
+            );
+        }
+    }
 
     async fn wait_for_workflow_side_effects() {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

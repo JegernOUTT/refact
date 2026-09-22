@@ -282,6 +282,20 @@ function installBuddyHomeHandlers(settings = makeSettings()) {
 }
 
 describe("BuddyHome", () => {
+  it("mounts the scene with presence motion enabled", async () => {
+    installBuddyHomeHandlers();
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+
+    render(<BuddyHome />, { store });
+
+    await screen.findByTestId("buddy-home-content");
+    expect(screen.getByTestId("buddy-world")).toHaveAttribute(
+      "data-presence-enabled",
+      "true",
+    );
+  });
+
   it("renders major enabled home regions from store and RTK Query data", async () => {
     installBuddyHomeHandlers();
     const store = setUpStore({ ...CONFIG_STATE });
@@ -290,41 +304,55 @@ describe("BuddyHome", () => {
     const { user } = render(<BuddyHome />, { store });
 
     expect(await screen.findByTestId("buddy-home-content")).toBeInTheDocument();
+    // The scene is hoisted out of the Play tab, so it owns the character and
+    // the presence header no longer repeats a second avatar.
     expect(screen.getByTestId("buddy-home-hero")).toBeInTheDocument();
     expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("buddy-presence-avatar"),
+    ).not.toBeInTheDocument();
     expect(screen.getByTestId("buddy-summary-strip")).toBeInTheDocument();
     expect(screen.getByText("Project setup")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Run Setup" }),
     ).toBeInTheDocument();
 
-    // Opportunities is the default tab; the other panels each live behind a tab.
-    expect(screen.getByTestId("buddy-opportunities-feed")).toBeInTheDocument();
-    expect(screen.getByText("Model config is broken")).toBeInTheDocument();
+    // Pulse is both the leftmost and the default tab.
+    expect(await screen.findByTestId("buddy-pulse-card")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("tab", { name: "Personality" }));
+    await user.click(screen.getByRole("button", { name: "Close Play" }));
+    expect(screen.queryByTestId("buddy-world")).not.toBeInTheDocument();
+    expect(screen.getByTestId("buddy-presence-avatar")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Open Play" }));
+    expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
     expect(
-      await screen.findByTestId("buddy-personality-panel"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Helper Sprite")).toBeInTheDocument();
+      screen.queryByTestId("buddy-presence-avatar"),
+    ).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("tab", { name: "Recent chats" }));
-    expect(await screen.findByText("Recent Buddy chat")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Opportunities" }));
+    expect(
+      await screen.findByTestId("buddy-opportunities-feed"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Model config is broken")).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Activity" }));
     expect(
       await screen.findByTestId("buddy-activity-panel"),
     ).toBeInTheDocument();
     expect(screen.getByText("Task coach noticed pattern")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("tab", { name: "Pulse" }));
-    expect(await screen.findByTestId("buddy-pulse-card")).toBeInTheDocument();
+    expect(await screen.findByText("Recent Buddy chat")).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Recent errors" }));
     expect(
       await screen.findByTestId("buddy-recent-errors-panel"),
     ).toBeInTheDocument();
     expect(screen.getByText("Model unavailable")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    expect(
+      await screen.findByTestId("buddy-personality-panel"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Helper Sprite")).toBeInTheDocument();
   });
 
   it("shows disabled state and enables Buddy through the settings mutation", async () => {
@@ -368,7 +396,7 @@ describe("BuddyHome", () => {
     expect(screen.getByText("Loading Buddy")).toBeInTheDocument();
   });
 
-  it("opens the settings panel from the first (settings) tab", async () => {
+  it("opens settings and personality from the trailing settings tab", async () => {
     installBuddyHomeHandlers();
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot()));
@@ -376,10 +404,13 @@ describe("BuddyHome", () => {
     const { user } = render(<BuddyHome />, { store });
 
     expect(await screen.findByTestId("buddy-home-content")).toBeInTheDocument();
-    // Settings is the first tab but the default tab is Opportunities, so the
-    // settings panel is not mounted until the tab is selected.
+    // Configuration trails the useful tabs, so neither panel is mounted until
+    // the last tab is selected.
     expect(
       screen.queryByTestId("buddy-settings-panel"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("buddy-personality-panel"),
     ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Settings" }));
@@ -387,6 +418,7 @@ describe("BuddyHome", () => {
     expect(
       await screen.findByTestId("buddy-settings-panel"),
     ).toBeInTheDocument();
+    expect(screen.getByTestId("buddy-personality-panel")).toBeInTheDocument();
   });
 
   it("resets workspace-scoped Buddy state while preserving seen notifications", () => {
