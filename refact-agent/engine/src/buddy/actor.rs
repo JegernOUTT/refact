@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -49,6 +49,82 @@ const BUDDY_DESCRIPTION_MAX_CHARS: usize = 500;
 const BUDDY_STATIC_SPEECH_FALLBACK: &str = "Tiny gremlin update: something needs attention.";
 const BUDDY_STATIC_TITLE_FALLBACK: &str = "Buddy update";
 const BUDDY_STATIC_DESCRIPTION_FALLBACK: &str = "Buddy has an update ready.";
+const OPERATOR_REOPEN_DELAYS: [Duration; 5] = [
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(2 * 60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(15 * 60),
+];
+
+#[derive(Clone, Debug)]
+pub(crate) struct OperatorOpenFailure {
+    pub(crate) reason: OperatorOpenFailureReason,
+    retry_stage: usize,
+    next_retry_at: tokio::time::Instant,
+    attempts: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum OperatorOpenFailureReason {
+    AlreadyOwned(Option<super::operator_store::OperatorLockOwner>),
+    Other(String),
+}
+
+impl std::fmt::Display for OperatorOpenFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyOwned(Some(owner)) => write!(
+                f,
+                "operator store is already owned by another writer ({})",
+                owner.describe()
+            ),
+            Self::AlreadyOwned(None) => {
+                f.write_str("operator store is already owned by another writer")
+            }
+            Self::Other(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl From<super::operator_runtime::OperatorRuntimeOpenError> for OperatorOpenFailureReason {
+    fn from(error: super::operator_runtime::OperatorRuntimeOpenError) -> Self {
+        match error {
+            super::operator_runtime::OperatorRuntimeOpenError::Store(
+                super::operator_store::OperatorStoreError::AlreadyOwned(owner),
+            ) => Self::AlreadyOwned(owner),
+            error => Self::Other(error.to_string()),
+        }
+    }
+}
+
+impl OperatorOpenFailure {
+    fn new(reason: OperatorOpenFailureReason, now: tokio::time::Instant) -> Self {
+        Self {
+            reason,
+            retry_stage: 0,
+            next_retry_at: now + OPERATOR_REOPEN_DELAYS[0],
+            attempts: 1,
+        }
+    }
+
+    fn is_due(&self, now: tokio::time::Instant) -> bool {
+        now >= self.next_retry_at
+    }
+
+    fn record_failure(
+        &mut self,
+        reason: OperatorOpenFailureReason,
+        now: tokio::time::Instant,
+    ) -> bool {
+        self.reason = reason;
+        self.attempts = self.attempts.saturating_add(1);
+        let previous_stage = self.retry_stage;
+        self.retry_stage = (self.retry_stage + 1).min(OPERATOR_REOPEN_DELAYS.len() - 1);
+        self.next_retry_at = now + OPERATOR_REOPEN_DELAYS[self.retry_stage];
+        self.retry_stage > previous_stage
+    }
+}
 
 pub(crate) fn chat_phrase_bank_is_fresh(bank: &BuddyChatPhraseBank, now: DateTime<Utc>) -> bool {
     bank.day == now.date_naive().to_string()
@@ -232,6 +308,15 @@ pub struct BuddyService {
     pub state: BuddyState,
     pub settings: BuddySettings,
     pub outcome_runtime: Option<super::outcome_runtime::OutcomeRuntime>,
+    pub(crate) operator_open_failure: Option<OperatorOpenFailure>,
+    operator_reopen_task: Option<
+        JoinHandle<
+            Result<
+                super::outcome_runtime::OutcomeRuntime,
+                super::operator_runtime::OperatorRuntimeOpenError,
+            >,
+        >,
+    >,
     pub operator_features: super::operator_runtime::OperatorFeatures,
     /// Read-only compatibility cache; never saved into legacy state.
     pub operator_opportunity_projection: Vec<BuddyOpportunity>,
@@ -568,6 +653,8 @@ impl BuddyService {
             state,
             settings,
             outcome_runtime: None,
+            operator_open_failure: None,
+            operator_reopen_task: None,
             operator_features: Default::default(),
             operator_opportunity_projection: Vec::new(),
             operator_legacy_seeded: false,
@@ -614,14 +701,81 @@ impl BuddyService {
         self.operator_features =
             super::operator_runtime::OperatorFeatures::from_settings(&self.settings);
         if !self.operator_features.storage {
+            self.operator_open_failure = None;
             return;
         }
         match super::operator_runtime::open_project_runtime(&self.project_root) {
-            Ok(runtime) => self.outcome_runtime = Some(runtime),
-            Err(error) => warn!(
-                "buddy: operator store unavailable, operator status stays unavailable: {}",
-                error
-            ),
+            Ok(runtime) => {
+                self.outcome_runtime = Some(runtime);
+                self.operator_open_failure = None;
+            }
+            Err(error) => {
+                self.record_operator_open_failure(error, tokio::time::Instant::now());
+            }
+        }
+    }
+
+    fn should_reopen_operator(&self, now: tokio::time::Instant) -> bool {
+        self.operator_features.storage
+            && self.outcome_runtime.is_none()
+            && self
+                .operator_open_failure
+                .as_ref()
+                .is_some_and(|failure| failure.is_due(now))
+    }
+
+    fn record_operator_open_failure(
+        &mut self,
+        error: super::operator_runtime::OperatorRuntimeOpenError,
+        now: tokio::time::Instant,
+    ) {
+        let error = OperatorOpenFailureReason::from(error);
+        let should_log = match &mut self.operator_open_failure {
+            Some(failure) => failure.record_failure(error, now),
+            None => {
+                self.operator_open_failure = Some(OperatorOpenFailure::new(error, now));
+                true
+            }
+        };
+        if should_log {
+            let reason = self
+                .operator_open_failure
+                .as_ref()
+                .map(|failure| failure.reason.to_string())
+                .unwrap_or_else(|| "operator store unavailable".to_string());
+            warn!("buddy: operator store unavailable, operator status stays unavailable: {reason}");
+        }
+    }
+
+    fn install_reopened_operator_runtime(
+        &mut self,
+        project_root: &Path,
+        runtime: super::outcome_runtime::OutcomeRuntime,
+    ) -> bool {
+        if !self.operator_features.storage
+            || self.outcome_runtime.is_some()
+            || self.project_root != project_root
+        {
+            return false;
+        }
+        self.outcome_runtime = Some(runtime);
+        self.operator_open_failure = None;
+        true
+    }
+
+    fn begin_operator_reopen(&mut self, now: tokio::time::Instant) {
+        if !self.should_reopen_operator(now) || self.operator_reopen_task.is_some() {
+            return;
+        }
+        self.operator_reopen_task = Some(tokio::spawn(
+            super::operator_runtime::open_project_runtime_async(self.project_root.clone()),
+        ));
+    }
+
+    async fn shutdown_operator_reopen(&mut self) {
+        if let Some(task) = self.operator_reopen_task.take() {
+            task.abort();
+            let _ = task.await;
         }
     }
 
@@ -2524,6 +2678,64 @@ pub fn make_runtime_event(
     }
 }
 
+async fn tick_operator_reopen(buddy: &Arc<tokio::sync::Mutex<Option<BuddyService>>>) {
+    let completed = {
+        let mut guard = buddy.lock().await;
+        let Some(service) = guard.as_mut() else {
+            return;
+        };
+        if service
+            .operator_reopen_task
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            service.operator_reopen_task.take()
+        } else {
+            service.begin_operator_reopen(tokio::time::Instant::now());
+            None
+        }
+    };
+    let Some(task) = completed else {
+        return;
+    };
+    let result = task.await.unwrap_or_else(|_| {
+        Err(super::operator_runtime::OperatorRuntimeOpenError::Task(
+            "operator store reopen task failed".to_string(),
+        ))
+    });
+    let project_root = {
+        let guard = buddy.lock().await;
+        guard.as_ref().map(|service| service.project_root.clone())
+    };
+    let Some(project_root) = project_root else {
+        if let Ok(runtime) = result {
+            runtime.shutdown().await;
+        }
+        return;
+    };
+    match result {
+        Ok(runtime) => {
+            let installed = {
+                let mut guard = buddy.lock().await;
+                guard.as_mut().is_some_and(|service| {
+                    service.install_reopened_operator_runtime(&project_root, runtime.clone())
+                })
+            };
+            if installed {
+                info!("buddy: operator store reopened after contention");
+            } else {
+                runtime.shutdown().await;
+            }
+        }
+        Err(error) => {
+            let mut guard = buddy.lock().await;
+            if let Some(service) = guard.as_mut() {
+                service.record_operator_open_failure(error, tokio::time::Instant::now());
+            }
+        }
+    }
+}
+
 pub async fn buddy_complete_event(gcx: AppState, dedupe_key: &str, status: &str) {
     let buddy_arc = gcx.buddy.buddy.clone();
     let mut lock = buddy_arc.lock().await;
@@ -3006,6 +3218,7 @@ pub async fn buddy_background_task(gcx: AppState) {
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 expiry_tick += 1;
+                tick_operator_reopen(&buddy_arc).await;
                 if let Err(error) = publish_operator_inputs(&buddy_arc).await {
                     if expiry_tick % 60 == 0 {
                         warn!("buddy: operator proposals remain pending: {}", error);
@@ -3451,6 +3664,9 @@ pub async fn buddy_background_task(gcx: AppState) {
     // daemon owner can open it; the database itself is left untouched.
     if let Some(runtime) = service.as_ref().and_then(|svc| svc.outcome_runtime.clone()) {
         runtime.shutdown().await;
+    }
+    if let Some(svc) = service.as_mut() {
+        svc.shutdown_operator_reopen().await;
     }
     drop(service);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), writer_handle).await;

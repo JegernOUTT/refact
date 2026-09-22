@@ -521,7 +521,7 @@ fn operator_error(error: OperatorStoreError) -> ScratchError {
         OperatorStoreError::SchemaTooNew(_) | OperatorStoreError::CorruptSchema(_) => {
             StatusCode::UNPROCESSABLE_ENTITY
         }
-        OperatorStoreError::AlreadyOwned => StatusCode::SERVICE_UNAVAILABLE,
+        OperatorStoreError::AlreadyOwned(_) => StatusCode::SERVICE_UNAVAILABLE,
         OperatorStoreError::Conflict(_) | OperatorStoreError::StaleRevision { .. } => {
             StatusCode::CONFLICT
         }

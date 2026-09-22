@@ -8,6 +8,23 @@ use sha2::{Digest, Sha256};
 
 use crate::app_state::AppState;
 use super::outcome_runtime::OutcomeRuntime;
+use super::operator_store::OperatorStoreError;
+
+#[derive(Debug)]
+pub(crate) enum OperatorRuntimeOpenError {
+    ProjectIdentity(String),
+    Store(OperatorStoreError),
+    Task(String),
+}
+
+impl std::fmt::Display for OperatorRuntimeOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ProjectIdentity(error) | Self::Task(error) => f.write_str(error),
+            Self::Store(error) => error.fmt(f),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub struct OperatorFeatures {
@@ -83,10 +100,23 @@ pub fn engine_worker_identity() -> WorkerIdentity {
 
 /// Open the durable operator store for the live service. Every failure is an
 /// error the caller reports as `unavailable`; nothing here removes or rewrites data.
-pub fn open_project_runtime(project_root: &Path) -> Result<OutcomeRuntime, String> {
-    let project = project_identity(project_root)?;
+pub(crate) fn open_project_runtime(
+    project_root: &Path,
+) -> Result<OutcomeRuntime, OperatorRuntimeOpenError> {
+    let project =
+        project_identity(project_root).map_err(OperatorRuntimeOpenError::ProjectIdentity)?;
     OutcomeRuntime::open(project_root, project, engine_worker_identity())
-        .map_err(|error| error.to_string())
+        .map_err(OperatorRuntimeOpenError::Store)
+}
+
+pub(crate) async fn open_project_runtime_async(
+    project_root: std::path::PathBuf,
+) -> Result<OutcomeRuntime, OperatorRuntimeOpenError> {
+    tokio::task::spawn_blocking(move || open_project_runtime(&project_root))
+        .await
+        .map_err(|_| {
+            OperatorRuntimeOpenError::Task("operator store open task failed".to_string())
+        })?
 }
 
 pub async fn runtime(

@@ -45,6 +45,116 @@ fn speech() -> BuddySpeechItem {
     .unwrap()
 }
 
+#[tokio::test(start_paused = true)]
+async fn reopen_succeeds_once_the_lock_is_released() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let holder = super::super::operator_runtime::open_project_runtime(&root).unwrap();
+    let mut service = service(&root);
+    service.enable_operator_from_settings();
+    assert!(service.outcome_runtime.is_none());
+    assert!(matches!(
+        service
+            .operator_open_failure
+            .as_ref()
+            .map(|failure| &failure.reason),
+        Some(OperatorOpenFailureReason::AlreadyOwned(Some(_)))
+    ));
+    let buddy = Arc::new(tokio::sync::Mutex::new(Some(service)));
+
+    tokio::time::advance(OPERATOR_REOPEN_DELAYS[0]).await;
+    for _ in 0..10_000 {
+        tick_operator_reopen(&buddy).await;
+        if buddy
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .operator_open_failure
+            .as_ref()
+            .is_some_and(|failure| failure.attempts == 2)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        buddy
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .operator_open_failure
+            .as_ref()
+            .unwrap()
+            .attempts,
+        2
+    );
+
+    holder.shutdown().await;
+    tokio::time::advance(OPERATOR_REOPEN_DELAYS[1] - Duration::from_secs(1)).await;
+    tick_operator_reopen(&buddy).await;
+    assert!(buddy
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .operator_reopen_task
+        .is_none());
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..10_000 {
+        tick_operator_reopen(&buddy).await;
+        if buddy
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .outcome_runtime
+            .is_some()
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let reopened = buddy.lock().await;
+    let service = reopened.as_ref().unwrap();
+    assert!(service.outcome_runtime.is_some());
+    assert!(service.operator_open_failure.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn reopen_backoff_does_not_busy_loop() {
+    let now = tokio::time::Instant::now();
+    let mut failure =
+        OperatorOpenFailure::new(OperatorOpenFailureReason::Other("contended".into()), now);
+    assert!(!failure.is_due(now));
+    for (attempt, delay) in OPERATOR_REOPEN_DELAYS.iter().enumerate() {
+        tokio::time::advance(*delay - Duration::from_secs(1)).await;
+        assert!(!failure.is_due(tokio::time::Instant::now()));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(failure.is_due(tokio::time::Instant::now()));
+        failure.record_failure(
+            OperatorOpenFailureReason::Other(format!("failure-{attempt}")),
+            tokio::time::Instant::now(),
+        );
+    }
+    assert_eq!(failure.retry_stage, OPERATOR_REOPEN_DELAYS.len() - 1);
+    assert_eq!(failure.attempts, OPERATOR_REOPEN_DELAYS.len() as u64 + 1);
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(15 * 60 - 1)).await;
+        assert!(!failure.is_due(tokio::time::Instant::now()));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(failure.is_due(tokio::time::Instant::now()));
+        failure.record_failure(
+            OperatorOpenFailureReason::Other("still contended".into()),
+            tokio::time::Instant::now(),
+        );
+    }
+    assert_eq!(failure.retry_stage, OPERATOR_REOPEN_DELAYS.len() - 1);
+    assert_eq!(failure.attempts, OPERATOR_REOPEN_DELAYS.len() as u64 + 4);
+}
+
 #[test]
 fn rollout_stays_closed_and_editorial_preserves_explicit_user_speech() {
     let root = tempfile::tempdir().unwrap();

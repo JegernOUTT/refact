@@ -1,7 +1,9 @@
 use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use refact_buddy_core::operator_types::{
     ActionExecution, ActionExecutionState, ArtifactRevision, OperatorContract, ProjectIdentity,
     ReadState, RunOutcome, WorkItem, WorkSnooze, OPERATOR_SCHEMA_VERSION_V1,
@@ -23,7 +25,7 @@ pub enum OperatorStoreError {
     SchemaTooNew(i64),
     CorruptSchema(&'static str),
     ProjectMismatch,
-    AlreadyOwned,
+    AlreadyOwned(Option<OperatorLockOwner>),
     Conflict(&'static str),
     StaleRevision { current: u64 },
 }
@@ -38,7 +40,9 @@ impl std::fmt::Display for OperatorStoreError {
             Self::RecordTooLarge => f.write_str("operator record exceeds size limit"),
             Self::SchemaTooNew(v) => write!(f, "operator store schema {v} is newer than supported"),
             Self::ProjectMismatch => f.write_str("operator store belongs to a different project"),
-            Self::AlreadyOwned => f.write_str("operator store is already owned by another writer"),
+            Self::AlreadyOwned(_) => {
+                f.write_str("operator store is already owned by another writer")
+            }
             Self::StaleRevision { current } => {
                 write!(f, "stale revision; current revision is {current}")
             }
@@ -59,6 +63,45 @@ impl From<rusqlite::Error> for OperatorStoreError {
 impl From<serde_json::Error> for OperatorStoreError {
     fn from(e: serde_json::Error) -> Self {
         Self::Json(e)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorLockOwner {
+    pub pid: u32,
+    pub hostname: String,
+    pub started_at_ms: u64,
+    pub version: String,
+    pub command: String,
+}
+
+impl OperatorLockOwner {
+    fn for_current_process() -> Self {
+        Self {
+            pid: std::process::id(),
+            hostname: hostname::get()
+                .ok()
+                .and_then(|value| value.into_string().ok())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "unknown-host".to_string()),
+            started_at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(0),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            command: std::env::args().collect::<Vec<_>>().join(" "),
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        let started_at = chrono::DateTime::from_timestamp_millis(self.started_at_ms as i64)
+            .map(|time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| "an unknown time".to_string());
+        format!(
+            "pid {} (refact-lsp {}) on {}, started {}, cmd: {}",
+            self.pid, self.version, self.hostname, started_at, self.command
+        )
     }
 }
 
@@ -936,12 +979,18 @@ impl OperatorStore {
         lock_options.create(true).read(true).write(true);
         #[cfg(unix)]
         lock_options.mode(0o600);
-        let writer_lock = lock_options.open(lock_path)?;
+        let mut writer_lock = lock_options.open(lock_path)?;
         restrict_file(&writer_lock)?;
-        writer_lock.try_lock().map_err(|error| match error {
-            fs::TryLockError::WouldBlock => OperatorStoreError::AlreadyOwned,
-            fs::TryLockError::Error(error) => OperatorStoreError::Io(error),
-        })?;
+        match writer_lock.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(OperatorStoreError::AlreadyOwned(read_lock_owner(
+                    &mut writer_lock,
+                )));
+            }
+            Err(fs::TryLockError::Error(error)) => return Err(OperatorStoreError::Io(error)),
+        }
+        write_lock_owner(&mut writer_lock, &OperatorLockOwner::for_current_process())?;
         let writer_lock = WriterLock(writer_lock);
         reject_symlink_or_permissive_file(&path, "operator database")?;
         for suffix in ["-wal", "-shm", "-journal"] {
@@ -3645,6 +3694,26 @@ fn restrict_file(file: &fs::File) -> Result<(), OperatorStoreError> {
     Ok(())
 }
 
+fn write_lock_owner(
+    file: &mut fs::File,
+    owner: &OperatorLockOwner,
+) -> Result<(), OperatorStoreError> {
+    let payload = serde_json::to_vec(owner)?;
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&payload)?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    Ok(())
+}
+
+fn read_lock_owner(file: &mut fs::File) -> Option<OperatorLockOwner> {
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut payload = String::new();
+    file.read_to_string(&mut payload).ok()?;
+    serde_json::from_str(payload.trim()).ok()
+}
+
 fn restrict_store_files(path: &Path) -> Result<(), OperatorStoreError> {
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let file_path = sidecar_path(path, suffix);
@@ -4715,7 +4784,7 @@ mod tests {
         let inherited = store._writer_lock.0.try_clone().unwrap();
         assert!(matches!(
             OperatorStore::open(dir.path(), &project),
-            Err(OperatorStoreError::AlreadyOwned)
+            Err(OperatorStoreError::AlreadyOwned(_))
         ));
         drop(store);
         let reopened = OperatorStore::open(dir.path(), &project).unwrap();
@@ -5292,10 +5361,57 @@ mod tests {
         let first = OperatorStore::open(d.path(), &p).unwrap();
         assert!(matches!(
             OperatorStore::open(d.path(), &p),
-            Err(OperatorStoreError::AlreadyOwned)
+            Err(OperatorStoreError::AlreadyOwned(_))
         ));
         drop(first);
         OperatorStore::open(d.path(), &p).unwrap();
+    }
+
+    #[test]
+    fn lock_file_records_owner_metadata() {
+        let root = TempDir::new().unwrap();
+        let identity = project(root.path());
+        let store = OperatorStore::open(root.path(), &identity).unwrap();
+        let owner: OperatorLockOwner = serde_json::from_slice(
+            &fs::read(root.path().join(".refact/buddy/operator.lock")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(owner.pid, std::process::id());
+        assert!(!owner.hostname.is_empty());
+        assert!(owner.started_at_ms > 0);
+        assert!(!owner.version.is_empty());
+        assert!(!owner.command.is_empty());
+        assert!(owner.describe().contains(&owner.pid.to_string()));
+        assert!(owner.describe().contains(&owner.command));
+        drop(store);
+    }
+
+    #[test]
+    fn contended_open_reports_the_owner() {
+        let root = TempDir::new().unwrap();
+        let identity = project(root.path());
+        let first = OperatorStore::open(root.path(), &identity).unwrap();
+        let Err(error) = OperatorStore::open(root.path(), &identity) else {
+            panic!("expected contended lock");
+        };
+        let OperatorStoreError::AlreadyOwned(Some(owner)) = error else {
+            panic!("expected contended lock owner");
+        };
+        assert_eq!(owner.pid, std::process::id());
+        drop(first);
+    }
+
+    #[test]
+    fn malformed_lock_file_still_yields_already_owned() {
+        let root = TempDir::new().unwrap();
+        let identity = project(root.path());
+        let first = OperatorStore::open(root.path(), &identity).unwrap();
+        fs::write(root.path().join(".refact/buddy/operator.lock"), b"not-json").unwrap();
+        let Err(error) = OperatorStore::open(root.path(), &identity) else {
+            panic!("expected contended lock");
+        };
+        assert!(matches!(error, OperatorStoreError::AlreadyOwned(None)));
+        drop(first);
     }
     #[test]
     fn recovery_reservation_is_atomic_charged_and_unknown_is_not_replayed() {
