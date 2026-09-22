@@ -63,7 +63,7 @@ export function BuddyReportReadState({
               ? "Loading reading status…"
               : "New report revision since last read."}
       </p>
-      <p>Reading does not accept a proposal or resolve this work.</p>
+      <p>Marked read. Still open.</p>
       {error && (
         <Button size="sm" variant="ghost" onClick={() => void refetch()}>
           Retry reading status

@@ -612,6 +612,54 @@ describe("buddy UI polish", () => {
     expect(section).toHaveTextContent("No job runs recorded yet");
   });
 
+  it.each([
+    ["missing", undefined, "Emitted 0, skipped 0."],
+    ["partial", { emitted: 4 }, "Emitted 4, skipped 0."],
+    ["zero", { emitted: 0, skipped: 0 }, "Emitted 0, skipped 0."],
+  ] as const)(
+    "settings_never_renders_undefined when counts_by_result is %s",
+    async (_, countsByResult, expectedStatus) => {
+      const store = setUpStore({ ...CONFIG_STATE });
+      const snapshot = makeSnapshot();
+      snapshot.chat_reaction_debug = {
+        recent_attempts: [],
+        ...(countsByResult === undefined
+          ? {}
+          : { counts_by_result: countsByResult }),
+      } as NonNullable<BuddySnapshot["chat_reaction_debug"]>;
+      store.dispatch(setBuddySnapshot(snapshot));
+
+      render(<BuddySettingsPanel />, {
+        preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
+      });
+
+      const diagnostics = await screen.findByTestId(
+        "buddy-chat-reaction-diagnostics",
+      );
+      expect(diagnostics).not.toHaveTextContent("undefined");
+      expect(diagnostics).toHaveTextContent(expectedStatus);
+    },
+  );
+
+  it("settings_uses_the_live_buddy_name", async () => {
+    const store = setUpStore({ ...CONFIG_STATE });
+    const snapshot = makeSnapshot();
+    snapshot.state.identity = { ...snapshot.state.identity, name: "Spark" };
+    store.dispatch(setBuddySnapshot(snapshot));
+
+    render(<BuddySettingsPanel />, {
+      preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
+    });
+
+    expect(
+      await screen.findByText(
+        "Tune Spark's autonomy, observations, and tiny-chaos operating hours.",
+      ),
+    ).toBeVisible();
+    expect(screen.getByText(/Spark reacts to your messages/)).toBeVisible();
+    expect(screen.queryByText(/Pixel/)).not.toBeInTheDocument();
+  });
+
   it("BuddySettingsPanel_shows_chat_observation_and_reactions_as_independent", async () => {
     const store = setUpStore({ ...CONFIG_STATE });
     const snapshot = makeSnapshot();
@@ -660,7 +708,7 @@ describe("buddy UI polish", () => {
     expect(
       screen.getByText(/Independent from live chat reactions/i),
     ).toBeVisible();
-    expect(screen.getByText(/Pixel reacts to your messages/i)).toBeVisible();
+    expect(screen.getByText(/Buddy reacts to your messages/i)).toBeVisible();
     expect(patternToggle).toHaveAttribute("data-state", "unchecked");
     expect(reactionsToggle).toHaveAttribute("data-state", "checked");
 

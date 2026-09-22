@@ -2243,7 +2243,7 @@ describe("BuddyWorld_dynamic_environment", () => {
     );
   });
 
-  it("renders world controls and routes object clicks", async () => {
+  it("ramen_control_has_a_matching_label", async () => {
     const onCare = vi.fn();
     const onOpenPage = vi.fn();
 
@@ -2301,6 +2301,9 @@ describe("BuddyWorld_dynamic_environment", () => {
 
     await user.click(screen.getByRole("button", { name: /play in sun/i }));
     expect(onCare).toHaveBeenCalledWith("play", "scroll");
+
+    await user.click(screen.getByRole("button", { name: "Feed Buddy" }));
+    expect(onCare).toHaveBeenCalledWith("feed", undefined);
 
     await user.click(screen.getByRole("button", { name: /open buddy home/i }));
     expect(onOpenPage).toHaveBeenCalledWith({ type: "buddy" });

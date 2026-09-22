@@ -673,7 +673,7 @@ function DeskContent({
             <div className={styles.placeholder}>
               <Icon icon={FileSearch} size="md" tone="muted" />
               <Text size="2" color="gray">
-                Pick something on the left to read what Buddy found.
+                Choose a report to read what Buddy found.
               </Text>
             </div>
           )

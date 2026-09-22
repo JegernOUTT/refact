@@ -283,7 +283,7 @@ describe("BuddyDesk", () => {
     },
   );
 
-  it("snoozes independently of read status and sends attention filters to the server", async () => {
+  it("read_and_snooze_copy_is_positive_and_still_unambiguous", async () => {
     const writes: Record<string, unknown>[] = [];
     const filters: string[] = [];
     server.use(
@@ -323,9 +323,16 @@ describe("BuddyDesk", () => {
       name: "Snooze for one hour",
     });
     await waitFor(() => expect(snooze).toBeEnabled());
+    expect(screen.getByText("Marked read. Still open.")).toBeTruthy();
+    expect(
+      screen.queryByText("Still open — a new revision ends the snooze."),
+    ).toBeNull();
     fireEvent.click(snooze);
     fireEvent.click(snooze);
     expect(await screen.findByText(/Snoozed until/)).toBeTruthy();
+    expect(
+      screen.getByText("Still open — a new revision ends the snooze."),
+    ).toBeTruthy();
     expect(writes).toHaveLength(1);
     expect(writes[0]).toMatchObject({
       project_id: project.project_id,
@@ -392,7 +399,7 @@ describe("BuddyDesk", () => {
     expect(
       within(desk).queryByRole("button", { name: "Needs you" }),
     ).toBeNull();
-    expect(within(desk).queryByText(/Pick something on the left/)).toBeNull();
+    expect(within(desk).queryByText(/on the left/)).toBeNull();
     fireEvent.click(
       within(desk).getByRole("button", { name: "Browse saved work" }),
     );
@@ -467,7 +474,7 @@ describe("BuddyDesk", () => {
     expect(screen.queryByText(new RegExp(digest))).toBeNull();
   });
 
-  it("does not offer a report placeholder when the current view has nothing to pick", async () => {
+  it("desk_placeholder_does_not_claim_a_left_column", async () => {
     server.use(
       http.get("*/v1/buddy/work", () =>
         HttpResponse.json(envelope([record({ ...item, state: "delivered" })])),
@@ -478,12 +485,17 @@ describe("BuddyDesk", () => {
     expect(
       await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
     ).toBeTruthy();
-    expect(screen.getByText(/Pick something on the left/)).toBeTruthy();
+    expect(
+      screen.getByText("Choose a report to read what Buddy found."),
+    ).toBeTruthy();
+    expect(screen.queryByText(/on the left/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Watching" }));
     expect(
       await screen.findByText("Nothing is being watched right now."),
     ).toBeTruthy();
-    expect(screen.queryByText(/Pick something on the left/)).toBeNull();
+    expect(
+      screen.queryByText("Choose a report to read what Buddy found."),
+    ).toBeNull();
   });
 
   it("shows unavailable rather than an empty successful result", async () => {
@@ -639,11 +651,7 @@ describe("BuddyDesk", () => {
     expect(
       await screen.findByText("This report revision is marked read."),
     ).toBeTruthy();
-    expect(
-      screen.getByText(
-        "Reading does not accept a proposal or resolve this work.",
-      ),
-    ).toBeTruthy();
+    expect(screen.getByText("Marked read. Still open.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Back to work list" }));
     fireEvent.click(
       screen.getByRole("button", { name: /Provider setup diagnosis/ }),
@@ -1144,14 +1152,17 @@ describe("BuddyDesk", () => {
     expect(desk).toHaveAttribute("data-detail-open", "false");
     expect(screen.queryByRole("article", { name: "Work detail" })).toBeNull();
     expect(
-      screen.getByText(/Pick something on the left/).parentElement,
+      screen.getByText("Choose a report to read what Buddy found.")
+        .parentElement,
     ).toHaveClass(styles.placeholder);
     fireEvent.click(row);
     expect(
       await screen.findByRole("article", { name: "Work detail" }),
     ).toBeTruthy();
     expect(desk).toHaveAttribute("data-detail-open", "true");
-    expect(screen.queryByText(/Pick something on the left/)).toBeNull();
+    expect(
+      screen.queryByText("Choose a report to read what Buddy found."),
+    ).toBeNull();
   });
 
   it("carries an absolute timestamp in the row tooltip and accessible name", async () => {

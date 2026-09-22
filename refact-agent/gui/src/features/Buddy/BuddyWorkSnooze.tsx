@@ -57,10 +57,7 @@ export function BuddyWorkSnooze({
           ? `Snoozed until ${snooze.until}.`
           : "This report is not snoozed."}
       </p>
-      <p>
-        Snoozing does not mark read, resolve work, pause a worker, or hide
-        native decisions. A new report revision ends the snooze.
-      </p>
+      {active ? <p>Still open — a new revision ends the snooze.</p> : null}
       {query.error ? (
         <>
           <p role="alert">Snooze status is unavailable.</p>

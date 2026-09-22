@@ -2032,7 +2032,7 @@ export const BuddyWorld: React.FC<BuddyWorldProps> = ({
         <button
           type="button"
           className={styles.sceneButton}
-          aria-label={`Water ${state.name}'s garden`}
+          aria-label={`Feed ${state.name}`}
           onClick={() => runCareActivity("feed")}
         >
           🍜
