@@ -502,6 +502,7 @@ pub enum BuddyFactKind {
     AgentsMdGapDetected,
     DefaultModelMissing,
     BrokenModelReference,
+    ProviderRateLimited,
     McpAuthExpired,
     IntegrationFailing,
     DiagnosticCluster,

@@ -124,20 +124,16 @@ pub fn build_workflow_outcome(
 pub fn terminal_from_workflow_result(result: &Result<(), String>) -> WorkflowTerminal {
     match result {
         Ok(()) => WorkflowTerminal::Inconclusive,
-        Err(error) if is_cancelled(error) => WorkflowTerminal::Cancelled {
-            failure_class: Some("cancelled".to_string()),
-        },
-        Err(_) => WorkflowTerminal::Failed {
-            failure_class: Some("workflow_error".to_string()),
-        },
+        Err(error) => {
+            let category = refact_buddy_core::workflows::WorkflowFailureCategory::classify(error);
+            let failure_class = Some(category.as_str().to_string());
+            if category == refact_buddy_core::workflows::WorkflowFailureCategory::Cancelled {
+                WorkflowTerminal::Cancelled { failure_class }
+            } else {
+                WorkflowTerminal::Failed { failure_class }
+            }
+        }
     }
-}
-
-fn is_cancelled(error: &str) -> bool {
-    let error = error.to_ascii_lowercase();
-    ["cancelled", "canceled", "aborted", "aborterror"]
-        .iter()
-        .any(|needle| error.contains(needle))
 }
 
 #[derive(Clone)]
@@ -235,6 +231,37 @@ impl OutcomeRuntime {
     ) -> Result<Page<Stored<WorkItem>>, OperatorStoreError> {
         self.read(move |store| store.list_work_items(after, limit))
             .await
+    }
+
+    pub async fn clear_provider_rate_limit_work(&self) -> Result<(), OperatorStoreError> {
+        let project = self.project.clone();
+        self.with_store(move |store| {
+            let producer_id = format!(
+                "producer:{}",
+                super::work_items::stable_hash(&["provider:rate_limited:global"])
+            );
+            let subject = SubjectKey::new(
+                &project,
+                "legacy_opportunity",
+                producer_id,
+                "legacy-import-v1",
+                "1",
+            )
+            .map_err(|_| OperatorStoreError::Conflict("provider rate-limit subject is invalid"))?;
+            let Some(mut work) = store.get_work_item(&subject.work_item_id())? else {
+                return Ok(());
+            };
+            if matches!(
+                work.value.state,
+                refact_buddy_core::operator_types::WorkItemState::NeedsAttention
+                    | refact_buddy_core::operator_types::WorkItemState::Blocked
+            ) {
+                work.value.state = refact_buddy_core::operator_types::WorkItemState::Cancelled;
+                store.upsert_work_item(&work.value, Some(work.revision))?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub async fn search_work_items(
@@ -985,6 +1012,50 @@ mod tests {
             "2026-09-05T00:01:00Z".to_string(),
         );
         assert_eq!(outcome.status, RunStatus::Inconclusive);
+    }
+
+    #[tokio::test]
+    async fn failure_class_preserves_provider_rate_limit() {
+        let dir = TempDir::new().unwrap();
+        let start = start(dir.path(), "provider-rate-limit");
+        let runtime =
+            OutcomeRuntime::open(dir.path(), start.project.clone(), start.worker.clone()).unwrap();
+        let outcome = build_workflow_outcome(
+            start,
+            WorkflowOutcomeCheckpoint::from_evidence([]),
+            terminal_from_workflow_result(&Err(
+                "OpenAI API error (429): rate_limit_exceeded".to_string()
+            )),
+            "2026-09-05T00:01:00Z".to_string(),
+        );
+        let stored = runtime.append(outcome).await.unwrap();
+        assert_eq!(
+            stored.value.failure_class.as_deref(),
+            Some("provider_rate_limit")
+        );
+        runtime.shutdown().await;
+    }
+
+    #[test]
+    fn failure_class_preserves_provider_transient() {
+        assert_eq!(
+            terminal_from_workflow_result(&Err(
+                "OpenAI API error (503 Service Unavailable): overloaded".to_string()
+            )),
+            WorkflowTerminal::Failed {
+                failure_class: Some("provider_transient".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn legacy_workflow_error_rows_still_deserialise() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../crates/refact-buddy-core/tests/fixtures/operator_contract_v1.json"
+        ))
+        .unwrap();
+        let legacy: RunOutcome = serde_json::from_value(fixture["run_outcome"].clone()).unwrap();
+        assert_eq!(legacy.failure_class.as_deref(), Some("workflow_error"));
     }
 
     #[tokio::test]

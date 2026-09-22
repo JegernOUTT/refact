@@ -4070,6 +4070,7 @@ fn schema_contract_buddy_fact_kind_variants() {
             BuddyFactKind::BrokenModelReference,
             "broken_model_reference",
         ),
+        (BuddyFactKind::ProviderRateLimited, "provider_rate_limited"),
         (BuddyFactKind::McpAuthExpired, "mcp_auth_expired"),
         (BuddyFactKind::IntegrationFailing, "integration_failing"),
         (BuddyFactKind::DiagnosticCluster, "diagnostic_cluster"),

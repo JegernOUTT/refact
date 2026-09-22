@@ -49,6 +49,10 @@ const RULES: &[Rule] = &[
         build: rules::provider_tuning_broken_ref,
     },
     Rule {
+        cooldown_secs: 0,
+        build: rules::provider_rate_limited,
+    },
+    Rule {
         cooldown_secs: 43200,
         build: rules::memory_garden,
     },
@@ -461,6 +465,56 @@ mod rules {
                 );
                 o.related = related_with_config_paths(vec!["providers/defaults".to_string()]);
                 Some(o)
+            })
+            .collect()
+    }
+
+    pub fn provider_rate_limited(
+        store: &crate::facts::FactStore,
+        _pulse: &BuddyPulse,
+        _queue: &OpportunityQueue,
+        now: DateTime<Utc>,
+    ) -> Vec<BuddyOpportunity> {
+        store
+            .recent_at(BuddyFactKind::ProviderRateLimited, Duration::minutes(60), now)
+            .into_iter()
+            .filter(|fact| {
+                fact.payload
+                    .get("active")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+            })
+            .take(1)
+            .map(|fact| {
+                let failures = fact
+                    .payload
+                    .get("failures")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
+                let workflows = fact
+                    .payload
+                    .get("distinct_workflows")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
+                let mut opportunity = opp(
+                    BuddyOpportunityKind::ProviderTuning,
+                    format!(
+                        "Your provider is rate limited\n\n{failures} failed requests across {workflows} workflows in the last hour. Wait for the limit to reset, switch the provider slot yourself, or raise the provider cap."
+                    ),
+                    BuddyPriority::Critical,
+                    fact.confidence,
+                    vec![fact.key.clone()],
+                    "provider:rate_limited:global",
+                    vec![
+                        BuddyAction::OpenPage {
+                            page: BuddyPage::DefaultModels,
+                        },
+                        BuddyAction::Dismiss,
+                    ],
+                    now,
+                );
+                opportunity.related = related_with_config_paths(vec!["providers/defaults".into()]);
+                opportunity
             })
             .collect()
     }
@@ -1068,7 +1122,7 @@ pub fn primary_fact_kind_for_opportunity(
         BuddyOpportunityKind::MemoryGarden => BuddyFactKind::MemoryOrphan,
         BuddyOpportunityKind::ConfigDrift => BuddyFactKind::ModePromptOverlap,
         BuddyOpportunityKind::AgentsMdGap => BuddyFactKind::AgentsMdGapDetected,
-        BuddyOpportunityKind::ProviderTuning => BuddyFactKind::DefaultModelMissing,
+        BuddyOpportunityKind::ProviderTuning => BuddyFactKind::ProviderRateLimited,
         BuddyOpportunityKind::IntegrationFix => BuddyFactKind::McpAuthExpired,
         BuddyOpportunityKind::DiagnosticInvestigation => BuddyFactKind::DiagnosticCluster,
         BuddyOpportunityKind::GitHygiene => BuddyFactKind::UncommittedPressure,

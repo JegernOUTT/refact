@@ -351,6 +351,7 @@ pub struct BuddyService {
     pub drafts_dirty: bool,
     pub last_observer_tick: HashMap<&'static str, DateTime<Utc>>,
     pub observers: Vec<Arc<dyn BuddyObserver>>,
+    pub provider_rate_limit_window: super::observers::provider_health::ProviderRateLimitWindow,
     pub background_tasks: Vec<JoinHandle<()>>,
     pub chat_reaction_limiter: crate::buddy::chat_reactions::ChatReactionLimiter,
     pub chat_reaction_debug: crate::buddy::chat_reactions::ChatReactionDebugState,
@@ -684,6 +685,7 @@ impl BuddyService {
             drafts_dirty: false,
             last_observer_tick: HashMap::new(),
             observers: build_observer_registry(),
+            provider_rate_limit_window: Default::default(),
             background_tasks: Vec::new(),
             chat_reaction_limiter: crate::buddy::chat_reactions::ChatReactionLimiter::new(),
             chat_reaction_debug: crate::buddy::chat_reactions::ChatReactionDebugState::new(),
@@ -897,6 +899,33 @@ impl BuddyService {
         if self.operator_features.storage {
             tracing::warn!("operator producer requires durable async admission");
             return false;
+        }
+        if opp.cooldown_key == "provider:rate_limited:global" {
+            let refreshed = if let Some(existing) = self
+                .opportunity_queue
+                .items
+                .iter_mut()
+                .find(|existing| existing.cooldown_key == opp.cooldown_key)
+            {
+                existing.summary = opp.summary.clone();
+                existing.priority = opp.priority;
+                existing.confidence = opp.confidence;
+                existing.fact_keys = opp.fact_keys.clone();
+                existing.proposed_actions = opp.proposed_actions.clone();
+                existing.related = opp.related.clone();
+                existing.expires_at = opp.expires_at;
+                Some(existing.clone())
+            } else {
+                None
+            };
+            if let Some(opportunity) = refreshed {
+                self.state.opportunities = self.opportunity_queue.snapshot();
+                self.dirty = true;
+                let _ = self
+                    .events_tx
+                    .send(BuddyEvent::OpportunityProduced { opportunity });
+                return true;
+            }
         }
         self.opportunity_queue
             .push_with_cooldown(opp.clone(), cooldown_secs);
@@ -1982,6 +2011,39 @@ impl BuddyService {
         });
     }
 
+    pub fn record_provider_rate_limit_result(
+        &mut self,
+        workflow_id: &str,
+        category: Option<&refact_buddy_core::workflows::WorkflowFailureCategory>,
+    ) {
+        if category.is_some_and(|category| {
+            *category == refact_buddy_core::workflows::WorkflowFailureCategory::ProviderRateLimit
+        }) {
+            self.provider_rate_limit_window
+                .record_failure(workflow_id, Utc::now());
+        }
+    }
+
+    pub fn record_provider_rate_limit_recovery(
+        &mut self,
+    ) -> Option<super::outcome_runtime::OutcomeRuntime> {
+        if !self.provider_rate_limit_window.record_success() {
+            return None;
+        }
+        let id = self
+            .opportunity_queue
+            .iter()
+            .find(|opportunity| opportunity.cooldown_key == "provider:rate_limited:global")
+            .map(|opportunity| opportunity.id.clone());
+        if let Some(id) = id {
+            self.opportunity_queue
+                .mark_status(&id, OpportunityStatus::Completed);
+            self.state.opportunities = self.opportunity_queue.snapshot();
+            self.dirty = true;
+        }
+        self.outcome_runtime.clone()
+    }
+
     pub fn record_workflow_telemetry(
         &mut self,
         workflow_id: &str,
@@ -2034,6 +2096,7 @@ impl BuddyService {
         &mut self,
         report: super::workflows::WorkflowFailureReport,
     ) -> Option<(std::path::PathBuf, super::workflows::WorkflowFailureReport)> {
+        self.record_provider_rate_limit_result(&report.workflow_id, Some(&report.category));
         if !validate_workflow_id(&report.workflow_id) {
             tracing::warn!(
                 "buddy: refusing to record failure report with invalid workflow_id '{}'",

@@ -349,6 +349,7 @@ fn fact_kind_name(kind: BuddyFactKind) -> &'static str {
         BuddyFactKind::AgentsMdGapDetected => "agents_md_gap_detected",
         BuddyFactKind::DefaultModelMissing => "default_model_missing",
         BuddyFactKind::BrokenModelReference => "broken_model_reference",
+        BuddyFactKind::ProviderRateLimited => "provider_rate_limited",
         BuddyFactKind::McpAuthExpired => "mcp_auth_expired",
         BuddyFactKind::IntegrationFailing => "integration_failing",
         BuddyFactKind::DiagnosticCluster => "diagnostic_cluster",
@@ -5346,9 +5347,9 @@ mod tests {
             BuddyFactKind::ModePromptOverlap
             | BuddyFactKind::SkillTriggerWeak
             | BuddyFactKind::AgentsMdGapDetected => "customization_drift",
-            BuddyFactKind::DefaultModelMissing | BuddyFactKind::BrokenModelReference => {
-                "provider_health"
-            }
+            BuddyFactKind::DefaultModelMissing
+            | BuddyFactKind::BrokenModelReference
+            | BuddyFactKind::ProviderRateLimited => "provider_health",
             BuddyFactKind::McpAuthExpired | BuddyFactKind::IntegrationFailing => "mcp_auth",
             BuddyFactKind::DiagnosticCluster | BuddyFactKind::FrontendErrorBurst => {
                 "diagnostic_cluster"
@@ -7608,16 +7609,45 @@ mod tests {
             let finalization = autonomous_finalization(&spec, &observation).unwrap();
 
             assert!(!finalization.successful);
+            // The shared classifier does not recognise this free-form string, so
+            // "unknown" is the honest category. What matters is that it is no
+            // longer flattened to "workflow_error"; see the test below for a
+            // string the classifier does recognise.
             assert_eq!(
                 finalization.terminal,
                 WorkflowTerminal::Failed {
-                    failure_class: Some("workflow_error".to_string())
+                    failure_class: Some("unknown".to_string())
                 }
             );
             assert!(finalization.report.contains("provider returned 500"));
             assert!(finalization
                 .report
                 .contains("did not produce a verified report"));
+        }
+
+        #[test]
+        fn recognised_provider_errors_keep_their_specific_failure_class() {
+            let spec = finalization_spec();
+            for (error, expected) in [
+                (
+                    "OpenAI API error (503 Service Unavailable): The server is overloaded",
+                    "provider_transient",
+                ),
+                (
+                    "LLM error (429 Too Many Requests): \"The usage limit has been reached\"",
+                    "provider_rate_limit",
+                ),
+            ] {
+                let observation = AutonomousRunObservation::failed(error.to_string());
+                let finalization = autonomous_finalization(&spec, &observation).unwrap();
+                assert_eq!(
+                    finalization.terminal,
+                    WorkflowTerminal::Failed {
+                        failure_class: Some(expected.to_string())
+                    },
+                    "{error} should classify as {expected}, not be flattened"
+                );
+            }
         }
 
         #[test]

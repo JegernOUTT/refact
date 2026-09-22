@@ -254,11 +254,13 @@ where
         };
 
         let mut failure_write = None;
+        let mut recovery_runtime = None;
         {
             let mut buddy = buddy_arc.lock().await;
             if let Some(svc) = buddy.as_mut() {
                 svc.complete_runtime_event(&dedupe_key, "completed");
                 if success {
+                    recovery_runtime = svc.record_provider_rate_limit_recovery();
                     svc.add_activity(activity);
                     let now = Utc::now().to_rfc3339();
                     if let Some(ws) = svc
@@ -299,6 +301,12 @@ where
                         workflow_id_owned
                     );
                 }
+            }
+        }
+
+        if let Some(runtime) = recovery_runtime {
+            if let Err(error) = runtime.clear_provider_rate_limit_work().await {
+                tracing::warn!(%error, "buddy: provider rate-limit recovery was not persisted");
             }
         }
 
