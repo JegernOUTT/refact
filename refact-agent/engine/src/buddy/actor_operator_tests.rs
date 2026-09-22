@@ -76,7 +76,10 @@ async fn reopen_succeeds_once_the_lock_is_released() {
         {
             break;
         }
-        tokio::task::yield_now().await;
+        // Virtual time only: the clock is paused, so without an explicit
+        // advance this loop relies on tokio's auto-advance and becomes
+        // scheduling-dependent under parallel test load.
+        tokio::time::advance(Duration::from_millis(100)).await;
     }
     assert_eq!(
         buddy
@@ -115,7 +118,7 @@ async fn reopen_succeeds_once_the_lock_is_released() {
         {
             break;
         }
-        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
     }
     let reopened = buddy.lock().await;
     let service = reopened.as_ref().unwrap();
