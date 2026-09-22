@@ -36,6 +36,12 @@ export type WorkItemState =
   | "watching"
   | "blocked"
   | "cancelled";
+export type WorkItemSeverity =
+  | "unknown"
+  | "low"
+  | "normal"
+  | "high"
+  | "critical";
 export type WorkItem = {
   schema_version: number;
   id: string;
@@ -48,6 +54,9 @@ export type WorkItem = {
   current_artifact_id: string | null;
   current_artifact_revision: number | null;
   last_material_change_at: string;
+  severity?: WorkItemSeverity | null;
+  problem_summary?: string | null;
+  scope?: string | null;
 };
 export type RunStatus =
   | "no_change"
@@ -309,6 +318,7 @@ const states = {
     "blocked",
     "cancelled",
   ],
+  workSeverity: ["unknown", "low", "normal", "high", "critical"],
   run: [
     "no_change",
     "partial",
@@ -379,6 +389,14 @@ function nullableInteger(value: unknown): number | null {
 }
 function nullableU32(value: unknown): number | null {
   return value === undefined || value === null ? null : u32(value);
+}
+function nullableEnumValue<T extends string>(
+  value: unknown,
+  values: readonly T[],
+): T | null {
+  return value === undefined || value === null
+    ? null
+    : enumValue(value, values);
 }
 function exact<T>(raw: JsonRecord, parsed: T): T {
   const parsedRecord = parsed as JsonRecord;
@@ -512,6 +530,9 @@ export function parseWorkItem(value: unknown): WorkItem {
     current_artifact_id: nullableText(v.current_artifact_id),
     current_artifact_revision: nullableU32(v.current_artifact_revision),
     last_material_change_at: text(v.last_material_change_at, true),
+    severity: nullableEnumValue(v.severity, states.workSeverity),
+    problem_summary: nullableText(v.problem_summary),
+    scope: nullableText(v.scope),
   });
 }
 export function parseRunOutcome(value: unknown): RunOutcome {

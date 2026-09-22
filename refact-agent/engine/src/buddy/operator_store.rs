@@ -2575,6 +2575,77 @@ impl OperatorStore {
         page(rows, limit)
     }
 
+    pub fn dismiss_work_item_with_execution(
+        &mut self,
+        execution: &ActionExecution,
+        item: &WorkItem,
+        expected_work_revision: u64,
+    ) -> Result<(Stored<ActionExecution>, Stored<WorkItem>), OperatorStoreError> {
+        self.validate_for_project(execution, &execution.project)?;
+        self.validate_for_project(item, &item.project)?;
+        if execution.project != self.identity
+            || item.project != self.identity
+            || execution.status != ActionExecutionState::Completed
+            || item.state != refact_buddy_core::operator_types::WorkItemState::Cancelled
+        {
+            return Err(OperatorStoreError::Conflict("invalid work dismissal"));
+        }
+        let payload = encode(execution)?;
+        let item_payload = encode(item)?;
+        let tx = self.connection.transaction()?;
+        let existing: Option<(String, u64, u64)> = tx
+            .query_row(
+                "SELECT payload,revision,change_seq FROM executions WHERE idempotency_key=?1",
+                [&execution.idempotency_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((payload, revision, change_seq)) = existing {
+            let existing: ActionExecution = decode(&payload)?;
+            if existing.spec_hash == execution.spec_hash
+                && existing.action_id == execution.action_id
+                && existing.requester == execution.requester
+                && existing.project == execution.project
+            {
+                let work = stored_mutable_in_tx::<WorkItem>(&tx, "work_items", &item.id)?
+                    .ok_or(OperatorStoreError::Conflict("dismissed work item missing"))?;
+                return Ok((
+                    Stored {
+                        value: existing,
+                        revision,
+                        change_seq,
+                    },
+                    work,
+                ));
+            }
+            return Err(OperatorStoreError::Conflict(
+                "idempotency key was used with different immutable execution identity",
+            ));
+        }
+        let current = stored_mutable_in_tx::<WorkItem>(&tx, "work_items", &item.id)?
+            .ok_or(OperatorStoreError::Conflict("work item no longer exists"))?;
+        if current.revision != expected_work_revision {
+            return Err(OperatorStoreError::StaleRevision {
+                current: current.revision,
+            });
+        }
+        let execution_seq = next_seq(&tx)?;
+        tx.execute(
+            "INSERT INTO executions(execution_id,idempotency_key,spec_hash,payload,revision,change_seq) VALUES(?1,?2,?3,?4,1,?5)",
+            params![execution.execution_id, execution.idempotency_key, execution.spec_hash, payload, execution_seq],
+        )?;
+        let work = upsert_work_item_in_tx(&tx, item, &item_payload, Some(expected_work_revision))?;
+        tx.commit()?;
+        Ok((
+            Stored {
+                value: execution.clone(),
+                revision: 1,
+                change_seq: execution_seq as u64,
+            },
+            work,
+        ))
+    }
+
     /// Inserts the intent before any effect. A matching key/hash returns the original claim;
     /// a reused key with a different hash is rejected. It does not provide exactly-once effects.
     pub fn claim_execution(

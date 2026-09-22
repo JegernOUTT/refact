@@ -3,7 +3,8 @@ use std::sync::Arc;
 use refact_buddy_core::operator_types::{
     ActionAvailability, ActionCapabilities, ActionExecution, ActionSpec, ArtifactRevision,
     AuthorityClass, ConfirmationClass, DecisionReference, NativeSourceIdentity, NativeSourceKind,
-    OperatorContract, ResourceRef, WorkerIdentity, OPERATOR_SCHEMA_VERSION_V1,
+    OperatorContract, ResourceEffect, ResourceRef, WorkItemState, WorkerIdentity,
+    OPERATOR_SCHEMA_VERSION_V1,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,7 +16,9 @@ use super::action_execution::{
 use super::operator_store::{OperatorStore, OperatorStoreError, Stored};
 
 pub const CHECK_SAVED_EVIDENCE: &str = "check_saved_evidence";
+pub const DISMISS_NOT_A_PROBLEM: &str = "dismiss_not_a_problem";
 const ADAPTER_ID: &str = "operator.saved_evidence";
+const DISMISS_ADAPTER_ID: &str = "operator.work_lifecycle";
 const MAX_LINKS: usize = 200;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -96,6 +99,14 @@ fn requester() -> NativeSourceIdentity {
     }
 }
 
+fn dismissal_requester() -> NativeSourceIdentity {
+    NativeSourceIdentity {
+        source_kind: NativeSourceKind::External,
+        source_id: "buddy-desk:dismiss".into(),
+        source_version: "1".into(),
+    }
+}
+
 impl Authorizer for EvidenceLinksAuthorizer {
     fn authorize(
         &self,
@@ -148,7 +159,7 @@ pub fn actions_for_work(
     ))?));
     let bounded =
         artifact.source_run_ids.len() <= MAX_LINKS && artifact.evidence.len() <= MAX_LINKS;
-    let spec = ActionSpec {
+    let evidence_spec = ActionSpec {
         schema_version: OPERATOR_SCHEMA_VERSION_V1,
         action_id: CHECK_SAVED_EVIDENCE.into(),
         kind: CHECK_SAVED_EVIDENCE.into(),
@@ -159,7 +170,7 @@ pub fn actions_for_work(
             resource_id: work_id.into(),
             version: version.clone(),
         },
-        expected_version: version,
+        expected_version: version.clone(),
         parameter_ref: None,
         availability: if bounded {
             ActionAvailability::Available
@@ -176,17 +187,8 @@ pub fn actions_for_work(
             can_cancel: false,
         },
     };
-    let spec_hash = action_spec_hash(&spec, &None);
-    let latest_execution = store.latest_execution_for_spec(&spec_hash)?;
-    let mut actions = vec![DeskAction {
-        work_id: work_id.into(),
-        spec, spec_hash, work_revision: work.revision, artifact_id: id.clone(), artifact_revision: revision,
-        label: "Check saved evidence links".into(),
-        description: if bounded {
-            "Checks retained source outcomes and evidence metadata. Does not open source files or URLs, verify findings, or apply fixes. Only the check receipt is saved."
-        } else { "This report exceeds the bounded evidence-check limit; no check will run." }.into(),
-        latest_execution,
-    }];
+    let evidence_hash = action_spec_hash(&evidence_spec, &None);
+    let mut actions = vec![];
     if let Some(registered) =
         store.get_document::<WorkActionBindings>("work_action_bindings", work_id)?
     {
@@ -220,6 +222,64 @@ pub fn actions_for_work(
                 latest_execution: store.latest_execution_for_spec(&hash)?,
             });
         }
+    }
+    actions.push(DeskAction {
+        work_id: work_id.into(),
+        spec: evidence_spec,
+        spec_hash: evidence_hash.clone(),
+        work_revision: work.revision,
+        artifact_id: id.clone(),
+        artifact_revision: revision,
+        label: "Verify saved evidence".into(),
+        description: if bounded {
+            "Checks retained source outcomes and evidence metadata. Does not open source files or URLs, verify findings, or apply fixes. Only the check receipt is saved."
+        } else {
+            "This report exceeds the bounded evidence-check limit; no check will run."
+        }
+        .into(),
+        latest_execution: store.latest_execution_for_spec(&evidence_hash)?,
+    });
+    if matches!(
+        work.value.state,
+        WorkItemState::NeedsAttention | WorkItemState::Blocked
+    ) {
+        let dismissal_spec = ActionSpec {
+            schema_version: OPERATOR_SCHEMA_VERSION_V1,
+            action_id: DISMISS_NOT_A_PROBLEM.into(),
+            kind: DISMISS_NOT_A_PROBLEM.into(),
+            adapter: DISMISS_ADAPTER_ID.into(),
+            project: store.identity().clone(),
+            resource: ResourceRef {
+                resource_kind: "work_item".into(),
+                resource_id: work_id.into(),
+                version: version.clone(),
+            },
+            expected_version: version,
+            parameter_ref: None,
+            availability: ActionAvailability::Available,
+            confirmation: ConfirmationClass::None,
+            authority_class: AuthorityClass::Mutating,
+            capabilities: ActionCapabilities {
+                can_preview: false,
+                can_execute: true,
+                can_verify: true,
+                can_recover: false,
+                can_cancel: false,
+            },
+        };
+        let dismissal_hash = action_spec_hash(&dismissal_spec, &None);
+        actions.push(DeskAction {
+            work_id: work_id.into(),
+            spec: dismissal_spec,
+            spec_hash: dismissal_hash.clone(),
+            work_revision: work.revision,
+            artifact_id: id.clone(),
+            artifact_revision: revision,
+            label: "Dismiss — not a problem".into(),
+            description: "Moves this item out of Needs you. Saved evidence remains available."
+                .into(),
+            latest_execution: store.latest_execution_for_spec(&dismissal_hash)?,
+        });
     }
     Ok(actions)
 }
@@ -328,6 +388,69 @@ pub fn validate_resource_origin(
 mod resource_origin_tests {
     use super::*;
 
+    fn worker() -> WorkerIdentity {
+        WorkerIdentity {
+            worker_id: "worker".into(),
+            engine_instance_id: "engine".into(),
+            epoch: 1,
+        }
+    }
+
+    fn seed_work(
+        store: &mut OperatorStore,
+        project: &refact_buddy_core::operator_types::ProjectIdentity,
+        id: &str,
+        kind: &str,
+    ) -> (
+        refact_buddy_core::operator_types::WorkItem,
+        ArtifactRevision,
+    ) {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../crates/refact-buddy-core/tests/fixtures/operator_contract_v1.json"
+        ))
+        .unwrap();
+        let mut work: refact_buddy_core::operator_types::WorkItem =
+            serde_json::from_value(fixture["work_item"].clone()).unwrap();
+        let mut artifact: ArtifactRevision =
+            serde_json::from_value(fixture["artifact_revision"].clone()).unwrap();
+        let mut outcome: refact_buddy_core::operator_types::RunOutcome =
+            serde_json::from_value(fixture["run_outcome"].clone()).unwrap();
+        work.id = id.into();
+        work.kind = kind.into();
+        work.project = project.clone();
+        work.subject.resource_id = format!("{kind}-subject");
+        work.current_artifact_id = Some(format!("{id}-artifact"));
+        work.current_artifact_revision = Some(1);
+        artifact.artifact_id = format!("{id}-artifact");
+        artifact.revision = 1;
+        artifact.project = project.clone();
+        artifact.source_run_ids = vec![format!("{id}-run")];
+        artifact.provenance.source_run_ids = artifact.source_run_ids.clone();
+        outcome.run_id = format!("{id}-run");
+        outcome.work_id = work.id.clone();
+        outcome.project = project.clone();
+        outcome.worker = worker();
+        store
+            .append_outcome_work_item_artifact(&outcome, &work, None, Some(&artifact))
+            .unwrap();
+        (work, artifact)
+    }
+
+    fn dismissal_request(
+        project: &refact_buddy_core::operator_types::ProjectIdentity,
+        action: &DeskAction,
+        idempotency_key: &str,
+    ) -> DeskActionRequest {
+        DeskActionRequest {
+            project_id: project.project_id.clone(),
+            work_revision: action.work_revision,
+            artifact_id: action.artifact_id.clone(),
+            artifact_revision: action.artifact_revision,
+            spec_hash: action.spec_hash.clone(),
+            idempotency_key: idempotency_key.into(),
+        }
+    }
+
     #[test]
     fn registered_target_is_separate_from_work_and_stale_origin_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
@@ -385,16 +508,219 @@ mod resource_origin_tests {
         attach_resource_action(&mut store, origin.clone()).unwrap();
         attach_resource_action(&mut store, origin).unwrap();
         let actions = actions_for_work(&store, &work.id).unwrap();
-        assert_eq!(actions.len(), 2);
-        assert_eq!(actions[1].work_id, work.id);
-        assert_ne!(actions[1].spec.resource.resource_id, work.id);
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[0].work_id, work.id);
+        assert_ne!(actions[0].spec.resource.resource_id, work.id);
+        assert_eq!(actions[1].spec.action_id, CHECK_SAVED_EVIDENCE);
+        assert_eq!(actions[2].spec.action_id, DISMISS_NOT_A_PROBLEM);
         assert!(validate_resource_origin(&store, &hash).is_ok());
         work.title.push_str(" changed");
         store
             .upsert_work_item(&work, Some(stored.revision))
             .unwrap();
         assert!(validate_resource_origin(&store, &hash).is_err());
-        assert_eq!(actions_for_work(&store, &work.id).unwrap().len(), 1);
+        let actions = actions_for_work(&store, &work.id).unwrap();
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].spec.action_id, CHECK_SAVED_EVIDENCE);
+        assert_eq!(actions[1].spec.action_id, DISMISS_NOT_A_PROBLEM);
+    }
+
+    #[test]
+    fn every_needs_you_item_offers_a_terminal_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = refact_buddy_core::operator_types::ProjectIdentity {
+            project_id: "terminal-actions".into(),
+            canonical_root: dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let mut store = OperatorStore::open(dir.path(), &project).unwrap();
+        for (index, kind) in [
+            "provider_health",
+            "workspace_hygiene",
+            "instructions",
+            "mode_prompts",
+            "dependency_check",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (work, _) = seed_work(&mut store, &project, &format!("work-{index}"), kind);
+            let actions = actions_for_work(&store, &work.id).unwrap();
+            assert_eq!(
+                actions.last().unwrap().spec.action_id,
+                DISMISS_NOT_A_PROBLEM
+            );
+            execute_action(
+                &mut store,
+                worker(),
+                &work.id,
+                DISMISS_NOT_A_PROBLEM,
+                dismissal_request(
+                    &project,
+                    actions.last().unwrap(),
+                    &format!("dismiss-{index}"),
+                ),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            store
+                .search_work_items(None, 50, Some("needs_you"), None)
+                .unwrap()
+                .entries
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn dismiss_moves_item_out_of_needs_you_preserves_evidence_and_records_a_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = refact_buddy_core::operator_types::ProjectIdentity {
+            project_id: "dismissal".into(),
+            canonical_root: dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let mut store = OperatorStore::open(dir.path(), &project).unwrap();
+        let (work, artifact) = seed_work(&mut store, &project, "work-dismiss", "provider_health");
+        let actions = actions_for_work(&store, &work.id).unwrap();
+        assert_eq!(actions[0].spec.action_id, CHECK_SAVED_EVIDENCE);
+        assert_eq!(actions[1].spec.action_id, DISMISS_NOT_A_PROBLEM);
+        let request = dismissal_request(&project, actions.last().unwrap(), "dismiss-once");
+        let execution = execute_action(
+            &mut store,
+            worker(),
+            &work.id,
+            DISMISS_NOT_A_PROBLEM,
+            request.clone(),
+        )
+        .unwrap();
+        assert_eq!(execution.value.requester, dismissal_requester());
+        assert_eq!(
+            execution.value.status,
+            refact_buddy_core::operator_types::ActionExecutionState::Completed
+        );
+        assert_eq!(
+            store.get_work_item(&work.id).unwrap().unwrap().value.state,
+            WorkItemState::Cancelled
+        );
+        assert!(store
+            .search_work_items(None, 1, Some("needs_you"), None)
+            .unwrap()
+            .entries
+            .is_empty());
+        assert_eq!(
+            store
+                .get_artifact_revision(&artifact.artifact_id, Some(artifact.revision))
+                .unwrap()
+                .unwrap()
+                .value,
+            artifact
+        );
+        assert_eq!(
+            store
+                .list_work_outcomes(&work.id, None, 10)
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        assert!(
+            !store
+                .retention_preview()
+                .unwrap()
+                .evidence_deletion_supported
+        );
+        let duplicate = execute_action(
+            &mut store,
+            worker(),
+            &work.id,
+            DISMISS_NOT_A_PROBLEM,
+            request,
+        )
+        .unwrap();
+        assert_eq!(duplicate, execution);
+    }
+
+    #[test]
+    fn evidence_check_is_no_longer_primary_and_dismiss_is_always_the_last_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = refact_buddy_core::operator_types::ProjectIdentity {
+            project_id: "ordering".into(),
+            canonical_root: dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let mut store = OperatorStore::open(dir.path(), &project).unwrap();
+        let (work, artifact) = seed_work(&mut store, &project, "work-order", "provider_health");
+        let spec = ActionSpec {
+            schema_version: OPERATOR_SCHEMA_VERSION_V1,
+            action_id: "resource-fix".into(),
+            kind: "markdown_project_apply".into(),
+            adapter: "extensions".into(),
+            project: project.clone(),
+            resource: ResourceRef {
+                resource_kind: "native_markdown".into(),
+                resource_id: "skills/fix".into(),
+                version: "1".into(),
+            },
+            expected_version: "1".into(),
+            parameter_ref: Some("draft".into()),
+            availability: ActionAvailability::Available,
+            confirmation: ConfirmationClass::UserConfirmationRequired,
+            authority_class: AuthorityClass::Mutating,
+            capabilities: ActionCapabilities {
+                can_preview: true,
+                can_execute: true,
+                can_verify: true,
+                can_recover: false,
+                can_cancel: false,
+            },
+        };
+        let hash = action_spec_hash(&spec, &spec.parameter_ref);
+        let prepared = PreparedAction {
+            spec: spec.clone(),
+            spec_hash: hash.clone(),
+            bound_parameter_ref: spec.parameter_ref.clone(),
+        };
+        let document = super::super::resource_execution::ResourceDocument {
+            schema_version: 1,
+            project: project.clone(),
+            payload: prepared,
+        };
+        store
+            .put_document("prepared_action", &hash, &document, None)
+            .unwrap();
+        let current = store.get_work_item(&work.id).unwrap().unwrap();
+        attach_resource_action(
+            &mut store,
+            WorkActionOrigin {
+                schema_version: 1,
+                project: project.clone(),
+                work_id: work.id.clone(),
+                work_revision: current.revision,
+                artifact_id: artifact.artifact_id,
+                artifact_revision: artifact.revision,
+                spec_hash: hash,
+            },
+        )
+        .unwrap();
+        let actions = actions_for_work(&store, &work.id).unwrap();
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[0].spec.action_id, spec.action_id);
+        assert_eq!(actions[1].label, "Verify saved evidence");
+        assert_eq!(actions[2].spec.action_id, DISMISS_NOT_A_PROBLEM);
     }
 }
 
@@ -461,6 +787,20 @@ pub fn execute_action(
     {
         return Err(OperatorStoreError::InvalidInput("invalid idempotency key"));
     }
+    if action_id == DISMISS_NOT_A_PROBLEM {
+        if let Some(existing) = store.get_execution_by_idempotency_key(&request.idempotency_key)? {
+            if existing.value.action_id == DISMISS_NOT_A_PROBLEM
+                && existing.value.spec_hash == request.spec_hash
+                && existing.value.project == *store.identity()
+                && existing.value.requester == dismissal_requester()
+            {
+                return Ok(existing);
+            }
+            return Err(OperatorStoreError::Conflict(
+                "idempotency key was used with a different dismissal",
+            ));
+        }
+    }
     let action = actions_for_work(store, work_id)?
         .into_iter()
         .find(|action| action.spec.action_id == action_id)
@@ -478,6 +818,9 @@ pub fn execute_action(
     }
     if action.spec.availability != ActionAvailability::Available {
         return Err(OperatorStoreError::Conflict("action is unavailable"));
+    }
+    if action.spec.action_id == DISMISS_NOT_A_PROBLEM {
+        return execute_dismissal(store, worker, work_id, action, request.idempotency_key);
     }
     let artifact = store
         .get_artifact_revision(&action.artifact_id, Some(action.artifact_revision))?
@@ -522,4 +865,71 @@ pub fn execute_action(
             "action rejected; reload its execution status before retrying",
         )),
     }
+}
+
+fn execute_dismissal(
+    store: &mut OperatorStore,
+    worker: WorkerIdentity,
+    work_id: &str,
+    action: DeskAction,
+    idempotency_key: String,
+) -> Result<Stored<ActionExecution>, OperatorStoreError> {
+    if let Some(existing) = store.get_execution_by_idempotency_key(&idempotency_key)? {
+        if existing.value.spec_hash != action.spec_hash
+            || existing.value.action_id != DISMISS_NOT_A_PROBLEM
+            || existing.value.project != action.spec.project
+            || existing.value.requester != dismissal_requester()
+        {
+            return Err(OperatorStoreError::Conflict(
+                "idempotency key was used with a different dismissal",
+            ));
+        }
+        return Ok(existing);
+    }
+    let execution_id = format!(
+        "desk:{}",
+        hex::encode(Sha256::digest(idempotency_key.as_bytes()))
+    );
+    let execution = ActionExecution {
+        schema_version: OPERATOR_SCHEMA_VERSION_V1,
+        execution_id,
+        project: action.spec.project.clone(),
+        worker,
+        idempotency_key,
+        action_id: DISMISS_NOT_A_PROBLEM.into(),
+        spec_hash: action.spec_hash,
+        requester: dismissal_requester(),
+        decision: None,
+        status: refact_buddy_core::operator_types::ActionExecutionState::Completed,
+        started_at: Some(chrono::Utc::now().to_rfc3339()),
+        ended_at: Some(chrono::Utc::now().to_rfc3339()),
+        effects: vec![ResourceEffect {
+            resource: action.spec.resource.clone(),
+            state: refact_buddy_core::operator_types::EffectState::Applied,
+            evidence_refs: vec![],
+        }],
+        verification_evidence: vec![
+            "Work item dismissed by user request; retained evidence was not deleted.".into(),
+        ],
+        recovery: None,
+    };
+    let work = store
+        .get_work_item(work_id)?
+        .ok_or(OperatorStoreError::Conflict("work item no longer exists"))?;
+    if work.revision != action.work_revision
+        || work.value.current_artifact_id.as_deref() != Some(&action.artifact_id)
+        || work.value.current_artifact_revision != Some(action.artifact_revision)
+    {
+        return Err(OperatorStoreError::Conflict(
+            "work or report changed; reload actions before executing",
+        ));
+    }
+    let mut dismissed = work.value;
+    dismissed.state = WorkItemState::Cancelled;
+    let (execution, _) =
+        store.dismiss_work_item_with_execution(&execution, &dismissed, work.revision)?;
+    execution.value.validate().map_err(|_| {
+        OperatorStoreError::Conflict("dismissal execution did not satisfy operator contract")
+    })?;
+    Ok(execution)
 }

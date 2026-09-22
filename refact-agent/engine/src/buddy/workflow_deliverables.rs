@@ -2387,10 +2387,18 @@ mod tests {
             .with_store(move |store| crate::buddy::desk_actions::actions_for_work(store, &work_id))
             .await
             .unwrap();
-        assert_eq!(actions.len(), 2);
-        assert_eq!(actions[1].spec_hash, hash);
-        assert_eq!(actions[1].spec.adapter, "extensions");
-        assert_eq!(actions[1].spec.kind, "markdown_project_apply");
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[0].spec_hash, hash);
+        assert_eq!(actions[0].spec.adapter, "extensions");
+        assert_eq!(actions[0].spec.kind, "markdown_project_apply");
+        assert_eq!(
+            actions[1].spec.action_id,
+            crate::buddy::desk_actions::CHECK_SAVED_EVIDENCE
+        );
+        assert_eq!(
+            actions[2].spec.action_id,
+            crate::buddy::desk_actions::DISMISS_NOT_A_PROBLEM
+        );
         assert!(attach_local_proposal(
             app.clone(),
             &runtime,

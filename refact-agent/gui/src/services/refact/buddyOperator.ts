@@ -269,10 +269,13 @@ function parseDeskAction(
   if (
     spec.project.project_id !== projectId ||
     (v.work_id === undefined
-      ? spec.adapter !== "operator.saved_evidence" ||
-        spec.resource.resource_id !== workId
+      ? !["operator.saved_evidence", "operator.work_lifecycle"].includes(
+          spec.adapter,
+        ) || spec.resource.resource_id !== workId
       : v.work_id !== workId) ||
     (spec.adapter === "operator.saved_evidence" &&
+      spec.resource.resource_id !== workId) ||
+    (spec.adapter === "operator.work_lifecycle" &&
       spec.resource.resource_id !== workId) ||
     (latest &&
       (latest.value.spec_hash !== v.spec_hash ||
@@ -840,6 +843,7 @@ export const buddyOperatorApi = buddyApi.injectEndpoints({
           return invalidResponse(error);
         }
       },
+      invalidatesTags: ["BuddySnapshot"],
     }),
     getBuddyOperatorWork: builder.query<
       OperatorPage<OperatorRecord<WorkItem>[]>,
@@ -877,6 +881,7 @@ export const buddyOperatorApi = buddyApi.injectEndpoints({
           return invalidResponse(error);
         }
       },
+      providesTags: ["BuddySnapshot"],
     }),
     getBuddyOperatorWorkItem: builder.query<
       OperatorPage<OperatorRecord<WorkItem>>,

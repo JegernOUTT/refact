@@ -26,6 +26,15 @@ const fixture: unknown = JSON.parse(
     "utf8",
   ),
 );
+const triagedFixture: Record<string, unknown> = JSON.parse(
+  readFileSync(
+    join(
+      process.cwd(),
+      "../engine/crates/refact-buddy-core/tests/fixtures/work_item_v1_triaged.json",
+    ),
+    "utf8",
+  ),
+);
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
@@ -68,7 +77,17 @@ describe("operator contract v1", () => {
 
   test("round trips the shared golden fixture", () => {
     const parsed = parseOperatorContractFixture(fixture);
-    expect(JSON.parse(JSON.stringify(parsed))).toEqual(fixture);
+    const serialized = JSON.parse(JSON.stringify(parsed)) as {
+      work_item: {
+        severity?: null;
+        problem_summary?: null;
+        scope?: null;
+      };
+    };
+    delete serialized.work_item.severity;
+    delete serialized.work_item.problem_summary;
+    delete serialized.work_item.scope;
+    expect(serialized).toEqual(fixture);
     expect(parsed.action_execution.status).toBe("reconciling");
     expect(parsed.decision_projection.decision.native.source_kind).toBe(
       "question",
@@ -123,6 +142,17 @@ describe("operator contract v1", () => {
     expect(() => parseOperatorContractFixture(overflow)).toThrow(
       InvalidOperatorContract,
     );
+  });
+
+  test("accepts named triage fields but still rejects unrelated fields", () => {
+    expect(parseWorkItem(triagedFixture)).toMatchObject({
+      severity: "high",
+      problem_summary: "Reconnect provider",
+      scope: "providers/primary",
+    });
+    expect(() =>
+      parseWorkItem({ ...triagedFixture, unexpected_field: true }),
+    ).toThrow(InvalidOperatorContract);
   });
 
   test("round trips the inconclusive run outcome", () => {

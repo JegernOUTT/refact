@@ -785,6 +785,31 @@ describe("BuddyDesk", () => {
     description: "Only retained metadata is checked. No fix is applied.",
     latest_execution: null,
   };
+  const dismissAction: DeskAction = {
+    ...action,
+    spec: {
+      ...action.spec,
+      action_id: "dismiss_not_a_problem",
+      kind: "dismiss_not_a_problem",
+      adapter: "operator.work_lifecycle",
+      resource: {
+        resource_kind: "work_item",
+        resource_id: item.id,
+        version: "digest",
+      },
+      authority_class: "mutating",
+      capabilities: {
+        can_preview: false,
+        can_execute: true,
+        can_verify: true,
+        can_recover: false,
+        can_cancel: false,
+      },
+    },
+    spec_hash: "dismiss-hash",
+    label: "Dismiss — not a problem",
+    description: "Moves this item out of Needs you.",
+  };
   const receipt = (key: string): ActionExecution => ({
     schema_version: 1,
     execution_id: "execution-1",
@@ -808,6 +833,18 @@ describe("BuddyDesk", () => {
       "Findings are not independently verified.",
     ],
     recovery: null,
+  });
+  const dismissalReceipt = (key: string): ActionExecution => ({
+    ...receipt(key),
+    action_id: dismissAction.spec.action_id,
+    spec_hash: dismissAction.spec_hash,
+    requester: {
+      source_kind: "external",
+      source_id: "buddy-desk:dismiss",
+      source_version: "1",
+    },
+    status: "completed",
+    verification_evidence: ["Work item dismissed by user request."],
   });
   function setupActions(getAction: () => DeskAction = () => action) {
     server.use(
@@ -867,16 +904,20 @@ describe("BuddyDesk", () => {
       idempotency_key: requests[0].idempotency_key,
     });
     expect(typeof requests[0].idempotency_key).toBe("string");
-    expect(screen.queryByText("Saved check: Partial")).toBeNull();
+    expect(screen.queryByText("Saved evidence check: Partial")).toBeNull();
     release?.();
-    expect(await screen.findByText("Saved check: Partial")).toBeTruthy();
+    expect(
+      await screen.findByText("Saved evidence check: Partial"),
+    ).toBeTruthy();
     expect(
       screen.getByText("Findings are not independently verified."),
     ).toBeTruthy();
     expect(store.getState().pages.at(-1)?.name).toBe("login page");
     fireEvent.click(screen.getByRole("button", { name: "Back to work list" }));
     await openReport();
-    expect(await screen.findByText("Saved check: Partial")).toBeTruthy();
+    expect(
+      await screen.findByText("Saved evidence check: Partial"),
+    ).toBeTruthy();
     expect(requests).toHaveLength(1);
   });
 
@@ -905,13 +946,53 @@ describe("BuddyDesk", () => {
     expect(
       await screen.findByText(/No acknowledged result was received/),
     ).toBeTruthy();
-    expect(screen.queryByText("Saved check: Partial")).toBeNull();
+    expect(screen.queryByText("Saved evidence check: Partial")).toBeNull();
     fireEvent.click(
       screen.getByRole("button", { name: "Check saved evidence links" }),
     );
-    expect(await screen.findByText("Saved check: Partial")).toBeTruthy();
+    expect(
+      await screen.findByText("Saved evidence check: Partial"),
+    ).toBeTruthy();
     expect(keys).toHaveLength(2);
     expect(keys[0]).toBe(keys[1]);
+  });
+
+  it("executes dismissal and removes the row from Needs you", async () => {
+    let workRequests = 0;
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope(workRequests++ === 0 ? [record(item)] : [])),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+      http.get("*/v1/buddy/work/:id/actions", () =>
+        HttpResponse.json(envelope([dismissAction])),
+      ),
+      http.post(
+        "*/v1/buddy/work/:id/actions/:action/execute",
+        async ({ params, request }) => {
+          expect(params.action).toBe("dismiss_not_a_problem");
+          const body = (await request.json()) as { idempotency_key: string };
+          return HttpResponse.json(
+            envelope(record(dismissalReceipt(body.idempotency_key))),
+          );
+        },
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: dismissAction.label }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /Provider setup diagnosis/ }),
+      ).toBeNull(),
+    );
+    expect(workRequests).toBeGreaterThanOrEqual(2);
   });
 
   it("does not enable an unsupported action or one for an old report revision", async () => {

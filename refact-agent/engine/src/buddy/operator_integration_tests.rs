@@ -278,6 +278,9 @@ fn scratch_records(
         current_artifact_id: Some("scratch-artifact".to_string()),
         current_artifact_revision: Some(1),
         last_material_change_at: "2026-09-05T00:00:00Z".to_string(),
+        severity: None,
+        problem_summary: None,
+        scope: None,
     };
     let outcome = RunOutcome {
         schema_version: OPERATOR_SCHEMA_VERSION_V1,
@@ -740,9 +743,13 @@ async fn isolated_registered_desk_action_persists_partial_receipt_without_changi
     let router = harness.operator_router(Some(runtime.clone())).await;
     let (status, actions) = get_json(router.clone(), "/v1/buddy/work/scratch-work/actions").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(actions["data"].as_array().unwrap().len(), 1);
+    assert_eq!(actions["data"].as_array().unwrap().len(), 2);
     assert_eq!(actions["data"][0]["spec"]["authority_class"], "read_only");
     assert!(actions["data"][0]["latest_execution"].is_null());
+    assert_eq!(
+        actions["data"][1]["spec"]["action_id"],
+        crate::buddy::desk_actions::DISMISS_NOT_A_PROBLEM
+    );
     let body = action_body(&actions["data"][0], &project);
     let (status, response) =
         post_action(router.clone(), "check_saved_evidence", body.clone()).await;
@@ -770,6 +777,7 @@ async fn isolated_registered_desk_action_persists_partial_receipt_without_changi
     let router = harness.operator_router(Some(reopened.clone())).await;
     let (_, actions) = get_json(router.clone(), "/v1/buddy/work/scratch-work/actions").await;
     assert_eq!(actions["data"][0]["latest_execution"], response["data"]);
+    assert!(actions["data"][1]["latest_execution"].is_null());
     let (_, fetched) = get_json(
         router,
         &format!(

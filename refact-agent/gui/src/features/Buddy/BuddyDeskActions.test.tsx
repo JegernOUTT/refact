@@ -10,6 +10,7 @@ import {
   type DeskAction,
 } from "../../services/refact/buddyOperator";
 import type {
+  ActionExecution,
   ArtifactRevision,
   ProjectIdentity,
   WorkItem,
@@ -95,7 +96,53 @@ const action: DeskAction = {
   description: "Only retained metadata is checked. No fix is applied.",
   latest_execution: null,
 };
-const envelope = (data: DeskAction[], envelopeProject = project) => ({
+const dismissAction: DeskAction = {
+  ...action,
+  spec: {
+    ...action.spec,
+    action_id: "dismiss_not_a_problem",
+    kind: "dismiss_not_a_problem",
+    adapter: "operator.work_lifecycle",
+    resource: {
+      resource_kind: "work_item",
+      resource_id: item.id,
+      version: "digest",
+    },
+    authority_class: "mutating",
+    capabilities: {
+      can_preview: false,
+      can_execute: true,
+      can_verify: true,
+      can_recover: false,
+      can_cancel: false,
+    },
+  },
+  spec_hash: "dismiss-hash",
+  label: "Dismiss — not a problem",
+  description: "Moves this item out of Needs you.",
+};
+const dismissal = (key: string): ActionExecution => ({
+  schema_version: 1,
+  execution_id: "dismiss-execution",
+  project,
+  worker: { worker_id: "worker", engine_instance_id: "engine", epoch: 1 },
+  idempotency_key: key,
+  action_id: dismissAction.spec.action_id,
+  spec_hash: dismissAction.spec_hash,
+  requester: {
+    source_kind: "external",
+    source_id: "buddy-desk:dismiss",
+    source_version: "1",
+  },
+  decision: null,
+  status: "completed",
+  started_at: "2026-09-05T00:00:00Z",
+  ended_at: "2026-09-05T00:00:01Z",
+  effects: [],
+  verification_evidence: ["Work item dismissed by user request."],
+  recovery: null,
+});
+const envelope = <T,>(data: T, envelopeProject = project) => ({
   schema_version: 1,
   project: envelopeProject,
   data,
@@ -207,5 +254,46 @@ describe("BuddyDeskActions", () => {
     expect(await screen.findByText(refetched.description)).toBeTruthy();
     expect(screen.queryByText(action.description)).toBeNull();
     expect(screen.getAllByRole("button", actionButton)).toHaveLength(1);
+  });
+
+  it("renders dismissal as supported and names dismissal in pending and receipt copy", async () => {
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.get("*/v1/buddy/work/:id/actions", () =>
+        HttpResponse.json(envelope([dismissAction])),
+      ),
+      http.post(
+        "*/v1/buddy/work/:id/actions/:action/execute",
+        async ({ params, request }) => {
+          expect(params.action).toBe("dismiss_not_a_problem");
+          const body = (await request.json()) as { idempotency_key: string };
+          await pending;
+          return HttpResponse.json(
+            envelope({
+              value: dismissal(body.idempotency_key),
+              revision: 1,
+              change_seq: 2,
+            }),
+          );
+        },
+      ),
+    );
+    renderActions();
+    const button = await screen.findByRole("button", {
+      name: dismissAction.label,
+    });
+    expect(button).not.toBeDisabled();
+    expect(screen.queryByText(/not supported by this client/)).toBeNull();
+    fireEvent.click(button);
+    expect(
+      await screen.findByRole("button", { name: "Dismissing item…" }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/saved evidence/i)).toBeNull();
+    release?.();
+    expect(await screen.findByText(/Dismissed from Needs you/)).toBeTruthy();
+    expect(screen.queryByText(/saved evidence/i)).toBeNull();
   });
 });

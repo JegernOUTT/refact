@@ -57,8 +57,9 @@ function ActionControl({
     ["claimed", "running", "reconciling", "outcome_unknown"].includes(
       latest.status,
     );
-  const supported =
-    buddyRegisteredActionHandler(action.spec) === "saved_evidence";
+  const handler = buddyRegisteredActionHandler(action.spec);
+  const lifecycle = handler === "work_lifecycle";
+  const supported = handler === "saved_evidence" || lifecycle;
   const available =
     supported &&
     !unresolved &&
@@ -109,7 +110,11 @@ function ActionControl({
         disabled={disabled || pending || !available}
         onClick={() => void run()}
       >
-        {pending ? "Checking saved evidence…" : action.label}
+        {pending
+          ? lifecycle
+            ? "Dismissing item…"
+            : "Verifying saved evidence…"
+          : action.label}
       </Button>
       {!supported && (
         <Text as="p" size="1" color="gray" className={styles.description}>
@@ -124,7 +129,8 @@ function ActionControl({
       {latest && (
         <div role="status" className={styles.receipt}>
           <Text as="p" size="1" weight="medium" className={styles.description}>
-            Saved check: {humanizeIdentifier(latest.status)}
+            {lifecycle ? "Dismissed from Needs you" : "Saved evidence check"}:{" "}
+            {humanizeIdentifier(latest.status)}
           </Text>
           <ul className={styles.evidence}>
             {latest.verification_evidence.map((evidence, index) => (

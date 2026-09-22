@@ -14,7 +14,7 @@ use super::types::{
     BuddyAction, BuddyActivity, BuddyDraft, BuddyOpportunity, BuddyOpportunityKind,
     BuddyOpportunityLinks, BuddyPriority, OpportunityStatus,
 };
-use super::work_items::{stable_hash, SubjectKey, WorkItemDraft};
+use super::work_items::{problem_summary_from_title, stable_hash, SubjectKey, WorkItemDraft};
 
 pub const MAX_MIGRATION_BATCH: usize = 128;
 /// Namespaces for retained legacy history. These are read-only projections of
@@ -821,6 +821,9 @@ fn import_record(
         state,
         native_sources: vec![],
         last_material_change_at: created_at.into(),
+        severity: Some(refact_buddy_core::operator_types::WorkItemSeverity::Unknown),
+        problem_summary: problem_summary_from_title(&title),
+        scope: None,
     }
     .build()
     .map_err(|_| OperatorStoreError::Conflict("invalid legacy work item"))?;

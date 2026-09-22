@@ -56,7 +56,7 @@ const RESOURCE_HANDLERS = [
 
 export function buddyRegisteredActionHandler(
   spec: ActionSpec,
-): "resource" | "saved_evidence" | "unsupported" {
+): "resource" | "saved_evidence" | "work_lifecycle" | "unsupported" {
   if (spec.schema_version !== 1) return "unsupported";
   if (
     spec.adapter === "operator.saved_evidence" &&
@@ -66,6 +66,14 @@ export function buddyRegisteredActionHandler(
     spec.confirmation === "none"
   )
     return "saved_evidence";
+  if (
+    spec.adapter === "operator.work_lifecycle" &&
+    spec.kind === "dismiss_not_a_problem" &&
+    spec.resource.resource_kind === "work_item" &&
+    spec.authority_class === "mutating" &&
+    spec.confirmation === "none"
+  )
+    return "work_lifecycle";
   if (
     spec.authority_class === "mutating" &&
     spec.confirmation === "user_confirmation_required" &&

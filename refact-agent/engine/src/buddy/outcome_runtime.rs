@@ -5,12 +5,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
 use refact_buddy_core::operator_types::{
     ActionExecution, ArtifactRevision, EvidenceRef, ProjectIdentity, ReadState, RunOutcome,
-    RunStatus, WorkItem, WorkSnooze, WorkerIdentity, OPERATOR_SCHEMA_VERSION_V1,
+    RunStatus, WorkItem, WorkItemSeverity, WorkSnooze, WorkerIdentity, OPERATOR_SCHEMA_VERSION_V1,
 };
 
 use super::operator_store::{OperatorStore, OperatorStoreError, Page, Stored};
 use super::artifacts::{ArtifactDraft, ArtifactMaterialization};
-use super::work_items::{SubjectKey, WorkItemDraft};
+use super::work_items::{problem_summary_from_title, SubjectKey, WorkItemDraft};
 
 pub const MAX_OUTCOME_EVIDENCE: usize = 12;
 
@@ -757,7 +757,7 @@ pub(crate) fn publish_report_in_store_owned(
         project: outcome.project.clone(),
         subject,
         kind: "assessment".into(),
-        title,
+        title: title.clone(),
         state,
         native_sources: outcome
             .evidence
@@ -768,6 +768,9 @@ pub(crate) fn publish_report_in_store_owned(
             .ended_at
             .clone()
             .unwrap_or_else(|| outcome.started_at.clone()),
+        severity: Some(WorkItemSeverity::Unknown),
+        problem_summary: problem_summary_from_title(&title),
+        scope: Some(outcome.coverage.clone()),
     }
     .build()
     .map_err(|error| error.to_string())?;

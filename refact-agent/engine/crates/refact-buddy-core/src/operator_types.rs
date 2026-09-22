@@ -62,6 +62,16 @@ pub enum WorkItemState {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemSeverity {
+    Unknown,
+    Low,
+    Normal,
+    High,
+    Critical,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct WorkItem {
     pub schema_version: u16,
@@ -75,6 +85,12 @@ pub struct WorkItem {
     pub current_artifact_id: Option<String>,
     pub current_artifact_revision: Option<u32>,
     pub last_material_change_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<WorkItemSeverity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -640,6 +656,23 @@ impl OperatorContractFixture {
 mod tests {
     use super::*;
 
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    #[serde(rename_all = "snake_case", deny_unknown_fields)]
+    struct LegacyWorkItem {
+        schema_version: u16,
+        id: String,
+        project: ProjectIdentity,
+        subject: ResourceRef,
+        kind: String,
+        title: String,
+        state: WorkItemState,
+        native_sources: Vec<NativeSourceIdentity>,
+        current_artifact_id: Option<String>,
+        current_artifact_revision: Option<u32>,
+        last_material_change_at: String,
+    }
+
     #[test]
     fn golden_v1_fixture_deserializes_and_validates() {
         let fixture: OperatorContractFixture =
@@ -671,6 +704,24 @@ mod tests {
         round_trip!(fixture.delivery, Delivery);
         round_trip!(fixture.read_state, ReadState);
         round_trip!(fixture.improvement_candidate, ImprovementCandidate);
+    }
+
+    #[test]
+    fn triage_fields_preserve_legacy_wire_and_reject_old_readers_when_populated() {
+        let legacy = include_str!("../tests/fixtures/work_item_v1_legacy.json").trim_end();
+        let work = parse_operator_contract::<WorkItem>(legacy).unwrap();
+        assert_eq!(work.severity, None);
+        assert_eq!(work.problem_summary, None);
+        assert_eq!(work.scope, None);
+        assert_eq!(serde_json::to_string(&work).unwrap(), legacy);
+
+        let triaged = include_str!("../tests/fixtures/work_item_v1_triaged.json").trim_end();
+        let work = parse_operator_contract::<WorkItem>(triaged).unwrap();
+        assert_eq!(work.severity, Some(WorkItemSeverity::High));
+        assert_eq!(work.problem_summary.as_deref(), Some("Reconnect provider"));
+        assert_eq!(work.scope.as_deref(), Some("providers/primary"));
+        assert_eq!(serde_json::to_string(&work).unwrap(), triaged);
+        assert!(serde_json::from_str::<LegacyWorkItem>(triaged).is_err());
     }
 
     #[test]

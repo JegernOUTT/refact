@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 
 use refact_buddy_core::operator_types::{
-    NativeSourceIdentity, ProjectIdentity, ResourceRef, WorkItem, WorkItemState,
+    NativeSourceIdentity, ProjectIdentity, ResourceRef, WorkItem, WorkItemState, WorkItemSeverity,
     OPERATOR_SCHEMA_VERSION_V1,
 };
 
@@ -68,6 +68,9 @@ pub struct WorkItemDraft {
     pub state: WorkItemState,
     pub native_sources: Vec<NativeSourceIdentity>,
     pub last_material_change_at: String,
+    pub severity: Option<WorkItemSeverity>,
+    pub problem_summary: Option<String>,
+    pub scope: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +98,16 @@ impl WorkItemDraft {
         self.kind = self.kind.trim().to_string();
         self.title = self.title.trim().to_string();
         self.last_material_change_at = self.last_material_change_at.trim().to_string();
+        self.problem_summary = self
+            .problem_summary
+            .as_deref()
+            .and_then(problem_summary_from_title);
+        self.scope = self
+            .scope
+            .as_deref()
+            .map(str::trim)
+            .filter(|scope| !scope.is_empty())
+            .map(ToOwned::to_owned);
         if self.kind.is_empty() {
             return Err(WorkItemBuildError::MissingField("kind"));
         }
@@ -124,8 +137,20 @@ impl WorkItemDraft {
             current_artifact_id: None,
             current_artifact_revision: None,
             last_material_change_at: self.last_material_change_at,
+            severity: self.severity,
+            problem_summary: self.problem_summary,
+            scope: self.scope,
         })
     }
+}
+
+pub fn problem_summary_from_title(title: &str) -> Option<String> {
+    let summary = title
+        .split_whitespace()
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!summary.is_empty()).then_some(summary)
 }
 
 pub fn is_cosmetic_helper_outcome(
@@ -181,10 +206,67 @@ mod tests {
                 source_version: "main@a".to_string(),
             }],
             last_material_change_at: "2026-09-05T00:00:00Z".to_string(),
+            severity: Some(WorkItemSeverity::Unknown),
+            problem_summary: problem_summary_from_title("Cargo check"),
+            scope: Some("engine".to_string()),
         }
         .build()
         .unwrap();
         assert_eq!(item.id, subject.work_item_id());
         assert_eq!(item.subject.version, "main@a");
+    }
+
+    #[test]
+    fn rows_expose_distinct_summaries() {
+        let summaries = [
+            ("provider", "Repair provider authentication"),
+            ("workspace", "Review uncommitted workspace changes"),
+            ("instructions", "Update missing AGENTS instructions"),
+            ("modes", "Resolve overlapping mode prompts"),
+            ("dependencies", "Check dependency manifest changes"),
+        ]
+        .into_iter()
+        .map(|(kind, title)| {
+            WorkItemDraft {
+                project: project(),
+                subject: SubjectKey::new(&project(), kind, kind, kind, "main@a").unwrap(),
+                kind: kind.to_string(),
+                title: title.to_string(),
+                state: WorkItemState::NeedsAttention,
+                native_sources: vec![],
+                last_material_change_at: "2026-09-05T00:00:00Z".to_string(),
+                severity: Some(WorkItemSeverity::Unknown),
+                problem_summary: problem_summary_from_title(title),
+                scope: None,
+            }
+            .build()
+            .unwrap()
+            .problem_summary
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(summaries.len(), 5);
+    }
+
+    #[test]
+    fn missing_severity_or_scope_is_representable() {
+        let item = WorkItemDraft {
+            project: project(),
+            subject: SubjectKey::new(&project(), "check", "lint", "src", "main@a").unwrap(),
+            kind: "check".to_string(),
+            title: "Lint source".to_string(),
+            state: WorkItemState::NeedsAttention,
+            native_sources: vec![],
+            last_material_change_at: "2026-09-05T00:00:00Z".to_string(),
+            severity: None,
+            problem_summary: None,
+            scope: None,
+        }
+        .build()
+        .unwrap();
+        let wire = serde_json::to_string(&item).unwrap();
+        assert!(!wire.contains("severity"));
+        let round_trip: WorkItem = serde_json::from_str(&wire).unwrap();
+        assert_eq!(round_trip.severity, None);
+        assert_eq!(round_trip.scope, None);
     }
 }
