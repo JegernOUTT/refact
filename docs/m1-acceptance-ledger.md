@@ -61,7 +61,7 @@ Notes on the table:
   carries failures in sidebar/dashboard/app-restore that predate this work and are
   unrelated to §4.9; running it would not add evidence for any row here.
 - **E18 found one stale citation in the previous revision of this ledger.** Row 13 named
-  `agents::tool_authority::tests::canonical_aliases_and_transport_are_not_ambient_authority`;
+  `agents::tool_authority::tests::canonical_aliases_and_mcp_transport_are_not_ambient_authority`;
   the test is actually
   `agents::tool_authority::tests::canonical_aliases_and_mcp_transport_are_not_ambient_authority`.
   Row 8's `tool_undo`/`tool_apply` module paths were likewise wrong; the real paths are
