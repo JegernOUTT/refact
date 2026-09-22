@@ -1,4 +1,9 @@
 .scene {
+  --buddy-scene-ink: var(--rf-color-fg);
+  --buddy-scene-ink-muted: var(--rf-color-fg);
+  --buddy-scene-control-bg: var(--rf-surface-overlay);
+  --buddy-scene-control-border: var(--rf-border-strong);
+  --buddy-scene-tooltip-bg: var(--rf-surface-overlay);
   position: relative;
   height: 280px;
   min-height: 220px;
@@ -55,7 +60,7 @@
   border: 1px solid transparent;
   border-radius: var(--rf-radius-pill);
   background: transparent;
-  color: rgba(255, 255, 255, 0.82);
+  color: var(--buddy-scene-ink);
   transition:
     transform 0.12s ease,
     background 0.12s ease,
@@ -137,9 +142,10 @@
   min-width: 88px;
   max-width: 122px;
   padding: 4px 7px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid var(--buddy-scene-control-border);
   border-radius: var(--rf-radius-card);
-  background: rgba(17, 24, 39, 0.64);
+  background: var(--buddy-scene-tooltip-bg);
+  color: var(--buddy-scene-ink);
   opacity: 0;
   pointer-events: none;
   transform: translateX(-50%) translateY(4px);
@@ -168,7 +174,7 @@
 .objectValue {
   max-width: 96px;
   overflow: hidden;
-  color: rgba(255, 255, 255, 0.72);
+  color: var(--buddy-scene-ink-muted);
   font-size: var(--rf-text-1);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -353,10 +359,10 @@
   min-width: 24px;
   height: 24px;
   padding: 0 7px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid var(--buddy-scene-control-border);
   border-radius: var(--rf-radius-pill);
-  background: rgba(17, 24, 39, 0.28);
-  color: rgba(255, 255, 255, 0.9);
+  background: var(--buddy-scene-control-bg);
+  color: var(--buddy-scene-ink);
   font-size: var(--rf-text-1);
   backdrop-filter: blur(4px);
   transition:
@@ -366,15 +372,15 @@
 }
 
 .sceneButtonGhost {
-  color: rgba(255, 255, 255, 0.68);
+  color: var(--buddy-scene-ink-muted);
 }
 
 .sceneButton:hover,
 .sceneButton:focus-visible,
 .sceneButtonGhost:hover,
 .sceneButtonGhost:focus-visible {
-  background: rgba(17, 24, 39, 0.64);
-  border-color: rgba(255, 255, 255, 0.36);
+  background: var(--rf-surface-overlay);
+  border-color: var(--rf-color-accent);
   transform: translateY(-1px);
   outline: none;
 }

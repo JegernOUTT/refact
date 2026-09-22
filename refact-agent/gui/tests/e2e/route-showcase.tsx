@@ -94,6 +94,9 @@ const multiChatRoute = route === "chat-split" || chatDndRoute;
 const operatorParam = new URLSearchParams(window.location.search).get(
   "operator",
 );
+const sceneSpeechParam = new URLSearchParams(window.location.search).has(
+  "scene_speech",
+);
 const showcaseProject = {
   project_id: "showcase",
   canonical_root: "/workspace/refact",
@@ -360,7 +363,19 @@ const buddySnapshot: BuddySnapshot = {
     settings_path: "/workspace/refact/.refact/buddy/settings.json",
   },
   recent_diagnostics: [],
-  active_speech: null,
+  active_speech: sceneSpeechParam
+    ? {
+        id: "showcase-scene-speech",
+        text: "Snack beacon detected.",
+        mood: "curious",
+        scope: "project",
+        persistent: true,
+        ttl_seconds: 0,
+        created_at: now,
+        controls: [],
+        speech_intent: "speech_insight",
+      }
+    : null,
   runtime_queue: [buddyRuntimeEvent],
   now_playing: null,
   pulse: buddyPulse,

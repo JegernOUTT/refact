@@ -26,7 +26,7 @@
   position: relative;
   width: 100%;
   padding: 8px 12px 9px;
-  background: linear-gradient(168deg, #fdfaf1 0%, #f8f1df 100%);
+  background: var(--bb-bg);
   border: 1.8px solid var(--bb-border);
   border-radius: 15px 17px 14px 18px / 17px 14px 18px 15px;
   color: var(--bb-ink);
