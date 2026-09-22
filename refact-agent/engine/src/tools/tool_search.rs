@@ -557,7 +557,7 @@ impl Tool for ToolSearch {
             if cards.is_empty() {
                 cards = idx_guard.related_for_related_files(&files, 8);
             }
-            format_related_memories_section(&cards, None)
+            format_related_memories_section(&cards)
         };
 
         let mut results = vec_context_file_to_context_tools(all_context_files);

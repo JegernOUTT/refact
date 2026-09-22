@@ -1361,6 +1361,16 @@ fn path_is_refact_runtime_state(path: &Path) -> bool {
     false
 }
 
+fn path_is_knowledge_document(path: &Path) -> bool {
+    let knowledge: Vec<Component> = Path::new(crate::file_filter::KNOWLEDGE_FOLDER_NAME)
+        .components()
+        .collect();
+    path.components()
+        .collect::<Vec<_>>()
+        .windows(knowledge.len())
+        .any(|window| window == knowledge.as_slice())
+}
+
 fn path_is_refact_internal(path: &Path) -> bool {
     path_is_refact_import_internal(path)
         || path_is_refact_runtime_state(path)
@@ -2092,6 +2102,7 @@ pub async fn add_folder(gcx: Arc<GlobalContext>, fpath: &PathBuf) {
     };
     if was_added {
         gcx.enrichment_generation.fetch_add(1, Ordering::SeqCst);
+        gcx.knowledge_generation.fetch_add(1, Ordering::SeqCst);
         tracing::info!("Added folder {} to workspace", canonical_path.display());
         on_workspaces_init(gcx.clone()).await;
     } else {
@@ -2114,6 +2125,7 @@ pub async fn remove_folder(gcx: Arc<GlobalContext>, path: &PathBuf) {
     };
     if was_removed {
         gcx.enrichment_generation.fetch_add(1, Ordering::SeqCst);
+        gcx.knowledge_generation.fetch_add(1, Ordering::SeqCst);
         tracing::info!("Removed folder {} from workspace", path.display());
         on_workspaces_init(gcx.clone()).await;
     } else {
@@ -2898,6 +2910,13 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
             .any(|path| !path_is_refact_internal(path))
         {
             gcx.enrichment_generation.fetch_add(1, Ordering::SeqCst);
+        }
+        if event
+            .paths
+            .iter()
+            .any(|path| !path_is_refact_internal(path) && path_is_knowledge_document(path))
+        {
+            gcx.knowledge_generation.fetch_add(1, Ordering::SeqCst);
         }
         let debounce_now = Instant::now();
         let is_remove_event = matches!(&event.kind, EventKind::Remove(_));
@@ -4418,6 +4437,33 @@ mod tests {
         let workspace_files_len = gcx.documents_state.workspace_files.lock().unwrap().len();
         assert_eq!(workspace_files_len, 0);
         assert_eq!(cache_dirty_value(&gcx).await, 0.0);
+    }
+
+    #[tokio::test]
+    async fn watcher_bumps_knowledge_generation_only_for_knowledge_paths() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("src").join("lib.rs");
+        write_file(&source, "fn main() {}\n");
+        let knowledge = temp
+            .path()
+            .join(".refact")
+            .join("knowledge")
+            .join("note.md");
+        write_file(&knowledge, "---\nid: \"note\"\n---\n\nBody\n");
+
+        let source_event =
+            notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+                .add_path(source);
+        file_watcher_event(source_event, Arc::downgrade(&gcx)).await;
+        assert_eq!(gcx.knowledge_generation.load(Ordering::SeqCst), 0);
+        assert!(gcx.enrichment_generation.load(Ordering::SeqCst) > 0);
+
+        let knowledge_event =
+            notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+                .add_path(knowledge);
+        file_watcher_event(knowledge_event, Arc::downgrade(&gcx)).await;
+        assert_eq!(gcx.knowledge_generation.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

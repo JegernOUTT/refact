@@ -194,7 +194,7 @@ impl Tool for ToolGetKnowledge {
                 tags.sort();
                 tags.dedup();
                 let cards = idx_guard.related_for_tags(&tags, 8);
-                format_related_memories_section(&cards, None)
+                format_related_memories_section(&cards)
             };
 
             body.push_str(&related);

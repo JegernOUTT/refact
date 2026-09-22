@@ -1983,24 +1983,6 @@ fn destructive_memory_op(op_type: MemoryOpType) -> bool {
     )
 }
 
-async fn rewrite_memory_document(
-    path: &Path,
-    frontmatter: KnowledgeFrontmatter,
-    content: &str,
-    extras: &[(&str, String)],
-) -> Result<(), String> {
-    debug_assert!(extras.is_empty());
-    let mapping = serde_yaml::to_value(&frontmatter)
-        .ok()
-        .and_then(|value| value.as_mapping().cloned())
-        .unwrap_or_default();
-    let yaml = serde_yaml::to_string(&mapping)
-        .map_err(|e| format!("failed to serialize memory document: {e}"))?;
-    tokio::fs::write(path, format!("---\n{}---\n\n{}", yaml, content.trim()))
-        .await
-        .map_err(|e| format!("failed to rewrite memory document: {e}"))
-}
-
 async fn apply_create_memory(
     gcx: AppState,
     op: &MemoryLifecycleOp,
@@ -2257,22 +2239,22 @@ async fn apply_mark_review_needed(
     let mut paths = Vec::new();
     for target in &op.target_paths {
         let path = validate_existing_memory_path(target, &roots).await?;
-        let text = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| format!("failed to read memory for review mark: {e}"))?;
-        let (frontmatter, body_start) = KnowledgeFrontmatter::parse(&text);
-        let body = text.get(body_start..).unwrap_or("").trim().to_string();
-        if frontmatter.review_after.as_deref() == Some(review_after.as_str())
-            && frontmatter.review_needed == Some(true)
-        {
-            continue;
+        // Use the owning atomic writer so retrieval/index state changes with the file.
+        let changed = update_memory_document_frontmatter(gcx.gcx.clone(), &path, |frontmatter| {
+            if frontmatter.review_after.as_deref() == Some(review_after.as_str())
+                && frontmatter.review_needed == Some(true)
+            {
+                return Ok(false);
+            }
+            frontmatter.review_after = Some(review_after.clone());
+            frontmatter.review_needed = Some(true);
+            frontmatter.updated = Some(today_string());
+            Ok(true)
+        })
+        .await?;
+        if changed {
+            paths.push(path);
         }
-        let mut updated = frontmatter;
-        updated.review_after = Some(review_after.clone());
-        updated.review_needed = Some(true);
-        updated.updated = Some(today_string());
-        rewrite_memory_document(&path, updated, &body, &[]).await?;
-        paths.push(path);
     }
     if paths.is_empty() {
         Ok(MemoryApplyOutcome::skipped("review mark already applied"))

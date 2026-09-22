@@ -574,7 +574,7 @@ impl Tool for ToolRegexSearch {
             if cards.is_empty() {
                 cards = idx_guard.related_for_related_files(&matched_files, 8);
             }
-            format_related_memories_section(&cards, None)
+            format_related_memories_section(&cards)
         };
 
         let disclosed_paths = all_search_results

@@ -170,7 +170,7 @@ impl Tool for ToolUpdateTextDocAnchored {
             if cards.is_empty() {
                 cards = idx_guard.related_for_related_files(&paths, 8);
             }
-            format_related_memories_section(&cards, None)
+            format_related_memories_section(&cards)
         };
 
         let mut out = vec![ContextEnum::ChatMessage(ChatMessage {

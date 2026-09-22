@@ -734,6 +734,8 @@ pub async fn memories_add(
         atomic_write_text(&file_path, &md_content).await?;
         gcx.enrichment_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        gcx.knowledge_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         info!("Created knowledge entry: {}", file_path.display());
 
@@ -1996,6 +1998,8 @@ pub async fn rewrite_memory_document(
         atomic_write_text(doc_path, &content).await?;
         gcx.enrichment_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        gcx.knowledge_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         let path_buf = doc_path.to_path_buf();
         {
@@ -2089,6 +2093,8 @@ pub async fn delete_document_from_disk(
             Err(e) => return Err(format!("Failed to delete document: {}", e)),
         }
         gcx.enrichment_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        gcx.knowledge_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         info!("Deleted document from disk: {}", doc_path.display());

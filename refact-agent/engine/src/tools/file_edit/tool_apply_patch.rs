@@ -464,7 +464,7 @@ impl Tool for ToolApplyPatch {
             if cards.is_empty() {
                 cards = idx_guard.related_for_related_files(&files, 8);
             }
-            format_related_memories_section(&cards, None)
+            format_related_memories_section(&cards)
         };
 
         let mut out = vec![ContextEnum::ChatMessage(ChatMessage {

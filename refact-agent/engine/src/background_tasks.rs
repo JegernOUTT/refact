@@ -13,7 +13,7 @@ const CACHE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 use crate::global_context::GlobalContext;
 use crate::knowledge_index::{build_knowledge_index, knowledge_index_watcher_background_task};
 
-async fn wait_for_shutdown(gcx: Arc<GlobalContext>) {
+pub async fn wait_for_shutdown(gcx: Arc<GlobalContext>) {
     while !gcx.shutdown_flag.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }

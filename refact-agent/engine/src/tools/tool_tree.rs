@@ -279,7 +279,7 @@ impl Tool for ToolTree {
             keys.sort();
             keys.dedup();
             let cards = idx_guard.related_for_related_files(&keys, 8);
-            format_related_memories_section(&cards, None)
+            format_related_memories_section(&cards)
         };
 
         Ok((

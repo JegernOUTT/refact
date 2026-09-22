@@ -208,17 +208,9 @@ fn task_card_from_mapping(
     }
 }
 
-pub fn format_related_memories_section(
-    cards: &[KnowledgeCard],
-    exclude_path: Option<&Path>,
-) -> String {
+pub fn format_related_memories_section(cards: &[KnowledgeCard]) -> String {
     let mut shown = Vec::new();
     for c in cards {
-        if let Some(ex) = exclude_path {
-            if c.file_path == ex {
-                continue;
-            }
-        }
         let mut line = format!("- {} ({})", c.title, c.file_path.display());
         let desc = c
             .description

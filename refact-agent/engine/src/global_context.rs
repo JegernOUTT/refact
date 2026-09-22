@@ -409,6 +409,7 @@ pub struct GlobalContext {
     pub knowledge_index: Arc<AMutex<KnowledgeIndex>>,
     pub enrichment_cache: Arc<crate::knowledge::enrichment::EnrichmentCache>,
     pub enrichment_generation: Arc<AtomicU64>,
+    pub knowledge_generation: Arc<AtomicU64>,
     pub llm_stats_sender:
         Arc<StdMutex<Option<tokio::sync::mpsc::Sender<crate::stats::event::LlmCallEvent>>>>,
     pub ext_cache_generation: Arc<std::sync::atomic::AtomicU64>,
@@ -990,6 +991,7 @@ pub async fn create_global_context(
         knowledge_index: Arc::new(AMutex::new(KnowledgeIndex::empty())),
         enrichment_cache: Arc::new(crate::knowledge::enrichment::EnrichmentCache::default()),
         enrichment_generation: Arc::new(AtomicU64::new(0)),
+        knowledge_generation: Arc::new(AtomicU64::new(0)),
         llm_stats_sender: Arc::new(StdMutex::new(None)),
         ext_cache_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tool_catalog_generations: Arc::new(ToolCatalogGenerations::default()),
@@ -1397,6 +1399,7 @@ pub mod tests {
             knowledge_index: Arc::new(AMutex::new(KnowledgeIndex::empty())),
             enrichment_cache: Arc::new(crate::knowledge::enrichment::EnrichmentCache::default()),
             enrichment_generation: Arc::new(AtomicU64::new(0)),
+            knowledge_generation: Arc::new(AtomicU64::new(0)),
             llm_stats_sender: Arc::new(StdMutex::new(None)),
             ext_cache_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_catalog_generations: Arc::new(ToolCatalogGenerations::default()),
