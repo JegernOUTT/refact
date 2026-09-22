@@ -432,7 +432,7 @@ function DeskContent({
   }, [currentData, previous]);
 
   useLayoutEffect(() => {
-    if (selectedId === null) trigger.current?.focus();
+    if (selectedId === null) trigger.current?.focus({ preventScroll: true });
   }, [selectedId]);
 
   const refresh = () => {
