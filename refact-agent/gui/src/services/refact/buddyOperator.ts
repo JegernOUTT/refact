@@ -64,14 +64,64 @@ export type OperatorStatus = {
   >;
   project: ProjectIdentity | null;
   worker: WorkerIdentity | null;
+  unavailable_reason?: OperatorUnavailableReason;
 };
+
+export type OperatorUnavailableReason = {
+  kind: string;
+  detail: string;
+  retry_in_seconds?: number;
+};
+
+function parseOperatorUnavailableReason(
+  value: unknown,
+): OperatorUnavailableReason {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Invalid operator unavailable reason");
+  const reason = value as Record<string, unknown>;
+  if (
+    ![2, 3].includes(Object.keys(reason).length) ||
+    Object.keys(reason).some(
+      (key) => !["kind", "detail", "retry_in_seconds"].includes(key),
+    ) ||
+    typeof reason.kind !== "string" ||
+    reason.kind.trim() === "" ||
+    reason.kind.length > 64 ||
+    typeof reason.detail !== "string" ||
+    reason.detail.trim() === "" ||
+    reason.detail.length > 2000 ||
+    (reason.retry_in_seconds !== undefined &&
+      (typeof reason.retry_in_seconds !== "number" ||
+        !Number.isSafeInteger(reason.retry_in_seconds) ||
+        reason.retry_in_seconds < 0))
+  )
+    throw new Error("Invalid operator unavailable reason");
+  return {
+    kind: reason.kind,
+    detail: reason.detail,
+    ...(reason.retry_in_seconds === undefined
+      ? {}
+      : { retry_in_seconds: reason.retry_in_seconds }),
+  };
+}
 
 export function parseOperatorStatus(value: unknown): OperatorStatus {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Invalid operator status");
   const row = value as Record<string, unknown>;
   if (
-    Object.keys(row).length !== 5 ||
+    ![5, 6].includes(Object.keys(row).length) ||
+    Object.keys(row).some(
+      (key) =>
+        ![
+          "schema_version",
+          "mode",
+          "features",
+          "project",
+          "worker",
+          "unavailable_reason",
+        ].includes(key),
+    ) ||
     row.schema_version !== 1 ||
     (row.mode !== "enabled" &&
       row.mode !== "disabled" &&
@@ -81,6 +131,12 @@ export function parseOperatorStatus(value: unknown): OperatorStatus {
     Array.isArray(row.features)
   )
     throw new Error("Unsupported operator status");
+  const unavailableReason =
+    row.unavailable_reason === undefined
+      ? undefined
+      : parseOperatorUnavailableReason(row.unavailable_reason);
+  if (row.mode !== "unavailable" && unavailableReason !== undefined)
+    throw new Error("Unexpected operator unavailable reason");
   const features = row.features as Record<string, unknown>;
   if (
     Object.keys(features).length !== 5 ||
@@ -133,6 +189,9 @@ export function parseOperatorStatus(value: unknown): OperatorStatus {
       improvement: features.improvement,
       editorial: features.editorial,
     },
+    ...(unavailableReason === undefined
+      ? {}
+      : { unavailable_reason: unavailableReason }),
   };
 }
 
@@ -436,6 +495,28 @@ export const buddyOperatorApi = buddyApi.injectEndpoints({
         const result = await baseQuery(
           buildApiUrlFromState(state, "/v1/buddy/operator/status"),
         );
+        if (result.error) return { error: result.error };
+        try {
+          if (
+            identity !==
+            buddyOperatorIdentity(api.getState() as BuddyOperatorState)
+          )
+            throw new Error("Operator connection changed");
+          return { data: parseOperatorStatus(result.data) };
+        } catch (error) {
+          return invalidResponse(error);
+        }
+      },
+    }),
+    reopenBuddyOperator: builder.mutation<OperatorStatus, string>({
+      queryFn: async (identity, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyOperatorState;
+        if (identity !== buddyOperatorIdentity(state))
+          return invalidResponse(new Error("Operator connection changed"));
+        const result = await baseQuery({
+          url: buildApiUrlFromState(state, "/v1/buddy/operator/reopen"),
+          method: "POST",
+        });
         if (result.error) return { error: result.error };
         try {
           if (
@@ -975,6 +1056,7 @@ export const buddyOperatorApi = buddyApi.injectEndpoints({
 export const {
   useGetBuddyLegacyDraftWorkQuery,
   useGetBuddyOperatorStatusQuery,
+  useReopenBuddyOperatorMutation,
   useGetBuddyWorkOutcomesQuery,
   useGetBuddyWorkSnoozeQuery,
   useSnoozeBuddyWorkMutation,

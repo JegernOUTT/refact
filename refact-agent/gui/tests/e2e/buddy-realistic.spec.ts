@@ -736,6 +736,42 @@ test.describe("Buddy with realistic saved work", () => {
     ).toBeVisible();
   });
 
+  test("names the process holding saved work and retries it for real", async ({
+    page,
+  }) => {
+    await openBuddy(page, { width: 1280, route: UNAVAILABLE_ROUTE });
+
+    const alert = page.getByTestId("buddy-operator-degraded");
+    await expect(alert).toContainText(
+      "Another Refact process is using saved work",
+    );
+    await expect(alert).toContainText("pid 2810136");
+    await expect(alert).toContainText("refact-lsp --http-port 8001");
+    await expect(alert).toContainText(
+      "Buddy is already trying again in about 15 minutes.",
+    );
+    await page
+      .getByRole("button", { name: "Retry work authority", exact: true })
+      .click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const value = window as unknown as {
+            __routeShowcaseRequests?: { path: string; method: string }[];
+          };
+          return value.__routeShowcaseRequests?.filter(
+            (request) =>
+              request.path === "/v1/buddy/operator/reopen" &&
+              request.method === "POST",
+          ).length;
+        }),
+      )
+      .toBe(1);
+    await expect(alert.getByRole("status")).toContainText(
+      "Saved work is still unavailable.",
+    );
+  });
+
   test("never answers a failed request with a settled empty state", async ({
     page,
   }) => {

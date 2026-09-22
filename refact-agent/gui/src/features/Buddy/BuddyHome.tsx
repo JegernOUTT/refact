@@ -88,6 +88,8 @@ import {
   useGetBuddyOperatorStatusQuery,
   useGetBuddyOperatorWorkQuery,
   useGetBuddyLegacyDraftWorkQuery,
+  useReopenBuddyOperatorMutation,
+  type OperatorUnavailableReason,
 } from "../../services/refact/buddyOperator";
 import { BuddyPresence } from "./BuddyPresence";
 import { BuddyNativeDecisions } from "./BuddyNativeDecisions";
@@ -227,6 +229,33 @@ const OPERATOR_FAILURE_DETAIL: Record<BuddyOperatorFailure, string> = {
 
 const OPERATOR_FAILURE_SCOPE =
   "Your chats, files and recent warnings are untouched. Progress, counters and project setup stay hidden until something can confirm them.";
+
+const OPERATOR_UNAVAILABLE_REASON_TITLES: Record<string, string> = {
+  already_owned: "Another Refact process is using saved work",
+  io_error: "Buddy could not open saved work",
+  project_mismatch: "Saved work belongs to a different project",
+  not_attempted: "Buddy has not opened saved work yet",
+};
+
+function unavailableReasonTitle(
+  reason: OperatorUnavailableReason | undefined,
+): string {
+  if (!reason) return OPERATOR_FAILURE_TITLES.unavailable;
+  return (
+    OPERATOR_UNAVAILABLE_REASON_TITLES[reason.kind] ??
+    "Buddy could not open saved work"
+  );
+}
+
+function retryScheduleCopy(retryInSeconds: number | undefined): string | null {
+  if (retryInSeconds === undefined) return null;
+  if (retryInSeconds < 60)
+    return "Buddy is already trying again in under a minute.";
+  const minutes = Math.ceil(retryInSeconds / 60);
+  return `Buddy is already trying again in about ${minutes} minute${
+    minutes === 1 ? "" : "s"
+  }.`;
+}
 
 type ClipboardWriter = {
   clipboard?: {
@@ -378,6 +407,8 @@ const BuddyHomeContent: React.FC = () => {
     refetchOnFocus: true,
     refetchOnReconnect: true,
   });
+  const [reopenOperator, { isLoading: isReopeningOperator }] =
+    useReopenBuddyOperatorMutation();
   const operatorMode: BuddyOperatorMode = operator.error
     ? "error"
     : operator.currentData
@@ -469,6 +500,9 @@ const BuddyHomeContent: React.FC = () => {
   const [speechIndex, setSpeechIndex] = useState(0);
   const [recentErrorNow, setRecentErrorNow] = useState(() => Date.now());
   const [isRetryingBuddySnapshot, setIsRetryingBuddySnapshot] = useState(false);
+  const [operatorRetryOutcome, setOperatorRetryOutcome] = useState<
+    "recovered" | "unavailable" | "failed" | null
+  >(null);
   const [updateSettings, { isLoading: isSavingSettings }] =
     useUpdateBuddySettingsMutation();
 
@@ -574,6 +608,21 @@ const BuddyHomeContent: React.FC = () => {
       setIsRetryingBuddySnapshot(false);
     }
   }, [dispatch]);
+
+  const handleRetryOperator = useCallback(async () => {
+    setOperatorRetryOutcome(null);
+    try {
+      const status = await reopenOperator(operatorIdentity).unwrap();
+      setOperatorRetryOutcome(
+        status.mode === "enabled" ? "recovered" : "unavailable",
+      );
+    } catch (error) {
+      void error;
+      setOperatorRetryOutcome("failed");
+    } finally {
+      void operator.refetch();
+    }
+  }, [operator, operatorIdentity, reopenOperator]);
 
   const handleViewStats = useCallback(() => {
     dispatch(push({ name: "stats dashboard" }));
@@ -1118,12 +1167,30 @@ const BuddyHomeContent: React.FC = () => {
             <div className={styles.degradedHeader}>
               <Icon icon={AlertTriangle} size="sm" tone="danger" />
               <Text size="3" weight="bold" className={styles.degradedTitle}>
-                {OPERATOR_FAILURE_TITLES[degraded]}
+                {degraded === "unavailable"
+                  ? unavailableReasonTitle(
+                      operator.currentData?.unavailable_reason,
+                    )
+                  : OPERATOR_FAILURE_TITLES[degraded]}
               </Text>
             </div>
             <Text size="2" className={styles.degradedText}>
-              {OPERATOR_FAILURE_DETAIL[degraded]}
+              {degraded === "unavailable" &&
+              operator.currentData?.unavailable_reason
+                ? operator.currentData.unavailable_reason.detail
+                : OPERATOR_FAILURE_DETAIL[degraded]}
             </Text>
+            {degraded === "unavailable" &&
+              retryScheduleCopy(
+                operator.currentData?.unavailable_reason?.retry_in_seconds,
+              ) && (
+                <Text size="2" color="gray" className={styles.degradedText}>
+                  {retryScheduleCopy(
+                    operator.currentData?.unavailable_reason?.retry_in_seconds,
+                  )}{" "}
+                  This button tries now.
+                </Text>
+              )}
             <Text size="2" color="gray" className={styles.degradedText}>
               {OPERATOR_FAILURE_SCOPE}
             </Text>
@@ -1131,11 +1198,25 @@ const BuddyHomeContent: React.FC = () => {
               <Button
                 size="sm"
                 variant="primary"
-                onClick={() => void operator.refetch()}
+                onClick={() => void handleRetryOperator()}
+                disabled={isReopeningOperator}
               >
-                Retry work authority
+                {isReopeningOperator
+                  ? "Retrying work authority…"
+                  : !operator.currentData?.unavailable_reason
+                    ? "Check work authority"
+                    : "Retry work authority"}
               </Button>
             </div>
+            {operatorRetryOutcome && (
+              <Text size="2" role="status" className={styles.degradedText}>
+                {operatorRetryOutcome === "recovered"
+                  ? "Saved work is available again."
+                  : operatorRetryOutcome === "unavailable"
+                    ? "Saved work is still unavailable. Buddy will keep trying."
+                    : "Buddy could not try saved work. Check work authority again later."}
+              </Text>
+            )}
           </Surface>
         )}
 

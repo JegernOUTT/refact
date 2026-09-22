@@ -70,7 +70,14 @@ import type {
 } from "../features/Buddy/types";
 import type React from "react";
 
-const operatorStatus = (mode: "disabled" | "enabled" | "unavailable") => ({
+const operatorStatus = (
+  mode: "disabled" | "enabled" | "unavailable",
+  unavailableReason?: {
+    kind: string;
+    detail: string;
+    retry_in_seconds?: number;
+  },
+) => ({
   schema_version: 1,
   mode,
   features: {
@@ -88,6 +95,9 @@ const operatorStatus = (mode: "disabled" | "enabled" | "unavailable") => ({
     mode === "enabled"
       ? { worker_id: "worker", engine_instance_id: "engine", epoch: 1 }
       : null,
+  ...(mode === "unavailable" && unavailableReason
+    ? { unavailable_reason: unavailableReason }
+    : {}),
 });
 
 // Existing legacy tests explicitly exercise the disabled compatibility contract.
@@ -322,7 +332,7 @@ describe("BuddyHome single work authority", () => {
       const { user } = render(<BuddyHome />, { store });
       if (mode === "enabled")
         await screen.findByRole("region", { name: "Buddy Desk" });
-      else await screen.findByRole("button", { name: "Retry work authority" });
+      else await screen.findByRole("button", { name: "Check work authority" });
       // Pulse and Opportunities were one-line redirects to the Desk once the
       // operator owns the work, so they are retired outside legacy mode.
       for (const name of ["Pulse", "Opportunities"]) {
@@ -1674,12 +1684,20 @@ describe("BuddyHome_layout_contract", () => {
       const retry = screen.queryByRole("button", {
         name: "Retry work authority",
       });
-      if (mode === "unavailable") expect(retry).toBeInTheDocument();
-      else expect(retry).toBeNull();
+      const check = screen.queryByRole("button", {
+        name: "Check work authority",
+      });
+      if (mode === "unavailable") {
+        expect(retry).toBeNull();
+        expect(check).toBeInTheDocument();
+      } else {
+        expect(retry).toBeNull();
+        expect(check).toBeNull();
+      }
     },
   );
 
-  it("renders a broken status pill and the retry branch when status fails", async () => {
+  it("renders a broken status pill and an honest check control when status fails", async () => {
     server.use(
       ...layoutHandlers,
       http.get(
@@ -1699,7 +1717,7 @@ describe("BuddyHome_layout_contract", () => {
     await waitFor(() => expect(pill).toHaveAttribute("data-state", "error"));
     expect(pill).toHaveTextContent("Broken");
     expect(
-      await screen.findByRole("button", { name: "Retry work authority" }),
+      await screen.findByRole("button", { name: "Check work authority" }),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("buddy-opportunities-feed")).toBeNull();
   });
@@ -1995,6 +2013,71 @@ describe("BuddyHome_operator_surface", () => {
     },
   );
 
+  it("renders the lock holder and invokes the operator reopen endpoint", async () => {
+    let reopenCalls = 0;
+    const unavailableReason = {
+      kind: "already_owned",
+      detail:
+        "operator store is already owned by another writer (pid 2810136 (refact-lsp 0.1.0) on svakhreev-work, started 2026-09-15 09:36:52 UTC, cmd: refact-lsp --http-port 8001)",
+      retry_in_seconds: 900,
+    };
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("unavailable", unavailableReason)),
+      ),
+      http.post("*/v1/buddy/operator/reopen", () => {
+        reopenCalls += 1;
+        return HttpResponse.json(
+          operatorStatus("unavailable", unavailableReason),
+        );
+      }),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    const { user } = render(<BuddyHome />, { store });
+
+    const banner = await screen.findByTestId("buddy-operator-degraded");
+    expect(banner).toHaveTextContent(
+      "Another Refact process is using saved work",
+    );
+    expect(banner).toHaveTextContent("pid 2810136");
+    expect(banner).toHaveTextContent("refact-lsp --http-port 8001");
+    expect(banner).toHaveTextContent(
+      "Buddy is already trying again in about 15 minutes.",
+    );
+    await user.click(
+      within(banner).getByRole("button", { name: "Retry work authority" }),
+    );
+    await waitFor(() => expect(reopenCalls).toBe(1));
+    expect(await within(banner).findByRole("status")).toHaveTextContent(
+      "Saved work is still unavailable.",
+    );
+  });
+
+  it("falls back safely for an unfamiliar unavailable reason", async () => {
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(
+          operatorStatus("unavailable", {
+            kind: "a-new-engine-kind",
+            detail: "The engine reported a new condition.",
+          }),
+        ),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
+
+    render(<BuddyHome />, { store });
+
+    const banner = await screen.findByTestId("buddy-operator-degraded");
+    expect(banner).toHaveTextContent("Buddy could not open saved work");
+    expect(banner).toHaveTextContent("The engine reported a new condition.");
+  });
+
   it("stops rendering cached progress and blocks setup runs when work authority fails", async () => {
     server.use(
       ...surfaceHandlers,
@@ -2009,11 +2092,8 @@ describe("BuddyHome_operator_surface", () => {
 
     const banner = await screen.findByTestId("buddy-operator-degraded");
     expect(banner).toHaveAttribute("role", "alert");
-    expect(banner).toHaveTextContent(
-      "this is a connection failure, not an empty queue",
-    );
     expect(
-      within(banner).getByRole("button", { name: "Retry work authority" }),
+      within(banner).getByRole("button", { name: "Check work authority" }),
     ).toBeInTheDocument();
 
     await waitFor(() =>

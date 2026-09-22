@@ -1146,6 +1146,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             get(buddy_operator::handle_operator_status),
         )
         .route(
+            "/buddy/operator/reopen",
+            post(buddy_operator::handle_operator_reopen),
+        )
+        .route(
             "/buddy/operator/legacy-drafts/:id/work",
             get(buddy_operator::handle_legacy_draft_work),
         )

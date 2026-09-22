@@ -56,6 +56,33 @@ const OPERATOR_REOPEN_DELAYS: [Duration; 5] = [
     Duration::from_secs(5 * 60),
     Duration::from_secs(15 * 60),
 ];
+const OPERATOR_MANUAL_REOPEN_COOLDOWN: Duration = Duration::from_secs(3);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OperatorOpenFailureKind {
+    AlreadyOwned,
+    IoError,
+    ProjectMismatch,
+    NotAttempted,
+}
+
+impl OperatorOpenFailureKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::AlreadyOwned => "already_owned",
+            Self::IoError => "io_error",
+            Self::ProjectMismatch => "project_mismatch",
+            Self::NotAttempted => "not_attempted",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OperatorUnavailableStatus {
+    pub(crate) kind: OperatorOpenFailureKind,
+    pub(crate) detail: String,
+    pub(crate) retry_in_seconds: Option<u64>,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct OperatorOpenFailure {
@@ -68,7 +95,10 @@ pub(crate) struct OperatorOpenFailure {
 #[derive(Clone, Debug)]
 pub(crate) enum OperatorOpenFailureReason {
     AlreadyOwned(Option<super::operator_store::OperatorLockOwner>),
-    Other(String),
+    Other {
+        kind: OperatorOpenFailureKind,
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for OperatorOpenFailureReason {
@@ -82,7 +112,16 @@ impl std::fmt::Display for OperatorOpenFailureReason {
             Self::AlreadyOwned(None) => {
                 f.write_str("operator store is already owned by another writer")
             }
-            Self::Other(reason) => f.write_str(reason),
+            Self::Other { detail, .. } => f.write_str(detail),
+        }
+    }
+}
+
+impl OperatorOpenFailureReason {
+    fn kind(&self) -> OperatorOpenFailureKind {
+        match self {
+            Self::AlreadyOwned(_) => OperatorOpenFailureKind::AlreadyOwned,
+            Self::Other { kind, .. } => *kind,
         }
     }
 }
@@ -93,7 +132,22 @@ impl From<super::operator_runtime::OperatorRuntimeOpenError> for OperatorOpenFai
             super::operator_runtime::OperatorRuntimeOpenError::Store(
                 super::operator_store::OperatorStoreError::AlreadyOwned(owner),
             ) => Self::AlreadyOwned(owner),
-            error => Self::Other(error.to_string()),
+            super::operator_runtime::OperatorRuntimeOpenError::ProjectIdentity(detail) => {
+                Self::Other {
+                    kind: OperatorOpenFailureKind::ProjectMismatch,
+                    detail,
+                }
+            }
+            super::operator_runtime::OperatorRuntimeOpenError::Store(
+                super::operator_store::OperatorStoreError::ProjectMismatch,
+            ) => Self::Other {
+                kind: OperatorOpenFailureKind::ProjectMismatch,
+                detail: "operator store belongs to a different project".to_string(),
+            },
+            error => Self::Other {
+                kind: OperatorOpenFailureKind::IoError,
+                detail: error.to_string(),
+            },
         }
     }
 }
@@ -123,6 +177,10 @@ impl OperatorOpenFailure {
         self.retry_stage = (self.retry_stage + 1).min(OPERATOR_REOPEN_DELAYS.len() - 1);
         self.next_retry_at = now + OPERATOR_REOPEN_DELAYS[self.retry_stage];
         self.retry_stage > previous_stage
+    }
+
+    fn replace_reason_without_rescheduling(&mut self, reason: OperatorOpenFailureReason) {
+        self.reason = reason;
     }
 }
 
@@ -309,6 +367,7 @@ pub struct BuddyService {
     pub settings: BuddySettings,
     pub outcome_runtime: Option<super::outcome_runtime::OutcomeRuntime>,
     pub(crate) operator_open_failure: Option<OperatorOpenFailure>,
+    operator_manual_reopen_at: Option<tokio::time::Instant>,
     operator_reopen_task: Option<
         JoinHandle<
             Result<
@@ -655,6 +714,7 @@ impl BuddyService {
             settings,
             outcome_runtime: None,
             operator_open_failure: None,
+            operator_manual_reopen_at: None,
             operator_reopen_task: None,
             operator_features: Default::default(),
             operator_opportunity_projection: Vec::new(),
@@ -731,7 +791,14 @@ impl BuddyService {
         error: super::operator_runtime::OperatorRuntimeOpenError,
         now: tokio::time::Instant,
     ) {
-        let error = OperatorOpenFailureReason::from(error);
+        self.record_operator_open_failure_reason(OperatorOpenFailureReason::from(error), now);
+    }
+
+    fn record_operator_open_failure_reason(
+        &mut self,
+        error: OperatorOpenFailureReason,
+        now: tokio::time::Instant,
+    ) {
         let should_log = match &mut self.operator_open_failure {
             Some(failure) => failure.record_failure(error, now),
             None => {
@@ -746,6 +813,62 @@ impl BuddyService {
                 .map(|failure| failure.reason.to_string())
                 .unwrap_or_else(|| "operator store unavailable".to_string());
             warn!("buddy: operator store unavailable, operator status stays unavailable: {reason}");
+        }
+    }
+
+    pub(crate) fn operator_unavailable_status(&self) -> OperatorUnavailableStatus {
+        let Some(failure) = self.operator_open_failure.as_ref() else {
+            return OperatorUnavailableStatus {
+                kind: OperatorOpenFailureKind::NotAttempted,
+                detail: "Buddy has not opened saved work for this project yet.".to_string(),
+                retry_in_seconds: None,
+            };
+        };
+        let detail =
+            crate::llm::safe_truncate(&redact_sensitive(&failure.reason.to_string()), 1_000)
+                .trim()
+                .to_string();
+        OperatorUnavailableStatus {
+            kind: failure.reason.kind(),
+            detail: if detail.is_empty() {
+                "Buddy could not open saved work.".to_string()
+            } else {
+                detail
+            },
+            retry_in_seconds: Some(
+                failure
+                    .next_retry_at
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    .as_secs()
+                    .max(1),
+            ),
+        }
+    }
+
+    fn manual_operator_reopen_root(&mut self, now: tokio::time::Instant) -> Option<PathBuf> {
+        if !self.operator_features.storage
+            || self.outcome_runtime.is_some()
+            || self.operator_reopen_task.is_some()
+            || self.operator_manual_reopen_at.is_some_and(|previous| {
+                now.duration_since(previous) < OPERATOR_MANUAL_REOPEN_COOLDOWN
+            })
+        {
+            return None;
+        }
+        self.operator_manual_reopen_at = Some(now);
+        Some(self.project_root.clone())
+    }
+
+    fn record_manual_operator_open_failure(
+        &mut self,
+        error: super::operator_runtime::OperatorRuntimeOpenError,
+        now: tokio::time::Instant,
+    ) {
+        let reason = OperatorOpenFailureReason::from(error);
+        if let Some(failure) = self.operator_open_failure.as_mut() {
+            failure.replace_reason_without_rescheduling(reason);
+        } else {
+            self.record_operator_open_failure_reason(reason, now);
         }
     }
 
@@ -2705,6 +2828,45 @@ fn require_publication_owner(
         Ok(())
     } else {
         Err("Buddy operator owner changed during publication".into())
+    }
+}
+
+pub(crate) async fn reopen_operator_now(
+    buddy: &Arc<tokio::sync::Mutex<Option<BuddyService>>>,
+) -> bool {
+    let Some(project_root) = ({
+        let mut guard = buddy.lock().await;
+        guard
+            .as_mut()
+            .and_then(|service| service.manual_operator_reopen_root(tokio::time::Instant::now()))
+    }) else {
+        return buddy
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|service| service.outcome_runtime.is_some());
+    };
+    let result = super::operator_runtime::open_project_runtime_async(project_root.clone()).await;
+    match result {
+        Ok(runtime) => {
+            let installed = {
+                let mut guard = buddy.lock().await;
+                guard.as_mut().is_some_and(|service| {
+                    service.install_reopened_operator_runtime(&project_root, runtime.clone())
+                })
+            };
+            if !installed {
+                runtime.shutdown().await;
+            }
+            installed
+        }
+        Err(error) => {
+            let mut guard = buddy.lock().await;
+            if let Some(service) = guard.as_mut() {
+                service.record_manual_operator_open_failure(error, tokio::time::Instant::now());
+            }
+            false
+        }
     }
 }
 

@@ -132,6 +132,16 @@ const buddyOperatorStatus: OperatorStatus =
         },
         project: null,
         worker: null,
+        ...(operatorParam === "unavailable"
+          ? {
+              unavailable_reason: {
+                kind: "already_owned",
+                detail:
+                  "operator store is already owned by another writer (pid 2810136 (refact-lsp 0.1.0) on svakhreev-work, started 2026-09-15 09:36:52 UTC, cmd: refact-lsp --http-port 8001)",
+                retry_in_seconds: 900,
+              },
+            }
+          : {}),
       };
 
 const buddySettings: BuddySettings = {
@@ -1447,6 +1457,9 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     );
   }
   if (path === "/v1/buddy/operator/status") {
+    return Promise.resolve(jsonResponse(buddyOperatorStatus));
+  }
+  if (path === "/v1/buddy/operator/reopen") {
     return Promise.resolve(jsonResponse(buddyOperatorStatus));
   }
   if (path === "/v1/buddy") return Promise.resolve(jsonResponse(buddySnapshot));

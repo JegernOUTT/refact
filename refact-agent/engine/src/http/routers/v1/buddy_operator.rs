@@ -8,6 +8,7 @@ use refact_buddy_core::operator_types::{
 use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
+use crate::buddy::actor::{OperatorOpenFailureKind, OperatorUnavailableStatus};
 use crate::buddy::operator_store::{OperatorStoreError, Page, Stored};
 use crate::buddy::outcome_runtime::OutcomeRuntime;
 use crate::custom_error::ScratchError;
@@ -22,6 +23,32 @@ pub struct OperatorStatus {
     features: crate::buddy::operator_runtime::OperatorFeatures,
     project: Option<ProjectIdentity>,
     worker: Option<refact_buddy_core::operator_types::WorkerIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_reason: Option<OperatorUnavailableReason>,
+}
+
+#[derive(Serialize)]
+struct OperatorUnavailableReason {
+    kind: &'static str,
+    detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_in_seconds: Option<u64>,
+}
+
+fn unavailable_reason(status: OperatorUnavailableStatus) -> OperatorUnavailableReason {
+    OperatorUnavailableReason {
+        kind: status.kind.as_str(),
+        detail: status.detail,
+        retry_in_seconds: status.retry_in_seconds,
+    }
+}
+
+fn not_attempted_reason(detail: impl Into<String>) -> OperatorUnavailableReason {
+    OperatorUnavailableReason {
+        kind: OperatorOpenFailureKind::NotAttempted.as_str(),
+        detail: detail.into(),
+        retry_in_seconds: None,
+    }
 }
 
 /// Read-only rollout discovery: an unavailable store must never enable legacy writers.
@@ -44,13 +71,30 @@ pub async fn handle_operator_status(
         Some(_) if runtime.is_some() => "enabled",
         _ => "unavailable",
     };
+    let unavailable_reason = (mode == "unavailable").then(|| {
+        current
+            .map(|service| unavailable_reason(service.operator_unavailable_status()))
+            .unwrap_or_else(|| {
+                not_attempted_reason(
+                    "Buddy needs one active project before it can open saved work.",
+                )
+            })
+    });
     Ok(axum::Json(OperatorStatus {
         schema_version: 1,
         mode,
         features,
         project: runtime.map(OutcomeRuntime::project),
         worker: runtime.map(OutcomeRuntime::worker),
+        unavailable_reason,
     }))
+}
+
+pub async fn handle_operator_reopen(
+    State(app): State<AppState>,
+) -> Result<axum::Json<OperatorStatus>, ScratchError> {
+    crate::buddy::actor::reopen_operator_now(&app.buddy.buddy).await;
+    handle_operator_status(State(app)).await
 }
 
 use crate::buddy::resource_execution as resources;
@@ -872,6 +916,76 @@ pub async fn handle_v1_buddy_operator_action_execute(
 #[cfg(test)]
 mod resource_http_tests {
     use super::*;
+
+    #[test]
+    fn unavailable_reason_serializes_each_supported_kind() {
+        for (kind, expected) in [
+            (OperatorOpenFailureKind::AlreadyOwned, "already_owned"),
+            (OperatorOpenFailureKind::IoError, "io_error"),
+            (OperatorOpenFailureKind::ProjectMismatch, "project_mismatch"),
+            (OperatorOpenFailureKind::NotAttempted, "not_attempted"),
+        ] {
+            let reason = unavailable_reason(OperatorUnavailableStatus {
+                kind,
+                detail: "safe detail".to_string(),
+                retry_in_seconds: Some(30),
+            });
+            let value = serde_json::to_value(reason).unwrap();
+            assert_eq!(value["kind"], expected);
+            assert_eq!(value["detail"], "safe detail");
+            assert_eq!(value["retry_in_seconds"], 30);
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_status_reports_the_owner_and_manual_reopen_recovers() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            root.join("cache"),
+            root.join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
+        let app = AppState::from_gcx(gcx).await;
+        let holder = crate::buddy::operator_runtime::open_project_runtime(&root).unwrap();
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let mut service = crate::buddy::actor::BuddyService::new(
+            root.clone(),
+            crate::buddy::state::default_buddy_state(),
+            crate::buddy::settings::BuddySettings::default(),
+            vec![],
+            crate::buddy::runtime_queue::RuntimeQueue::new(),
+            tx,
+            None,
+        );
+        service.enable_operator_from_settings();
+        *app.buddy.buddy.lock().await = Some(service);
+
+        let unavailable = handle_operator_status(State(app.clone())).await.unwrap().0;
+        assert_eq!(unavailable.mode, "unavailable");
+        let reason = unavailable.unavailable_reason.unwrap();
+        assert_eq!(reason.kind, "already_owned");
+        assert!(reason.detail.contains("pid "));
+        assert!(reason.retry_in_seconds.is_some());
+
+        holder.shutdown().await;
+        let recovered = handle_operator_reopen(State(app.clone())).await.unwrap().0;
+        assert_eq!(recovered.mode, "enabled");
+        assert!(recovered.unavailable_reason.is_none());
+        app.buddy
+            .buddy
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .outcome_runtime
+            .clone()
+            .unwrap()
+            .shutdown()
+            .await;
+    }
+
     #[tokio::test]
     async fn status_never_treats_missing_service_or_missing_store_as_disabled() {
         let root = tempfile::tempdir().unwrap();

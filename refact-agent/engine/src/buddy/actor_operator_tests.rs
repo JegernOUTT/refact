@@ -124,10 +124,71 @@ async fn reopen_succeeds_once_the_lock_is_released() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn manual_reopen_succeeds_immediately_once_the_lock_is_released() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let holder = super::super::operator_runtime::open_project_runtime(&root).unwrap();
+    let mut service = service(&root);
+    service.enable_operator_from_settings();
+    let buddy = Arc::new(tokio::sync::Mutex::new(Some(service)));
+
+    holder.shutdown().await;
+
+    assert!(reopen_operator_now(&buddy).await);
+    let service = buddy.lock().await;
+    assert!(service.as_ref().unwrap().outcome_runtime.is_some());
+    assert!(service.as_ref().unwrap().operator_open_failure.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn manual_reopen_is_rate_limited_without_resetting_the_backoff() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let holder = super::super::operator_runtime::open_project_runtime(&root).unwrap();
+    let mut service = service(&root);
+    service.enable_operator_from_settings();
+    let buddy = Arc::new(tokio::sync::Mutex::new(Some(service)));
+    let initial = {
+        let guard = buddy.lock().await;
+        let failure = guard
+            .as_ref()
+            .unwrap()
+            .operator_open_failure
+            .as_ref()
+            .unwrap();
+        (failure.attempts, failure.retry_stage, failure.next_retry_at)
+    };
+
+    assert!(!reopen_operator_now(&buddy).await);
+    assert!(!reopen_operator_now(&buddy).await);
+    let guard = buddy.lock().await;
+    let failure = guard
+        .as_ref()
+        .unwrap()
+        .operator_open_failure
+        .as_ref()
+        .unwrap();
+    assert_eq!(failure.attempts, initial.0);
+    assert_eq!(failure.retry_stage, initial.1);
+    assert_eq!(failure.next_retry_at, initial.2);
+    assert!(matches!(
+        failure.reason,
+        OperatorOpenFailureReason::AlreadyOwned(Some(_))
+    ));
+    drop(guard);
+    holder.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn reopen_backoff_does_not_busy_loop() {
     let now = tokio::time::Instant::now();
-    let mut failure =
-        OperatorOpenFailure::new(OperatorOpenFailureReason::Other("contended".into()), now);
+    let mut failure = OperatorOpenFailure::new(
+        OperatorOpenFailureReason::Other {
+            kind: OperatorOpenFailureKind::IoError,
+            detail: "contended".into(),
+        },
+        now,
+    );
     assert!(!failure.is_due(now));
     for (attempt, delay) in OPERATOR_REOPEN_DELAYS.iter().enumerate() {
         tokio::time::advance(*delay - Duration::from_secs(1)).await;
@@ -135,7 +196,10 @@ async fn reopen_backoff_does_not_busy_loop() {
         tokio::time::advance(Duration::from_secs(1)).await;
         assert!(failure.is_due(tokio::time::Instant::now()));
         failure.record_failure(
-            OperatorOpenFailureReason::Other(format!("failure-{attempt}")),
+            OperatorOpenFailureReason::Other {
+                kind: OperatorOpenFailureKind::IoError,
+                detail: format!("failure-{attempt}"),
+            },
             tokio::time::Instant::now(),
         );
     }
@@ -147,7 +211,10 @@ async fn reopen_backoff_does_not_busy_loop() {
         tokio::time::advance(Duration::from_secs(1)).await;
         assert!(failure.is_due(tokio::time::Instant::now()));
         failure.record_failure(
-            OperatorOpenFailureReason::Other("still contended".into()),
+            OperatorOpenFailureReason::Other {
+                kind: OperatorOpenFailureKind::IoError,
+                detail: "still contended".into(),
+            },
             tokio::time::Instant::now(),
         );
     }

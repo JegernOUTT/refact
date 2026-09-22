@@ -311,7 +311,7 @@ describe("operator status runtime contract", () => {
     project: { project_id: "p", canonical_root: "/p" },
     worker: { worker_id: "w", engine_instance_id: "e", epoch: 0 },
   };
-  test("accepts explicit enabled, disabled and unavailable", () => {
+  test("accepts the additive unavailable reason and old status shape", () => {
     expect(parseOperatorStatus(enabled)).toEqual(enabled);
     for (const mode of ["disabled", "unavailable"]) {
       const value = {
@@ -323,6 +323,19 @@ describe("operator status runtime contract", () => {
       };
       expect(parseOperatorStatus(value)).toEqual(value);
     }
+    const unavailable = {
+      ...enabled,
+      mode: "unavailable",
+      features: { ...enabled.features, storage: false },
+      project: null,
+      worker: null,
+      unavailable_reason: {
+        kind: "already_owned",
+        detail: "pid 2810136 (refact-lsp) owns the store",
+        retry_in_seconds: 900,
+      },
+    };
+    expect(parseOperatorStatus(unavailable)).toEqual(unavailable);
   });
   test.each([
     null,
@@ -349,6 +362,30 @@ describe("operator status runtime contract", () => {
     { ...enabled, worker: { ...enabled.worker, epoch: 0.5 } },
     { ...enabled, worker: { ...enabled.worker, extra: true } },
     { ...enabled, worker: { ...enabled.worker, worker_id: " " } },
+    {
+      ...enabled,
+      unavailable_reason: { kind: "already_owned", detail: "holder" },
+    },
+    {
+      ...enabled,
+      mode: "unavailable",
+      features: { ...enabled.features, storage: false },
+      project: null,
+      worker: null,
+      unavailable_reason: { kind: "", detail: "holder" },
+    },
+    {
+      ...enabled,
+      mode: "unavailable",
+      features: { ...enabled.features, storage: false },
+      project: null,
+      worker: null,
+      unavailable_reason: {
+        kind: "already_owned",
+        detail: "",
+        retry_in_seconds: -1,
+      },
+    },
   ])("rejects malformed status %#", (value) =>
     expect(() => parseOperatorStatus(value)).toThrow(),
   );
