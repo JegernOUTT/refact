@@ -761,6 +761,9 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_work_inspect::ToolWorkInspect {
             config_path: config_path.clone(),
         }),
+        Box::new(crate::tools::tool_metrics::ToolMetrics {
+            config_path: config_path.clone(),
+        }),
         Box::new(crate::tools::tool_disagreement::ToolDisagreementFile {
             config_path: config_path.clone(),
         }),
@@ -1618,7 +1621,7 @@ mod tests {
             );
             assert!(builtin(name)[0].0, "{name} must remain a builtin");
         }
-        for name in ["work_overview", "work_inspect"] {
+        for name in ["work_overview", "work_inspect", "metrics"] {
             assert_eq!(
                 builtin(name),
                 vec![(true, true)],

@@ -291,6 +291,7 @@ tools:
   - agent_resume
   - work_overview
   - work_inspect
+  - metrics
   - disagreement_file
   - disagreement_list
   - disagreement_adjudicate
@@ -390,6 +391,8 @@ tool_confirm:
     - match: "work_overview"
       action: auto
     - match: "work_inspect"
+      action: auto
+    - match: "metrics"
       action: auto
     - match: "tasks_set"
       action: auto

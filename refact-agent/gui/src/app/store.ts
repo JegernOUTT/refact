@@ -18,6 +18,7 @@ import { workApi } from "../services/refact/work";
 import { causalApi } from "../services/refact/causal";
 import { attentionApi } from "../services/refact/attention";
 import { hookSurfaceApi } from "../services/refact/hookSurface";
+import { metricsApi } from "../services/refact/metrics";
 import {
   capsApi,
   promptsApi,
@@ -164,6 +165,7 @@ const rootReducer = combineSlices(
     [causalApi.reducerPath]: causalApi.reducer,
     [attentionApi.reducerPath]: attentionApi.reducer,
     [hookSurfaceApi.reducerPath]: hookSurfaceApi.reducer,
+    [metricsApi.reducerPath]: metricsApi.reducer,
     [capsApi.reducerPath]: capsApi.reducer,
     [promptsApi.reducerPath]: promptsApi.reducer,
     [toolsApi.reducerPath]: toolsApi.reducer,
@@ -314,6 +316,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           causalApi.middleware,
           attentionApi.middleware,
           hookSurfaceApi.middleware,
+          metricsApi.middleware,
           capsApi.middleware,
           promptsApi.middleware,
           toolsApi.middleware,

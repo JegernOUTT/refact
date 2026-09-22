@@ -177,6 +177,7 @@ mod mcp_marketplace;
 mod mcp_marketplace_sources;
 mod mcp_oauth;
 mod mcp_server_info;
+mod metrics;
 mod performance;
 mod plugins;
 mod privacy;
@@ -284,6 +285,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/work/provenance", delete(work::forget_provenance))
         .route("/work/causal", get(causal::trace))
         .route("/work/causal/subscribe", get(causal::subscribe))
+        .route("/metrics", get(metrics::page))
         .route("/attention", get(attention::queue))
         .route("/hooks", get(hooks::handle_v1_hooks_surface))
         .route("/work/:id", get(work::inspect))

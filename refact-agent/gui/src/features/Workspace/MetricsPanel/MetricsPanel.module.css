@@ -1,0 +1,79 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  gap: var(--rf-space-2);
+  padding: var(--rf-panel-pad);
+}
+
+.heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.heading h2 {
+  margin: 0;
+  font-size: var(--rf-text-3);
+  line-height: var(--rf-line-3);
+}
+
+.muted {
+  color: var(--rf-color-muted);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-xs);
+  padding-block: var(--rf-space-3);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  min-width: 0;
+}
+
+.text {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.inputs {
+  display: grid;
+  gap: var(--rf-space-xs);
+  margin: 0;
+}
+
+.inputs div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: var(--rf-space-2);
+}
+
+.inputs dt,
+.inputs dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.inputs dt {
+  color: var(--rf-color-muted);
+}

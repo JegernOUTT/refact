@@ -4,6 +4,7 @@ import { AgentsSection } from "../../AgentsPanel";
 import { AttentionPanel } from "../AttentionPanel/AttentionPanel";
 import { CausalTracePanel } from "../CausalTrace/CausalTracePanel";
 import { HooksPanel } from "../HooksPanel/HooksPanel";
+import { MetricsPanel } from "../MetricsPanel/MetricsPanel";
 import { WorkPanel } from "./WorkPanel";
 import styles from "./WorkPanel.module.css";
 
@@ -27,6 +28,7 @@ export function AgentWorkSection({
           { value: "causal", label: "Causality" },
           { value: "attention", label: "Attention" },
           { value: "hooks", label: "Hooks" },
+          { value: "metrics", label: "Metrics" },
         ]}
       />
       {view === "agents" && (
@@ -41,6 +43,7 @@ export function AgentWorkSection({
       )}
       {view === "attention" && <AttentionPanel />}
       {view === "hooks" && <HooksPanel />}
+      {view === "metrics" && <MetricsPanel />}
     </div>
   );
 }

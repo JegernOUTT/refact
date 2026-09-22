@@ -57,6 +57,7 @@ mod tool_image_region;
 mod tool_knowledge;
 mod tool_mark_elements;
 mod tool_mcp_search;
+pub mod tool_metrics;
 mod tool_mv;
 mod tool_process;
 mod tool_process_subscribe;
