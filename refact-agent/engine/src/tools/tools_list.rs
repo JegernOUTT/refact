@@ -16,6 +16,13 @@ use crate::yaml_configs::customization_registry::{
 use super::tool_config_subagent::ToolConfigSubagent;
 use super::tools_description::{Tool, ToolDesc, ToolGroup, ToolGroupCategory, ToolSourceType};
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolGating {
+    pub capability: &'static str,
+    pub unavailable_reason: &'static str,
+    pub enablement: &'static str,
+}
+
 /// When MCP tool count exceeds this threshold, lazy loading activates.
 /// The full MCP schemas are replaced by two fixed proxy tools:
 /// - `mcp_tool_search` — discover MCP tools by regex, returns schema text
@@ -229,43 +236,56 @@ pub async fn mcp_config_allowed_for_model(
         .mcp_allowed(provider_of_model(model_id), &server)
 }
 
-fn tool_available(
-    tool: &Box<dyn Tool + Send>,
-    codegraph_on: bool,
-    vecdb_on: bool,
-    is_there_a_thinking_model: bool,
-    allow_knowledge: bool,
-    allow_experimental: bool,
-) -> bool {
+fn tool_gating(tool: &Box<dyn Tool + Send>, availability: &ToolAvailability) -> Option<ToolGating> {
     let dependencies = tool.tool_depends_on();
     if dependencies
         .iter()
         .any(|dependency| dependency == "ast" || dependency == "codegraph")
-        && !codegraph_on
+        && !availability.codegraph_on
     {
-        return false;
+        return Some(ToolGating {
+            capability: "code graph index",
+            unavailable_reason: "which is not enabled on this engine",
+            enablement: "enable code graph indexing",
+        });
     }
-    if dependencies.iter().any(|dependency| dependency == "vecdb") && !vecdb_on {
-        return false;
+    if dependencies.iter().any(|dependency| dependency == "vecdb") && !availability.vecdb_on {
+        return Some(ToolGating {
+            capability: "vector database",
+            unavailable_reason: "which is not enabled on this engine",
+            enablement: "start it with --vecdb",
+        });
     }
     if dependencies
         .iter()
         .any(|dependency| dependency == "thinking")
-        && !is_there_a_thinking_model
+        && !availability.is_there_a_thinking_model
     {
-        return false;
+        return Some(ToolGating {
+            capability: "thinking model",
+            unavailable_reason: "which is not configured on this engine",
+            enablement: "configure a thinking-capable model",
+        });
     }
     if dependencies
         .iter()
         .any(|dependency| dependency == "knowledge")
-        && !allow_knowledge
+        && !availability.allow_knowledge
     {
-        return false;
+        return Some(ToolGating {
+            capability: "knowledge tools",
+            unavailable_reason: "which are not enabled on this engine",
+            enablement: "enable knowledge tools",
+        });
     }
-    if tool.tool_description().experimental && !allow_experimental {
-        return false;
+    if tool.tool_description().experimental && !availability.allow_experimental {
+        return Some(ToolGating {
+            capability: "experimental tools",
+            unavailable_reason: "which are not enabled on this engine",
+            enablement: "start it with --experimental",
+        });
     }
-    true
+    None
 }
 
 pub(crate) fn catalog_policy_for_tools(
@@ -347,20 +367,26 @@ impl ToolAvailability {
     }
 
     fn allows(&self, tool: &Box<dyn Tool + Send>) -> bool {
-        tool_available(
-            tool,
-            self.codegraph_on,
-            self.vecdb_on,
-            self.is_there_a_thinking_model,
-            self.allow_knowledge,
-            self.allow_experimental,
-        )
+        tool_gating(tool, self).is_none()
     }
 }
 
 impl ToolGroup {
-    fn retain_available_tools(&mut self, availability: &ToolAvailability) {
-        self.tools.retain(|tool| availability.allows(tool));
+    fn retain_available_tools(
+        &mut self,
+        availability: &ToolAvailability,
+        gated_tools: Option<&mut HashMap<String, ToolGating>>,
+    ) {
+        let mut gated_tools = gated_tools;
+        self.tools.retain(|tool| {
+            let Some(gating) = tool_gating(tool, availability) else {
+                return true;
+            };
+            if let Some(gated_tools) = gated_tools.as_deref_mut() {
+                gated_tools.insert(tool.tool_description().name, gating);
+            }
+            false
+        });
     }
 }
 
@@ -429,6 +455,7 @@ pub(crate) fn builtin_system_tools(config_path: String) -> Vec<Box<dyn Tool + Se
 async fn get_builtin_tools(
     gcx: Arc<GlobalContext>,
     availability: &ToolAvailability,
+    gated_tools: Option<&mut HashMap<String, ToolGating>>,
 ) -> Vec<ToolGroup> {
     let config_dir = gcx.config_dir.clone();
     let config_path = config_dir
@@ -889,8 +916,9 @@ async fn get_builtin_tools(
         },
     ];
 
+    let mut gated_tools = gated_tools;
     for tool_group in tool_groups.iter_mut() {
-        tool_group.retain_available_tools(availability);
+        tool_group.retain_available_tools(availability, gated_tools.as_deref_mut());
     }
 
     tool_groups
@@ -898,12 +926,13 @@ async fn get_builtin_tools(
 
 pub async fn get_integration_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
     let availability = ToolAvailability::from_gcx(gcx.clone()).await;
-    build_integration_tool_groups(gcx, &availability).await
+    build_integration_tool_groups(gcx, &availability, None).await
 }
 
 async fn build_integration_tool_groups(
     gcx: Arc<GlobalContext>,
     availability: &ToolAvailability,
+    gated_tools: Option<&mut HashMap<String, ToolGating>>,
 ) -> Vec<ToolGroup> {
     let mut integrations_group = ToolGroup {
         name: "Integrations".to_string(),
@@ -951,8 +980,9 @@ async fn build_integration_tool_groups(
     let mut tool_groups = vec![integrations_group];
     tool_groups.extend(sorted_mcp.into_iter().map(|(_, group)| group));
 
+    let mut gated_tools = gated_tools;
     for tool_group in tool_groups.iter_mut() {
-        tool_group.retain_available_tools(availability);
+        tool_group.retain_available_tools(availability, gated_tools.as_deref_mut());
     }
 
     span.finish_tool(PerfOutcome::Success, 1, tool_groups.len() as u64, None);
@@ -1107,13 +1137,37 @@ mod tests {
     async fn builtin_catalog_registers_set_trajectory_label() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let availability = ToolAvailability::from_gcx(gcx.clone()).await;
-        let names = get_builtin_tools(gcx, &availability)
+        let names = get_builtin_tools(gcx, &availability, None)
             .await
             .into_iter()
             .flat_map(|group| group.tools)
             .map(|tool| tool.tool_description().name)
             .collect::<HashSet<_>>();
         assert!(names.contains("set_trajectory_label"));
+    }
+
+    #[tokio::test]
+    async fn unavailable_catalog_records_vecdb_gating_without_enabling_the_tool() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let availability = ToolAvailability::from_gcx(gcx.clone()).await;
+        assert!(!availability.vecdb_on);
+        let mut gated_tools = HashMap::new();
+        let names = get_builtin_tools(gcx, &availability, Some(&mut gated_tools))
+            .await
+            .into_iter()
+            .flat_map(|group| group.tools)
+            .map(|tool| tool.tool_description().name)
+            .collect::<HashSet<_>>();
+
+        assert!(!names.contains("search_semantic"));
+        assert_eq!(
+            gated_tools.get("search_semantic"),
+            Some(&ToolGating {
+                capability: "vector database",
+                unavailable_reason: "which is not enabled on this engine",
+                enablement: "start it with --vecdb",
+            })
+        );
     }
 
     struct TestTool(ToolDesc);
@@ -2442,8 +2496,20 @@ mod tests {
 
 pub async fn get_available_tool_groups(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
     let availability = ToolAvailability::from_gcx(gcx.clone()).await;
-    let mut tools_all = get_builtin_tools(gcx.clone(), &availability).await;
-    tools_all.extend(build_integration_tool_groups(gcx.clone(), &availability).await);
+    get_available_tool_groups_with_availability(gcx, &availability, None).await
+}
+
+async fn get_available_tool_groups_with_availability(
+    gcx: Arc<GlobalContext>,
+    availability: &ToolAvailability,
+    gated_tools: Option<&mut HashMap<String, ToolGating>>,
+) -> Vec<ToolGroup> {
+    let mut gated_tools = gated_tools;
+    let mut tools_all =
+        get_builtin_tools(gcx.clone(), availability, gated_tools.as_deref_mut()).await;
+    let integration_tools =
+        build_integration_tool_groups(gcx.clone(), availability, gated_tools.as_deref_mut()).await;
+    tools_all.extend(integration_tools);
 
     let config_subagent_group = get_config_subagent_tools(gcx).await;
     if !config_subagent_group.tools.is_empty() {
@@ -2545,27 +2611,34 @@ pub async fn get_tools_for_mode(
         false
     };
 
-    let described_tools: Vec<DescribedTool> = get_available_tool_groups(gcx.clone())
-        .await
-        .into_iter()
-        .flat_map(|group| {
-            let category = group.category;
-            group.tools.into_iter().map(move |tool| {
-                let desc = tool.tool_description();
-                (category, desc, tool)
-            })
+    let availability = ToolAvailability::from_gcx(gcx.clone()).await;
+    let mut gated_tools = HashMap::new();
+    let described_tools: Vec<DescribedTool> = get_available_tool_groups_with_availability(
+        gcx.clone(),
+        &availability,
+        Some(&mut gated_tools),
+    )
+    .await
+    .into_iter()
+    .flat_map(|group| {
+        let category = group.category;
+        group.tools.into_iter().map(move |tool| {
+            let desc = tool.tool_description();
+            (category, desc, tool)
         })
-        .collect();
+    })
+    .collect();
 
     let registered_tool_names: HashSet<String> = described_tools
         .iter()
         .map(|(_, desc, _)| desc.name.clone())
         .collect();
-    crate::yaml_configs::mode_validation::warn_unknown_mode_tools(
+    crate::yaml_configs::mode_validation::warn_unavailable_mode_tools(
         gcx.clone(),
         mode_id,
         &mode_config.tools,
         &registered_tool_names,
+        &gated_tools,
     )
     .await;
 
