@@ -656,7 +656,13 @@ test.describe("Buddy with realistic saved work", () => {
 
     const headlines = await page.evaluate((desk: string) => {
       const rows = [...document.querySelectorAll(`${desk} ul li button`)].map(
-        (row) => (row.firstElementChild?.textContent ?? "").trim(),
+        (row) =>
+          (
+            row.querySelector('[data-testid="buddy-desk-row-title"]')
+              ?.textContent ??
+            row.firstElementChild?.textContent ??
+            ""
+          ).trim(),
       );
       const headings = [
         ...document.querySelectorAll(
@@ -676,6 +682,22 @@ test.describe("Buddy with realistic saved work", () => {
       "a raw UUID was used as a headline; the human title belongs there and the id belongs in secondary detail",
     ).toEqual([]);
     expect(headlines).toContain("Finish multi-agent parity M1–M10");
+
+    const rowText = await page.evaluate(
+      (desk: string) =>
+        [...document.querySelectorAll(`${desk} ul li button`)].map((row) =>
+          (row.textContent ?? "").trim(),
+        ),
+      DESK,
+    );
+    expect(
+      rowText.filter((text) =>
+        /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i.test(
+          text,
+        ),
+      ),
+      "a raw UUID leaked anywhere into a work row, not just its headline",
+    ).toEqual([]);
   });
 
   test("stops claiming progress when the work service is broken", async ({

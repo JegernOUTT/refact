@@ -474,6 +474,123 @@ describe("BuddyDesk", () => {
     expect(screen.queryByText(new RegExp(digest))).toBeNull();
   });
 
+  it("rows_with_distinct_scopes_render_distinct_subtitles", async () => {
+    const triaged = [
+      ["Mode prompts are overlapping", "chat/modes", "high"],
+      ["AGENTS.md missing or outdated", "AGENTS.md", "normal"],
+      ["Security Whisperer source check", "src/security", "critical"],
+      ["Setup Coach run outcome", "project setup", "low"],
+      ["Dependency Radar source check", "Cargo.lock", "normal"],
+    ] as const;
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(
+          envelope(
+            triaged.map(([title, scope, severity], index) =>
+              record({
+                ...item,
+                id: `triage-${index}`,
+                title,
+                severity,
+                scope,
+                problem_summary: null,
+                current_artifact_id: null,
+                current_artifact_revision: null,
+              }),
+            ),
+          ),
+        ),
+      ),
+      http.get("*/v1/buddy/work/:id/actions", () =>
+        HttpResponse.json(envelope([])),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    const rows = await Promise.all(
+      triaged.map(([title]) =>
+        screen.findByRole("button", { name: new RegExp(title) }),
+      ),
+    );
+    const subtitles = rows.map(
+      (row) => row.querySelector(`.${styles.itemMeta}`)?.textContent,
+    );
+    expect(new Set(subtitles).size).toBe(triaged.length);
+    for (const [, scope] of triaged)
+      expect(screen.getByText(scope, { exact: true })).toBeTruthy();
+  });
+
+  it("absent_triage_fields_render_a_clean_row", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(
+          envelope([
+            record({
+              ...item,
+              severity: null,
+              problem_summary: null,
+              scope: null,
+            }),
+          ]),
+        ),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    const row = await screen.findByRole("button", {
+      name: /Provider setup diagnosis/,
+    });
+    expect(row.querySelector(`.${styles.severity}`)).toBeNull();
+    expect(row.querySelector(`.${styles.problemSummary}`)).toBeNull();
+    expect(row.querySelector(`.${styles.scope}`)).toBeNull();
+    expect(row.querySelector(`.${styles.metaSeparator}`)).toBeNull();
+  });
+
+  it("unknown_severity_renders_no_indicator", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record({ ...item, severity: "unknown" })])),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    const row = await screen.findByRole("button", {
+      name: /Provider setup diagnosis/,
+    });
+    expect(within(row).queryByRole("img")).toBeNull();
+  });
+
+  it("severity_is_not_colour_only", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(
+          envelope([record({ ...item, severity: "critical" })]),
+        ),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    const row = await screen.findByRole("button", {
+      name: /Provider setup diagnosis/,
+    });
+    expect(
+      within(row).getByRole("img", { name: "Critical severity" }),
+    ).toBeTruthy();
+  });
+
+  it("problem_summary_equal_to_title_is_not_repeated", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(
+          envelope([
+            record({ ...item, problem_summary: "Provider setup diagnosis" }),
+          ]),
+        ),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    const row = await screen.findByRole("button", {
+      name: /Provider setup diagnosis/,
+    });
+    expect(row.querySelector(`.${styles.problemSummary}`)).toBeNull();
+  });
+
   it("desk_placeholder_does_not_claim_a_left_column", async () => {
     server.use(
       http.get("*/v1/buddy/work", () =>
@@ -810,6 +927,26 @@ describe("BuddyDesk", () => {
     label: "Dismiss — not a problem",
     description: "Moves this item out of Needs you.",
   };
+  const resourceAction: DeskAction = {
+    ...action,
+    work_id: item.id,
+    spec: {
+      ...action.spec,
+      action_id: "apply_saved_setting",
+      kind: "markdown_project_apply",
+      adapter: "extensions",
+      resource: {
+        resource_kind: "settings",
+        resource_id: "provider-config",
+        version: "digest",
+      },
+      authority_class: "mutating",
+      confirmation: "user_confirmation_required",
+    },
+    spec_hash: "resource-hash",
+    label: "Apply saved setting",
+    description: "Applies the saved setting proposal.",
+  };
   const receipt = (key: string): ActionExecution => ({
     schema_version: 1,
     execution_id: "execution-1",
@@ -1021,6 +1158,37 @@ describe("BuddyDesk", () => {
     ).toBeNull();
   });
 
+  it("dismiss_remains_the_last_action", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(item)])),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+      http.get("*/v1/buddy/work/:id/actions", () =>
+        HttpResponse.json(envelope([resourceAction, action, dismissAction])),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    await screen.findByRole("button", { name: dismissAction.label });
+    const labels = [...document.querySelectorAll("section[aria-label]")]
+      .map((section) => section.getAttribute("aria-label"))
+      .filter((label) =>
+        [resourceAction.label, action.label, dismissAction.label].includes(
+          label ?? "",
+        ),
+      );
+    expect(labels).toEqual([
+      resourceAction.label,
+      action.label,
+      dismissAction.label,
+    ]);
+  });
+
   it.each([
     ["extensions", "markdown_project_apply", "native_markdown"],
     ["candidate_artifact", "stage_exact_artifact", "candidate_artifact"],
@@ -1164,6 +1332,44 @@ describe("BuddyDesk", () => {
       within(unfinished).getByText("No result yet", { exact: true }),
     ).toBeTruthy();
     expect(actionRequests).not.toContain(withoutResult.id);
+  });
+
+  it("hides an action verb that would be repeated on every row", async () => {
+    const second: WorkItem = {
+      ...item,
+      id: "work-2",
+      title: "Second diagnosis",
+    };
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(item), record(second)])),
+      ),
+      http.get("*/v1/buddy/work/:id/actions", ({ params }) =>
+        HttpResponse.json(
+          envelope([
+            {
+              ...action,
+              spec: {
+                ...action.spec,
+                resource: {
+                  ...action.spec.resource,
+                  resource_id: String(params.id),
+                },
+              },
+            },
+          ]),
+        ),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    const first = await screen.findByRole("button", {
+      name: /Provider setup diagnosis/,
+    });
+    await screen.findByRole("button", { name: /Second diagnosis/ });
+    await waitFor(() =>
+      expect(first.querySelector(`.${styles.actionVerb}`)).toBeNull(),
+    );
+    expect(screen.queryByText(action.label, { exact: true })).toBeNull();
   });
 
   it("drops the state badge when the whole view shares one state and keeps it when it differentiates", async () => {

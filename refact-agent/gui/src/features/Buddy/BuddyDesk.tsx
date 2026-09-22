@@ -1,4 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   ArrowLeft,
   ChevronRight,
@@ -66,6 +72,41 @@ function readableSubject(item: WorkItem): string | null {
   return subject;
 }
 
+function meaningfulText(value: string | null | undefined): string | null {
+  const text = value?.trim() ?? "";
+  if (text === "" || opaqueIdentifier.test(text)) return null;
+  return text;
+}
+
+function comparableText(value: string): string {
+  return value
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\b(?:a|an|the|issue|problem|finding|report|review)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function problemSummary(item: WorkItem): string | null {
+  const summary = meaningfulText(item.problem_summary);
+  if (!summary) return null;
+  const title = comparableText(item.title);
+  const comparableSummary = comparableText(summary);
+  if (
+    comparableSummary === "" ||
+    comparableSummary === title ||
+    comparableSummary.includes(title) ||
+    title.includes(comparableSummary)
+  )
+    return null;
+  return summary;
+}
+
+function severityLabel(item: WorkItem): string | null {
+  if (!item.severity || item.severity === "unknown") return null;
+  return `${humanizeIdentifier(item.severity)} severity`;
+}
+
 function changedAt(value: string): string | null {
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) return null;
@@ -87,14 +128,18 @@ function WorkRow({
   item,
   endpointIdentity,
   showState,
+  showActionVerb,
   selected,
   onOpen,
+  onActionVerb,
 }: {
   item: WorkItem;
   endpointIdentity: string;
   showState: boolean;
+  showActionVerb: boolean;
   selected: boolean;
   onOpen: (item: WorkItem, trigger: HTMLButtonElement) => void;
+  onActionVerb: (id: string, verb: string) => void;
 }) {
   const artifactId = item.current_artifact_id;
   const { currentData, isFetching, error } = useGetBuddyDeskActionsQuery(
@@ -119,6 +164,12 @@ function WorkRow({
   else if (action) verb = action.label;
   const changed = changedAt(item.last_material_change_at);
   const absolute = changedAtAbsolute(item.last_material_change_at);
+  const severity = severityLabel(item);
+  const scope = meaningfulText(item.scope);
+  const summary = problemSummary(item);
+  useEffect(() => {
+    if (verb !== null) onActionVerb(item.id, verb);
+  }, [item.id, onActionVerb, verb]);
   return (
     <li>
       <button
@@ -126,34 +177,66 @@ function WorkRow({
         aria-current={selected ? "true" : undefined}
         onClick={(event) => onOpen(item, event.currentTarget)}
       >
-        <Text size="2" weight="medium" className={styles.name}>
-          {item.title}
-        </Text>
-        <span className={styles.itemMeta}>
-          {verb !== null && (
+        <span className={styles.itemContent}>
+          <span className={styles.titleLine}>
+            {severity && (
+              <span
+                aria-label={severity}
+                className={styles.severity}
+                data-severity={item.severity}
+                role="img"
+              />
+            )}
+            <Text
+              size="2"
+              weight="medium"
+              className={styles.name}
+              data-testid="buddy-desk-row-title"
+            >
+              {item.title}
+            </Text>
+          </span>
+          {summary && (
+            <Text size="1" className={styles.problemSummary}>
+              {summary}
+            </Text>
+          )}
+          <span className={styles.itemMeta}>
+            {scope && (
+              <Text size="1" className={styles.scope}>
+                {scope}
+              </Text>
+            )}
+            {scope && showActionVerb && verb !== null && (
+              <span aria-hidden className={styles.metaSeparator}>
+                ·
+              </span>
+            )}
+            {showActionVerb && verb !== null && (
+              <Text
+                size="1"
+                weight={action ? "medium" : "regular"}
+                className={styles.actionVerb}
+              >
+                {verb}
+              </Text>
+            )}
             <Text
               size="1"
-              weight={action ? "medium" : "regular"}
-              color={action ? "accent" : "gray"}
+              color="gray"
+              className={showState ? undefined : styles.srOnly}
             >
-              {verb}
+              {humanizeIdentifier(item.state)}
             </Text>
-          )}
-          <Text
-            size="1"
-            color="gray"
-            className={showState ? undefined : styles.srOnly}
-          >
-            {humanizeIdentifier(item.state)}
-          </Text>
-          {changed && (
-            <Text size="1" color="gray" title={absolute ?? undefined}>
-              {changed}
-              {absolute && (
-                <span className={styles.srOnly}>{` · ${absolute}`}</span>
-              )}
-            </Text>
-          )}
+            {changed && (
+              <Text size="1" color="gray" title={absolute ?? undefined}>
+                {changed}
+                {absolute && (
+                  <span className={styles.srOnly}>{` · ${absolute}`}</span>
+                )}
+              </Text>
+            )}
+          </span>
         </span>
         <Icon
           icon={ChevronRight}
@@ -351,6 +434,7 @@ function DeskContent({
   const config = useConfig();
   const [cursor, setCursor] = useState<number>();
   const [previous, setPrevious] = useState<OperatorRecord<WorkItem>[]>([]);
+  const [actionVerbs, setActionVerbs] = useState<Record<string, string>>({});
   const [view, setView] = useState<WorkView>(DEFAULT_VIEW);
   const [selectedId, setSelectedId] = useState<string | null>(workId ?? null);
   const [expanded, setExpanded] = useState(false);
@@ -405,6 +489,12 @@ function DeskContent({
     ({ value }) => viewForState[value.state] === view,
   );
   const distinctStates = new Set(filtered.map(({ value }) => value.state));
+  const actionVerbsReady =
+    filtered.length > 0 &&
+    filtered.every(({ value }) => actionVerbs[value.id] !== undefined);
+  const showActionVerb =
+    actionVerbsReady &&
+    new Set(filtered.map(({ value }) => actionVerbs[value.id])).size > 1;
   const filtersApplied = query !== "" || attention !== "all";
   const collapsed =
     !expanded &&
@@ -463,6 +553,11 @@ function DeskContent({
     setSelectedId(item.id);
     updateLink(item);
   };
+  const recordActionVerb = useCallback((id: string, verb: string) => {
+    setActionVerbs((current) =>
+      current[id] === verb ? current : { ...current, [id]: verb },
+    );
+  }, []);
 
   if (collapsed) {
     return (
@@ -641,8 +736,10 @@ function DeskContent({
                     item={value}
                     endpointIdentity={endpointIdentity}
                     showState={distinctStates.size > 1}
+                    showActionVerb={showActionVerb}
                     selected={selectedId === value.id}
                     onOpen={open}
+                    onActionVerb={recordActionVerb}
                   />
                 ))}
               </ul>

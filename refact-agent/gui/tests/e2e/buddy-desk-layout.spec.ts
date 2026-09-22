@@ -12,6 +12,9 @@ type Seed = {
   title: string;
   state: "needs_attention" | "blocked" | "watching";
   minutesAgo: number;
+  severity?: "low" | "normal" | "high" | "critical";
+  problemSummary?: string;
+  scope?: string;
 };
 
 const SEEDS: Seed[] = [
@@ -20,60 +23,76 @@ const SEEDS: Seed[] = [
     title: "Knowledge base needs attention: 97 lifecycle candidate(s)",
     state: "needs_attention",
     minutesAgo: 11,
+    severity: "high",
+    scope: "knowledge/index",
   },
   {
     id: "garden-conflicts",
     title: "Two saved memories disagree about the release tag scheme",
     state: "needs_attention",
     minutesAgo: 11,
+    severity: "critical",
+    problemSummary: "Release metadata disagrees across saved sources.",
+    scope: "release/config",
   },
   {
     id: "workspace-warmup",
     title: "Warm up this workspace",
     state: "needs_attention",
     minutesAgo: 34,
+    scope: "workspace setup",
   },
   {
     id: "git-uncommitted",
     title: "5681 uncommitted files",
     state: "needs_attention",
     minutesAgo: 58,
+    severity: "high",
+    scope: "working tree",
   },
   {
     id: "parity-goal",
     title: "Finish multi-agent parity M1–M10",
     state: "needs_attention",
     minutesAgo: 92,
+    scope: "multi-agent parity",
   },
   {
     id: "provider-key",
     title: "Waiting on a provider key",
     state: "blocked",
     minutesAgo: 140,
+    severity: "low",
+    scope: "provider credentials",
   },
   {
     id: "diagnostic-cluster",
     title: "Review the long-running diagnostic cluster that keeps reopening",
     state: "needs_attention",
     minutesAgo: 190,
+    severity: "normal",
+    scope: "diagnostics",
   },
   {
     id: "tidy",
     title: "Tidy",
     state: "needs_attention",
     minutesAgo: 240,
+    scope: "project cleanup",
   },
   {
     id: "memo-extraction",
     title: "memo_extraction — run outcome",
     state: "watching",
     minutesAgo: 12,
+    scope: "memo extraction",
   },
   {
     id: "error-detective",
     title: "Error Detective",
     state: "watching",
     minutesAgo: 300,
+    scope: "error analysis",
   },
 ];
 
@@ -113,6 +132,9 @@ function workRecord(seed: Seed) {
     current_artifact_id: null,
     current_artifact_revision: null,
     last_material_change_at: minutes(seed.minutesAgo),
+    severity: seed.severity ?? null,
+    problem_summary: seed.problemSummary ?? null,
+    scope: seed.scope ?? null,
   });
 }
 
@@ -182,9 +204,10 @@ async function deskMetrics(page: Page) {
     const row = root?.querySelector<HTMLElement>("ul li button");
     const name = row?.querySelector<HTMLElement>("span");
     const chevron = row?.querySelector<HTMLElement>("svg");
+    const items = root?.querySelector<HTMLElement>("ul");
     const heading = root?.querySelector<HTMLElement>("h2");
     const views = root?.querySelector<HTMLElement>("nav");
-    if (!root || !row || !name || !chevron || !heading || !views)
+    if (!root || !row || !name || !chevron || !heading || !views || !items)
       throw new Error("Desk geometry is unavailable");
     const rowBox = row.getBoundingClientRect();
     const nameBox = name.getBoundingClientRect();
@@ -195,6 +218,8 @@ async function deskMetrics(page: Page) {
     return {
       fill: (chevronBox.right - nameBox.left) / rowBox.width,
       gap: chevronBox.left - nameBox.right,
+      measure: Number.parseFloat(getComputedStyle(items).maxWidth),
+      rowWidth: rowBox.width,
       leftEdges,
       scrollWidth: document.documentElement.scrollWidth,
       clientWidth: document.documentElement.clientWidth,
@@ -218,6 +243,15 @@ test.describe("Buddy Desk layout", () => {
           metrics.gap,
           `${width}px chevron gap ${metrics.gap}`,
         ).toBeLessThan(48);
+      if (width >= 1280) {
+        expect(metrics.measure, `${width}px 72ch row measure`).toBeGreaterThan(
+          0,
+        );
+        expect(
+          metrics.rowWidth,
+          `${width}px triaged row width ${metrics.rowWidth}`,
+        ).toBeLessThanOrEqual(metrics.measure);
+      }
     }
   });
 
