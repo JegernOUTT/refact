@@ -203,16 +203,6 @@ pub fn uninstall_sink() {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 }
 
-fn instance_id() -> String {
-    format!(
-        "{}:{}",
-        hostname::get()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        std::process::id()
-    )
-}
-
 /// Open this engine's provenance sink. Coordination being off, or a store that
 /// cannot be opened, leaves the sink absent: edits keep working and attribution
 /// falls back to the process-local registry.
@@ -229,7 +219,7 @@ pub async fn install(app: &AppState) {
         .next()
         .map(|root| root.to_string_lossy().into_owned());
     match super::outbox::store_for_path(&path, &settings).await {
-        Ok(store) => install_sink(store, project, instance_id(), checkout),
+        Ok(store) => install_sink(store, project, super::engine_instance_id(), checkout),
         Err(error) => super::outbox::note_durability_unavailable(&path, error.to_string()),
     }
 }

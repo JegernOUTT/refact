@@ -40,3 +40,13 @@ pub mod teams;
 pub mod types;
 #[cfg(test)]
 mod work_vocabulary_tests;
+
+pub fn engine_instance_id() -> String {
+    format!(
+        "{}:{}",
+        hostname::get()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        std::process::id()
+    )
+}

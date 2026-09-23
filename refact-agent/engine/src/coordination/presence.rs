@@ -21,6 +21,42 @@ use tokio::task::JoinHandle;
 
 use super::types::Freshness;
 
+pub async fn start_background_presence(
+    app: &crate::app_state::AppState,
+) -> Option<PresenceService> {
+    let project_root = crate::files_correction::get_project_dirs(app.gcx.clone())
+        .await
+        .into_iter()
+        .next()?;
+    let settings = match crate::runtime_settings::coordination_for_project(&project_root).await {
+        Ok(settings) if settings.enabled => settings,
+        Ok(_) => return None,
+        Err(error) => {
+            tracing::warn!("engine presence settings unavailable: {error}");
+            return None;
+        }
+    };
+    let path = refact_work_core::default_store_path(&app.paths.cache_dir);
+    let store = match super::outbox::store_for_path(&path, &settings).await {
+        Ok(store) => store,
+        Err(error) => {
+            super::outbox::note_durability_unavailable(&path, error.to_string());
+            return None;
+        }
+    };
+    let project = ProjectKey::new(super::roots::project_identity(&project_root));
+    let identity = EngineIdentity::detect(super::engine_instance_id());
+    let access = store.authorize(project.clone());
+    let activity = scheduler_activity(app.work_scheduler.clone(), project);
+    match EnginePresence::new(store, access, identity, activity, &settings) {
+        Ok(presence) => Some(PresenceService::spawn(Arc::new(presence))),
+        Err(error) => {
+            tracing::warn!("engine presence could not start: {error}");
+            None
+        }
+    }
+}
+
 /// Stored in `process_started_at_ms` when the platform cannot tell us when a
 /// process started. Such a record can never classify as alive.
 pub const START_IDENTITY_UNOBTAINABLE: i64 = -1;
@@ -1058,5 +1094,98 @@ mod tests {
         assert_eq!(unsure, Freshness::Unknown);
         assert_eq!(nobody, Freshness::Stale);
         assert_eq!(unpublished, Freshness::Recent);
+    }
+
+    #[serial_test::serial(runtime_settings)]
+    #[tokio::test]
+    async fn production_startup_publishes_presence_and_shutdown_closes_it() {
+        crate::runtime_settings::reset_for_test();
+        let workspace = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            workspace.path().join("cache"),
+            config.path().to_path_buf(),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let project = roots::project_identity(workspace.path());
+        forget(&project);
+
+        let service = start_background_presence(&app)
+            .await
+            .expect("enabled coordination starts presence");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while project_liveness(&project).is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("startup heartbeat publishes project liveness");
+        assert_eq!(
+            project_liveness(&project),
+            Some(PeerLiveness::NoOtherEngine)
+        );
+
+        let settings = crate::runtime_settings::coordination_for_project(workspace.path())
+            .await
+            .unwrap();
+        let path = refact_work_core::default_store_path(&app.paths.cache_dir);
+        let store = super::super::outbox::store_for_path(&path, &settings)
+            .await
+            .unwrap();
+        let project_key = ProjectKey::new(project.clone());
+        let access = store.authorize(project_key);
+        let engine_id = crate::coordination::engine_instance_id();
+        let stored = store
+            .get_engine_instance(&access, &engine_id)
+            .await
+            .unwrap()
+            .expect("startup heartbeat records this engine");
+        assert!(classify(
+            &stored,
+            &HostIdentity::local(),
+            probe_process_start(stored.pid),
+            now_ms(),
+            settings.presence_stale_after_ms as i64,
+        )
+        .is_alive());
+
+        service.shutdown().await.unwrap();
+        let closed = store
+            .get_engine_instance(&access, &engine_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(closed.presence_mark, PresenceMark::Closed);
+        assert_eq!(project_liveness(&project), None);
+        crate::runtime_settings::reset_for_test();
+    }
+
+    #[serial_test::serial(runtime_settings)]
+    #[tokio::test]
+    async fn disabled_coordination_does_not_publish_presence() {
+        crate::runtime_settings::reset_for_test();
+        let workspace = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            workspace.path().join("cache"),
+            config.path().to_path_buf(),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx).await;
+        let project = roots::project_identity(workspace.path());
+        forget(&project);
+        let disabled = crate::tools::settings_guard::SettingsGuard::install(|settings| {
+            settings.coordination.enabled = false;
+        });
+
+        assert!(start_background_presence(&app).await.is_none());
+        assert_eq!(project_liveness(&project), None);
+        drop(disabled);
+        crate::runtime_settings::reset_for_test();
     }
 }

@@ -63,6 +63,7 @@ async fn cache_maintenance_background_task(
 pub struct BackgroundTasksHolder {
     gcx: Option<Arc<GlobalContext>>,
     tasks: Vec<JoinHandle<()>>,
+    presence: Option<crate::coordination::presence::PresenceService>,
 }
 
 impl Default for BackgroundTasksHolder {
@@ -73,14 +74,23 @@ impl Default for BackgroundTasksHolder {
 
 impl BackgroundTasksHolder {
     pub fn new(tasks: Vec<JoinHandle<()>>) -> Self {
-        BackgroundTasksHolder { gcx: None, tasks }
+        BackgroundTasksHolder {
+            gcx: None,
+            tasks,
+            presence: None,
+        }
     }
 
     pub fn with_gcx(gcx: Arc<GlobalContext>, tasks: Vec<JoinHandle<()>>) -> Self {
         BackgroundTasksHolder {
             gcx: Some(gcx),
             tasks,
+            presence: None,
         }
+    }
+
+    fn set_presence(&mut self, presence: crate::coordination::presence::PresenceService) {
+        self.presence = Some(presence);
     }
 
     pub fn push_back(&mut self, task: JoinHandle<()>) {
@@ -104,6 +114,11 @@ impl BackgroundTasksHolder {
             .as_ref()
             .is_some_and(|gcx| gcx.shutdown_flag.load(std::sync::atomic::Ordering::Relaxed));
         crate::agents::spawn::drain_spawn_owners(close_admission).await;
+        if let Some(presence) = self.presence.take() {
+            if let Err(error) = presence.shutdown().await {
+                tracing::warn!("engine presence shutdown failed: {error}");
+            }
+        }
         if let Some(gcx) = &self.gcx {
             crate::integrations::operator_probe::drain_cleanup(gcx).await;
         }
@@ -128,6 +143,7 @@ impl BackgroundTasksHolder {
 
 pub async fn start_full_soak_background_tasks(gcx: Arc<GlobalContext>) -> BackgroundTasksHolder {
     let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let presence_app = app_state.clone();
     let goal_monitor_app = app_state.clone();
     let background_agent_monitor_app = app_state.clone();
     let cache_maintenance_app = app_state.clone();
@@ -187,6 +203,11 @@ pub async fn start_full_soak_background_tasks(gcx: Arc<GlobalContext>) -> Backgr
             }),
         ],
     );
+    if let Some(presence) =
+        crate::coordination::presence::start_background_presence(&presence_app).await
+    {
+        bg.set_presence(presence);
+    }
     bg.push_back(crate::scheduler::runner::spawn(
         crate::scheduler::runner::session_cron_store(),
         gcx,
@@ -206,6 +227,7 @@ pub async fn start_background_tasks(
     let gcx_for_knowledge_index = gcx.clone();
     let gcx_for_stats = gcx.clone();
     let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let presence_app = app_state.clone();
     let goal_monitor_app = app_state.clone();
     let background_agent_monitor_app = app_state.clone();
     let cache_maintenance_app = app_state.clone();
@@ -297,6 +319,11 @@ pub async fn start_background_tasks(
             }),
         ],
     );
+    if let Some(presence) =
+        crate::coordination::presence::start_background_presence(&presence_app).await
+    {
+        bg.set_presence(presence);
+    }
     bg.extend(crate::scheduler::runner::spawn_from_active_project(gcx.clone()).await);
     if !gcx.cmdline.daemon_endpoint.is_empty() {
         bg.push_back(tokio::spawn(crate::daemon_link::daemon_link_task(
@@ -397,6 +424,74 @@ mod tests {
                 "{signature} must spawn agents::monitor::run_background_agent_monitor exactly once"
             );
         }
+    }
+
+    #[test]
+    fn both_wiring_paths_own_engine_presence_until_shutdown() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/background_tasks.rs"),
+        )
+        .unwrap();
+        for signature in [
+            "\npub async fn start_background_tasks(",
+            "\npub async fn start_full_soak_background_tasks(",
+        ] {
+            let body = wiring_body(&source, signature);
+            assert_eq!(
+                body.matches("start_background_presence(&presence_app)")
+                    .count(),
+                1,
+                "{signature} must start presence exactly once"
+            );
+            assert!(
+                body.contains("bg.set_presence(presence)"),
+                "{signature} must retain the service for joined shutdown"
+            );
+        }
+        let holder = source
+            .split_once("pub struct BackgroundTasksHolder")
+            .unwrap()
+            .1
+            .split_once("}\n")
+            .unwrap()
+            .0;
+        assert!(holder.contains("presence: Option<crate::coordination::presence::PresenceService>"));
+        assert!(source.contains("presence.shutdown().await"));
+    }
+
+    #[test]
+    fn presence_service_uses_the_single_historical_engine_instance_id() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/coordination/mod.rs"),
+        )
+        .unwrap();
+        let function = source
+            .split_once("pub fn engine_instance_id()")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(function.contains("hostname::get()"));
+        assert!(function.contains("std::process::id()"));
+
+        let provenance = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/coordination/file_provenance.rs"),
+        )
+        .unwrap();
+        let presence = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/coordination/presence.rs"),
+        )
+        .unwrap();
+        assert!(provenance.contains("super::engine_instance_id()"));
+        assert!(presence.contains("EngineIdentity::detect(super::engine_instance_id())"));
+        assert_eq!(
+            source.matches("pub fn engine_instance_id()").count()
+                + provenance.matches("fn instance_id()").count()
+                + presence.matches("fn instance_id()").count(),
+            1
+        );
     }
 
     struct DropFlag(Arc<AtomicBool>);
