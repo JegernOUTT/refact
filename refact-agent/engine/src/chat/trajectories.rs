@@ -2532,33 +2532,6 @@ fn record_trajectory_physical_write(chat_id: &str) {
 }
 
 #[cfg(test)]
-struct ThreadLocalDiskReadCounter;
-
-#[cfg(test)]
-impl ThreadLocalDiskReadCounter {
-    fn fetch_add(&self, value: usize, _ordering: Ordering) -> usize {
-        TRAJECTORY_METADATA_DISK_READS_ON_THIS_THREAD.with(|reads| {
-            let previous = reads.get();
-            reads.set(previous.saturating_add(value));
-            previous
-        })
-    }
-
-    fn load(&self, _ordering: Ordering) -> usize {
-        TRAJECTORY_METADATA_DISK_READS_ON_THIS_THREAD.with(std::cell::Cell::get)
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    static TRAJECTORY_METADATA_DISK_READS_ON_THIS_THREAD: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-static TRAJECTORY_METADATA_DISK_READS: ThreadLocalDiskReadCounter = ThreadLocalDiskReadCounter;
-
-#[cfg(test)]
 fn trajectory_physical_writes_for_chat(chat_id: &str) -> usize {
     trajectory_physical_writes_by_chat()
         .lock()

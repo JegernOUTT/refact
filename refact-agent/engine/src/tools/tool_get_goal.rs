@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use refact_chat_api::{GoalSnapshot, GoalStatus};
+use refact_chat_api::GoalSnapshot;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 

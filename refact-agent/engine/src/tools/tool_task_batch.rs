@@ -14,9 +14,11 @@ use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, TaskBoard};
 use crate::tasks::overlap_order::WaveOrder;
 use crate::tasks::waves::{
-    plan_schedule, plan_schedule_with_overlap, Lane, LaneKind, LaneOutcome, LaneStage, Wave,
-    WaveLimits, WaveSchedule,
+    plan_schedule_with_overlap, Lane, LaneKind, LaneOutcome, LaneStage, Wave, WaveLimits,
+    WaveSchedule,
 };
+#[cfg(test)]
+use crate::tasks::waves::plan_schedule;
 use crate::tools::tool_task_board::ToolTaskBoardCreateCard;
 use crate::tools::tool_task_mark_card::{ToolTaskMarkCardDone, ToolTaskMarkCardFailed};
 use crate::tools::tool_task_merge_agent::ToolTaskMergeAgent;

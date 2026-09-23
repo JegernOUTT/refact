@@ -14,13 +14,12 @@ use refact_chat_api::{
 
 use crate::storage;
 use crate::types::{
-    AgentCompletion, AgentListFilter, AgentQuestion, AgentRunOutcome, BackgroundAgent,
-    BgAgentStatus, CreateAgentRequest,
+    AgentCompletion, AgentListFilter, AgentRunOutcome, BackgroundAgent, BgAgentStatus,
+    CreateAgentRequest,
 };
 #[cfg(test)]
 use crate::types::BgAgentKind;
 
-const MAX_INBOX_MESSAGES: usize = 100;
 /// Native steering notes are bounded by the mandate's own note capacity; a
 /// full queue rejects instead of silently discarding an earlier authorization.
 pub const MAX_NATIVE_NOTES: usize = 12;

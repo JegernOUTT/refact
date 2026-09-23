@@ -9,11 +9,14 @@ use uuid::Uuid;
 use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
 use crate::chat::trajectory_ops::{CompressOptions, TransformStats, compress_in_place};
+#[cfg(test)]
 use crate::call_validation::ChatMessage;
 use crate::agentic::mode_transition::{
     GoalTransferResult, ReconstructionRequest, reconstruct_context,
-    insert_goal_messages_before_plan, transfer_goal_ownership,
+    insert_goal_messages_before_plan,
 };
+#[cfg(test)]
+use crate::agentic::mode_transition::transfer_goal_ownership;
 use crate::chat::types::SessionState;
 use crate::tools::tool_handoff_to_mode::{persist_transition, transition_goal, transition_report};
 

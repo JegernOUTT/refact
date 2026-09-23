@@ -298,10 +298,6 @@ fn synthesize_responses_context_cutoff_error_if_needed(
     error
 }
 
-fn safe_context_limit_error_for_log(error: &str) -> String {
-    safe_provider_error_diagnostic(error)
-}
-
 fn context_limit_final_error_message(error: &str) -> String {
     format!(
         "Context too large and context reconstruction failed or the rebuilt context is still too large. Explicitly rebuild the context or start a new chat. Original error: {}",
@@ -3798,20 +3794,6 @@ mod tests {
         assert!(
             text.contains("[REDACTED"),
             "redaction marker missing: {text}"
-        );
-    }
-
-    #[test]
-    fn context_limit_log_error_redacts_provider_secret() {
-        let text = safe_context_limit_error_for_log(
-            "context_length_exceeded: Authorization: Bearer sk-test-secret",
-        );
-
-        assert_context_limit_secret_redacted(&text);
-        assert!(
-            text.len() <= crate::chat::diagnostics::SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS,
-            "len={}",
-            text.len()
         );
     }
 
