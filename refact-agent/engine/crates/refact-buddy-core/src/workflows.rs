@@ -139,6 +139,102 @@ pub fn workflow_label(workflow_id: &str) -> &str {
     }
 }
 
+/// How a workflow's runs are allowed to reach the user's Desk.
+///
+/// `UserFacing` is the default for every workflow: each run publishes a work
+/// item the user can read. `Housekeeping` is for continuous background
+/// maintenance whose individual runs are not news to anybody — those publish
+/// no work item at all and become visible only when they are durably blocked,
+/// as exactly one item.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowVisibility {
+    #[default]
+    UserFacing,
+    Housekeeping,
+}
+
+impl WorkflowVisibility {
+    pub fn is_housekeeping(self) -> bool {
+        matches!(self, Self::Housekeeping)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserFacing => "user_facing",
+            Self::Housekeeping => "housekeeping",
+        }
+    }
+}
+
+/// Classification is declared per workflow id and defaults to `UserFacing`, so
+/// a workflow is never silently hidden by being forgotten here.
+///
+/// `memo_extraction` is housekeeping: it sweeps abandoned trajectories on a
+/// five-minute timer, so its per-run result is maintenance noise rather than a
+/// reading the user asked for. Publishing it per run collapsed 7,867 distinct
+/// trajectories onto one constant-fingerprint row carrying 1,698 artifact
+/// revisions; giving each run a real fingerprint would have produced ~1,698
+/// separate Desk rows instead. Neither is a report anybody wants, so it
+/// publishes nothing until it is blocked.
+pub fn workflow_visibility(workflow_id: &str) -> WorkflowVisibility {
+    if HOUSEKEEPING_WORKFLOWS.contains(&workflow_id) {
+        WorkflowVisibility::Housekeeping
+    } else {
+        WorkflowVisibility::UserFacing
+    }
+}
+
+/// Every workflow id classified as `Housekeeping`, enumerable so an upgrade can
+/// retire the per-run rows these ids published before the classification existed.
+/// `memory_extract` is the legacy alias of `memo_extraction` and is listed for
+/// the same reason, not because a second sweep exists.
+pub const HOUSEKEEPING_WORKFLOWS: &[&str] = &["memo_extraction", "memory_extract"];
+
+/// Consecutive failed housekeeping runs before background maintenance counts as
+/// durably blocked rather than transiently unlucky. Deliberately the same 3 as
+/// `trajectory_memos`' rate-limit breaker threshold and its per-trajectory
+/// abandonment threshold, so the Desk becomes visible at the same moment the
+/// loop actually stops doing work.
+pub const HOUSEKEEPING_BLOCK_THRESHOLD: u32 = 3;
+
+/// The one reading a blocked housekeeping loop owes the user: what stopped, and
+/// what they can do about it. Deliberately free of counters and timestamps so
+/// repeated publication folds into the existing revision instead of growing a
+/// revision per retry.
+pub fn housekeeping_blocked_report(
+    workflow_id: &str,
+    category: Option<&WorkflowFailureCategory>,
+) -> (String, String) {
+    let label = workflow_label(workflow_id);
+    let title = format!("Background {label} is blocked");
+    let cause = match category {
+        Some(WorkflowFailureCategory::ProviderRateLimit) => {
+            "the configured provider refused the requests with a rate limit"
+        }
+        Some(WorkflowFailureCategory::BillingQuota) => "a billing or quota limit was reached",
+        Some(WorkflowFailureCategory::AuthenticationFailed) => {
+            "the provider rejected the credentials"
+        }
+        Some(WorkflowFailureCategory::ModelUnavailable) => "the model it runs on is not available",
+        Some(WorkflowFailureCategory::ContextTooLarge) => {
+            "the inputs it was given exceeded the model's context"
+        }
+        Some(WorkflowFailureCategory::ToolUnavailable)
+        | Some(WorkflowFailureCategory::ToolFailed) => "a tool it depends on failed",
+        Some(WorkflowFailureCategory::ContentPolicy) => "a content policy blocked the requests",
+        _ => "its runs kept failing",
+    };
+    let body = format!(
+        "Background {label} stopped retrying because {cause}. \
+         This is maintenance Buddy normally does silently, so nothing you were working on has been lost \
+         and no earlier result has been discarded.\n\n\
+         What you can do: wait for the provider to recover, switch the Buddy model slot to a provider that is answering, \
+         or turn the background sweep off. Buddy retries on its own and this item clears as soon as a run succeeds again."
+    );
+    (title, body)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkflowEntry {
     timestamp: String,

@@ -202,7 +202,23 @@ where
     };
 
     if let (Some(runtime), Some(start)) = (outcome_runtime, outcome_start) {
-        let publication = if let Some(report) = report_fn(&result) {
+        // A housekeeping workflow's terminal result never becomes a per-run work
+        // item. The outcome is still recorded; the Desk stays empty until the
+        // loop is durably blocked.
+        let publication = if workflow_visibility(workflow_id).is_housekeeping() {
+            let terminal = match result.as_ref() {
+                Ok(_) => super::outcome_runtime::WorkflowTerminal::Inconclusive,
+                Err(error) => terminal_from_workflow_result(&Err(error.clone())),
+            };
+            let category = result
+                .as_ref()
+                .err()
+                .map(|error| WorkflowFailureCategory::classify(error));
+            runtime
+                .publish_housekeeping_result(start, terminal, category)
+                .await
+                .map(|()| None)
+        } else if let Some(report) = report_fn(&result) {
             runtime
                 .publish_report(
                     start,
@@ -212,6 +228,7 @@ where
                     report.terminal,
                 )
                 .await
+                .map(Some)
         } else {
             let terminal = match result.as_ref() {
                 Ok(_) => super::outcome_runtime::WorkflowTerminal::Inconclusive,
@@ -220,6 +237,7 @@ where
             runtime
                 .publish_workflow_result(start, summary.clone(), terminal)
                 .await
+                .map(Some)
         };
         if let Err(error) = publication {
             tracing::error!(
@@ -596,6 +614,436 @@ mod tests {
 
     async fn wait_for_workflow_side_effects() {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    // ---- R-5: memo_extraction is housekeeping ----------------------------
+
+    /// Drive the housekeeping wrapper once with a fixed outcome.
+    async fn run_memo_extraction(app: &AppState, outcome: Result<usize, String>) {
+        let expected = outcome.clone();
+        let result = buddy_wrap_workflow(
+            app.clone(),
+            "memo_extraction",
+            "🧠",
+            8,
+            |memos: &usize| format!("Memory extracted: {memos} memos"),
+            || async move { outcome },
+        )
+        .await;
+        assert_eq!(result, expected);
+        drain_side_effects(app).await;
+    }
+
+    async fn work_items(
+        runtime: &super::super::outcome_runtime::OutcomeRuntime,
+    ) -> Vec<refact_buddy_core::operator_types::WorkItem> {
+        runtime
+            .list_work_items(None, 100)
+            .await
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|entry| entry.value)
+            .collect()
+    }
+
+    /// Items the user would actually see: anything not already terminal.
+    async fn visible_work_items(
+        runtime: &super::super::outcome_runtime::OutcomeRuntime,
+    ) -> Vec<refact_buddy_core::operator_types::WorkItem> {
+        use refact_buddy_core::operator_types::WorkItemState;
+        work_items(runtime)
+            .await
+            .into_iter()
+            .filter(|item| {
+                !matches!(
+                    item.state,
+                    WorkItemState::Cancelled | WorkItemState::Delivered
+                )
+            })
+            .collect()
+    }
+
+    fn rate_limit_error() -> String {
+        "OpenAI API error (429): rate_limit_exceeded".to_string()
+    }
+
+    #[tokio::test]
+    async fn housekeeping_run_creates_no_work_item() {
+        let (_dir, app, runtime) = isolated_app().await;
+        for memos in [7usize, 6, 8] {
+            run_memo_extraction(&app, Ok(memos)).await;
+        }
+
+        // Zero Desk rows, zero artifact revisions.
+        assert!(
+            work_items(&runtime).await.is_empty(),
+            "a successful housekeeping run published a work item"
+        );
+        let subject = super::super::outcome_runtime::housekeeping_subject(
+            &runtime.project(),
+            "memo_extraction",
+        )
+        .unwrap();
+        assert!(runtime
+            .list_artifact_revisions(subject.artifact_id(), None, 100)
+            .await
+            .unwrap()
+            .entries
+            .is_empty());
+
+        // Accountability is preserved: every run still recorded a RunOutcome.
+        assert_eq!(
+            recorded_run_outcomes(&runtime).await,
+            3,
+            "housekeeping outcomes were not recorded"
+        );
+        runtime.shutdown().await;
+    }
+
+    /// Count of persisted `RunOutcome` rows. Housekeeping outcomes have no work
+    /// item to list them under, which is the point, so count them at the store.
+    async fn recorded_run_outcomes(runtime: &super::super::outcome_runtime::OutcomeRuntime) -> u64 {
+        runtime
+            .with_store(|store| store.diagnostic_summary())
+            .await
+            .unwrap()
+            .tables
+            .into_iter()
+            .find(|table| table.table == "run_outcomes")
+            .map(|table| table.sampled_rows)
+            .expect("run_outcomes is always sampled")
+    }
+
+    #[tokio::test]
+    async fn housekeeping_failure_creates_no_work_item() {
+        let (_dir, app, runtime) = isolated_app().await;
+        // Below the block threshold: unlucky, not blocked. Still invisible.
+        for _ in 0..(refact_buddy_core::workflows::HOUSEKEEPING_BLOCK_THRESHOLD - 1) {
+            run_memo_extraction(&app, Err("model unavailable".into())).await;
+        }
+        assert!(
+            work_items(&runtime).await.is_empty(),
+            "an ordinary housekeeping failure published a work item"
+        );
+        let subject = super::super::outcome_runtime::housekeeping_subject(
+            &runtime.project(),
+            "memo_extraction",
+        )
+        .unwrap();
+        assert!(runtime
+            .list_artifact_revisions(subject.artifact_id(), None, 100)
+            .await
+            .unwrap()
+            .entries
+            .is_empty());
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn blocked_housekeeping_creates_exactly_one_item() {
+        use refact_buddy_core::operator_types::WorkItemState;
+        let (_dir, app, runtime) = isolated_app().await;
+        for _ in 0..refact_buddy_core::workflows::HOUSEKEEPING_BLOCK_THRESHOLD {
+            run_memo_extraction(&app, Err(rate_limit_error())).await;
+        }
+        let items = visible_work_items(&runtime).await;
+        assert_eq!(
+            items.len(),
+            1,
+            "blocked housekeeping is not exactly one item"
+        );
+        assert_eq!(items[0].state, WorkItemState::Blocked);
+        assert!(items[0].title.contains("memo extraction"));
+        let artifact_id = items[0].current_artifact_id.clone().unwrap();
+        let body = runtime
+            .get_artifact_revision(artifact_id.clone(), None)
+            .await
+            .unwrap()
+            .unwrap()
+            .value
+            .body;
+        // It says what stopped and what the user can do.
+        assert!(body.contains("rate limit"));
+        assert!(body.contains("What you can do"));
+
+        // Repeat: still one item, refreshed rather than duplicated.
+        for _ in 0..5 {
+            run_memo_extraction(&app, Err(rate_limit_error())).await;
+        }
+        let repeated = visible_work_items(&runtime).await;
+        assert_eq!(repeated.len(), 1, "a repeated block duplicated the item");
+        assert_eq!(repeated[0].id, items[0].id);
+        assert_eq!(
+            runtime
+                .list_artifact_revisions(artifact_id, None, 100)
+                .await
+                .unwrap()
+                .entries
+                .len(),
+            1,
+            "a repeated block appended an artifact revision instead of folding"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn blocked_item_clears_on_recovery() {
+        use refact_buddy_core::operator_types::WorkItemState;
+        let (_dir, app, runtime) = isolated_app().await;
+        for _ in 0..refact_buddy_core::workflows::HOUSEKEEPING_BLOCK_THRESHOLD {
+            run_memo_extraction(&app, Err(rate_limit_error())).await;
+        }
+        let blocked = visible_work_items(&runtime).await;
+        assert_eq!(blocked.len(), 1);
+        let id = blocked[0].id.clone();
+
+        run_memo_extraction(&app, Ok(4)).await;
+
+        assert!(
+            visible_work_items(&runtime).await.is_empty(),
+            "the blocked item did not clear once housekeeping resumed succeeding"
+        );
+        // Cleared means terminal, not deleted: the row and its artifact remain.
+        let retired = runtime.get_work_item(id).await.unwrap().unwrap().value;
+        assert_eq!(retired.state, WorkItemState::Cancelled);
+        assert!(runtime
+            .get_artifact_revision(retired.current_artifact_id.unwrap(), Some(1))
+            .await
+            .unwrap()
+            .is_some());
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn no_double_report_with_provider_rate_limit_fact() {
+        use refact_buddy_core::operator_types::WorkItemState;
+        let (_dir, app, runtime) = isolated_app().await;
+        // R-4's aggregated provider-rate-limit item, already on the Desk.
+        seed_provider_rate_limit_aggregate(&runtime).await;
+        assert_eq!(visible_work_items(&runtime).await.len(), 1);
+
+        for _ in 0..(refact_buddy_core::workflows::HOUSEKEEPING_BLOCK_THRESHOLD + 3) {
+            run_memo_extraction(&app, Err(rate_limit_error())).await;
+        }
+
+        let items = visible_work_items(&runtime).await;
+        assert_eq!(
+            items.len(),
+            1,
+            "housekeeping raised a second item beside R-4's aggregate: {items:#?}"
+        );
+        assert_eq!(items[0].kind, "legacy_opportunity");
+        assert_eq!(items[0].state, WorkItemState::NeedsAttention);
+        runtime.shutdown().await;
+    }
+
+    /// Seed R-4's aggregated provider-rate-limit work item exactly as the
+    /// opportunity migration produces it.
+    async fn seed_provider_rate_limit_aggregate(
+        runtime: &super::super::outcome_runtime::OutcomeRuntime,
+    ) {
+        let worker = runtime.worker();
+        runtime
+            .with_store(move |store| {
+                let producer_id = format!(
+                    "producer:{}",
+                    crate::buddy::work_items::stable_hash(&["provider:rate_limited:global"])
+                );
+                let opportunity: crate::buddy::types::BuddyOpportunity =
+                    serde_json::from_value(serde_json::json!({
+                        "id": "provider-rate-limit", "kind": "config_drift",
+                        "summary": "Rate limit reached", "priority": "critical", "confidence": 0.98,
+                        "fact_keys": ["provider:rate_limited:global"],
+                        "cooldown_key": "provider:rate_limited:global", "cooldown_secs": 0,
+                        "status": "new", "proposed_actions": [],
+                        "humor": null, "humor_allowed": false, "related": {},
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "expires_at": "2026-01-02T00:00:00Z", "resolved_at": null
+                    }))
+                    .unwrap();
+                crate::buddy::legacy_work::migrate_batch(store, &worker, &[opportunity], &[])?;
+                let subject =
+                    crate::buddy::outcome_runtime::provider_rate_limit_subject(store.identity())?;
+                assert_eq!(subject.resource_id, producer_id);
+                let seeded = store
+                    .get_work_item(&subject.work_item_id())?
+                    .expect("R-4 aggregate fixture must exist under the expected subject");
+                let mut live = seeded.value.clone();
+                live.state = refact_buddy_core::operator_types::WorkItemState::NeedsAttention;
+                store.upsert_work_item(&live, Some(seeded.revision))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    /// The subject key of a user-facing workflow is a stored identity: changing
+    /// it re-keys existing work items and orphans the user's history. Asserted
+    /// byte-for-byte against a golden fixture rather than recomputed.
+    #[tokio::test]
+    async fn user_facing_workflows_are_unchanged() {
+        use refact_buddy_core::operator_types::WorkItemState;
+        const GOLDEN_COMMIT_MESSAGE_WORK_ID: &str =
+            "work:f180476eb72011ab024fadf503565bfd2e52ffc0184924280ef66953fb91ec69";
+        const GOLDEN_COMMIT_MESSAGE_ARTIFACT_ID: &str =
+            "artifact:f180476eb72011ab024fadf503565bfd2e52ffc0184924280ef66953fb91ec69";
+        let (_dir, app, runtime) = isolated_app().await;
+        assert_eq!(runtime.project().project_id, "workflow-test");
+        assert_eq!(
+            workflow_visibility("commit_message"),
+            WorkflowVisibility::UserFacing
+        );
+
+        buddy_wrap_workflow(
+            app.clone(),
+            "commit_message",
+            "x",
+            0,
+            |_| "Subject line".to_string(),
+            || async { Ok::<_, String>(()) },
+        )
+        .await
+        .unwrap();
+        drain_side_effects(&app).await;
+
+        let items = work_items(&runtime).await;
+        assert_eq!(items.len(), 1, "a user-facing workflow stopped publishing");
+        assert_eq!(items[0].id, GOLDEN_COMMIT_MESSAGE_WORK_ID);
+        assert_eq!(
+            items[0].current_artifact_id.as_deref(),
+            Some(GOLDEN_COMMIT_MESSAGE_ARTIFACT_ID)
+        );
+        assert_eq!(items[0].subject.resource_kind, "workflow");
+        assert_eq!(items[0].subject.resource_id, "commit_message");
+        assert_eq!(items[0].subject.version, "workflow:commit_message");
+        assert_eq!(
+            items[0].scope.as_deref(),
+            Some("workflow invocation and terminal result")
+        );
+        assert_ne!(items[0].state, WorkItemState::Cancelled);
+        runtime.shutdown().await;
+    }
+
+    /// The live store holds one collapsed `memo_extraction` row carrying 1,698
+    /// artifact revisions and its outcomes. Upgrading retires it; it must not
+    /// delete it, its artifacts or its outcomes.
+    #[tokio::test]
+    async fn existing_collapsed_row_is_retired_not_deleted() {
+        use refact_buddy_core::operator_types::{RunStatus, WorkItemState};
+        use super::super::outcome_runtime::{
+            collapsed_workflow_subject, OutcomeRuntime, WorkflowOutcomeStart, WorkflowTerminal,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let project = refact_buddy_core::operator_types::ProjectIdentity {
+            project_id: "collapsed-row".into(),
+            canonical_root: dir.path().canonicalize().unwrap().to_string_lossy().into(),
+        };
+        let worker = refact_buddy_core::operator_types::WorkerIdentity {
+            worker_id: "worker".into(),
+            engine_instance_id: "engine".into(),
+            epoch: 1,
+        };
+
+        // Seed the pre-fix shape directly: one subject, many differing bodies,
+        // exactly as the constant fingerprint produced in the user's store.
+        let subject = collapsed_workflow_subject(&project, "memo_extraction").unwrap();
+        let collapsed_id = subject.work_item_id();
+        let store =
+            crate::buddy::operator_store::OperatorStore::open(dir.path(), &project).unwrap();
+        let seeder = OutcomeRuntime::from_store(store, project.clone(), worker.clone());
+        const SEEDED_REVISIONS: usize = 12;
+        for index in 0..SEEDED_REVISIONS {
+            let mut start = WorkflowOutcomeStart {
+                run_id: format!("seeded-run-{index}"),
+                work_id: collapsed_id.clone(),
+                parent_run_id: None,
+                project: project.clone(),
+                worker: worker.clone(),
+                origin: "buddy_workflow".into(),
+                workflow: "memo_extraction".into(),
+                input_fingerprint: "workflow:memo_extraction".into(),
+                coverage: "workflow invocation and terminal result".into(),
+                started_at: "2026-09-05T00:00:00Z".into(),
+            };
+            start.work_id = collapsed_id.clone();
+            seeder
+                .publish_report(
+                    start,
+                    "memo_extraction — run outcome".into(),
+                    format!("Memory extracted: {index} memos"),
+                    vec![],
+                    WorkflowTerminal::Failed {
+                        failure_class: Some("provider_rate_limit".into()),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let before = seeder
+            .get_work_item(collapsed_id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.value.state, WorkItemState::Blocked);
+        let artifact_id = before.value.current_artifact_id.clone().unwrap();
+        assert_eq!(
+            before.value.current_artifact_revision,
+            Some(SEEDED_REVISIONS as u32)
+        );
+        seeder.shutdown().await;
+
+        // Upgrade: reopening the store runs the retirement.
+        let upgraded = OutcomeRuntime::open(dir.path(), project.clone(), worker.clone()).unwrap();
+        let retired = upgraded
+            .get_work_item(collapsed_id.clone())
+            .await
+            .unwrap()
+            .expect("the collapsed row must still exist");
+        assert_eq!(
+            retired.value.state,
+            WorkItemState::Cancelled,
+            "the collapsed row was not retired"
+        );
+
+        // Nothing was deleted. Every revision and every outcome still reads.
+        let revisions = upgraded
+            .list_artifact_revisions(artifact_id.clone(), None, 200)
+            .await
+            .unwrap();
+        assert_eq!(revisions.entries.len(), SEEDED_REVISIONS);
+        for index in 0..SEEDED_REVISIONS {
+            let revision = upgraded
+                .get_artifact_revision(artifact_id.clone(), Some(index as u32 + 1))
+                .await
+                .unwrap()
+                .expect("every seeded revision must stay readable");
+            assert!(revision.value.body.contains(&format!("{index} memos")));
+        }
+        let outcomes = upgraded
+            .list_work_outcomes(collapsed_id.clone(), None, 200)
+            .await
+            .unwrap();
+        assert_eq!(outcomes.entries.len(), SEEDED_REVISIONS);
+        assert!(outcomes
+            .entries
+            .iter()
+            .all(|entry| entry.value.status == RunStatus::Failed));
+        for index in 0..SEEDED_REVISIONS {
+            assert!(upgraded
+                .get_run_outcome(format!("seeded-run-{index}"))
+                .await
+                .unwrap()
+                .is_some());
+        }
+
+        // Idempotent: reopening again does not churn the row.
+        upgraded.shutdown().await;
+        let reopened = OutcomeRuntime::open(dir.path(), project, worker).unwrap();
+        let again = reopened.get_work_item(collapsed_id).await.unwrap().unwrap();
+        assert_eq!(again.value.state, WorkItemState::Cancelled);
+        assert_eq!(again.revision, retired.revision);
+        reopened.shutdown().await;
     }
 
     async fn wait_for_path(path: &std::path::Path) {

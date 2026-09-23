@@ -1,11 +1,16 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
 
 use chrono::Utc;
 use refact_buddy_core::operator_types::{
     ActionExecution, ArtifactRevision, EvidenceRef, ProjectIdentity, ReadState, RunOutcome,
     RunStatus, WorkItem, WorkItemSeverity, WorkSnooze, WorkerIdentity, OPERATOR_SCHEMA_VERSION_V1,
+};
+use refact_buddy_core::workflows::{
+    housekeeping_blocked_report, workflow_visibility, WorkflowFailureCategory,
+    HOUSEKEEPING_BLOCK_THRESHOLD,
 };
 
 use super::operator_store::{OperatorStore, OperatorStoreError, Page, Stored};
@@ -13,6 +18,125 @@ use super::artifacts::{ArtifactDraft, ArtifactMaterialization};
 use super::work_items::{problem_summary_from_title, SubjectKey, WorkItemDraft};
 
 pub const MAX_OUTCOME_EVIDENCE: usize = 12;
+
+/// The one coverage string a housekeeping subject ever uses. Housekeeping does
+/// not report per-run coverage because it does not report per-run at all.
+pub const HOUSEKEEPING_COVERAGE: &str =
+    "background maintenance health only; individual runs are not reported";
+
+/// Subject for the single work item a blocked housekeeping loop is allowed to
+/// raise. The `resource_kind` is deliberately *not* `"workflow"`, so this can
+/// never adopt, re-key or collide with the work item a user-facing workflow
+/// publishes under `SubjectKey::new(project, "workflow", ...)`.
+pub(crate) fn housekeeping_subject(
+    project: &ProjectIdentity,
+    workflow: &str,
+) -> Result<SubjectKey, OperatorStoreError> {
+    SubjectKey::new(
+        project,
+        "workflow_housekeeping",
+        workflow,
+        HOUSEKEEPING_COVERAGE,
+        "housekeeping-v1",
+    )
+    .map_err(|_| OperatorStoreError::Conflict("housekeeping subject is invalid"))
+}
+
+/// The subject a housekeeping workflow's per-run rows were published under
+/// before this classification existed: the constant coverage and constant
+/// fingerprint that collapsed every trajectory onto one row. Reconstructed
+/// exactly so the upgrade can retire that row without deleting anything.
+pub(crate) fn collapsed_workflow_subject(
+    project: &ProjectIdentity,
+    workflow: &str,
+) -> Result<SubjectKey, OperatorStoreError> {
+    SubjectKey::new(
+        project,
+        "workflow",
+        workflow,
+        "workflow invocation and terminal result",
+        format!("workflow:{workflow}"),
+    )
+    .map_err(|_| OperatorStoreError::Conflict("collapsed workflow subject is invalid"))
+}
+
+/// Subject of R-4's aggregated provider-rate-limit item. Housekeeping consults
+/// it rather than raising a second item that says the same thing.
+pub(crate) fn provider_rate_limit_subject(
+    project: &ProjectIdentity,
+) -> Result<SubjectKey, OperatorStoreError> {
+    let producer_id = format!(
+        "producer:{}",
+        super::work_items::stable_hash(&["provider:rate_limited:global"])
+    );
+    SubjectKey::new(
+        project,
+        "legacy_opportunity",
+        producer_id,
+        "legacy-import-v1",
+        "1",
+    )
+    .map_err(|_| OperatorStoreError::Conflict("provider rate-limit subject is invalid"))
+}
+
+/// True when R-4 already has one live aggregated provider-rate-limit item on the
+/// Desk. Housekeeping references that fact instead of duplicating it.
+pub(crate) fn provider_rate_limit_item_is_live(
+    store: &OperatorStore,
+    project: &ProjectIdentity,
+) -> Result<bool, OperatorStoreError> {
+    let subject = provider_rate_limit_subject(project)?;
+    Ok(store
+        .get_work_item(&subject.work_item_id())?
+        .is_some_and(|work| {
+            matches!(
+                work.value.state,
+                refact_buddy_core::operator_types::WorkItemState::NeedsAttention
+                    | refact_buddy_core::operator_types::WorkItemState::Blocked
+            )
+        }))
+}
+
+/// Move a work item to a terminal state without deleting it, its artifact
+/// revisions or its outcomes. Evidence retention is a hard contract.
+fn retire_work_item_in_store(
+    store: &mut OperatorStore,
+    work_item_id: &str,
+) -> Result<bool, OperatorStoreError> {
+    let Some(current) = store.get_work_item(work_item_id)? else {
+        return Ok(false);
+    };
+    if !matches!(
+        current.value.state,
+        refact_buddy_core::operator_types::WorkItemState::NeedsAttention
+            | refact_buddy_core::operator_types::WorkItemState::Blocked
+            | refact_buddy_core::operator_types::WorkItemState::Watching
+    ) {
+        return Ok(false);
+    }
+    let mut retired = current.value.clone();
+    retired.state = refact_buddy_core::operator_types::WorkItemState::Cancelled;
+    store.upsert_work_item(&retired, Some(current.revision))?;
+    Ok(true)
+}
+
+/// One-shot upgrade step: retire the collapsed per-run row each housekeeping
+/// workflow published before it was classified as housekeeping. This is a state
+/// transition only — the row, its 1,698 artifact revisions and every outcome
+/// linked to it stay readable.
+pub(crate) fn retire_collapsed_housekeeping_rows(
+    store: &mut OperatorStore,
+    project: &ProjectIdentity,
+) -> Result<usize, OperatorStoreError> {
+    let mut retired = 0;
+    for workflow in refact_buddy_core::workflows::HOUSEKEEPING_WORKFLOWS {
+        let subject = collapsed_workflow_subject(project, workflow)?;
+        if retire_work_item_in_store(store, &subject.work_item_id())? {
+            retired += 1;
+        }
+    }
+    Ok(retired)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -142,6 +266,10 @@ pub struct OutcomeRuntime {
     project: ProjectIdentity,
     worker: WorkerIdentity,
     closed: Arc<AtomicBool>,
+    /// Consecutive failed housekeeping runs per workflow id. In-process only:
+    /// a restart starts the count again, but an already published blocked item
+    /// survives in the store and still clears on the next success.
+    housekeeping_failures: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl OutcomeRuntime {
@@ -236,18 +364,7 @@ impl OutcomeRuntime {
     pub async fn clear_provider_rate_limit_work(&self) -> Result<(), OperatorStoreError> {
         let project = self.project.clone();
         self.with_store(move |store| {
-            let producer_id = format!(
-                "producer:{}",
-                super::work_items::stable_hash(&["provider:rate_limited:global"])
-            );
-            let subject = SubjectKey::new(
-                &project,
-                "legacy_opportunity",
-                producer_id,
-                "legacy-import-v1",
-                "1",
-            )
-            .map_err(|_| OperatorStoreError::Conflict("provider rate-limit subject is invalid"))?;
+            let subject = provider_rate_limit_subject(&project)?;
             let Some(mut work) = store.get_work_item(&subject.work_item_id())? else {
                 return Ok(());
             };
@@ -448,7 +565,23 @@ impl OutcomeRuntime {
         project: ProjectIdentity,
         worker: WorkerIdentity,
     ) -> Result<Self, OperatorStoreError> {
-        let store = OperatorStore::open(project_root, &project)?;
+        let mut store = OperatorStore::open(project_root, &project)?;
+        // Upgrade step, idempotent and non-destructive: the per-run row each
+        // housekeeping workflow published before it was classified is moved to a
+        // terminal state. Nothing is deleted, so its artifact revisions and all
+        // of its outcomes stay readable. A failure here must not keep the user
+        // out of their own store.
+        match retire_collapsed_housekeeping_rows(&mut store, &project) {
+            Ok(0) => {}
+            Ok(retired) => tracing::info!(
+                retired,
+                "buddy: retired collapsed per-run housekeeping rows; their artifacts and outcomes are retained"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                "buddy: collapsed housekeeping row was not retired; it stays readable and will be retried on the next open"
+            ),
+        }
         Ok(Self::from_store(store, project, worker))
     }
 
@@ -462,6 +595,7 @@ impl OutcomeRuntime {
             project,
             worker,
             closed: Arc::new(AtomicBool::new(false)),
+            housekeeping_failures: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -471,6 +605,26 @@ impl OutcomeRuntime {
         started_at: String,
     ) -> WorkflowOutcomeStart {
         let workflow = workflow.into();
+        if workflow_visibility(&workflow).is_housekeeping() {
+            // One subject, one coverage, one fingerprint for the whole loop. The
+            // per-run identity is `run_id`, which is what keeps every run
+            // queryable without giving every run a Desk row.
+            let work_id = housekeeping_subject(&self.project, &workflow)
+                .map(|subject| subject.work_item_id())
+                .unwrap_or_else(|_| format!("workflow_housekeeping:{workflow}"));
+            return WorkflowOutcomeStart {
+                run_id: uuid::Uuid::new_v4().to_string(),
+                work_id,
+                parent_run_id: None,
+                project: self.project.clone(),
+                worker: self.worker.clone(),
+                origin: "buddy_workflow".to_string(),
+                input_fingerprint: "housekeeping-v1".to_string(),
+                coverage: HOUSEKEEPING_COVERAGE.to_string(),
+                workflow,
+                started_at,
+            };
+        }
         WorkflowOutcomeStart {
             run_id: uuid::Uuid::new_v4().to_string(),
             work_id: format!("workflow:{workflow}"),
@@ -489,6 +643,14 @@ impl OutcomeRuntime {
         &self,
         start: WorkflowOutcomeStart,
     ) -> Result<(), OperatorStoreError> {
+        // Housekeeping never persists an active run. An active run exists so
+        // crash recovery can publish an "interrupted run" work item, and a
+        // housekeeping loop that publishes a Desk row on every engine restart
+        // is precisely the noise this classification removes. Its terminal
+        // outcome is still recorded on the normal path.
+        if workflow_visibility(&start.workflow).is_housekeeping() {
+            return Ok(());
+        }
         self.write_active(start, None).await
     }
 
@@ -616,6 +778,86 @@ impl OutcomeRuntime {
         };
         self.publish_report(start, title, report, Vec::new(), terminal)
             .await
+    }
+
+    /// Terminal path for a workflow classified as `Housekeeping`.
+    ///
+    /// The run's `RunOutcome` is always recorded, so accountability is intact
+    /// and every run stays queryable by `run_id`. No work item and no artifact
+    /// revision are created while the loop is merely working or merely
+    /// unlucky. Only once it is durably blocked does exactly one work item
+    /// appear, and it is refreshed rather than duplicated on every repeat.
+    pub(crate) async fn publish_housekeeping_result(
+        &self,
+        mut start: WorkflowOutcomeStart,
+        terminal: WorkflowTerminal,
+        failure: Option<WorkflowFailureCategory>,
+    ) -> Result<(), String> {
+        let subject = housekeeping_subject(&self.project, &start.workflow)
+            .map_err(|error| error.to_string())?;
+        start.work_id = subject.work_item_id();
+        // Every housekeeping run shares one subject, coverage and fingerprint:
+        // the thing being reported on is the health of the loop, not the
+        // individual run. The per-run identity lives in `run_id`.
+        start.coverage = HOUSEKEEPING_COVERAGE.to_string();
+        start.input_fingerprint = "housekeeping-v1".to_string();
+        let workflow = start.workflow.clone();
+        let blocked = self.record_housekeeping_terminal(&workflow, &terminal);
+        let outcome = build_workflow_outcome(
+            start,
+            WorkflowOutcomeCheckpoint::from_evidence([]),
+            terminal,
+            Utc::now().to_rfc3339(),
+        );
+        let (title, body) = housekeeping_blocked_report(&workflow, failure.as_ref());
+        let title = super::jobs::autonomous_chats::redact_and_cap_text(&title, 240);
+        let body = super::jobs::autonomous_chats::redact_and_cap_text(&body, 8_000);
+        let project = self.project.clone();
+        self.with_store(move |store| {
+            // R-4 already raises ONE aggregated provider-rate-limit item across
+            // every workflow. When that item is live it is the user's single
+            // report of this outage, so housekeeping references it instead of
+            // raising a second row saying the same thing.
+            let aggregate_is_live = provider_rate_limit_item_is_live(store, &project)?;
+            if blocked && !aggregate_is_live {
+                // One item, refreshed not duplicated: the subject is constant and
+                // the report carries no counters, so a repeat folds into the
+                // existing artifact revision instead of appending a new one.
+                publish_report_in_store(store, outcome, subject, title, body).map_err(|_| {
+                    OperatorStoreError::Conflict("housekeeping report was not published")
+                })?;
+                return Ok(());
+            }
+            // Healthy, transiently unlucky, or already covered by R-4's item:
+            // the outcome is still recorded, but nothing reaches the Desk.
+            store.append_run_outcome(&outcome)?;
+            retire_work_item_in_store(store, &subject.work_item_id())?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| error.to_string())
+    }
+
+    /// Count consecutive failed housekeeping runs and report whether the loop is
+    /// now durably blocked. Anything that is not an outright failure resets the
+    /// count, which is what makes the blocked item clear on recovery.
+    fn record_housekeeping_terminal(&self, workflow: &str, terminal: &WorkflowTerminal) -> bool {
+        let failed = matches!(
+            terminal,
+            WorkflowTerminal::Failed { .. } | WorkflowTerminal::Blocked { .. }
+        );
+        let Ok(mut failures) = self.housekeeping_failures.lock() else {
+            return false;
+        };
+        if !failed {
+            failures.remove(workflow);
+            return false;
+        }
+        let count = failures
+            .entry(workflow.to_string())
+            .and_modify(|count| *count = count.saturating_add(1))
+            .or_insert(1);
+        *count >= HOUSEKEEPING_BLOCK_THRESHOLD
     }
 
     pub(crate) async fn publish_report(
