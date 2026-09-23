@@ -795,6 +795,7 @@ async fn get_builtin_tools(
         Box::new(crate::tools::tool_task_agent_finish::ToolTaskAgentFinish::new()),
         Box::new(crate::tools::tool_task_mark_card::ToolTaskMarkCardDone::new()),
         Box::new(crate::tools::tool_task_mark_card::ToolTaskMarkCardFailed::new()),
+        Box::new(crate::tools::tool_task_mark_card::ToolTaskFinalizeCard::new()),
         Box::new(crate::tools::tool_task_batch::ToolMarkDoneBatch::new()),
         Box::new(crate::tools::tool_task_batch::ToolMarkFailedBatch::new()),
         Box::new(crate::tools::tool_task_merge_agent::ToolTaskMergeAgent::new()),

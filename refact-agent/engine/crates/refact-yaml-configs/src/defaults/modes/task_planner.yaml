@@ -1,4 +1,4 @@
-schema_version: 28
+schema_version: 29
 id: task_planner
 title: Task Planner
 description: Task board management mode
@@ -425,6 +425,7 @@ tools:
   - merge_agent
   - mark_done
   - mark_failed
+  - finalize_card
   - task_mem_save
   - task_mem_get
   - doc_list

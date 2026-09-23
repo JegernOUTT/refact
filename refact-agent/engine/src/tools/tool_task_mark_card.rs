@@ -11,7 +11,9 @@ use crate::tools::tools_description::{
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::tasks::storage;
-use crate::tasks::types::StatusUpdate;
+use crate::tasks::types::{FinalizeDecision, StatusUpdate};
+
+const FINALIZE_REFUSAL_PREFIX: &str = "finalize_refusal:";
 
 async fn get_task_id(
     ccx: &Arc<AMutex<AtCommandsContext>>,
@@ -46,6 +48,7 @@ async fn authorize_finalizer(
 
 pub struct ToolTaskMarkCardDone;
 pub struct ToolTaskMarkCardFailed;
+pub struct ToolTaskFinalizeCard;
 
 impl ToolTaskMarkCardDone {
     pub fn new() -> Self {
@@ -54,6 +57,12 @@ impl ToolTaskMarkCardDone {
 }
 
 impl ToolTaskMarkCardFailed {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl ToolTaskFinalizeCard {
     pub fn new() -> Self {
         Self
     }
@@ -151,12 +160,123 @@ impl Tool for ToolTaskMarkCardDone {
     }
 }
 
+#[async_trait]
+impl Tool for ToolTaskFinalizeCard {
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "finalize_card".to_string(),
+            display_name: "Task Finalize Card".to_string(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: String::new(),
+            },
+            experimental: false,
+            allow_parallel: false,
+            description: "Finalize a done card after checking its review authority and required outcome evidence. Returns every unmet requirement when finalization is refused.".to_string(),
+            input_schema: json_schema_from_params(
+                &[
+                    ("card_id", "string", "Card ID to finalize"),
+                    ("task_id", "string", "Task UUID (optional if in task context)"),
+                ],
+                &["card_id"],
+            ),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let task_id = get_task_id(&ccx, args).await?;
+        let card_id = args
+            .get("card_id")
+            .and_then(Value::as_str)
+            .ok_or("Missing 'card_id'")?;
+        let (gcx, principal, is_planner) = {
+            let ccx_lock = ccx.lock().await;
+            (
+                ccx_lock.app.gcx.clone(),
+                ccx_lock.chat_id.clone(),
+                ccx_lock
+                    .task_meta
+                    .as_ref()
+                    .is_some_and(|meta| meta.role == "planner"),
+            )
+        };
+        if !is_planner {
+            return Err(
+                "finalize_card can only be called by the task planner. Switch to the planner chat to finalize cards."
+                    .to_string(),
+            );
+        }
+        let allow_self_review = storage::board_allows_self_review(gcx.clone(), &task_id).await?;
+        let card_id_owned = card_id.to_string();
+        let principal_owned = principal.clone();
+        let finalized_at = Utc::now().to_rfc3339();
+        let result = storage::update_board_atomic(gcx, &task_id, move |board| {
+            match board.finalize_card(
+                &card_id_owned,
+                &principal_owned,
+                allow_self_review,
+                finalized_at,
+            ) {
+                Ok(()) => Ok(()),
+                Err(decision) => {
+                    let decision =
+                        serde_json::to_string(&decision).map_err(|error| error.to_string())?;
+                    Err(format!("{FINALIZE_REFUSAL_PREFIX}{decision}"))
+                }
+            }
+        })
+        .await;
+        let (finalized, decision) = match result {
+            Ok(_) => (true, FinalizeDecision::default()),
+            Err(error) => match error.strip_prefix(FINALIZE_REFUSAL_PREFIX) {
+                Some(decision) => (
+                    false,
+                    serde_json::from_str(decision).map_err(|e| e.to_string())?,
+                ),
+                None => return Err(error),
+            },
+        };
+        let output = serde_json::json!({
+            "type": "task_card_finalize",
+            "task_id": task_id,
+            "card_id": card_id,
+            "finalized": finalized,
+            "decision": decision,
+        })
+        .to_string();
+        Ok((
+            false,
+            vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(output),
+                tool_calls: None,
+                tool_call_id: tool_call_id.clone(),
+                ..Default::default()
+            })],
+        ))
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec![]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app_state::AppState;
     use crate::global_context::GlobalContext;
-    use crate::tasks::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus};
+    use crate::tasks::types::{
+        BoardCard, FragmentReview, OutcomeFragment, OutcomeRequirement, TaskBoard, TaskMeta,
+        TaskStatus, VerifierReport, VerifierReportClassification,
+    };
     use refact_chat_api::TaskMeta as ThreadTaskMeta;
     use serde_json::json;
 
@@ -267,6 +387,17 @@ mod tests {
         ])
     }
 
+    fn tool_text(contexts: Vec<ContextEnum>) -> String {
+        match contexts
+            .into_iter()
+            .next()
+            .expect("tool produced no message")
+        {
+            ContextEnum::ChatMessage(message) => message.content.content_text_only(),
+            _ => panic!("expected a tool chat message"),
+        }
+    }
+
     #[tokio::test]
     async fn legacy_board_without_an_owner_still_finalises() {
         let (gcx, _temp) = setup_task().await;
@@ -357,6 +488,226 @@ mod tests {
                 .column,
             "done"
         );
+    }
+
+    #[tokio::test]
+    async fn finalize_card_tool_reaches_finalize_gate_and_records_finalization() {
+        let (gcx, _temp) = setup_task().await;
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.cards[0].column = "done".to_string();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let ccx = chat_ccx(gcx.clone(), "planner-chat").await;
+        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
+
+        let output = ToolTaskFinalizeCard::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_str(&tool_text(output.1)).unwrap();
+
+        assert_eq!(response["finalized"], json!(true));
+        assert_eq!(response["decision"]["blocks"], json!([]));
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        assert!(board.card_is_finalized("T-1"));
+        assert_eq!(board.get_card("T-1").unwrap().column, "done");
+    }
+
+    #[tokio::test]
+    async fn finalize_card_refusal_lists_all_blocks_and_leaves_done_card_unchanged() {
+        let (gcx, _temp) = setup_task().await;
+        let report = VerifierReport {
+            passed: true,
+            recommendation: "merge".to_string(),
+            classification: VerifierReportClassification::Passed,
+            ..Default::default()
+        };
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.owner_chat_id = Some("planner-chat".to_string());
+            board.reviewer_chat_ids = vec!["reviewer-chat".to_string()];
+            board.cards[0].column = "done".to_string();
+            board.cards[0].verifier_report = Some(report.clone());
+            board
+                .attest_review(
+                    "T-1",
+                    "reviewer-chat",
+                    &report,
+                    "2026-01-01T00:00:00Z".to_string(),
+                    false,
+                )
+                .map_err(|error| error.to_string())?;
+            board.record_card_outcome(
+                "T-1",
+                vec![
+                    OutcomeRequirement {
+                        fragment: "summary".to_string(),
+                        requires_evidence: false,
+                    },
+                    OutcomeRequirement {
+                        fragment: "verification".to_string(),
+                        requires_evidence: false,
+                    },
+                ],
+                vec![
+                    OutcomeFragment::new(
+                        "summary",
+                        "Implemented the change",
+                        Some("agent-1".into()),
+                    ),
+                    OutcomeFragment::new("verification", "Tests failed", Some("agent-1".into())),
+                ],
+            );
+            board
+                .card_outcomes
+                .get_mut("T-1")
+                .unwrap()
+                .record_review(
+                    "summary",
+                    FragmentReview::Rejected,
+                    "reviewer-chat",
+                    "2026-01-01T00:00:00Z".to_string(),
+                    Some("summary is unsupported".to_string()),
+                )
+                .map_err(|error| error.to_string())?;
+            board
+                .card_outcomes
+                .get_mut("T-1")
+                .unwrap()
+                .record_review(
+                    "verification",
+                    FragmentReview::Contradicted,
+                    "reviewer-chat",
+                    "2026-01-01T00:00:00Z".to_string(),
+                    Some("the report records a failing test".to_string()),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let revision = storage::load_board(gcx.clone(), "task-1")
+            .await
+            .unwrap()
+            .rev;
+        let ccx = chat_ccx(gcx.clone(), "planner-chat").await;
+        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
+
+        let output = ToolTaskFinalizeCard::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_str(&tool_text(output.1)).unwrap();
+
+        assert_eq!(response["finalized"], json!(false));
+        let blocks = response["decision"]["blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["kind"], json!("rejected_fragment"));
+        assert_eq!(blocks[1]["kind"], json!("contradicted_fragment"));
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        assert_eq!(board.rev, revision);
+        assert_eq!(board.get_card("T-1").unwrap().column, "done");
+        assert!(!board.card_is_finalized("T-1"));
+    }
+
+    #[tokio::test]
+    async fn finalize_card_refuses_self_review_by_default_and_setting_can_allow_it() {
+        let (gcx, temp) = setup_task().await;
+        let report = VerifierReport {
+            passed: true,
+            recommendation: "merge".to_string(),
+            classification: VerifierReportClassification::Passed,
+            ..Default::default()
+        };
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.owner_chat_id = Some("planner-chat".to_string());
+            board.reviewer_chat_ids = vec!["reviewer-chat".to_string()];
+            board.cards[0].column = "done".to_string();
+            board.cards[0].verifier_report = Some(report.clone());
+            board
+                .attest_review(
+                    "T-1",
+                    "reviewer-chat",
+                    &report,
+                    "2026-01-01T00:00:00Z".to_string(),
+                    false,
+                )
+                .map_err(|error| error.to_string())?;
+            board
+                .claim_card(
+                    "T-1",
+                    "planner-chat",
+                    "claim",
+                    "2026-01-01T00:00:00Z".into(),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let ccx = chat_ccx(gcx.clone(), "planner-chat").await;
+        let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
+
+        let refused = ToolTaskFinalizeCard::new()
+            .tool_execute(ccx.clone(), &"call".to_string(), &args)
+            .await
+            .unwrap();
+        let refused: Value = serde_json::from_str(&tool_text(refused.1)).unwrap();
+        assert_eq!(refused["finalized"], json!(false));
+        assert!(refused["decision"]["blocks"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("self-review is refused"));
+        assert!(!storage::load_board(gcx.clone(), "task-1")
+            .await
+            .unwrap()
+            .card_is_finalized("T-1"));
+
+        tokio::fs::write(
+            temp.path().join(".refact").join("coordination.yaml"),
+            "board_allow_self_review: true\n",
+        )
+        .await
+        .unwrap();
+        let allowed = ToolTaskFinalizeCard::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+        let allowed: Value = serde_json::from_str(&tool_text(allowed.1)).unwrap();
+        assert_eq!(allowed["finalized"], json!(true));
+        assert!(storage::load_board(gcx, "task-1")
+            .await
+            .unwrap()
+            .card_is_finalized("T-1"));
+    }
+
+    #[tokio::test]
+    async fn finalize_card_tool_is_planner_only() {
+        let (gcx, _temp) = setup_task().await;
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.cards[0].column = "done".to_string();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let ccx = chat_ccx(gcx.clone(), "agent-chat").await;
+        ccx.lock().await.task_meta.as_mut().unwrap().role = "agent".to_string();
+
+        let denied = ToolTaskFinalizeCard::new()
+            .tool_execute(
+                ccx,
+                &"call".to_string(),
+                &HashMap::from([("card_id".to_string(), json!("T-1"))]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(denied.contains("only be called by the task planner"));
+        assert!(!storage::load_board(gcx, "task-1")
+            .await
+            .unwrap()
+            .card_is_finalized("T-1"));
     }
 }
 
