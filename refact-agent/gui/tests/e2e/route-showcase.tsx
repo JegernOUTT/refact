@@ -1,7 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { Provider, useSelector } from "react-redux";
-import { Button as UiButton } from "../../src/components/ui";
+import { Badge, Button as UiButton } from "../../src/components/ui";
 import { Button, Flex, Text } from "@radix-ui/themes";
 
 import { setUpStore, type RootState } from "../../src/app/store";
@@ -2134,6 +2134,42 @@ const ShowcaseSurface = () => {
 
   if (route === "privacy-block") {
     return <PrivacyBlockSurface />;
+  }
+
+  if (route === "badges") {
+    const tones = [
+      "default",
+      "accent",
+      "success",
+      "warning",
+      "danger",
+      "muted",
+    ] as const;
+    const variants = ["soft", "outline", "glass"] as const;
+    const sizes = ["xs", "sm", "md"] as const;
+
+    return (
+      <div>
+        {tones.flatMap((tone) =>
+          variants.flatMap((variant) =>
+            sizes.map((size) => (
+              <Badge
+                key={`${tone}-${variant}-${size}`}
+                data-testid="badge-contrast"
+                data-tone={tone}
+                data-variant={variant}
+                data-size={size}
+                tone={tone}
+                variant={variant}
+                size={size}
+              >
+                {`${tone} ${variant} ${size}`}
+              </Badge>
+            )),
+          ),
+        )}
+      </div>
+    );
   }
 
   if (chatDndRoute) {
