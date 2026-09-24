@@ -292,6 +292,12 @@ impl GuardedMerge {
     }
 }
 
+fn source_cleanup_allowed(post_merge: Option<&MergeVerification>) -> bool {
+    post_merge.map_or(true, |verification| {
+        verification.passed || verification.auto_reverted
+    })
+}
+
 /// Merge `worktree_id` into `service`'s checkout while holding that checkout's
 /// merge lease, then verify the merged tree.
 ///
@@ -338,11 +344,8 @@ where
         true => verify_merged_tree(service.source_workspace_root().to_path_buf()).await,
         false => None,
     };
-    let verification_failed = post_merge
-        .as_ref()
-        .is_some_and(|verification| !verification.passed);
     let cleanup = match delete_requested
-        && !verification_failed
+        && source_cleanup_allowed(post_merge.as_ref())
         && (response.merged || response.status == "nothing_to_merge")
     {
         true => match service.delete_worktree(worktree_id, true, true).await {
@@ -491,6 +494,29 @@ mod tests {
             } else {
                 VerificationOutcome::CommandFailed
             },
+        }
+    }
+
+    #[test]
+    fn source_cleanup_matches_opted_in_post_merge_outcomes() {
+        let passed = verification(VerificationStage::PostMerge, true);
+        let failed = verification(VerificationStage::PostMerge, false);
+        let mut reverted = failed.clone();
+        reverted.auto_reverted = true;
+        let mut skipped_revert = failed.clone();
+        skipped_revert.revert_skipped_reason = Some("HEAD moved".to_string());
+        let mut infrastructure = failed.clone();
+        infrastructure.outcome = VerificationOutcome::InfrastructureFailed;
+
+        for (result, expected) in [
+            (None, true),
+            (Some(&passed), true),
+            (Some(&reverted), true),
+            (Some(&skipped_revert), false),
+            (Some(&infrastructure), false),
+            (Some(&failed), false),
+        ] {
+            assert_eq!(source_cleanup_allowed(result), expected);
         }
     }
 
