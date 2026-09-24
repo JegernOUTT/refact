@@ -550,13 +550,17 @@ describe("BuddyDesk", () => {
   });
 
   it("loads a real API-shaped report without navigating to a worker chat", async () => {
+    const headedArtifact = {
+      ...artifact,
+      body: "# diagnostic_assessment\n\n## Second level\n\n### Third level",
+    };
     server.use(
       http.get("*/v1/buddy/work", () =>
         HttpResponse.json(envelope([record(item)])),
       ),
       http.get("*/v1/buddy/artifacts/:id", ({ request }) => {
         expect(new URL(request.url).searchParams.get("revision")).toBe("1");
-        return HttpResponse.json(envelope(record(artifact)));
+        return HttpResponse.json(envelope(record(headedArtifact)));
       }),
     );
     const { store } = render(<BuddyDesk />, { preloadedState: config });
@@ -568,6 +572,25 @@ describe("BuddyDesk", () => {
     expect(
       screen.getByRole("heading", { level: 3, name: artifact.title }),
     ).toBeTruthy();
+    const detail = screen.getByRole("article", { name: "Work detail" });
+    const headings = [...detail.querySelectorAll("h1, h2, h3, h4, h5, h6")];
+    expect(headings.map((heading) => heading.tagName)).toEqual([
+      "H3",
+      "H4",
+      "H5",
+      "H6",
+    ]);
+    expect(headings.map((heading) => heading.textContent)).toEqual([
+      artifact.title,
+      "diagnostic_assessment",
+      "Second level",
+      "Third level",
+    ]);
+    expect(
+      headings.every(
+        (heading, index) => Number(heading.tagName.slice(1)) >= 3 + index,
+      ),
+    ).toBe(true);
     expect(screen.getByText("Network access was not tested.")).toBeTruthy();
     expect(
       screen.getByText(/no proposed fix is applied automatically/),
