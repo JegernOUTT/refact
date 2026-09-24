@@ -7,8 +7,6 @@ mod browser_e2e;
 mod buddy_operator;
 mod buddy_operator_soak;
 mod daemon_e2e;
-mod daemon_proxy;
-mod daemon_supervisor;
 mod mcp_stdio_e2e;
 mod review_bench;
 mod test_bitbucket_integration;
