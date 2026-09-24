@@ -148,6 +148,31 @@ export function formatResetAt(
   })}`;
 }
 
+export function formatQuotaMoment(
+  moment: string | null | undefined,
+): string | null {
+  if (!moment) return null;
+  const trimmed = moment.trim();
+  if (!trimmed) return null;
+  const date = new Date(trimmed);
+  if (Number.isNaN(date.getTime())) return trimmed;
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export function formatClaudeLimitName(limit: string): string {
+  const known = CLAUDE_USAGE_WINDOWS.find((window) => window.key === limit);
+  if (known) return known.label;
+  if (limit === "seven_day_overage_included") {
+    return "Current week — including extra usage";
+  }
+  return limit.replace(/_/g, " ");
+}
+
 export function formatLimitWindowSeconds(
   seconds: number | null | undefined,
 ): string | null {

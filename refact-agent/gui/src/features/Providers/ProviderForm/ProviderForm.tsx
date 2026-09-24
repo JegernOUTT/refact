@@ -8,6 +8,10 @@ import { Spinner } from "../../../components/Spinner";
 
 import { useProviderForm } from "./useProviderForm";
 import type {
+  ClaudeCodeResetClaimData,
+  ClaudeCodeResetGrant,
+  ClaudeCodeSavedResets,
+  ClaudeCodeSessionReset,
   ProviderListItem,
   ProviderQuotaFact,
   ProviderQuotaSnapshot,
@@ -19,13 +23,17 @@ import { Badge, Button, ProviderQuota, Surface } from "../../../components/ui";
 import styles from "./ProviderForm.module.css";
 import { ProviderModelsList } from "./ProviderModelsList/ProviderModelsList";
 import {
+  useClaimClaudeCodeResetMutation,
+  useGetClaudeCodeResetStatusQuery,
   useGetOpenRouterHealthQuery,
   useGetProviderQuotaQuery,
   useRedeemOpenAICodexResetCreditMutation,
 } from "../../../services/refact";
 import {
+  formatClaudeLimitName,
   formatLimitWindowSeconds,
   formatQuotaMeta,
+  formatQuotaMoment,
   formatResetAfterSeconds,
   formatResetAt,
   formatUsagePercent,
@@ -183,6 +191,229 @@ const CodexResetCreditAction: React.FC<{
       {redeemMessage ? (
         <div className={styles.usageMeta} role="status">
           {redeemMessage}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+const humanizeResetReason = (reason: string): string =>
+  reason.replace(/_/g, " ");
+
+const formatClaudeResetClaim = (claim: ClaudeCodeResetClaimData): string => {
+  switch (claim.result) {
+    case "reset": {
+      const cleared = claim.cleared.length
+        ? ` Cleared: ${claim.cleared.map(formatClaudeLimitName).join(", ")}.`
+        : "";
+      const left =
+        typeof claim.resets_left === "number"
+          ? ` ${claim.resets_left} saved ${
+              claim.resets_left === 1 ? "reset" : "resets"
+            } left.`
+          : "";
+      const next = formatQuotaMoment(claim.next_available_at);
+      return `Usage limit reset.${cleared}${left}${
+        next ? ` Next session reset available ${next}.` : ""
+      }`;
+    }
+    case "already_used":
+      return claim.program === "juniper_tide"
+        ? "Your session limit is already being reset."
+        : "Another reset was just started on your account.";
+    case "not_limited":
+      return "Your reset only works at a usage limit, and you're not at one now.";
+    case "cooldown": {
+      const until = formatQuotaMoment(claim.cooldown_until);
+      return until
+        ? `Resets are cooling down until ${until}.`
+        : "Resets are cooling down. Try again later.";
+    }
+    case "ineligible":
+      return claim.reason
+        ? `This reset can't be used right now (${humanizeResetReason(
+            claim.reason,
+          )}).`
+        : "This reset can't be used right now.";
+    default:
+      return claim.program === "juniper_tide"
+        ? "A session-limit reset isn't available right now."
+        : "A reset isn't available right now.";
+  }
+};
+
+const findNextClaudeGrant = (
+  saved: ClaudeCodeSavedResets,
+): ClaudeCodeResetGrant | null => {
+  if (!saved.eligible) return null;
+  const grant = saved.grants.find((item) => item.id === saved.next_grant_id);
+  return grant ?? null;
+};
+
+const describeClaudeGrant = (
+  grant: ClaudeCodeResetGrant,
+  saved: ClaudeCodeSavedResets,
+): string => {
+  const parts: string[] = [];
+  parts.push(
+    `${grant.resets_left} of ${grant.resets_total} ${
+      grant.resets_total === 1 ? "reset" : "resets"
+    } left${grant.label ? ` · ${grant.label}` : ""}`,
+  );
+  if (grant.clears.length) {
+    parts.push(`Clears ${grant.clears.map(formatClaudeLimitName).join(", ")}`);
+  }
+  const endsAt = formatQuotaMoment(grant.ends_at);
+  if (endsAt) parts.push(`Expires ${endsAt}`);
+  if (grant.paused) {
+    parts.push("Paused");
+  } else if (grant.use_requires_limit && !saved.at_limit) {
+    parts.push("Works when you reach a usage limit");
+  }
+  return parts.join(" · ");
+};
+
+const describeClaudeSessionReset = (
+  session: ClaudeCodeSessionReset,
+): string => {
+  if (session.available) {
+    return `Clears the current session limit · ${session.resets_per_week} per week`;
+  }
+  const next = formatQuotaMoment(session.next_available_at);
+  if (next) return `Next session reset available ${next}`;
+  if (session.ineligible_reason) {
+    return `Unavailable (${humanizeResetReason(session.ineligible_reason)})`;
+  }
+  return "No session reset available right now";
+};
+
+const ClaudeCodeResetAction: React.FC<{
+  providerName: string;
+  onClaimed: () => void;
+}> = ({ providerName, onClaimed }) => {
+  const {
+    data: statusResponse,
+    isFetching,
+    isError,
+    refetch,
+  } = useGetClaudeCodeResetStatusQuery({
+    providerName,
+    useInstanceRoute: true,
+  });
+  const [claim, { isLoading: isClaiming }] = useClaimClaudeCodeResetMutation();
+  const [message, setMessage] = React.useState<string | null>(null);
+  const savedRequestIdRef = React.useRef<string | null>(null);
+
+  const saved = statusResponse?.data?.cedar_ember ?? null;
+  const session = statusResponse?.data?.juniper_tide ?? null;
+  const nextGrant = saved ? findNextClaudeGrant(saved) : null;
+  const sessionOffered = session?.eligible === true && session.arm === "reset";
+  const statusError = isError
+    ? "Couldn't check usage resets."
+    : statusResponse?.error ?? null;
+  const nothingOffered =
+    !statusError && !isFetching && !nextGrant && !sessionOffered;
+  const ineligibleReason =
+    saved?.ineligible_reason ?? session?.ineligible_reason ?? null;
+
+  const runClaim = async (program: "cedar_ember" | "juniper_tide") => {
+    setMessage(null);
+    if (program === "cedar_ember") {
+      if (!nextGrant) return;
+      if (!savedRequestIdRef.current) savedRequestIdRef.current = uuidv4();
+    }
+    const response = await claim({
+      providerName,
+      useInstanceRoute: true,
+      program,
+      grantId: program === "cedar_ember" ? nextGrant?.id : undefined,
+      requestId:
+        program === "cedar_ember"
+          ? savedRequestIdRef.current ?? undefined
+          : undefined,
+    });
+    if ("error" in response) {
+      setMessage("Couldn't use the reset. Please try again.");
+      return;
+    }
+    const payload = response.data;
+    if (payload.error != null || !payload.data) {
+      setMessage(payload.error ?? "Couldn't use the reset. Please try again.");
+      return;
+    }
+    if (program === "cedar_ember") savedRequestIdRef.current = null;
+    setMessage(formatClaudeResetClaim(payload.data));
+    onClaimed();
+  };
+
+  return (
+    <div className={styles.resetBlock} data-testid="claude-code-resets">
+      <div className={styles.usageActions}>
+        <div className={styles.usageTitle}>Usage resets</div>
+        <Button
+          size="1"
+          variant="ghost"
+          loading={isFetching}
+          disabled={isFetching || isClaiming}
+          onClick={() => void refetch()}
+        >
+          Refresh
+        </Button>
+      </div>
+      {statusError ? (
+        <div className={styles.usageMeta} role="alert">
+          {statusError}
+        </div>
+      ) : null}
+      {saved?.eligible && nextGrant ? (
+        <div className={styles.usageActions}>
+          <div className={styles.usageMeta}>
+            {describeClaudeGrant(nextGrant, saved)}
+          </div>
+          <Button
+            size="1"
+            variant="soft"
+            loading={isClaiming}
+            disabled={
+              isClaiming ||
+              !nextGrant.usable_now ||
+              nextGrant.paused ||
+              nextGrant.resets_left <= 0
+            }
+            onClick={() => void runClaim("cedar_ember")}
+          >
+            Use saved reset
+          </Button>
+        </div>
+      ) : null}
+      {session && sessionOffered ? (
+        <div className={styles.usageActions}>
+          <div className={styles.usageMeta}>
+            {describeClaudeSessionReset(session)}
+          </div>
+          <Button
+            size="1"
+            variant="soft"
+            loading={isClaiming}
+            disabled={isClaiming || !session.available}
+            onClick={() => void runClaim("juniper_tide")}
+          >
+            Reset session limit
+          </Button>
+        </div>
+      ) : null}
+      {nothingOffered ? (
+        <div className={styles.usageMeta}>
+          {ineligibleReason
+            ? `No usage resets are available for this account (${humanizeResetReason(
+                ineligibleReason,
+              )}).`
+            : "No usage resets are available for this account right now."}
+        </div>
+      ) : null}
+      {message ? (
+        <div className={styles.usageMeta} role="status">
+          {message}
         </div>
       ) : null}
     </div>
@@ -355,20 +586,25 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
           fetching={quotaFetching}
           error={quotaError}
           action={
-            baseProvider === "openai_codex" && quotaResponse?.quota
-              ? (() => {
-                  const availableResets = findResetCredits(
-                    quotaResponse.quota.facts,
-                  );
-                  return availableResets === null ? null : (
-                    <CodexResetCreditAction
-                      availableResets={availableResets}
-                      providerName={currentProvider.name}
-                      onRedeemed={() => setForceQuotaRefresh(true)}
-                    />
-                  );
-                })()
-              : null
+            baseProvider === "claude_code" && quotaResponse?.quota ? (
+              <ClaudeCodeResetAction
+                providerName={currentProvider.name}
+                onClaimed={() => setForceQuotaRefresh(true)}
+              />
+            ) : baseProvider === "openai_codex" && quotaResponse?.quota ? (
+              (() => {
+                const availableResets = findResetCredits(
+                  quotaResponse.quota.facts,
+                );
+                return availableResets === null ? null : (
+                  <CodexResetCreditAction
+                    availableResets={availableResets}
+                    providerName={currentProvider.name}
+                    onRedeemed={() => setForceQuotaRefresh(true)}
+                  />
+                );
+              })()
+            ) : null
           }
         />
 

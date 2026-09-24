@@ -129,6 +129,15 @@
   justify-content: space-between;
 }
 
+.resetBlock {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  padding-top: var(--rf-space-1);
+  border-top: 1px solid var(--rf-border);
+}
+
 .customModelDialog {
   display: flex;
   max-height: calc(100dvh - 2 * var(--rf-space-3));
