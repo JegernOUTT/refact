@@ -19,9 +19,8 @@ use refact_lsp::refact_browser::{setup_recording_for_tab, BrowserRuntime, UTILIT
 use refact_lsp::refact_integrations::browser_types::RecorderEvent;
 use serde_json::{json, Value};
 
-mod browser_common;
 
-use browser_common::{discover_chrome, e2e_enabled, e2e_launch_options, print_skip, FixtureServer};
+use crate::browser_common::{discover_chrome, e2e_enabled, e2e_launch_options, print_skip, FixtureServer};
 
 use tempfile::{tempdir, TempDir};
 

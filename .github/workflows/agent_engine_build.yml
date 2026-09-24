@@ -75,7 +75,7 @@ jobs:
         # Single-threaded: each test spawns a real daemon + worker subprocesses;
         # running them concurrently on a 2-core runner starves the daemon's
         # idle/cron poll loops and makes lifecycle timeouts flaky.
-        run: cargo test --test daemon_e2e -- --nocapture --test-threads=1
+        run: cargo test --test it -- daemon_e2e:: --nocapture --test-threads=1
 
   dist:
     strategy:

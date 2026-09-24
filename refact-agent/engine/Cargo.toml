@@ -201,6 +201,19 @@ path = "src/bin/refact.rs"
 test = false
 bench = false
 
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+
+[[test]]
+name = "daemon_proxy"
+path = "tests/it/daemon_proxy.rs"
+test = true
+
+[[test]]
+name = "daemon_supervisor"
+path = "tests/it/daemon_supervisor.rs"
+
 [features]
 default = ["voice"]
 voice = ["refact-voice/voice"]

@@ -35,9 +35,8 @@ use serde_json::json;
 use structopt::StructOpt;
 use tempfile::{tempdir, TempDir};
 
-mod browser_common;
 
-use browser_common::{
+use crate::browser_common::{
     discover_chrome, discover_chrome_with, e2e_enabled, e2e_launch_options, print_skip,
     FixtureServer,
 };

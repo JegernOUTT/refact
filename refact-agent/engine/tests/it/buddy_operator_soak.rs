@@ -196,7 +196,7 @@ fn fixed_spec_owner_admission_is_bounded_and_duplicate_safe() {
     let project = identity(root.path());
     let mut store = OperatorStore::open(root.path(), &project).unwrap();
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../crates/refact-buddy-core/tests/fixtures/operator_contract_v1.json"
+        "../../crates/refact-buddy-core/tests/fixtures/operator_contract_v1.json"
     ))
     .unwrap();
     let authority =

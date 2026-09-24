@@ -1,6 +1,6 @@
 //! Scratch-root helpers for Buddy operator-effect tests.
 
-#[path = "../../tests/buddy_operator_common/fixtures.rs"]
+#[path = "../../tests/it/buddy_operator_common/fixtures.rs"]
 mod isolated_fixtures;
 
 #[tokio::test]

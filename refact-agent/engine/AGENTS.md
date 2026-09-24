@@ -1040,7 +1040,7 @@ All foreground, background, service, and PTY exec spawns apply `EXEC_ENV_DEFAULT
 
 ## Testing
 
-- **Integration tests in `tests/`**: live HTTP+SSE Python suites plus Rust e2e suites (`daemon_e2e.rs`, `daemon_proxy.rs`, `daemon_supervisor.rs`) that share the `tests/e2e_helpers/` module. Python helpers include `fake_worker.py` and `lsp_connect.py`; 7 `test_chat_session_*.py` files cover the chat session flow.
+- **Integration tests in `tests/`**: live HTTP+SSE Python suites plus the Rust `tests/it` harness (daemon proxy/supervisor suites remain separate binaries because their process-global environment mutation is isolated with `serial_test`). Python helpers include `fake_worker.py` and `lsp_connect.py`; 7 `test_chat_session_*.py` files cover the chat session flow.
 - **Rust unit tests**: `src/chat/tests.rs`, CodeGraph/parser tests, 50+ modules. `cargo test --lib`.
 - **Test data**: `tests/emergency_frog_situation/` — themed frog simulations for parsing edge cases.
 

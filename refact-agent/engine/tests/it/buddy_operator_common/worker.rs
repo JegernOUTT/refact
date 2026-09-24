@@ -300,7 +300,7 @@ async fn browser_controller(client: &reqwest::Client) -> TestResult {
     stop(worker).await?;
     {
         let fixture: Value = serde_json::from_str(include_str!(
-            "../../crates/refact-buddy-core/tests/fixtures/operator_contract_v1.json"
+            "../../../crates/refact-buddy-core/tests/fixtures/operator_contract_v1.json"
         ))?;
         let mut work: WorkItem = serde_json::from_value(fixture["work_item"].clone())?;
         let mut artifact: ArtifactRevision =

@@ -1,18 +1,17 @@
 //! Real daemon/worker E2E suite.
 //!
 //! Run with:
-//! `REFACT_SKIP_GUI_BUILD=1 cargo build && REFACT_DAEMON_E2E=1 REFACT_SKIP_GUI_BUILD=1 cargo test --test daemon_e2e -- --nocapture`
+//! `REFACT_SKIP_GUI_BUILD=1 cargo build && REFACT_DAEMON_E2E=1 REFACT_SKIP_GUI_BUILD=1 cargo test --test it -- daemon_e2e:: --nocapture`
 //!
 //! Without `REFACT_DAEMON_E2E=1`, every test prints `skipped: set REFACT_DAEMON_E2E=1` and
 //! returns before spawning the daemon. The tests set `REFACT_DAEMON_DIR` and `HOME` per process so
 //! daemon state, config, worker logs, and engine user dirs stay inside a temp directory.
 
-mod e2e_helpers;
 
 use std::time::{Duration, SystemTime};
 
 use chrono::{Datelike, Timelike, Utc};
-use e2e_helpers::{e2e_enabled, make_project, print_skip, wait_for, DaemonProcess, E2eDirs};
+use crate::e2e_helpers::{e2e_enabled, make_project, print_skip, wait_for, DaemonProcess, E2eDirs};
 use serde_json::{json, Value};
 
 fn future_minute_cron(offset_secs: i64) -> (String, u64) {
@@ -360,8 +359,8 @@ async fn worker_lsp_tcp_accepts_two_clients_concurrently() {
     let lsp_port = opened["worker"]["lsp_port"].as_u64().unwrap();
 
     let (first, second) = tokio::join!(
-        e2e_helpers::lsp_initialize(lsp_port, 1),
-        e2e_helpers::lsp_initialize(lsp_port, 2)
+        crate::e2e_helpers::lsp_initialize(lsp_port, 1),
+        crate::e2e_helpers::lsp_initialize(lsp_port, 2)
     );
     assert_eq!(first["id"], 1);
     assert!(first.get("result").is_some(), "first response: {first}");

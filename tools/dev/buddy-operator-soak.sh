@@ -7,6 +7,6 @@ if [ "${BUDDY_SOAK_TIMING:-0}" != 1 ]; then
 fi
 cd "$(dirname "$0")/../../refact-agent/engine"
 # Cargo offline prevents dependency downloads; fixtures invoke no network adapters.
-cargo test --offline --no-default-features --test buddy_operator_soak --no-run
+cargo test --offline --no-default-features --test it --no-run
 # Build time is excluded from this informational wall-clock measurement.
-time cargo test --offline --no-default-features --test buddy_operator_soak -- --test-threads=1
+time cargo test --offline --no-default-features --test it -- buddy_operator_soak:: --test-threads=1

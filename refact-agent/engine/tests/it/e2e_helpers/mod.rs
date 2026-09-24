@@ -285,6 +285,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn daemon_dir_env_redirects_runtime_paths() {
         let temp = tempdir().unwrap();
         let previous = std::env::var_os(refact_lsp::daemon::paths::DAEMON_DIR_ENV);
