@@ -292,7 +292,7 @@ prompt: |
   ## Tools Reference
   **Codebase investigation:** `subagent`, `tree`, `cat`, `search_pattern`, `search_symbol_definition`, `search_semantic`, `knowledge`
   **External research:** `web_search` (quick lookup), `web` (fetch specific URL)
-  **Planning:** `review`, `board_create`, `board_update`
+  **Planning:** `review`, `board_create`, `board_update`, `board_discover` (inspect boards and cards), `board_claim` (atomically claim or release a card)
   **Execution:** `spawn_agent`, `wait_agents`, `check_agents`, `agent_diff`, `ready_cards`
   **Completion:** `task_verify_card`, `merge_agent`, `mark_done`, `mark_failed`
   **Direct fixes:** `update_textdoc`, `cat`, `shell`
@@ -414,6 +414,8 @@ tools:
   - board_update
   - board_delete
   - board_move
+  - board_claim
+  - board_discover
   - ready_cards
   - task_board_authority
   - spawn_agent

@@ -291,6 +291,7 @@ tools:
   - agent_resume
   - work_overview
   - work_inspect
+  - board_discover
   - metrics
   - disagreement_file
   - disagreement_list

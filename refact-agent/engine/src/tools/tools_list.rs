@@ -1950,6 +1950,8 @@ mod tests {
             "agent_message",
             "agent_peer_grant",
             "progress_report",
+            "board_claim",
+            "board_discover",
         ] {
             assert_eq!(
                 builtin(name).len(),
@@ -1958,7 +1960,7 @@ mod tests {
             );
             assert!(builtin(name)[0].0, "{name} must remain a builtin");
         }
-        for name in ["work_overview", "work_inspect", "metrics"] {
+        for name in ["work_overview", "work_inspect", "metrics", "board_discover"] {
             assert_eq!(
                 builtin(name),
                 vec![(true, true)],
@@ -1986,6 +1988,41 @@ mod tests {
         assert!(
             tool_names.contains(&"web_search".to_string()),
             "{tool_names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn board_tools_are_available_only_to_modes_with_board_authority() {
+        let gcx = task_prompt_contract_gcx().await;
+
+        for mode in ["task_planner", "task_agent"] {
+            let tool_names = get_tools_for_mode(gcx.clone(), mode, None)
+                .await
+                .into_iter()
+                .map(|tool| tool.tool_description().name)
+                .collect::<Vec<_>>();
+            assert!(
+                tool_names.contains(&"board_claim".to_string()),
+                "{mode}: {tool_names:?}"
+            );
+            assert!(
+                tool_names.contains(&"board_discover".to_string()),
+                "{mode}: {tool_names:?}"
+            );
+        }
+
+        let agent_tools = get_tools_for_mode(gcx, "agent", None)
+            .await
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect::<Vec<_>>();
+        assert!(
+            agent_tools.contains(&"board_discover".to_string()),
+            "{agent_tools:?}"
+        );
+        assert!(
+            !agent_tools.contains(&"board_claim".to_string()),
+            "{agent_tools:?}"
         );
     }
 
