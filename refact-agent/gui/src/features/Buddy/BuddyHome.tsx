@@ -83,6 +83,8 @@ import {
 import { buddyActionResultMessage } from "./hooks/useExecuteBuddyAction";
 import { useBuddyControlAction } from "./hooks/useBuddyControlAction";
 import { BuddyDesk } from "./BuddyDesk";
+import { formatRelativeTime } from "./buddyUtils";
+import { HISTORY_PAGE_SIZE } from "./buddyHistory";
 import {
   buddyOperatorIdentity,
   useGetBuddyOperatorStatusQuery,
@@ -265,6 +267,26 @@ type ClipboardWriter = {
 
 const RECENT_ERROR_WINDOW_MS = 6 * 60 * 60 * 1000;
 const RECENT_ERROR_REFRESH_MS = 60 * 1000;
+
+function normalizeRecentErrorText(value: string | null | undefined): string {
+  return (value ?? "").trim().replace(/\s+/g, " ");
+}
+
+function recentErrorDetail(event: RecentBuddyError): string | null {
+  const normalizedTitle = normalizeRecentErrorText(event.title).toLowerCase();
+  return (
+    [event.failure_summary, event.description]
+      .map(normalizeRecentErrorText)
+      .find((detail) => {
+        const normalizedDetail = detail.toLowerCase();
+        return (
+          detail &&
+          normalizedDetail !== normalizedTitle &&
+          !normalizedDetail.startsWith(normalizedTitle)
+        );
+      }) ?? null
+  );
+}
 
 function uniqueRecentErrorIds(event: RecentBuddyError): string[] {
   const ids =
@@ -503,6 +525,8 @@ const BuddyHomeContent: React.FC = () => {
   const verdictReaction = useAppSelector(selectVerdictReaction);
   const [speechIndex, setSpeechIndex] = useState(0);
   const [recentErrorNow, setRecentErrorNow] = useState(() => Date.now());
+  const [recentErrorsVisibleCount, setRecentErrorsVisibleCount] =
+    useState(HISTORY_PAGE_SIZE);
   const [isRetryingBuddySnapshot, setIsRetryingBuddySnapshot] = useState(false);
   const [operatorRetryOutcome, setOperatorRetryOutcome] = useState<
     "recovered" | "unavailable" | "failed" | null
@@ -981,8 +1005,34 @@ const BuddyHomeContent: React.FC = () => {
         });
       }
     }
-    return Array.from(sigMap.values()).slice(0, 25);
+    return Array.from(sigMap.values());
   }, [nowPlaying, recentErrorNow, runtimeQueue]);
+  const recentErrorRows = useMemo(() => {
+    const rows: {
+      event: RecentBuddyError;
+      detail: string | null;
+      count: number;
+    }[] = [];
+    for (const event of recentErrors) {
+      const detail = recentErrorDetail(event);
+      const previous = rows.at(-1);
+      if (
+        previous &&
+        normalizeRecentErrorText(previous.event.title).toLowerCase() ===
+          normalizeRecentErrorText(event.title).toLowerCase() &&
+        previous.detail?.toLowerCase() === detail?.toLowerCase()
+      ) {
+        previous.count += event.occurrences ?? 1;
+      } else {
+        rows.push({ event, detail, count: event.occurrences ?? 1 });
+      }
+    }
+    return rows;
+  }, [recentErrors]);
+  const visibleRecentErrorRows = recentErrorRows.slice(
+    0,
+    recentErrorsVisibleCount,
+  );
 
   const handleInvestigateError = useCallback(
     (event: RecentBuddyError) => {
@@ -1437,7 +1487,7 @@ const BuddyHomeContent: React.FC = () => {
             {legacyCompatibility ? (
               <div className={styles.tabPanel}>
                 <BuddyRecentErrorsPanel
-                  recentErrors={recentErrors}
+                  recentErrors={recentErrors.slice(0, 25)}
                   onInvestigate={handleInvestigateError}
                   onDismiss={handleDismissError}
                 />
@@ -1449,16 +1499,44 @@ const BuddyHomeContent: React.FC = () => {
                     ? "No warnings in the last six hours."
                     : "Recent warnings, read-only."}
                 </Text>
-                {recentErrors.map((event) => (
-                  <Text
-                    key={event.id}
-                    size="1"
-                    color="gray"
-                    className={styles.tabNoticeRow}
+                {recentErrorRows.length > 0 && (
+                  <ul
+                    aria-label="Recent warnings"
+                    className={styles.tabNoticeItems}
                   >
-                    {event.title}: {event.failure_summary ?? event.description}
-                  </Text>
-                ))}
+                    {visibleRecentErrorRows.map(({ event, detail, count }) => (
+                      <li key={event.id} className={styles.tabNoticeRow}>
+                        <Text size="1" color="gray">
+                          {event.title}
+                          {count > 1 && ` ×${count}`}
+                        </Text>
+                        {detail && (
+                          <Text size="1" color="gray">
+                            {detail}
+                          </Text>
+                        )}
+                        {event.created_at && (
+                          <Text size="1" color="gray">
+                            {formatRelativeTime(event.created_at)}
+                          </Text>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {visibleRecentErrorRows.length < recentErrorRows.length && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() =>
+                      setRecentErrorsVisibleCount(
+                        (count) => count + HISTORY_PAGE_SIZE,
+                      )
+                    }
+                  >
+                    Show more
+                  </Button>
+                )}
               </div>
             )}
           </Tabs.Content>

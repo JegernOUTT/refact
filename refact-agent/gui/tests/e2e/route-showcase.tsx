@@ -97,6 +97,9 @@ const operatorParam = new URLSearchParams(window.location.search).get(
 const sceneSpeechParam = new URLSearchParams(window.location.search).has(
   "scene_speech",
 );
+const recentErrorsFixtureParam = new URLSearchParams(
+  window.location.search,
+).has("recent_errors_fixture");
 const showcaseProject = {
   project_id: "showcase",
   canonical_root: "/workspace/refact",
@@ -264,6 +267,30 @@ const buddyRuntimeEvent: BuddyRuntimeEvent = {
   chat_id: "showcase-chat",
 };
 
+const buddyRecentErrorsFixture: BuddyRuntimeEvent[] = [
+  {
+    ...buddyRuntimeEvent,
+    id: "recent-error-title-summary",
+    title: "Model unavailable",
+    failure_summary: "Model unavailable",
+    created_at: new Date(Date.now() - 1000).toISOString(),
+  },
+  ...Array.from({ length: 3 }, (_, index) => ({
+    ...buddyRuntimeEvent,
+    id: `recent-error-repeated-${index}`,
+    title: "Provider unavailable",
+    failure_summary: "Provider unavailable — retry later",
+    created_at: new Date(Date.now() - 2000).toISOString(),
+  })),
+  ...Array.from({ length: 25 }, (_, index) => ({
+    ...buddyRuntimeEvent,
+    id: `recent-error-distinct-${index}`,
+    title: `Distinct warning ${index}`,
+    failure_summary: `Additional detail ${index}`,
+    created_at: new Date(Date.now() - 3000 - index * 1000).toISOString(),
+  })),
+];
+
 const buddyConversations: BuddyConversationEntry[] = [
   {
     id: "showcase-buddy-chat",
@@ -427,7 +454,9 @@ const buddySnapshot: BuddySnapshot = {
         speech_intent: "speech_insight",
       }
     : null,
-  runtime_queue: [buddyRuntimeEvent],
+  runtime_queue: recentErrorsFixtureParam
+    ? buddyRecentErrorsFixture
+    : [buddyRuntimeEvent],
   now_playing: null,
   pulse: buddyPulse,
   opportunities: [buddyOpportunity],
