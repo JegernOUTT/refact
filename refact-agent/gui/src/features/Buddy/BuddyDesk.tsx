@@ -288,10 +288,12 @@ function WorkDetail({
   item,
   endpointIdentity,
   onBack,
+  onSnoozeChange,
 }: {
   item: WorkItem;
   endpointIdentity: string;
   onBack: () => void;
+  onSnoozeChange: () => void;
 }) {
   const { currentData, isFetching, error, refetch } =
     useGetBuddyOperatorArtifactQuery(
@@ -407,6 +409,7 @@ function WorkDetail({
                 item={item}
                 artifact={artifact}
                 identity={endpointIdentity}
+                onChange={onSnoozeChange}
               />
             </div>
           </div>
@@ -493,6 +496,9 @@ function DeskContent({
   const [actionVerbs, setActionVerbs] = useState<Record<string, string>>({});
   const [view, setView] = useState<WorkView>(DEFAULT_VIEW);
   const [selectedId, setSelectedId] = useState<string | null>(workId ?? null);
+  const [selectedOverride, setSelectedOverride] = useState<WorkItem | null>(
+    null,
+  );
   const [expanded, setExpanded] = useState(false);
   const linkedWork = useGetBuddyOperatorWorkItemQuery(
     {
@@ -505,7 +511,7 @@ function DeskContent({
   const [search, setSearch] = useState("");
   const [attention, setAttention] = useState<
     "all" | "unread" | "snoozed" | "unsnoozed"
-  >("all");
+  >("unsnoozed");
   const listRef = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement | null>(null);
   const viewTrigger = useRef<HTMLButtonElement | null>(null);
@@ -516,6 +522,8 @@ function DeskContent({
   const [refreshPending, setRefreshPending] = useState(false);
   const [refreshNotice, setRefreshNotice] = useState(false);
   const refreshFocusPending = useRef(false);
+  const snoozeFocusPending = useRef(false);
+  const snoozedSelectionId = useRef<string | null>(null);
   const {
     currentData,
     isFetching,
@@ -554,7 +562,8 @@ function DeskContent({
   const selected =
     selectedId === workId
       ? linkedWork.currentData?.data.value
-      : records.find((record) => record.value.id === selectedId)?.value;
+      : records.find((record) => record.value.id === selectedId)?.value ??
+        (selectedOverride?.id === selectedId ? selectedOverride : undefined);
   const query = search.trim().toLocaleLowerCase();
   const filtered = records.filter(
     ({ value }) => viewForState[value.state] === view,
@@ -566,7 +575,7 @@ function DeskContent({
   const showActionVerb =
     actionVerbsReady &&
     new Set(filtered.map(({ value }) => actionVerbs[value.id])).size > 1;
-  const filtersApplied = query !== "" || attention !== "all";
+  const filtersApplied = query !== "" || attention !== "unsnoozed";
   const collapsed =
     !expanded &&
     selectedId === null &&
@@ -635,6 +644,7 @@ function DeskContent({
       selectedId !== workId &&
       !currentData.data.some(({ value }) => value.id === selectedId)
     ) {
+      if (snoozedSelectionId.current === selectedId) return;
       refreshFocusPending.current = true;
       trigger.current = null;
       setExpanded(true);
@@ -656,9 +666,22 @@ function DeskContent({
     if (!refreshFocusPending.current || selectedId !== null) return;
     const firstRow =
       listRef.current?.querySelector<HTMLButtonElement>("ul li button");
-    (firstRow ?? refreshButton.current)?.focus({ preventScroll: true });
+    (firstRow ?? refreshButton.current ?? expandButton.current)?.focus({
+      preventScroll: true,
+    });
     refreshFocusPending.current = false;
   }, [records, selectedId]);
+
+  useLayoutEffect(() => {
+    if (!snoozeFocusPending.current || selectedId !== null || isFetching)
+      return;
+    const firstRow =
+      listRef.current?.querySelector<HTMLButtonElement>("ul li button");
+    (firstRow ?? refreshButton.current ?? expandButton.current)?.focus({
+      preventScroll: true,
+    });
+    snoozeFocusPending.current = false;
+  }, [isFetching, records, selectedId]);
 
   const refresh = () => {
     setPrevious([]);
@@ -670,6 +693,8 @@ function DeskContent({
   };
   const back = () => {
     setSelectedId(null);
+    setSelectedOverride(null);
+    snoozedSelectionId.current = null;
     if (config.host === "web" && config.engineServed) {
       const url = new URL(window.location.href);
       url.searchParams.delete("buddy_work");
@@ -687,8 +712,17 @@ function DeskContent({
   };
   const open = (item: WorkItem, source: HTMLButtonElement) => {
     trigger.current = source;
+    setSelectedOverride(null);
+    snoozedSelectionId.current = null;
     setSelectedId(item.id);
     updateLink(item);
+  };
+  const onSnoozeChange = () => {
+    if (!selected) return;
+    setSelectedOverride(selected);
+    snoozedSelectionId.current = selected.id;
+    snoozeFocusPending.current = true;
+    void refetch();
   };
   const recordActionVerb = useCallback((id: string, verb: string) => {
     setActionVerbs((current) =>
@@ -792,24 +826,26 @@ function DeskContent({
               </Button>
             ))}
           </nav>
-          {(records.length > 0 || filtersApplied) && !error && (
+          {(records.length > 0 || filtersApplied || expanded) && !error && (
             <div className={styles.filters}>
-              <label className={styles.search}>
-                <Text size="1" color="gray">
-                  Search saved work
-                </Text>
-                <input
-                  type="search"
-                  value={search}
-                  maxLength={256}
-                  onChange={(event) => {
-                    setSearch(event.target.value);
-                    setCursor(undefined);
-                    setPrevious([]);
-                    setSelectedId(null);
-                  }}
-                />
-              </label>
+              {(records.length > 0 || query !== "") && (
+                <label className={styles.search}>
+                  <Text size="1" color="gray">
+                    Search saved work
+                  </Text>
+                  <input
+                    type="search"
+                    value={search}
+                    maxLength={256}
+                    onChange={(event) => {
+                      setSearch(event.target.value);
+                      setCursor(undefined);
+                      setPrevious([]);
+                      setSelectedId(null);
+                    }}
+                  />
+                </label>
+              )}
               <label className={styles.search}>
                 <Text size="1" color="gray">
                   Report attention
@@ -831,10 +867,10 @@ function DeskContent({
                     setSelectedId(null);
                   }}
                 >
-                  <option value="all">All saved work</option>
+                  <option value="unsnoozed">Active reports</option>
                   <option value="unread">Unread reports</option>
                   <option value="snoozed">Snoozed reports</option>
-                  <option value="unsnoozed">Not snoozed</option>
+                  <option value="all">All saved work, including snoozed</option>
                 </select>
               </label>
             </div>
@@ -908,6 +944,7 @@ function DeskContent({
             item={selected}
             endpointIdentity={endpointIdentity}
             onBack={back}
+            onSnoozeChange={onSnoozeChange}
           />
         ) : (
           filtered.length > 0 && (

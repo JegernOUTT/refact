@@ -513,7 +513,7 @@ const BuddyHomeContent: React.FC = () => {
       endpoint_identity: operatorIdentity,
       view: "needs_you",
       search: "",
-      attention: "all",
+      attention: "unsnoozed",
     },
     { skip: !operatorEnabled, refetchOnMountOrArgChange: true },
   );

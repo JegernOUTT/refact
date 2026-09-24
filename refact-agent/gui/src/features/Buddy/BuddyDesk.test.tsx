@@ -21,6 +21,7 @@ import type {
   WorkItemState,
 } from "./operatorTypes";
 import type { DeskAction } from "../../services/refact/buddyOperator";
+import { useGetBuddySnapshotQuery } from "../../services/refact/buddy";
 
 const project = { project_id: "project", canonical_root: "/scratch/project" };
 const config = {
@@ -63,6 +64,11 @@ const artifact: ArtifactRevision = {
   },
 };
 const record = <T,>(value: T) => ({ value, revision: 1, change_seq: 1 });
+
+function BuddySnapshotProbe() {
+  useGetBuddySnapshotQuery(undefined);
+  return null;
+}
 
 function readGuiSource(path: string): Promise<string> {
   return readFile(resolve(process.cwd(), "src", path), "utf8");
@@ -378,6 +384,171 @@ describe("BuddyDesk", () => {
     );
     await waitFor(() => expect(filters).toContain("unread"));
   });
+
+  it("defaults to active reports and exposes snoozed work only through archive filters", async () => {
+    const filters: string[] = [];
+    server.use(
+      http.get("*/v1/buddy/work", ({ request }) => {
+        const attention = new URL(request.url).searchParams.get("attention");
+        filters.push(attention ?? "");
+        return HttpResponse.json(
+          envelope(attention === "unsnoozed" ? [] : [record(item)]),
+        );
+      }),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    expect(
+      await screen.findByText("Nothing needs you right now."),
+    ).toBeTruthy();
+    expect(filters[0]).toBe("unsnoozed");
+    fireEvent.click(screen.getByRole("button", { name: "Browse saved work" }));
+    const attention = screen.getByRole("combobox", {
+      name: "Report attention",
+    });
+    expect(attention).toHaveValue("unsnoozed");
+    expect(
+      screen.queryByRole("button", { name: /Provider setup diagnosis/ }),
+    ).toBeNull();
+    fireEvent.change(attention, { target: { value: "snoozed" } });
+    expect(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    ).toBeTruthy();
+    fireEvent.change(
+      screen.getByRole("combobox", { name: "Report attention" }),
+      {
+        target: { value: "all" },
+      },
+    );
+    expect(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    ).toBeTruthy();
+    expect(filters).toContain("snoozed");
+    expect(filters).toContain("all");
+    expect(
+      screen.getByRole("option", { name: "Active reports" }),
+    ).toHaveAttribute("value", "unsnoozed");
+    expect(
+      screen.getByRole("option", { name: "All saved work, including snoozed" }),
+    ).toHaveAttribute("value", "all");
+  });
+
+  it("refetches the active list once after snoozing and keeps the report open", async () => {
+    let listRequests = 0;
+    let snapshotRequests = 0;
+    let snoozed = false;
+    const snoozeRecord = {
+      schema_version: 1,
+      project,
+      work_id: item.id,
+      artifact_id: artifact.artifact_id,
+      artifact_revision: artifact.revision,
+      until: "2099-01-01T00:00:00Z",
+    };
+    server.use(
+      http.get("*/v1/buddy", () => {
+        snapshotRequests += 1;
+        return HttpResponse.json({});
+      }),
+      http.get("*/v1/buddy/work", ({ request }) => {
+        listRequests += 1;
+        const attention = new URL(request.url).searchParams.get("attention");
+        const visible =
+          attention === "snoozed" ? snoozed : attention === "all" || !snoozed;
+        return HttpResponse.json(envelope(visible ? [record(item)] : []));
+      }),
+      http.get("*/v1/buddy/work/:id/snooze", () =>
+        HttpResponse.json(envelope(snoozed ? snoozeRecord : null)),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+      http.post("*/v1/buddy/work/:id/snooze", async ({ request }) => {
+        const body = (await request.json()) as { minutes: number | null };
+        snoozed = body.minutes !== null;
+        return HttpResponse.json(envelope(snoozed ? snoozeRecord : null));
+      }),
+    );
+    render(
+      <>
+        <BuddySnapshotProbe />
+        <BuddyDesk />
+      </>,
+      { preloadedState: config },
+    );
+    await waitFor(() => expect(snapshotRequests).toBe(1));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    await screen.findByRole("heading", { name: artifact.title });
+    const snooze = await screen.findByRole("button", {
+      name: "Snooze for one hour",
+    });
+    await waitFor(() => expect(snooze).toBeEnabled());
+    fireEvent.click(snooze);
+    expect(await screen.findByText(/Snoozed until/)).toBeTruthy();
+    await waitFor(() => expect(listRequests).toBe(2));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /Provider setup diagnosis/ }),
+      ).toBeNull(),
+    );
+    expect(listRequests).toBe(2);
+    expect(snapshotRequests).toBe(1);
+    expect(
+      screen.queryByText("That item is no longer in this view."),
+    ).toBeNull();
+    expect(screen.getByRole("article", { name: "Work detail" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: artifact.title })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "End snooze" }));
+    await waitFor(() => expect(listRequests).toBe(3));
+    expect(listRequests).toBe(3);
+    expect(snapshotRequests).toBe(1);
+    expect(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Back to work list" }));
+    await waitFor(() =>
+      expect(document.activeElement?.matches("ul li button")).toBe(true),
+    );
+  });
+
+  it("does not claim an unsnoozed report while its first snooze-status request is pending", async () => {
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(item)])),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+      http.get("*/v1/buddy/work/:id/snooze", async () => {
+        await pending;
+        return HttpResponse.json(envelope(null));
+      }),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    await screen.findByRole("heading", { name: artifact.title });
+    const snooze = within(screen.getByRole("region", { name: "Work snooze" }));
+    expect(await snooze.findByRole("status")).toHaveTextContent(
+      "Loading snooze status…",
+    );
+    expect(snooze.queryByText("This report is not snoozed.")).toBeNull();
+    expect(
+      snooze.getByRole("button", { name: "Snooze for one hour" }),
+    ).toBeDisabled();
+    expect(
+      snooze.getByRole("button", { name: "Snooze for one day" }),
+    ).toBeDisabled();
+    release?.();
+    expect(await snooze.findByText("This report is not snoozed.")).toBeTruthy();
+  });
+
   it("loads a real API-shaped report without navigating to a worker chat", async () => {
     server.use(
       http.get("*/v1/buddy/work", () =>
