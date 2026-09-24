@@ -49,7 +49,6 @@ serde = { version = "1", features = ["rc", "derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "signal", "process"] }
 tracing = "0.1"
-heed = "0.22.0"
 indexmap = { version = "1.9.1", features = ["serde-1"] }
 itertools = "0.14.0"
 lazy_static = "1.4.0"
@@ -57,7 +56,6 @@ libc = "0.2"
 md5 = "0.7"
 regex = "1.9.5"
 ropey = "1.6"
-serde_cbor = "0.11.2"
 tempfile = "3.8.1"
 image = { version = "0.25.6", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 tokenizers = { version = "0.21.0", default-features = false, features = ["onig"] }
@@ -235,14 +233,13 @@ pnet_datalink = "0.35.0"
 # Pinned transitive dep (via rustls -> aws-lc-rs): aws-lc-sys 0.42.0's build script
 # aborts with a false-positive "COMPILER BUG DETECTED" (gcc bug 95189) on the CI
 # toolchain, breaking the x86_64-unknown-linux-gnu engine build. 0.38.0 builds cleanly
-# and is compatible with aws-lc-rs 1.16.x. Cargo.lock is gitignored, so pin here.
+# and is compatible with aws-lc-rs 1.16.x. Cargo.lock is tracked; keep this pin here.
 aws-lc-sys = "=0.38.0"
 
 refact-core = { path = "crates/refact-core" }
 refact-chat-api = { path = "crates/refact-chat-api" }
 refact-vecdb = { path = "crates/refact-vecdb" }
 refact-codegraph = { path = "crates/refact-codegraph" }
-refact-codegraph-parsers = { path = "crates/refact-codegraph-parsers" }
 refact-codehealth = { path = "crates/refact-codehealth" }
 refact-git-intel = { path = "crates/refact-git-intel" }
 refact-codewiki = { path = "crates/refact-codewiki" }
@@ -292,14 +289,12 @@ iana-time-zone = "0.1"
 diff = "0.1.13"
 dunce = "1.0.5"
 fd-lock = "4.0.4"
-dyn_partial_eq = "=0.1.2"
 filetime = "0.2.25"
 futures = "0.3"
 git2 = "0.20.2"
 glob = "0.3.1"
 hashbrown = "0.15.2"
 headless_chrome = "1.0.16"
-heed = "0.22.0"
 image.workspace = true
 home = "0.5"
 hostname = "0.4"
@@ -310,15 +305,12 @@ indexmap = { version = "1.9.1", features = ["serde-1"] }
 itertools = "0.14.0"
 lazy_static = "1.4.0"
 libc.workspace = true
-libsqlite3-sys = "0.28.0"
 log = "0.4.20"
 md5 = "0.7"
 mdns-sd = "0.20.0"
 mimalloc = { version = "0.1", default-features = false }
 notify = { version = "8.0.0", features = ["serde"] }
 parking_lot = { version = "0.12.1", features = ["serde"] }
-portable-pty = "0.9"
-process-wrap = { version = "8.0.2", features = ["tokio1"] }
 rand = "0.8.5"
 rayon = "1.8.0"
 roxmltree = "0.20.0"
@@ -332,7 +324,6 @@ rusqlite = { version = "0.31.0", features = ["bundled"] }
 rust-embed = { version = "8.5.0", features = ["include-exclude"] }
 percent-encoding = "2.3"
 serde = { version = "1", features = ["rc", "derive"] }
-serde_cbor = "0.11.2"
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9.31"
 # all features = ["compression", "docs", "event_log", "failpoints", "io_uring", "lock_free_delays", "measure_allocs", "miri_optimizations", "mutex", "no_inline", "no_logs", "pretty_backtrace", "testing"]
@@ -344,7 +335,6 @@ shell-escape = "0.1.5"
 select = "0.6.0"
 similar = "2.3.0"
 sqlite-vec = { version = "0.1.6" }
-strip-ansi-escapes = "0.2.1"
 strsim = "0.11.1"
 structopt = "0.3"
 sysinfo = { version = "0.35.2", default-features = false, features = ["system"] }
@@ -354,7 +344,6 @@ tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "
 tokio-rusqlite = "0.5.0"
 tokio-util = { version = "0.7.12", features = ["compat"] }
 tokio-tungstenite = { version = "0.21.0", features = ["rustls-tls-webpki-roots"] }
-tar = "0.4"
 tower-http = { version = "0.4.0", features = ["cors"] }
 tower-lsp = "0.20"
 tracing = "0.1"
@@ -362,14 +351,6 @@ tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tree-sitter = "0.25"
 tree-sitter-bash = { workspace = true }
-tree-sitter-cpp = "0.23"
-tree-sitter-java = "0.23"
-tree-sitter-javascript = "0.25"
-tree-sitter-kotlin-ng = "1.1.0"
-tree-sitter-python = "0.25"
-tree-sitter-rust = "0.24"
-tree-sitter-typescript = "0.23"
-typetag = "0.2"
 unicode-width = "0.2"
 # SSE event decoding for the legacy MCP HTTP+SSE client transport (same crate rmcp uses internally).
 sse-stream = "0.2"
@@ -386,8 +367,10 @@ zerocopy = "0.8.14"
 # Pinned to a known-good rmcp rev because upstream main drifts and Cargo.lock is gitignored.
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "63583b164f54ec6ed2f17c98450487c747d34aeb", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
 oauth2 = { version = "5.0", default-features = false }
-thiserror = "2.0.12"
 dirs = "5.0"
+
+[package.metadata.cargo-machete]
+ignored = ["aws-lc-sys", "tokio-util", "proptest", "astral-tokio-tar"]
 
 [dev-dependencies]
 refact-privacy = { path = "crates/refact-privacy", features = ["test-util"] }

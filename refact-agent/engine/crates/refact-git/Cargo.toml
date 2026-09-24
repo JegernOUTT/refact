@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 refact-core = { path = "../refact-core" }
 serde.workspace = true
-serde_json.workspace = true
 tracing.workspace = true
 git2 = "0.20.2"
 chrono = { version = "0.4.31", features = ["serde"] }

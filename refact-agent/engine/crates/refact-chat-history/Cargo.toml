@@ -14,7 +14,6 @@ md5.workspace = true
 sha2 = "0.10.8"
 hex = "0.4.3"
 tracing.workspace = true
-tokio = { workspace = true, features = ["time", "macros"] }
 
 [dev-dependencies]
 base64 = "0.22.1"
