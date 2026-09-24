@@ -450,7 +450,10 @@ function DeskContent({
   const [attention, setAttention] = useState<
     "all" | "unread" | "snoozed" | "unsnoozed"
   >("all");
+  const listRef = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement | null>(null);
+  const viewTrigger = useRef<HTMLButtonElement | null>(null);
+  const restoreViewFocus = useRef(false);
   const expandButton = useRef<HTMLButtonElement>(null);
   const { currentData, isFetching, error, refetch } =
     useGetBuddyOperatorWorkQuery(
@@ -522,8 +525,19 @@ function DeskContent({
   }, [currentData, previous]);
 
   useLayoutEffect(() => {
-    if (selectedId === null) trigger.current?.focus({ preventScroll: true });
+    if (selectedId === null && trigger.current && !restoreViewFocus.current) {
+      trigger.current?.focus({ preventScroll: true });
+    }
   }, [selectedId]);
+
+  useLayoutEffect(() => {
+    if (selectedId !== null || !restoreViewFocus.current || isFetching) return;
+    const firstRow =
+      listRef.current?.querySelector<HTMLButtonElement>("ul li button");
+    if (firstRow) firstRow.focus({ preventScroll: true });
+    else viewTrigger.current?.focus({ preventScroll: true });
+    restoreViewFocus.current = false;
+  }, [isFetching, selectedId, view]);
 
   const refresh = () => {
     setPrevious([]);
@@ -629,7 +643,7 @@ function DeskContent({
         </Surface>
       )}
       <div className={styles.layout}>
-        <div className={styles.list}>
+        <div className={styles.list} ref={listRef}>
           <nav className={styles.views} aria-label="Work views">
             {views.map((label) => (
               <Button
@@ -637,7 +651,9 @@ function DeskContent({
                 size="sm"
                 variant={view === label ? "primary" : "ghost"}
                 aria-pressed={view === label}
-                onClick={() => {
+                onClick={(event) => {
+                  viewTrigger.current = event.currentTarget;
+                  restoreViewFocus.current = selectedId !== null;
                   setView(label);
                   setSelectedId(null);
                   setCursor(undefined);
