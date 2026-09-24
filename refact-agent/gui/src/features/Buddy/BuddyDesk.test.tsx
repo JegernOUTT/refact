@@ -68,6 +68,10 @@ function readGuiSource(path: string): Promise<string> {
   return readFile(resolve(process.cwd(), "src", path), "utf8");
 }
 
+function literal(text: string): RegExp {
+  return new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+}
+
 function readCssBlock(source: string, selector: string): string {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = new RegExp(`(^|\\n)\\s*${escaped}\\s*{`).exec(source);
@@ -400,6 +404,110 @@ describe("BuddyDesk", () => {
     expect(store.getState().pages.at(-1)?.name).toBe("login page");
     fireEvent.click(screen.getByRole("button", { name: "Back to work list" }));
     await waitFor(() => expect(document.activeElement).toBe(row));
+  });
+
+  it("shows a multiline report title remainder once in the detail body", async () => {
+    const multilineArtifact = {
+      ...artifact,
+      title: "Report headline\n\nExtra detail not in body",
+      body: "Body content without the extra title detail.",
+    };
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(item)])),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(multilineArtifact))),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    expect(
+      await screen.findByRole("heading", {
+        level: 3,
+        name: "Report headline",
+      }),
+    ).toBeTruthy();
+    const body = screen.getByText("Extra detail not in body");
+    expect(body.closest(`.${styles.disclosureBody}`)).toBeTruthy();
+    expect(
+      within(
+        screen.getByText("The full write-up").closest("details")!,
+      ).getAllByText("Extra detail not in body", { exact: true }),
+    ).toHaveLength(1);
+  });
+
+  it("does not repeat a title remainder already present in the detail body", async () => {
+    const multilineArtifact = {
+      ...artifact,
+      title: "Report headline\n\nExtra detail included",
+      body: "The body already contains Extra detail included in this sentence.",
+    };
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(item)])),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(multilineArtifact))),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    expect(
+      await screen.findByRole("heading", {
+        level: 3,
+        name: "Report headline",
+      }),
+    ).toBeTruthy();
+    const details = screen.getByText("The full write-up").closest("details");
+    if (!details) throw new Error("report body disclosure missing");
+    expect(
+      within(details).getAllByText(/Extra detail included/, { exact: false }),
+    ).toHaveLength(1);
+  });
+
+  it("renders only a multiline title headline in the work row", async () => {
+    const multilineItem = {
+      ...item,
+      title: "Headline\n\nBody text",
+      severity: "high",
+      scope: "src/config",
+    };
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(multilineItem)])),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    const row = await screen.findByRole("button", { name: /Headline/ });
+    expect(within(row).getByTestId("buddy-desk-row-title")).toHaveTextContent(
+      /^Headline$/,
+    );
+    expect(row).not.toHaveTextContent("Body text");
+    expect(row).toHaveAccessibleName(/Headline/);
+    expect(row).toHaveAccessibleName(/High severity/);
+    expect(row).toHaveAccessibleName(/src\/config/);
+    expect(row).toHaveAccessibleName(/Needs attention/);
+    expect(row).toHaveAccessibleName(/\d+d ago/);
+    expect(row).not.toHaveAccessibleName(/Body text/);
+    expect(row).not.toHaveAccessibleName(
+      literal(new Date(multilineItem.last_material_change_at).toLocaleString()),
+    );
+    const describedTimestamp = document.getElementById(
+      row.getAttribute("aria-describedby") ?? "",
+    );
+    expect(describedTimestamp).toHaveTextContent(
+      new Date(multilineItem.last_material_change_at).toLocaleString(),
+    );
+    expect(row).toHaveAccessibleDescription(
+      expect.stringContaining(
+        new Date(multilineItem.last_material_change_at).toLocaleString(),
+      ),
+    );
   });
 
   it("keeps the open report and shows its refreshed revision", async () => {
@@ -1807,19 +1915,32 @@ describe("BuddyDesk", () => {
     ).toBeNull();
   });
 
-  it("carries an absolute timestamp in the row tooltip and accessible name", async () => {
+  it("carries an absolute timestamp in the row tooltip and accessible description", async () => {
+    const timestampItem = { ...item, severity: "high", scope: "src/config" };
     server.use(
       http.get("*/v1/buddy/work", () =>
-        HttpResponse.json(envelope([record(item)])),
+        HttpResponse.json(envelope([record(timestampItem)])),
       ),
     );
     render(<BuddyDesk />, { preloadedState: config });
     const row = await screen.findByRole("button", {
       name: /Provider setup diagnosis/,
     });
-    const stamp = new Date(item.last_material_change_at).toLocaleString();
+    const stamp = new Date(
+      timestampItem.last_material_change_at,
+    ).toLocaleString();
     expect(row.querySelector("[title]")).toHaveAttribute("title", stamp);
-    expect(row.textContent).toContain(stamp);
+    expect(row).toHaveAccessibleDescription(expect.stringContaining(stamp));
+    expect(row).not.toHaveAccessibleName(literal(stamp));
+    expect(row).toHaveAccessibleName(/Provider setup diagnosis/);
+    expect(row).toHaveAccessibleName(/High severity/);
+    expect(row).toHaveAccessibleName(/src\/config/);
+    expect(row).toHaveAccessibleName(/\d+d ago/);
+    const describedTimestamp = document.getElementById(
+      row.getAttribute("aria-describedby") ?? "",
+    );
+    expect(describedTimestamp).toHaveTextContent(stamp);
+    expect(row).toHaveAccessibleDescription(expect.stringContaining(stamp));
   });
 
   it("hides an opaque resource effect behind its resource kind", async () => {

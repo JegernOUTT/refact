@@ -1408,6 +1408,7 @@ const BuddyHomeContent: React.FC = () => {
             activeIndex={tabOrder.indexOf(activeTab)}
             itemCount={tabOrder.length}
             className={styles.tabsList}
+            aria-label="Buddy sections"
           >
             {tabOrder.map((tab) => (
               <Tabs.Trigger key={tab} value={tab}>

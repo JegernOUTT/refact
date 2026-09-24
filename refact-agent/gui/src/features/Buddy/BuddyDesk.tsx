@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -31,6 +32,7 @@ import { BuddyReportReadState } from "./BuddyReportReadState";
 import { BuddyArtifactBody } from "./BuddyArtifactBody";
 import { BuddyReportHistory } from "./BuddyReportHistory";
 import { BuddyWorkSnooze } from "./BuddyWorkSnooze";
+import { headline } from "./buddyUtils";
 import styles from "./BuddyDesk.module.css";
 
 const views = ["Needs you", "Working on", "Delivered", "Watching"] as const;
@@ -133,6 +135,22 @@ function changedAtAbsolute(value: string): string | null {
   return new Date(parsed).toLocaleString();
 }
 
+function titleRemainder(title: string, body?: string): string | null {
+  const lines = title.split(/\r?\n/);
+  const headlineIndex = lines.findIndex((line) => line.trim() !== "");
+  if (headlineIndex < 0) return null;
+  const remainder = lines
+    .slice(headlineIndex + 1)
+    .join(" ")
+    .trim();
+  if (!remainder) return null;
+  const normalize = (value: string) =>
+    value.toLowerCase().replace(/\s+/g, " ").trim();
+  return body && normalize(body).includes(normalize(remainder))
+    ? null
+    : remainder;
+}
+
 function WorkRow({
   item,
   endpointIdentity,
@@ -173,6 +191,7 @@ function WorkRow({
   else if (action) verb = action.label;
   const changed = changedAt(item.last_material_change_at);
   const absolute = changedAtAbsolute(item.last_material_change_at);
+  const absoluteTimeId = useId();
   const severity = severityLabel(item);
   const scope = meaningfulText(item.scope);
   const summary = problemSummary(item);
@@ -184,6 +203,7 @@ function WorkRow({
       <button
         className={styles.item}
         aria-current={selected ? "true" : undefined}
+        aria-describedby={absolute ? absoluteTimeId : undefined}
         onClick={(event) => onOpen(item, event.currentTarget)}
       >
         <span className={styles.itemContent}>
@@ -202,7 +222,7 @@ function WorkRow({
               className={styles.name}
               data-testid="buddy-desk-row-title"
             >
-              {item.title}
+              {headline(item.title)}
             </Text>
           </span>
           {summary && (
@@ -240,10 +260,16 @@ function WorkRow({
             {changed && (
               <Text size="1" color="gray" title={absolute ?? undefined}>
                 {changed}
-                {absolute && (
-                  <span className={styles.srOnly}>{` · ${absolute}`}</span>
-                )}
               </Text>
+            )}
+            {absolute && (
+              <span
+                id={absoluteTimeId}
+                className={styles.srOnly}
+                aria-hidden="true"
+              >
+                {absolute}
+              </span>
             )}
           </span>
         </span>
@@ -283,6 +309,9 @@ function WorkDetail({
     artifact.project.canonical_root === item.project.canonical_root;
   const backButton = useRef<HTMLButtonElement>(null);
   const subject = readableSubject(item);
+  const remainder = artifact
+    ? titleRemainder(artifact.title, artifact.body)
+    : titleRemainder(item.title);
   useEffect(() => {
     backButton.current?.focus();
   }, []);
@@ -305,10 +334,15 @@ function WorkDetail({
             : humanizeIdentifier(item.state)}
         </Text>
       </div>
+      {!item.current_artifact_id && remainder && (
+        <Text as="p" size="2" color="gray">
+          {remainder}
+        </Text>
+      )}
       {!item.current_artifact_id && (
         <Surface variant="surface-1" className={styles.note} role="status">
           <Text size="2" color="gray">
-            {item.title} has not produced a result yet.
+            {headline(item.title)} has not produced a result yet.
           </Text>
         </Surface>
       )}
@@ -344,7 +378,7 @@ function WorkDetail({
             className={styles.headline}
           >
             <Text as="h3" size="3" weight="bold" className={styles.title}>
-              {artifact.title}
+              {headline(artifact.title)}
             </Text>
             <Text as="p" size="3" className={styles.conclusion}>
               {artifact.conclusion}
@@ -379,6 +413,11 @@ function WorkDetail({
           <details className={styles.disclosure} open>
             <summary className={styles.summary}>The full write-up</summary>
             <div className={styles.disclosureBody}>
+              {remainder && (
+                <Text as="p" size="2" color="gray">
+                  {remainder}
+                </Text>
+              )}
               <BuddyArtifactBody body={artifact.body} />
               {artifact.uncertainty && (
                 <section aria-label="Limitations" className={styles.limits}>

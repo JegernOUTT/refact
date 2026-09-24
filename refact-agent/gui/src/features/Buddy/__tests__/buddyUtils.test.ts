@@ -3,6 +3,7 @@ import {
   anxietyFromNeglect,
   computeXpFill,
   formatReportTime,
+  headline,
   humanizeResourceReference,
   xpDisplay,
 } from "../buddyUtils";
@@ -26,6 +27,20 @@ describe("xpDisplay", () => {
 
   it("clamps overflow to the goal", () => {
     expect(xpDisplay(60, 35, false)).toBe("35 / 35 XP");
+  });
+});
+
+describe("headline", () => {
+  it.each([
+    ["Single line", "Single line"],
+    ["a\n\nb", "a"],
+    ["\n\n headline \nbody", "headline"],
+    ["  \n\t\n body", "body"],
+    ["first\r\n\r\nsecond", "first"],
+    ["", ""],
+    [" \n \t ", ""],
+  ])("returns the first non-empty trimmed line for %j", (title, expected) => {
+    expect(headline(title)).toBe(expected);
   });
 });
 

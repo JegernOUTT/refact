@@ -304,6 +304,9 @@ describe("BuddyHome", () => {
     const { user } = render(<BuddyHome />, { store });
 
     expect(await screen.findByTestId("buddy-home-content")).toBeInTheDocument();
+    expect(
+      screen.getByRole("tablist", { name: "Buddy sections" }),
+    ).toBeInTheDocument();
     // The scene is hoisted out of the Play tab, so it owns the character and
     // the presence header no longer repeats a second avatar.
     expect(screen.getByTestId("buddy-home-hero")).toBeInTheDocument();

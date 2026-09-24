@@ -1,5 +1,15 @@
 import { humanizeIdentifier } from "../../utils/displayNames";
 
+export function headline(title: string): string {
+  const trimmed = title.trim();
+  return (
+    trimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) ?? trimmed
+  );
+}
+
 export function computeXpFill(xp: number, xpNext: number): number {
   if (!Number.isFinite(xp)) return 0;
   if (!Number.isFinite(xpNext)) return xp > 0 ? 100 : 0;
