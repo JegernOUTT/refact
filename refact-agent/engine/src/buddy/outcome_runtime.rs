@@ -188,7 +188,7 @@ pub(crate) fn workflow_result_title(title: &str, terminal: &WorkflowTerminal) ->
         WorkflowTerminal::NoChange => format!("{title} — no change"),
         WorkflowTerminal::Partial { .. } => format!("{title} is incomplete"),
         WorkflowTerminal::Blocked { .. } => format!("{title} is blocked"),
-        WorkflowTerminal::Cancelled { .. } => format!("{title} was canceled"),
+        WorkflowTerminal::Cancelled { .. } => format!("{title} was cancelled"),
         WorkflowTerminal::Failed { .. } => format!("{title} didn't finish"),
         WorkflowTerminal::Completed => format!("{title} finished"),
         WorkflowTerminal::Inconclusive => format!("{title} assessment"),
@@ -1243,13 +1243,14 @@ mod tests {
             },
         )
         .unwrap();
-        for (id, terminal, expected) in [
+        for (id, terminal, expected_state, expected_title) in [
             (
                 "failed",
                 WorkflowTerminal::Failed {
                     failure_class: Some("auth".into()),
                 },
                 refact_buddy_core::operator_types::WorkItemState::Blocked,
+                "Dependency Radar didn't finish",
             ),
             (
                 "cancelled",
@@ -1257,9 +1258,15 @@ mod tests {
                     failure_class: None,
                 },
                 refact_buddy_core::operator_types::WorkItemState::Cancelled,
+                "Dependency Radar was cancelled",
             ),
         ] {
-            let start = runtime.start_workflow(id, "2026-09-05T00:00:00Z".into());
+            let mut start = runtime.start_workflow(
+                refact_buddy_core::autonomous_workflows::DEPENDENCY_RADAR_WORKFLOW_ID,
+                "2026-09-05T00:00:00Z".into(),
+            );
+            start.run_id = id.into();
+            start.input_fingerprint = id.into();
             let work = runtime
                 .publish_workflow_result(
                     start,
@@ -1268,12 +1275,16 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(work.value.state, expected);
+            assert_eq!(work.value.state, expected_state);
+            assert_eq!(work.value.title, expected_title);
+            assert!(!work.value.title.contains("assessment"));
             let artifact = runtime
                 .get_artifact_revision(work.value.current_artifact_id.unwrap(), Some(1))
                 .await
                 .unwrap()
                 .unwrap();
+            assert_eq!(artifact.value.title, expected_title);
+            assert!(!artifact.value.title.contains("assessment"));
             assert!(artifact.value.body.contains("did not finish"));
             assert!(
                 artifact.value.conclusion.contains("Run failed.")
@@ -1282,6 +1293,49 @@ mod tests {
             assert!(artifact.value.proposed_action_ids.is_empty());
         }
         runtime.shutdown().await;
+    }
+
+    #[test]
+    fn workflow_result_titles_are_terminal_specific() {
+        let cases = [
+            (WorkflowTerminal::NoChange, "Dependency Radar — no change"),
+            (
+                WorkflowTerminal::Partial {
+                    failure_class: Some("partial".into()),
+                },
+                "Dependency Radar is incomplete",
+            ),
+            (
+                WorkflowTerminal::Blocked {
+                    failure_class: Some("blocked".into()),
+                },
+                "Dependency Radar is blocked",
+            ),
+            (
+                WorkflowTerminal::Cancelled {
+                    failure_class: Some("cancelled".into()),
+                },
+                "Dependency Radar was cancelled",
+            ),
+            (
+                WorkflowTerminal::Failed {
+                    failure_class: Some("failed".into()),
+                },
+                "Dependency Radar didn't finish",
+            ),
+            (WorkflowTerminal::Completed, "Dependency Radar finished"),
+            (
+                WorkflowTerminal::Inconclusive,
+                "Dependency Radar assessment",
+            ),
+        ];
+
+        for (terminal, expected) in cases {
+            assert_eq!(
+                workflow_result_title("Dependency Radar", &terminal),
+                expected
+            );
+        }
     }
 
     #[tokio::test]
