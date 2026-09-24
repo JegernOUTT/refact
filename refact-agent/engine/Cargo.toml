@@ -222,7 +222,7 @@ perf-tests = []
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [build-dependencies]
-shadow-rs = "1.1.0"
+shadow-rs = { version = "1.1.0", default-features = false, features = ["build"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55.0"

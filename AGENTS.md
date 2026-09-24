@@ -174,7 +174,7 @@ parallel-safe (unlike a shared `CARGO_TARGET_DIR`, which locks).
 - `CARGO_INCREMENTAL=0` is **required** for sccache to cache. Trade-off: slightly
   slower single-worktree incremental rebuilds, much faster cold cross-worktree builds.
 - npm cache (`~/.npm`) is already shared; use `npm ci --prefer-offline` in worktrees.
-- Optional: `mold` linker (uncomment in `refact-agent/engine/.cargo/config.toml`).
+- Optional mold linking: install mold (`apt install mold` on Ubuntu), then uncomment the `-B/usr/libexec/mold` rustflag in `refact-agent/engine/.cargo/config.toml` (adjust the path for your distro); Rust ≥1.90's default rust-lld already links in 2.7–3.4 s, while mold saves about 2 s per link.
 
 ### Issues = WHAT, task planner = HOW
 
