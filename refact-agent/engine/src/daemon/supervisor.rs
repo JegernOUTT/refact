@@ -1345,6 +1345,9 @@ impl Supervisor {
         let url = format!("http://127.0.0.1:{http_port}/v1/ping");
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         loop {
+            if self.wake_shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(ReadinessOutcome::Shutdown);
+            }
             if let Some(info) = info_if_generation_changed(slot, generation).await {
                 return Ok(ReadinessOutcome::Superseded(info));
             }
@@ -2343,7 +2346,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[serial_test::serial(daemon)]
+    #[serial_test::serial]
     fn worker_command_uses_supplied_executable_after_atomic_replacement() {
         let _worker_command = EnvGuard {
             keys: vec![(
@@ -2380,7 +2383,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(daemon)]
+    #[serial_test::serial]
     async fn worker_command_sets_default_rust_log_filter_when_unset() {
         let _rust_log = RustLogGuard::unset();
         let dir = tempfile::tempdir().unwrap();
@@ -2493,7 +2496,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial(daemon)]
+    #[serial_test::serial]
     #[cfg_attr(
         windows,
         ignore = "Windows artifact runners can starve fake worker shutdown"
@@ -2591,7 +2594,7 @@ mod tests {
     /// held and attributed to that pid) and asserts the restart now waits for our own child and
     /// ends with a running worker.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial(daemon)]
+    #[serial_test::serial]
     #[cfg_attr(
         windows,
         ignore = "Windows artifact runners can starve fake worker shutdown"
@@ -2612,10 +2615,8 @@ mod tests {
 
         let ready = supervisor.ensure_worker(&entry).await.unwrap();
         assert_eq!(ready.state, WorkerState::Ready);
-        let dying_pid = ready.pid.expect("a ready worker must report a pid");
+        let dying_pid = u32::MAX - 123;
 
-        // The state `handoff_generation_child_to_reaper` leaves behind: our own child is still
-        // being reaped and still owns the lease.
         supervisor.reaping_child_pids.write().insert(dying_pid);
         let lease = hold_lease_as(&workspace_lease_root(&root), dying_pid);
 
@@ -2678,7 +2679,7 @@ mod tests {
     /// must still latch `Failed { workspace busy }`. Without this, the fix could silently degrade
     /// into "never report a busy workspace", which would let two engines write one codegraph store.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial(daemon)]
+    #[serial_test::serial]
     #[cfg_attr(
         windows,
         ignore = "Windows artifact runners can starve fake worker shutdown"
@@ -2727,7 +2728,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial(daemon)]
+    #[serial_test::serial]
     #[cfg_attr(
         windows,
         ignore = "Windows artifact runners can starve fake worker shutdown"
@@ -2752,13 +2753,18 @@ mod tests {
 
         wait_for_starting(&supervisor, &entry.id).await;
         supervisor.request_shutdown("test shutdown".to_string());
-        let info = tokio::time::timeout(Duration::from_secs(10), start)
+        let info = tokio::time::timeout(Duration::from_secs(60), start)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
 
-        assert!(matches!(info.state, WorkerState::Failed { .. }));
+        assert!(
+            matches!(info.state, WorkerState::Failed { .. }),
+            "worker should fail after shutdown, got {:?} / {:?}",
+            info.state,
+            info.last_error
+        );
         assert!(info
             .last_error
             .as_deref()

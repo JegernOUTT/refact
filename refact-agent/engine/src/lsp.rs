@@ -1060,7 +1060,7 @@ mod tests {
 
     /// The whole point of the fix: a busy root must come back as `rejected`, not vanish.
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn lsp_busy_workspace_root_is_reported_not_silently_dropped() {
         let _locks = LspLocksDirGuard::set();
         let gcx = make_lease_test_gcx(false).await;
@@ -1094,7 +1094,7 @@ mod tests {
     /// The message a user actually sees: names the folder and the holder, and does not leak the
     /// sha256 lease path under the cache directory.
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn lsp_busy_workspace_root_message_names_folder_and_holder_without_cache_paths() {
         let _locks = LspLocksDirGuard::set();
         let gcx = make_lease_test_gcx(false).await;
@@ -1125,7 +1125,7 @@ mod tests {
     /// `--allow-shared-workspace` keeps its old behaviour exactly: the root is served and nothing
     /// is reported to the client.
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn lsp_allow_shared_workspace_still_accepts_a_busy_root() {
         let _locks = LspLocksDirGuard::set();
         let gcx = make_lease_test_gcx(true).await;
@@ -1148,7 +1148,7 @@ mod tests {
     /// root this engine already holds is still accepted rather than reported as busy against
     /// itself.
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn lsp_free_workspace_root_is_accepted_and_held() {
         let _locks = LspLocksDirGuard::set();
         let gcx = make_lease_test_gcx(false).await;
