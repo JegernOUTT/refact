@@ -56,6 +56,7 @@ import { useExecuteBuddyAction } from "../features/Buddy/hooks/useExecuteBuddyAc
 import { executeBuddyNavigation } from "../features/Buddy/executeBuddyAction";
 import { PALETTES, STAGES } from "../features/Buddy/constants";
 import { SETUP_MODES } from "../features/Setup/setupModes";
+import { buddyApi } from "../services/refact/buddy";
 import {
   buddyOperatorApi,
   buddyOperatorIdentity,
@@ -171,6 +172,11 @@ describe("BuddyHome single work authority", () => {
             ),
           )
           .unwrap();
+        if (mode === "disabled") {
+          await store
+            .dispatch(buddyApi.endpoints.getOpportunities.initiate(undefined))
+            .unwrap();
+        }
         const view = render(<Surface />, { store });
         expect(
           await screen.findByText("Review cleanup candidates"),
