@@ -147,16 +147,19 @@ describe("BuddyHome single work authority", () => {
           style: "primary" as const,
         },
       ];
-      for (const Surface of [
-        () => <BuddyPanel />,
-        () => <BuddyChatCompanion chatId="producer-fixture" />,
-        () => <BuddySpeechCloud />,
-      ]) {
+      for (const [surfaceIndex, Surface] of (
+        [
+          () => <BuddyPanel />,
+          () => <BuddyChatCompanion chatId="producer-fixture" />,
+          () => <BuddySpeechCloud />,
+        ] as const
+      ).entries()) {
         const store = setUpStore({ ...CONFIG_STATE });
         store.dispatch(
           setBuddySnapshot(
             makeSnapshot(undefined, {
               active_speech: makeSpeech({
+                id: `speech-${mode}-${surfaceIndex}`,
                 text: "Saved cleanup advice",
                 created_at: new Date().toISOString(),
                 persistent: true,
