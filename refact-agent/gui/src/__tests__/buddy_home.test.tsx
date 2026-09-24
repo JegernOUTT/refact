@@ -4830,6 +4830,119 @@ describe("BuddySettingsPanel_renders_all_settings", () => {
       screen.getByRole("switch", { name: /provider health/i }),
     ).toBeInTheDocument();
   });
+
+  it("humanizes muted intent labels and keeps their identifiers internal", async () => {
+    const intentLabels = [
+      ["humor", "Humor"],
+      ["suggestion", "Suggestions"],
+      ["insight", "Insights"],
+      ["win", "Wins"],
+      ["error_alert", "Error alerts"],
+      ["greeting", "Greetings"],
+      ["tour", "Tours"],
+      ["milestone", "Milestones"],
+      ["memory_pulse_commentary", "Memory pulse commentary"],
+      ["quest_accept", "Quest acceptance"],
+      ["quest_complete", "Quest completion"],
+      ["chat_reaction", "Chat reactions"],
+    ] as const;
+    const opaqueRule = "rule-0123456789abcdef0123456789abcdef";
+    const opaqueWorkflow = "12345678-1234-1234-1234-123456789abc";
+    const capturedBodies: unknown[] = [];
+    server.use(
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBodies.push(await request.json());
+        return HttpResponse.json({
+          ...makeSnapshot().settings,
+          muted_intents: intentLabels
+            .map(([intent]) => intent)
+            .filter((intent) => intent !== "error_alert"),
+        });
+      }),
+    );
+
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(undefined, {
+          settings: {
+            ...makeSnapshot().settings,
+            muted_intents: intentLabels.map(([intent]) => intent),
+          },
+          state: {
+            ...makeSnapshot().state,
+            muted_rules: [opaqueRule, "buddy_memory_garden"],
+            workflow_summaries: [
+              {
+                workflow_id: opaqueWorkflow,
+                last_run: null,
+                run_count: 1,
+                last_outcome: null,
+              },
+            ],
+          },
+        }),
+      ),
+    );
+
+    const { user } = render(<BuddySettingsPanel />, { store });
+    const panel = screen.getByTestId("buddy-settings-panel");
+    const mutedIntents = within(screen.getByTestId("buddy-muted-intents"));
+
+    for (const [intent, label] of intentLabels) {
+      expect(
+        within(panel).getByRole("switch", {
+          name: `Mute ${label.toLowerCase()}`,
+        }),
+      ).toBeChecked();
+      expect(mutedIntents.getByText(label)).toBeInTheDocument();
+      expect(label).not.toMatch(/[a-z]+_[a-z]+/);
+      if (intent.includes("_"))
+        expect(
+          within(panel).queryByRole("switch", { name: `Mute ${intent}` }),
+        ).toBeNull();
+    }
+    const switchNames = within(panel)
+      .getAllByRole("switch")
+      .map((toggle) => toggle.getAttribute("aria-label") ?? "");
+    for (const name of switchNames) {
+      expect(name).not.toMatch(/[a-z]+_[a-z]+/);
+      expect(name).not.toMatch(/[0-9a-f]{24,}/i);
+      expect(name).not.toMatch(/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/i);
+    }
+    expect(within(panel).getByText("Saved rule 1")).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("button", { name: "Unmute Saved rule 1" }),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("buddy-muted-rules")).getByText(
+        "Buddy Memory Garden",
+      ),
+    ).toBeInTheDocument();
+    expect(within(panel).getAllByText("Workflow").length).toBeGreaterThan(0);
+    expect(within(panel).queryByText(opaqueRule)).toBeNull();
+    expect(within(panel).queryByText(opaqueWorkflow)).toBeNull();
+    expect(
+      within(panel).queryByRole("button", { name: new RegExp(opaqueRule) }),
+    ).toBeNull();
+    expect(
+      within(panel).queryByRole("switch", {
+        name: /[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/i,
+      }),
+    ).toBeNull();
+
+    await user.click(
+      within(panel).getByRole("switch", { name: "Mute error alerts" }),
+    );
+    await waitFor(() => expect(capturedBodies).toHaveLength(1));
+    expect(capturedBodies).toEqual([
+      {
+        muted_intents: intentLabels
+          .map(([intent]) => intent)
+          .filter((intent) => intent !== "error_alert"),
+      },
+    ]);
+  });
 });
 
 describe("BuddySettingsPanel_segmented_controls_accessible_state", () => {

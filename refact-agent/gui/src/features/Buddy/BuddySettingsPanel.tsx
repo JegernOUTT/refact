@@ -36,6 +36,7 @@ import type {
   QuietHoursMode,
 } from "./types";
 import { formatCompactNumber, formatTimestamp } from "./buddyUtils";
+import { humanizeIdentifier } from "../../utils/displayNames";
 import styles from "./BuddySettingsPanel.module.css";
 
 function totalTokens(row: BuddyWorkflowSummary): number {
@@ -46,7 +47,7 @@ const TELEMETRY_COLUMNS: DataTableColumn<BuddyWorkflowSummary>[] = [
   {
     id: "job",
     header: "Job",
-    cell: (row) => row.workflow_id,
+    cell: (row) => safeIdentifierLabel(row.workflow_id, "Workflow"),
     sortValue: (row) => row.workflow_id,
   },
   {
@@ -136,8 +137,48 @@ const SPEECH_INTENT_KEYS: string[] = [
 ];
 
 const SPEECH_INTENT_LABELS: Record<string, string> = {
+  humor: "Humor",
+  suggestion: "Suggestions",
+  insight: "Insights",
+  win: "Wins",
+  error_alert: "Error alerts",
+  greeting: "Greetings",
+  tour: "Tours",
+  milestone: "Milestones",
+  memory_pulse_commentary: "Memory pulse commentary",
+  quest_accept: "Quest acceptance",
+  quest_complete: "Quest completion",
   chat_reaction: "Chat reactions",
 };
+
+const MUTED_RULE_LABELS: Record<string, string> = {
+  buddy_memory_garden: "Buddy Memory Garden",
+};
+
+function safeIdentifierLabel(value: string, fallback: string): string {
+  if (
+    /[0-9a-f]{24,}/i.test(value) ||
+    /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value)
+  ) {
+    return fallback;
+  }
+  return /[_-]/.test(value) || /[a-z][A-Z]/.test(value)
+    ? humanizeIdentifier(value)
+    : value;
+}
+
+function speechIntentLabel(intent: string): string {
+  return (
+    SPEECH_INTENT_LABELS[intent] ?? safeIdentifierLabel(intent, "Speech intent")
+  );
+}
+
+function mutedRuleLabel(ruleKey: string, index: number): string {
+  return (
+    MUTED_RULE_LABELS[ruleKey] ??
+    safeIdentifierLabel(ruleKey, `Saved rule ${index + 1}`)
+  );
+}
 
 const buildPromptPatch = (value: string): BuddySettingsPatch => {
   if (value.trim() === "") return { clear_personality_prompt: true };
@@ -152,10 +193,16 @@ function formatChatReactionStatus(
   const skipped = debug.counts_by_result?.skipped ?? 0;
   const last = debug.recent_attempts.at(-1);
   if (last?.result === "emitted") {
-    return `Last emitted ${last.signal_type ?? "chat reaction"}.`;
+    return `Last emitted ${safeIdentifierLabel(
+      last.signal_type ?? "chat reaction",
+      "chat reaction",
+    )}.`;
   }
   if (debug.last_skip_reason) {
-    return `Last skipped: ${debug.last_skip_reason}.`;
+    return `Last skipped: ${safeIdentifierLabel(
+      debug.last_skip_reason,
+      "unknown reason",
+    )}.`;
   }
   return `Emitted ${emitted}, skipped ${skipped}.`;
 }
@@ -706,18 +753,21 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
             </Text>
           </div>
           <div className={styles.observersGrid}>
-            {SPEECH_INTENT_KEYS.map((key) => (
-              <div key={key} className={styles.toggleRow}>
-                <Text size="1" className={styles.toggleLabel}>
-                  {SPEECH_INTENT_LABELS[key] ?? key.replace(/_/g, " ")}
-                </Text>
-                <Switch
-                  checked={mutedIntents.includes(key)}
-                  onCheckedChange={(v) => handleIntentMute(key, v)}
-                  aria-label={`Mute ${key}`}
-                />
-              </div>
-            ))}
+            {SPEECH_INTENT_KEYS.map((key) => {
+              const label = speechIntentLabel(key);
+              return (
+                <div key={key} className={styles.toggleRow}>
+                  <Text size="1" className={styles.toggleLabel}>
+                    {label}
+                  </Text>
+                  <Switch
+                    checked={mutedIntents.includes(key)}
+                    onCheckedChange={(v) => handleIntentMute(key, v)}
+                    aria-label={`Mute ${label.toLowerCase()}`}
+                  />
+                </div>
+              );
+            })}
           </div>
         </div>
 
@@ -747,8 +797,11 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
                   className={styles.toggleRow}
                 >
                   <Text size="1" className={styles.toggleLabel}>
-                    {decision.allowed ? "✓" : "✕"} [{decision.reason}]
-                    {decision.intent ? ` ${decision.intent}:` : ""}{" "}
+                    {decision.allowed ? "✓" : "✕"} [
+                    {safeIdentifierLabel(decision.reason, "unknown reason")}]
+                    {decision.intent
+                      ? ` ${speechIntentLabel(decision.intent)}:`
+                      : ""}{" "}
                     {decision.preview}
                   </Text>
                 </div>
@@ -865,21 +918,24 @@ export const BuddySettingsPanel: React.FC<Props> = ({ onClose }) => {
             </Text>
           ) : (
             <div className={styles.observersGrid}>
-              {mutedRules.map((ruleKey) => (
-                <div key={ruleKey} className={styles.toggleRow}>
-                  <Text size="1" className={styles.toggleLabel}>
-                    {ruleKey}
-                  </Text>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    aria-label={`Unmute ${ruleKey}`}
-                    onClick={() => void handleUnmute(ruleKey)}
-                  >
-                    Unmute
-                  </Button>
-                </div>
-              ))}
+              {mutedRules.map((ruleKey, index) => {
+                const label = mutedRuleLabel(ruleKey, index);
+                return (
+                  <div key={ruleKey} className={styles.toggleRow}>
+                    <Text size="1" className={styles.toggleLabel}>
+                      {label}
+                    </Text>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      aria-label={`Unmute ${label}`}
+                      onClick={() => void handleUnmute(ruleKey)}
+                    >
+                      Unmute
+                    </Button>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
