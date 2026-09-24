@@ -377,3 +377,30 @@
     display: none;
   }
 }
+
+@media (max-width: 520px) {
+  .desk {
+    gap: var(--rf-space-2);
+    padding: var(--rf-space-2);
+  }
+
+  .views {
+    flex-wrap: nowrap;
+    gap: 0;
+    border: 0;
+  }
+
+  .views button {
+    padding-inline: var(--rf-space-2xs);
+  }
+
+  .list {
+    gap: var(--rf-space-1);
+    padding-left: 0;
+  }
+
+  .filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--rf-space-1);
+  }
+}
