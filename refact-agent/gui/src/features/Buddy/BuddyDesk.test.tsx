@@ -402,6 +402,339 @@ describe("BuddyDesk", () => {
     await waitFor(() => expect(document.activeElement).toBe(row));
   });
 
+  it("keeps the open report and shows its refreshed revision", async () => {
+    let requests = 0;
+    server.use(
+      http.get("*/v1/buddy/work", () => {
+        requests += 1;
+        const refreshed = requests > 1;
+        return HttpResponse.json(
+          envelope([
+            record({
+              ...item,
+              title: refreshed ? "Refreshed diagnosis" : item.title,
+              current_artifact_revision: refreshed ? 2 : 1,
+            }),
+          ]),
+        );
+      }),
+      http.get("*/v1/buddy/artifacts/:id", ({ request }) => {
+        const revision = new URL(request.url).searchParams.get("revision");
+        return HttpResponse.json(
+          envelope(
+            record({
+              ...artifact,
+              revision: Number(revision ?? 1),
+              title: revision === "2" ? "Refreshed assessment" : artifact.title,
+            }),
+          ),
+        );
+      }),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    await screen.findByRole("heading", { name: artifact.title });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh work" }));
+    expect(
+      await screen.findByRole("heading", { name: "Refreshed assessment" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("article", { name: "Work detail" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /Refreshed diagnosis/ }),
+    ).toBeTruthy();
+  });
+
+  it("reconciles sequential refreshes and restores focus when an item disappears", async () => {
+    let requests = 0;
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.get("*/v1/buddy/work", async () => {
+        requests += 1;
+        if (requests === 2) await pending;
+        return HttpResponse.json(
+          envelope(
+            requests === 3
+              ? []
+              : [
+                  record({
+                    ...item,
+                    title:
+                      requests === 2
+                        ? "Still present after refresh"
+                        : item.title,
+                  }),
+                ],
+          ),
+        );
+      }),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    await screen.findByRole("heading", { name: artifact.title });
+    const refresh = screen.getByRole("button", { name: "Refresh work" });
+    fireEvent.click(refresh);
+    await waitFor(() => expect(requests).toBe(2));
+    expect(screen.getByRole("article", { name: "Work detail" })).toBeTruthy();
+    expect(
+      screen.queryByText("That item is no longer in this view."),
+    ).toBeNull();
+    release?.();
+    await screen.findByRole("button", { name: /Still present after refresh/ });
+    await waitFor(() => expect(screen.queryByText("Loading work…")).toBeNull());
+    fireEvent.click(refresh);
+    expect(
+      await screen.findByText("That item is no longer in this view."),
+    ).toBeTruthy();
+    expect(screen.queryByRole("article", { name: "Work detail" })).toBeNull();
+    expect(
+      screen.getAllByText("That item is no longer in this view."),
+    ).toHaveLength(1);
+    await waitFor(() => {
+      const active = document.activeElement;
+      expect(active?.matches("ul li button") || active === refresh).toBe(true);
+    });
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("waits for one in-flight request after a rapid second refresh click", async () => {
+    let requests = 0;
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.get("*/v1/buddy/work", async () => {
+        requests += 1;
+        if (requests > 1) await pending;
+        return HttpResponse.json(envelope(requests > 1 ? [] : [record(item)]));
+      }),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    await screen.findByRole("heading", { name: artifact.title });
+    const refresh = screen.getByRole("button", { name: "Refresh work" });
+    fireEvent.click(refresh);
+    fireEvent.click(refresh);
+    await waitFor(() => expect(requests).toBe(2));
+    expect(screen.getByRole("article", { name: "Work detail" })).toBeTruthy();
+    expect(
+      screen.queryByText("That item is no longer in this view."),
+    ).toBeNull();
+    release?.();
+    expect(
+      await screen.findByText("That item is no longer in this view."),
+    ).toBeTruthy();
+    expect(requests).toBe(2);
+    expect(
+      screen.getAllByText("That item is no longer in this view."),
+    ).toHaveLength(1);
+    expect(screen.queryByRole("article", { name: "Work detail" })).toBeNull();
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("keeps the selection on refresh error and reconciles after Retry work succeeds", async () => {
+    let requests = 0;
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.get("*/v1/buddy/work", async () => {
+        requests += 1;
+        if (requests === 2) {
+          await pending;
+          return HttpResponse.json({ detail: "unavailable" }, { status: 503 });
+        }
+        return HttpResponse.json(
+          envelope(requests === 3 ? [] : [record(item)]),
+        );
+      }),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    await screen.findByRole("heading", { name: artifact.title });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh work" }));
+    await waitFor(() => expect(requests).toBe(2));
+    expect(screen.getByRole("region", { name: "Buddy Desk" })).toHaveAttribute(
+      "data-detail-open",
+      "true",
+    );
+    release?.();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Buddy could not reach your saved work.",
+    );
+    expect(
+      screen.queryByText("That item is no longer in this view."),
+    ).toBeNull();
+    expect(screen.getByRole("region", { name: "Buddy Desk" })).toHaveAttribute(
+      "data-detail-open",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry work" }));
+    expect(
+      await screen.findByText("That item is no longer in this view."),
+    ).toBeTruthy();
+    expect(requests).toBe(3);
+    expect(screen.queryByRole("article", { name: "Work detail" })).toBeNull();
+  });
+
+  it("leaves a deep-linked item open when the refreshed list omits it", async () => {
+    let requests = 0;
+
+    server.use(
+      http.get("*/v1/buddy/work", () => {
+        requests += 1;
+        return HttpResponse.json(
+          envelope(requests === 1 ? [record(item)] : []),
+        );
+      }),
+      http.get("*/v1/buddy/work/work-1", () =>
+        HttpResponse.json(envelope(record(item))),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+    );
+    render(<BuddyDesk workId={item.id} projectId={project.project_id} />, {
+      preloadedState: config,
+    });
+    await screen.findByRole("heading", { name: artifact.title });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh work" }));
+    expect(
+      await screen.findByText("Nothing needs you right now."),
+    ).toBeTruthy();
+    await waitFor(() => expect(requests).toBe(2));
+    expect(screen.getByRole("article", { name: "Work detail" })).toBeTruthy();
+    expect(
+      screen.queryByText("That item is no longer in this view."),
+    ).toBeNull();
+  });
+
+  it("hides workflow machine identifiers from the detail header", async () => {
+    const workflowItem: WorkItem = {
+      ...item,
+      subject: {
+        ...item.subject,
+        resource_kind: "workflow",
+        resource_id: "buddy_security_whisperer",
+      },
+    };
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(workflowItem)])),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    const detail = await screen.findByRole("article", { name: "Work detail" });
+    expect(detail).not.toHaveTextContent("buddy_security_whisperer");
+    expect(
+      within(detail).getByText("Needs attention", { exact: true }),
+    ).toBeTruthy();
+  });
+
+  it("hides UUID-shaped subject identifiers from the detail header", async () => {
+    const uuidItem: WorkItem = {
+      ...item,
+      subject: {
+        ...item.subject,
+        resource_id: "3f155984-a130-4c90-a1fd-ff2908bc4921",
+      },
+    };
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(uuidItem)])),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    const detail = await screen.findByRole("article", { name: "Work detail" });
+    expect(detail).not.toHaveTextContent(uuidItem.subject.resource_id);
+    expect(
+      within(detail).getByText("Needs attention", { exact: true }),
+    ).toBeTruthy();
+  });
+
+  it("renders evidence timestamps relatively with an absolute tooltip", async () => {
+    const observedAt = "2026-09-05T00:00:00Z";
+    const evidenceArtifact = {
+      ...artifact,
+      evidence: [
+        {
+          evidence_id: "evidence-1",
+          source: {
+            source_kind: "file",
+            source_id: "Cargo.toml",
+            source_version: "1",
+          },
+          locator: "Cargo.toml:1",
+          observed_at: observedAt,
+          digest: null,
+        },
+        {
+          evidence_id: "evidence-invalid-date",
+          source: {
+            source_kind: "file",
+            source_id: "Cargo.lock",
+            source_version: "1",
+          },
+          locator: "Cargo.lock:1",
+          observed_at: "not-a-valid-date",
+          digest: null,
+        },
+      ],
+    };
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(item)])),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(evidenceArtifact))),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    const observed = await screen.findByText(/Observed \d+d ago/);
+    expect(observed).toHaveAttribute(
+      "title",
+      new Date(observedAt).toLocaleString(),
+    );
+    expect(observed).not.toHaveTextContent(observedAt);
+    expect(screen.queryByText("Observed not-a-valid-date")).toBeNull();
+  });
+
   it("collapses to one honest line instead of empty desk chrome", async () => {
     server.use(
       http.get("*/v1/buddy/work", () => HttpResponse.json(envelope([]))),

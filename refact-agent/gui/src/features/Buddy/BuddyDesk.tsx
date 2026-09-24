@@ -65,10 +65,19 @@ const NO_ACTION = "No action to take";
 const ACTION_STATUS_UNAVAILABLE = "Action status unavailable";
 
 const opaqueIdentifier = /[0-9a-f]{24,}/i;
+const uuidLikeIdentifier = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 
 function readableSubject(item: WorkItem): string | null {
   const subject = item.subject.resource_id.trim();
-  if (subject === "" || opaqueIdentifier.test(subject)) return null;
+  const machineToken = /^[a-z0-9_-]+$/.test(subject) && /[_-]/.test(subject);
+  if (
+    subject === "" ||
+    item.subject.resource_kind === "workflow" ||
+    opaqueIdentifier.test(subject) ||
+    uuidLikeIdentifier.test(subject) ||
+    machineToken
+  )
+    return null;
   return subject;
 }
 
@@ -402,9 +411,17 @@ function WorkDetail({
                       <Text size="1" color="gray">
                         {evidence.locator}
                       </Text>
-                      <Text size="1" color="gray">
-                        Observed {evidence.observed_at}
-                      </Text>
+                      {changedAt(evidence.observed_at) && (
+                        <Text
+                          size="1"
+                          color="gray"
+                          title={
+                            changedAtAbsolute(evidence.observed_at) ?? undefined
+                          }
+                        >
+                          Observed {changedAt(evidence.observed_at)}
+                        </Text>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -455,18 +472,30 @@ function DeskContent({
   const viewTrigger = useRef<HTMLButtonElement | null>(null);
   const restoreViewFocus = useRef(false);
   const expandButton = useRef<HTMLButtonElement>(null);
-  const { currentData, isFetching, error, refetch } =
-    useGetBuddyOperatorWorkQuery(
-      {
-        cursor,
-        limit: 50,
-        endpoint_identity: endpointIdentity,
-        view: viewQuery[view],
-        search: search.trim(),
-        attention,
-      },
-      { refetchOnMountOrArgChange: true },
-    );
+  const refreshButton = useRef<HTMLButtonElement>(null);
+  const refreshStartedAt = useRef<number | null>(null);
+  const [refreshPending, setRefreshPending] = useState(false);
+  const [refreshNotice, setRefreshNotice] = useState(false);
+  const refreshFocusPending = useRef(false);
+  const {
+    currentData,
+    isFetching,
+    isError,
+    error,
+    startedTimeStamp,
+    fulfilledTimeStamp,
+    refetch,
+  } = useGetBuddyOperatorWorkQuery(
+    {
+      cursor,
+      limit: 50,
+      endpoint_identity: endpointIdentity,
+      view: viewQuery[view],
+      search: search.trim(),
+      attention,
+    },
+    { refetchOnMountOrArgChange: true },
+  );
   const compatiblePrevious = currentData
     ? previous.filter(
         (record) =>
@@ -501,6 +530,8 @@ function DeskContent({
   const filtersApplied = query !== "" || attention !== "all";
   const collapsed =
     !expanded &&
+    selectedId === null &&
+    !refreshNotice &&
     !workId &&
     !error &&
     !filtersApplied &&
@@ -539,9 +570,62 @@ function DeskContent({
     restoreViewFocus.current = false;
   }, [isFetching, selectedId, view]);
 
+  useEffect(() => {
+    const startedAt = refreshStartedAt.current;
+    if (!refreshPending || startedAt === null) return;
+    if (
+      isError &&
+      startedTimeStamp !== undefined &&
+      startedTimeStamp >= startedAt
+    ) {
+      refreshStartedAt.current = null;
+      setRefreshPending(false);
+      return;
+    }
+    if (
+      isFetching ||
+      !currentData ||
+      fulfilledTimeStamp === undefined ||
+      fulfilledTimeStamp < startedAt
+    )
+      return;
+    refreshStartedAt.current = null;
+    setRefreshPending(false);
+    if (
+      selectedId &&
+      selectedId !== workId &&
+      !currentData.data.some(({ value }) => value.id === selectedId)
+    ) {
+      refreshFocusPending.current = true;
+      trigger.current = null;
+      setExpanded(true);
+      setRefreshNotice(true);
+      setSelectedId(null);
+    }
+  }, [
+    currentData,
+    fulfilledTimeStamp,
+    isError,
+    isFetching,
+    refreshPending,
+    selectedId,
+    startedTimeStamp,
+    workId,
+  ]);
+
+  useLayoutEffect(() => {
+    if (!refreshFocusPending.current || selectedId !== null) return;
+    const firstRow =
+      listRef.current?.querySelector<HTMLButtonElement>("ul li button");
+    (firstRow ?? refreshButton.current)?.focus({ preventScroll: true });
+    refreshFocusPending.current = false;
+  }, [records, selectedId]);
+
   const refresh = () => {
     setPrevious([]);
-    setSelectedId(null);
+    refreshStartedAt.current = Date.now();
+    setRefreshPending(true);
+    setRefreshNotice(false);
     if (cursor === undefined) void refetch();
     else setCursor(undefined);
   };
@@ -610,15 +694,20 @@ function DeskContent({
         <h2 className={styles.heading}>Buddy Desk</h2>
         <span className={styles.headerSpacer} aria-hidden />
         <Button
+          ref={refreshButton}
           size="sm"
           variant="ghost"
           leftIcon={RefreshCw}
-          disabled={isFetching}
           onClick={refresh}
         >
           Refresh work
         </Button>
       </header>
+      {refreshNotice && (
+        <Text as="p" size="1" color="gray" role="status">
+          That item is no longer in this view.
+        </Text>
+      )}
       {selectedId === workId && linkedWork.isFetching && (
         <Surface variant="surface-1" className={styles.note} role="status">
           <Text size="2" color="gray">
