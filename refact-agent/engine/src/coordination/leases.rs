@@ -315,6 +315,10 @@ impl LeaseManager {
         self.renew_interval
     }
 
+    pub fn launch_protocol(&self) -> super::reconcile::LaunchProtocol {
+        super::reconcile::LaunchProtocol::new(self.store.clone(), self.access.project().clone())
+    }
+
     fn term_ends(&self, at_ms: i64) -> i64 {
         at_ms.saturating_add(self.ttl_ms)
     }
@@ -480,7 +484,7 @@ pub async fn leases_for(app: &AppState) -> Option<Arc<LeaseManager>> {
     leases_for_settings(app, &settings).await
 }
 
-async fn leases_for_settings(
+pub(super) async fn leases_for_settings(
     app: &AppState,
     settings: &CoordinationSettings,
 ) -> Option<Arc<LeaseManager>> {
@@ -605,6 +609,12 @@ impl LeaseRenewal {
             }
         }
         self.manager.release(&self.holder).await
+    }
+}
+
+impl Drop for LeaseRenewal {
+    fn drop(&mut self) {
+        self.cancel.notify_one();
     }
 }
 

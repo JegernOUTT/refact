@@ -20,6 +20,7 @@ pub mod error;
 pub mod fact_ledger;
 pub mod file_provenance;
 pub mod history;
+pub mod launch_intents;
 pub mod leases;
 pub mod merge_gate;
 pub mod metrics;

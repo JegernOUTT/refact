@@ -252,8 +252,17 @@ impl BackgroundAgentRegistry {
         &self,
         req: CreateAgentRequest,
     ) -> Result<(BackgroundAgent, Arc<AtomicBool>, Arc<Notify>), String> {
-        let now = Utc::now();
         let agent_id = format!("bgagent-{}", Uuid::new_v4());
+        self.create_with_id(req, agent_id).await
+    }
+
+    pub async fn create_with_id(
+        &self,
+        req: CreateAgentRequest,
+        agent_id: impl Into<String>,
+    ) -> Result<(BackgroundAgent, Arc<AtomicBool>, Arc<Notify>), String> {
+        let now = Utc::now();
+        let agent_id = agent_id.into();
         let record = BackgroundAgent {
             schema_version: 1,
             run_generation: 1,
@@ -314,6 +323,9 @@ impl BackgroundAgentRegistry {
         let native_notes = Arc::new(Mutex::new(VecDeque::new()));
         {
             let mut records = self.records.write().await;
+            if records.contains_key(&agent_id) {
+                return Err("agent id already exists".to_string());
+            }
             records.insert(agent_id.clone(), record.clone());
             let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
             drop(records);
@@ -2273,6 +2285,29 @@ mod tests {
         .as_error()
         .unwrap();
         registry.mark_failed(&record.agent_id, error).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_with_id_rejects_duplicates_without_replacing_the_record() {
+        let (_temp, registry) = registry().await;
+        let (original, _, _) = registry
+            .create_with_id(request("parent"), "stable-agent")
+            .await
+            .unwrap();
+        let before = registry.get_any("stable-agent").await.unwrap();
+
+        assert_eq!(
+            registry
+                .create_with_id(request("other-parent"), "stable-agent")
+                .await
+                .unwrap_err(),
+            "agent id already exists"
+        );
+        assert_eq!(registry.get_any("stable-agent").await.unwrap(), before);
+        assert_eq!(original.parent_chat_id, "parent");
+
+        let (generated, _, _) = registry.create(request("parent")).await.unwrap();
+        assert!(generated.agent_id.starts_with("bgagent-"));
     }
 
     #[tokio::test]
