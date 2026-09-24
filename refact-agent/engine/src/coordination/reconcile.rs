@@ -25,6 +25,7 @@
 //! engine holds its lease or may legitimately take it over under the M3 rules,
 //! so reconciliation can never "clean up" work a live engine is still doing.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -95,6 +96,7 @@ pub enum InspectionReason {
     /// a child started is unknown, so nothing is started and nothing is
     /// retried.
     UnacknowledgedLaunch,
+    NoAuthorizedResumePolicy,
     /// The record and the world disagree — something is running that the
     /// record says was never dispatched. Which of the two is wrong cannot be
     /// derived, so it is surfaced for repair rather than guessed at.
@@ -107,6 +109,9 @@ impl InspectionReason {
             InspectionReason::UnacknowledgedLaunch => {
                 "a runtime record exists but the launch was never acknowledged; \
                  whether a child started is unknown"
+            }
+            InspectionReason::NoAuthorizedResumePolicy => {
+                "the launch is safe to start, but no persisted authorization can rebuild it"
             }
             InspectionReason::ContradictoryRecord => {
                 "work appears to be running for a record that says nothing was dispatched"
@@ -285,6 +290,7 @@ impl LaunchProtocol {
 
 /// Looks up what can be observed about a run right now.
 pub type EvidenceProbe = Arc<dyn Fn(&RunKey) -> LaunchEvidence + Send + Sync>;
+type EvidenceRefresh = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Starts a run that provably had no effect yet. Only ever called for
 /// [`Resolution::StartFresh`].
@@ -446,12 +452,29 @@ pub struct Reconciler {
     evidence: EvidenceProbe,
     start: StartAction,
     retention_ms: i64,
+    allow_start_fresh: bool,
+    evidence_refresh: Option<EvidenceRefresh>,
 }
 
 impl Reconciler {
     pub fn new(
         store: Arc<CoordinationStore>,
         setup: &ReconcilerSetup,
+    ) -> Result<Reconciler, LeaseError> {
+        Self::new_with_start_policy(store, setup, true)
+    }
+
+    pub fn new_surface_only(
+        store: Arc<CoordinationStore>,
+        setup: &ReconcilerSetup,
+    ) -> Result<Reconciler, LeaseError> {
+        Self::new_with_start_policy(store, setup, false)
+    }
+
+    fn new_with_start_policy(
+        store: Arc<CoordinationStore>,
+        setup: &ReconcilerSetup,
+        allow_start_fresh: bool,
     ) -> Result<Reconciler, LeaseError> {
         let access = store.authorize(setup.project.clone());
         let leases = LeaseManager::new(
@@ -474,6 +497,8 @@ impl Reconciler {
                     .saturating_mul(1000),
             )
             .unwrap_or(i64::MAX),
+            allow_start_fresh,
+            evidence_refresh: None,
         })
     }
 
@@ -485,12 +510,20 @@ impl Reconciler {
         &self.protocol
     }
 
+    fn with_evidence_refresh(mut self, refresh: EvidenceRefresh) -> Reconciler {
+        self.evidence_refresh = Some(refresh);
+        self
+    }
+
     /// One pass over every incomplete record of this project.
     ///
     /// Running it again produces the same result: the records it started have
     /// moved past `Persisted` and are classified by evidence on the next pass,
     /// and every other resolution is already a fixpoint.
     pub async fn reconcile(&self, trigger: ReconcileTrigger, at_ms: i64) -> ReconciliationReport {
+        if let Some(refresh) = &self.evidence_refresh {
+            refresh().await;
+        }
         let mut report = ReconciliationReport::new(trigger);
         let records = match self.store.list_run_intents(&self.access).await {
             Ok(records) => records,
@@ -534,7 +567,15 @@ impl Reconciler {
         };
         let evidence = (self.evidence)(&run);
         match classify(record.state, evidence) {
-            Resolution::StartFresh => self.start_fresh(&holder, &record, at_ms, report).await,
+            Resolution::StartFresh if self.allow_start_fresh => {
+                self.start_fresh(&holder, &record, at_ms, report).await
+            }
+            Resolution::StartFresh => report.needs_inspection.push(InspectionItem {
+                run,
+                state: record.state,
+                reason: InspectionReason::NoAuthorizedResumePolicy,
+                evidence,
+            }),
             Resolution::LeaveRunning => report.left_running.push(run),
             Resolution::RecoverInterrupted => report.recovered.push(run),
             Resolution::Settle => report.settled.push(run),
@@ -636,11 +677,178 @@ pub async fn reconcile_at_path(
     }
 }
 
+pub async fn start_background_reconciliation(
+    app: &crate::app_state::AppState,
+) -> Option<ReconciliationService> {
+    let project_root = crate::files_correction::get_project_dirs(app.gcx.clone())
+        .await
+        .into_iter()
+        .next()?;
+    let settings = match crate::runtime_settings::coordination_for_project(&project_root).await {
+        Ok(settings) if settings.enabled => settings,
+        Ok(_) => return None,
+        Err(error) => {
+            tracing::warn!("crash reconciliation settings unavailable: {error}");
+            return None;
+        }
+    };
+    let path = refact_work_core::default_store_path(&app.paths.cache_dir);
+    let store = match super::outbox::store_for_path(&path, &settings).await {
+        Ok(store) => store,
+        Err(error) => {
+            super::outbox::note_durability_unavailable(&path, error.to_string());
+            return None;
+        }
+    };
+    let project = ProjectKey::new(super::roots::project_identity(&project_root));
+    let observations = Arc::new(std::sync::RwLock::new(HashMap::new()));
+    let read_observations = observations.clone();
+    let evidence: EvidenceProbe = Arc::new(move |run| {
+        read_observations
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(run)
+            .copied()
+            .unwrap_or_else(LaunchEvidence::unknown)
+    });
+    let refresh = startup_evidence_refresh(app.clone(), project.clone(), observations);
+    let setup = ReconcilerSetup {
+        project,
+        instance_id: super::engine_instance_id(),
+        settings,
+        evidence,
+        start: Arc::new(|run, _holder| {
+            Box::pin(async move {
+                Err(format!(
+                    "persisted run {run} has no durable authorized resume policy; surfaced for inspection"
+                ))
+            })
+        }),
+    };
+    match Reconciler::new_surface_only(store, &setup) {
+        Ok(reconciler) => {
+            let service =
+                ReconciliationService::spawn(Arc::new(reconciler.with_evidence_refresh(refresh)));
+            service.wait_initial_pass().await;
+            Some(service)
+        }
+        Err(error) => {
+            super::outbox::note_durability_unavailable(&path, error.to_string());
+            None
+        }
+    }
+}
+
+fn startup_evidence_refresh(
+    app: crate::app_state::AppState,
+    project: ProjectKey,
+    observations: Arc<std::sync::RwLock<HashMap<RunKey, LaunchEvidence>>>,
+) -> EvidenceRefresh {
+    Arc::new(move || {
+        let app = app.clone();
+        let project = project.clone();
+        let observations = observations.clone();
+        Box::pin(async move {
+            *observations
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = HashMap::new();
+            let path = refact_work_core::default_store_path(&app.paths.cache_dir);
+            let root = match crate::files_correction::get_project_dirs(app.gcx.clone())
+                .await
+                .into_iter()
+                .next()
+            {
+                Some(root) => root,
+                None => return,
+            };
+            let settings = match crate::runtime_settings::coordination_for_project(&root).await {
+                Ok(settings) if settings.enabled => settings,
+                _ => return,
+            };
+            let store = match super::outbox::store_for_path(&path, &settings).await {
+                Ok(store) => store,
+                Err(error) => {
+                    super::outbox::note_durability_unavailable(&path, error.to_string());
+                    return;
+                }
+            };
+            let access = store.authorize(project);
+            let records = match store.list_run_intents(&access).await {
+                Ok(records) => records,
+                Err(error) => {
+                    tracing::warn!("reconciliation evidence snapshot failed: {error}");
+                    return;
+                }
+            };
+            let mut snapshot = HashMap::new();
+            for record in records.into_iter().filter(|record| {
+                matches!(
+                    record.state,
+                    IntentState::Dispatched | IntentState::Acknowledged
+                )
+            }) {
+                let (runner_live, progress_observed) = if record.run.work.runtime
+                    == refact_work_core::identity::RuntimeKind::BackgroundAgent
+                {
+                    match app.agents.get_any(&record.run.work.id).await {
+                        Ok(agent) => {
+                            let runner = agent
+                                .child_chat_id
+                                .as_deref()
+                                .map(|chat_id| {
+                                    app.agent_executions.get(chat_id).is_some()
+                                        || app.agent_executions.task_active(chat_id)
+                                })
+                                .map(|active| {
+                                    if active {
+                                        Observation::Yes
+                                    } else {
+                                        Observation::No
+                                    }
+                                })
+                                .unwrap_or(Observation::Unknown);
+                            let progress = match agent.child_chat_id.as_deref() {
+                                Some(chat_id) => {
+                                    match crate::chat::trajectories::load_trajectory_for_chat(
+                                        app.gcx.clone(),
+                                        chat_id,
+                                    )
+                                    .await
+                                    {
+                                        Some(trajectory) if trajectory.messages.is_empty() => {
+                                            Observation::No
+                                        }
+                                        Some(_) => Observation::Yes,
+                                        None => Observation::Unknown,
+                                    }
+                                }
+                                None => Observation::Unknown,
+                            };
+                            (runner, progress)
+                        }
+                        Err(_) => (Observation::Unknown, Observation::Unknown),
+                    }
+                } else {
+                    (Observation::Unknown, Observation::Unknown)
+                };
+                snapshot.insert(
+                    record.run,
+                    LaunchEvidence::new(runner_live, progress_observed),
+                );
+            }
+            *observations
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = snapshot;
+        })
+    })
+}
+
 /// Owns the reconciliation task: one startup pass, then a pass per requested
 /// takeover, with one cancellation path that shutdown joins.
 pub struct ReconciliationService {
     cancel: Arc<Notify>,
     wake: Arc<Notify>,
+    initial_pass: Arc<Notify>,
     task: JoinHandle<()>,
 }
 
@@ -648,8 +856,23 @@ impl ReconciliationService {
     pub fn spawn(reconciler: Arc<Reconciler>) -> ReconciliationService {
         let cancel = Arc::new(Notify::new());
         let wake = Arc::new(Notify::new());
-        let task = tokio::spawn(reconcile_loop(reconciler, cancel.clone(), wake.clone()));
-        ReconciliationService { cancel, wake, task }
+        let initial_pass = Arc::new(Notify::new());
+        let task = tokio::spawn(reconcile_loop(
+            reconciler,
+            cancel.clone(),
+            wake.clone(),
+            initial_pass.clone(),
+        ));
+        ReconciliationService {
+            cancel,
+            wake,
+            initial_pass,
+            task,
+        }
+    }
+
+    async fn wait_initial_pass(&self) {
+        self.initial_pass.notified().await;
     }
 
     /// Ask for a pass because a lease changed hands.
@@ -667,10 +890,20 @@ impl ReconciliationService {
     }
 }
 
-async fn reconcile_loop(reconciler: Arc<Reconciler>, cancel: Arc<Notify>, wake: Arc<Notify>) {
+async fn reconcile_loop(
+    reconciler: Arc<Reconciler>,
+    cancel: Arc<Notify>,
+    wake: Arc<Notify>,
+    initial_pass: Arc<Notify>,
+) {
     let mut trigger = ReconcileTrigger::Startup;
+    let mut first_pass = true;
     loop {
         reconciler.reconcile(trigger, now_ms()).await.report();
+        if first_pass {
+            first_pass = false;
+            initial_pass.notify_one();
+        }
         let woken = wake.notified();
         tokio::pin!(woken);
         woken.as_mut().enable();

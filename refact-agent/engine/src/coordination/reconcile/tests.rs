@@ -148,6 +148,84 @@ async fn seed_released_intent(store: &Arc<CoordinationStore>, project: &str, run
     assert!(leases.release(&holder).await.unwrap());
 }
 
+#[tokio::test]
+async fn surface_only_reconciliation_surfaces_persisted_and_unknown_without_starting() {
+    let project = project_id();
+    let store = store().await;
+    let persisted = run("persisted-without-policy");
+    let dispatched = run("dispatched-unknown");
+    seed_released_intent(&store, &project, &persisted).await;
+    crashed_launch(&store, &project, &dispatched, IntentState::Dispatched).await;
+    publish(&project, "engine-crashed", PresenceState::Unreachable);
+
+    let log = StartLog::default();
+    let reconciler = Reconciler::new_surface_only(
+        store.clone(),
+        &setup(
+            &project,
+            "engine-recovering",
+            probe(Observation::Unknown, Observation::Unknown),
+            log.action(),
+        ),
+    )
+    .unwrap();
+    let report = reconciler
+        .reconcile(ReconcileTrigger::Startup, RECOVER_AT_MS)
+        .await;
+    presence::forget(&project);
+
+    assert!(log.started().is_empty());
+    assert_eq!(report.needs_inspection.len(), 2, "{report:?}");
+    assert!(report.needs_inspection.iter().any(|item| {
+        item.run == persisted
+            && item.state == IntentState::Persisted
+            && item.reason == InspectionReason::NoAuthorizedResumePolicy
+    }));
+    assert!(report.needs_inspection.iter().any(|item| {
+        item.run == dispatched
+            && item.state == IntentState::Dispatched
+            && item.reason == InspectionReason::UnacknowledgedLaunch
+            && item.evidence == LaunchEvidence::unknown()
+    }));
+    assert_eq!(
+        state_of(&store, &project, &persisted).await,
+        IntentState::Persisted
+    );
+    assert_eq!(
+        state_of(&store, &project, &dispatched).await,
+        IntentState::Dispatched
+    );
+}
+
+#[serial_test::serial(runtime_settings)]
+#[tokio::test]
+async fn production_startup_owns_reconciliation_and_skips_when_disabled() {
+    crate::runtime_settings::reset_for_test();
+    let workspace = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+        workspace.path().join("cache"),
+        config.path().to_path_buf(),
+    )
+    .await;
+    *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace.path().to_path_buf()];
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+
+    let service = super::start_background_reconciliation(&app)
+        .await
+        .expect("enabled coordination starts reconciliation");
+    tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+        .await
+        .expect("shutdown joins reconciliation");
+
+    let disabled = crate::tools::settings_guard::SettingsGuard::install(|settings| {
+        settings.coordination.enabled = false;
+    });
+    assert!(super::start_background_reconciliation(&app).await.is_none());
+    drop(disabled);
+    crate::runtime_settings::reset_for_test();
+}
+
 #[test]
 fn every_boundary_and_every_piece_of_evidence_has_one_decided_resolution() {
     use InspectionReason::*;

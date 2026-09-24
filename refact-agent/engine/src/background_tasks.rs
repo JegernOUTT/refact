@@ -64,6 +64,7 @@ pub struct BackgroundTasksHolder {
     gcx: Option<Arc<GlobalContext>>,
     tasks: Vec<JoinHandle<()>>,
     presence: Option<crate::coordination::presence::PresenceService>,
+    reconciliation: Option<crate::coordination::reconcile::ReconciliationService>,
 }
 
 impl Default for BackgroundTasksHolder {
@@ -78,6 +79,7 @@ impl BackgroundTasksHolder {
             gcx: None,
             tasks,
             presence: None,
+            reconciliation: None,
         }
     }
 
@@ -86,11 +88,19 @@ impl BackgroundTasksHolder {
             gcx: Some(gcx),
             tasks,
             presence: None,
+            reconciliation: None,
         }
     }
 
     fn set_presence(&mut self, presence: crate::coordination::presence::PresenceService) {
         self.presence = Some(presence);
+    }
+
+    fn set_reconciliation(
+        &mut self,
+        reconciliation: crate::coordination::reconcile::ReconciliationService,
+    ) {
+        self.reconciliation = Some(reconciliation);
     }
 
     pub fn push_back(&mut self, task: JoinHandle<()>) {
@@ -118,6 +128,9 @@ impl BackgroundTasksHolder {
             if let Err(error) = presence.shutdown().await {
                 tracing::warn!("engine presence shutdown failed: {error}");
             }
+        }
+        if let Some(reconciliation) = self.reconciliation.take() {
+            reconciliation.shutdown().await;
         }
         if let Some(gcx) = &self.gcx {
             crate::integrations::operator_probe::drain_cleanup(gcx).await;
@@ -207,6 +220,11 @@ pub async fn start_full_soak_background_tasks(gcx: Arc<GlobalContext>) -> Backgr
         crate::coordination::presence::start_background_presence(&presence_app).await
     {
         bg.set_presence(presence);
+    }
+    if let Some(reconciliation) =
+        crate::coordination::reconcile::start_background_reconciliation(&presence_app).await
+    {
+        bg.set_reconciliation(reconciliation);
     }
     bg.push_back(crate::scheduler::runner::spawn(
         crate::scheduler::runner::session_cron_store(),
@@ -323,6 +341,11 @@ pub async fn start_background_tasks(
         crate::coordination::presence::start_background_presence(&presence_app).await
     {
         bg.set_presence(presence);
+    }
+    if let Some(reconciliation) =
+        crate::coordination::reconcile::start_background_reconciliation(&presence_app).await
+    {
+        bg.set_reconciliation(reconciliation);
     }
     bg.extend(crate::scheduler::runner::spawn_from_active_project(gcx.clone()).await);
     if !gcx.cmdline.daemon_endpoint.is_empty() {
@@ -457,6 +480,38 @@ mod tests {
             .0;
         assert!(holder.contains("presence: Option<crate::coordination::presence::PresenceService>"));
         assert!(source.contains("presence.shutdown().await"));
+    }
+
+    #[test]
+    fn both_wiring_paths_own_crash_reconciliation_until_shutdown() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/background_tasks.rs"),
+        )
+        .unwrap();
+        for signature in [
+            "\npub async fn start_background_tasks(",
+            "\npub async fn start_full_soak_background_tasks(",
+        ] {
+            let body = wiring_body(&source, signature);
+            assert_eq!(
+                body.matches("start_background_reconciliation(&presence_app)")
+                    .count(),
+                1,
+                "{signature} must start reconciliation exactly once"
+            );
+            assert!(body.contains("bg.set_reconciliation(reconciliation)"));
+        }
+        let holder = source
+            .split_once("pub struct BackgroundTasksHolder")
+            .unwrap()
+            .1
+            .split_once("}\n")
+            .unwrap()
+            .0;
+        assert!(holder.contains(
+            "reconciliation: Option<crate::coordination::reconcile::ReconciliationService>"
+        ));
+        assert!(source.contains("reconciliation.shutdown().await"));
     }
 
     #[test]
