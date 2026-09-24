@@ -27,7 +27,7 @@
   align-items: flex-start;
   padding: var(--rf-space-3);
   border: 1px solid var(--rf-color-danger);
-  border-radius: var(--rf-radius-2);
+  border-radius: var(--rf-radius-ctl);
   color: var(--rf-color-danger);
   font-size: var(--rf-text-2);
   line-height: var(--rf-line-2);

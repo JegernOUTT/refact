@@ -79,7 +79,6 @@
 .mergeBadge,
 .questionsBadge {
   flex: 0 0 auto;
-  max-width: var(--rf-space-15);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

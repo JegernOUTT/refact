@@ -24,9 +24,9 @@
   cursor: pointer;
   padding-inline: var(--rf-space-3);
   transition:
-    background-color var(--rf-dur-base) var(--rf-ease-standard),
-    color var(--rf-dur-base) var(--rf-ease-standard),
-    opacity var(--rf-dur-base) var(--rf-ease-standard);
+    background-color var(--rf-dur-med) var(--rf-ease-standard),
+    color var(--rf-dur-med) var(--rf-ease-standard),
+    opacity var(--rf-dur-med) var(--rf-ease-standard);
 }
 
 .disabledButton {

@@ -44,7 +44,7 @@
 }
 
 .commentBody {
-  font-size: var(--rf-font-size-1);
+  font-size: var(--rf-text-1);
   margin-bottom: var(--rf-space-1);
   overflow-wrap: anywhere;
 }

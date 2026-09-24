@@ -1,7 +1,7 @@
 .field {
   width: 100%;
   opacity: 1;
-  transition: opacity var(--rf-dur-base) var(--rf-ease-standard);
+  transition: opacity var(--rf-dur-med) var(--rf-ease-standard);
 }
 
 .field[data-hidden="true"] {

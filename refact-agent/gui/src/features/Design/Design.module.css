@@ -7,7 +7,7 @@
   min-width: 0;
   min-height: 0;
   color: var(--rf-color-fg);
-  background: var(--rf-surface-0);
+  background: var(--rf-bg);
 }
 
 .toolbar {
@@ -43,7 +43,7 @@
   color: var(--rf-color-fg);
   background: var(--rf-surface-1);
   border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-control);
+  border-radius: var(--rf-radius-ctl);
 }
 
 .notice {
@@ -75,7 +75,7 @@
   flex: 0 0 auto;
   min-height: 100%;
   overflow: hidden;
-  background: var(--rf-surface-0);
+  background: var(--rf-bg);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
   box-shadow: var(--rf-elev-panel);

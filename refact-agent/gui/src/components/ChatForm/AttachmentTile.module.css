@@ -92,7 +92,7 @@
   color: currentColor;
   font-size: 10px;
   font-weight: var(--rf-weight-semibold);
-  line-height: var(--rf-line-tight);
+  line-height: var(--rf-line);
   text-transform: uppercase;
 }
 
@@ -110,7 +110,7 @@
 .subtitle {
   color: var(--rf-color-faint);
   font-size: 8px;
-  line-height: var(--rf-line-tight);
+  line-height: var(--rf-line);
 }
 
 .removeButton,
