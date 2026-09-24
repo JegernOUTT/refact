@@ -319,11 +319,38 @@ pub async fn handle_v1_worktrees_merge(
             }
         }
     }
-    service
-        .merge_worktree(&id, request)
+    let result = if let Some(leases) = crate::coordination::leases::leases_for(&app).await {
+        let settings = crate::file_activity::settings();
+        let gate = crate::coordination::merge_gate::MergeGate::new(leases, &settings);
+        crate::coordination::merge_gate::merge_under_lease(
+            &gate,
+            &service,
+            &id,
+            request,
+            None,
+            |_checkout| async { None },
+        )
         .await
-        .map(Json)
-        .map_err(map_service_error)
+        .map(|outcome| outcome.response)
+        .map_err(|error| match error {
+            crate::coordination::merge_gate::MergeGateError::Busy(busy) => (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "code": "merge_busy",
+                    "error": format!("checkout `{}` is busy; retry after {}ms", busy.checkout, busy.waited_ms),
+                    "retryable": true,
+                    "request_id": uuid::Uuid::new_v4().to_string(),
+                })),
+            ),
+            other => map_service_error(other.to_string()),
+        })
+    } else {
+        service
+            .merge_worktree(&id, request)
+            .await
+            .map_err(map_service_error)
+    };
+    result.map(Json)
 }
 
 pub async fn handle_v1_worktrees_delete(

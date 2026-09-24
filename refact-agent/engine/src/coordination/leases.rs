@@ -26,6 +26,7 @@ use refact_work_core::settings::CoordinationSettings;
 use refact_work_core::store::records::{
     now_ms, IntentState, LeaseAcquisition, LeaseAuthority, LeaseRecord, RunIntentRecord,
 };
+use refact_work_core::default_store_path;
 use refact_work_core::store::{CoordinationStore, ProjectAccess, StoreError};
 use serde::Serialize;
 use tokio::sync::Notify;
@@ -33,6 +34,8 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use super::presence::{self, PresenceState};
+
+use crate::app_state::AppState;
 
 /// Distinct takeovers kept in memory for inspection.
 const MAX_TAKEOVER_JOURNAL: usize = 64;
@@ -472,6 +475,38 @@ impl LeaseManager {
     }
 }
 
+pub async fn leases_for(app: &AppState) -> Option<Arc<LeaseManager>> {
+    let settings = crate::file_activity::settings();
+    leases_for_settings(app, &settings).await
+}
+
+async fn leases_for_settings(
+    app: &AppState,
+    settings: &CoordinationSettings,
+) -> Option<Arc<LeaseManager>> {
+    if !settings.enabled {
+        return None;
+    }
+    let path = default_store_path(&app.paths.cache_dir);
+    let project = super::outbox::project_key_for_root(app, None).await;
+    match super::outbox::store_for_path(&path, &settings).await {
+        Ok(store) => {
+            let access = store.authorize(project);
+            match LeaseManager::new(store, access, super::engine_instance_id(), &settings) {
+                Ok(manager) => Some(Arc::new(manager)),
+                Err(error) => {
+                    super::outbox::note_durability_unavailable(&path, error.to_string());
+                    None
+                }
+            }
+        }
+        Err(error) => {
+            super::outbox::note_durability_unavailable(&path, error.to_string());
+            None
+        }
+    }
+}
+
 /// What engine presence says about the engine behind a lease. `None` covers
 /// both "no presence data" and "not a peer we know about"; neither is a claim.
 fn holder_presence(project: &str, holder_instance: &str) -> Option<PresenceState> {
@@ -538,7 +573,7 @@ pub struct LeaseRenewal {
     manager: Arc<LeaseManager>,
     holder: LeaseHolder,
     cancel: Arc<Notify>,
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
 }
 
 impl LeaseRenewal {
@@ -553,7 +588,7 @@ impl LeaseRenewal {
             manager,
             holder,
             cancel,
-            task,
+            task: Some(task),
         }
     }
 
@@ -562,10 +597,12 @@ impl LeaseRenewal {
     }
 
     /// Cancel the loop, join it, then release the lease.
-    pub async fn shutdown(self) -> Result<bool, LeaseError> {
+    pub async fn shutdown(&mut self) -> Result<bool, LeaseError> {
         self.cancel.notify_one();
-        if let Err(error) = self.task.await {
-            tracing::warn!("lease renewal task failed to join: {error}");
+        if let Some(task) = self.task.take() {
+            if let Err(error) = task.await {
+                tracing::warn!("lease renewal task failed to join: {error}");
+            }
         }
         self.manager.release(&self.holder).await
     }
@@ -631,6 +668,18 @@ mod tests {
     fn manager(store: Arc<CoordinationStore>, project: &str, instance: &str) -> LeaseManager {
         let access = store.authorize(ProjectKey::new(project));
         LeaseManager::new(store, access, instance, &settings()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn disabled_coordination_leaves_merges_without_a_durable_lease() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let settings = CoordinationSettings {
+            enabled: false,
+            ..settings()
+        };
+
+        assert!(leases_for_settings(&app, &settings).await.is_none());
     }
 
     fn publish(project: &str, instance: &str, state: PresenceState) {
@@ -947,7 +996,7 @@ mod tests {
         let store = store().await;
         let engine = Arc::new(manager(store.clone(), &project, "engine-1"));
         let holder = engine.acquire("build", now_ms()).await.unwrap();
-        let renewal = LeaseRenewal::spawn(engine.clone(), holder.clone());
+        let mut renewal = LeaseRenewal::spawn(engine.clone(), holder.clone());
 
         let mut renewed = holder.clone();
         while renewed.expires_at_ms == holder.expires_at_ms {

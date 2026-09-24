@@ -31,6 +31,7 @@ use crate::chat::evidence::{
 };
 use crate::chat::verify_cmd::VerifyCommandPolicy;
 use crate::coordination::merge_gate::{MergeVerification, VerificationStage};
+use crate::tasks::types::VerificationOutcome;
 
 const ABSENT: &str = "<absent>";
 const REFUSED: &str = "<refused>";
@@ -580,6 +581,19 @@ pub async fn revalidate_merged_tree<R: EvidenceRunner>(
             passed: record.verdict.is_passed(),
             exit_code: record.exit_code,
             output_tail: record.output_tail.clone(),
+            auto_reverted: false,
+            merge_commit: None,
+            revert_commit: None,
+            fix_card_id: None,
+            skipped_reason: None,
+            revert_skipped_reason: None,
+            outcome: if record.verdict.is_passed() {
+                VerificationOutcome::Passed
+            } else if record.exit_code.is_some() {
+                VerificationOutcome::CommandFailed
+            } else {
+                VerificationOutcome::InfrastructureFailed
+            },
         },
         None => MergeVerification {
             stage: VerificationStage::PostMerge,
@@ -587,6 +601,13 @@ pub async fn revalidate_merged_tree<R: EvidenceRunner>(
             passed: false,
             exit_code: None,
             output_tail: "no verification contract ran against the merged tree".to_string(),
+            auto_reverted: false,
+            merge_commit: None,
+            revert_commit: None,
+            fix_card_id: None,
+            skipped_reason: None,
+            revert_skipped_reason: None,
+            outcome: VerificationOutcome::NoCommands,
         },
     };
     Some(verification)

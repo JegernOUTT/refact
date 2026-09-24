@@ -14,6 +14,7 @@ use crate::tools::tools_description::{
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::chat::verifier::{load_expected_card_state, outcome_is_infrastructure};
+use crate::tasks::types::VerificationOutcome;
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tools::task_tool_helpers::require_bound_planner_task;
@@ -25,6 +26,57 @@ use crate::worktrees::types::{
 
 fn git_merge_lock(workspace_root: &std::path::Path) -> Arc<AMutex<()>> {
     merge_lock_for(workspace_root)
+}
+
+async fn merge_under_available_lease(
+    app: &crate::app_state::AppState,
+    service: &WorktreeService,
+    worktree_id: &str,
+    request: MergeWorktreeRequest,
+) -> Result<
+    (
+        MergeWorktreeResponse,
+        Option<crate::coordination::merge_gate::MergeVerification>,
+        bool,
+    ),
+    String,
+> {
+    let Some(leases) = crate::coordination::leases::leases_for(app).await else {
+        return service
+            .merge_worktree(worktree_id, request)
+            .await
+            .map(|response| (response, None, false));
+    };
+    let settings = crate::file_activity::settings();
+    let gate = crate::coordination::merge_gate::MergeGate::new(leases, &settings);
+    let outcome = crate::coordination::merge_gate::merge_under_lease(
+        &gate,
+        service,
+        worktree_id,
+        request,
+        None,
+        |_checkout| async { None },
+    )
+    .await
+    .map_err(|error| match error {
+        crate::coordination::merge_gate::MergeGateError::Busy(_) => {
+            crate::coordination::error::WorkError::new("merge_busy", error.to_string(), true)
+                .to_string()
+        }
+        other => other.to_string(),
+    })?;
+    let post_merge = outcome.post_merge.clone();
+    let mut response = outcome.response;
+    if let Some(cleanup) = outcome.cleanup {
+        response.cleanup = Some(crate::worktrees::types::WorktreeRemovalResult {
+            worktree_deleted: cleanup.deleted,
+            branch_deleted: cleanup.branch_deleted,
+            registry_deleted: cleanup.deleted,
+            stale_path: cleanup.stale_path,
+            warnings: cleanup.warnings,
+        });
+    }
+    Ok((response, post_merge, true))
 }
 
 fn strategy_from_str(strategy: &str) -> Result<WorktreeMergeStrategy, String> {
@@ -864,39 +916,56 @@ async fn merge_registered_task_worktree(
     } else {
         None
     };
-    let response = service
-        .merge_worktree(
-            &worktree_id,
-            MergeWorktreeRequest {
-                strategy: strategy_from_str(strategy)?,
-                delete_after_merge: true,
-                include_uncommitted: true,
-                target_branch: Some(target_branch),
-                commit_message,
-                generate_commit_message: false,
-                acknowledge_dirty_baseline: false,
-            },
-        )
-        .await?;
-    let post_merge_check_result = match (response.merge_commit.as_ref(), post_merge_expected_state)
-    {
-        (Some(merge_commit), Some(expected_card_state)) if response.merged && auto_revert => {
-            crate::chat::post_merge_check::post_merge_check(
-                gcx.clone(),
-                crate::chat::post_merge_check::PostMergeCheckRequest {
-                    task_id: task_id.to_string(),
-                    card_id: card_id.to_string(),
-                    workspace_root: workspace_root.to_path_buf(),
-                    enabled: true,
-                    timeout: auto_revert_timeout,
-                    expected_merge_commit: merge_commit.clone(),
-                    expected_card_state: Some(expected_card_state),
-                },
-            )
-            .await
-            .map(Some)
-        }
-        _ => Ok(None),
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let auto_revert = auto_revert && post_merge_expected_state.is_some();
+    let (response, post_merge_verification, _lease_used) = merge_under_available_lease(
+        &app,
+        &service,
+        &worktree_id,
+        MergeWorktreeRequest {
+            strategy: strategy_from_str(strategy)?,
+            delete_after_merge: true,
+            include_uncommitted: true,
+            target_branch: Some(target_branch),
+            commit_message,
+            generate_commit_message: false,
+            acknowledge_dirty_baseline: false,
+        },
+    )
+    .await?;
+    let post_merge_check_result = match post_merge_verification {
+        Some(verification) => Ok(Some(crate::chat::post_merge_check::PostMergeCheckResult {
+            checked: verification.outcome != VerificationOutcome::Unknown,
+            auto_reverted: verification.auto_reverted,
+            command: Some(verification.command),
+            exit_code: verification.exit_code,
+            output_tail: verification.output_tail,
+            merge_commit: verification.merge_commit,
+            revert_commit: verification.revert_commit,
+            fix_card_id: verification.fix_card_id,
+            skipped_reason: verification.skipped_reason,
+            revert_skipped_reason: verification.revert_skipped_reason,
+            outcome: verification.outcome,
+        })),
+        None => match (response.merge_commit.as_ref(), post_merge_expected_state) {
+            (Some(merge_commit), Some(expected_card_state)) if response.merged && auto_revert => {
+                crate::chat::post_merge_check::post_merge_check(
+                    gcx.clone(),
+                    crate::chat::post_merge_check::PostMergeCheckRequest {
+                        task_id: task_id.to_string(),
+                        card_id: card_id.to_string(),
+                        workspace_root: workspace_root.to_path_buf(),
+                        enabled: true,
+                        timeout: auto_revert_timeout,
+                        expected_merge_commit: merge_commit.clone(),
+                        expected_card_state: Some(expected_card_state),
+                    },
+                )
+                .await
+                .map(Some)
+            }
+            _ => Ok(None),
+        },
     };
     let force_merge_auto_reverted = post_merge_check_result
         .as_ref()

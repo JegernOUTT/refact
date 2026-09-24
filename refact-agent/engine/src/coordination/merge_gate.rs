@@ -42,8 +42,9 @@ use crate::worktrees::types::{
     DeleteWorktreeResponse, DirtyBaseline, MergeWorktreeRequest, MergeWorktreeResponse,
     WorktreeConflictState,
 };
+use crate::tasks::types::VerificationOutcome;
 
-use super::leases::{LeaseError, LeaseHolder, LeaseManager};
+use super::leases::{LeaseError, LeaseHolder, LeaseManager, LeaseRenewal};
 
 /// Identity of a checkout a merge writes into.
 pub fn checkout_key(root: &Path) -> CheckoutKey {
@@ -214,7 +215,7 @@ impl MergeGate {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationStage {
     /// Ran in the source worktree, before the merge existed.
@@ -223,14 +224,36 @@ pub enum VerificationStage {
     PostMerge,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+impl Default for VerificationStage {
+    fn default() -> Self {
+        Self::PostMerge
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct MergeVerification {
     pub stage: VerificationStage,
     pub command: String,
     pub passed: bool,
     pub exit_code: Option<i32>,
     pub output_tail: String,
+    #[serde(default)]
+    pub auto_reverted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revert_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix_card_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revert_skipped_reason: Option<String>,
+    #[serde(default)]
+    pub outcome: VerificationOutcome,
 }
+
+impl MergeVerification {}
 
 /// One merge, with the two verification results kept apart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -292,6 +315,7 @@ where
 {
     let checkout = checkout_key(service.source_workspace_root());
     let slot = gate.acquire(&checkout).await?;
+    let renewal = LeaseRenewal::spawn(slot.leases.clone(), slot.holder.clone());
     let waited_for_lease_ms = slot.waited_ms();
     let delete_requested = request.delete_after_merge;
     let response = service
@@ -306,7 +330,7 @@ where
     let response = match response {
         Ok(response) => response,
         Err(error) => {
-            release_slot(slot).await;
+            shutdown_renewal(renewal).await;
             return Err(MergeGateError::Merge(error));
         }
     };
@@ -333,7 +357,7 @@ where
         },
         false => None,
     };
-    release_slot(slot).await;
+    shutdown_renewal(renewal).await;
     Ok(GuardedMerge {
         checkout: checkout.as_str().to_string(),
         waited_for_lease_ms,
@@ -344,10 +368,9 @@ where
     })
 }
 
-async fn release_slot(slot: MergeSlot) {
-    let lease_key = slot.holder().lease_key.clone();
-    if let Err(error) = slot.release().await {
-        tracing::warn!(lease_key = %lease_key, "merge lease could not be released: {error}");
+async fn shutdown_renewal(mut renewal: LeaseRenewal) {
+    if let Err(error) = renewal.shutdown().await {
+        tracing::warn!("merge lease renewal could not release the lease: {error}");
     }
 }
 
@@ -457,6 +480,17 @@ mod tests {
             passed,
             exit_code: Some(i32::from(!passed)),
             output_tail: String::new(),
+            auto_reverted: false,
+            merge_commit: None,
+            revert_commit: None,
+            fix_card_id: None,
+            skipped_reason: None,
+            revert_skipped_reason: None,
+            outcome: if passed {
+                VerificationOutcome::Passed
+            } else {
+                VerificationOutcome::CommandFailed
+            },
         }
     }
 
@@ -750,6 +784,62 @@ mod tests {
             worktree_root.exists() && outcome.source_preserved(),
             "a failed reverification keeps the source worktrees on disk"
         );
+    }
+
+    #[tokio::test]
+    async fn infrastructure_verification_failure_preserves_source_without_auto_revert() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        init_repo(&source);
+        let service = WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap();
+        let (gate, _leases) = shared_gate(&Uuid::new_v4().to_string()).await;
+        let (id, worktree_root) = worktree_with_commit(
+            &service,
+            "refact/chat/infrastructure",
+            "feature.txt",
+            "feature\n",
+        )
+        .await;
+
+        let outcome = merge_under_lease(
+            &gate,
+            &service,
+            &id,
+            MergeWorktreeRequest {
+                delete_after_merge: true,
+                ..merge_request()
+            },
+            None,
+            |_checkout| async {
+                Some(MergeVerification {
+                    stage: VerificationStage::PostMerge,
+                    command: "cargo test".into(),
+                    passed: false,
+                    exit_code: None,
+                    output_tail: "runner unavailable".into(),
+                    auto_reverted: false,
+                    merge_commit: None,
+                    revert_commit: None,
+                    fix_card_id: None,
+                    skipped_reason: None,
+                    revert_skipped_reason: Some("verification infrastructure failed".into()),
+                    outcome: VerificationOutcome::InfrastructureFailed,
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        let verification = outcome.post_merge.as_ref().unwrap();
+        assert_eq!(
+            verification.outcome,
+            VerificationOutcome::InfrastructureFailed
+        );
+        assert_eq!(verification.output_tail, "runner unavailable");
+        assert!(!verification.auto_reverted);
+        assert!(worktree_root.exists());
+        assert!(outcome.source_preserved());
+        assert!(source.join("feature.txt").exists());
     }
 
     #[tokio::test]

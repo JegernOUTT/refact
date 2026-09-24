@@ -196,14 +196,38 @@ pub async fn post_merge_check(
     gcx: Arc<GlobalContext>,
     request: PostMergeCheckRequest,
 ) -> Result<PostMergeCheckResult, String> {
+    post_merge_check_with_revert_policy(gcx, request, true).await
+}
+
+pub async fn post_merge_check_without_revert(
+    gcx: Arc<GlobalContext>,
+    request: PostMergeCheckRequest,
+) -> Result<PostMergeCheckResult, String> {
+    post_merge_check_with_revert_policy(gcx, request, false).await
+}
+
+async fn post_merge_check_with_revert_policy(
+    gcx: Arc<GlobalContext>,
+    request: PostMergeCheckRequest,
+    allow_revert: bool,
+) -> Result<PostMergeCheckResult, String> {
     let mut runner = SystemPostMergeCommandRunner { gcx: gcx.clone() };
-    post_merge_check_with_runner(gcx, request, &mut runner).await
+    post_merge_check_with_runner_and_revert_policy(gcx, request, &mut runner, allow_revert).await
 }
 
 pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
     gcx: Arc<GlobalContext>,
     request: PostMergeCheckRequest,
     runner: &mut R,
+) -> Result<PostMergeCheckResult, String> {
+    post_merge_check_with_runner_and_revert_policy(gcx, request, runner, true).await
+}
+
+async fn post_merge_check_with_runner_and_revert_policy<R: PostMergeCommandRunner>(
+    gcx: Arc<GlobalContext>,
+    request: PostMergeCheckRequest,
+    runner: &mut R,
+    allow_revert: bool,
 ) -> Result<PostMergeCheckResult, String> {
     if !request.enabled {
         return Ok(skipped_result("auto_revert disabled"));
@@ -303,7 +327,21 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
             output_tail,
         ));
     }
-
+    if !allow_revert {
+        return Ok(PostMergeCheckResult {
+            checked: true,
+            auto_reverted: false,
+            command: Some(command),
+            exit_code,
+            output_tail,
+            merge_commit: None,
+            revert_commit: None,
+            fix_card_id: None,
+            skipped_reason: None,
+            revert_skipped_reason: Some("automatic revert was not enabled".to_string()),
+            outcome: VerificationOutcome::CommandFailed,
+        });
+    }
     let expected_merge_commit = request.expected_merge_commit.trim().to_string();
     if expected_merge_commit.is_empty() {
         return Ok(skipped_result("missing expected merge commit"));
