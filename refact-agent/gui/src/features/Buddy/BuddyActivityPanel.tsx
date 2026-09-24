@@ -2,17 +2,17 @@ import React from "react";
 import { History } from "lucide-react";
 import {
   Badge,
+  Button,
   Icon,
   SegmentedControl,
   Surface,
-  Tooltip,
-  Text,
 } from "../../components/ui";
 import type { BuddyActivityEntry } from "./types";
 import { formatBuddyTime, formatFailureLabel } from "./buddyUtils";
 import { BuddySectionHeader } from "./BuddySectionHeader";
 import { activityIcon } from "./buddyIcons";
 import styles from "./BuddyActivityPanel.module.css";
+import { collapseConsecutive, HISTORY_PAGE_SIZE } from "./buddyHistory";
 
 type ActivityFilter = "all" | "refact_" | "buddy_";
 
@@ -34,13 +34,17 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
   onOpenChat,
 }) => {
   const [filter, setFilter] = React.useState<ActivityFilter>("all");
-  const filteredActivities = React.useMemo(
-    () =>
-      activities.filter((entry) =>
-        filter === "all" ? true : entry.activity_type.startsWith(filter),
-      ),
-    [activities, filter],
-  );
+  const [visibleCount, setVisibleCount] = React.useState(HISTORY_PAGE_SIZE);
+  const filteredActivities = React.useMemo(() => {
+    const filtered = activities.filter((entry) =>
+      filter === "all" ? true : entry.activity_type.startsWith(filter),
+    );
+    return collapseConsecutive(
+      filtered,
+      (entry) => `${entry.activity_type}\u0000${entry.title}`,
+    );
+  }, [activities, filter]);
+  const visibleActivities = filteredActivities.slice(0, visibleCount);
 
   return (
     <Surface
@@ -64,73 +68,75 @@ export const BuddyActivityPanel: React.FC<BuddyActivityPanelProps> = ({
           { value: "buddy_", label: "buddy_*" },
         ]}
       />
-      <div className={`${styles.scrollList} rf-stagger`}>
+      <ul className={`${styles.scrollList} rf-stagger`}>
         {filteredActivities.length === 0 && (
-          <Text size="1" className={styles.emptyText}>
-            No recent activity
-          </Text>
+          <li className={styles.emptyText}>No recent activity</li>
         )}
-        {filteredActivities.map((a) => {
-          const failureLabel = formatFailureLabel(a.failure_category);
-          const detail = a.failure_summary ?? a.description;
-          const tooltip = detail;
-          const canOpen = Boolean(a.chat_id && onOpenChat);
+        {visibleActivities.map(({ entry, count }) => {
+          const failureLabel = formatFailureLabel(entry.failure_category);
+          const detail = entry.failure_summary ?? entry.description;
+          const canOpen = Boolean(entry.chat_id && onOpenChat);
+          const content = (
+            <>
+              <span className={styles.listIcon}>
+                <Icon
+                  icon={activityIcon(entry)}
+                  size="sm"
+                  tone={activityTone(entry)}
+                />
+              </span>
+              <span className={styles.listContent}>
+                <span className={styles.listTitle}>
+                  {entry.title}
+                  {count > 1 && <Badge tone="muted">{count} similar</Badge>}
+                  {failureLabel && <Badge tone="warning">{failureLabel}</Badge>}
+                </span>
+                {detail && (
+                  <span className={styles.listSubtitle}>{detail}</span>
+                )}
+              </span>
+              <span className={styles.listMeta}>
+                {formatBuddyTime(entry.timestamp)}
+              </span>
+            </>
+          );
           return (
-            <Tooltip
-              key={`${a.activity_type}-${a.timestamp}-${a.chat_id ?? ""}-${
-                a.title
-              }-${a.description}`}
-              content={tooltip}
-              delayDuration={150}
+            <li
+              key={`${entry.activity_type}-${entry.timestamp}-${entry.title}`}
+              className={styles.listItem}
             >
-              <div
-                className={`${styles.listRow} rf-enter-rise`}
-                data-clickable={canOpen ? "true" : undefined}
-                {...(canOpen
-                  ? {
-                      tabIndex: 0,
-                      role: "button",
-                      "aria-label": `${tooltip}. Open Buddy chat`,
-                      onClick: () => {
-                        if (a.chat_id) onOpenChat?.(a.chat_id, a.title);
-                      },
-                      onKeyDown: (
-                        event: React.KeyboardEvent<HTMLDivElement>,
-                      ) => {
-                        if (!a.chat_id || !onOpenChat) return;
-                        if (event.key !== "Enter" && event.key !== " ") return;
-                        event.preventDefault();
-                        onOpenChat(a.chat_id, a.title);
-                      },
-                    }
-                  : {})}
-              >
-                <span className={styles.listIcon}>
-                  <Icon
-                    icon={activityIcon(a)}
-                    size="sm"
-                    tone={activityTone(a)}
-                  />
-                </span>
-                <div className={styles.listContent}>
-                  <span className={styles.listTitle}>
-                    {a.title}
-                    {failureLabel && (
-                      <Badge tone="warning">{failureLabel}</Badge>
-                    )}
-                  </span>
-                  {detail && (
-                    <span className={styles.listSubtitle}>{detail}</span>
-                  )}
+              {canOpen ? (
+                <button
+                  type="button"
+                  className={`${styles.listRow} rf-enter-rise`}
+                  data-clickable="true"
+                  aria-label={`${entry.title}.${
+                    failureLabel ? ` ${failureLabel}.` : ""
+                  }${detail ? ` ${detail}.` : ""} Open Buddy chat`}
+                  onClick={() => {
+                    if (entry.chat_id) onOpenChat?.(entry.chat_id, entry.title);
+                  }}
+                >
+                  {content}
+                </button>
+              ) : (
+                <div className={`${styles.listRow} rf-enter-rise`}>
+                  {content}
                 </div>
-                <span className={styles.listMeta}>
-                  {formatBuddyTime(a.timestamp)}
-                </span>
-              </div>
-            </Tooltip>
+              )}
+            </li>
           );
         })}
-      </div>
+      </ul>
+      {visibleActivities.length < filteredActivities.length && (
+        <Button
+          type="button"
+          variant="ghost"
+          onClick={() => setVisibleCount((count) => count + HISTORY_PAGE_SIZE)}
+        >
+          Show more
+        </Button>
+      )}
     </Surface>
   );
 };

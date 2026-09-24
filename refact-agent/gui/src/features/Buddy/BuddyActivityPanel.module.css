@@ -31,6 +31,14 @@
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.listItem {
+  list-style: none;
+  min-width: 0;
 }
 
 .listRow {
@@ -46,6 +54,7 @@
   border-radius: var(--rf-radius-ctl);
   background: transparent;
   color: inherit;
+  font: inherit;
   text-align: left;
   cursor: default;
   transition:

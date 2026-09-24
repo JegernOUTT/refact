@@ -785,8 +785,12 @@ describe("AutonomousChats_groups_by_workflow_id", () => {
       { preloadedState: CONFIG_STATE },
     );
 
-    expect(screen.getByText("refact self critic")).toBeInTheDocument();
-    expect(screen.getByText("buddy memory garden")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Refact self critic" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Buddy memory garden" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Refact A")).toBeInTheDocument();
     expect(screen.getByText("Refact B")).toBeInTheDocument();
     expect(screen.getByText("Buddy A")).toBeInTheDocument();

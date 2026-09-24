@@ -290,6 +290,47 @@ const buddyConversations: BuddyConversationEntry[] = [
   },
 ];
 
+const activityFixtureParam = new URLSearchParams(window.location.search).has(
+  "activity_fixture",
+);
+const buddyActivityConversations: BuddyConversationEntry[] =
+  activityFixtureParam
+    ? Array.from({ length: 60 }, (_, index) => {
+        const workflowIndex = Math.floor(index / 12);
+        const ids = [
+          "refact_error_detective",
+          "buddy_pr_issue_matchmaker",
+          "kg_deprecate",
+          "privacy_observation_degraded",
+          "commit_message",
+        ];
+        const badges = [
+          "Error Detective",
+          "PR Matchmaker",
+          "Knowledge",
+          "Privacy observation degraded",
+          "Commit message",
+        ];
+        const id = ids[workflowIndex];
+        const badge = badges[workflowIndex];
+        const title =
+          index % 12 < 2
+            ? `${id.replace(/_/g, " ")} (${badge})`
+            : `${badge} report ${index}`;
+        return {
+          id: index % 12 < 2 ? id : `${id}-${index}`,
+          kind: "workflow",
+          title,
+          created_at: now,
+          updated_at: now,
+          status: "completed",
+          message_count: index === 0 ? 1 : 2,
+          icon: "⚙️",
+          badge,
+        };
+      })
+    : buddyConversations;
+
 const buddySnapshot: BuddySnapshot = {
   state: {
     identity: {
@@ -1483,7 +1524,7 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         }),
       );
     }
-    return Promise.resolve(jsonResponse(buddyConversations));
+    return Promise.resolve(jsonResponse(buddyActivityConversations));
   }
   if (path === "/v1/buddy/pulse")
     return Promise.resolve(jsonResponse(buddyPulse));
