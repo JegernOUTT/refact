@@ -151,13 +151,202 @@ describe("Tabs", () => {
       </Tabs>,
     );
 
-    expect(scrolled.at(-1)).toBe(screen.getByRole("tab", { name: "One" }));
+    expect(scrolled).toHaveLength(0);
 
     await user.click(screen.getByRole("tab", { name: "Two" }));
 
     await waitFor(() => {
       expect(scrolled.at(-1)).toBe(screen.getByRole("tab", { name: "Two" }));
     });
+
+    scrollIntoView.mockRestore();
+  });
+
+  it("reveals an off-screen default trigger by scrolling only the list", () => {
+    const scrolled: Element[] = [];
+    const scrollIntoView = vi
+      .spyOn(Element.prototype, "scrollIntoView")
+      .mockImplementation(function (this: Element) {
+        scrolled.push(this);
+      });
+    mockTriggerMetrics(
+      new Map([
+        ["One", { left: 0, width: 100 }],
+        ["Two", { left: 140, width: 100 }],
+      ]),
+    );
+    let scrollLeft = 0;
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(
+      function (this: HTMLElement) {
+        return this.getAttribute("role") === "tablist" ? 200 : 0;
+      },
+    );
+    vi.spyOn(HTMLElement.prototype, "scrollLeft", "get").mockImplementation(
+      function (this: HTMLElement) {
+        return this.getAttribute("role") === "tablist" ? scrollLeft : 0;
+      },
+    );
+    vi.spyOn(HTMLElement.prototype, "scrollLeft", "set").mockImplementation(
+      function (this: HTMLElement, value: number) {
+        if (this.getAttribute("role") === "tablist") scrollLeft = value;
+      },
+    );
+    render(
+      <Tabs defaultValue="two">
+        <Tabs.List activeIndex={1} itemCount={2}>
+          <Tabs.Trigger value="one">One</Tabs.Trigger>
+          <Tabs.Trigger value="two">Two</Tabs.Trigger>
+        </Tabs.List>
+      </Tabs>,
+    );
+
+    const list = screen.getByRole("tablist");
+    const active = screen.getByRole("tab", { name: "Two" });
+    expect(list.scrollLeft).toBe(40);
+    expect(active.offsetLeft).toBeGreaterThanOrEqual(list.scrollLeft);
+    expect(active.offsetLeft + active.offsetWidth).toBeLessThanOrEqual(
+      list.scrollLeft + list.clientWidth,
+    );
+    expect(scrolled).toHaveLength(0);
+
+    scrollIntoView.mockRestore();
+  });
+
+  it("reveals app-activated triggers inside the list when focus is outside", async () => {
+    const scrolled: Element[] = [];
+    const scrollIntoView = vi
+      .spyOn(Element.prototype, "scrollIntoView")
+      .mockImplementation(function (this: Element) {
+        scrolled.push(this);
+      });
+    mockTriggerMetrics(
+      new Map([
+        ["One", { left: 0, width: 100 }],
+        ["Two", { left: 140, width: 100 }],
+      ]),
+    );
+    let scrollLeft = 0;
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(
+      function (this: HTMLElement) {
+        return this.getAttribute("role") === "tablist" ? 200 : 0;
+      },
+    );
+    vi.spyOn(HTMLElement.prototype, "scrollLeft", "get").mockImplementation(
+      function (this: HTMLElement) {
+        return this.getAttribute("role") === "tablist" ? scrollLeft : 0;
+      },
+    );
+    vi.spyOn(HTMLElement.prototype, "scrollLeft", "set").mockImplementation(
+      function (this: HTMLElement, value: number) {
+        if (this.getAttribute("role") === "tablist") scrollLeft = value;
+      },
+    );
+
+    const { rerender } = render(
+      <Tabs value="one" onValueChange={vi.fn()}>
+        <Tabs.List activeIndex={0} itemCount={2}>
+          <Tabs.Trigger value="one">One</Tabs.Trigger>
+          <Tabs.Trigger value="two">Two</Tabs.Trigger>
+        </Tabs.List>
+      </Tabs>,
+    );
+
+    rerender(
+      <Tabs value="two" onValueChange={vi.fn()}>
+        <Tabs.List activeIndex={1} itemCount={2}>
+          <Tabs.Trigger value="one">One</Tabs.Trigger>
+          <Tabs.Trigger value="two">Two</Tabs.Trigger>
+        </Tabs.List>
+      </Tabs>,
+    );
+
+    const list = screen.getByRole("tablist");
+    const active = screen.getByRole("tab", { name: "Two" });
+    await waitFor(() => expect(list.scrollLeft).toBe(40));
+    expect(scrolled).toHaveLength(0);
+    expect(active.offsetLeft).toBeGreaterThanOrEqual(list.scrollLeft);
+    expect(active.offsetLeft + active.offsetWidth).toBeLessThanOrEqual(
+      list.scrollLeft + list.clientWidth,
+    );
+
+    scrollIntoView.mockRestore();
+  });
+
+  it("scrolls app-activated triggers into view when focus is inside the list", async () => {
+    const scrolled: Element[] = [];
+    const scrollIntoView = vi
+      .spyOn(Element.prototype, "scrollIntoView")
+      .mockImplementation(function (this: Element) {
+        scrolled.push(this);
+      });
+
+    const { rerender } = render(
+      <Tabs value="one" onValueChange={vi.fn()}>
+        <Tabs.List activeIndex={0} itemCount={2}>
+          <Tabs.Trigger value="one">One</Tabs.Trigger>
+          <Tabs.Trigger value="two">Two</Tabs.Trigger>
+        </Tabs.List>
+      </Tabs>,
+    );
+    const one = screen.getByRole("tab", { name: "One" });
+    one.focus();
+
+    rerender(
+      <Tabs value="two" onValueChange={vi.fn()}>
+        <Tabs.List activeIndex={1} itemCount={2}>
+          <Tabs.Trigger value="one">One</Tabs.Trigger>
+          <Tabs.Trigger value="two">Two</Tabs.Trigger>
+        </Tabs.List>
+      </Tabs>,
+    );
+
+    await waitFor(() => {
+      expect(scrolled.at(-1)).toBe(screen.getByRole("tab", { name: "Two" }));
+    });
+
+    scrollIntoView.mockRestore();
+  });
+
+  it("keeps scrollLeft at zero when the default trigger fits in the list", () => {
+    const scrolled: Element[] = [];
+    const scrollIntoView = vi
+      .spyOn(Element.prototype, "scrollIntoView")
+      .mockImplementation(function (this: Element) {
+        scrolled.push(this);
+      });
+    render(
+      <Tabs defaultValue="one">
+        <Tabs.List
+          ref={(list) => {
+            if (!list) return;
+            Object.defineProperties(list, {
+              clientWidth: { configurable: true, value: 200 },
+              scrollWidth: { configurable: true, value: 200 },
+              scrollLeft: { configurable: true, writable: true, value: 0 },
+            });
+          }}
+          activeIndex={0}
+          itemCount={2}
+        >
+          <Tabs.Trigger
+            ref={(trigger) => {
+              if (!trigger) return;
+              Object.defineProperties(trigger, {
+                offsetLeft: { configurable: true, value: 0 },
+                offsetWidth: { configurable: true, value: 80 },
+              });
+            }}
+            value="one"
+          >
+            One
+          </Tabs.Trigger>
+          <Tabs.Trigger value="two">Two</Tabs.Trigger>
+        </Tabs.List>
+      </Tabs>,
+    );
+
+    expect(screen.getByRole("tablist").scrollLeft).toBe(0);
+    expect(scrolled).toHaveLength(0);
 
     scrollIntoView.mockRestore();
   });

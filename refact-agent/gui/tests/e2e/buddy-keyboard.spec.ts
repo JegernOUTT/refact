@@ -229,6 +229,7 @@ test.describe("Buddy keyboard access", () => {
         focusLog: rawFocusLog,
       }),
     );
+    expect(rawLoad.count).toBe(9);
 
     await page.goto(ROUTE);
     await expect(page.locator(`${DESK} ul li button`)).toHaveCount(7);
@@ -247,6 +248,7 @@ test.describe("Buddy keyboard access", () => {
       JSON.stringify({ stops: trueStart.count, targets: trueStart.targets }),
     );
     expect(trueStart.count).toBe(9);
+    expect(rawLoad.count).toBe(trueStart.count);
   });
 
   test("keeps_the_activated_view_focused_when_no_selection_is_open", async ({

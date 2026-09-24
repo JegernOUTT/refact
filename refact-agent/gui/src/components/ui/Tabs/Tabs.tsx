@@ -61,12 +61,32 @@ const TabsList = React.forwardRef<HTMLDivElement, TabsListProps>(
 
       const sync = () => {
         const active = list.querySelector<HTMLElement>('[data-state="active"]');
-
-        if (active !== activeTriggerRef.current) {
+        const previousActive = activeTriggerRef.current;
+        if (active !== previousActive) {
           activeTriggerRef.current = active;
-          if (active && typeof active.scrollIntoView === "function") {
-            active.scrollIntoView({ block: "nearest", inline: "nearest" });
+        }
+
+        if (active && typeof active.scrollIntoView === "function") {
+          if (!previousActive || !list.contains(document.activeElement)) {
+            const left = active.offsetLeft;
+            const right = left + active.offsetWidth;
+            const visibleLeft = list.scrollLeft;
+            const visibleRight = visibleLeft + list.clientWidth;
+
+            if (left < visibleLeft) list.scrollLeft = left;
+            else if (right > visibleRight)
+              list.scrollLeft = right - list.clientWidth;
           }
+        }
+
+        if (
+          active &&
+          previousActive &&
+          active !== previousActive &&
+          typeof active.scrollIntoView === "function" &&
+          list.contains(document.activeElement)
+        ) {
+          active.scrollIntoView({ block: "nearest", inline: "nearest" });
         }
 
         const next =
