@@ -334,7 +334,7 @@ function WorkDetail({
             radius="card"
             className={styles.headline}
           >
-            <Text as="p" size="3" weight="bold" className={styles.title}>
+            <Text as="h3" size="3" weight="bold" className={styles.title}>
               {artifact.title}
             </Text>
             <Text as="p" size="3" className={styles.conclusion}>

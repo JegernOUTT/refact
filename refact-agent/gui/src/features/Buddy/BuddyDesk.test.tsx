@@ -371,6 +371,9 @@ describe("BuddyDesk", () => {
     });
     fireEvent.click(row);
     expect(await screen.findByText("The token has expired.")).toBeTruthy();
+    expect(
+      screen.getByRole("heading", { level: 3, name: artifact.title }),
+    ).toBeTruthy();
     expect(screen.getByText("Network access was not tested.")).toBeTruthy();
     expect(
       screen.getByText(/no proposed fix is applied automatically/),

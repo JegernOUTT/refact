@@ -261,17 +261,17 @@ for (const width of [240, 360, 768, 1280]) {
     await page
       .getByRole("button", { name: "Check saved evidence links" })
       .click();
-    await expect(page.getByText("Saved check: Partial")).toBeVisible();
+    await expect(page.getByText("Saved evidence check: Partial")).toBeVisible();
     await expect(
       page.getByText("Findings are not independently verified."),
     ).toBeVisible();
     await page.getByRole("button", { name: "Back to work list" }).click();
     await expect(row).toBeFocused();
     await row.click();
-    await expect(page.getByText("Saved check: Partial")).toBeVisible();
+    await expect(page.getByText("Saved evidence check: Partial")).toBeVisible();
     await page.reload();
     await row.click();
-    await expect(page.getByText("Saved check: Partial")).toBeVisible();
+    await expect(page.getByText("Saved evidence check: Partial")).toBeVisible();
     expect(executions).toBe(1);
     await expect(
       page.getByText("This report revision is marked read."),
