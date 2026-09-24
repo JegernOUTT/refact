@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 
 use reqwest::header::{CONTENT_TYPE, USER_AGENT};
 use reqwest::Client;
-use select::document::Document;
-use select::predicate::{Class, Name};
+use html5ever::tendril::TendrilSink;
+use html5ever::parse_document;
+use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use serde_json::Value;
 use tracing::{info, warn};
 use url::Url;
@@ -565,26 +566,24 @@ fn push_result(
 }
 
 pub fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
-    let document = Document::from(html);
+    let document = parse_document(RcDom::default(), Default::default()).one(html);
+    let document_nodes = descendant_nodes(&document.document);
     let mut results = Vec::new();
     let mut seen_urls = HashSet::new();
 
-    for node in document.find(Class("result__body")) {
-        let anchor = node
-            .find(Class("result__a"))
-            .next()
-            .or_else(|| node.find(Name("a")).next());
+    for node in matching_nodes(&document_nodes, "result__body") {
+        let descendants = descendant_nodes(&node);
+        let anchor = find_class_node(&descendants, "result__a")
+            .or_else(|| find_element_node(&descendants, "a"));
 
-        let title = anchor.as_ref().map(|n| n.text()).unwrap_or_default();
+        let title = anchor.as_ref().map(node_text).unwrap_or_default();
         let url = anchor
             .as_ref()
-            .and_then(|n| n.attr("href"))
+            .and_then(|node| node_attribute(node, "href"))
             .unwrap_or_default()
-            .to_string();
-        let snippet = node
-            .find(Class("result__snippet"))
-            .next()
-            .map(|n| n.text())
+            .to_owned();
+        let snippet = find_class_node(&descendants, "result__snippet")
+            .map(|node| node_text(&node))
             .unwrap_or_default();
 
         push_result(
@@ -597,23 +596,20 @@ pub fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
         );
     }
 
-    for node in document.find(Class("results_links")) {
-        let anchor = node
-            .find(Class("result__a"))
-            .next()
-            .or_else(|| node.find(Name("a")).next());
+    for node in matching_nodes(&document_nodes, "results_links") {
+        let descendants = descendant_nodes(&node);
+        let anchor = find_class_node(&descendants, "result__a")
+            .or_else(|| find_element_node(&descendants, "a"));
 
-        let title = anchor.as_ref().map(|n| n.text()).unwrap_or_default();
+        let title = anchor.as_ref().map(node_text).unwrap_or_default();
         let url = anchor
             .as_ref()
-            .and_then(|n| n.attr("href"))
+            .and_then(|node| node_attribute(node, "href"))
             .unwrap_or_default()
-            .to_string();
-        let snippet = node
-            .find(Class("result__snippet"))
-            .next()
-            .or_else(|| node.find(Name("td")).last())
-            .map(|n| n.text())
+            .to_owned();
+        let snippet = find_class_node(&descendants, "result__snippet")
+            .or_else(|| find_element_nodes(&descendants, "td").pop())
+            .map(|node| node_text(&node))
             .unwrap_or_default();
 
         push_result(
@@ -626,22 +622,19 @@ pub fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
         );
     }
 
-    for node in document.find(Class("result")) {
-        let anchor = node
-            .find(Class("result__a"))
-            .next()
-            .or_else(|| node.find(Name("a")).next());
+    for node in matching_nodes(&document_nodes, "result") {
+        let descendants = descendant_nodes(&node);
+        let anchor = find_class_node(&descendants, "result__a")
+            .or_else(|| find_element_node(&descendants, "a"));
 
-        let title = anchor.as_ref().map(|n| n.text()).unwrap_or_default();
+        let title = anchor.as_ref().map(node_text).unwrap_or_default();
         let url = anchor
             .as_ref()
-            .and_then(|n| n.attr("href"))
+            .and_then(|node| node_attribute(node, "href"))
             .unwrap_or_default()
-            .to_string();
-        let snippet = node
-            .find(Class("result__snippet"))
-            .next()
-            .map(|n| n.text())
+            .to_owned();
+        let snippet = find_class_node(&descendants, "result__snippet")
+            .map(|node| node_text(&node))
             .unwrap_or_default();
 
         push_result(
@@ -655,6 +648,87 @@ pub fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
     }
 
     results
+}
+
+fn descendant_nodes(node: &Handle) -> Vec<Handle> {
+    let mut nodes = Vec::new();
+    let mut pending = node
+        .children
+        .borrow()
+        .iter()
+        .rev()
+        .cloned()
+        .collect::<Vec<_>>();
+    while let Some(node) = pending.pop() {
+        pending.extend(node.children.borrow().iter().rev().cloned());
+        nodes.push(node);
+    }
+    nodes
+}
+
+fn matching_nodes(nodes: &[Handle], class: &str) -> Vec<Handle> {
+    nodes
+        .iter()
+        .filter(|node| node_has_class(node, class))
+        .cloned()
+        .collect()
+}
+
+fn find_class_node(nodes: &[Handle], class: &str) -> Option<Handle> {
+    nodes
+        .iter()
+        .find(|node| node_has_class(node, class))
+        .cloned()
+}
+
+fn find_element_node(nodes: &[Handle], name: &str) -> Option<Handle> {
+    nodes
+        .iter()
+        .find(|node| node_element_name(node) == Some(name))
+        .cloned()
+}
+
+fn find_element_nodes(nodes: &[Handle], name: &str) -> Vec<Handle> {
+    nodes
+        .iter()
+        .filter(|node| node_element_name(node) == Some(name))
+        .cloned()
+        .collect()
+}
+
+fn node_element_name(node: &Handle) -> Option<&str> {
+    match &node.data {
+        NodeData::Element { name, .. } => Some(name.local.as_ref()),
+        _ => None,
+    }
+}
+
+fn node_attribute(node: &Handle, name: &str) -> Option<String> {
+    match &node.data {
+        NodeData::Element { attrs, .. } => attrs
+            .borrow()
+            .iter()
+            .find(|attribute| attribute.name.local.as_ref() == name)
+            .map(|attribute| attribute.value.to_string()),
+        _ => None,
+    }
+}
+
+fn node_has_class(node: &Handle, class: &str) -> bool {
+    node_attribute(node, "class")
+        .is_some_and(|classes| classes.split_whitespace().any(|token| token == class))
+}
+
+fn node_text(node: &Handle) -> String {
+    let mut text = String::new();
+    let mut pending = vec![node.clone()];
+    while let Some(node) = pending.pop() {
+        match &node.data {
+            NodeData::Text { contents } => text.push_str(contents.borrow().as_ref()),
+            _ => pending.extend(node.children.borrow().iter().rev().cloned()),
+        }
+    }
+    text
 }
 
 pub fn clean_ddg_url(href: &str) -> String {
@@ -2466,6 +2540,77 @@ mod tests {
     fn test_parse_ddg_html_empty() {
         let results = parse_ddg_html("<html><body></body></html>");
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_parse_ddg_result_body_layout() {
+        let html = r#"
+            <div class="extra result__body">
+                <a href="https://ignored.example">ignored anchor</a>
+                <a class="result__a" href="https://first.example"> First <b>result</b> </a>
+                <a class="result__a" href="https://second.example">Second result</a>
+                <span class="result__snippet extra"> First <b>snippet</b> </span>
+                <span class="result__snippet">Second snippet</span>
+            </div>
+        "#;
+
+        let results = parse_ddg_html(html);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "First result");
+        assert_eq!(results[0].url, "https://first.example/");
+        assert_eq!(results[0].snippet, "First snippet");
+    }
+
+    #[test]
+    fn test_parse_ddg_results_links_layout_uses_last_table_cell_fallback() {
+        let html = r#"
+            <div class="extra results_links">
+                <a href="https://first.example"> First <b>link</b> </a>
+                <a href="https://second.example">Second link</a>
+                <table><tr><td>First cell</td><td> Last <b>cell</b> </td></tr></table>
+            </div>
+        "#;
+
+        let results = parse_ddg_html(html);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "First link");
+        assert_eq!(results[0].url, "https://first.example/");
+        assert_eq!(results[0].snippet, "Last cell");
+    }
+
+    #[test]
+    fn test_parse_ddg_results_links_layout_prefers_classed_anchor_and_snippet() {
+        let html = r#"
+            <div class="results_links result">
+                <a href="https://fallback.example">Fallback link</a>
+                <a class="result__a" href="https://preferred.example"> Preferred <b>link</b> </a>
+                <table><tr><td>Fallback cell</td></tr></table>
+                <span class="result__snippet"> Preferred <b>snippet</b> </span>
+            </div>
+        "#;
+
+        let results = parse_ddg_html(html);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Preferred link");
+        assert_eq!(results[0].url, "https://preferred.example/");
+        assert_eq!(results[0].snippet, "Preferred snippet");
+    }
+
+    #[test]
+    fn test_parse_ddg_result_layout_uses_first_anchor_fallback() {
+        let html = r#"
+            <div class="extra result">
+                <a href="https://first.example"> First <b>link</b> </a>
+                <a href="https://second.example">Second link</a>
+                <span class="result__snippet"> Result <b>snippet</b> </span>
+            </div>
+        "#;
+
+        let results = parse_ddg_html(html);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "First link");
+        assert_eq!(results[0].url, "https://first.example/");
+        assert_eq!(results[0].snippet, "Result snippet");
     }
 
     #[test]
