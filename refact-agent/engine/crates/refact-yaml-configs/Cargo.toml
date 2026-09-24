@@ -11,7 +11,7 @@ serde_json.workspace = true
 serde_yaml = "0.9.31"
 tokio.workspace = true
 tracing.workspace = true
-rust-embed = { version = "8.5.0", features = ["debug-embed"] }
+rust-embed = "8.5.0"
 md5 = "0.7"
 dunce = "1.0.5"
 
