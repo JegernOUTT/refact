@@ -303,6 +303,27 @@ describe("BuddyHome single work authority", () => {
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot()));
     store.dispatch(push({ name: "buddy", draftId: "expired" }));
+    await Promise.all([
+      store
+        .dispatch(
+          buddyOperatorApi.endpoints.getBuddyLegacyDraftWork.initiate({
+            id: "expired",
+            project_id: "fixture",
+            endpoint_identity: buddyOperatorIdentity(store.getState()),
+          }),
+        )
+        .unwrap(),
+      store
+        .dispatch(
+          buddyOperatorApi.endpoints.getBuddyOperatorArtifact.initiate({
+            id: "saved-report",
+            revision: 1,
+            project_id: "fixture",
+            endpoint_identity: buddyOperatorIdentity(store.getState()),
+          }),
+        )
+        .unwrap(),
+    ]);
     render(<BuddyHome />, { store });
     expect(
       await screen.findByText("Retained proposal report"),
