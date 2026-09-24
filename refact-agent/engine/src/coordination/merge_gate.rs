@@ -316,7 +316,7 @@ pub async fn merge_under_lease<F, Fut>(
     verify_merged_tree: F,
 ) -> Result<GuardedMerge, MergeGateError>
 where
-    F: FnOnce(PathBuf) -> Fut,
+    F: FnOnce(PathBuf, Option<String>) -> Fut,
     Fut: Future<Output = Option<MergeVerification>>,
 {
     let checkout = checkout_key(service.source_workspace_root());
@@ -341,7 +341,13 @@ where
         }
     };
     let post_merge = match response.merged {
-        true => verify_merged_tree(service.source_workspace_root().to_path_buf()).await,
+        true => {
+            verify_merged_tree(
+                service.source_workspace_root().to_path_buf(),
+                response.merge_commit.clone(),
+            )
+            .await
+        }
         false => None,
     };
     let cleanup = match delete_requested
@@ -520,7 +526,10 @@ mod tests {
         }
     }
 
-    async fn nothing_verified(_checkout: PathBuf) -> Option<MergeVerification> {
+    async fn nothing_verified(
+        _checkout: PathBuf,
+        _merge_commit: Option<String>,
+    ) -> Option<MergeVerification> {
         None
     }
 
@@ -781,7 +790,7 @@ mod tests {
                 ..merge_request()
             },
             Some(verification(VerificationStage::PreMerge, true)),
-            |checkout: PathBuf| async move {
+            |checkout: PathBuf, _merge_commit: Option<String>| async move {
                 seen.lock()
                     .unwrap()
                     .push(checkout.join("feature.txt").exists());
@@ -836,7 +845,7 @@ mod tests {
                 ..merge_request()
             },
             None,
-            |_checkout| async {
+            |_checkout, _merge_commit| async {
                 Some(MergeVerification {
                     stage: VerificationStage::PostMerge,
                     command: "cargo test".into(),
@@ -878,22 +887,21 @@ mod tests {
         let (id, worktree_root) =
             worktree_with_commit(&service, "refact/chat/green", "green.txt", "green\n").await;
 
-        let outcome =
-            merge_under_lease(
-                &gate,
-                &service,
-                &id,
-                MergeWorktreeRequest {
-                    delete_after_merge: true,
-                    ..merge_request()
-                },
-                None,
-                |_checkout: PathBuf| async move {
-                    Some(verification(VerificationStage::PostMerge, true))
-                },
-            )
-            .await
-            .unwrap();
+        let outcome = merge_under_lease(
+            &gate,
+            &service,
+            &id,
+            MergeWorktreeRequest {
+                delete_after_merge: true,
+                ..merge_request()
+            },
+            None,
+            |_checkout: PathBuf, _merge_commit: Option<String>| async move {
+                Some(verification(VerificationStage::PostMerge, true))
+            },
+        )
+        .await
+        .unwrap();
 
         assert!(outcome.merged_tree_verified());
         assert!(outcome.cleanup.is_some_and(|cleanup| cleanup.deleted));
@@ -1002,7 +1010,7 @@ mod tests {
                 ..merge_request()
             },
             Some(verification(VerificationStage::PreMerge, true)),
-            |checkout: PathBuf| async move {
+            |checkout: PathBuf, _merge_commit: Option<String>| async move {
                 let mut red = FixedRunner { exit_code: 1, seen };
                 revalidate_merged_tree(
                     checkout,

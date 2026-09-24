@@ -328,7 +328,7 @@ pub async fn handle_v1_worktrees_merge(
             &id,
             request,
             None,
-            |_checkout| async { None },
+            |_checkout, _merge_commit| async { None },
         )
         .await
         .map(|outcome| outcome.response)

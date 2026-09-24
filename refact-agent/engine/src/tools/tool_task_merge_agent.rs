@@ -28,11 +28,13 @@ fn git_merge_lock(workspace_root: &std::path::Path) -> Arc<AMutex<()>> {
     merge_lock_for(workspace_root)
 }
 
-async fn merge_under_available_lease(
+async fn merge_under_available_lease<F, Fut>(
     app: &crate::app_state::AppState,
     service: &WorktreeService,
     worktree_id: &str,
     request: MergeWorktreeRequest,
+    post_merge_check: Option<crate::chat::post_merge_check::PostMergeCheckRequest>,
+    check: F,
 ) -> Result<
     (
         MergeWorktreeResponse,
@@ -40,7 +42,13 @@ async fn merge_under_available_lease(
         bool,
     ),
     String,
-> {
+>
+where
+    F: FnOnce(Arc<GlobalContext>, crate::chat::post_merge_check::PostMergeCheckRequest) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<crate::chat::post_merge_check::PostMergeCheckResult, String>,
+    >,
+{
     let Some(leases) = crate::coordination::leases::leases_for(app).await else {
         return service
             .merge_worktree(worktree_id, request)
@@ -49,13 +57,16 @@ async fn merge_under_available_lease(
     };
     let settings = crate::file_activity::settings();
     let gate = crate::coordination::merge_gate::MergeGate::new(leases, &settings);
+    let gcx = app.gcx.clone();
     let outcome = crate::coordination::merge_gate::merge_under_lease(
         &gate,
         service,
         worktree_id,
         request,
         None,
-        |_checkout| async { None },
+        move |checkout, merge_commit| {
+            verify_merged_checkout(gcx, check, post_merge_check, checkout, merge_commit)
+        },
     )
     .await
     .map_err(|error| match error {
@@ -77,6 +88,82 @@ async fn merge_under_available_lease(
         });
     }
     Ok((response, post_merge, true))
+}
+
+async fn verify_merged_checkout<F, Fut>(
+    gcx: Arc<GlobalContext>,
+    check: F,
+    request: Option<crate::chat::post_merge_check::PostMergeCheckRequest>,
+    _checkout: std::path::PathBuf,
+    merge_commit: Option<String>,
+) -> Option<crate::coordination::merge_gate::MergeVerification>
+where
+    F: FnOnce(Arc<GlobalContext>, crate::chat::post_merge_check::PostMergeCheckRequest) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<crate::chat::post_merge_check::PostMergeCheckResult, String>,
+    >,
+{
+    let Some(mut request) = request else {
+        return None;
+    };
+    let Some(merge_commit) = merge_commit.filter(|commit| !commit.trim().is_empty()) else {
+        return Some(post_merge_infrastructure_failure(
+            "merge produced no commit".to_string(),
+        ));
+    };
+    request.expected_merge_commit = merge_commit.clone();
+    Some(post_merge_verification(
+        check(gcx, request).await,
+        merge_commit,
+    ))
+}
+
+fn post_merge_infrastructure_failure(
+    error: String,
+) -> crate::coordination::merge_gate::MergeVerification {
+    crate::coordination::merge_gate::MergeVerification {
+        stage: crate::coordination::merge_gate::VerificationStage::PostMerge,
+        command: "post_merge_check".to_string(),
+        passed: false,
+        exit_code: None,
+        output_tail: error,
+        auto_reverted: false,
+        merge_commit: None,
+        revert_commit: None,
+        fix_card_id: None,
+        skipped_reason: None,
+        revert_skipped_reason: Some("post-merge verification could not run".to_string()),
+        outcome: VerificationOutcome::InfrastructureFailed,
+    }
+}
+
+fn post_merge_verification(
+    result: Result<crate::chat::post_merge_check::PostMergeCheckResult, String>,
+    merge_commit: String,
+) -> crate::coordination::merge_gate::MergeVerification {
+    use crate::coordination::merge_gate::{MergeVerification, VerificationStage};
+
+    match result {
+        Ok(result) => MergeVerification {
+            stage: VerificationStage::PostMerge,
+            command: result.command.unwrap_or_default(),
+            passed: result.checked && result.outcome == VerificationOutcome::Passed,
+            exit_code: result.exit_code,
+            output_tail: result.output_tail,
+            auto_reverted: result.auto_reverted,
+            merge_commit: result.merge_commit.or(Some(merge_commit)),
+            revert_commit: result.revert_commit,
+            fix_card_id: result.fix_card_id,
+            skipped_reason: result.skipped_reason,
+            revert_skipped_reason: result.revert_skipped_reason,
+            outcome: result.outcome,
+        },
+        Err(error) => {
+            let mut verification = post_merge_infrastructure_failure(error);
+            verification.merge_commit = Some(merge_commit);
+            verification
+        }
+    }
 }
 
 fn strategy_from_str(strategy: &str) -> Result<WorktreeMergeStrategy, String> {
@@ -918,7 +1005,24 @@ async fn merge_registered_task_worktree(
     };
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     let auto_revert = auto_revert && post_merge_expected_state.is_some();
-    let (response, post_merge_verification, _lease_used) = merge_under_available_lease(
+    let lease_check_request = if auto_revert {
+        post_merge_expected_state
+            .clone()
+            .map(
+                |expected_card_state| crate::chat::post_merge_check::PostMergeCheckRequest {
+                    task_id: task_id.to_string(),
+                    card_id: card_id.to_string(),
+                    workspace_root: workspace_root.to_path_buf(),
+                    enabled: true,
+                    timeout: auto_revert_timeout,
+                    expected_merge_commit: String::new(),
+                    expected_card_state: Some(expected_card_state),
+                },
+            )
+    } else {
+        None
+    };
+    let (response, post_merge_verification, lease_used) = merge_under_available_lease(
         &app,
         &service,
         &worktree_id,
@@ -930,6 +1034,10 @@ async fn merge_registered_task_worktree(
             commit_message,
             generate_commit_message: false,
             acknowledge_dirty_baseline: false,
+        },
+        lease_check_request,
+        |gcx, check_request| async move {
+            crate::chat::post_merge_check::post_merge_check(gcx, check_request).await
         },
     )
     .await?;
@@ -947,6 +1055,7 @@ async fn merge_registered_task_worktree(
             revert_skipped_reason: verification.revert_skipped_reason,
             outcome: verification.outcome,
         })),
+        None if lease_used => Ok(None),
         None => match (response.merge_commit.as_ref(), post_merge_expected_state) {
             (Some(merge_commit), Some(expected_card_state)) if response.merged && auto_revert => {
                 crate::chat::post_merge_check::post_merge_check(
@@ -1747,6 +1856,10 @@ The agent's work has been successfully merged back to the main branch."#,
         vec![]
     }
 }
+
+#[cfg(test)]
+#[path = "tool_task_merge_agent_lease_tests.rs"]
+mod lease_tests;
 
 #[cfg(test)]
 mod worktree_merge_tool_tests {
