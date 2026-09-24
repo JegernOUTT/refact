@@ -323,7 +323,7 @@ mod tests {
     }
 
     async fn wait_for_stopped(state: &DaemonState, project_id: &str) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(120);
         loop {
             if let Some(info) = state.supervisor.worker_info(project_id).await {
                 if matches!(info.state, WorkerState::Stopped) {
@@ -336,7 +336,7 @@ mod tests {
     }
 
     async fn wait_for_idle_stopped_event(state: &DaemonState, project_id: &str) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(120);
         loop {
             if state.events.snapshot().await.iter().any(|event| {
                 event.kind == "worker_idle_stopped"

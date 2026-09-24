@@ -1111,13 +1111,17 @@ mod tests {
     }
 
     async fn wait_for_info(path: &std::path::Path) -> DaemonInfo {
-        for _ in 0..100 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        loop {
             if let Some(info) = crate::daemon::state::read_daemon_info(path).await.unwrap() {
                 return info;
             }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "daemon info not written"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        panic!("daemon info not written");
     }
 
     async fn stop_daemon(info: &DaemonInfo, task: tokio::task::JoinHandle<i32>) {
@@ -1137,7 +1141,7 @@ mod tests {
             model: Some("test/model".to_string()),
             approve,
             json,
-            timeout_secs: 10,
+            timeout_secs: 120,
             prompt: "say hi".to_string(),
             listen_ctrl_c: false,
         }

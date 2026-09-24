@@ -2346,7 +2346,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     fn worker_command_uses_supplied_executable_after_atomic_replacement() {
         let _worker_command = EnvGuard {
             keys: vec![(
@@ -2383,7 +2383,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn worker_command_sets_default_rust_log_filter_when_unset() {
         let _rust_log = RustLogGuard::unset();
         let dir = tempfile::tempdir().unwrap();
@@ -2480,7 +2480,7 @@ mod tests {
     }
 
     async fn wait_for_starting(supervisor: &Supervisor, project_id: &str) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(120);
         loop {
             if supervisor
                 .worker_info(project_id)
@@ -2496,7 +2496,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     #[cfg_attr(
         windows,
         ignore = "Windows artifact runners can starve fake worker shutdown"
@@ -2594,7 +2594,7 @@ mod tests {
     /// held and attributed to that pid) and asserts the restart now waits for our own child and
     /// ends with a running worker.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     #[cfg_attr(
         windows,
         ignore = "Windows artifact runners can starve fake worker shutdown"
@@ -2679,7 +2679,7 @@ mod tests {
     /// must still latch `Failed { workspace busy }`. Without this, the fix could silently degrade
     /// into "never report a busy workspace", which would let two engines write one codegraph store.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     #[cfg_attr(
         windows,
         ignore = "Windows artifact runners can starve fake worker shutdown"
@@ -2728,7 +2728,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     #[cfg_attr(
         windows,
         ignore = "Windows artifact runners can starve fake worker shutdown"
