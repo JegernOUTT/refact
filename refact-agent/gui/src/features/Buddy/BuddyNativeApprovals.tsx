@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { ShieldAlert, ShieldCheck } from "lucide-react";
 import { Badge, Button, Icon, Surface, Text } from "../../components/ui";
-import { useAppSelector } from "../../hooks";
+import { useAppDispatch, useAppSelector } from "../../hooks";
 import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import { buddyOperatorIdentity } from "../../services/refact/buddyOperator";
+import { useGetBuddyNativeWorkQuery } from "../../services/refact/buddyNativeWork";
 import {
   useGetBuddyNativeApprovalsQuery,
   useRespondBuddyNativeApprovalMutation,
@@ -14,6 +15,9 @@ import {
 } from "../../services/refact/buddyApprovals";
 import { BuddySectionHeader } from "./BuddySectionHeader";
 import styles from "./BuddyNativeApprovals.module.css";
+import { humanizeIdentifier } from "../../utils/displayNames";
+import { openBuddyChat } from "../Chat/Thread";
+import { push } from "../Pages/pagesSlice";
 
 const APPROVAL_POLLING_INTERVAL_MS = 5000;
 
@@ -42,15 +46,18 @@ function ApprovalSession({
   session,
   snapshot,
   identity,
+  chatTitle,
   disabled,
   refresh,
 }: {
   session: NativeApprovalSession;
   snapshot: NativeApprovalsSnapshot;
   identity: string;
+  chatTitle?: string;
   disabled: boolean;
   refresh: () => void;
 }) {
+  const dispatch = useAppDispatch();
   const [respond] = useRespondBuddyNativeApprovalMutation();
   const [selection, setSelection] = useState<
     Record<string, "accept" | "reject">
@@ -62,6 +69,13 @@ function ApprovalSession({
   const [failed, setFailed] = useState(false);
   const lock = useRef(false);
   const blocked = disabled || sending || sent || failed;
+  const toolNames = session.tools.map((tool) =>
+    humanizeIdentifier(tool.tool_name),
+  );
+  const toolNameCounts = new Map<string, number>();
+  for (const name of toolNames)
+    toolNameCounts.set(name, (toolNameCounts.get(name) ?? 0) + 1);
+  const toolNameIndexes = new Map<string, number>();
   const send = async (response: ApprovalResponse) => {
     if (lock.current || blocked) return;
     lock.current = true;
@@ -91,10 +105,10 @@ function ApprovalSession({
       variant="surface-1"
       radius="control"
       className={styles.session}
-      aria-label={`Native approvals for chat ${session.chat_id}`}
+      aria-label={`Native approvals for ${chatTitle ?? "untitled chat"}`}
     >
       <Text as="p" size="2" weight="medium" className={styles.sessionTitle}>
-        Chat {session.chat_id}
+        {chatTitle ?? "Untitled chat"}
       </Text>
       {session.warnings.map((warning) => (
         <Text
@@ -107,74 +121,82 @@ function ApprovalSession({
           {warningText[warning]}
         </Text>
       ))}
-      {session.tools.map((tool) => (
-        <div
-          key={tool.tool_call_id}
-          role="group"
-          aria-labelledby={`${session.chat_id}:${tool.tool_call_id}:label`}
-          className={styles.request}
-          data-disabled={blocked ? "true" : undefined}
-        >
-          <Text
-            as="p"
-            size="1"
-            weight="medium"
-            id={`${session.chat_id}:${tool.tool_call_id}:label`}
-            className={styles.requestTitle}
+      {session.tools.map((tool, index) => {
+        const name = toolNames[index];
+        const count = toolNameCounts.get(name) ?? 0;
+        const ordinal = (toolNameIndexes.get(name) ?? 0) + 1;
+        toolNameIndexes.set(name, ordinal);
+        const requestName =
+          count > 1 ? `${name}, request ${ordinal} of ${count}` : name;
+        return (
+          <div
+            key={tool.tool_call_id}
+            role="group"
+            aria-labelledby={`${session.chat_id}:${tool.tool_call_id}:label`}
+            className={styles.request}
+            data-disabled={blocked ? "true" : undefined}
           >
-            {tool.tool_name}: {tool.tool_call_id}
-          </Text>
-          <pre className={styles.command}>{tool.command}</pre>
-          <Text as="p" size="1" className={styles.note}>
-            {tool.rule}
-          </Text>
-          {tool.rule ===
-          "Privacy approval required: command read guarded files" ? (
-            <Text as="p" size="1" className={styles.note}>
-              The command already ran and read guarded files. Accept releases
-              its guarded output to the model; reject withholds that output.
-              This does not undo the command.
+            <Text
+              as="p"
+              size="1"
+              weight="medium"
+              id={`${session.chat_id}:${tool.tool_call_id}:label`}
+              className={styles.requestTitle}
+            >
+              {requestName}
             </Text>
-          ) : (
+            <pre className={styles.command}>{tool.command}</pre>
             <Text as="p" size="1" className={styles.note}>
-              This responds only to this native confirmation. It does not change
-              permission rules or approve other tools.
+              {tool.rule}
             </Text>
-          )}
-          {(["accept", "reject"] as const).map((choice) => (
-            <label key={choice} className={styles.choice}>
-              <input
-                type="radio"
-                name={`${session.chat_id}:${tool.tool_call_id}`}
-                disabled={blocked}
-                checked={selection[tool.tool_call_id] === choice}
-                onChange={() =>
-                  setSelection((previous) => ({
-                    ...previous,
-                    [tool.tool_call_id]: choice,
-                  }))
-                }
-              />
-              {choice === "accept"
-                ? "Accept this request"
-                : "Reject this request"}
-            </label>
-          ))}
-          <Button
-            size="sm"
-            disabled={blocked || !selection[tool.tool_call_id]}
-            onClick={() =>
-              void send({
-                kind: "tool",
-                tool_call_id: tool.tool_call_id,
-                accepted: selection[tool.tool_call_id] === "accept",
-              })
-            }
-          >
-            Submit tool decision
-          </Button>
-        </div>
-      ))}
+            {tool.rule ===
+            "Privacy approval required: command read guarded files" ? (
+              <Text as="p" size="1" className={styles.note}>
+                The command already ran and read guarded files. Accept releases
+                its guarded output to the model; reject withholds that output.
+                This does not undo the command.
+              </Text>
+            ) : (
+              <Text as="p" size="1" className={styles.note}>
+                This responds only to this native confirmation. It does not
+                change permission rules or approve other tools.
+              </Text>
+            )}
+            {(["accept", "reject"] as const).map((choice) => (
+              <label key={choice} className={styles.choice}>
+                <input
+                  type="radio"
+                  name={`${session.chat_id}:${tool.tool_call_id}`}
+                  disabled={blocked}
+                  checked={selection[tool.tool_call_id] === choice}
+                  onChange={() =>
+                    setSelection((previous) => ({
+                      ...previous,
+                      [tool.tool_call_id]: choice,
+                    }))
+                  }
+                />
+                {choice === "accept"
+                  ? "Accept this request"
+                  : "Reject this request"}
+              </label>
+            ))}
+            <Button
+              size="sm"
+              disabled={blocked || !selection[tool.tool_call_id]}
+              onClick={() =>
+                void send({
+                  kind: "tool",
+                  tool_call_id: tool.tool_call_id,
+                  accepted: selection[tool.tool_call_id] === "accept",
+                })
+              }
+            >
+              Submit tool decision
+            </Button>
+          </div>
+        );
+      })}
       {session.browser_request_id && (
         <div
           role="group"
@@ -256,10 +278,27 @@ function ApprovalSession({
         </Text>
       )}
       {failed && (
-        <Text as="p" size="1" role="alert" className={styles.alert}>
-          Response not confirmed. Check the native chat before retrying; no
-          success is assumed.
-        </Text>
+        <div role="alert" className={styles.errorRow}>
+          <Text as="p" size="1" className={styles.alert}>
+            {chatTitle
+              ? `Buddy couldn't confirm your response. Open the chat "${chatTitle}" to check whether your response was applied. No success is assumed.`
+              : "Buddy couldn't confirm your response. Open the relevant chat from Recent chats to check whether your response was applied. No success is assumed."}
+          </Text>
+          <Button
+            size="sm"
+            onClick={() => {
+              dispatch(
+                openBuddyChat({
+                  chat_id: session.chat_id,
+                  title: chatTitle ?? "Untitled chat",
+                }),
+              );
+              dispatch(push({ name: "chat" }));
+            }}
+          >
+            Open chat
+          </Button>
+        </div>
       )}
     </Surface>
   );
@@ -278,6 +317,28 @@ function Approvals({ identity }: { identity: string }) {
       refetchOnReconnect: true,
     },
   );
+  const work = useGetBuddyNativeWorkQuery(
+    { endpoint_identity: identity },
+    {
+      refetchOnMountOrArgChange: true,
+      refetchOnFocus: true,
+      refetchOnReconnect: true,
+    },
+  );
+  const chatTitles = useMemo(() => {
+    const titles = new Map<string, string>();
+    const nativeWork = work.currentData;
+    if (!nativeWork) return titles;
+    for (const session of nativeWork.sessions) {
+      const title = session.title.trim();
+      if (title)
+        titles.set(
+          JSON.stringify([nativeWork.project_root, session.chat_id]),
+          title,
+        );
+    }
+    return titles;
+  }, [work.currentData]);
   const snapshot = query.currentData;
   const failed = Boolean(query.error);
   useEffect(() => {
@@ -325,8 +386,8 @@ function Approvals({ identity }: { identity: string }) {
           <Icon icon={ShieldAlert} size="sm" tone="danger" />
           <Text as="p" size="1" className={styles.errorText}>
             Native approvals could not be loaded, so approval controls are
-            disabled. Pending requests were not resolved — use the native chat
-            or retry.
+            disabled. Open the relevant chat from Recent chats to review its
+            request, or retry.
           </Text>
           <Button size="sm" onClick={() => void query.refetch()}>
             Retry
@@ -363,6 +424,9 @@ function Approvals({ identity }: { identity: string }) {
             session={session}
             snapshot={snapshot}
             identity={identity}
+            chatTitle={chatTitles.get(
+              JSON.stringify([snapshot.project_root, session.chat_id]),
+            )}
             disabled={failed || query.isFetching}
             refresh={() => {
               void query.refetch();

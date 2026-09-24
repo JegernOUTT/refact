@@ -72,6 +72,180 @@ describe("Buddy native approvals without intelligence", () => {
     expect(submit).toBeDisabled();
   });
 
+  it("uses the joined chat title without exposing the chat id", async () => {
+    const chatId = "53ee2bb5-b29a-4488-a69e-b1b63113101e";
+    server.use(
+      http.get("*/v1/buddy/approvals/current", () =>
+        HttpResponse.json({
+          ...snapshot,
+          sessions: [{ ...session, chat_id: chatId }],
+        }),
+      ),
+      http.get("*/v1/buddy/native-work", () =>
+        HttpResponse.json({
+          schema_version: 1,
+          project_root: "/scratch",
+          coverage: "loaded_native_sessions",
+          next_cursor: null,
+          sessions: [
+            {
+              chat_id: chatId,
+              title: "Fix the garden path",
+              model: "chosen/model",
+              state: "waiting_user_input",
+              persistence_pending: false,
+              goal: null,
+              agents: [],
+              agents_truncated: false,
+              pending_questions: 0,
+              approval_count: 1,
+              browser_decision_pending: false,
+              error: null,
+            },
+          ],
+        }),
+      ),
+    );
+    render(<BuddyNativeApprovals />, { preloadedState: config });
+    expect(await screen.findByText("Fix the garden path")).toBeTruthy();
+    expect(screen.queryByText(chatId)).toBeNull();
+    expect(screen.getByRole("group", { name: "Shell" })).toBeTruthy();
+  });
+
+  it("uses an untitled fallback when there is no matching nonblank title", async () => {
+    server.use(
+      http.get("*/v1/buddy/approvals/current", () =>
+        HttpResponse.json({
+          ...snapshot,
+          sessions: [{ ...session, chat_id: "other-chat" }],
+        }),
+      ),
+      http.get("*/v1/buddy/native-work", () =>
+        HttpResponse.json({
+          schema_version: 1,
+          project_root: "/scratch",
+          coverage: "loaded_native_sessions",
+          next_cursor: null,
+          sessions: [],
+        }),
+      ),
+    );
+    render(<BuddyNativeApprovals />, { preloadedState: config });
+    expect(await screen.findByText("Untitled chat")).toBeTruthy();
+  });
+
+  it("does not borrow a title from another project root", async () => {
+    server.use(
+      http.get("*/v1/buddy/approvals/current", () =>
+        HttpResponse.json({
+          ...snapshot,
+          sessions: [{ ...session, chat_id: "other-chat" }],
+        }),
+      ),
+      http.get("*/v1/buddy/native-work", () =>
+        HttpResponse.json({
+          schema_version: 1,
+          project_root: "/other",
+          coverage: "loaded_native_sessions",
+          next_cursor: null,
+          sessions: [
+            {
+              chat_id: "other-chat",
+              title: "Foreign project title",
+              model: "chosen/model",
+              state: "waiting_user_input",
+              persistence_pending: false,
+              goal: null,
+              agents: [],
+              agents_truncated: false,
+              pending_questions: 0,
+              approval_count: 1,
+              browser_decision_pending: false,
+              error: null,
+            },
+          ],
+        }),
+      ),
+    );
+    render(<BuddyNativeApprovals />, { preloadedState: config });
+    expect(await screen.findByText("Untitled chat")).toBeTruthy();
+    expect(screen.queryByText("Foreign project title")).toBeNull();
+  });
+
+  it("disambiguates repeated humanized tool labels without exposing call ids", async () => {
+    server.use(
+      http.get("*/v1/buddy/approvals/current", () =>
+        HttpResponse.json({
+          ...snapshot,
+          sessions: [
+            {
+              ...session,
+              tools: [
+                session.tools[0],
+                { ...session.tools[0], tool_call_id: "tool-2" },
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    render(<BuddyNativeApprovals />, { preloadedState: config });
+    expect(
+      await screen.findByRole("group", { name: "Shell, request 1 of 2" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("group", { name: "Shell, request 2 of 2" }),
+    ).toBeTruthy();
+    expect(screen.queryByText("tool-1")).toBeNull();
+    expect(screen.queryByText("tool-2")).toBeNull();
+  });
+
+  it("explains a failed response without referring to the native chat", async () => {
+    server.use(
+      http.get("*/v1/buddy/approvals/current", () =>
+        HttpResponse.json(snapshot),
+      ),
+      http.post("*/v1/buddy/approvals/chat-a/response", () =>
+        HttpResponse.json({ error: "offline" }, { status: 503 }),
+      ),
+      http.get("*/v1/buddy/native-work", () =>
+        HttpResponse.json({
+          schema_version: 1,
+          project_root: "/scratch",
+          coverage: "loaded_native_sessions",
+          next_cursor: null,
+          sessions: [
+            {
+              chat_id: "chat-a",
+              title: "Fix the garden path",
+              model: "chosen/model",
+              state: "waiting_user_input",
+              persistence_pending: false,
+              goal: null,
+              agents: [],
+              agents_truncated: false,
+              pending_questions: 0,
+              approval_count: 1,
+              browser_decision_pending: false,
+              error: null,
+            },
+          ],
+        }),
+      ),
+    );
+    render(<BuddyNativeApprovals />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("radio", { name: "Accept this request" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Submit tool decision" }),
+    );
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain('"Fix the garden path"');
+    expect(alert.textContent?.toLowerCase()).not.toContain("the native chat");
+    expect(screen.getByRole("button", { name: "Open chat" })).toBeTruthy();
+  });
+
   it("has no default browser consent and forwards only explicitly selected categories", async () => {
     const commands: unknown[] = [];
     server.use(
@@ -216,16 +390,17 @@ describe("Buddy native approvals without intelligence", () => {
       name: "Accept this request",
     });
     await waitFor(() => expect(choice).toBeEnabled());
-    const group = screen.getByRole("group", { name: /shell: tool-1/ });
+    const group = screen.getByRole("group", { name: "Shell" });
     expect(group).not.toHaveAttribute("data-disabled");
     fireEvent.click(choice);
     fireEvent.click(
       screen.getByRole("button", { name: "Submit tool decision" }),
     );
     await waitFor(() =>
-      expect(
-        screen.getByRole("group", { name: /shell: tool-1/ }),
-      ).toHaveAttribute("data-disabled", "true"),
+      expect(screen.getByRole("group", { name: "Shell" })).toHaveAttribute(
+        "data-disabled",
+        "true",
+      ),
     );
     expect(choice).toBeDisabled();
   });
