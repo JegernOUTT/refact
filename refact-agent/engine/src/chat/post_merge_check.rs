@@ -7,7 +7,11 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::process::Command;
 
-use crate::chat::verify_cmd::{parse_verification_argv, verification_commands, VerifyCommandPolicy};
+use crate::chat::evidence::{
+    EvidenceContext, EvidenceDefaults, EvidenceRunner, EvidenceService, EvidenceVerdict,
+};
+use crate::chat::evidence_cache::{evidence_cache, revalidate_merged_tree, MergedTreeRevalidation};
+use crate::chat::verify_cmd::VerifyCommandPolicy;
 use crate::chat::verifier::ExpectedCardState;
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
@@ -118,6 +122,42 @@ impl PostMergeCommandRunner for SystemPostMergeCommandRunner {
                 cmd.args(&args).current_dir(workspace_root);
                 run_command(cmd, &label, timeout).await
             }
+        }
+    }
+}
+
+struct PostMergeEvidenceRunner<'a, R> {
+    inner: &'a mut R,
+    timeout: Duration,
+}
+
+#[async_trait]
+impl<R: PostMergeCommandRunner> EvidenceRunner for PostMergeEvidenceRunner<'_, R> {
+    async fn run(
+        &mut self,
+        worktree: &Path,
+        spec: &crate::chat::evidence::VerificationSpec,
+    ) -> crate::tasks::types::VerificationResult {
+        let output = self
+            .inner
+            .run(
+                worktree,
+                PostMergeCommand::Verify {
+                    cwd: spec.cwd.clone(),
+                    env: spec.env.clone(),
+                    argv: spec.argv.clone(),
+                },
+                self.timeout,
+            )
+            .await;
+        crate::tasks::types::VerificationResult {
+            command: spec.command.clone(),
+            exit_code: output.exit_code,
+            passed: output.success,
+            output_tail: output.output,
+            outcome: output.outcome,
+            from_cache: false,
+            executed_at: None,
         }
     }
 }
@@ -246,65 +286,91 @@ async fn post_merge_check_with_runner_and_revert_policy<R: PostMergeCommandRunne
         }
     }
     let card = card.clone();
-    let commands = verification_commands(&card);
-    if commands.is_empty() {
+    let assignment =
+        match crate::tasks::assignment::load_assignment(gcx.clone(), &request.task_id, &card.id)
+            .await
+        {
+            Ok(assignment) => assignment,
+            Err(error) => {
+                return Ok(failed_without_revert(
+                    None,
+                    VerificationOutcome::InfrastructureFailed,
+                    format!("cannot load the dispatched assignment: {error}"),
+                ));
+            }
+        };
+    let defaults = EvidenceDefaults::from_settings();
+    let specs =
+        crate::tasks::assignment::specs_for_validation(assignment.as_ref(), &card, &defaults);
+    if specs.is_empty() {
         return Ok(failed_without_revert(
             None,
             VerificationOutcome::NoCommands,
             "no verification command found".to_string(),
         ));
     }
-    let command_policy = VerifyCommandPolicy::load(gcx.clone()).await;
-    let mut parsed = Vec::new();
-    for command in commands {
-        match parse_verification_argv(&command) {
-            Ok(verification) => {
-                if let Err(reason) = command_policy.check(&command) {
-                    return Ok(failed_without_revert(
-                        Some(command),
-                        VerificationOutcome::PolicyDenied,
-                        format!("Denied by shell policy: {}", reason),
-                    ));
-                }
-                parsed.push((command, verification));
-            }
-            Err(reason) => {
-                return Ok(failed_without_revert(
-                    Some(command),
-                    VerificationOutcome::Rejected,
-                    format!("Cannot run as a command: {}", reason),
-                ));
-            }
-        }
+    let expected_merge_commit = request.expected_merge_commit.trim();
+    let service = EvidenceService::new(
+        VerifyCommandPolicy::load(gcx.clone()).await,
+        EvidenceContext {
+            worktree: request.workspace_root.clone(),
+            commit: (!expected_merge_commit.is_empty()).then(|| expected_merge_commit.to_string()),
+            scope: card.id.clone(),
+        },
+    );
+    let mut bounded_specs = specs;
+    for spec in &mut bounded_specs {
+        spec.timeout_secs = request.timeout.as_secs().max(1);
+        spec.output_cap_bytes = MAX_OUTPUT_TAIL_CHARS;
     }
-    let mut command = String::new();
-    let mut verification = PostMergeCommandOutput {
-        exit_code: Some(0),
-        success: true,
-        output: String::new(),
-        outcome: VerificationOutcome::Passed,
+    let mut evidence_runner = PostMergeEvidenceRunner {
+        inner: runner,
+        timeout: request.timeout,
     };
-    for (next_command, verified) in parsed {
-        command = next_command;
-        verification = runner
-            .run(
-                &request.workspace_root,
-                PostMergeCommand::Verify {
-                    cwd: verified.cwd,
-                    env: verified.env,
-                    argv: verified.argv,
-                },
-                request.timeout,
-            )
-            .await;
-        if !verification.success {
-            break;
+    let revalidation = revalidate_merged_tree(
+        &service,
+        bounded_specs,
+        evidence_cache(),
+        &mut evidence_runner,
+    )
+    .await;
+    let record = match revalidation {
+        MergedTreeRevalidation::Refused(record) => {
+            let reason = record
+                .reason
+                .clone()
+                .unwrap_or_else(|| record.output_tail.clone());
+            return Ok(failed_without_revert(
+                Some(record.command),
+                record.outcome,
+                reason,
+            ));
         }
-    }
-    let exit_code = verification.exit_code;
-    let verification_success = verification.success;
-    let output_tail = tail_chars(&verification.output, MAX_OUTPUT_TAIL_CHARS);
-    let verification_outcome = verification.outcome;
+        MergedTreeRevalidation::Ran(records) => records
+            .into_iter()
+            .last()
+            .ok_or_else(|| "revalidation returned no records".to_string())?,
+        MergedTreeRevalidation::NoContract => {
+            return Ok(failed_without_revert(
+                None,
+                VerificationOutcome::NoCommands,
+                "no verification command found".to_string(),
+            ));
+        }
+    };
+    let command = record.command.clone();
+    let exit_code = record.exit_code;
+    let verification_success = record.verdict == EvidenceVerdict::Passed;
+    let output_tail = tail_chars(&record.output_tail, MAX_OUTPUT_TAIL_CHARS);
+    let verification_outcome = match record.verdict {
+        EvidenceVerdict::Passed => VerificationOutcome::Passed,
+        EvidenceVerdict::Failed => VerificationOutcome::CommandFailed,
+        EvidenceVerdict::Blocked => record.outcome,
+        EvidenceVerdict::Unavailable | EvidenceVerdict::Superseded => {
+            VerificationOutcome::InfrastructureFailed
+        }
+        EvidenceVerdict::NotRun => VerificationOutcome::NoCommands,
+    };
     if verification_success {
         return Ok(PostMergeCheckResult {
             checked: true,
@@ -862,6 +928,8 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
+    use crate::chat::evidence::{EvidenceContext, EvidenceRunner, VerificationSpec};
+    use crate::chat::evidence_cache::{execute_cached, CacheKeyInputs, CacheMode};
     use crate::tasks::types::{ScopeGuardMode, TaskBoard, TaskMeta, TaskStatus};
 
     #[derive(Default)]
@@ -919,6 +987,36 @@ mod tests {
             self.outputs
                 .pop_front()
                 .expect("mock output must be queued")
+        }
+    }
+
+    #[derive(Default)]
+    struct CacheEvidenceRunner {
+        exit_code: i32,
+        runs: usize,
+    }
+
+    #[async_trait]
+    impl EvidenceRunner for CacheEvidenceRunner {
+        async fn run(
+            &mut self,
+            _worktree: &Path,
+            spec: &VerificationSpec,
+        ) -> crate::tasks::types::VerificationResult {
+            self.runs += 1;
+            crate::tasks::types::VerificationResult {
+                command: spec.command.clone(),
+                exit_code: Some(self.exit_code),
+                passed: self.exit_code == 0,
+                output_tail: format!("cache runner {}", self.runs),
+                outcome: if self.exit_code == 0 {
+                    VerificationOutcome::Passed
+                } else {
+                    VerificationOutcome::CommandFailed
+                },
+                from_cache: false,
+                executed_at: None,
+            }
         }
     }
 
@@ -1153,6 +1251,174 @@ mod tests {
                 argv: vec!["dotnet".to_string(), "test".to_string()]
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn post_merge_uses_the_dispatched_assignment_contract() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut card = card("## Verification\n- Verify: `cargo test --assignment`");
+        card.target_files = vec!["src/lib.rs".to_string()];
+        write_task(gcx.clone(), temp.path(), {
+            let mut edited = card.clone();
+            edited.instructions =
+                "## Verification\n- Verify: `cargo test --edited-card`".to_string();
+            edited
+        })
+        .await;
+        crate::tasks::assignment::save_assignment(
+            gcx.clone(),
+            "task-1",
+            &crate::tasks::assignment::Assignment::from_card(&card),
+        )
+        .await
+        .unwrap();
+        let mut runner = MockRunner {
+            outputs: VecDeque::from([output(true, Some(0), "ok")]),
+            calls: Vec::new(),
+        };
+
+        let result = post_merge_check_with_runner(gcx, request(temp.path()), &mut runner)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, VerificationOutcome::Passed);
+        assert_eq!(
+            runner.calls,
+            vec![PostMergeCommand::Verify {
+                cwd: None,
+                env: Vec::new(),
+                argv: vec![
+                    "cargo".to_string(),
+                    "test".to_string(),
+                    "--assignment".to_string()
+                ]
+            }],
+            "the admitted assignment wins over edited card prose"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(evidence_cache)]
+    async fn post_merge_revalidates_even_when_the_same_tree_has_cached_green_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let unique = uuid::Uuid::new_v4().to_string();
+        let input = format!("input-{unique}.txt");
+        tokio::fs::write(temp.path().join(&input), &unique)
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(temp.path().join("src"))
+            .await
+            .unwrap();
+        tokio::fs::write(temp.path().join("src/lib.rs"), &unique)
+            .await
+            .unwrap();
+        let mut card = card("## Verification\n- Verify: `cargo test --lib`");
+        card.target_files = vec![input];
+        let assignment = crate::tasks::assignment::Assignment::from_card(&card);
+        write_task(gcx.clone(), temp.path(), card.clone()).await;
+        crate::tasks::assignment::save_assignment(gcx.clone(), "task-1", &assignment)
+            .await
+            .unwrap();
+
+        let defaults = EvidenceDefaults::from_settings();
+        let mut specs =
+            crate::tasks::assignment::specs_for_validation(Some(&assignment), &card, &defaults);
+        for spec in &mut specs {
+            spec.timeout_secs = request(temp.path()).timeout.as_secs().max(1);
+            spec.output_cap_bytes = MAX_OUTPUT_TAIL_CHARS;
+        }
+        let policy = VerifyCommandPolicy::load(gcx.clone()).await;
+        let service = EvidenceService::new(
+            policy,
+            EvidenceContext {
+                worktree: temp.path().to_path_buf(),
+                commit: Some("mergehash".to_string()),
+                scope: card.id.clone(),
+            },
+        );
+        let cache = evidence_cache();
+        let key = CacheKeyInputs::collect(
+            service.worktree(),
+            &service.accept(specs[0].clone()).unwrap(),
+            &service.policy_fingerprint(),
+        )
+        .await
+        .key();
+        let mut green_runner = CacheEvidenceRunner {
+            exit_code: 0,
+            runs: 0,
+        };
+        let cached = execute_cached(
+            &service,
+            cache,
+            specs[0].clone(),
+            &mut green_runner,
+            CacheMode::Replay,
+            crate::chat::evidence_cache::now_ms(),
+        )
+        .await;
+        assert_eq!(cached.verdict, EvidenceVerdict::Passed);
+        assert_eq!(green_runner.runs, 1);
+        assert!(cache.lock().await.contains(&key));
+        let entries_after_seed = cache.lock().await.len();
+
+        let mut red_runner = MockRunner {
+            outputs: VecDeque::from([
+                output(false, Some(1), "error: fresh failure"),
+                output(true, Some(0), "newhead"),
+            ]),
+            calls: Vec::new(),
+        };
+        let result = post_merge_check_with_runner(gcx, request(temp.path()), &mut red_runner)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, VerificationOutcome::CommandFailed);
+        assert!(!result.auto_reverted);
+        assert!(result.output_tail.contains("error: fresh failure"));
+        assert_eq!(red_runner.calls.len(), 2, "verify then guarded HEAD check");
+        assert!(matches!(
+            red_runner.calls[0],
+            PostMergeCommand::Verify { .. }
+        ));
+        assert!(matches!(red_runner.calls[1], PostMergeCommand::Git(_)));
+        assert_eq!(
+            cache.lock().await.len(),
+            entries_after_seed,
+            "revalidation must not write or evict cache entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_merge_command_failure_without_exit_code_is_infrastructure_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        write_task(
+            gcx.clone(),
+            temp.path(),
+            card("## Verification\n- Verify: `cargo test --lib`"),
+        )
+        .await;
+        let mut runner = MockRunner {
+            outputs: VecDeque::from([PostMergeCommandOutput {
+                exit_code: None,
+                success: false,
+                output: "killed before exit status".to_string(),
+                outcome: VerificationOutcome::CommandFailed,
+            }]),
+            calls: Vec::new(),
+        };
+
+        let result = post_merge_check_with_runner(gcx, request(temp.path()), &mut runner)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, VerificationOutcome::InfrastructureFailed);
+        assert!(!result.auto_reverted);
+        assert_eq!(runner.calls.len(), 1);
+        assert!(matches!(runner.calls[0], PostMergeCommand::Verify { .. }));
     }
 
     #[tokio::test]

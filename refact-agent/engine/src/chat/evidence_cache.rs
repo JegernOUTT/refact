@@ -26,12 +26,9 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::chat::evidence::{
-    unexecuted_record, EvidenceContext, EvidenceRecord, EvidenceRunner, EvidenceService,
-    EvidenceVerdict, VerificationSpec,
+    unexecuted_record, EvidenceRecord, EvidenceRunner, EvidenceService, EvidenceVerdict,
+    VerificationSpec,
 };
-use crate::chat::verify_cmd::VerifyCommandPolicy;
-use crate::coordination::merge_gate::{MergeVerification, VerificationStage};
-use crate::tasks::types::VerificationOutcome;
 
 const ABSENT: &str = "<absent>";
 const REFUSED: &str = "<refused>";
@@ -550,67 +547,55 @@ pub async fn execute_cached_all<R: EvidenceRunner>(
 /// may come from cache.
 ///
 /// [`merge_under_lease`]: crate::coordination::merge_gate::merge_under_lease
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergedTreeRevalidation {
+    NoContract,
+    Refused(EvidenceRecord),
+    Ran(Vec<EvidenceRecord>),
+}
+
 pub async fn revalidate_merged_tree<R: EvidenceRunner>(
-    checkout: PathBuf,
+    service: &EvidenceService,
     specs: Vec<VerificationSpec>,
-    policy: VerifyCommandPolicy,
-    scope: String,
     cache: &Mutex<EvidenceCache>,
     runner: &mut R,
-) -> Option<MergeVerification> {
+) -> MergedTreeRevalidation {
     if specs.is_empty() {
-        return None;
+        return MergedTreeRevalidation::NoContract;
     }
-    let service = EvidenceService::new(
-        policy,
-        EvidenceContext {
-            commit: crate::chat::verifier_diff::git_head_commit(&checkout).await,
-            worktree: checkout,
-            scope,
-        },
-    );
-    let records = execute_cached_all(&service, cache, specs, runner, CacheMode::Revalidate).await;
-    let decisive = records
-        .iter()
-        .find(|record| !record.verdict.is_passed())
-        .or_else(|| records.last());
-    let verification = match decisive {
-        Some(record) => MergeVerification {
-            stage: VerificationStage::PostMerge,
-            command: record.command.clone(),
-            passed: record.verdict.is_passed(),
-            exit_code: record.exit_code,
-            output_tail: record.output_tail.clone(),
-            auto_reverted: false,
-            merge_commit: None,
-            revert_commit: None,
-            fix_card_id: None,
-            skipped_reason: None,
-            revert_skipped_reason: None,
-            outcome: if record.verdict.is_passed() {
-                VerificationOutcome::Passed
-            } else if record.exit_code.is_some() {
-                VerificationOutcome::CommandFailed
-            } else {
-                VerificationOutcome::InfrastructureFailed
-            },
-        },
-        None => MergeVerification {
-            stage: VerificationStage::PostMerge,
-            command: String::new(),
-            passed: false,
-            exit_code: None,
-            output_tail: "no verification contract ran against the merged tree".to_string(),
-            auto_reverted: false,
-            merge_commit: None,
-            revert_commit: None,
-            fix_card_id: None,
-            skipped_reason: None,
-            revert_skipped_reason: None,
-            outcome: VerificationOutcome::NoCommands,
-        },
-    };
-    Some(verification)
+    let mut accepted = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let proposal = spec.clone();
+        match service.accept(spec) {
+            Ok(spec) => accepted.push(spec),
+            Err(rejection) => {
+                return MergedTreeRevalidation::Refused(unexecuted_record(
+                    &proposal,
+                    rejection.verdict,
+                    rejection.outcome,
+                    rejection.reason,
+                ));
+            }
+        }
+    }
+    let mut records = Vec::with_capacity(accepted.len());
+    for spec in accepted {
+        let record = execute_cached(
+            service,
+            cache,
+            spec,
+            runner,
+            CacheMode::Revalidate,
+            now_ms(),
+        )
+        .await;
+        let passed = record.verdict.is_passed();
+        records.push(record);
+        if !passed {
+            break;
+        }
+    }
+    MergedTreeRevalidation::Ran(records)
 }
 
 #[cfg(test)]
@@ -628,6 +613,7 @@ mod tests {
     use crate::chat::evidence::{
         evaluate_gates, EvidenceContext, EvidenceDefaults, SpecAuthority, VerificationSpec,
     };
+    use crate::chat::verify_cmd::VerifyCommandPolicy;
     use crate::tasks::types::{VerificationOutcome, VerificationResult};
     use async_trait::async_trait;
     use std::sync::Arc;
@@ -1275,23 +1261,17 @@ mod tests {
     #[tokio::test]
     async fn post_merge_revalidation_runs_fresh_evidence_against_the_merged_tree() {
         let temp = worktree_with_source().await;
-        let merged = tempfile::tempdir().unwrap();
-        tokio::fs::create_dir_all(merged.path().join("src"))
-            .await
-            .unwrap();
-        tokio::fs::write(merged.path().join("src").join("lib.rs"), "fn main() {}")
-            .await
-            .unwrap();
         let cache = test_cache();
+        let service = service(temp.path());
         let mut green = CountingRunner::default();
 
         execute_cached(
-            &service(temp.path()),
+            &service,
             &cache,
             spec("cargo test --lib"),
             &mut green,
             CacheMode::Replay,
-            1_000,
+            now_ms(),
         )
         .await;
         assert_eq!(
@@ -1304,24 +1284,109 @@ mod tests {
             exit_code: 1,
             ..CountingRunner::default()
         };
-        let verification = revalidate_merged_tree(
-            merged.path().to_path_buf(),
-            vec![spec("cargo test --lib")],
-            VerifyCommandPolicy::permissive(),
-            "T-1".to_string(),
-            &cache,
-            &mut red,
-        )
-        .await
-        .expect("the merged tree is verified");
+        let verification =
+            revalidate_merged_tree(&service, vec![spec("cargo test --lib")], &cache, &mut red)
+                .await;
 
         assert_eq!(red.runs, 1, "the merged tree gets its own execution");
-        assert_eq!(verification.stage, VerificationStage::PostMerge);
+        let MergedTreeRevalidation::Ran(records) = verification else {
+            panic!("the merged tree is verified");
+        };
         assert!(
-            !verification.passed,
+            !records[0].verdict.is_passed(),
             "a green branch cache entry must not decide the merged tree"
         );
-        assert_eq!(verification.exit_code, Some(1));
+        assert_eq!(records[0].exit_code, Some(1));
+    }
+
+    #[tokio::test]
+    async fn revalidation_refuses_all_specs_before_running_any() {
+        let temp = worktree_with_source().await;
+        let service = EvidenceService::new(
+            VerifyCommandPolicy::from_shell_policy(
+                &crate::tools::shell_gate::ShellGatePolicy::default(),
+            ),
+            EvidenceContext {
+                worktree: temp.path().to_path_buf(),
+                commit: None,
+                scope: "T-1".to_string(),
+            },
+        );
+        let mut allowed = spec("cargo test --lib");
+        allowed.spec_id = "allowed".to_string();
+        let mut denied = spec("sudo rm -rf /");
+        denied.spec_id = "denied".to_string();
+        let mut runner = CountingRunner::default();
+
+        let result =
+            revalidate_merged_tree(&service, vec![allowed, denied], &test_cache(), &mut runner)
+                .await;
+
+        let MergedTreeRevalidation::Refused(record) = result else {
+            panic!("the denied contract must refuse revalidation");
+        };
+        assert_eq!(record.spec_id, "denied");
+        assert_eq!(record.verdict, EvidenceVerdict::Blocked);
+        assert_eq!(runner.runs, 0, "no spec may run before all are accepted");
+    }
+
+    #[tokio::test]
+    async fn revalidation_stops_after_the_first_non_passing_spec() {
+        #[derive(Default)]
+        struct SequenceRunner {
+            exit_codes: std::collections::VecDeque<i32>,
+            runs: usize,
+        }
+
+        #[async_trait]
+        impl EvidenceRunner for SequenceRunner {
+            async fn run(
+                &mut self,
+                _worktree: &Path,
+                spec: &VerificationSpec,
+            ) -> VerificationResult {
+                self.runs += 1;
+                let exit_code = self.exit_codes.pop_front().unwrap();
+                VerificationResult {
+                    command: spec.command.clone(),
+                    exit_code: Some(exit_code),
+                    passed: exit_code == 0,
+                    output_tail: String::new(),
+                    outcome: if exit_code == 0 {
+                        VerificationOutcome::Passed
+                    } else {
+                        VerificationOutcome::CommandFailed
+                    },
+                    from_cache: false,
+                    executed_at: None,
+                }
+            }
+        }
+
+        let temp = worktree_with_source().await;
+        let service = service(temp.path());
+        let mut specs = vec![
+            spec("cargo test --first"),
+            spec("cargo test --second"),
+            spec("cargo test --third"),
+        ];
+        for (index, spec) in specs.iter_mut().enumerate() {
+            spec.spec_id = format!("spec-{index}");
+        }
+        let mut runner = SequenceRunner {
+            exit_codes: [0, 1, 0].into_iter().collect(),
+            runs: 0,
+        };
+
+        let result = revalidate_merged_tree(&service, specs, &test_cache(), &mut runner).await;
+
+        let MergedTreeRevalidation::Ran(records) = result else {
+            panic!("all specs were accepted");
+        };
+        assert_eq!(runner.runs, 2);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].verdict, EvidenceVerdict::Passed);
+        assert_eq!(records[1].verdict, EvidenceVerdict::Failed);
     }
 
     #[tokio::test]

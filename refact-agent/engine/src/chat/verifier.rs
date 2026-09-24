@@ -728,7 +728,7 @@ fn tail_chars(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::chat::evidence::{gate_outcome_for_verdicts, specs_from_card, EvidenceVerdict};
-    use crate::chat::verify_cmd::verification_commands;
+    use crate::chat::verify_cmd::reported_verification_commands;
     use crate::tasks::types::{FinalReport, ScopeGuardMode, TaskBoard, TaskMeta, TaskStatus};
 
     fn card(instructions: &str) -> BoardCard {
@@ -834,7 +834,16 @@ mod tests {
         );
 
         assert_eq!(
-            verification_commands(&card),
+            crate::chat::evidence::specs_from_card(
+                &card,
+                &EvidenceDefaults {
+                    timeout_secs: 60,
+                    output_cap_bytes: 4_000,
+                },
+            )
+            .into_iter()
+            .map(|spec| spec.command)
+            .collect::<Vec<_>>(),
             vec!["cargo test --lib -p refact-lsp -- verifier merge_agent".to_string()]
         );
     }
@@ -856,7 +865,7 @@ mod tests {
         });
 
         assert_eq!(
-            verification_commands(&card),
+            reported_verification_commands(&card),
             vec!["cargo test --lib -p refact-lsp -- verifier".to_string()]
         );
     }

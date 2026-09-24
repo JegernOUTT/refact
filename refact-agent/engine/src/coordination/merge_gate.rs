@@ -910,9 +910,12 @@ mod tests {
 
     #[tokio::test]
     async fn post_merge_revalidation_runs_fresh_evidence_against_the_merged_tree() {
-        use crate::chat::evidence::{EvidenceDefaults, EvidenceRunner, SpecAuthority, VerificationSpec};
+        use crate::chat::evidence::{
+            EvidenceContext, EvidenceDefaults, EvidenceRunner, EvidenceService, SpecAuthority,
+            VerificationSpec,
+        };
         use crate::chat::evidence_cache::{
-            execute_cached, revalidate_merged_tree, test_cache, CacheMode,
+            execute_cached, revalidate_merged_tree, test_cache, CacheMode, MergedTreeRevalidation,
         };
         use crate::chat::verify_cmd::VerifyCommandPolicy;
         use crate::tasks::types::{VerificationOutcome, VerificationResult};
@@ -1010,17 +1013,45 @@ mod tests {
                 ..merge_request()
             },
             Some(verification(VerificationStage::PreMerge, true)),
-            |checkout: PathBuf, _merge_commit: Option<String>| async move {
-                let mut red = FixedRunner { exit_code: 1, seen };
-                revalidate_merged_tree(
-                    checkout,
-                    vec![contract()],
+            |checkout: PathBuf, merge_commit: Option<String>| async move {
+                let service = EvidenceService::new(
                     VerifyCommandPolicy::permissive(),
-                    "T-1".to_string(),
-                    &cache,
-                    &mut red,
-                )
-                .await
+                    EvidenceContext {
+                        worktree: checkout.clone(),
+                        commit: merge_commit,
+                        scope: "T-1".to_string(),
+                    },
+                );
+                let mut red = FixedRunner { exit_code: 1, seen };
+                let cache = test_cache();
+                match revalidate_merged_tree(&service, vec![contract()], &cache, &mut red).await {
+                    MergedTreeRevalidation::Ran(records) => {
+                        let record = records.last()?;
+                        Some(MergeVerification {
+                            stage: VerificationStage::PostMerge,
+                            command: record.command.clone(),
+                            passed: record.verdict.is_passed(),
+                            exit_code: record.exit_code,
+                            output_tail: record.output_tail.clone(),
+                            auto_reverted: false,
+                            merge_commit: None,
+                            revert_commit: None,
+                            fix_card_id: None,
+                            skipped_reason: None,
+                            revert_skipped_reason: None,
+                            outcome: if record.verdict.is_passed() {
+                                VerificationOutcome::Passed
+                            } else if record.verdict
+                                == crate::chat::evidence::EvidenceVerdict::Failed
+                            {
+                                VerificationOutcome::CommandFailed
+                            } else {
+                                VerificationOutcome::InfrastructureFailed
+                            },
+                        })
+                    }
+                    MergedTreeRevalidation::NoContract | MergedTreeRevalidation::Refused(_) => None,
+                }
             },
         )
         .await

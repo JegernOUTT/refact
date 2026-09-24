@@ -163,19 +163,6 @@ fn env_name_len(bytes: &[u8]) -> usize {
         .count()
 }
 
-pub(crate) fn verification_commands(card: &BoardCard) -> Vec<String> {
-    let mut commands = instruction_verification_commands(card);
-    for command in reported_verification_commands(card) {
-        push_unique(&mut commands, command);
-    }
-    commands
-}
-
-/// Commands the planner wrote into the card. Authored by the planner, still policy-checked.
-pub(crate) fn instruction_verification_commands(card: &BoardCard) -> Vec<String> {
-    instruction_commands(&card.instructions)
-}
-
 /// The same extraction against instruction prose captured elsewhere, such as the TASK
 /// leg of a dispatched assignment.
 pub(crate) fn instruction_commands(instructions: &str) -> Vec<String> {
@@ -606,9 +593,9 @@ mod tests {
             "assignee":null,"agent_chat_id":null,"created_at":"now","started_at":null,"completed_at":null
         })).unwrap();
         assert!(
-            verification_commands(&card).is_empty(),
+            instruction_commands(&card.instructions).is_empty(),
             "prose must not be executed: {:?}",
-            verification_commands(&card)
+            instruction_commands(&card.instructions)
         );
     }
 
@@ -620,7 +607,7 @@ mod tests {
             "assignee":null,"agent_chat_id":null,"created_at":"now","started_at":null,"completed_at":null
         })).unwrap();
         assert_eq!(
-            verification_commands(&card),
+            instruction_commands(&card.instructions),
             vec!["make check", "go test ./...", "dotnet test", "npm run lint"]
         );
     }
@@ -639,7 +626,7 @@ mod tests {
             "assignee":null,"agent_chat_id":null,"created_at":"now","started_at":null,"completed_at":null
         })).unwrap();
         assert_eq!(
-            verification_commands(&card),
+            instruction_commands(&card.instructions),
             vec![
                 "cd refact-agent/engine && cargo check",
                 "cd refact-agent/engine && cargo test --lib",
@@ -653,8 +640,8 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            verification_commands(&card).last().unwrap(),
-            "npm test -- \"unit suite\""
+            reported_verification_commands(&card),
+            vec!["npm test -- \"unit suite\"".to_string()]
         );
     }
 
@@ -682,6 +669,6 @@ mod tests {
             "id":"T","title":"t","column":"done","instructions":"## Notes\n- cargo test is mentioned here\n```text\ncargo test\nprose\n```\n## Acceptance Criteria\n- behavior works",
             "assignee":null,"agent_chat_id":null,"created_at":"now","started_at":null,"completed_at":null
         })).unwrap();
-        assert!(verification_commands(&card).is_empty());
+        assert!(instruction_commands(&card.instructions).is_empty());
     }
 }
