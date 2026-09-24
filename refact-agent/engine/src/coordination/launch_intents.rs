@@ -1,8 +1,9 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use tokio::sync::Mutex;
 use refact_work_core::identity::{RunKey, WorkKey};
 use refact_work_core::store::records::{now_ms, IntentState, RunIntentRecord};
-use refact_work_core::store::CoordinationStore;
 use refact_work_core::CoordinationSettings;
 
 use super::leases::{LeaseError, LeaseManager, LeaseRenewal};
@@ -14,6 +15,95 @@ pub struct LaunchIntent {
     renewal: LeaseRenewal,
     run: RunKey,
     current: RunIntentRecord,
+}
+
+#[derive(Clone)]
+pub struct LaunchIntentSlot {
+    inner: Arc<LaunchIntentSlotInner>,
+}
+
+struct LaunchIntentSlotInner {
+    intent: Mutex<Option<LaunchIntent>>,
+    occupied: AtomicBool,
+}
+
+impl Drop for LaunchIntentSlotInner {
+    fn drop(&mut self) {
+        if let Some(intent) = self.intent.get_mut().as_ref() {
+            tracing::warn!(run = ?intent.run(), "launch intent slot dropped before terminal settlement");
+        }
+    }
+}
+
+impl LaunchIntentSlot {
+    pub async fn persist_for_agent(app: &AppState, agent_id: &str, generation: u64) -> Self {
+        let settings = crate::file_activity::settings();
+        Self::persist_for_agent_with_settings(app, agent_id, generation, &settings).await
+    }
+
+    async fn persist_for_agent_with_settings(
+        app: &AppState,
+        agent_id: &str,
+        generation: u64,
+        settings: &CoordinationSettings,
+    ) -> Self {
+        match LaunchIntent::persist_for_agent_with_settings(app, agent_id, generation, settings)
+            .await
+        {
+            Some(intent) => Self::with_intent(intent),
+            None => Self::empty(),
+        }
+    }
+
+    pub(crate) fn with_intent(intent: LaunchIntent) -> Self {
+        Self {
+            inner: Arc::new(LaunchIntentSlotInner {
+                intent: Mutex::new(Some(intent)),
+                occupied: AtomicBool::new(true),
+            }),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            inner: Arc::new(LaunchIntentSlotInner {
+                intent: Mutex::new(None),
+                occupied: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.inner.occupied.load(Ordering::Acquire)
+    }
+
+    pub async fn dispatched(&self) {
+        let mut intent = self.inner.intent.lock().await;
+        if let Some(intent) = intent.as_mut() {
+            if let Err(error) = intent.dispatched(now_ms()).await {
+                tracing::warn!(run = ?intent.run(), %error, "failed to advance launch intent to dispatched");
+            }
+        }
+    }
+
+    pub async fn acknowledged(&self) {
+        let mut intent = self.inner.intent.lock().await;
+        if let Some(intent) = intent.as_mut() {
+            if let Err(error) = intent.acknowledged(now_ms()).await {
+                tracing::warn!(run = ?intent.run(), %error, "failed to advance launch intent to acknowledged");
+            }
+        }
+    }
+
+    pub async fn settle(&self) {
+        let intent = self.inner.intent.lock().await.take();
+        self.inner.occupied.store(false, Ordering::Release);
+        if let Some(intent) = intent {
+            if let Err(error) = intent.terminal(now_ms()).await {
+                tracing::warn!(%error, "failed to settle launch intent");
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -151,6 +241,7 @@ mod tests {
     use super::*;
     use crate::coordination::leases::LeaseRenewal;
     use refact_work_core::identity::ProjectKey;
+    use refact_work_core::store::CoordinationStore;
     use uuid::Uuid;
 
     const NOW_MS: i64 = 1_800_000_000_000;
@@ -326,16 +417,133 @@ mod tests {
             ..CoordinationSettings::default()
         };
 
-        assert!(LaunchIntent::persist_for_agent_with_settings(
-            &app,
-            "agent-disabled",
-            1,
-            &disabled
-        )
-        .await
-        .is_none());
+        let slot =
+            LaunchIntentSlot::persist_for_agent_with_settings(&app, "agent-disabled", 1, &disabled)
+                .await;
+        assert!(slot.is_empty());
+        slot.dispatched().await;
+        slot.acknowledged().await;
+        slot.settle().await;
         let path = refact_work_core::default_store_path(&app.paths.cache_dir);
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn slot_persists_advances_settles_and_releases_lease() {
+        let project = project_id();
+        let settings = settings();
+        let store = store(&settings).await;
+        let leases = manager(store.clone(), &project, &settings);
+        let run_key = run("slot-lifecycle", 1);
+        let intent = LaunchIntent::persist(leases.clone(), run_key.clone(), NOW_MS)
+            .await
+            .unwrap();
+        let slot = LaunchIntentSlot::with_intent(intent);
+
+        assert!(!slot.is_empty());
+        assert_eq!(
+            intent_record(&store, &project, &run_key).await.state,
+            IntentState::Persisted
+        );
+        slot.dispatched().await;
+        assert_eq!(
+            intent_record(&store, &project, &run_key).await.state,
+            IntentState::Dispatched
+        );
+        slot.acknowledged().await;
+        assert_eq!(
+            intent_record(&store, &project, &run_key).await.state,
+            IntentState::Acknowledged
+        );
+        slot.settle().await;
+        assert!(slot.is_empty());
+        assert_eq!(
+            intent_record(&store, &project, &run_key).await.state,
+            IntentState::Terminal
+        );
+        assert!(leases
+            .inspect(&run_lease_key(&run_key), NOW_MS + 3)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_slot_settlement_transitions_once_and_later_boundaries_are_noops() {
+        let project = project_id();
+        let settings = settings();
+        let store = store(&settings).await;
+        let leases = manager(store.clone(), &project, &settings);
+        let run_key = run("slot-concurrent", 1);
+        let intent = LaunchIntent::persist(leases.clone(), run_key.clone(), NOW_MS)
+            .await
+            .unwrap();
+        let slot = LaunchIntentSlot::with_intent(intent);
+        let first = slot.clone();
+        let second = slot.clone();
+
+        tokio::join!(first.settle(), second.settle());
+        slot.dispatched().await;
+
+        assert!(slot.is_empty());
+        assert_eq!(
+            intent_record(&store, &project, &run_key).await.state,
+            IntentState::Terminal
+        );
+        assert!(leases
+            .inspect(&run_lease_key(&run_key), NOW_MS + 3)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn acknowledged_before_dispatched_does_not_panic_and_settles() {
+        let project = project_id();
+        let settings = settings();
+        let store = store(&settings).await;
+        let leases = manager(store.clone(), &project, &settings);
+        let run_key = run("slot-out-of-order", 1);
+        let intent = LaunchIntent::persist(leases, run_key.clone(), NOW_MS)
+            .await
+            .unwrap();
+        let slot = LaunchIntentSlot::with_intent(intent);
+
+        slot.acknowledged().await;
+        assert_eq!(
+            intent_record(&store, &project, &run_key).await.state,
+            IntentState::Acknowledged
+        );
+        slot.settle().await;
+        assert_eq!(
+            intent_record(&store, &project, &run_key).await.state,
+            IntentState::Terminal
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_slot_clone_settles_shared_state_and_forget_removes_it() {
+        let project = project_id();
+        let settings = settings();
+        let store = store(&settings).await;
+        let leases = manager(store.clone(), &project, &settings);
+        let run_key = run("slot-registry", 1);
+        let intent = LaunchIntent::persist(leases, run_key.clone(), NOW_MS)
+            .await
+            .unwrap();
+        let slot = LaunchIntentSlot::with_intent(intent);
+        let registry = crate::agents::execution::ExecutionRegistry::default();
+
+        registry.remember_launch_intent("slot-registry", slot.clone());
+        let lookup = registry.launch_intent("slot-registry").unwrap();
+        lookup.settle().await;
+        assert!(slot.is_empty());
+        assert_eq!(
+            intent_record(&store, &project, &run_key).await.state,
+            IntentState::Terminal
+        );
+        registry.forget_launch_intent("slot-registry");
+        assert!(registry.launch_intent("slot-registry").is_none());
     }
 
     #[tokio::test]

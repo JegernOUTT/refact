@@ -1,3 +1,4 @@
+use crate::coordination::launch_intents::LaunchIntentSlot;
 use refact_work_core::{AdmissionError, Permit, Ticket};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -466,6 +467,7 @@ pub struct ExecutionRegistry {
     scopes: Mutex<HashMap<String, std::path::PathBuf>>,
     path_scopes: Mutex<HashMap<String, crate::agents::path_scope::PathScope>>,
     launch_provenance: Mutex<HashMap<String, (Vec<refact_privacy::FileRecord>, bool)>>,
+    launch_intents: Mutex<HashMap<String, LaunchIntentSlot>>,
     resume_intents: Mutex<std::collections::HashSet<String>>,
     pub(crate) board_admission_closed: std::sync::atomic::AtomicBool,
 }
@@ -529,6 +531,8 @@ impl Drop for ExecutionRegistration {
             .is_some_and(|(owned, current)| Arc::ptr_eq(owned, current))
         {
             runs.remove(&self.chat_id);
+            drop(runs);
+            self.registry.forget_launch_intent(&self.chat_id);
         }
     }
 }
@@ -615,6 +619,36 @@ impl ExecutionRegistry {
         self.launch_provenance
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .remove(agent_id);
+    }
+
+    pub fn remember_launch_intent(&self, agent_id: &str, slot: LaunchIntentSlot) {
+        let max_outstanding = crate::file_activity::settings().max_outstanding;
+        let mut slots = self
+            .launch_intents
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if slots.contains_key(agent_id) {
+            tracing::warn!(agent_id, "launch intent slot already registered");
+            return;
+        }
+        if slots.len() < max_outstanding {
+            slots.insert(agent_id.into(), slot);
+        }
+    }
+
+    pub fn launch_intent(&self, agent_id: &str) -> Option<LaunchIntentSlot> {
+        self.launch_intents
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(agent_id)
+            .cloned()
+    }
+
+    pub fn forget_launch_intent(&self, agent_id: &str) {
+        self.launch_intents
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
             .remove(agent_id);
     }
 
@@ -716,6 +750,7 @@ impl ExecutionRegistry {
     /// Release the slot held by this child and forget it. Returns whether a
     /// live execution was found, so a repeated close settles once.
     pub fn release(&self, chat_id: &str) -> bool {
+        self.forget_launch_intent(chat_id);
         let execution = self
             .runs
             .lock()
@@ -731,6 +766,7 @@ impl ExecutionRegistry {
     }
 
     pub fn finish(&self, chat_id: &str) {
+        self.forget_launch_intent(chat_id);
         self.runs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -833,6 +869,10 @@ impl ExecutionRegistry {
         self.launch_provenance
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.launch_intents
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
             .clear();
     }
 
@@ -1280,6 +1320,17 @@ mod tests {
         registry.finish("child");
         drop(execution);
         assert_eq!(sched.snapshot().outstanding, 0);
+    }
+
+    #[test]
+    fn launch_intent_registry_remembers_clones_and_forgets_entries() {
+        let registry = ExecutionRegistry::default();
+        let slot = LaunchIntentSlot::empty();
+
+        registry.remember_launch_intent("child", slot.clone());
+        assert!(registry.launch_intent("child").is_some());
+        registry.forget_launch_intent("child");
+        assert!(registry.launch_intent("child").is_none());
     }
 
     #[tokio::test]
