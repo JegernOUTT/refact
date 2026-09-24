@@ -1,9 +1,182 @@
 //! On-demand, content-free diagnostics. No sampler, journal, rollout, or evidence expiry.
 //! Missing product retention policy is deliberately represented as a refusal, not a TTL.
 use serde::Serialize;
+use std::sync::{Mutex, OnceLock};
 
 pub const MAX_DIAGNOSTIC_ROWS_PER_TABLE: usize = 10_000;
 pub const MAX_COMPACTION_ROWS: usize = 10_000;
+pub const DEFAULT_STORE_SOFT_LIMIT_BYTES: u64 = 250 * 1024 * 1024;
+pub const DEFAULT_ARTIFACT_REVISION_SOFT_LIMIT: u64 = 500;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct GrowthThresholds {
+    pub store_soft_limit_bytes: u64,
+    pub artifact_revision_soft_limit: u64,
+}
+
+impl GrowthThresholds {
+    pub fn from_env() -> Self {
+        static THRESHOLDS: OnceLock<GrowthThresholds> = OnceLock::new();
+        *THRESHOLDS.get_or_init(|| {
+            let store_soft_limit_bytes = env_threshold(
+                "REFACT_BUDDY_STORE_SOFT_LIMIT_MB",
+                DEFAULT_STORE_SOFT_LIMIT_BYTES / (1024 * 1024),
+            )
+            .saturating_mul(1024 * 1024);
+            let artifact_revision_soft_limit = env_threshold(
+                "REFACT_BUDDY_ARTIFACT_REVISION_SOFT_LIMIT",
+                DEFAULT_ARTIFACT_REVISION_SOFT_LIMIT,
+            );
+            Self {
+                store_soft_limit_bytes,
+                artifact_revision_soft_limit,
+            }
+        })
+    }
+}
+
+fn env_threshold(name: &str, default: u64) -> u64 {
+    match std::env::var(name) {
+        Ok(value) => match parse_threshold_value(&value) {
+            Some(value) => value,
+            _ => {
+                tracing::warn!(
+                    variable = name,
+                    "invalid Buddy store growth threshold; using default"
+                );
+                default
+            }
+        },
+        Err(std::env::VarError::NotPresent) => default,
+        Err(_) => {
+            tracing::warn!(
+                variable = name,
+                "invalid Buddy store growth threshold; using default"
+            );
+            default
+        }
+    }
+}
+
+fn parse_threshold_value(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok().filter(|value| *value > 0)
+}
+
+#[cfg(test)]
+mod growth_threshold_tests {
+    use super::*;
+
+    #[test]
+    fn zero_and_invalid_growth_thresholds_fall_back_to_default() {
+        assert_eq!(parse_threshold_value("0"), None);
+        assert_eq!(parse_threshold_value("nope"), None);
+        assert_eq!(parse_threshold_value(" 42 "), Some(42));
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct StoreFileMetric {
+    pub file: &'static str,
+    pub size_bytes: u64,
+    pub modified_at_ms: Option<u128>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TableRowCount {
+    pub table: &'static str,
+    pub exact_rows: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ArtifactRevisionCount {
+    pub artifact_id: String,
+    pub revisions: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct StoreGrowthMetrics {
+    pub total_disk_bytes: u64,
+    pub files: Vec<StoreFileMetric>,
+    pub table_row_counts: Vec<TableRowCount>,
+    pub min_seq: Option<u64>,
+    pub max_seq: Option<u64>,
+    pub retained_seq_span: u64,
+    pub retained_seq_span_exact_under_prefix_compaction: bool,
+    pub first_recorded_outcome_started_at: Option<String>,
+    pub last_recorded_outcome_started_at: Option<String>,
+    pub top_artifacts_by_revision_count: Vec<ArtifactRevisionCount>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GrowthWarningLatch {
+    pub store_size: bool,
+    pub artifact_revisions: bool,
+}
+
+pub fn evaluate_growth_warnings(
+    metrics: &StoreGrowthMetrics,
+    thresholds: GrowthThresholds,
+    latch: &mut GrowthWarningLatch,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let store_size_exceeded = metrics.total_disk_bytes >= thresholds.store_soft_limit_bytes;
+    if store_size_exceeded && !latch.store_size {
+        let mut files = metrics
+            .files
+            .iter()
+            .filter(|file| file.size_bytes > 0)
+            .collect::<Vec<_>>();
+        files.sort_by_key(|file| std::cmp::Reverse(file.size_bytes));
+        let contributors = files
+            .into_iter()
+            .take(3)
+            .map(|file| format!("{}: {} bytes", file.file, file.size_bytes))
+            .collect::<Vec<_>>();
+        warnings.push(format!(
+            "Buddy operator store uses {} bytes (soft limit {} bytes); largest files: {}",
+            metrics.total_disk_bytes,
+            thresholds.store_soft_limit_bytes,
+            contributors.join(", ")
+        ));
+    }
+    latch.store_size = store_size_exceeded;
+
+    let largest_artifact = metrics.top_artifacts_by_revision_count.first();
+    let artifact_exceeded = largest_artifact
+        .is_some_and(|artifact| artifact.revisions >= thresholds.artifact_revision_soft_limit);
+    if artifact_exceeded && !latch.artifact_revisions {
+        let artifact = largest_artifact.expect("threshold requires an artifact");
+        warnings.push(format!(
+            "Buddy operator artifact {} has {} revisions (soft limit {} revisions)",
+            artifact.artifact_id, artifact.revisions, thresholds.artifact_revision_soft_limit
+        ));
+    }
+    latch.artifact_revisions = artifact_exceeded;
+    warnings
+}
+
+pub fn evaluate_process_growth_warnings(
+    metrics: &StoreGrowthMetrics,
+    thresholds: GrowthThresholds,
+) -> Vec<String> {
+    static LATCH: OnceLock<Mutex<GrowthWarningLatch>> = OnceLock::new();
+    match LATCH
+        .get_or_init(|| Mutex::new(GrowthWarningLatch::default()))
+        .lock()
+    {
+        Ok(mut latch) => evaluate_growth_warnings(metrics, thresholds, &mut latch),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn evaluate_growth_warnings_with_latch(
+    metrics: &StoreGrowthMetrics,
+    thresholds: GrowthThresholds,
+    latch: &mut GrowthWarningLatch,
+) -> Vec<String> {
+    evaluate_growth_warnings(metrics, thresholds, latch)
+}
 
 /// Explicit opt-in new-work backpressure, never a hard terminal-write disk quota.
 /// Generic documents remain native-owner governed and are counted, not deleted.
@@ -156,6 +329,8 @@ pub struct StoreSummary {
     /// receipt, decision, pin and material revision. No reference graph is guessed.
     pub protected_payload_rows_lower_bound: u64,
     pub evidence_deletion_supported: bool,
+    pub growth_thresholds: GrowthThresholds,
+    pub growth: StoreGrowthMetrics,
 }
 
 #[derive(Clone, Debug, Serialize)]

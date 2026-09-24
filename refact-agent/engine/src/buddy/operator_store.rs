@@ -804,6 +804,22 @@ impl OperatorStore {
     pub fn diagnostic_summary(
         &self,
     ) -> Result<super::operator_observability::StoreSummary, OperatorStoreError> {
+        self.diagnostic_summary_inner(false)
+            .map(|(summary, _)| summary)
+    }
+
+    pub fn diagnostic_summary_with_growth_warnings(
+        &self,
+    ) -> Result<(super::operator_observability::StoreSummary, Vec<String>), OperatorStoreError>
+    {
+        self.diagnostic_summary_inner(true)
+    }
+
+    fn diagnostic_summary_inner(
+        &self,
+        evaluate_growth: bool,
+    ) -> Result<(super::operator_observability::StoreSummary, Vec<String>), OperatorStoreError>
+    {
         use super::operator_observability::*;
         let mut tables = Vec::new();
         let mut protected = 0;
@@ -818,17 +834,21 @@ impl OperatorStore {
             "work_snoozes",
             "changes",
         ] {
-            let bytes = if table == "changes" {
-                "8"
+            let (rows, bytes): (u64, u64) = if table == "changes" {
+                let mut statement = self
+                    .connection
+                    .prepare("SELECT seq FROM changes LIMIT ?1")?;
+                let sample = statement
+                    .query_map([MAX_DIAGNOSTIC_ROWS_PER_TABLE], |row| row.get::<_, u64>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                (sample.len() as u64, (sample.len() as u64).saturating_mul(8))
             } else {
-                "length(CAST(payload AS BLOB))"
-            };
-            let sql = format!("SELECT count(*),COALESCE(sum(bytes),0) FROM (SELECT {bytes} AS bytes FROM {table} LIMIT ?1)");
-            let (rows, bytes): (u64, u64) =
+                let sql = format!("SELECT count(*),COALESCE(sum(bytes),0) FROM (SELECT length(CAST(payload AS BLOB)) AS bytes FROM {table} LIMIT ?1)");
                 self.connection
                     .query_row(&sql, [MAX_DIAGNOSTIC_ROWS_PER_TABLE], |r| {
                         Ok((r.get(0)?, r.get(1)?))
-                    })?;
+                    })?
+            };
             let truncated: bool = self.connection.query_row(
                 &format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1 OFFSET ?1)"),
                 [MAX_DIAGNOSTIC_ROWS_PER_TABLE],
@@ -845,21 +865,25 @@ impl OperatorStore {
                 enforced_row_capacity: (table == "active_runs").then_some(MAX_ACTIVE_RUNS),
             });
         }
-        let (active, unknown) = self.connection.query_row(
-            "SELECT COALESCE(sum(json_extract(payload,'$.status') IN ('claimed','running','reconciling')),0),COALESCE(sum(json_extract(payload,'$.status')='outcome_unknown'),0) FROM (SELECT payload FROM executions ORDER BY execution_id LIMIT ?1)",
-            [MAX_DIAGNOSTIC_ROWS_PER_TABLE], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        let (active, unknown) = self.connection.query_row("SELECT COALESCE(sum(json_extract(payload,'$.status') IN ('claimed','running','reconciling')),0),COALESCE(sum(json_extract(payload,'$.status')='outcome_unknown'),0) FROM (SELECT payload FROM executions ORDER BY execution_id LIMIT ?1)", [MAX_DIAGNOSTIC_ROWS_PER_TABLE], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        let growth_thresholds = GrowthThresholds::from_env();
+        let growth = self.store_growth_metrics()?;
+        let warnings = if evaluate_growth {
+            evaluate_process_growth_warnings(&growth, growth_thresholds)
+        } else {
+            Vec::new()
+        };
         let pragma = |name: &str| -> Result<u64, OperatorStoreError> {
             Ok(self
                 .connection
                 .query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))?)
         };
-        Ok(StoreSummary {
+        let summary = StoreSummary {
             interrupted_workflow_outcomes_lower_bound: self.connection.query_row("SELECT count(*) FROM (SELECT payload FROM run_outcomes LIMIT ?1) WHERE json_extract(payload,'$.failure_class')='engine_interrupted'", [MAX_DIAGNOSTIC_ROWS_PER_TABLE], |r| r.get(0))?,
             new_work_admission_policy: self.capacity_policy()?,
             document_growth: DocumentGrowthSummary {
                 snapshot: self.policy_snapshot()?,
                 terminal_reservations: self.connection.query_row("SELECT count(*),COALESCE(sum(remaining),0),COALESCE(sum(coverage IN ('grandfathered_inactive','grandfathered_legacy')),0),COALESCE(sum(coverage='policy_control'),0) FROM terminal_reservations", [], |r| Ok(TerminalReservationSummary { retained_entries:r.get(0)?,outstanding_slots:r.get(1)?,grandfathered_entries:r.get(2)?,policy_control_entries:r.get(3)?,retained_ledger_is_charged:true,covered_producers:&["resource_apply", "fixed_evaluation", "native_installation", "artifact_stage", "artifact_cleanup", "host_release", "supervision", "supervision_completion", "recovery_grant"],unclassified_writes_exempt:false,hard_database_quota:false }))?,
-
                 editorial_mutable_slots: usize::from(self.document_growth_policy()?.is_some_and(|p| p.replace_editorial_aggregate)),
                 editorial_selection_admission: self.document_growth_policy()?.is_some(),
                 sequence_allocator_growth_bounded: false,
@@ -874,10 +898,7 @@ impl OperatorStore {
             },
             generic_document_growth_is_native_owner_governed: true,
             schema_version: 1,
-            active_runs: tables
-                .iter()
-                .find(|t| t.table == "active_runs")
-                .map_or(0, |t| t.sampled_rows),
+            active_runs: tables.iter().find(|t| t.table == "active_runs").map_or(0, |t| t.sampled_rows),
             tables,
             record_byte_limit: MAX_RECORD_BYTES,
             page_limit: MAX_PAGE_SIZE,
@@ -885,13 +906,103 @@ impl OperatorStore {
             scan_rows_per_table: MAX_DIAGNOSTIC_ROWS_PER_TABLE,
             database_allocated_bytes: pragma("page_count")?.saturating_mul(pragma("page_size")?),
             database_reusable_bytes: pragma("freelist_count")?.saturating_mul(pragma("page_size")?),
-            effective_database_byte_capacity: pragma("max_page_count")?
-                .saturating_mul(pragma("page_size")?),
+            effective_database_byte_capacity: pragma("max_page_count")?.saturating_mul(pragma("page_size")?),
             database_capacity_excludes_wal_and_backups: true,
             active_executions_lower_bound: active,
             unknown_executions_lower_bound: unknown,
             protected_payload_rows_lower_bound: protected,
             evidence_deletion_supported: false,
+            growth_thresholds,
+            growth,
+        };
+        Ok((summary, warnings))
+    }
+
+    fn store_growth_metrics(
+        &self,
+    ) -> Result<super::operator_observability::StoreGrowthMetrics, OperatorStoreError> {
+        use super::operator_observability::*;
+        let mut files = Vec::new();
+        let mut total_disk_bytes = 0u64;
+        for (label, path) in [
+            ("db", self.path.clone()),
+            ("wal", sidecar_path(&self.path, "-wal")),
+            ("shm", sidecar_path(&self.path, "-shm")),
+        ] {
+            let (size_bytes, modified_at_ms) = match fs::metadata(path) {
+                Ok(metadata) if metadata.is_file() => {
+                    let modified_at_ms = metadata
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_millis());
+                    (metadata.len(), modified_at_ms)
+                }
+                Ok(_) => (0, None),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (0, None),
+                Err(error) => return Err(error.into()),
+            };
+            total_disk_bytes = total_disk_bytes.saturating_add(size_bytes);
+            files.push(StoreFileMetric {
+                file: label,
+                size_bytes,
+                modified_at_ms,
+            });
+        }
+        let mut table_row_counts = Vec::new();
+        for table in [
+            "run_outcomes",
+            "artifacts",
+            "work_items",
+            "executions",
+            "active_runs",
+            "operator_documents",
+            "read_states",
+            "work_snoozes",
+            "changes",
+        ] {
+            let exact_rows = if table == "changes" {
+                None
+            } else {
+                Some(self.connection.query_row(
+                    &format!("SELECT count(*) FROM {table}"),
+                    [],
+                    |row| row.get(0),
+                )?)
+            };
+            table_row_counts.push(TableRowCount { table, exact_rows });
+        }
+        let (min_seq, max_seq): (Option<u64>, Option<u64>) = self.connection.query_row(
+            "SELECT (SELECT min(seq) FROM changes), (SELECT max(seq) FROM changes)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let retained_seq_span = match (min_seq, max_seq) {
+            (Some(min), Some(max)) => max.saturating_sub(min).saturating_add(1),
+            _ => 0,
+        };
+        let mut stmt = self.connection.prepare("SELECT artifact_id,count(*) AS revisions FROM artifacts GROUP BY artifact_id ORDER BY revisions DESC,artifact_id LIMIT 5")?;
+        let top_artifacts_by_revision_count = stmt
+            .query_map([], |row| {
+                Ok(ArtifactRevisionCount {
+                    artifact_id: row.get(0)?,
+                    revisions: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let first_recorded_outcome_started_at = self.connection.query_row("SELECT json_extract(payload,'$.started_at') FROM run_outcomes ORDER BY rowid ASC LIMIT 1", [], |row| row.get(0)).optional()?;
+        let last_recorded_outcome_started_at = self.connection.query_row("SELECT json_extract(payload,'$.started_at') FROM run_outcomes ORDER BY rowid DESC LIMIT 1", [], |row| row.get(0)).optional()?;
+        Ok(StoreGrowthMetrics {
+            total_disk_bytes,
+            files,
+            table_row_counts,
+            min_seq,
+            max_seq,
+            retained_seq_span,
+            retained_seq_span_exact_under_prefix_compaction: true,
+            first_recorded_outcome_started_at,
+            last_recorded_outcome_started_at,
+            top_artifacts_by_revision_count,
         })
     }
 
@@ -3932,6 +4043,7 @@ fn page<T: DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::operator_observability::evaluate_growth_warnings_with_latch as evaluate_growth_warnings;
     use tempfile::TempDir;
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
@@ -4444,6 +4556,212 @@ mod tests {
         let text = serde_json::to_string(&summary).unwrap();
         assert!(!text.contains("never-disclose"));
         assert!(!text.contains("private-namespace"));
+    }
+
+    #[test]
+    fn metrics_report_sizes_and_counts() {
+        let root = TempDir::new().unwrap();
+        let project = project(root.path());
+        let mut store = OperatorStore::open(root.path(), &project).unwrap();
+        store
+            .upsert_work_item(&work("metric-work", &project), None)
+            .unwrap();
+        store
+            .append_artifact_revision(&artifact("metric-artifact", 1, "run-1", &project))
+            .unwrap();
+        store
+            .append_artifact_revision(&artifact("metric-artifact", 2, "run-2", &project))
+            .unwrap();
+        let metrics = store.diagnostic_summary().unwrap().growth;
+        let db_size = fs::metadata(store.path()).unwrap().len();
+        assert_eq!(
+            metrics.total_disk_bytes,
+            metrics
+                .files
+                .iter()
+                .map(|file| file.size_bytes)
+                .sum::<u64>()
+        );
+        assert!(metrics
+            .files
+            .iter()
+            .any(|file| file.file == "db" && file.size_bytes == db_size));
+        assert_eq!(
+            metrics
+                .table_row_counts
+                .iter()
+                .find(|table| table.table == "work_items")
+                .unwrap()
+                .exact_rows,
+            Some(1)
+        );
+        assert_eq!(
+            metrics.top_artifacts_by_revision_count[0].artifact_id,
+            "metric-artifact"
+        );
+        assert_eq!(metrics.top_artifacts_by_revision_count[0].revisions, 2);
+        assert_eq!(metrics.first_recorded_outcome_started_at, None);
+        assert_eq!(metrics.last_recorded_outcome_started_at, None);
+    }
+
+    #[test]
+    fn metrics_are_cheap_and_seq_span_survives_prefix_compaction() {
+        let root = TempDir::new().unwrap();
+        let project = project(root.path());
+        let mut store = OperatorStore::open(root.path(), &project).unwrap();
+        store.connection.execute_batch("WITH RECURSIVE n(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM n WHERE seq < 10000) INSERT INTO changes(seq) SELECT seq FROM n;").unwrap();
+        let plan: Vec<String> = store
+            .connection
+            .prepare("EXPLAIN QUERY PLAN SELECT (SELECT min(seq) FROM changes), (SELECT max(seq) FROM changes)")
+            .unwrap()
+            .query_map([], |row| row.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let plan = plan.join(" ").to_ascii_lowercase();
+        assert!(plan.contains("search changes"), "{plan}");
+        assert!(!plan.contains("scan changes"), "{plan}");
+        let started = std::time::Instant::now();
+        let summary = store.diagnostic_summary().unwrap();
+        let elapsed = started.elapsed();
+        eprintln!(
+            "R-8 metrics measurement: rows=10000, elapsed_ms={}, changes_query_plan={plan}",
+            elapsed.as_millis()
+        );
+        assert_eq!(summary.growth.max_seq, Some(10000));
+        assert_eq!(
+            summary
+                .growth
+                .table_row_counts
+                .iter()
+                .find(|table| table.table == "changes")
+                .unwrap()
+                .exact_rows,
+            None
+        );
+        assert!(
+            elapsed.as_millis() < 1000,
+            "metrics over 10000 rows took {elapsed:?}"
+        );
+        let prepared = store.prepare_sequence_compaction().unwrap();
+        store.apply_sequence_compaction(prepared).unwrap();
+        let metrics = store.store_growth_metrics().unwrap();
+        let retained: u64 = store
+            .connection
+            .query_row("SELECT count(*) FROM changes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(metrics.retained_seq_span, retained);
+    }
+
+    #[test]
+    fn soft_threshold_warns_once_and_names_top_contributor() {
+        use super::super::operator_observability::*;
+        let metrics = StoreGrowthMetrics {
+            total_disk_bytes: 11,
+            files: vec![StoreFileMetric {
+                file: "db",
+                size_bytes: 11,
+                modified_at_ms: None,
+            }],
+            table_row_counts: vec![],
+            min_seq: None,
+            max_seq: None,
+            retained_seq_span: 0,
+            retained_seq_span_exact_under_prefix_compaction: true,
+            first_recorded_outcome_started_at: None,
+            last_recorded_outcome_started_at: None,
+            top_artifacts_by_revision_count: vec![ArtifactRevisionCount {
+                artifact_id: "largest-artifact".into(),
+                revisions: 3,
+            }],
+        };
+        let thresholds = GrowthThresholds {
+            store_soft_limit_bytes: 10,
+            artifact_revision_soft_limit: 3,
+        };
+        let mut latch = GrowthWarningLatch::default();
+        let warnings = evaluate_growth_warnings(&metrics, thresholds, &mut latch);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].contains("db"));
+        assert!(warnings[1].contains("largest-artifact"));
+        assert!(evaluate_growth_warnings(&metrics, thresholds, &mut latch).is_empty());
+    }
+
+    #[test]
+    fn threshold_rearms_after_clearing() {
+        use super::super::operator_observability::*;
+        let thresholds = GrowthThresholds {
+            store_soft_limit_bytes: 10,
+            artifact_revision_soft_limit: 500,
+        };
+        let mut latch = GrowthWarningLatch::default();
+        let mut metrics = StoreGrowthMetrics {
+            total_disk_bytes: 11,
+            files: vec![],
+            table_row_counts: vec![],
+            min_seq: None,
+            max_seq: None,
+            retained_seq_span: 0,
+            retained_seq_span_exact_under_prefix_compaction: true,
+            first_recorded_outcome_started_at: None,
+            last_recorded_outcome_started_at: None,
+            top_artifacts_by_revision_count: vec![],
+        };
+        assert_eq!(
+            evaluate_growth_warnings(&metrics, thresholds, &mut latch).len(),
+            1
+        );
+        metrics.total_disk_bytes = 9;
+        assert!(evaluate_growth_warnings(&metrics, thresholds, &mut latch).is_empty());
+        metrics.total_disk_bytes = 10;
+        assert_eq!(
+            evaluate_growth_warnings(&metrics, thresholds, &mut latch).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn no_policy_is_installed_by_migration_and_nothing_is_deleted() {
+        let root = TempDir::new().unwrap();
+        let project = project(root.path());
+        let mut store = OperatorStore::open(root.path(), &project).unwrap();
+        for id in ["retain-a", "retain-b"] {
+            store.upsert_work_item(&work(id, &project), None).unwrap();
+        }
+        let rows_before: u64 = store
+            .connection
+            .query_row("SELECT count(*) FROM work_items", [], |row| row.get(0))
+            .unwrap();
+        let artifacts_before: u64 = store
+            .connection
+            .query_row("SELECT count(*) FROM artifacts", [], |row| row.get(0))
+            .unwrap();
+        let summary = store.diagnostic_summary().unwrap();
+        assert!(summary.growth_thresholds.store_soft_limit_bytes > 0);
+        assert!(summary.growth_thresholds.artifact_revision_soft_limit > 0);
+        let policies: u64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM meta WHERE key LIKE '%capacity%' OR key LIKE '%growth%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(policies, 0);
+        assert_eq!(
+            store
+                .connection
+                .query_row::<u64, _, _>("SELECT count(*) FROM work_items", [], |row| row.get(0))
+                .unwrap(),
+            rows_before
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row::<u64, _, _>("SELECT count(*) FROM artifacts", [], |row| row.get(0))
+                .unwrap(),
+            artifacts_before
+        );
     }
 
     #[test]

@@ -3283,6 +3283,70 @@ pub async fn buddy_apply(gcx: AppState, m: BuddyMutation) {
     }
 }
 
+async fn check_operator_store_growth(buddy: &Arc<tokio::sync::Mutex<Option<BuddyService>>>) {
+    let runtime = buddy
+        .lock()
+        .await
+        .as_ref()
+        .filter(|service| service.operator_features.storage)
+        .and_then(|service| service.outcome_runtime.clone());
+    let Some(runtime) = runtime else { return };
+    let warnings = match runtime
+        .with_store(|store| {
+            store
+                .diagnostic_summary_with_growth_warnings()
+                .map(|(_, warnings)| warnings)
+        })
+        .await
+    {
+        Ok(warnings) => warnings,
+        Err(error) => {
+            warn!(%error, "buddy: operator store growth check failed");
+            return;
+        }
+    };
+    if warnings.is_empty() {
+        return;
+    }
+    let mut guard = buddy.lock().await;
+    let Some(service) = guard.as_mut() else {
+        return;
+    };
+    if !service
+        .outcome_runtime
+        .as_ref()
+        .is_some_and(|current| current.same_owner(&runtime))
+    {
+        return;
+    }
+    publish_operator_store_growth_warnings(service, warnings);
+}
+
+pub(crate) fn operator_store_growth_check_due(tick: u64) -> bool {
+    tick != 0 && tick % 3600 == 0
+}
+
+pub(crate) fn publish_operator_store_growth_warnings(
+    service: &mut BuddyService,
+    warnings: Vec<String>,
+) {
+    for warning in warnings {
+        let collected_at = Utc::now().to_rfc3339();
+        warn!("{warning}");
+        service.add_diagnostic(super::diagnostics::DiagnosticContext {
+            error_type: "operator_store_growth".into(),
+            error_message: format!("{warning} (observed {collected_at})"),
+            source_file: Some("buddy/operator_store.rs".into()),
+            tool_name: None,
+            chat_id: None,
+            model_id: None,
+            collected_at,
+            severity: super::diagnostics::DiagnosticSeverity::Medium,
+            occurrences: None,
+        });
+    }
+}
+
 pub async fn buddy_background_task(gcx: AppState) {
     let project_root = loop {
         if gcx.runtime.shutdown_flag.load(Ordering::SeqCst) {
@@ -3444,6 +3508,11 @@ pub async fn buddy_background_task(gcx: AppState) {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 expiry_tick += 1;
                 tick_operator_reopen(&buddy_arc).await;
+                if operator_store_growth_check_due(expiry_tick)
+                    && !shutdown_flag.load(Ordering::SeqCst)
+                {
+                    check_operator_store_growth(&buddy_arc).await;
+                }
                 if let Err(error) = publish_operator_inputs(&buddy_arc).await {
                     if expiry_tick % 60 == 0 {
                         warn!("buddy: operator proposals remain pending: {}", error);

@@ -782,3 +782,84 @@ async fn production_maintenance_driver_stops_while_repository_is_blocked() {
         .is_empty());
     assert!(events.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn store_growth_warning_reaches_recent_diagnostics_once_per_crossing() {
+    use super::super::operator_observability::{
+        evaluate_growth_warnings_with_latch as evaluate_growth_warnings, ArtifactRevisionCount,
+        GrowthThresholds, GrowthWarningLatch, StoreFileMetric, StoreGrowthMetrics,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let mut svc = service(root.path());
+    let mut metrics = StoreGrowthMetrics {
+        total_disk_bytes: 11,
+        files: vec![StoreFileMetric {
+            file: "db",
+            size_bytes: 11,
+            modified_at_ms: None,
+        }],
+        table_row_counts: vec![],
+        min_seq: None,
+        max_seq: None,
+        retained_seq_span: 0,
+        retained_seq_span_exact_under_prefix_compaction: true,
+        first_recorded_outcome_started_at: None,
+        last_recorded_outcome_started_at: None,
+        top_artifacts_by_revision_count: vec![ArtifactRevisionCount {
+            artifact_id: "largest-artifact".into(),
+            revisions: 3,
+        }],
+    };
+    let thresholds = GrowthThresholds {
+        store_soft_limit_bytes: 10,
+        artifact_revision_soft_limit: 3,
+    };
+    let mut latch = GrowthWarningLatch::default();
+    publish_operator_store_growth_warnings(
+        &mut svc,
+        evaluate_growth_warnings(&metrics, thresholds, &mut latch),
+    );
+    publish_operator_store_growth_warnings(
+        &mut svc,
+        evaluate_growth_warnings(&metrics, thresholds, &mut latch),
+    );
+    assert_eq!(
+        svc.recent_diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.error_type == "operator_store_growth")
+            .count(),
+        2
+    );
+    assert!(svc
+        .recent_diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.error_message.contains("largest-artifact")));
+    metrics.total_disk_bytes = 9;
+    metrics.top_artifacts_by_revision_count.clear();
+    assert!(evaluate_growth_warnings(&metrics, thresholds, &mut latch).is_empty());
+    metrics.total_disk_bytes = 11;
+    publish_operator_store_growth_warnings(
+        &mut svc,
+        evaluate_growth_warnings(&metrics, thresholds, &mut latch),
+    );
+    assert_eq!(
+        svc.recent_diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.error_type == "operator_store_growth")
+            .count(),
+        3
+    );
+    for task in svc.take_background_tasks() {
+        let _ = task.await;
+    }
+}
+
+#[test]
+fn operator_store_growth_check_runs_once_per_hourly_tick() {
+    assert!(!operator_store_growth_check_due(0));
+    assert!(!operator_store_growth_check_due(3599));
+    assert!(operator_store_growth_check_due(3600));
+    assert!(!operator_store_growth_check_due(3601));
+    assert!(operator_store_growth_check_due(7200));
+}
