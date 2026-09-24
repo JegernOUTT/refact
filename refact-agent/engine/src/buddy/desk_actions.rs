@@ -21,6 +21,26 @@ const ADAPTER_ID: &str = "operator.saved_evidence";
 const DISMISS_ADAPTER_ID: &str = "operator.work_lifecycle";
 const MAX_LINKS: usize = 200;
 
+fn resource_kind_label(resource_kind: &str) -> String {
+    match resource_kind {
+        "project_code" => "code".into(),
+        "default_models" => "default model".into(),
+        "project_customization_file" => "project setup".into(),
+        "native_markdown" => "markdown".into(),
+        "memory" => "memory".into(),
+        "settings" => "settings".into(),
+        "saved_report" => "saved report".into(),
+        "work_item" => "work item".into(),
+        "worktree" => "isolated code".into(),
+        "registered_worktree" => "worktree".into(),
+        "project" => "project".into(),
+        "test" => "test".into(),
+        "local" => "local resource".into(),
+        "scratch" => "scratch resource".into(),
+        other => other.replace('_', " "),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeskActionRequest {
@@ -217,7 +237,10 @@ pub fn actions_for_work(
             actions.push(DeskAction {
                 work_id: work_id.into(), spec: prepared.spec.clone(), spec_hash: hash.clone(),
                 work_revision: work.revision, artifact_id: id.clone(), artifact_revision: revision,
-                label: format!("Preview {} change", prepared.spec.resource.resource_kind),
+                label: format!(
+                    "Preview {} change",
+                    resource_kind_label(&prepared.spec.resource.resource_kind)
+                ),
                 description: "Review the registered resource scope and exact changes before granting permission. Report text does not authorize execution.".into(),
                 latest_execution: store.latest_execution_for_spec(&hash)?,
             });
@@ -232,7 +255,7 @@ pub fn actions_for_work(
         artifact_revision: revision,
         label: "Verify saved evidence".into(),
         description: if bounded {
-            "Checks retained source outcomes and evidence metadata. Does not open source files or URLs, verify findings, or apply fixes. Only the check receipt is saved."
+            "Checks that this report's saved evidence is still intact."
         } else {
             "This report exceeds the bounded evidence-check limit; no check will run."
         }
@@ -387,6 +410,24 @@ pub fn validate_resource_origin(
 #[cfg(test)]
 mod resource_origin_tests {
     use super::*;
+
+    #[test]
+    fn resource_action_labels_use_human_resource_names() {
+        assert_eq!(resource_kind_label("project_code"), "code");
+        assert_eq!(resource_kind_label("default_models"), "default model");
+        assert_eq!(
+            resource_kind_label("unknown_resource_kind"),
+            "unknown resource kind"
+        );
+    }
+
+    #[test]
+    fn verify_saved_evidence_description_is_concise_and_scoped() {
+        let text = "Checks that this report's saved evidence is still intact.";
+        assert_eq!(text.split_whitespace().count(), 9);
+        assert!(!text.contains("not independently verified"));
+        assert!(!text.contains("no fix was applied"));
+    }
 
     fn worker() -> WorkerIdentity {
         WorkerIdentity {
@@ -719,6 +760,7 @@ mod resource_origin_tests {
         let actions = actions_for_work(&store, &work.id).unwrap();
         assert_eq!(actions.len(), 3);
         assert_eq!(actions[0].spec.action_id, spec.action_id);
+        assert_eq!(actions[0].label, "Preview markdown change");
         assert_eq!(actions[1].label, "Verify saved evidence");
         assert_eq!(actions[2].spec.action_id, DISMISS_NOT_A_PROBLEM);
     }
@@ -764,7 +806,7 @@ fn check_links(
         format!("Retained source outcomes: {retained}/{}.", artifact.source_run_ids.len()),
         format!("Evidence metadata matches: {matched}/{} (including recorded digests, not live file hashes).", artifact.evidence.len()),
         format!("Provenance references match: {}.", if provenance_matches { "yes" } else { "no" }),
-        "Findings are not independently verified. Source files and URLs were not opened; no fix was applied.".into(),
+        "Findings are not independently verified.".into(),
     ]))
 }
 

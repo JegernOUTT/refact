@@ -164,6 +164,37 @@ pub enum WorkflowTerminal {
     Inconclusive,
 }
 
+pub(crate) fn workflow_display_title(workflow: &str) -> String {
+    refact_buddy_core::autonomous_workflows::autonomous_workflow_meta(workflow)
+        .map(|meta| meta.title.to_string())
+        .unwrap_or_else(|| {
+            workflow
+                .split('_')
+                .filter(|part| !part.is_empty())
+                .map(|part| {
+                    let mut chars = part.chars();
+                    chars
+                        .next()
+                        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+}
+
+pub(crate) fn workflow_result_title(title: &str, terminal: &WorkflowTerminal) -> String {
+    match terminal {
+        WorkflowTerminal::NoChange => format!("{title} — no change"),
+        WorkflowTerminal::Partial { .. } => format!("{title} is incomplete"),
+        WorkflowTerminal::Blocked { .. } => format!("{title} is blocked"),
+        WorkflowTerminal::Cancelled { .. } => format!("{title} was canceled"),
+        WorkflowTerminal::Failed { .. } => format!("{title} didn't finish"),
+        WorkflowTerminal::Completed => format!("{title} finished"),
+        WorkflowTerminal::Inconclusive => format!("{title} assessment"),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowOutcomeCheckpoint {
@@ -736,11 +767,16 @@ impl OutcomeRuntime {
         terminal: WorkflowTerminal,
     ) -> Result<Stored<RunOutcome>, OperatorStoreError> {
         let run_id = start.run_id.clone();
-        let title = format!("{} — run outcome", start.workflow);
-        self.publish_report(start, title,
-            "The run ended with the recorded status and evidence. Effects have not been independently verified.".into(),
-            checkpoint.evidence, terminal).await
-            .map_err(|_| OperatorStoreError::Conflict("terminal report publication failed"))?;
+        let title = workflow_result_title(&workflow_display_title(&start.workflow), &terminal);
+        self.publish_report(
+            start,
+            title,
+            "The run ended with the recorded status and evidence.".into(),
+            checkpoint.evidence,
+            terminal,
+        )
+        .await
+        .map_err(|_| OperatorStoreError::Conflict("terminal report publication failed"))?;
         self.get_run_outcome(run_id)
             .await?
             .ok_or(OperatorStoreError::Conflict("published run is unavailable"))
@@ -769,10 +805,9 @@ impl OutcomeRuntime {
         summary: String,
         terminal: WorkflowTerminal,
     ) -> Result<Stored<WorkItem>, String> {
-        let title = format!("{} — run outcome", start.workflow);
+        let title = workflow_result_title(&workflow_display_title(&start.workflow), &terminal);
         let report = if summary.trim().is_empty() {
-            "The workflow returned no readable summary. Coverage and effects remain unverified."
-                .to_string()
+            "The workflow returned no readable summary.".to_string()
         } else {
             summary
         };
@@ -879,6 +914,10 @@ impl OutcomeRuntime {
             &start.input_fingerprint,
         )
         .map_err(|error| error.to_string())?;
+        let uncertainty = Some(
+            "Buddy's assessment; its findings and any effects have not been independently verified."
+                .to_string(),
+        );
         start.work_id = subject.work_item_id();
         let outcome = build_workflow_outcome(
             start,
@@ -900,7 +939,14 @@ impl OutcomeRuntime {
             let store = guard
                 .as_mut()
                 .ok_or_else(|| "outcome runtime is shut down".to_string())?;
-            publish_report_in_store(store, outcome, subject, title, report)
+            publish_report_in_store_with_uncertainty(
+                store,
+                outcome,
+                subject,
+                title,
+                report,
+                uncertainty,
+            )
         })
         .await
         .map_err(|_| "assessment writer task failed".to_string())?
@@ -936,16 +982,62 @@ pub(crate) fn publish_report_in_store(
     title: String,
     report: String,
 ) -> Result<Stored<WorkItem>, String> {
-    publish_report_in_store_owned(store, outcome, subject, title, report, None)
+    publish_report_in_store_with_uncertainty(
+        store,
+        outcome,
+        subject,
+        title,
+        report,
+        Some("Buddy's assessment; its findings and any effects have not been independently verified.".into()),
+    )
+}
+
+fn publish_report_in_store_with_uncertainty(
+    store: &mut OperatorStore,
+    outcome: RunOutcome,
+    subject: SubjectKey,
+    title: String,
+    report: String,
+    uncertainty: Option<String>,
+) -> Result<Stored<WorkItem>, String> {
+    publish_report_in_store_owned_with_uncertainty(
+        store,
+        outcome,
+        subject,
+        title,
+        report,
+        None,
+        uncertainty,
+    )
 }
 
 pub(crate) fn publish_report_in_store_owned(
+    store: &mut OperatorStore,
+    outcome: RunOutcome,
+    subject: SubjectKey,
+    title: String,
+    report: String,
+    completion: Option<&super::operator_store::SupervisionCompletion>,
+) -> Result<Stored<WorkItem>, String> {
+    publish_report_in_store_owned_with_uncertainty(
+        store,
+        outcome,
+        subject,
+        title,
+        report,
+        completion,
+        Some("Buddy's assessment; its findings and any effects have not been independently verified.".into()),
+    )
+}
+
+fn publish_report_in_store_owned_with_uncertainty(
     store: &mut OperatorStore,
     mut outcome: RunOutcome,
     subject: SubjectKey,
     title: String,
     report: String,
     completion: Option<&super::operator_store::SupervisionCompletion>,
+    uncertainty: Option<String>,
 ) -> Result<Stored<WorkItem>, String> {
     store
         .retain_run_checkpoint(&mut outcome)
@@ -982,7 +1074,7 @@ pub(crate) fn publish_report_in_store_owned(
         .map_err(|error| error.to_string())?;
     let (conclusion, state) = match outcome.status {
         RunStatus::Failed => (
-            "Run failed. No verified resolution was recorded.",
+            "Run failed.",
             refact_buddy_core::operator_types::WorkItemState::Blocked,
         ),
         RunStatus::Blocked => (
@@ -990,7 +1082,7 @@ pub(crate) fn publish_report_in_store_owned(
             refact_buddy_core::operator_types::WorkItemState::Blocked,
         ),
         RunStatus::Cancelled => (
-            "Run cancelled. No verified resolution was recorded.",
+            "Run cancelled.",
             refact_buddy_core::operator_types::WorkItemState::Cancelled,
         ),
         RunStatus::Partial => (
@@ -1002,26 +1094,30 @@ pub(crate) fn publish_report_in_store_owned(
             refact_buddy_core::operator_types::WorkItemState::Watching,
         ),
         RunStatus::Completed => (
-            "Run completed; this summary does not independently verify its effects.",
+            "Run completed.",
             refact_buddy_core::operator_types::WorkItemState::Delivered,
         ),
         _ => (
-            "Assessment available; findings have not been independently verified.",
+            "Assessment ready.",
             refact_buddy_core::operator_types::WorkItemState::NeedsAttention,
         ),
     };
     let artifact = ArtifactDraft {
-                subject: subject.clone(),
-                source_run_ids: vec![outcome.run_id.clone()],
-                title: title.clone(),
-                conclusion: conclusion.into(),
-                delta: String::new(),
-                body: report,
-                uncertainty: Some("This is the workflow's assessment, not proof that a change was applied or that the issue is resolved.".into()),
-                proposed_action_ids: Vec::new(),
-                evidence: outcome.evidence.clone(),
-            }.materialize(std::slice::from_ref(&outcome), current_artifact.as_ref().map(|record| &record.value))
-                .map_err(|error| error.to_string())?;
+        subject: subject.clone(),
+        source_run_ids: vec![outcome.run_id.clone()],
+        title: title.clone(),
+        conclusion: conclusion.into(),
+        delta: String::new(),
+        body: report,
+        uncertainty: uncertainty.clone(),
+        proposed_action_ids: Vec::new(),
+        evidence: outcome.evidence.clone(),
+    }
+    .materialize(
+        std::slice::from_ref(&outcome),
+        current_artifact.as_ref().map(|record| &record.value),
+    )
+    .map_err(|error| error.to_string())?;
     let mut item = WorkItemDraft {
         project: outcome.project.clone(),
         subject,
@@ -1179,10 +1275,222 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(artifact.value.body.contains("did not finish"));
-            assert!(artifact.value.conclusion.contains("No verified resolution"));
+            assert!(
+                artifact.value.conclusion.contains("Run failed.")
+                    || artifact.value.conclusion.contains("Run cancelled.")
+            );
             assert!(artifact.value.proposed_action_ids.is_empty());
         }
         runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn one_caveat_per_published_report() {
+        let dir = TempDir::new().unwrap();
+        let runtime = OutcomeRuntime::open(
+            dir.path(),
+            identity(dir.path()),
+            WorkerIdentity {
+                worker_id: "worker".into(),
+                engine_instance_id: "engine".into(),
+                epoch: 1,
+            },
+        )
+        .unwrap();
+        let terminals = [
+            WorkflowTerminal::Completed,
+            WorkflowTerminal::Inconclusive,
+            WorkflowTerminal::Partial {
+                failure_class: Some("partial".into()),
+            },
+            WorkflowTerminal::NoChange,
+            WorkflowTerminal::Failed {
+                failure_class: Some("failed".into()),
+            },
+            WorkflowTerminal::Blocked {
+                failure_class: Some("blocked".into()),
+            },
+            WorkflowTerminal::Cancelled {
+                failure_class: Some("cancelled".into()),
+            },
+        ];
+        let caveat = regex::Regex::new(
+            r"(?i)(not (been )?independently verif|no fix was|unverified|not proof|remain(s)? inconclusive)",
+        )
+        .unwrap();
+        for (index, terminal) in terminals.into_iter().enumerate() {
+            let mut start = runtime.start_workflow("commit_msg", "2026-09-05T00:00:00Z".into());
+            start.run_id = format!("caveat-run-{index}");
+            start.input_fingerprint = format!("caveat-{index}");
+            let work = runtime
+                .publish_workflow_result(start, "A readable result.".into(), terminal)
+                .await
+                .unwrap();
+            let artifact = runtime
+                .get_artifact_revision(
+                    work.value.current_artifact_id.unwrap(),
+                    work.value.current_artifact_revision,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let rendered = format!(
+                "{}\n{}\n{}\n{}",
+                artifact.value.conclusion,
+                artifact.value.delta,
+                artifact.value.body,
+                artifact.value.uncertainty.as_deref().unwrap_or_default()
+            );
+            assert_eq!(caveat.find_iter(&rendered).count(), 1, "{rendered}");
+            assert!(artifact.value.uncertainty.is_some(), "{rendered}");
+            assert!(artifact
+                .value
+                .uncertainty
+                .as_deref()
+                .unwrap()
+                .contains("independently verified"));
+        }
+        let check = crate::buddy::workflow_deliverables::SourceCheck {
+            scope: "the complete scratch scope".into(),
+            input_fingerprint: "source-check-fingerprint".into(),
+            evidence: vec![refact_buddy_core::operator_types::EvidenceRef {
+                evidence_id: "source-check-evidence".into(),
+                source: NativeSourceIdentity {
+                    source_kind: refact_buddy_core::operator_types::NativeSourceKind::Check,
+                    source_id: "source-check".into(),
+                    source_version: "1".into(),
+                },
+                locator: "refact://check/source-check".into(),
+                observed_at: "2026-09-05T00:00:00Z".into(),
+                digest: None,
+            }],
+            completion: crate::buddy::workflow_deliverables::SourceCompletion::Complete,
+            findings: vec![],
+        };
+        let report = check.into_report("commit_msg");
+        let mut start = runtime.start_workflow("commit_msg", "2026-09-05T00:00:00Z".into());
+        start.run_id = "source-check-report".into();
+        start.input_fingerprint = "source-check-report".into();
+        let work = runtime
+            .publish_report(
+                start,
+                report.title,
+                report.body,
+                report.evidence,
+                report.terminal,
+            )
+            .await
+            .unwrap();
+        let artifact = runtime
+            .get_artifact_revision(
+                work.value.current_artifact_id.unwrap(),
+                work.value.current_artifact_revision,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let rendered = format!(
+            "{}\n{}\n{}\n{}",
+            artifact.value.conclusion,
+            artifact.value.delta,
+            artifact.value.body,
+            artifact.value.uncertainty.as_deref().unwrap_or_default()
+        );
+        assert_eq!(caveat.find_iter(&rendered).count(), 1, "{rendered}");
+        assert!(artifact.value.uncertainty.is_some(), "{rendered}");
+        assert!(artifact
+            .value
+            .uncertainty
+            .as_deref()
+            .unwrap()
+            .contains("independently verified"));
+        assert!(artifact
+            .value
+            .uncertainty
+            .as_deref()
+            .unwrap()
+            .contains("independently verified"));
+        let assessment = crate::buddy::workflow_deliverables::assessment_body(
+            refact_buddy_core::autonomous_workflows::DEPENDENCY_RADAR_WORKFLOW_ID,
+            "Cargo.toml modified",
+            "A follow-up is available.",
+            None,
+        );
+        let assessment_caveat_count = caveat.find_iter(&assessment).count();
+        assert_eq!(assessment_caveat_count, 0, "{assessment}");
+        let mut start = runtime.start_workflow(
+            refact_buddy_core::autonomous_workflows::DEPENDENCY_RADAR_WORKFLOW_ID,
+            "2026-09-05T00:00:00Z".into(),
+        );
+        start.run_id = "autonomous-assessment-caveat".into();
+        start.input_fingerprint = "autonomous-assessment-caveat".into();
+        let work = runtime
+            .publish_assessment(
+                start,
+                "Dependency Radar assessment".into(),
+                assessment,
+                vec![],
+            )
+            .await
+            .unwrap();
+        let artifact = runtime
+            .get_artifact_revision(
+                work.value.current_artifact_id.unwrap(),
+                work.value.current_artifact_revision,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let rendered = format!(
+            "{}\n{}\n{}\n{}",
+            artifact.value.conclusion,
+            artifact.value.delta,
+            artifact.value.body,
+            artifact.value.uncertainty.as_deref().unwrap_or_default()
+        );
+        assert_eq!(caveat.find_iter(&rendered).count(), 1, "{rendered}");
+        assert!(artifact.value.uncertainty.is_some(), "{rendered}");
+        assert!(artifact
+            .value
+            .uncertainty
+            .as_deref()
+            .unwrap()
+            .contains("independently verified"));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn titles_never_contain_raw_workflow_ids() {
+        for workflow in refact_buddy_core::autonomous_workflows::AUTONOMOUS_BUDDY_WORKFLOWS {
+            let dir = TempDir::new().unwrap();
+            let runtime = OutcomeRuntime::open(
+                dir.path(),
+                identity(dir.path()),
+                WorkerIdentity {
+                    worker_id: "worker".into(),
+                    engine_instance_id: "engine".into(),
+                    epoch: 1,
+                },
+            )
+            .unwrap();
+            let start = runtime.start_workflow(workflow.id, "2026-09-05T00:00:00Z".into());
+            let work = runtime
+                .publish_workflow_result(
+                    start,
+                    "Completed summary.".into(),
+                    WorkflowTerminal::Completed,
+                )
+                .await
+                .unwrap();
+            let title = work.value.title;
+            assert!(title.starts_with(workflow.title), "{title}");
+            assert!(!title.contains("run outcome"), "{title}");
+            assert!(
+                !title.split_whitespace().any(|token| token.contains('_')),
+                "{title}"
+            );
+            runtime.shutdown().await;
+        }
     }
 
     fn identity(root: &Path) -> ProjectIdentity {
@@ -1520,7 +1828,12 @@ mod tests {
             .unwrap();
         assert_eq!(artifact.value.body, "A readable result");
         assert!(artifact.value.provenance.contains_untrusted_source);
-        assert!(artifact.value.uncertainty.unwrap().contains("not proof"));
+        assert!(artifact
+            .value
+            .uncertainty
+            .as_deref()
+            .unwrap()
+            .contains("not been independently verified"));
         let failed = runtime
             .publish_assessment(
                 start(dir.path(), "empty"),

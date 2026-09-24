@@ -361,17 +361,17 @@ pub fn workflow_deliverable_contract(id: &str) -> Option<WorkflowDeliverableCont
         ERROR_DETECTIVE_WORKFLOW_ID => (
             "diagnostic_assessment",
             "Smallest safe diagnostic checks and containment steps",
-            "Diagnostic summaries only; not proof of root cause or repair",
+            "Diagnostic summaries only",
         ),
         REFACT_SELF_CRITIC_WORKFLOW_ID => (
             "quality_proposal",
             "Reproduction, proposed correction, and acceptance checks",
-            "Observed traces only; proposed changes are not applied",
+            "Observed traces only",
         ),
         REFACT_COMPILE_SNIFFER_WORKFLOW_ID => (
             "compile_assessment",
             "Failing command, affected scope, and proposed correction",
-            "Retained compiler evidence only; no inferred successful rebuild",
+            "Retained compiler evidence only",
         ),
         BUDDY_DAILY_DIGEST_WORKFLOW_ID => (
             "daily_digest",
@@ -381,7 +381,7 @@ pub fn workflow_deliverable_contract(id: &str) -> Option<WorkflowDeliverableCont
         BUDDY_FRIDAY_RETRO_WORKFLOW_ID => (
             "retrospective",
             "Evidence-backed lessons and follow-up checklist",
-            "Retained week activity only; no inferred resolution",
+            "Retained week activity only",
         ),
         BUDDY_IDLE_SUGGESTER_WORKFLOW_ID => (
             "research_brief",
@@ -391,7 +391,7 @@ pub fn workflow_deliverable_contract(id: &str) -> Option<WorkflowDeliverableCont
         BUDDY_ONBOARDING_WORKFLOW_ID => (
             "onboarding_checklist",
             "Missing setup steps and local configuration proposal",
-            "Observed setup only; no inferred configuration change",
+            "Observed setup only",
         ),
         BUDDY_PR_ISSUE_MATCHMAKER_WORKFLOW_ID => (
             "issue_match_proposal",
@@ -421,7 +421,7 @@ pub fn workflow_deliverable_contract(id: &str) -> Option<WorkflowDeliverableCont
         SETUP_COACH_WORKFLOW_ID => (
             "setup_proposal",
             "Local setup checklist and next configuration steps",
-            "Presence checks only; not proof that integrations work",
+            "Presence checks only",
         ),
         DEPENDENCY_RADAR_WORKFLOW_ID => (
             "dependency_proposal",
@@ -431,7 +431,7 @@ pub fn workflow_deliverable_contract(id: &str) -> Option<WorkflowDeliverableCont
         DOCS_GARDENER_WORKFLOW_ID => (
             "documentation_proposal",
             "Affected documentation, suggested content, and source cross-checks",
-            "Changed path and documentation signals only; no inferred stale text or applied edit",
+            "Changed path and documentation signals only",
         ),
         ARCHITECTURE_DRIFT_WORKFLOW_ID => (
             "architecture_assessment",
@@ -441,12 +441,12 @@ pub fn workflow_deliverable_contract(id: &str) -> Option<WorkflowDeliverableCont
         MEMORY_GARDENER_WORKFLOW_ID => (
             "memory_proposal",
             "Candidate memory IDs and proposed consolidation or cleanup",
-            "Memory metadata only; no inferred deletion or consolidation",
+            "Memory metadata only",
         ),
         KNOWLEDGE_CONFLICT_WORKFLOW_ID => (
             "knowledge_resolution_proposal",
             "Conflicting IDs, source questions, and proposed resolution",
-            "Conflict summaries only; no inferred resolved knowledge",
+            "Conflict summaries only",
         ),
         BEHAVIOR_LEARNER_WORKFLOW_ID => (
             "preference_proposal",
@@ -461,7 +461,7 @@ pub fn workflow_deliverable_contract(id: &str) -> Option<WorkflowDeliverableCont
         MODEL_COST_OPTIMIZER_WORKFLOW_ID => (
             "model_cost_proposal",
             "Aggregate tradeoffs and proposed configuration comparison",
-            "Aggregate usage only; no inferred savings or applied model change",
+            "Aggregate usage only",
         ),
         _ => return None,
     };

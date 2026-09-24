@@ -970,7 +970,7 @@ mod tests {
             seeder
                 .publish_report(
                     start,
-                    "memo_extraction — run outcome".into(),
+                    "Memo Extraction didn't finish".into(),
                     format!("Memory extracted: {index} memos"),
                     vec![],
                     WorkflowTerminal::Failed {
