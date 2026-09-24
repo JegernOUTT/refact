@@ -2121,7 +2121,6 @@ impl OperatorStore {
             self.admit_new_work()?;
         }
         let outcome_payload = encode(outcome)?;
-        let item_payload = encode(item)?;
         let artifact_payload = artifact.map(encode).transpose()?;
         let tx = self.connection.transaction()?;
 
@@ -2140,7 +2139,14 @@ impl OperatorStore {
             let work = stored_mutable_in_tx::<WorkItem>(&tx, "work_items", &item.id)?.ok_or(
                 OperatorStoreError::Conflict("existing outcome has no linked work item"),
             )?;
-            if work.value != *item {
+            let mut expected_item = item.clone();
+            if item.subject.resource_kind == "workflow"
+                && work.value.subject == item.subject
+                && work.value.state == refact_buddy_core::operator_types::WorkItemState::Cancelled
+            {
+                expected_item.state = refact_buddy_core::operator_types::WorkItemState::Cancelled;
+            }
+            if work.value != expected_item {
                 return Err(OperatorStoreError::Conflict(
                     "existing outcome was completed against a different work item revision",
                 ));
@@ -2174,7 +2180,12 @@ impl OperatorStore {
             }
         }
 
-        let work = upsert_work_item_in_tx(&tx, item, &item_payload, expected_work_revision)?;
+        let mut published_item = item.clone();
+        retire_workflow_siblings_in_tx(&tx, outcome, &mut published_item)?;
+        let item_payload = encode(&published_item)?;
+
+        let work =
+            upsert_work_item_in_tx(&tx, &published_item, &item_payload, expected_work_revision)?;
         let outcome = insert_outcome_in_tx(&tx, outcome, &outcome_payload)?;
         let artifact = match (artifact, artifact_payload.as_deref()) {
             (Some(artifact), Some(payload)) => Some(insert_artifact_in_tx(&tx, artifact, payload)?),
@@ -3768,6 +3779,195 @@ fn upsert_work_item_in_tx(
         revision: revision as u64,
         change_seq: change_seq as u64,
     })
+}
+
+fn retire_workflow_siblings_in_tx(
+    tx: &Transaction<'_>,
+    outcome: &RunOutcome,
+    item: &mut WorkItem,
+) -> Result<(), OperatorStoreError> {
+    use refact_buddy_core::operator_types::{RunStatus, WorkItemState};
+
+    if item.subject.resource_kind != "workflow"
+        || outcome.workflow.as_deref() != Some(item.subject.resource_id.as_str())
+    {
+        return Ok(());
+    }
+    #[derive(Clone)]
+    struct Candidate {
+        work: Stored<WorkItem>,
+        status: RunStatus,
+        observed_at: chrono::DateTime<chrono::FixedOffset>,
+    }
+    let mut candidates = Vec::new();
+    let outcome_time = chrono::DateTime::parse_from_rfc3339(&outcome.started_at)
+        .map_err(|_| OperatorStoreError::InvalidInput("invalid workflow start timestamp"))?;
+    candidates.push(Candidate {
+        work: Stored {
+            value: item.clone(),
+            revision: 0,
+            change_seq: 0,
+        },
+        status: outcome.status.clone(),
+        observed_at: outcome_time,
+    });
+    let sibling_rows: Vec<(Stored<WorkItem>, Option<RunOutcome>)> = {
+        let mut statement = tx.prepare(
+            "SELECT payload,revision,change_seq FROM work_items WHERE id<>?1 AND json_extract(payload,'$.project.project_id')=?2 AND json_extract(payload,'$.project.canonical_root')=?3 AND json_extract(payload,'$.subject.resource_kind')='workflow' AND json_extract(payload,'$.subject.resource_id')=?4 AND json_extract(payload,'$.state') IN ('needs_attention','watching','blocked')",
+        )?;
+        let rows = statement.query_map(
+            rusqlite::params![
+                item.id,
+                item.project.project_id,
+                item.project.canonical_root,
+                item.subject.resource_id
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u64>(2)?,
+                ))
+            },
+        )?;
+        let mut candidates = Vec::new();
+        for row in rows {
+            let (payload, revision, change_seq) = row?;
+            let sibling: WorkItem = decode(&payload)?;
+            if sibling.project != item.project
+                || sibling.subject.resource_kind != "workflow"
+                || sibling.subject.resource_id != item.subject.resource_id
+            {
+                continue;
+            }
+            let latest: Option<String> = tx
+                .query_row(
+                    "SELECT payload FROM run_outcomes WHERE json_extract(payload,'$.work_id')=?1 AND json_extract(payload,'$.workflow')=?2 ORDER BY change_seq DESC LIMIT 1",
+                    rusqlite::params![sibling.id, item.subject.resource_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let latest = latest.map(|payload| decode(&payload)).transpose()?;
+            candidates.push((
+                Stored {
+                    value: sibling,
+                    revision,
+                    change_seq,
+                },
+                latest,
+            ));
+        }
+        candidates
+    };
+
+    for (sibling, latest) in sibling_rows {
+        let (status, coverage, observed_at) = if let Some(run) = latest {
+            (
+                run.status,
+                run.coverage,
+                chrono::DateTime::parse_from_rfc3339(&run.started_at).ok(),
+            )
+        } else {
+            let status = match &sibling.value.state {
+                WorkItemState::NeedsAttention | WorkItemState::Watching => RunStatus::Inconclusive,
+                WorkItemState::Blocked => RunStatus::Blocked,
+                _ => continue,
+            };
+            (
+                status,
+                sibling.value.scope.clone().unwrap_or_default(),
+                None,
+            )
+        };
+        if coverage != outcome.coverage {
+            continue;
+        }
+        let observed_at = match observed_at {
+            Some(value) => value,
+            None => {
+                match chrono::DateTime::parse_from_rfc3339(&sibling.value.last_material_change_at) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                }
+            }
+        };
+        candidates.push(Candidate {
+            work: sibling,
+            status,
+            observed_at,
+        });
+    }
+
+    let supersedes = |newer: &RunStatus, older: &RunStatus| {
+        let newer_assessment = matches!(
+            newer,
+            RunStatus::Completed
+                | RunStatus::Inconclusive
+                | RunStatus::NoChange
+                | RunStatus::Partial
+        );
+        let older_assessment = matches!(
+            older,
+            RunStatus::Completed
+                | RunStatus::Inconclusive
+                | RunStatus::NoChange
+                | RunStatus::Partial
+        );
+        let newer_failure = matches!(
+            newer,
+            RunStatus::Failed | RunStatus::Blocked | RunStatus::Cancelled
+        );
+        let older_failure = matches!(
+            older,
+            RunStatus::Failed | RunStatus::Blocked | RunStatus::Cancelled
+        );
+        (newer_assessment && (older_assessment || older_failure))
+            || (newer_failure && older_failure)
+    };
+    let newer_than = |newer: &Candidate, older: &Candidate| {
+        newer.observed_at > older.observed_at
+            || (newer.observed_at == older.observed_at && newer.work.value.id > older.work.value.id)
+    };
+    let eligible: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.work.value.id == item.id
+                || matches!(
+                    candidate.work.value.state,
+                    WorkItemState::NeedsAttention
+                        | WorkItemState::Watching
+                        | WorkItemState::Blocked
+                )
+        })
+        .collect();
+    let retire_ids: Vec<String> = eligible
+        .iter()
+        .filter(|row| {
+            eligible
+                .iter()
+                .any(|other| newer_than(other, row) && supersedes(&other.status, &row.status))
+        })
+        .map(|candidate| candidate.work.value.id.clone())
+        .collect();
+
+    for candidate in candidates {
+        if !retire_ids.contains(&candidate.work.value.id) {
+            continue;
+        }
+        if candidate.work.value.id == item.id {
+            item.state = WorkItemState::Cancelled;
+        } else {
+            let mut retired = candidate.work.value;
+            retired.state = WorkItemState::Cancelled;
+            upsert_work_item_in_tx(
+                tx,
+                &retired,
+                &encode(&retired)?,
+                Some(candidate.work.revision),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn insert_outcome_in_tx(

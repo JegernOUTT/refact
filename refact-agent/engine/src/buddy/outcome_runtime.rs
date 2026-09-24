@@ -19,6 +19,10 @@ use super::work_items::{problem_summary_from_title, SubjectKey, WorkItemDraft};
 
 pub const MAX_OUTCOME_EVIDENCE: usize = 12;
 
+#[cfg(test)]
+#[path = "outcome_supersede_tests.rs"]
+mod supersede_tests;
+
 /// The one coverage string a housekeeping subject ever uses. Housekeeping does
 /// not report per-run coverage because it does not report per-run at all.
 pub const HOUSEKEEPING_COVERAGE: &str =
