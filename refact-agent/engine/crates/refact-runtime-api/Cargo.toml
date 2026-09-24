@@ -8,5 +8,5 @@ refact-chat-api = { path = "../refact-chat-api" }
 refact-tool-api = { path = "../refact-tool-api" }
 refact-buddy-core = { path = "../refact-buddy-core" }
 refact-chat-history = { path = "../refact-chat-history" }
-async-trait = "0.1.73"
+async-trait.workspace = true
 serde_json.workspace = true

@@ -8,4 +8,4 @@ default = []
 http-client = ["dep:reqwest"]
 
 [dependencies]
-reqwest = { version = "0.13", default-features = false, features = ["json", "form", "stream", "rustls", "charset", "http2"], optional = true }
+reqwest = { workspace = true, optional = true}

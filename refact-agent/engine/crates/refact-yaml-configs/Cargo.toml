@@ -7,13 +7,13 @@ edition = "2021"
 refact-core = { path = "../refact-core" }
 refact-files = { path = "../refact-files" }
 serde.workspace = true
+serde_yaml.workspace = true
 serde_json.workspace = true
-serde_yaml = "0.9.31"
 tokio.workspace = true
+rust-embed.workspace = true
+md5.workspace = true
+dunce.workspace = true
 tracing.workspace = true
-rust-embed = "8.5.0"
-md5 = "0.7"
-dunce = "1.0.5"
 
 [dev-dependencies]
 tempfile.workspace = true

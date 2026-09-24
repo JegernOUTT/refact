@@ -5,6 +5,6 @@ edition = "2021"
 
 [dependencies]
 refact-core = { path = "../refact-core" }
-serde = { workspace = true }
-tree-sitter = { workspace = true }
+serde.workspace = true
+tree-sitter.workspace = true
 refact-codegraph-parsers = { path = "../refact-codegraph-parsers" }

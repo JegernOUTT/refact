@@ -6,15 +6,15 @@ edition = "2021"
 [dependencies]
 refact-core = { path = "../refact-core" }
 refact-chat-api = { path = "../refact-chat-api" }
-chrono = { version = "0.4.31", features = ["serde"] }
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-uuid.workspace = true
-md5.workspace = true
-sha2 = "0.10.8"
-hex = "0.4.3"
+sha2.workspace = true
+hex.workspace = true
 tracing.workspace = true
+md5.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-base64 = "0.22.1"
+base64.workspace = true
 image.workspace = true

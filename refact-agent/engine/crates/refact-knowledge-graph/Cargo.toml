@@ -6,12 +6,12 @@ edition = "2021"
 [dependencies]
 refact-core = { path = "../refact-core" }
 
-serde = { workspace = true }
-serde_json = { workspace = true }
-regex = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
-petgraph = "0.6"
-walkdir = "2.3"
-chrono = { version = "0.4.31", features = ["serde"] }
+petgraph.workspace = true
+walkdir.workspace = true
+chrono.workspace = true
