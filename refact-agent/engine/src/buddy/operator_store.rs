@@ -2661,7 +2661,7 @@ impl OperatorStore {
                      julianday(json_extract(s.payload,'$.until'))>julianday(?6)),0) AS snoozed
                 FROM work_items w LEFT JOIN read_states r ON r.work_id=w.id
                 LEFT JOIN work_snoozes s ON s.work_id=w.id
-             ) SELECT payload,revision,change_seq FROM selected WHERE change_seq>?1 AND (
+             ) SELECT payload,revision,change_seq FROM selected WHERE (?1 IS NULL OR change_seq<?1) AND (
                 ?2 IS NULL OR
                 (?2='needs_you' AND json_extract(payload,'$.state') IN ('needs_attention','blocked')) OR
                 (?2='working_on' AND json_extract(payload,'$.state')='working') OR
@@ -2670,11 +2670,11 @@ impl OperatorStore {
             ) AND (?3='' OR instr(lower(json_extract(payload,'$.title') || ' ' ||
                 json_extract(payload,'$.subject.resource_id') || ' ' || json_extract(payload,'$.kind')),?3)>0)
             AND (?5='all' OR (?5='unread' AND unread) OR (?5='snoozed' AND snoozed) OR (?5='unsnoozed' AND NOT snoozed))
-            ORDER BY change_seq,id LIMIT ?4",
+            ORDER BY change_seq DESC,id DESC LIMIT ?4",
         )?;
         let rows = statement.query_map(
             params![
-                after.unwrap_or(0),
+                after,
                 view,
                 search,
                 (limit + 1) as i64,
@@ -4039,6 +4039,10 @@ fn page<T: DeserializeOwned>(
         next_after,
     })
 }
+
+#[cfg(test)]
+#[path = "work_order_tests.rs"]
+mod work_order_tests;
 
 #[cfg(test)]
 mod tests {
@@ -5669,11 +5673,11 @@ mod tests {
         let first = store
             .search_work_items(None, 1, Some("needs_you"), Some("PROVIDER"))
             .unwrap();
-        assert_eq!(first.entries[0].value.id, "a");
+        assert_eq!(first.entries[0].value.id, "c");
         let second = store
             .search_work_items(first.next_after, 1, Some("needs_you"), Some("provider"))
             .unwrap();
-        assert_eq!(second.entries[0].value.id, "c");
+        assert_eq!(second.entries[0].value.id, "a");
         assert!(second.next_after.is_none());
         assert!(store
             .search_work_items(None, 10, None, Some("%' OR 1=1 --"))
