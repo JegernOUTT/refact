@@ -401,38 +401,7 @@ pub async fn list_all_buddy_conversations_with_diagnostics(
                 }
                 LedgerReadOutcome::Skipped => continue,
             };
-            let mapping = workflow_id_to_mapping(&stem);
-            let entry_count = val
-                .get("entries")
-                .and_then(|v| v.as_array())
-                .map(|a| a.len() as u32)
-                .unwrap_or(0);
-            let last_ts = val
-                .get("entries")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.last())
-                .and_then(|e| e.get("timestamp"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            entries.push(BuddyConversationEntry {
-                id: stem.clone(),
-                kind: mapping.kind.to_string(),
-                title: format!(
-                    "{}{}",
-                    stem.replace('_', " "),
-                    mapping
-                        .badge
-                        .map(|b| format!(" ({})", b))
-                        .unwrap_or_default()
-                ),
-                created_at: last_ts.clone(),
-                updated_at: last_ts,
-                status: "completed".to_string(),
-                message_count: entry_count,
-                icon: mapping.icon.to_string(),
-                badge: mapping.badge.map(|s| s.to_string()),
-            });
+            entries.push(workflow_entry_from_value(stem, &val));
         }
     }
 
@@ -492,35 +461,43 @@ fn conversation_entry_from_value(val: &serde_json::Value, id: String) -> BuddyCo
     }
 }
 
+fn humanize_workflow_stem(stem: &str) -> String {
+    let title = stem.replace('_', " ");
+    let mut chars = title.chars();
+    let Some(first) = chars.next() else {
+        return title;
+    };
+    first.to_uppercase().chain(chars).collect()
+}
+
 fn workflow_entry_from_value(stem: String, val: &serde_json::Value) -> BuddyConversationEntry {
     let mapping = workflow_id_to_mapping(&stem);
-    let entry_count = val
-        .get("entries")
-        .and_then(|v| v.as_array())
-        .map(|a| a.len() as u32)
-        .unwrap_or(0);
-    let last_ts = val
-        .get("entries")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| arr.last())
-        .and_then(|e| e.get("timestamp"))
+    let entries = val.get("entries").and_then(|v| v.as_array());
+    let entry_count = entries.map(|entries| entries.len() as u32).unwrap_or(0);
+    let last_entry = entries.and_then(|entries| entries.last());
+    let last_ts = last_entry
+        .and_then(|entry| entry.get("timestamp"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let status = match last_entry
+        .and_then(|entry| entry.get("success"))
+        .and_then(|success| success.as_bool())
+    {
+        Some(true) | None => "completed",
+        Some(false) => "failed",
+    };
+    let title = autonomous_workflow_meta(&stem)
+        .map(|meta| meta.title.to_string())
+        .or_else(|| mapping.badge.map(ToString::to_string))
+        .unwrap_or_else(|| humanize_workflow_stem(&stem));
     BuddyConversationEntry {
         id: stem.clone(),
         kind: mapping.kind.to_string(),
-        title: format!(
-            "{}{}",
-            stem.replace('_', " "),
-            mapping
-                .badge
-                .map(|b| format!(" ({})", b))
-                .unwrap_or_default()
-        ),
+        title,
         created_at: last_ts.clone(),
         updated_at: last_ts,
-        status: "completed".to_string(),
+        status: status.to_string(),
         message_count: entry_count,
         icon: mapping.icon.to_string(),
         badge: mapping.badge.map(|s| s.to_string()),
@@ -620,6 +597,12 @@ mod tests {
         .unwrap();
     }
 
+    async fn write_workflow_value(dir: &Path, id: &str, value: serde_json::Value) {
+        tokio::fs::write(dir.join(format!("{id}.json")), value.to_string())
+            .await
+            .unwrap();
+    }
+
     #[test]
     fn autonomous_workflow_ids_have_system_mappings() {
         for meta in AUTONOMOUS_BUDDY_WORKFLOWS {
@@ -639,6 +622,96 @@ mod tests {
         assert_eq!(mapping.kind, "workflow");
         assert_eq!(mapping.icon, "🔄");
         assert_eq!(mapping.badge, None);
+    }
+
+    #[tokio::test]
+    async fn workflow_entries_report_latest_status_and_human_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let wf_dir = dir.path().join(".refact/buddy/chats/workflows");
+        tokio::fs::create_dir_all(&wf_dir).await.unwrap();
+        write_workflow_value(
+            &wf_dir,
+            "buddy_architecture_drift_watcher",
+            serde_json::json!({
+                "entries": [
+                    {"timestamp": "2026-01-01T00:00:00Z", "success": false},
+                    {"timestamp": "2026-01-02T00:00:00Z", "success": true}
+                ]
+            }),
+        )
+        .await;
+        write_workflow_value(
+            &wf_dir,
+            "buddy_pr_issue_matchmaker",
+            serde_json::json!({
+                "entries": [{"timestamp": "2026-01-03T00:00:00Z", "success": false}]
+            }),
+        )
+        .await;
+        write_workflow_value(&wf_dir, "buddy_humor", serde_json::json!({ "entries": [] })).await;
+        write_workflow_value(
+            &wf_dir,
+            "custom_workflow",
+            serde_json::json!({
+                "entries": [{"timestamp": "2026-01-04T00:00:00Z", "success": "unknown"}]
+            }),
+        )
+        .await;
+        write_workflow_value(
+            &wf_dir,
+            "missing_success_workflow",
+            serde_json::json!({
+                "entries": [{"timestamp": "2026-01-05T00:00:00Z"}]
+            }),
+        )
+        .await;
+
+        let entries = list_all_buddy_conversations(dir.path(), None).await;
+        let find = |id: &str| entries.iter().find(|entry| entry.id == id).unwrap();
+
+        let latest_success = find("buddy_architecture_drift_watcher");
+        assert_eq!(latest_success.status, "completed");
+        assert_eq!(latest_success.message_count, 2);
+        assert_eq!(latest_success.updated_at, "2026-01-02T00:00:00Z");
+        assert_eq!(latest_success.title, "Architecture Drift Watcher");
+
+        let latest_failure = find("buddy_pr_issue_matchmaker");
+        assert_eq!(latest_failure.status, "failed");
+        assert_eq!(latest_failure.title, "PR/Issue Matchmaker");
+        assert!(!latest_failure.title.contains('_'));
+        assert!(!latest_failure.title.contains("(PR Matchmaker)"));
+
+        let empty = find("buddy_humor");
+        assert_eq!(empty.status, "completed");
+        assert_eq!(empty.message_count, 0);
+        assert_eq!(empty.title, "Humor");
+
+        let missing_success = find("custom_workflow");
+        assert_eq!(missing_success.status, "completed");
+        assert_eq!(missing_success.title, "Custom workflow");
+
+        let absent_success = find("missing_success_workflow");
+        assert_eq!(absent_success.status, "completed");
+    }
+
+    #[tokio::test]
+    async fn recent_workflow_entries_share_status_and_title_derivation() {
+        let dir = tempfile::tempdir().unwrap();
+        let wf_dir = dir.path().join(".refact/buddy/chats/workflows");
+        tokio::fs::create_dir_all(&wf_dir).await.unwrap();
+        write_workflow_value(
+            &wf_dir,
+            "buddy_security_whisperer",
+            serde_json::json!({
+                "entries": [{"timestamp": "2026-01-01T00:00:00Z", "success": false}]
+            }),
+        )
+        .await;
+
+        let recent = list_recent_buddy_conversations(dir.path(), 1).await;
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].status, "failed");
+        assert_eq!(recent[0].title, "Security Whisperer");
     }
 
     #[tokio::test]
