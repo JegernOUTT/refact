@@ -35,7 +35,6 @@ use serde_json::json;
 use structopt::StructOpt;
 use tempfile::{tempdir, TempDir};
 
-
 use crate::browser_common::{
     discover_chrome, discover_chrome_with, e2e_enabled, e2e_launch_options, print_skip,
     FixtureServer,
@@ -162,7 +161,7 @@ impl WsEchoServer {
                             continue;
                         };
                         if socket
-                            .send(Message::Text(format!("echo:{text}")))
+                            .send(Message::Text(format!("echo:{text}").into()))
                             .await
                             .is_err()
                         {
