@@ -5,6 +5,7 @@ import {
   useSnoozeBuddyWorkMutation,
 } from "../../services/refact/buddyOperator";
 import type { ArtifactRevision, WorkItem } from "./operatorTypes";
+import { formatReportTime } from "./buddyUtils";
 
 export function BuddyWorkSnooze({
   item,
@@ -33,6 +34,7 @@ export function BuddyWorkSnooze({
     snooze?.artifact_id === artifact.artifact_id &&
     snooze.artifact_revision === artifact.revision &&
     Date.parse(snooze.until) > Date.now();
+  const snoozeTime = formatReportTime(snooze?.until);
   const change = async (minutes: number | null) => {
     if (pending.current || query.isFetching || Boolean(query.error)) return;
     pending.current = true;
@@ -52,9 +54,9 @@ export function BuddyWorkSnooze({
   };
   return (
     <section aria-label="Work snooze">
-      <p>
+      <p title={active ? snoozeTime.absolute ?? undefined : undefined}>
         {active
-          ? `Snoozed until ${snooze.until}.`
+          ? `Snoozed until ${snoozeTime.relative}.`
           : "This report is not snoozed."}
       </p>
       {active ? <p>Still open — a new revision ends the snooze.</p> : null}

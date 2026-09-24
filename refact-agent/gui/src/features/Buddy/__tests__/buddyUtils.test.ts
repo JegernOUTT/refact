@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { anxietyFromNeglect, computeXpFill, xpDisplay } from "../buddyUtils";
+import {
+  anxietyFromNeglect,
+  computeXpFill,
+  formatReportTime,
+  humanizeResourceReference,
+  xpDisplay,
+} from "../buddyUtils";
 import { clinginessFromAffection } from "../hooks/useBuddyState";
 
 describe("xpDisplay", () => {
@@ -50,5 +56,34 @@ describe("computeXpFill", () => {
   it("caps at 100 percent", () => {
     expect(computeXpFill(70, 35)).toBe(100);
     expect(computeXpFill(7, 35)).toBe(20);
+  });
+});
+
+describe("report labels", () => {
+  it("formats relative report times with local absolute titles", () => {
+    const now = Date.parse("2026-09-24T00:00:00Z");
+    expect(formatReportTime("2026-09-23T23:59:00Z", now)).toEqual({
+      relative: "1 min ago",
+      absolute: new Date("2026-09-23T23:59:00Z").toLocaleString(),
+    });
+    expect(formatReportTime("invalid", now)).toEqual({
+      relative: "Unknown time",
+      absolute: null,
+    });
+  });
+
+  it("uses the resource kind for opaque ids and humanizes readable ids", () => {
+    expect(
+      humanizeResourceReference(
+        "saved_report",
+        "producer:0123456789abcdef0123456789abcdef",
+      ),
+    ).toBe("Saved report");
+    expect(humanizeResourceReference("settings", "provider-config")).toBe(
+      "Provider config",
+    );
+    expect(
+      humanizeResourceReference("chat", "550e8400-e29b-41d4-a716-446655440000"),
+    ).toBe("Chat");
   });
 });

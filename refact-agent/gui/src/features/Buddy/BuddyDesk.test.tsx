@@ -197,7 +197,7 @@ describe("BuddyDesk", () => {
       const expected = runStatusMatrix[status];
       const run: RunOutcome = {
         schema_version: 1,
-        run_id: `run-${status}`,
+        run_id: `buddy-check-${status}-550e8400-e29b-41d4-a716-446655440000`,
         work_id: item.id,
         parent_run_id: null,
         project,
@@ -257,8 +257,14 @@ describe("BuddyDesk", () => {
       details.open = true;
       fireEvent(details, new Event("toggle"));
       const row = await within(details).findByRole("button", {
-        name: `${expected.label} · ${run.ended_at} · ${run.run_id}`,
+        name: new RegExp(`^${expected.label} · `),
       });
+      expect(row).not.toHaveAccessibleName(new RegExp(run.run_id));
+      expect(row).not.toHaveAccessibleName(/\d{4}-\d{2}-\d{2}T/);
+      expect(row.getAttribute("title")).toContain(
+        new Date(run.ended_at ?? run.started_at).toLocaleString(),
+      );
+      expect(row.getAttribute("title")).toContain(run.run_id);
       expect(historyRequests).toHaveLength(1);
       expect(outcomeRequests).toHaveLength(0);
       expect(details).not.toHaveTextContent(/verified/i);
@@ -267,11 +273,19 @@ describe("BuddyDesk", () => {
         screen.getByRole("region", { name: "Recorded run" }),
       );
       expect(await evidence.findByText(run.coverage)).toBeTruthy();
-      expect(
-        evidence.getByText(
-          `${expected.label} · ${run.started_at} — ${run.ended_at}`,
-        ),
-      ).toBeTruthy();
+      const runSummary = evidence.getByText(
+        new RegExp(`^${expected.label} · `),
+      );
+      expect(runSummary).toBeTruthy();
+      expect(runSummary).not.toHaveTextContent(/\d{4}-\d{2}-\d{2}T/);
+      expect(runSummary).toHaveAttribute(
+        "title",
+        new Date(run.started_at).toLocaleString(),
+      );
+      expect(runSummary.querySelector("time")).toHaveAttribute(
+        "title",
+        new Date(run.ended_at ?? run.started_at).toLocaleString(),
+      );
       expect(
         evidence.getByRole("heading", { name: "Observed scope" }),
       ).toBeTruthy();
@@ -323,13 +337,18 @@ describe("BuddyDesk", () => {
       name: "Snooze for one hour",
     });
     await waitFor(() => expect(snooze).toBeEnabled());
-    expect(screen.getByText("Marked read. Still open.")).toBeTruthy();
+    expect(screen.queryByText("Marked read. Still open.")).toBeNull();
     expect(
       screen.queryByText("Still open — a new revision ends the snooze."),
     ).toBeNull();
     fireEvent.click(snooze);
     fireEvent.click(snooze);
-    expect(await screen.findByText(/Snoozed until/)).toBeTruthy();
+    const snoozeStatus = await screen.findByText(/Snoozed until/);
+    expect(snoozeStatus).not.toHaveTextContent(/T\d{2}:\d{2}/);
+    expect(snoozeStatus).toHaveAttribute(
+      "title",
+      new Date("2099-01-01T00:00:00Z").toLocaleString(),
+    );
     expect(
       screen.getByText("Still open — a new revision ends the snooze."),
     ).toBeTruthy();
@@ -1468,6 +1487,74 @@ describe("BuddyDesk", () => {
     const stamp = new Date(item.last_material_change_at).toLocaleString();
     expect(row.querySelector("[title]")).toHaveAttribute("title", stamp);
     expect(row.textContent).toContain(stamp);
+  });
+
+  it("hides an opaque resource effect behind its resource kind", async () => {
+    const run: RunOutcome = {
+      schema_version: 1,
+      run_id: "buddy-check-source-550e8400-e29b-41d4-a716-446655440000",
+      work_id: item.id,
+      parent_run_id: null,
+      project,
+      worker: { worker_id: "worker", engine_instance_id: "engine", epoch: 1 },
+      origin: "autonomous",
+      workflow: null,
+      input_fingerprint: "saved-input",
+      coverage: "The report was inspected.",
+      started_at: "2026-09-05T00:00:00Z",
+      ended_at: "2026-09-05T00:00:01Z",
+      status: "completed",
+      evidence: [],
+      effects: [
+        {
+          resource: {
+            resource_kind: "settings",
+            resource_id: "producer:0123456789abcdef0123456789abcdef",
+            version: "1",
+          },
+          state: "applied",
+          evidence_refs: [],
+        },
+      ],
+      failure_class: null,
+    };
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record({ ...item, state: "delivered" })])),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+      http.get("*/v1/buddy/work/:id/outcomes", () =>
+        HttpResponse.json(envelope([record(run)])),
+      ),
+      http.get("*/v1/buddy/outcomes/:id", () =>
+        HttpResponse.json(envelope(record(run))),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(screen.getByRole("button", { name: "Delivered" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    await screen.findByText("The token has expired.");
+    const details = screen
+      .getByText("All recorded checks, including unchanged runs")
+      .closest("details");
+    if (!details) throw new Error("recorded-check disclosure missing");
+    fireEvent.click(
+      within(details).getByText(
+        "All recorded checks, including unchanged runs",
+      ),
+    );
+    fireEvent.click(
+      await within(details).findByRole("button", { name: /^Completed · / }),
+    );
+    const evidence = within(
+      screen.getByRole("region", { name: "Recorded run" }),
+    );
+    expect(await evidence.findByText("Settings: Applied")).toBeTruthy();
+    expect(evidence.queryByText(/producer:0123456789abcdef/)).toBeNull();
   });
 
   it("separates an archive that was never populated from an empty filter result", async () => {

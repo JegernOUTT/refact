@@ -227,6 +227,10 @@ describe("registered resource action with real RTK and MSW", () => {
             : /Observed result: Partial/,
         ),
       ).toBeDefined();
+      const receiptStatus = screen
+        .getByText(/Observed result:/)
+        .closest("[role=status]");
+      expect(receiptStatus).not.toHaveTextContent(/\d{4}-\d{2}-\d{2}T/);
       if (outcome === "duplicate")
         expect(screen.getByText(/Existing execution returned/)).toBeDefined();
     },
@@ -257,6 +261,12 @@ describe("registered resource action with real RTK and MSW", () => {
       screen.getByRole("button", { name: "Preview exact change" }),
     ).toBeDisabled();
     expect(grants).toHaveLength(0);
+  });
+  test("opaque exact targets display their resource kind, not the resource id", () => {
+    const id = "550e8400-e29b-41d4-a716-446655440000";
+    mount({ ...spec, resource: { ...spec.resource, resource_id: id } });
+    expect(screen.getByText("Hook", { exact: true })).toBeTruthy();
+    expect(screen.queryByText(id)).toBeNull();
   });
   test("permission denial cannot execute", async () => {
     handlers();
