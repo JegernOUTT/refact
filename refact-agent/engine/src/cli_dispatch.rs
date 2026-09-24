@@ -343,6 +343,15 @@ mod tests {
     }
 
     #[test]
+    fn parse_worker_version_exits_successfully() {
+        let error = parse_from(["refact", "worker", "--version"]).unwrap_err();
+
+        assert_eq!(error.exit_code, 0);
+        assert!(!error.use_stderr);
+        assert!(error.message.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
     fn parse_version() {
         match parse_from(["refact", "version"]).unwrap() {
             RefactCliCommand::Control(options) => {

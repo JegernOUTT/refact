@@ -46,7 +46,7 @@ fn daemon_auth_token_from_env() -> Option<String> {
 }
 
 #[derive(Debug, Parser, Clone)]
-#[command(name = "refact-lsp")]
+#[command(name = "refact-lsp", version)]
 pub struct CommandLine {
     #[arg(
         long,
@@ -226,7 +226,14 @@ pub struct CommandLine {
 
 impl CommandLine {
     pub fn from_args() -> Self {
-        Self::parse()
+        match Self::try_parse() {
+            Ok(cmdline) => cmdline,
+            Err(error) => {
+                let exit_code = command_line_exit_code(&error);
+                let _ = error.print();
+                std::process::exit(exit_code);
+            }
+        }
     }
 
     pub fn from_iter_safe<I, T>(iter: I) -> Result<Self, clap::Error>
@@ -240,6 +247,13 @@ impl CommandLine {
     fn with_daemon_auth_token_from_env(mut self) -> Self {
         self.daemon_auth_token = self.daemon_auth_token.or_else(daemon_auth_token_from_env);
         self
+    }
+}
+
+fn command_line_exit_code(error: &clap::Error) -> i32 {
+    match error.kind() {
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => 0,
+        _ => 1,
     }
 }
 
@@ -1136,6 +1150,32 @@ pub mod tests {
         assert!(cmdline.no_scheduler);
         assert_eq!(cmdline.daemon_endpoint, "http://127.0.0.1:8488");
         assert_eq!(cmdline.project_id, "project-123");
+    }
+
+    #[test]
+    fn command_line_version_flags_render_legacy_version() {
+        for flag in ["--version", "-V"] {
+            let error = CommandLine::from_iter_safe(["refact-lsp", flag]).unwrap_err();
+
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+            assert_eq!(
+                error.to_string(),
+                format!("refact-lsp {}\n", env!("CARGO_PKG_VERSION"))
+            );
+        }
+    }
+
+    #[test]
+    fn command_line_usage_errors_keep_exit_code_one() {
+        let error = CommandLine::from_iter_safe(["refact-lsp", "--bogus"]).unwrap_err();
+
+        assert_eq!(command_line_exit_code(&error), 1);
+        assert_eq!(
+            command_line_exit_code(
+                &CommandLine::from_iter_safe(["refact-lsp", "--version"]).unwrap_err()
+            ),
+            0
+        );
     }
 
     #[test]
