@@ -59,7 +59,8 @@ regex = "1.9.5"
 ropey = "1.6"
 serde_cbor = "0.11.2"
 tempfile = "3.8.1"
-tokenizers = "0.21.0"
+image = { version = "0.25.6", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+tokenizers = { version = "0.21.0", default-features = false, features = ["onig"] }
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25"
 tree-sitter-cpp = "0.23"
@@ -286,12 +287,12 @@ glob = "0.3.1"
 hashbrown = "0.15.2"
 headless_chrome = "1.0.16"
 heed = "0.22.0"
+image.workspace = true
 home = "0.5"
 hostname = "0.4"
 html2text = "0.12.5"
 humantime = "2.1"
 hyper = { version = "0.14", features = ["server", "stream"] }
-image = "0.25.2"
 indexmap = { version = "1.9.1", features = ["serde-1"] }
 itertools = "0.14.0"
 lazy_static = "1.4.0"
@@ -312,7 +313,7 @@ regex = "1.9.5"
 reqwest = { version = "0.13", default-features = false, features = ["json", "form", "stream", "rustls", "charset", "http2"] }
 eventsource-stream = "0.2"
 flate2 = "1.0"
-resvg = "0.44.0"
+resvg = { version = "0.44.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 ropey = "1.6"
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 rust-embed = { version = "8.5.0", features = ["include-exclude"] }
@@ -335,7 +336,7 @@ strsim = "0.11.1"
 structopt = "0.3"
 sysinfo = { version = "0.35.2", default-features = false, features = ["system"] }
 tempfile = "3.8.1"
-tokenizers = "0.21.0"
+tokenizers.workspace = true
 tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "signal", "process"] }
 tokio-rusqlite = "0.5.0"
 tokio-util = { version = "0.7.12", features = ["compat"] }

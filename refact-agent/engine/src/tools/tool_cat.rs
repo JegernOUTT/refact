@@ -1053,6 +1053,31 @@ mod tests {
         HashMap::from_iter([("paths".to_string(), Value::String(paths))])
     }
 
+    #[tokio::test]
+    async fn load_image_renders_svg_text_and_shapes_to_png() {
+        let temp = tempfile::Builder::new()
+            .prefix("refact-tool-cat-svg-")
+            .tempdir()
+            .unwrap();
+        let file = temp.path().join("tiny.svg");
+        std::fs::write(
+            &file,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="red"/><text x="4" y="24">Hi</text></svg>"#,
+        )
+        .unwrap();
+
+        let image = load_image(
+            &file.to_string_lossy().to_string(),
+            &"image/svg".to_string(),
+            &ImagePolicy::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(image.m_type, "image/png");
+        assert!(!image.m_content.is_empty());
+    }
+
     fn normalized(path: &std::path::Path) -> String {
         // Mirror the production path pipeline: canonical_path resolves platform
         // quirks (Windows 8.3 short names like RUNNER~1, symlinked /tmp on macOS)

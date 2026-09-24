@@ -15,5 +15,5 @@ tokio.workspace = true
 tracing.workspace = true
 regex.workspace = true
 ropey.workspace = true
-image = "0.25.2"
+image.workspace = true
 base64 = "0.22.1"
