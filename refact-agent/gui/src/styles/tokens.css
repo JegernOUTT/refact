@@ -28,6 +28,9 @@
   --rf-color-success: #5fae8b;
   --rf-color-warning: #cda04e;
   --rf-color-danger: #d8736d;
+  --rf-color-success-soft: rgba(95, 174, 139, 0.12);
+  --rf-color-warning-soft: rgba(205, 160, 78, 0.12);
+  --rf-color-danger-soft: rgba(216, 115, 109, 0.12);
   --rf-color-info: var(--rf-color-accent);
   --rf-focus-ring: rgba(127, 147, 216, 0.55);
   --rf-chart-1: #7f93d8;
@@ -168,6 +171,21 @@
       var(--rf-color-accent) 12%,
       transparent
     );
+    --rf-color-success-soft: color-mix(
+      in oklab,
+      var(--rf-color-success) 12%,
+      transparent
+    );
+    --rf-color-warning-soft: color-mix(
+      in oklab,
+      var(--rf-color-warning) 12%,
+      transparent
+    );
+    --rf-color-danger-soft: color-mix(
+      in oklab,
+      var(--rf-color-danger) 12%,
+      transparent
+    );
     --rf-focus-ring: color-mix(
       in oklab,
       var(--rf-color-accent) 55%,
@@ -256,6 +274,9 @@
   --rf-color-success: #1e7a52;
   --rf-color-warning: #8f5e08;
   --rf-color-danger: #c13c33;
+  --rf-color-success-soft: rgba(30, 122, 82, 0.16);
+  --rf-color-warning-soft: rgba(143, 94, 8, 0.16);
+  --rf-color-danger-soft: rgba(193, 60, 51, 0.16);
   --rf-color-accent: var(--accent-9, #006adc);
   --rf-color-accent-soft: rgba(0, 106, 220, 0.12);
   --rf-selected-bg: rgba(0, 106, 220, 0.1);
@@ -283,6 +304,21 @@
     --rf-color-accent-soft: color-mix(
       in oklab,
       var(--rf-color-accent) 16%,
+      transparent
+    );
+    --rf-color-success-soft: color-mix(
+      in oklab,
+      var(--rf-color-success) 16%,
+      transparent
+    );
+    --rf-color-warning-soft: color-mix(
+      in oklab,
+      var(--rf-color-warning) 16%,
+      transparent
+    );
+    --rf-color-danger-soft: color-mix(
+      in oklab,
+      var(--rf-color-danger) 16%,
       transparent
     );
     --rf-focus-ring: color-mix(
