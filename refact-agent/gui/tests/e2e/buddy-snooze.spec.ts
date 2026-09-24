@@ -45,55 +45,55 @@ const artifact = {
   },
 };
 
-test("a snoozed report leaves the active list until the snooze ends", async ({
-  page,
-  baseURL,
-}) => {
-  const origin = new URL(baseURL ?? "http://127.0.0.1:4173").origin;
-  let snoozed = false;
-  await page.route("**/*", async (route) => {
-    const url = new URL(route.request().url());
-    if (url.origin !== origin) return route.abort();
-    if (!url.pathname.startsWith("/v1/")) return route.continue();
-    if (url.pathname === "/v1/buddy/work") {
-      const attention = url.searchParams.get("attention");
-      const visible =
-        attention === "snoozed"
-          ? snoozed
-          : attention === "all"
-            ? true
-            : !snoozed;
-      return route.fulfill({ json: envelope(visible ? [record(work)] : []) });
-    }
-    if (url.pathname === "/v1/buddy/artifacts/snooze-report")
-      return route.fulfill({ json: envelope(record(artifact)) });
-    if (url.pathname === "/v1/buddy/work/snooze-work/snooze") {
-      if (route.request().method() === "POST") {
-        snoozed = (await route.request().postDataJSON()).minutes !== null;
+for (const width of [360, 1280]) {
+  test(`a snoozed report leaves the active list until the snooze ends at ${width}px`, async ({
+    page,
+    baseURL,
+  }) => {
+    const origin = new URL(baseURL ?? "http://127.0.0.1:4173").origin;
+    let snoozed = false;
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.origin !== origin) return route.abort();
+      if (!url.pathname.startsWith("/v1/")) return route.continue();
+      if (url.pathname === "/v1/buddy/work") {
+        const attention = url.searchParams.get("attention");
+        const visible =
+          attention === "snoozed"
+            ? snoozed
+            : attention === "all"
+              ? true
+              : !snoozed;
+        return route.fulfill({ json: envelope(visible ? [record(work)] : []) });
       }
-      return route.fulfill({
-        json: envelope(
-          snoozed
-            ? {
-                schema_version: 1,
-                project,
-                work_id: work.id,
-                artifact_id: artifact.artifact_id,
-                artifact_revision: artifact.revision,
-                until: "2099-01-01T00:00:00Z",
-              }
-            : null,
-        ),
-      });
-    }
-    return route.fulfill({ status: 503, json: { detail: "fixture only" } });
-  });
+      if (url.pathname === "/v1/buddy/artifacts/snooze-report")
+        return route.fulfill({ json: envelope(record(artifact)) });
+      if (url.pathname === "/v1/buddy/work/snooze-work/snooze") {
+        if (route.request().method() === "POST") {
+          snoozed = (await route.request().postDataJSON()).minutes !== null;
+        }
+        return route.fulfill({
+          json: envelope(
+            snoozed
+              ? {
+                  schema_version: 1,
+                  project,
+                  work_id: work.id,
+                  artifact_id: artifact.artifact_id,
+                  artifact_revision: artifact.revision,
+                  until: "2099-01-01T00:00:00Z",
+                }
+              : null,
+          ),
+        });
+      }
+      return route.fulfill({ status: 503, json: { detail: "fixture only" } });
+    });
 
-  for (const width of [360, 1280]) {
-    snoozed = false;
     await page.setViewportSize({ width, height: 900 });
     await page.goto(
       "/tests/e2e/route-showcase.html?route=buddy&operator=enabled",
+      { waitUntil: "domcontentloaded" },
     );
     const row = page.getByRole("button", {
       name: /Error Detective assessment/,
@@ -118,15 +118,23 @@ test("a snoozed report leaves the active list until the snooze ends", async ({
     await expect(attention).toHaveValue("unsnoozed");
     await attention.selectOption("snoozed");
     await expect(row).toBeVisible();
-    await page.reload();
+    await page.reload({ waitUntil: "domcontentloaded" });
     await page.getByRole("button", { name: "Browse saved work" }).click();
     await expect(
       page.getByRole("combobox", { name: "Report attention" }),
     ).toHaveValue("unsnoozed");
     await expect(row).toHaveCount(0);
+    const snoozedWork = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname === "/v1/buddy/work" &&
+        url.searchParams.get("attention") === "snoozed"
+      );
+    });
     await page
       .getByRole("combobox", { name: "Report attention" })
       .selectOption("snoozed");
+    await snoozedWork;
     await expect(row).toBeVisible();
-  }
-});
+  });
+}
