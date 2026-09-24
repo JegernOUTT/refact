@@ -29,8 +29,8 @@ export function Text({
         heading && styles.heading,
         styles[`size-${size}`],
         styles[`weight-${weight}`],
-        color && styles[`color-`],
-        align && styles[`align-`],
+        color && styles[`color-${color}`],
+        align && styles[`align-${align}`],
         className,
       )}
     />

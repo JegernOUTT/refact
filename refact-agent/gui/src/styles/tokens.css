@@ -254,7 +254,7 @@
 [data-appearance="light"] {
   --rf-bg: #fcfcfd;
   --rf-color-fg: rgba(0, 0, 0, 0.88);
-  --rf-color-muted: rgba(0, 0, 0, 0.55);
+  --rf-color-muted: rgba(0, 0, 0, 0.59);
   --rf-color-faint: rgba(0, 0, 0, 0.4);
   --rf-surface-1: rgba(0, 0, 0, 0.022);
   --rf-surface-2: rgba(0, 0, 0, 0.05);
