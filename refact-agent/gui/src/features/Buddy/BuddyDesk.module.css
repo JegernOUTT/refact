@@ -137,7 +137,7 @@
   align-items: center;
   column-gap: var(--rf-space-2);
   row-gap: var(--rf-space-1);
-  width: fit-content;
+  width: 100%;
   max-width: 100%;
   min-width: 0;
   text-align: start;
@@ -194,13 +194,12 @@
 }
 
 .problemSummary,
-.scope,
-.actionVerb {
+.scope {
   color: var(--rf-color-muted);
 }
 
 .actionVerb {
-  color: var(--rf-color-accent);
+  color: var(--rf-color-muted);
 }
 
 .itemMeta {
@@ -232,7 +231,7 @@
 .summary:focus-visible,
 .search input:focus-visible,
 .search select:focus-visible {
-  outline: var(--rf-hairline) solid var(--rf-color-accent);
+  outline: var(--rf-focus-ring-w) solid var(--rf-color-accent);
   outline-offset: var(--rf-space-1);
 }
 
