@@ -9,7 +9,6 @@ use refact_lsp::{
     global_context::{create_global_context, CommandLine},
 };
 use serde_json::{json, Value};
-use structopt::StructOpt;
 use tokio::{io::AsyncReadExt, process::Command};
 
 const ROOT: &str = "/scratch/project";

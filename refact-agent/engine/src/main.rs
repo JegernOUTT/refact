@@ -1,5 +1,3 @@
-use structopt::StructOpt;
-
 fn main() {
     if let Some(result) = refact_sandbox::run_sandbox_exec_from_env() {
         if let Err(error) = result {

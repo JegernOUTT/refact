@@ -52,6 +52,7 @@ tracing = "0.1"
 indexmap = { version = "1.9.1", features = ["serde-1"] }
 itertools = "0.14.0"
 lazy_static = "1.4.0"
+clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 md5 = "0.7"
 regex = "1.9.5"
@@ -230,6 +231,8 @@ pnet_datalink = "0.35.0"
 
 [dependencies]
 
+clap.workspace = true
+
 # Pinned transitive dep (via rustls -> aws-lc-rs): aws-lc-sys 0.42.0's build script
 # aborts with a false-positive "COMPILER BUG DETECTED" (gcc bug 95189) on the CI
 # toolchain, breaking the x86_64-unknown-linux-gnu engine build. 0.38.0 builds cleanly
@@ -337,7 +340,6 @@ shell-escape = "0.1.5"
 similar = "2.3.0"
 sqlite-vec = { version = "0.1.6" }
 strsim = "0.11.1"
-structopt = "0.3"
 sysinfo = { version = "0.35.2", default-features = false, features = ["system"] }
 tempfile = "3.8.1"
 tokenizers.workspace = true

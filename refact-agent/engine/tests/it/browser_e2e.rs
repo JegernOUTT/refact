@@ -32,7 +32,6 @@ use refact_lsp::refact_browser::{
     UTILITY_WORLD_NAME,
 };
 use serde_json::json;
-use structopt::StructOpt;
 use tempfile::{tempdir, TempDir};
 
 use crate::browser_common::{
