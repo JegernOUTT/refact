@@ -125,7 +125,13 @@
 
 .reason {
   margin: 0;
-  color: var(--rf-color-warning);
+  color: var(--rf-color-muted);
+}
+
+.disclosureBlocked {
+  align-self: flex-start;
+  color: var(--rf-color-muted);
+  border-color: transparent;
 }
 
 .alert {

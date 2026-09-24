@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { skipToken } from "@reduxjs/toolkit/query";
 import { v4 as uuidv4 } from "uuid";
 import { ShieldAlert, ShieldCheck } from "lucide-react";
@@ -59,14 +59,15 @@ function blockedReason(
   fresh: boolean,
   visible: boolean,
 ): string {
-  if (!visible) return "Paused while this view is in the background.";
-  if (!fresh) return "Reconnecting to the native owner.";
+  if (!visible)
+    return "Mandate controls are paused while this page is in the background.";
+  if (!fresh) return "Checking the latest supervision status for this project.";
   if (!context.features.storage)
-    return "Buddy storage is unavailable, so a mandate cannot be recorded.";
+    return "Buddy storage is unavailable, so this project cannot save a mandate.";
   if (!context.authenticated_owner)
-    return "Sign in to the native owner to grant a mandate.";
+    return "Granting a mandate needs this project's signed-in owner.";
   if (!context.project || !context.worker)
-    return "No project and worker are available in this window.";
+    return "A project and worker must be available before a mandate can be granted.";
   return "";
 }
 
@@ -107,6 +108,7 @@ function Controls({
   const [uncertain, setUncertain] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const reasonId = useId();
   const lock = useRef(false);
   const controlKeys = useRef(new Map<string, string>());
   const project = context.project;
@@ -267,21 +269,29 @@ function Controls({
   const selectedNote = snapshot?.steering_notes.find((n) => n.note_id === note);
   return (
     <div className={styles.controls}>
+      {reason && (
+        <Text
+          id={reasonId}
+          as="p"
+          size="1"
+          role="status"
+          className={styles.reason}
+        >
+          {reason}
+        </Text>
+      )}
       {!id && (
         <>
           <Button
             variant="ghost"
             size="sm"
+            className={!available ? styles.disclosureBlocked : undefined}
             aria-expanded={formOpen}
+            aria-describedby={reason ? reasonId : undefined}
             onClick={() => setFormOpen((open) => !open)}
           >
             {formOpen ? "Hide mandate setup" : "Grant a bounded mandate"}
           </Button>
-          {formOpen && reason && (
-            <Text as="p" size="1" role="status" className={styles.reason}>
-              {reason}
-            </Text>
-          )}
         </>
       )}
       {!id && formOpen && (

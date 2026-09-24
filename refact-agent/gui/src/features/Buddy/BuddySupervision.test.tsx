@@ -138,6 +138,27 @@ describe("Buddy supervision controls", () => {
     expect(screen.getByLabelText("Exact model ID")).toBeInTheDocument();
   });
 
+  it("explains the missing owner before opening the disabled mandate form", async () => {
+    server.use(
+      http.get("*/v1/buddy/supervision/context", () =>
+        HttpResponse.json({ ...context, authenticated_owner: null }),
+      ),
+    );
+    render(<BuddySupervision />, { preloadedState: config });
+
+    const reason = await screen.findByText(
+      "Granting a mandate needs this project's signed-in owner.",
+    );
+    const disclosure = screen.getByRole("button", {
+      name: "Grant a bounded mandate",
+    });
+
+    expect(reason).toBeVisible();
+    expect(disclosure).toHaveAccessibleDescription(reason.textContent);
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByLabelText("Exact model ID")).toBeNull();
+  });
+
   it("keeps the whole read-tool list out of the worker scope options", async () => {
     server.use(
       http.get("*/v1/buddy/supervision/context", () =>
