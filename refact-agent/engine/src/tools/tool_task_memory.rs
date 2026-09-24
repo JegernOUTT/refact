@@ -576,6 +576,55 @@ pub struct MemoryAccessContext {
     pub task_dir: Option<PathBuf>,
 }
 
+pub fn related_memory_access_context(
+    task_meta: Option<&crate::chat::types::TaskMeta>,
+) -> MemoryAccessContext {
+    MemoryAccessContext {
+        agent_id: task_meta.and_then(|meta| meta.agent_id.clone()),
+        role: task_meta.map(|meta| meta.role.clone()),
+        supervisor_override: false,
+        task_dir: None,
+    }
+}
+
+pub fn memory_tags_visible_to_reader(tags: &[String], reader: &MemoryAccessContext) -> bool {
+    tags.iter()
+        .filter_map(|tag| {
+            let (key, namespace) = tag.split_once(':')?;
+            key.eq_ignore_ascii_case("namespace").then_some(namespace)
+        })
+        .all(|namespace| memory_namespace_visible_to_reader(namespace, reader))
+}
+
+pub fn memory_tag_set_visible_to_reader<'a>(
+    tags: impl IntoIterator<Item = &'a str>,
+    namespace: Option<&str>,
+    reader: &MemoryAccessContext,
+) -> bool {
+    let mut tags = tags
+        .into_iter()
+        .filter(|tag| {
+            !tag.split_once(':')
+                .is_some_and(|(key, _)| key.eq_ignore_ascii_case("namespace"))
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if let Some(namespace) = namespace {
+        tags.push(format!("namespace:{namespace}"));
+    }
+    memory_tags_visible_to_reader(&tags, reader)
+}
+
+pub fn memory_namespace_visible_to_reader(namespace: &str, reader: &MemoryAccessContext) -> bool {
+    let namespace = namespace.trim();
+    if !namespace.to_ascii_lowercase().starts_with("agent:") {
+        return true;
+    }
+    namespace
+        .parse::<MemoryNamespace>()
+        .is_ok_and(|namespace| reader.decide(&namespace) == MemoryAccessDecision::Allowed)
+}
+
 impl MemoryAccessContext {
     pub fn operator() -> Self {
         Self {

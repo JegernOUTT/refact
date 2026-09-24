@@ -7,6 +7,9 @@ use crate::files_correction::get_project_dirs;
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
 use crate::global_context::GlobalContext;
 use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
+use crate::tools::tool_task_memory::{
+    memory_tags_visible_to_reader, related_memory_access_context, MemoryAccessContext,
+};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use tokio::sync::mpsc;
@@ -166,6 +169,10 @@ fn task_card_from_mapping(
     });
     let namespace = yaml_string(mapping, "namespace").unwrap_or_else(|| "task".to_string());
     let mut tags = yaml_string_list(mapping, "tags");
+    tags.retain(|tag| {
+        !tag.split_once(':')
+            .is_some_and(|(key, _)| key.eq_ignore_ascii_case("namespace"))
+    });
     push_unique(&mut tags, "scope:task");
     push_unique(&mut tags, format!("type:{}", directory_kind));
     push_unique(&mut tags, format!("namespace:{}", namespace));
@@ -203,8 +210,8 @@ fn task_card_from_mapping(
         tags,
         filenames,
         entities: Vec::new(),
-        related_files: Vec::new(),
-        related_entities: Vec::new(),
+        related_files: yaml_string_list(mapping, "related_files"),
+        related_entities: yaml_string_list(mapping, "related_entities"),
         kind,
         created: None,
         created_at: yaml_string(mapping, "created_at"),
@@ -213,8 +220,28 @@ fn task_card_from_mapping(
     }
 }
 
-pub fn format_related_memories_section(cards: &[KnowledgeCard]) -> String {
-    format_related_memories_section_excluding(cards, None)
+pub(crate) fn add_knowledge_frontmatter_to_index(
+    index: &mut KnowledgeIndex,
+    path: PathBuf,
+    frontmatter: &KnowledgeFrontmatter,
+    content: Option<&str>,
+) {
+    let mut frontmatter = frontmatter.clone();
+    if let Some(namespace) = frontmatter
+        .extra
+        .get("namespace")
+        .and_then(YamlValue::as_str)
+    {
+        push_unique(&mut frontmatter.tags, format!("namespace:{}", namespace));
+    }
+    index.add_from_frontmatter(path, &frontmatter, content);
+}
+
+pub fn format_related_memories_section(
+    cards: &[KnowledgeCard],
+    reader: &MemoryAccessContext,
+) -> String {
+    format_related_memories_section_excluding(cards, None, reader)
 }
 
 /// Same rendering as [`format_related_memories_section`], but skips the card whose
@@ -224,9 +251,13 @@ pub fn format_related_memories_section(cards: &[KnowledgeCard]) -> String {
 pub fn format_related_memories_section_excluding(
     cards: &[KnowledgeCard],
     exclude_path: Option<&Path>,
+    reader: &MemoryAccessContext,
 ) -> String {
     let mut shown = Vec::new();
     for c in cards {
+        if !memory_tags_visible_to_reader(&c.tags, reader) {
+            continue;
+        }
         if let Some(ex) = exclude_path {
             if c.file_path == ex {
                 continue;
@@ -355,7 +386,7 @@ pub async fn refresh_knowledge_index_path(
         refact_buddy_core::memory_dedup::content_signature(content),
         path.clone(),
     );
-    index.add_from_frontmatter(path, &frontmatter, Some(content));
+    add_knowledge_frontmatter_to_index(&mut index, path, &frontmatter, Some(content));
     true
 }
 
@@ -465,7 +496,7 @@ async fn scan_knowledge_dirs(index: &mut KnowledgeIndex, knowledge_dirs: Vec<Pat
             refact_buddy_core::memory_dedup::content_signature(content_slice),
             path_buf.clone(),
         );
-        index.add_from_frontmatter(path_buf, &fm, Some(content_slice));
+        add_knowledge_frontmatter_to_index(index, path_buf, &fm, Some(content_slice));
     }
 }
 
@@ -581,6 +612,66 @@ async fn scan_task_dirs(index: &mut KnowledgeIndex, task_roots: Vec<PathBuf>) {
 mod tests {
     use super::*;
 
+    fn memory_card(title: &str, path: &str, namespace: Option<&str>) -> KnowledgeCard {
+        KnowledgeCard {
+            id: path.to_string(),
+            title: title.to_string(),
+            summary: Some("memory body".to_string()),
+            description: None,
+            tags: namespace
+                .map(|namespace| vec![format!("namespace:{namespace}")])
+                .unwrap_or_default(),
+            filenames: Vec::new(),
+            entities: Vec::new(),
+            related_files: Vec::new(),
+            related_entities: Vec::new(),
+            kind: None,
+            created: None,
+            created_at: None,
+            updated: None,
+            file_path: PathBuf::from(path),
+        }
+    }
+
+    #[test]
+    fn related_memory_namespaces_follow_reader_access() {
+        let cards = vec![
+            memory_card("Private A", "/task/private.md", Some("agent:A")),
+            memory_card("Task Shared", "/task/shared.md", Some("task")),
+            memory_card("Card Shared", "/task/card.md", Some("card:T-1")),
+            memory_card("Untagged", "/task/legacy.md", None),
+            memory_card("Malformed", "/task/malformed.md", Some("agent:")),
+        ];
+        let reader_a = MemoryAccessContext {
+            agent_id: Some("A".to_string()),
+            role: Some("agents".to_string()),
+            ..Default::default()
+        };
+        let reader_b = MemoryAccessContext {
+            agent_id: Some("B".to_string()),
+            role: Some("agents".to_string()),
+            ..Default::default()
+        };
+        let no_task_meta = MemoryAccessContext::default();
+
+        let visible_to_a = format_related_memories_section(&cards, &reader_a);
+        assert!(visible_to_a.contains("Private A"));
+        assert!(visible_to_a.contains("Task Shared"));
+        assert!(visible_to_a.contains("Card Shared"));
+        assert!(visible_to_a.contains("Untagged"));
+        assert!(!visible_to_a.contains("Malformed"));
+
+        for reader in [&reader_b, &no_task_meta] {
+            let visible = format_related_memories_section(&cards, reader);
+            assert!(!visible.contains("Private A"));
+            assert!(!visible.contains("/task/private.md"));
+            assert!(!visible.contains("Malformed"));
+            assert!(visible.contains("Task Shared"));
+            assert!(visible.contains("Card Shared"));
+            assert!(visible.contains("Untagged"));
+        }
+    }
+
     #[test]
     fn extract_task_id_rejects_non_refact_tasks_path() {
         assert_eq!(
@@ -662,7 +753,11 @@ mod tests {
             .file_path
             .clone();
 
-        let section = format_related_memories_section_excluding(&cards, Some(&current_path));
+        let section = format_related_memories_section_excluding(
+            &cards,
+            Some(&current_path),
+            &related_memory_access_context(None),
+        );
 
         assert!(section.contains("Other Card"));
         assert!(!section.contains("Current Root"));

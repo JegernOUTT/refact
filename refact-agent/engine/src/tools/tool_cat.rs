@@ -198,9 +198,15 @@ impl Tool for ToolCat {
         let mut corrections = false;
         let limits = CatLimits::current();
         let (paths, symbols, mut input_notices) = parse_cat_args(args, limits.max_input_paths)?;
-        let (gcx, execution_scope) = {
+        let (gcx, execution_scope, memory_reader) = {
             let cgcx = ccx.lock().await;
-            (cgcx.app.gcx.clone(), cgcx.execution_scope.clone())
+            (
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
+                crate::tools::tool_task_memory::related_memory_access_context(
+                    cgcx.task_meta.as_ref(),
+                ),
+            )
         };
         let (
             filenames_present,
@@ -277,7 +283,7 @@ impl Tool for ToolCat {
             if cards.is_empty() {
                 cards = idx_guard.related_for_related_files(&filenames_present, 8);
             }
-            format_related_memories_section(&cards)
+            format_related_memories_section(&cards, &memory_reader)
         };
 
         let chat_content = if multimodal.is_empty() {
@@ -1049,6 +1055,35 @@ mod tests {
         ))
     }
 
+    async fn ccx_for_root_as_agent(
+        root: &std::path::Path,
+        agent_id: Option<&str>,
+    ) -> Arc<AMutex<AtCommandsContext>> {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![canonical_path(root.to_string_lossy())];
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                vec![],
+                "test-chat".to_string(),
+                None,
+                "test-model".to_string(),
+                Some(crate::chat::types::TaskMeta {
+                    task_id: "task-1".to_string(),
+                    role: "agents".to_string(),
+                    agent_id: agent_id.map(str::to_string),
+                    ..Default::default()
+                }),
+                None,
+            )
+            .await,
+        ))
+    }
+
     fn cat_args(paths: String) -> HashMap<String, Value> {
         HashMap::from_iter([("paths".to_string(), Value::String(paths))])
     }
@@ -1268,6 +1303,61 @@ mod tests {
             "visible file was unexpectedly dropped: {}",
             text
         );
+    }
+
+    #[tokio::test]
+    async fn tool_cat_related_memories_respect_agent_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("src/x.rs");
+        write_lines(&file, 2);
+        let task_memory = temp.path().join(".refact/tasks/task-1/memories/private.md");
+        std::fs::create_dir_all(task_memory.parent().unwrap()).unwrap();
+        std::fs::write(
+            &task_memory,
+            format!(
+                "---\ntitle: Agent Secret\ntask_id: task-1\nkind: finding\nnamespace: agent:A\nrelated_files: [\"{}\"]\n---\n\nsecret body",
+                file.display()
+            ),
+        )
+        .unwrap();
+
+        let ccx_b = ccx_for_root_as_agent(temp.path(), Some("B")).await;
+        let gcx = ccx_b.lock().await.app.gcx.clone();
+        {
+            let text = std::fs::read_to_string(&task_memory).unwrap();
+            let (frontmatter, content_start) =
+                crate::knowledge_graph::kg_structs::KnowledgeFrontmatter::parse(&text);
+            let mut index = gcx.knowledge_index.lock().await;
+            crate::knowledge_index::add_knowledge_frontmatter_to_index(
+                &mut index,
+                task_memory.clone(),
+                &frontmatter,
+                Some(&text[content_start..]),
+            );
+            index.mark_ready();
+        }
+        let output_b = tool_text(&run_cat(ccx_b, file.to_string_lossy().to_string()).await);
+        assert!(!output_b.contains("Agent Secret"));
+        assert!(!output_b.contains("private.md"));
+
+        let ccx_a = ccx_for_root_as_agent(temp.path(), Some("A")).await;
+        let gcx = ccx_a.lock().await.app.gcx.clone();
+        {
+            let text = std::fs::read_to_string(&task_memory).unwrap();
+            let (frontmatter, content_start) =
+                crate::knowledge_graph::kg_structs::KnowledgeFrontmatter::parse(&text);
+            let mut index = gcx.knowledge_index.lock().await;
+            crate::knowledge_index::add_knowledge_frontmatter_to_index(
+                &mut index,
+                task_memory.clone(),
+                &frontmatter,
+                Some(&text[content_start..]),
+            );
+            index.mark_ready();
+        }
+        let output_a = tool_text(&run_cat(ccx_a, file.to_string_lossy().to_string()).await);
+        assert!(output_a.contains("Agent Secret"), "{output_a}");
+        assert!(output_a.contains("private.md"), "{output_a}");
     }
 
     #[tokio::test]

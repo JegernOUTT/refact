@@ -92,9 +92,15 @@ impl Tool for ToolUpdateTextDoc {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, execution_scope) = {
+        let (gcx, execution_scope, memory_reader) = {
             let cgcx = ccx.lock().await;
-            (cgcx.app.gcx.clone(), cgcx.execution_scope.clone())
+            (
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
+                crate::tools::tool_task_memory::related_memory_access_context(
+                    cgcx.task_meta.as_ref(),
+                ),
+            )
         };
         let (_, _, chunks, summary) = tool_update_text_doc_exec(
             gcx.clone(),
@@ -125,7 +131,7 @@ impl Tool for ToolUpdateTextDoc {
             if cards.is_empty() {
                 cards = idx_guard.related_for_related_files(&paths, 8);
             }
-            format_related_memories_section(&cards)
+            format_related_memories_section(&cards, &memory_reader)
         };
 
         let mut out = vec![ContextEnum::ChatMessage(ChatMessage {

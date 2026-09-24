@@ -12,6 +12,7 @@ use crate::tools::tools_description::{
 };
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::memories::memories_search;
+use crate::memories::memo_record_visible_to_memory_reader;
 use crate::knowledge_graph::build_knowledge_graph;
 use crate::knowledge_index::format_related_memories_section;
 use crate::postprocessing::pp_command_output::OutputFilter;
@@ -81,9 +82,15 @@ impl Tool for ToolGetKnowledge {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         info!("knowledge search {:?}", args);
 
-        let (gcx, execution_scope) = {
+        let (gcx, execution_scope, memory_reader) = {
             let cgcx = ccx.lock().await;
-            (cgcx.app.gcx.clone(), cgcx.execution_scope.clone())
+            (
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
+                crate::tools::tool_task_memory::related_memory_access_context(
+                    cgcx.task_meta.as_ref(),
+                ),
+            )
         };
 
         let search_key = match args.get("search_key") {
@@ -95,10 +102,14 @@ impl Tool for ToolGetKnowledge {
         let memories = memories_search(gcx.clone(), &search_key, 5, 0, None).await?;
 
         let mut seen_memids = HashSet::new();
-        let mut unique_memories: Vec<_> = memories
-            .into_iter()
-            .filter(|m| seen_memids.insert(m.memid.clone()))
-            .collect();
+        let mut unique_memories = Vec::new();
+        for memory in memories {
+            if seen_memids.insert(memory.memid.clone())
+                && memo_record_visible_to_memory_reader(&memory, &memory_reader).await
+            {
+                unique_memories.push(memory);
+            }
+        }
 
         if !unique_memories.is_empty() {
             let kg = build_knowledge_graph(gcx.clone()).await;
@@ -114,7 +125,17 @@ impl Tool for ToolGetKnowledge {
 
             for id in expanded_ids {
                 if let Some(doc) = kg.get_doc_by_id(&id) {
-                    if doc.frontmatter.is_active() && !seen_memids.contains(&id) {
+                    if doc.frontmatter.is_active()
+                        && !seen_memids.contains(&id)
+                        && crate::tools::tool_task_memory::memory_tag_set_visible_to_reader(
+                            doc.frontmatter.tags.iter().map(String::as_str),
+                            doc.frontmatter
+                                .extra
+                                .get("namespace")
+                                .and_then(serde_yaml::Value::as_str),
+                            &memory_reader,
+                        )
+                    {
                         seen_memids.insert(id.clone());
                         let snippet: String = doc.content.chars().take(500).collect();
                         unique_memories.push(crate::memories::MemoRecord {
@@ -194,7 +215,7 @@ impl Tool for ToolGetKnowledge {
                 tags.sort();
                 tags.dedup();
                 let cards = idx_guard.related_for_tags(&tags, 8);
-                format_related_memories_section(&cards)
+                format_related_memories_section(&cards, &memory_reader)
             };
 
             body.push_str(&related);
@@ -235,6 +256,60 @@ impl Tool for ToolGetKnowledge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_state::AppState;
+    use crate::at_commands::at_commands::AtCommandsContext;
+    use crate::call_validation::ChatContent;
+
+    async fn run_knowledge(
+        gcx: Arc<crate::global_context::GlobalContext>,
+        agent_id: Option<&str>,
+    ) -> String {
+        let ccx = Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                vec![],
+                "knowledge-test-chat".to_string(),
+                None,
+                "test-model".to_string(),
+                Some(crate::chat::types::TaskMeta {
+                    task_id: "task-1".to_string(),
+                    role: "agents".to_string(),
+                    agent_id: agent_id.map(str::to_string),
+                    ..Default::default()
+                }),
+                None,
+            )
+            .await,
+        ));
+        let mut tool = ToolGetKnowledge {
+            config_path: String::new(),
+        };
+        let (_, results) = tool
+            .tool_execute(
+                ccx,
+                &"knowledge-call".to_string(),
+                &HashMap::from([(
+                    "search_key".to_string(),
+                    Value::String("needle".to_string()),
+                )]),
+            )
+            .await
+            .unwrap();
+        results
+            .into_iter()
+            .filter_map(|result| match result {
+                ContextEnum::ChatMessage(message) => match message.content {
+                    ChatContent::SimpleText(text) => Some(text),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn knowledge_references_use_native_query_artifact_and_workspace_path_metadata() {
@@ -270,5 +345,66 @@ mod tests {
         assert_eq!(enrichment.references[2].line1, Some(3));
         assert_eq!(enrichment.references[2].line2, Some(5));
         assert_eq!(message.content.content_text_only(), "raw knowledge");
+    }
+
+    #[tokio::test]
+    async fn knowledge_results_and_expansion_hide_foreign_agent_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(crate::file_filter::KNOWLEDGE_FOLDER_NAME);
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        tokio::fs::write(
+            knowledge_dir.join("private.md"),
+            "---\ntitle: Agent Secret\ntags: [needle]\nnamespace: agent:A\nstatus: active\n---\n\nprivate needle body",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            knowledge_dir.join("shared.md"),
+            "---\ntitle: Shared Knowledge\ntags: [needle]\nstatus: active\n---\n\nshared needle body",
+        )
+        .await
+        .unwrap();
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        {
+            let text = tokio::fs::read_to_string(knowledge_dir.join("private.md"))
+                .await
+                .unwrap();
+            let (frontmatter, content_start) =
+                crate::knowledge_graph::kg_structs::KnowledgeFrontmatter::parse(&text);
+            let mut index = gcx.knowledge_index.lock().await;
+            crate::knowledge_index::add_knowledge_frontmatter_to_index(
+                &mut index,
+                knowledge_dir.join("private.md"),
+                &frontmatter,
+                Some(&text[content_start..]),
+            );
+            index.add_from_frontmatter(
+                knowledge_dir.join("shared.md"),
+                &crate::knowledge_graph::kg_structs::KnowledgeFrontmatter {
+                    id: Some("shared".to_string()),
+                    title: Some("Shared Knowledge".to_string()),
+                    tags: vec!["needle".to_string()],
+                    status: Some("active".to_string()),
+                    ..Default::default()
+                },
+                Some("shared needle body"),
+            );
+            index.mark_ready();
+        }
+
+        let foreign_result = run_knowledge(gcx.clone(), Some("B")).await;
+        assert!(foreign_result.contains("Shared Knowledge"));
+        assert!(!foreign_result.contains("Agent Secret"), "{foreign_result}");
+        assert!(!foreign_result.contains("private.md"), "{foreign_result}");
+        assert!(
+            !foreign_result.contains("private needle body"),
+            "{foreign_result}"
+        );
+
+        let owner_result = run_knowledge(gcx, Some("A")).await;
+        assert!(owner_result.contains("Agent Secret"));
+        assert!(owner_result.contains("private.md"));
     }
 }

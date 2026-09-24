@@ -407,12 +407,15 @@ impl Tool for ToolRegexSearch {
             .unwrap_or(DEFAULT_MAX_TOTAL_MATCHES)
             .clamp(1, CAP_MAX_TOTAL_MATCHES);
 
-        let (gcx, execution_scope, abort_flag) = {
+        let (gcx, execution_scope, abort_flag, memory_reader) = {
             let cgcx = ccx.lock().await;
             (
                 cgcx.app.gcx.clone(),
                 cgcx.execution_scope.clone(),
                 cgcx.abort_flag.clone(),
+                crate::tools::tool_task_memory::related_memory_access_context(
+                    cgcx.task_meta.as_ref(),
+                ),
             )
         };
         let roots = workspace_roots(&gcx, execution_scope.as_ref());
@@ -574,7 +577,7 @@ impl Tool for ToolRegexSearch {
             if cards.is_empty() {
                 cards = idx_guard.related_for_related_files(&matched_files, 8);
             }
-            format_related_memories_section(&cards)
+            format_related_memories_section(&cards, &memory_reader)
         };
 
         let disclosed_paths = all_search_results

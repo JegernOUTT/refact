@@ -747,7 +747,12 @@ pub async fn memories_add(
                 refact_buddy_core::memory_dedup::content_signature(content),
                 file_path.clone(),
             );
-            idx.add_from_frontmatter(file_path.clone(), frontmatter, Some(content));
+            crate::knowledge_index::add_knowledge_frontmatter_to_index(
+                &mut idx,
+                file_path.clone(),
+                frontmatter,
+                Some(content),
+            );
         }
 
         let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
@@ -1354,6 +1359,90 @@ pub async fn memories_search(
         None,
     )
     .await
+}
+
+pub async fn memo_record_visible_to_memory_reader(
+    memory: &MemoRecord,
+    reader: &crate::tools::tool_task_memory::MemoryAccessContext,
+) -> bool {
+    if !crate::tools::tool_task_memory::memory_tags_visible_to_reader(&memory.tags, reader) {
+        return false;
+    }
+    let Some(path) = memory.file_path.as_ref() else {
+        return true;
+    };
+    let Ok(content) = fs::read_to_string(path).await else {
+        return true;
+    };
+    let (frontmatter, _) = KnowledgeFrontmatter::parse(&content);
+    let namespace = frontmatter
+        .extra
+        .get("namespace")
+        .and_then(serde_yaml::Value::as_str)
+        .unwrap_or("task");
+    crate::tools::tool_task_memory::memory_namespace_visible_to_reader(namespace, reader)
+}
+
+#[cfg(test)]
+mod related_memory_visibility_tests {
+    use super::*;
+    use crate::tools::tool_task_memory::{related_memory_access_context, MemoryAccessContext};
+
+    #[tokio::test]
+    async fn memo_records_hide_agent_namespaces_from_foreign_or_missing_task_meta() {
+        let memory = MemoRecord {
+            tags: vec!["namespace:agent:A".to_string()],
+            ..Default::default()
+        };
+        let owner = related_memory_access_context(Some(&crate::chat::types::TaskMeta {
+            task_id: "task-1".to_string(),
+            role: "agents".to_string(),
+            agent_id: Some("A".to_string()),
+            ..Default::default()
+        }));
+        let foreign = related_memory_access_context(Some(&crate::chat::types::TaskMeta {
+            task_id: "task-1".to_string(),
+            role: "agents".to_string(),
+            agent_id: Some("B".to_string()),
+            ..Default::default()
+        }));
+
+        assert!(memo_record_visible_to_memory_reader(&memory, &owner).await);
+        assert!(!memo_record_visible_to_memory_reader(&memory, &foreign).await);
+        assert!(
+            !memo_record_visible_to_memory_reader(&memory, &related_memory_access_context(None))
+                .await
+        );
+        assert!(
+            !memo_record_visible_to_memory_reader(
+                &MemoRecord {
+                    tags: vec!["namespace:agent:".to_string()],
+                    ..Default::default()
+                },
+                &MemoryAccessContext::default()
+            )
+            .await
+        );
+        for tag in ["namespace:task", "namespace:card:T-1"] {
+            assert!(
+                memo_record_visible_to_memory_reader(
+                    &MemoRecord {
+                        tags: vec![tag.to_string()],
+                        ..Default::default()
+                    },
+                    &MemoryAccessContext::default()
+                )
+                .await
+            );
+        }
+        assert!(
+            memo_record_visible_to_memory_reader(
+                &MemoRecord::default(),
+                &MemoryAccessContext::default()
+            )
+            .await
+        );
+    }
 }
 
 pub async fn memories_search_for_enrichment(
@@ -2011,7 +2100,12 @@ pub async fn rewrite_memory_document(
                     refact_buddy_core::memory_dedup::content_signature(body),
                     path_buf.clone(),
                 );
-                idx.add_from_frontmatter(path_buf.clone(), frontmatter, Some(body));
+                crate::knowledge_index::add_knowledge_frontmatter_to_index(
+                    &mut idx,
+                    path_buf.clone(),
+                    frontmatter,
+                    Some(body),
+                );
             }
         }
 
@@ -2464,7 +2558,12 @@ mod tests {
                 refact_buddy_core::memory_dedup::content_signature(body),
                 foreign_path.clone(),
             );
-            index.add_from_frontmatter(foreign_path.clone(), &fm, Some(body));
+            crate::knowledge_index::add_knowledge_frontmatter_to_index(
+                &mut index,
+                foreign_path.clone(),
+                &fm,
+                Some(body),
+            );
         }
         let outcome = memories_add_dedup(gcx, &fm, body).await.unwrap();
         assert!(outcome.created());
@@ -3255,7 +3354,12 @@ mod firewall_tests {
             let mut index = gcx.knowledge_index.lock().await;
             let text = tokio::fs::read_to_string(&indexed).await.unwrap();
             let (frontmatter, content_start) = KnowledgeFrontmatter::parse(&text);
-            index.add_from_frontmatter(indexed.clone(), &frontmatter, Some(&text[content_start..]));
+            crate::knowledge_index::add_knowledge_frontmatter_to_index(
+                &mut index,
+                indexed.clone(),
+                &frontmatter,
+                Some(&text[content_start..]),
+            );
             index.mark_ready();
         }
 

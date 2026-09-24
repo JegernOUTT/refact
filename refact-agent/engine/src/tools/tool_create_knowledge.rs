@@ -99,9 +99,15 @@ impl Tool for ToolCreateKnowledge {
             _ => vec![],
         };
 
-        let (root_chat_id, gcx) = {
+        let (root_chat_id, gcx, memory_reader) = {
             let ccx_lock = ccx.lock().await;
-            (ccx_lock.root_chat_id.clone(), ccx_lock.app.gcx.clone())
+            (
+                ccx_lock.root_chat_id.clone(),
+                ccx_lock.app.gcx.clone(),
+                crate::tools::tool_task_memory::related_memory_access_context(
+                    ccx_lock.task_meta.as_ref(),
+                ),
+            )
         };
 
         if get_project_dirs(gcx.clone()).await.is_empty() {
@@ -124,7 +130,7 @@ impl Tool for ToolCreateKnowledge {
             tags.sort();
             tags.dedup();
             let cards = idx_guard.related_for_tags(&tags, 5);
-            format_related_memories_section(&cards)
+            format_related_memories_section(&cards, &memory_reader)
         };
 
         spawn_memory_enrichment_task(ccx.clone(), gcx, content, enrichment_params);

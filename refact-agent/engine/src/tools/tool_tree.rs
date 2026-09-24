@@ -61,12 +61,15 @@ impl Tool for ToolTree {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, execution_scope, abort_flag) = {
+        let (gcx, execution_scope, abort_flag, memory_reader) = {
             let cgcx = ccx.lock().await;
             (
                 cgcx.app.gcx.clone(),
                 cgcx.execution_scope.clone(),
                 cgcx.abort_flag.clone(),
+                crate::tools::tool_task_memory::related_memory_access_context(
+                    cgcx.task_meta.as_ref(),
+                ),
             )
         };
         let mut build_budget = BuildBudget::new(MAX_TREE_PATHS, Some(abort_flag.clone()));
@@ -279,7 +282,7 @@ impl Tool for ToolTree {
             keys.sort();
             keys.dedup();
             let cards = idx_guard.related_for_related_files(&keys, 8);
-            format_related_memories_section(&cards)
+            format_related_memories_section(&cards, &memory_reader)
         };
 
         Ok((

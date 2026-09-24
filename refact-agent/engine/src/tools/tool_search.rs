@@ -397,9 +397,15 @@ impl Tool for ToolSearch {
             return Err("No valid queries provided".to_string());
         }
 
-        let (gcx, execution_scope) = {
+        let (gcx, execution_scope, memory_reader) = {
             let cgcx = ccx.lock().await;
-            (cgcx.app.gcx.clone(), cgcx.execution_scope.clone())
+            (
+                cgcx.app.gcx.clone(),
+                cgcx.execution_scope.clone(),
+                crate::tools::tool_task_memory::related_memory_access_context(
+                    cgcx.task_meta.as_ref(),
+                ),
+            )
         };
         let roots = workspace_roots(&gcx, execution_scope.as_ref());
         let mut references = NativeReferences::new();
@@ -557,7 +563,7 @@ impl Tool for ToolSearch {
             if cards.is_empty() {
                 cards = idx_guard.related_for_related_files(&files, 8);
             }
-            format_related_memories_section(&cards)
+            format_related_memories_section(&cards, &memory_reader)
         };
 
         let mut results = vec_context_file_to_context_tools(all_context_files);
