@@ -259,7 +259,7 @@ async fn start(client: &reqwest::Client) -> TestResult<tokio::process::Child> {
     let mut child = Command::new("/scratch/bin/operator-test")
         .args([
             "--exact",
-            "whole_worker_entry",
+            "buddy_operator::whole_worker_entry",
             "--nocapture",
             "--test-threads=1",
         ])
