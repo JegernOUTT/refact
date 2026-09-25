@@ -307,71 +307,28 @@ fn help_only_response(request_value: &Value) -> String {
         .unwrap_or_default()
 }
 
-fn locator_regex_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "required": ["source"],
-        "properties": {
-            "source": {"type": "string"},
-            "flags": {"type": "string"}
-        }
-    })
-}
+static BROWSER_LOCATOR_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    serde_json::from_str(include_str!("tool_chrome_schemas/browser_locator.json"))
+        .expect("embedded browser locator schema is valid JSON")
+});
+
+static BROWSER_STEP_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    serde_json::from_str(include_str!("tool_chrome_schemas/browser_step.json"))
+        .expect("embedded browser step schema is valid JSON")
+});
+
+static ROUTE_HANDLER_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    serde_json::from_str(include_str!("tool_chrome_schemas/route_handler.json"))
+        .expect("embedded route handler schema is valid JSON")
+});
+
+static LOCATOR_HANDLER_SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    serde_json::from_str(include_str!("tool_chrome_schemas/locator_handler.json"))
+        .expect("embedded locator handler schema is valid JSON")
+});
 
 fn browser_locator_schema() -> serde_json::Value {
-    let mut schema = serde_json::json!({
-        "type": "object",
-        "description": "Ref-first element address; see help topic 'locators'",
-        "required": ["by"],
-        "properties": {
-            "by": {"type": "string", "enum": ["ref", "css", "id", "name", "text", "label", "role", "xpath", "placeholder", "alt_text", "title", "autocomplete", "test_id"]},
-            "value": {"type": "string", "description": "Snapshot ref such as e12, or a selector value"},
-            "frames": {"type": "array", "items": {"type": "object"}, "description": "Outermost-first iframe-owner locator chain"},
-            "nth": {"type": "integer", "description": "Zero-based match index; -1 selects the last match"},
-            "within": {"type": "string", "description": "Deprecated CSS scope; use locator for chaining"},
-            "locator": {"type": "object", "description": "Nested locator evaluated under each outer match"},
-            "filter": {
-                "type": "object",
-                "properties": {
-                    "has": {"type": "object", "description": "Locator required under the candidate"},
-                    "has_not": {"type": "object", "description": "Locator forbidden under the candidate"},
-                    "has_text": {"oneOf": [{"type": "string"}, {"type": "object", "required": ["source"], "properties": {"source": {"type": "string"}, "flags": {"type": "string"}}}]},
-                    "has_not_text": {"oneOf": [{"type": "string"}, {"type": "object", "required": ["source"], "properties": {"source": {"type": "string"}, "flags": {"type": "string"}}}]},
-                    "visible": {"type": "boolean"}
-                }
-            },
-            "and": {"type": "object", "description": "Locator whose matches intersect this one"},
-            "or": {"type": "object", "description": "Locator whose matches union with this one in DOM order"},
-            "first": {"type": "boolean", "description": "Select the first match"},
-            "last": {"type": "boolean", "description": "Select the last match"},
-            "exact": {"type": "boolean", "description": "Case-sensitive whole-string match; regex ignores it"},
-            "attribute": {"type": "string", "description": "Test-id attribute; defaults to data-testid"},
-            "role": {"type": "string", "description": "ARIA role"},
-            "name": {"type": "string", "description": "Accessible name"},
-            "description": {"type": "string", "description": "Accessible description"},
-            "checked": {"oneOf": [{"type": "boolean"}, {"type": "string", "enum": ["mixed"]}]},
-            "pressed": {"oneOf": [{"type": "boolean"}, {"type": "string", "enum": ["mixed"]}]},
-            "selected": {"type": "boolean"},
-            "expanded": {"type": "boolean"},
-            "disabled": {"type": "boolean"},
-            "level": {"type": "integer"},
-            "include_hidden": {"type": "boolean"}
-        }
-    });
-    let properties = schema["properties"]
-        .as_object_mut()
-        .expect("locator properties are present");
-    properties.insert("regex".to_string(), locator_regex_schema());
-    properties.insert("name_regex".to_string(), locator_regex_schema());
-    properties.insert("description_regex".to_string(), locator_regex_schema());
-    schema
-}
-
-fn browser_locator_alias_schema(role: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "description": format!("{role}; same shape as `locator`")
-    })
+    BROWSER_LOCATOR_SCHEMA.clone()
 }
 
 fn tab_target_schema() -> serde_json::Value {
@@ -382,22 +339,6 @@ fn tab_target_schema() -> serde_json::Value {
             "type": {"type": "string", "enum": ["active", "id"]},
             "id": {"type": "string", "description": "Required when type is id"}
         }
-    })
-}
-
-fn url_pattern_schema() -> serde_json::Value {
-    serde_json::json!({
-        "oneOf": [
-            {"type": "string"},
-            {
-                "type": "object",
-                "required": ["source"],
-                "properties": {
-                    "source": {"type": "string"},
-                    "flags": {"type": "string"}
-                }
-            }
-        ]
     })
 }
 
@@ -449,763 +390,55 @@ fn browser_step_schema_with_actions(
     actions: &[&str],
     include_locator_handler: bool,
 ) -> serde_json::Value {
-    let mut properties = serde_json::Map::new();
-    properties.insert(
-        "action".to_string(),
-        serde_json::json!({
-            "type": "string",
-            "description": format!(
-                "Browser action in snake_case. Each action accepts ONLY its own fields; anything else is rejected. Required fields per action (optional fields and aliases are in the `help` action's documentation): {}",
-                browser_action_field_manifest(actions)
-            ),
-            "enum": actions
-        }),
+    let mut schema = BROWSER_STEP_SCHEMA.clone();
+    let properties = schema["properties"]
+        .as_object_mut()
+        .expect("browser step schema properties are present");
+    if include_locator_handler {
+        properties.insert("locator".to_string(), browser_locator_schema());
+    }
+    let action_schema = properties
+        .get_mut("action")
+        .and_then(Value::as_object_mut)
+        .expect("browser step action schema is present");
+    action_schema.insert(
+        "description".to_string(),
+        Value::String(format!(
+            "Browser action in snake_case. Each action accepts ONLY its own fields; anything else is rejected. Required fields per action (optional fields and aliases are in the `help` action's documentation): {}",
+            browser_action_field_manifest(actions)
+        )),
     );
-    properties.insert(
-        "topic".to_string(),
-        serde_json::json!({"type": "string", "description": "help section; omitted returns the index plus the overview"}),
+    action_schema.insert(
+        "enum".to_string(),
+        Value::Array(
+            actions
+                .iter()
+                .map(|action| Value::String((*action).to_string()))
+                .collect(),
+        ),
     );
-    properties.insert(
-        "url".to_string(),
-        serde_json::json!({"type": "string", "description": "navigate and open_tab URL, or the asset URL for add_script_tag and add_style_tag"}),
-    );
-    properties.insert(
-        "device".to_string(),
-        serde_json::json!({"type": "string", "enum": ["desktop", "mobile", "tablet"]}),
-    );
-    properties.insert("tab".to_string(), tab_target_schema());
     properties.insert("locator".to_string(), browser_locator_schema());
-    properties.insert(
-        "source".to_string(),
-        browser_locator_alias_schema("drag_and_drop source element"),
-    );
-    properties.insert(
-        "target".to_string(),
-        serde_json::json!({
-            "oneOf": [
-                browser_locator_alias_schema("drop target element"),
-                {"type": "string", "enum": ["page", "browser"], "description": "cdp_send target, page by default"}
-            ]
-        }),
-    );
-    let position_schema = serde_json::json!({
-        "type": "object",
-        "required": ["x", "y"],
-        "properties": {"x": {"type": "number"}, "y": {"type": "number"}}
-    });
-    properties.insert("source_position".to_string(), position_schema.clone());
-    properties.insert("target_position".to_string(), position_schema);
-    properties.insert(
-        "text".to_string(),
-        serde_json::json!({"type": "string", "description": "Text to fill, insert, type, wait for, or annotate with"}),
-    );
-    properties.insert(
-        "key".to_string(),
-        serde_json::json!({"type": "string", "description": "Key name for press_key, such as Enter, Escape, or ArrowDown"}),
-    );
-    properties.insert(
-        "modifiers".to_string(),
-        serde_json::json!({"type": "array", "items": {"type": "string", "enum": ["Alt", "Ctrl", "Meta", "Shift"]}, "description": "Modifier keys held during press_key"}),
-    );
-    properties.insert(
-        "expression".to_string(),
-        serde_json::json!({"type": "string", "description": "JavaScript for eval, wait_for_function, and expect_poll"}),
-    );
-    properties.insert(
-        "selector".to_string(),
-        serde_json::json!({"type": "string", "description": "CSS selector for dom_snapshot"}),
-    );
-    properties.insert(
-        "value".to_string(),
-        serde_json::json!({"type": "string", "description": "select_option value; locator values live inside locator"}),
-    );
-    properties.insert(
-        "attribute".to_string(),
-        serde_json::json!({"type": "string", "description": "Attribute name read by get_attribute"}),
-    );
-    properties.insert(
-        "seconds".to_string(),
-        serde_json::json!({"type": "number", "description": "Fixed delay for wait_seconds; never use it for readiness"}),
-    );
-    properties.insert("x".to_string(), serde_json::json!({"type": "number"}));
-    properties.insert("y".to_string(), serde_json::json!({"type": "number"}));
-    properties.insert("start_x".to_string(), serde_json::json!({"type": "number"}));
-    properties.insert("start_y".to_string(), serde_json::json!({"type": "number"}));
-    properties.insert("end_x".to_string(), serde_json::json!({"type": "number"}));
-    properties.insert("end_y".to_string(), serde_json::json!({"type": "number"}));
-    properties.insert("delta_x".to_string(), serde_json::json!({"type": "number"}));
-    properties.insert("delta_y".to_string(), serde_json::json!({"type": "number"}));
-    properties.insert(
-        "steps".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 1, "description": "mouse_move interpolation steps; defaults to 1"}),
-    );
-    properties.insert(
-        "button".to_string(),
-        serde_json::json!({"type": "string", "enum": ["left", "middle", "right"]}),
-    );
-    properties.insert(
-        "click_count".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 1}),
-    );
-    properties.insert(
-        "delay".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0, "description": "mouse_click_xy hold time in ms between press and release"}),
-    );
-    properties.insert(
-        "delay_ms".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0, "description": "press_sequentially per-character delay in ms; defaults to 0"}),
-    );
-    properties.insert(
-        "timeout_ms".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0, "description": "Timeout in ms (waits/navigate/expect/click/hover default 5000; eval 30000)"}),
-    );
-    properties.insert(
-        "ticks".to_string(),
-        serde_json::json!({
-            "oneOf": [
-                {"type": "integer", "description": "Milliseconds to advance the clock by"},
-                {"type": "string", "description": "Human-readable duration: \"08\", \"01:00\" or \"02:34:10\""}
-            ]
-        }),
-    );
-    properties.insert(
-        "time".to_string(),
-        serde_json::json!({
-            "oneOf": [
-                {"type": "integer", "description": "Unix time in milliseconds"},
-                {"type": "string", "description": "ISO date or date-time, for example \"2020-02-02\" or \"2020-02-02T10:00:00Z\""}
-            ]
-        }),
-    );
-    properties.insert(
-        "matcher".to_string(),
-        serde_json::json!({
-            "description": "Matcher for expect (object) or expect_poll (comparator name).",
-            "oneOf": [
-                {
-                    "type": "object",
-                    "description": "type plus expected/name/ignore_case; text accepts a string, a {source,flags} regex, or an array of them",
-                    "required": ["type"],
-                    "properties": {
-                        "type": {
-                            "type": "string",
-                            "enum": [
-                                "to_be_attached", "to_be_visible", "to_be_hidden", "to_be_enabled",
-                                "to_be_disabled", "to_be_editable", "to_be_checked", "to_be_focused",
-                                "to_be_empty", "to_be_in_viewport", "to_have_text", "to_contain_text",
-                                "to_have_value", "to_have_values", "to_have_attribute", "to_have_class",
-                                "to_contain_class", "to_have_count", "to_have_css", "to_have_id",
-                                "to_have_js_property", "to_have_role", "to_have_accessible_name",
-                                "to_have_accessible_description", "to_have_url", "to_have_title",
-                                "to_match_aria_snapshot"
-                            ]
-                        },
-                        "expected": {},
-                        "name": {"type": "string"},
-                        "ignore_case": {"type": "boolean"},
-                        "checked": {"type": "boolean", "description": "to_be_checked state; defaults to true"},
-                        "indeterminate": {"type": "boolean", "description": "to_be_checked mixed state; excludes checked"},
-                        "pseudo": {"type": "string", "enum": ["before", "after"], "description": "to_have_css pseudo-element"},
-                        "ratio": {"type": "number", "minimum": 0, "maximum": 1, "description": "to_be_in_viewport minimum intersection ratio"}
-                    }
-                },
-                {
-                    "type": "string",
-                    "description": "expect_poll comparator against `expected`",
-                    "enum": ["equals", "contains", "gt", "lt", "matches_regex"]
-                }
-            ]
-        }),
-    );
-    properties.insert(
-        "expected".to_string(),
-        serde_json::json!({
-            "description": "expect_poll expected value; matches_regex takes a regex string or {source,flags}"
-        }),
-    );
-    properties.insert(
-        "polling_ms".to_string(),
-        serde_json::json!({
-            "type": "integer",
-            "minimum": 0,
-            "description": "wait_for_function poll interval; defaults to 100/250/500/1000ms repeating the last"
-        }),
-    );
-    properties.insert(
-        "soft".to_string(),
-        serde_json::json!({"type": "boolean", "description": "Record assertion failure and continue the batch"}),
-    );
-    properties.insert(
-        "not".to_string(),
-        serde_json::json!({"type": "boolean", "description": "Invert the expect matcher and retry until it stops matching"}),
-    );
-    properties.insert(
-        "limit".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0, "description": "Maximum rows or matches returned; omitted returns all"}),
-    );
-    properties.insert(
-        "clear_first".to_string(),
-        serde_json::json!({"type": "boolean", "description": "Defaults to true"}),
-    );
-    properties.insert(
-        "verify".to_string(),
-        serde_json::json!({"type": "boolean", "description": "Defaults to true for fill and clear"}),
-    );
-    properties.insert(
-        "js".to_string(),
-        serde_json::json!({"type": "boolean", "description": "start_coverage JavaScript coverage; defaults to true"}),
-    );
-    properties.insert(
-        "css".to_string(),
-        serde_json::json!({"type": "boolean", "description": "start_coverage CSS coverage; defaults to true"}),
-    );
-    properties.insert(
-        "reset_on_navigation".to_string(),
-        serde_json::json!({"type": "boolean", "description": "Reset coverage on navigation; defaults to true"}),
-    );
-    properties.insert(
-        "duration_ms".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 1, "maximum": MAX_BURST_DURATION_MS, "description": "capture_frames burst length; defaults to 1000ms"}),
-    );
-    properties.insert(
-        "frame_count".to_string(),
-        serde_json::json!({"type": "integer", "minimum": MIN_FRAME_COUNT, "maximum": MAX_FRAME_COUNT, "description": "capture_frames frame count; defaults to 8, excludes interval_ms"}),
-    );
-    properties.insert(
-        "interval_ms".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 1, "description": "capture_frames spacing; excludes frame_count"}),
-    );
-    properties.insert(
-        "compose".to_string(),
-        serde_json::json!({
-            "anyOf": [
-                {"type": "boolean"},
-                {"type": "string", "enum": ["grid", "separate"]}
-            ],
-            "description": "screencast_stop: compose a filmstrip (default true). screenshot_elements: grid = one labeled sheet, separate = one image each"
-        }),
-    );
-    properties.insert(
-        "max_width".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 1, "description": "screencast_start frame width cap"}),
-    );
-    properties.insert(
-        "max_height".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 1, "description": "screencast_start frame height cap"}),
-    );
-    properties.insert(
-        "protocol".to_string(),
-        serde_json::json!({"type": "string", "enum": ["u2f", "ctap2"]}),
-    );
-    properties.insert(
-        "transport".to_string(),
-        serde_json::json!({"type": "string", "enum": ["usb", "nfc", "ble", "cable", "internal"]}),
-    );
-    properties.insert(
-        "has_resident_key".to_string(),
-        serde_json::json!({"type": "boolean"}),
-    );
-    properties.insert(
-        "has_user_verification".to_string(),
-        serde_json::json!({"type": "boolean"}),
-    );
-    properties.insert(
-        "is_user_verified".to_string(),
-        serde_json::json!({"type": "boolean"}),
-    );
-    properties.insert(
-        "id".to_string(),
-        serde_json::json!({
-            "type": "string",
-            "description": "Server-minted id from add_virtual_authenticator or add_init_script; sending it to the minting action is an error"
-        }),
-    );
-    properties.insert(
-        "credential".to_string(),
-        serde_json::json!({
-            "type": "object",
-            "required": ["credential_id", "private_key"],
-            "properties": {
-                "credential_id": {"type": "string"},
-                "is_resident_credential": {"type": "boolean"},
-                "rp_id": {"type": "string"},
-                "private_key": {"type": "string"},
-                "user_handle": {"type": "string"},
-                "sign_count": {"type": "integer", "minimum": 0},
-                "large_blob": {"type": "string"},
-                "backup_eligibility": {"type": "boolean"},
-                "backup_state": {"type": "boolean"},
-                "user_name": {"type": "string"},
-                "user_display_name": {"type": "string"}
-            }
-        }),
-    );
-    properties.insert(
-        "max_chars".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0, "description": "dom_snapshot and accessibility_snapshot character cap"}),
-    );
-    properties.insert(
-        "property_filter".to_string(),
-        serde_json::json!({"type": "string", "description": "case-sensitive substring test against each `property: value` line"}),
-    );
-    properties.insert(
-        "mode".to_string(),
-        serde_json::json!({"type": "string", "enum": ["ai", "default", "inner_text", "text_content"], "description": "accessibility_snapshot ai (default) or default; all_texts inner_text (default) or text_content"}),
-    );
-    properties.insert(
-        "refs".to_string(),
-        serde_json::json!({"type": "boolean", "description": "Mint refs in accessibility_snapshot; defaults to true in ai mode"}),
-    );
-    properties.insert(
-        "boxes".to_string(),
-        serde_json::json!({"type": "boolean", "description": "Include element boxes in accessibility_snapshot"}),
-    );
-    properties.insert(
-        "depth".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 1, "description": "Limit accessibility_snapshot nesting; deeper children collapse to a count marker"}),
-    );
-    properties.insert(
-        "paths".to_string(),
-        serde_json::json!({"type": "array", "items": {"type": "string"}, "description": "Absolute paths for set_input_files, drop_files, expect_file_chooser"}),
-    );
-    properties.insert(
-        "state".to_string(),
-        serde_json::json!({
-            "type": "string",
-            "enum": ["domcontentloaded", "load", "networkidle", "attached", "detached", "visible", "hidden"],
-            "description": "wait_for_load_state load state, or wait_for_selector element state (attached by default)"
-        }),
-    );
-    properties.insert(
-        "status".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 100, "maximum": 599, "description": "Response status filter for wait_for_response"}),
-    );
-    properties.insert(
-        "contains".to_string(),
-        serde_json::json!({"type": "string", "description": "Substring filter for wait_for_console_message"}),
-    );
-    properties.insert(
-        "level".to_string(),
-        serde_json::json!({"type": "string", "enum": ["log", "warning", "error"], "description": "Level filter for wait_for_console_message"}),
-    );
-    properties.insert(
-        "wait_until".to_string(),
-        serde_json::json!({"type": "string", "enum": ["domcontentloaded", "load", "networkidle"], "description": "Load state set_content waits for; defaults to load"}),
-    );
-    properties.insert(
-        "html".to_string(),
-        serde_json::json!({"type": "string", "description": "Raw document HTML for set_content"}),
-    );
-    properties.insert(
-        "content".to_string(),
-        serde_json::json!({"type": "string", "description": "Inline source for add_script_tag, add_style_tag, add_init_script; excludes url"}),
-    );
-    properties.insert(
-        "script_type".to_string(),
-        serde_json::json!({"type": "string", "description": "add_script_tag type attribute, for example module"}),
-    );
-    properties.insert(
-        "event_type".to_string(),
-        serde_json::json!({"type": "string", "description": "dispatch_event DOM event name; the class is inferred from it"}),
-    );
-    properties.insert(
-        "event_init".to_string(),
-        serde_json::json!({"type": "object", "description": "dispatch_event init; bubbles, cancelable, composed default to true"}),
-    );
-    let mut pattern_schema = url_pattern_schema();
-    pattern_schema["description"] = serde_json::json!(
-        "Glob or {source,flags} regex; wait_for_url reads plain text as a substring"
-    );
-    properties.insert("pattern".to_string(), pattern_schema);
-    properties.insert(
-        "aggressive".to_string(),
-        serde_json::json!({"type": "boolean", "description": "dismiss_overlays: also delete large fixed overlays, not just click dismiss buttons"}),
-    );
-    properties.insert(
-        "save_as".to_string(),
-        serde_json::json!({"type": "string", "description": "Artifact file name for storage_state and wait_for_download"}),
-    );
-    properties.insert(
-        "full_page".to_string(),
-        serde_json::json!({"type": "boolean", "description": "Capture the whole scrollable page instead of the viewport"}),
-    );
-    properties.insert(
-        "clip".to_string(),
-        serde_json::json!({
-            "type": "object",
-            "required": ["x", "y", "width", "height"],
-            "properties": {
-                "x": {"type": "number"},
-                "y": {"type": "number"},
-                "width": {"type": "number", "exclusiveMinimum": 0},
-                "height": {"type": "number", "exclusiveMinimum": 0}
-            }
-        }),
-    );
-    properties.insert(
-        "type".to_string(),
-        serde_json::json!({"type": "string", "enum": ["png", "jpeg", "webp"]}),
-    );
-    properties.insert(
-        "quality".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0, "maximum": 100, "description": "JPEG or WebP quality 0-100; ignored for png"}),
-    );
-    properties.insert(
-        "scale".to_string(),
-        serde_json::json!({"description": "Screenshot scale css|device, or numeric PDF scale 0.1-2", "anyOf": [{"type": "string", "enum": ["css", "device"]}, {"type": "number", "minimum": 0.1, "maximum": 2.0}]}),
-    );
-    properties.insert(
-        "omit_background".to_string(),
-        serde_json::json!({"type": "boolean"}),
-    );
-    properties.insert(
-        "animations".to_string(),
-        serde_json::json!({"type": "string", "enum": ["allow", "disabled"]}),
-    );
-    properties.insert(
-        "caret".to_string(),
-        serde_json::json!({"type": "string", "enum": ["hide", "initial"]}),
-    );
-    properties.insert(
-        "mask".to_string(),
-        serde_json::json!({"type": "array", "items": browser_locator_alias_schema("masked element")}),
-    );
-    properties.insert(
-        "mask_color".to_string(),
-        serde_json::json!({"type": "string"}),
-    );
-    properties.insert(
-        "style".to_string(),
-        serde_json::json!({"type": "string", "description": "highlight inline CSS, or an extra screenshot stylesheet"}),
-    );
-    properties.insert(
-        "locators".to_string(),
-        serde_json::json!({"type": "array", "items": browser_locator_alias_schema("captured element")}),
-    );
-    properties.insert(
-        "states".to_string(),
-        serde_json::json!({"type": "array", "items": {"type": "string", "enum": ["default", "hover", "focus", "active"]}}),
-    );
-    properties.insert("labels".to_string(), serde_json::json!({"type": "boolean"}));
-    properties.insert(
-        "label".to_string(),
-        serde_json::json!({"type": "string", "description": "Text label drawn by highlight"}),
-    );
-    properties.insert(
-        "landscape".to_string(),
-        serde_json::json!({"type": "boolean"}),
-    );
-    properties.insert(
-        "print_background".to_string(),
-        serde_json::json!({"type": "boolean"}),
-    );
-    properties.insert(
-        "format".to_string(),
-        serde_json::json!({"type": "string", "enum": ["Letter", "Legal", "Tabloid", "Ledger", "A0", "A1", "A2", "A3", "A4", "A5", "A6"]}),
-    );
-    properties.insert(
-        "margins".to_string(),
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "top": {"type": "string"},
-                "right": {"type": "string"},
-                "bottom": {"type": "string"},
-                "left": {"type": "string"}
-            }
-        }),
-    );
-    properties.insert(
-        "page_ranges".to_string(),
-        serde_json::json!({"type": "string"}),
-    );
-    properties.insert(
-        "prefer_css_page_size".to_string(),
-        serde_json::json!({"type": "boolean"}),
-    );
-    properties.insert("tagged".to_string(), serde_json::json!({"type": "boolean"}));
-    properties.insert(
-        "outline".to_string(),
-        serde_json::json!({"type": "boolean"}),
-    );
-    properties.insert(
-        "width".to_string(),
-        serde_json::json!({
-            "anyOf": [{"type": "integer", "minimum": 1}, {"type": "string"}],
-            "description": "pixels (set_viewport/set_window_bounds) or a CSS length (pdf)"
-        }),
-    );
-    properties.insert(
-        "height".to_string(),
-        serde_json::json!({
-            "anyOf": [{"type": "integer", "minimum": 1}, {"type": "string"}],
-            "description": "pixels (set_viewport/set_window_bounds) or a CSS length (pdf)"
-        }),
-    );
-    properties.insert(
-        "device_scale_factor".to_string(),
-        serde_json::json!({"type": "number", "minimum": 0}),
-    );
-    properties.insert(
-        "is_mobile".to_string(),
-        serde_json::json!({"type": "boolean"}),
-    );
-    properties.insert(
-        "has_touch".to_string(),
-        serde_json::json!({"type": "boolean"}),
-    );
-    properties.insert(
-        "color_scheme".to_string(),
-        serde_json::json!({"type": "string", "enum": ["light", "dark", "no-preference"]}),
-    );
-    properties.insert(
-        "reduced_motion".to_string(),
-        serde_json::json!({"type": "string", "enum": ["reduce", "no-preference"]}),
-    );
-    properties.insert(
-        "forced_colors".to_string(),
-        serde_json::json!({"type": "string", "enum": ["active", "none"]}),
-    );
-    properties.insert(
-        "contrast".to_string(),
-        serde_json::json!({"type": "string", "enum": ["more", "less", "custom", "no-preference"]}),
-    );
-    properties.insert("media".to_string(), serde_json::json!({"type": "string"}));
-    properties.insert("locale".to_string(), serde_json::json!({"type": "string"}));
-    properties.insert(
-        "timezone".to_string(),
-        serde_json::json!({"type": "string"}),
-    );
-    properties.insert(
-        "user_agent".to_string(),
-        serde_json::json!({"type": "string"}),
-    );
-    properties.insert(
-        "accept_language".to_string(),
-        serde_json::json!({"type": "string"}),
-    );
-    properties.insert(
-        "latitude".to_string(),
-        serde_json::json!({"type": "number"}),
-    );
-    properties.insert(
-        "longitude".to_string(),
-        serde_json::json!({"type": "number"}),
-    );
-    properties.insert(
-        "accuracy".to_string(),
-        serde_json::json!({"type": "number", "minimum": 0}),
-    );
-    properties.insert(
-        "offline".to_string(),
-        serde_json::json!({"type": "boolean"}),
-    );
-    properties.insert(
-        "headers".to_string(),
-        serde_json::json!({"type": "object", "additionalProperties": {"type": "string"}}),
-    );
-    properties.insert(
-        "method".to_string(),
-        serde_json::json!({"type": "string", "description": "http_request method (GET by default), wait_for_request and wait_for_response filter, or cdp_send CDP method"}),
-    );
-    properties.insert(
-        "params".to_string(),
-        serde_json::json!({"type": "object", "description": "cdp_send CDP parameters, omitted when the method takes none"}),
-    );
-    properties.insert(
-        "body".to_string(),
-        serde_json::json!({"type": "string", "description": "Raw http_request body; mutually exclusive with body_json and form"}),
-    );
-    properties.insert(
-        "body_json".to_string(),
-        serde_json::json!({"description": "http_request JSON body, sent as application/json"}),
-    );
-    properties.insert(
-        "form".to_string(),
-        serde_json::json!({"type": "object", "additionalProperties": {"type": "string"}, "description": "http_request form fields, sent as application/x-www-form-urlencoded"}),
-    );
-    properties.insert(
-        "max_redirects".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0, "maximum": 20}),
-    );
-    properties.insert(
-        "fail_on_status".to_string(),
-        serde_json::json!({"type": "boolean", "description": "Fail http_request when the status is not 2xx"}),
-    );
-    properties.insert(
-        "full_headers".to_string(),
-        serde_json::json!({"type": "boolean", "description": "Return all http_request response headers, not just content-type and content-length"}),
-    );
-    properties.insert(
-        "urls".to_string(),
-        serde_json::json!({"type": "array", "items": {"type": "string"}}),
-    );
-    properties.insert(
-        "cookies".to_string(),
-        serde_json::json!({"type": "array", "items": {"type": "object"}}),
-    );
-    properties.insert("domain".to_string(), serde_json::json!({"type": "string"}));
-    properties.insert(
-        "path".to_string(),
-        serde_json::json!({"type": "string", "description": "route_from_har, HAR recording, and cookie path filters"}),
-    );
-    properties.insert(
-        "kind".to_string(),
-        serde_json::json!({"type": "string", "enum": ["local", "session"]}),
-    );
-    properties.insert("origin".to_string(), serde_json::json!({"type": "string"}));
-    properties.insert(
-        "items".to_string(),
-        serde_json::json!({
-            "type": "array",
-            "items": {
-                "type": "object",
-                "required": ["name", "value"],
-                "properties": {
-                    "name": {},
-                    "value": {}
-                }
-            }
-        }),
-    );
-    properties.insert(
-        "permissions".to_string(),
-        serde_json::json!({"type": "array", "items": {"type": "string"}}),
-    );
-    properties.insert(
-        "username".to_string(),
-        serde_json::json!({"type": "string"}),
-    );
-    properties.insert(
-        "password".to_string(),
-        serde_json::json!({"type": "string"}),
-    );
-    properties.insert(
-        "name".to_string(),
-        serde_json::json!({"type": "string", "description": "Locator handler, device, cookie, or matcher property name"}),
-    );
-    properties.insert(
-        "times".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 1, "description": "Expire a route or locator handler after this many matches"}),
-    );
-    properties.insert(
-        "no_wait_after".to_string(),
-        serde_json::json!({"type": "boolean"}),
-    );
-    properties.insert(
-        "accept".to_string(),
-        serde_json::json!({"type": "boolean", "description": "handle_dialog: true accepts, false dismisses"}),
-    );
-    properties.insert(
-        "prompt_text".to_string(),
-        serde_json::json!({"type": "string"}),
-    );
     if include_locator_handler {
         properties.insert("handler".to_string(), handler_schema());
+    } else {
+        properties.remove("handler");
     }
-    // The flat property bag is hand-written, so drop anything no action actually accepts:
-    // advertising a field the deserializer rejects for every action is a contract lie.
+    properties.get_mut("duration_ms").unwrap()["maximum"] = Value::from(MAX_BURST_DURATION_MS);
+    properties.get_mut("frame_count").unwrap()["minimum"] = Value::from(MIN_FRAME_COUNT);
+    properties.get_mut("frame_count").unwrap()["maximum"] = Value::from(MAX_FRAME_COUNT);
     let contract_fields = browser_contract_field_names();
     properties.retain(|name, _| name == "action" || contract_fields.contains(name.as_str()));
-    serde_json::json!({
-        "type": "object",
-        "required": ["action"],
-        "properties": properties
-    })
+    schema
 }
 
 fn route_handler_schema() -> serde_json::Value {
-    serde_json::json!({
-        "oneOf": [
-            {
-                "type": "object",
-                "required": ["type"],
-                "properties": {
-                    "type": {"type": "string", "enum": ["fulfill"]},
-                    "status": {"type": "integer", "minimum": 100, "maximum": 599, "description": "Defaults to 200"},
-                    "headers": {"type": "object", "additionalProperties": {"type": "string"}},
-                    "content_type": {"type": "string"},
-                    "body": {"type": "string", "description": "UTF-8 text unless body_base64 marks it as base64 binary bytes"},
-                    "path": {"type": "string", "description": "Response body file; relative paths resolve inside the runtime artifact directory and may not escape it; content type is inferred from the extension"},
-                    "json": {"description": "Response body serialized as application/json"},
-                    "body_base64": {"type": "boolean", "description": "Treat body as base64 binary bytes"}
-                }
-            },
-            {
-                "type": "object",
-                "required": ["type", "reason"],
-                "properties": {
-                    "type": {"type": "string", "enum": ["abort"]},
-                    "reason": {"type": "string", "enum": ["failed", "aborted", "timedout", "accessdenied", "connectionclosed", "connectionreset", "connectionrefused", "connectionaborted", "connectionfailed", "namenotresolved", "internetdisconnected", "addressunreachable", "blockedbyclient", "blockedbyresponse"]}
-                }
-            },
-            {
-                "type": "object",
-                "required": ["type"],
-                "properties": {
-                    "type": {"type": "string", "enum": ["continue"]},
-                    "url": {"type": "string"},
-                    "method": {"type": "string"},
-                    "headers": {"type": "object", "additionalProperties": {"type": "string"}},
-                    "post_data": {"type": "string", "description": "UTF-8 request body replacement"}
-                }
-            },
-            {
-                "type": "object",
-                "required": ["type"],
-                "properties": {
-                    "type": {"type": "string", "enum": ["fallback"], "description": "Hand the request to the next older matching route, then the HAR replay, then the network"}
-                }
-            },
-            {
-                "type": "object",
-                "required": ["type"],
-                "properties": {
-                    "type": {"type": "string", "enum": ["fetch_and_fulfill"], "description": "Perform the real request from the engine, then fulfill the page with the response"},
-                    "url": {"type": "string", "description": "Request URL override"},
-                    "method": {"type": "string", "description": "Request method override"},
-                    "headers": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Request header overrides"},
-                    "post_data": {"type": "string", "description": "UTF-8 request body replacement"},
-                    "status": {"type": "integer", "minimum": 100, "maximum": 599, "description": "Response status override"},
-                    "response_headers": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Response header overrides"},
-                    "body": {"type": "string", "description": "Response body replacement"},
-                    "body_base64": {"type": "boolean", "description": "Treat body as base64 binary bytes"}
-                }
-            }
-        ]
-    })
+    ROUTE_HANDLER_SCHEMA.clone()
 }
 
-fn handler_schema() -> serde_json::Value {
-    serde_json::json!({
-        "oneOf": [locator_handler_schema(), route_handler_schema()]
-    })
-}
-
-fn locator_handler_schema() -> serde_json::Value {
-    serde_json::json!({
-        "oneOf": [
-            {
-                "type": "object",
-                "required": ["type"],
-                "properties": {"type": {"type": "string", "enum": ["click"]}}
-            },
-            {
-                "type": "object",
-                "required": ["type", "steps"],
-                "properties": {
-                    "type": {"type": "string", "enum": ["steps"]},
-                    "steps": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "description": "Same shape as request.steps items; see help topic 'handlers'"
-                        }
-                    }
-                }
-            }
-        ]
-    })
+fn handler_schema() -> Value {
+    let mut schema = Value::Object(serde_json::Map::new());
+    schema["oneOf"] = Value::Array(vec![LOCATOR_HANDLER_SCHEMA.clone(), route_handler_schema()]);
+    schema
 }
 
 fn browser_request_schema() -> serde_json::Value {
@@ -1554,6 +787,33 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    #[test]
+    fn browser_locator_schema_snapshot() {
+        insta::assert_snapshot!(serde_json::to_string(&browser_locator_schema()).unwrap());
+    }
+
+    #[test]
+    fn browser_step_schema_snapshot_for_tool_caller() {
+        insta::assert_snapshot!(serde_json::to_string(&browser_step_schema_with_actions(
+            crate::integrations::browser_models::BrowserStep::ACTION_NAMES,
+            true,
+        ))
+        .unwrap());
+    }
+
+    #[test]
+    fn route_handler_schema_snapshot() {
+        insta::assert_snapshot!(serde_json::to_string(&route_handler_schema()).unwrap());
+    }
+
+    #[test]
+    fn embedded_browser_schemas_parse_on_first_use() {
+        assert!(BROWSER_LOCATOR_SCHEMA.is_object());
+        assert!(BROWSER_STEP_SCHEMA.is_object());
+        assert!(ROUTE_HANDLER_SCHEMA.is_object());
+        assert!(LOCATOR_HANDLER_SCHEMA.is_object());
+    }
 
     fn schema_action_names(schema: &Value) -> BTreeSet<String> {
         schema
