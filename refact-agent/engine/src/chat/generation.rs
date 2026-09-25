@@ -1585,6 +1585,685 @@ async fn run_fork_subchat(
         .unwrap_or_else(|| "Fork skill completed but produced no response.".to_string()))
 }
 
+struct GenerationAttemptContext {
+    thread: ThreadParams,
+    chat_id: String,
+    chat_label: String,
+    abort_flag: Arc<AtomicBool>,
+}
+
+enum GenerationAttemptStart {
+    Continue,
+    Stop,
+    Generated {
+        context: GenerationAttemptContext,
+        result: Result<GenerationResult, LlmStreamError>,
+    },
+}
+
+enum GenerationLoopControl {
+    Continue,
+    Stop,
+}
+
+async fn start_generation_iteration(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    gcx: &Arc<crate::global_context::GlobalContext>,
+) -> GenerationAttemptStart {
+    match crate::chat::context_rebuild::drain_pending(gcx.clone(), session_arc).await {
+        Ok(true) => return GenerationAttemptStart::Stop,
+        Err(error) => {
+            let mut session = session_arc.lock().await;
+            session.append_error_message_deduped(&format!(
+                "Context operation failed: {}",
+                safe_provider_error_diagnostic(&error)
+            ));
+            session.set_runtime_state(SessionState::Error, Some(error));
+            return GenerationAttemptStart::Stop;
+        }
+        Ok(false) => {}
+    }
+    {
+        let mut session = session_arc.lock().await;
+        if let Err(error) = refact_core::active_context::active_context(&session.messages) {
+            let error = format!(
+                "Invalid active context: {error}. Explicit rebuild required before generation"
+            );
+            session.append_error_message_deduped(&error);
+            session.set_runtime_state(SessionState::Error, Some(error));
+            return GenerationAttemptStart::Stop;
+        }
+    }
+    if inject_priority_messages_before_llm_if_safe(app.clone(), session_arc.clone()).await {
+        return GenerationAttemptStart::Continue;
+    }
+    // `append` deliveries land here: before the next LLM request, with
+    // the previous assistant/tool window closed.
+    crate::chat::delivery::drain_deliveries_at_boundary(app.clone(), session_arc.clone()).await;
+
+    let (mut thread, chat_id) = {
+        let session = session_arc.lock().await;
+        (session.thread.clone(), session.chat_id.clone())
+    };
+    {
+        let session = session_arc.lock().await;
+        if let Some(ref m) = session.active_command.model_override {
+            if !m.is_empty() {
+                thread.model = m.clone();
+            }
+        }
+    }
+
+    let chat_label = {
+        let t = thread.title.trim().to_string();
+        if t.is_empty() || t == "New Chat" {
+            "Untitled chat".to_string()
+        } else {
+            t.chars().take(60).collect()
+        }
+    };
+
+    let fork_agent_name = {
+        let session = session_arc.lock().await;
+        session.active_command.context_fork.clone()
+    };
+
+    if let Some(agent_name) = fork_agent_name {
+        let user_content_opt = {
+            let session = session_arc.lock().await;
+            refact_core::active_context::active_context(&session.messages)
+                .ok()
+                .and_then(|view| {
+                    view.messages
+                        .into_iter()
+                        .rev()
+                        .find(|message| message.role == "user")
+                        .map(|message| message.content.content_text_only())
+                })
+        };
+        {
+            let mut session = session_arc.lock().await;
+            session.active_command.context_fork = None;
+        }
+        let user_content = match user_content_opt {
+            Some(c) => c,
+            None => {
+                warn!(
+                    "Fork skill '{}' skipped: no user message found in session {}",
+                    agent_name, chat_id
+                );
+                return GenerationAttemptStart::Continue;
+            }
+        };
+
+        let fork_result =
+            run_fork_subchat(app.clone(), &agent_name, &user_content, &thread, &chat_id).await;
+
+        match fork_result {
+            Ok(assistant_content) => {
+                let mut session = session_arc.lock().await;
+                session.add_message(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: ChatContent::SimpleText(assistant_content),
+                    ..Default::default()
+                });
+                session.set_runtime_state(SessionState::Idle, None);
+                drop(session);
+                spawn_completion_activity_reaction(app.clone(), session_arc.clone()).await;
+                maybe_save_trajectory_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Checkpoint,
+                )
+                .await;
+                return GenerationAttemptStart::Stop;
+            }
+            Err(e) => {
+                warn!(
+                    "Fork skill subchat failed ({}), falling back to normal generation",
+                    e
+                );
+                return GenerationAttemptStart::Continue;
+            }
+        }
+    }
+
+    // Resolve before the very first proactive check, with the command's
+    // actual model override applied. Failed resolution remains pending.
+    if thread.auto_compression_cap_pending {
+        if let Ok(caps) =
+            crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await
+        {
+            if let Ok(model) = crate::caps::resolve_chat_model(caps, &thread.model) {
+                let window = if model.base.n_ctx > 0 {
+                    model.base.n_ctx
+                } else {
+                    tokens().default_n_ctx
+                };
+                resolve_session_compression_cap(&app, &session_arc, &mut thread, window).await;
+            }
+        }
+    }
+
+    if matches!(
+        crate::chat::context_rebuild::apply_context_rebuild_with_reason(
+            gcx.clone(),
+            &session_arc,
+            &thread,
+            false,
+            None,
+        )
+        .await,
+        crate::chat::context_rebuild::CompactionOutcome::LlmUnavailable
+    ) {
+        return GenerationAttemptStart::Stop;
+    }
+
+    thread = {
+        let session = session_arc.lock().await;
+        let mut refreshed = session.thread.clone();
+        if let Some(model) = session
+            .active_command
+            .model_override
+            .as_ref()
+            .filter(|m| !m.is_empty())
+        {
+            refreshed.model = model.clone();
+        }
+        refreshed
+    };
+
+    // Rebuilds and handoffs replace the conversation but not the preamble.
+    ensure_session_preamble(app.clone(), session_arc.clone()).await;
+
+    if user_stop_requested(&session_arc).await {
+        return GenerationAttemptStart::Stop;
+    }
+
+    let (abort_flag, abort_notify) = {
+        let mut session = session_arc.lock().await;
+        match session.start_stream() {
+            Some((_message_id, abort_flag)) => {
+                session.delivery_wake_sources.clear();
+                let notify = session.abort_notify.clone();
+                (abort_flag, notify)
+            }
+            None => {
+                warn!(
+                    "Cannot start generation for {}: already generating",
+                    chat_id
+                );
+                return GenerationAttemptStart::Stop;
+            }
+        }
+    };
+    let stream_prepare_started_at = perf_diagnostics::is_enabled().then(Instant::now);
+
+    {
+        let mut ev = make_runtime_event(
+            "chat_started",
+            &format!("Started: {}", chat_label),
+            "chat",
+            &format!("chat_{}", chat_id),
+            "started",
+            None,
+        );
+        ev.chat_id = Some(chat_id.to_string());
+        app.buddy_event_sink.enqueue_event(ev).await;
+        let mut ev = make_runtime_event(
+            "streaming",
+            &format!("Generating reply in '{}'", chat_label),
+            "chat",
+            &format!("chat_{}", chat_id),
+            "streaming",
+            None,
+        );
+        ev.speech_text = Some(format!("Working on your request in '{}'...", chat_label));
+        ev.scene = Some("working".to_string());
+        ev.persistent = true;
+        ev.chat_id = Some(chat_id.to_string());
+        app.buddy_event_sink.enqueue_event(ev).await;
+    }
+
+    let generation_result = run_llm_generation(
+        app.clone(),
+        session_arc.clone(),
+        thread.clone(),
+        chat_id.clone(),
+        abort_flag.clone(),
+        abort_notify.clone(),
+        stream_prepare_started_at,
+    )
+    .await;
+    return GenerationAttemptStart::Generated {
+        context: GenerationAttemptContext {
+            thread,
+            chat_id,
+            chat_label,
+            abort_flag,
+        },
+        result: generation_result,
+    };
+}
+
+async fn handle_generation_error(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    gcx: &Arc<crate::global_context::GlobalContext>,
+    context: &GenerationAttemptContext,
+    mut error: LlmStreamError,
+    network_retry_attempt: &mut usize,
+) -> GenerationLoopControl {
+    let GenerationAttemptContext {
+        thread,
+        chat_id,
+        chat_label,
+        abort_flag,
+    } = context;
+
+    let retry_decision = error.retry_decision();
+    let should_retry_network = error.should_retry(*network_retry_attempt, abort_flag);
+    let retry_reason = retry_decision.reason();
+    if should_retry_network {
+        let delay = super::retry_policy::retry_delay_for_attempt(*network_retry_attempt);
+        *network_retry_attempt += 1;
+        {
+            let mut session = session_arc.lock().await;
+            if !session.abort_flag.load(Ordering::SeqCst) {
+                session.clear_stream_for_retry();
+                let retry_msg = make_ui_only_retry_status_message(
+                    &error.message,
+                    *network_retry_attempt,
+                    super::retry_policy::MAX_LLM_RETRY_ATTEMPTS,
+                    delay.as_secs(),
+                );
+                session.add_message(retry_msg);
+            }
+        }
+        {
+            let mut ev = make_runtime_event(
+                "chat_retrying",
+                &format!(
+                    "Retrying '{}' in {}s (attempt {}/{})",
+                    chat_label,
+                    delay.as_secs(),
+                    *network_retry_attempt,
+                    super::retry_policy::MAX_LLM_RETRY_ATTEMPTS,
+                ),
+                "chat",
+                &format!("chat_{}", chat_id),
+                "retrying",
+                None,
+            );
+            ev.chat_id = Some(chat_id.to_string());
+            ev.persistent = true;
+            app.buddy_event_sink.enqueue_event(ev).await;
+        }
+        warn!(
+            "Retrying chat generation after retryable LLM error in {}s (attempt {}/{}, reason={})",
+            delay.as_secs(),
+            network_retry_attempt,
+            super::retry_policy::MAX_LLM_RETRY_ATTEMPTS,
+            retry_reason,
+        );
+        if super::retry_policy::sleep_or_abort(delay, abort_flag.clone()).await {
+            return GenerationLoopControl::Stop;
+        }
+        return GenerationLoopControl::Continue;
+    }
+    let is_context_limit =
+        error.retry_decision().is_context_limit() && !abort_flag.load(Ordering::SeqCst);
+    if is_context_limit {
+        let original_error = error.message.clone();
+        let round = {
+            let mut session = session_arc.lock().await;
+            session.finish_stream_for_rebuild();
+            let round = session
+                .thread
+                .reactive_compact_attempts
+                .unwrap_or(0)
+                .saturating_add(1);
+            session.thread.reactive_compact_attempts = Some(round);
+            session.increment_version();
+            session.touch();
+            round
+        };
+        if round == 1
+            && thread.auto_compact_enabled_effective()
+            && crate::chat::context_rebuild::apply_context_rebuild_with_reason(
+                gcx.clone(),
+                &session_arc,
+                &thread,
+                true,
+                Some(CompressionReason::ContextLengthStop),
+            )
+            .await
+            .applied()
+        {
+            return GenerationLoopControl::Continue;
+        }
+        error.message = context_limit_final_error_message(&original_error);
+        {
+            let mut session = session_arc.lock().await;
+            crate::chat::goal_monitor::mark_goal_blocked_on_context_limit(&mut session);
+        }
+    }
+
+    if error.partial_output_emitted && !abort_flag.load(Ordering::SeqCst) {
+        let original = error.message.clone();
+        let safe_error = partial_output_stream_error_message(&original);
+        warn!("{}", safe_error);
+        error.message = safe_error;
+    }
+
+    let error_message = error.message;
+
+    let task_meta_opt = {
+        let mut session = session_arc.lock().await;
+        if !session.abort_flag.load(Ordering::SeqCst) {
+            let app2 = app.clone();
+            let err_clone = error_message.clone();
+            let chat_id2 = chat_id.clone();
+            let chat_label2 = chat_label.clone();
+            let model2 = session.thread.model.clone();
+            tokio::spawn(async move {
+                let model_ref = Some(model2.as_str()).filter(|m| !m.is_empty());
+                app2.buddy_event_sink
+                    .report_error_with_model(
+                        "llm_error",
+                        &err_clone,
+                        Some("chat/generation.rs"),
+                        Some(&chat_id2),
+                        model_ref,
+                    )
+                    .await;
+                let short_err: String = err_clone.chars().take(60).collect();
+                let priority =
+                    refact_buddy_core::diagnostics::diagnostic_priority_label(&err_clone);
+                let mut ev = make_runtime_event(
+                    "chat_error",
+                    &format!("Error in '{}': {}", chat_label2, short_err),
+                    "chat",
+                    &format!("chat_{}", chat_id2),
+                    "failed",
+                    Some(priority),
+                );
+                ev.chat_id = Some(chat_id2.to_string());
+                app2.buddy_event_sink.mark_chat_error(ev).await;
+            });
+            session.finish_stream_with_error(error_message);
+        }
+        session.thread.task_meta.clone()
+    };
+
+    maybe_save_trajectory_with_intent(
+        app.clone(),
+        session_arc.clone(),
+        TrajectoryCommitIntent::Checkpoint,
+    )
+    .await;
+
+    if let Some(task_meta) = task_meta_opt {
+        let error_msg = {
+            let session = session_arc.lock().await;
+            session.task_agent_error.clone()
+        };
+        if let Some(error) = error_msg {
+            super::task_agent_monitor::handle_agent_streaming_error(
+                app.clone(),
+                &task_meta,
+                &error,
+            )
+            .await;
+        }
+    }
+    {
+        let mut session = session_arc.lock().await;
+        if session.user_interrupt_flag.load(Ordering::SeqCst) {
+            session.clear_stream_for_retry();
+        }
+    }
+    GenerationLoopControl::Stop
+}
+
+async fn process_successful_generation(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    gcx: &Arc<crate::global_context::GlobalContext>,
+    context: &GenerationAttemptContext,
+) -> GenerationLoopControl {
+    let GenerationAttemptContext {
+        thread,
+        chat_id,
+        chat_label,
+        abort_flag,
+    } = context;
+
+    {
+        let mut session = session_arc.lock().await;
+        session.provider_usage_stale = false;
+        if session.thread.reactive_compact_attempts.take().is_some() {
+            session.increment_version();
+            session.touch();
+        }
+    }
+
+    if abort_flag.load(Ordering::SeqCst) {
+        return GenerationLoopControl::Stop;
+    }
+
+    let (mode_id, model_id, context_tokens_cap) = {
+        let session = session_arc.lock().await;
+        (
+            session.thread.mode.clone(),
+            session.thread.model.clone(),
+            session.thread.context_tokens_cap,
+        )
+    };
+
+    let model_id_opt = if model_id.is_empty() {
+        None
+    } else {
+        Some(model_id.as_str())
+    };
+
+    let (effective_n_ctx, image_token_mode) = {
+        let caps =
+            crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await;
+        let model_rec = match caps {
+            Ok(caps) => crate::caps::resolve_chat_model(caps, &model_id).ok(),
+            Err(_) => None,
+        };
+        let image_token_mode = model_rec
+            .as_ref()
+            .map(|rec| rec.base.image_token_mode)
+            .unwrap_or_default();
+        let effective_n_ctx = model_rec.map(|rec| {
+            let model_n_ctx = if rec.base.n_ctx > 0 {
+                rec.base.n_ctx
+            } else {
+                tokens().default_n_ctx
+            };
+            match context_tokens_cap {
+                Some(cap) if cap > 0 => cap.min(model_n_ctx),
+                _ => model_n_ctx,
+            }
+        });
+        (effective_n_ctx, image_token_mode)
+    };
+
+    if let Some(effective_n_ctx) = effective_n_ctx {
+        let mut session = session_arc.lock().await;
+        maybe_inject_token_budget_instruction(
+            &mut session,
+            effective_n_ctx,
+            TOKEN_BUDGET_CADENCE,
+            image_token_mode,
+        );
+    }
+
+    maybe_save_trajectory_background_with_intent(
+        app.clone(),
+        session_arc.clone(),
+        TrajectoryCommitIntent::Checkpoint,
+    );
+
+    match process_tool_calls_once(app.clone(), session_arc.clone(), &mode_id, model_id_opt).await {
+        ToolStepOutcome::NoToolCalls => {
+            if handle_task_agent_reasoning_token_stop(
+                app.clone(),
+                session_arc.clone(),
+                effective_n_ctx,
+                image_token_mode,
+            )
+            .await
+            {
+                return GenerationLoopControl::Stop;
+            }
+            if maybe_recover_after_length_stop(
+                gcx.clone(),
+                &session_arc,
+                &thread,
+                effective_n_ctx,
+                image_token_mode,
+            )
+            .await
+            {
+                maybe_save_trajectory_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Checkpoint,
+                )
+                .await;
+                return GenerationLoopControl::Continue;
+            }
+            if inject_priority_messages_before_llm_if_safe(app.clone(), session_arc.clone()).await {
+                return GenerationLoopControl::Continue;
+            }
+            let should_continue = {
+                let session = session_arc.lock().await;
+                tail_needs_assistant(&session.messages)
+            };
+            if should_continue {
+                return GenerationLoopControl::Continue;
+            }
+            if maybe_record_goal_pursuit_progress(session_arc.clone()).await {
+                maybe_save_trajectory_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Checkpoint,
+                )
+                .await;
+            }
+            if handle_goal_turn_end(app.clone(), session_arc.clone()).await {
+                return GenerationLoopControl::Stop;
+            }
+            spawn_chat_completion_side_effects(
+                app.clone(),
+                session_arc.clone(),
+                chat_id.clone(),
+                chat_label.clone(),
+                true,
+            )
+            .await;
+            return GenerationLoopControl::Stop;
+        }
+        ToolStepOutcome::Paused => {
+            let mut ev = make_runtime_event(
+                "tool_confirmation",
+                &format!("Waiting for approval: {}", chat_label),
+                "chat",
+                &format!("chat_{}", chat_id),
+                "paused",
+                None,
+            );
+            ev.chat_id = Some(chat_id.to_string());
+            ev.persistent = true;
+            let origin = {
+                let session = session_arc.lock().await;
+                session.thread.worktree.as_ref().map(|worktree| {
+                    (
+                        worktree.source_workspace_root.clone(),
+                        session.created_at.clone(),
+                        session.event_seq,
+                    )
+                })
+            };
+            let mut correlated = false;
+            if let Some((root, version, sequence)) = origin {
+                if let Ok(root) = tokio::fs::canonicalize(root).await {
+                    use refact_buddy_core::operator_events::{
+                        OperatorSignal, OperatorSignalAuthority, OperatorSignalKind,
+                        OPERATOR_SIGNAL_SCHEMA_VERSION_V1,
+                    };
+                    use refact_buddy_core::operator_types::{
+                        NativeSourceIdentity, NativeSourceKind, ProjectIdentity, ResourceRef,
+                    };
+                    let canonical_root = root.to_string_lossy().into_owned();
+                    let signal = OperatorSignal {
+                        schema_version: OPERATOR_SIGNAL_SCHEMA_VERSION_V1,
+                        kind: OperatorSignalKind::OperationState,
+                        authority: OperatorSignalAuthority::Hint,
+                        project: ProjectIdentity {
+                            project_id: canonical_root.clone(),
+                            canonical_root,
+                        },
+                        worker: None,
+                        source: NativeSourceIdentity {
+                            source_kind: NativeSourceKind::Chat,
+                            source_id: chat_id.to_string(),
+                            source_version: version.clone(),
+                        },
+                        source_sequence: Some(sequence),
+                        chat: Some(ResourceRef {
+                            resource_kind: "chat".into(),
+                            resource_id: chat_id.to_string(),
+                            version,
+                        }),
+                        tool: None,
+                        goal: None,
+                        runtime_event: ev.clone(),
+                    };
+                    correlated = app
+                        .buddy_event_sink
+                        .enqueue_operator_signal(signal)
+                        .await
+                        .is_ok();
+                }
+            }
+            if !correlated {
+                app.buddy_event_sink.enqueue_event(ev).await;
+            }
+            return GenerationLoopControl::Stop;
+        }
+        ToolStepOutcome::Stop => {
+            let completed = {
+                let session = session_arc.lock().await;
+                session.runtime.state == SessionState::Completed
+            };
+            if completed {
+                spawn_chat_completion_side_effects(
+                    app.clone(),
+                    session_arc.clone(),
+                    chat_id.clone(),
+                    chat_label.clone(),
+                    false,
+                )
+                .await;
+            }
+            return GenerationLoopControl::Stop;
+        }
+        ToolStepOutcome::Continue => {
+            if inject_priority_messages_before_llm_if_safe(app.clone(), session_arc.clone()).await {
+                return GenerationLoopControl::Continue;
+            }
+        }
+    }
+
+    GenerationLoopControl::Continue
+}
+
 pub fn start_generation(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
@@ -1592,645 +2271,45 @@ pub fn start_generation(
     Box::pin(async move {
         let gcx = app.gcx.clone();
         let mut network_retry_attempt = 0usize;
-        // Marks the whole turn (assistant plus the multi-step tool loop) as
-        // in-flight, so `when_idle` deliveries do not land on a transient Idle.
         let mut turn_guard = TurnDepthGuard::enter(app.clone(), session_arc.clone()).await;
         loop {
-            match crate::chat::context_rebuild::drain_pending(gcx.clone(), &session_arc).await {
-                Ok(true) => break,
-                Err(error) => {
-                    let mut session = session_arc.lock().await;
-                    session.append_error_message_deduped(&format!(
-                        "Context operation failed: {}",
-                        safe_provider_error_diagnostic(&error)
-                    ));
-                    session.set_runtime_state(SessionState::Error, Some(error));
-                    break;
-                }
-                Ok(false) => {}
-            }
-            {
-                let mut session = session_arc.lock().await;
-                if let Err(error) = refact_core::active_context::active_context(&session.messages) {
-                    let error = format!("Invalid active context: {error}. Explicit rebuild required before generation");
-                    session.append_error_message_deduped(&error);
-                    session.set_runtime_state(SessionState::Error, Some(error));
-                    break;
-                }
-            }
-            if inject_priority_messages_before_llm_if_safe(app.clone(), session_arc.clone()).await {
-                continue;
-            }
-            // `append` deliveries land here: before the next LLM request, with
-            // the previous assistant/tool window closed.
-            crate::chat::delivery::drain_deliveries_at_boundary(app.clone(), session_arc.clone())
+            let (context, generation_result) =
+                match start_generation_iteration(&app, &session_arc, &gcx).await {
+                    GenerationAttemptStart::Continue => continue,
+                    GenerationAttemptStart::Stop => break,
+                    GenerationAttemptStart::Generated { context, result } => (context, result),
+                };
+
+            if let Ok(GenerationResult::PausedForUserDecision) = &generation_result {
+                maybe_save_trajectory_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Checkpoint,
+                )
                 .await;
-
-            let (mut thread, chat_id) = {
-                let session = session_arc.lock().await;
-                (session.thread.clone(), session.chat_id.clone())
-            };
-            {
-                let session = session_arc.lock().await;
-                if let Some(ref m) = session.active_command.model_override {
-                    if !m.is_empty() {
-                        thread.model = m.clone();
-                    }
-                }
+                break;
             }
 
-            let chat_label = {
-                let t = thread.title.trim().to_string();
-                if t.is_empty() || t == "New Chat" {
-                    "Untitled chat".to_string()
-                } else {
-                    t.chars().take(60).collect()
-                }
-            };
-
-            let fork_agent_name = {
-                let session = session_arc.lock().await;
-                session.active_command.context_fork.clone()
-            };
-
-            if let Some(agent_name) = fork_agent_name {
-                let user_content_opt = {
-                    let session = session_arc.lock().await;
-                    refact_core::active_context::active_context(&session.messages)
-                        .ok()
-                        .and_then(|view| {
-                            view.messages
-                                .into_iter()
-                                .rev()
-                                .find(|message| message.role == "user")
-                                .map(|message| message.content.content_text_only())
-                        })
-                };
-                {
-                    let mut session = session_arc.lock().await;
-                    session.active_command.context_fork = None;
-                }
-                let user_content = match user_content_opt {
-                    Some(c) => c,
-                    None => {
-                        warn!(
-                            "Fork skill '{}' skipped: no user message found in session {}",
-                            agent_name, chat_id
-                        );
-                        continue;
-                    }
-                };
-
-                let fork_result =
-                    run_fork_subchat(app.clone(), &agent_name, &user_content, &thread, &chat_id)
-                        .await;
-
-                match fork_result {
-                    Ok(assistant_content) => {
-                        let mut session = session_arc.lock().await;
-                        session.add_message(ChatMessage {
-                            role: "assistant".to_string(),
-                            content: ChatContent::SimpleText(assistant_content),
-                            ..Default::default()
-                        });
-                        session.set_runtime_state(SessionState::Idle, None);
-                        drop(session);
-                        spawn_completion_activity_reaction(app.clone(), session_arc.clone()).await;
-                        maybe_save_trajectory_with_intent(
-                            app.clone(),
-                            session_arc.clone(),
-                            TrajectoryCommitIntent::Checkpoint,
-                        )
-                        .await;
-                        break;
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Fork skill subchat failed ({}), falling back to normal generation",
-                            e
-                        );
-                        continue;
-                    }
-                }
-            }
-
-            // Resolve before the very first proactive check, with the command's
-            // actual model override applied. Failed resolution remains pending.
-            if thread.auto_compression_cap_pending {
-                if let Ok(caps) =
-                    crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
-                        .await
-                {
-                    if let Ok(model) = crate::caps::resolve_chat_model(caps, &thread.model) {
-                        let window = if model.base.n_ctx > 0 {
-                            model.base.n_ctx
-                        } else {
-                            tokens().default_n_ctx
-                        };
-                        resolve_session_compression_cap(&app, &session_arc, &mut thread, window)
-                            .await;
-                    }
-                }
-            }
-
-            if matches!(
-                crate::chat::context_rebuild::apply_context_rebuild_with_reason(
-                    gcx.clone(),
+            if let Err(error) = generation_result {
+                match handle_generation_error(
+                    &app,
                     &session_arc,
-                    &thread,
-                    false,
-                    None,
+                    &gcx,
+                    &context,
+                    error,
+                    &mut network_retry_attempt,
                 )
-                .await,
-                crate::chat::context_rebuild::CompactionOutcome::LlmUnavailable
-            ) {
-                break;
-            }
-
-            thread = {
-                let session = session_arc.lock().await;
-                let mut refreshed = session.thread.clone();
-                if let Some(model) = session
-                    .active_command
-                    .model_override
-                    .as_ref()
-                    .filter(|m| !m.is_empty())
+                .await
                 {
-                    refreshed.model = model.clone();
+                    GenerationLoopControl::Continue => continue,
+                    GenerationLoopControl::Stop => break,
                 }
-                refreshed
-            };
-
-            // Rebuilds and handoffs replace the conversation but not the preamble.
-            ensure_session_preamble(app.clone(), session_arc.clone()).await;
-
-            if user_stop_requested(&session_arc).await {
-                break;
-            }
-
-            let (abort_flag, abort_notify) = {
-                let mut session = session_arc.lock().await;
-                match session.start_stream() {
-                    Some((_message_id, abort_flag)) => {
-                        session.delivery_wake_sources.clear();
-                        let notify = session.abort_notify.clone();
-                        (abort_flag, notify)
-                    }
-                    None => {
-                        warn!(
-                            "Cannot start generation for {}: already generating",
-                            chat_id
-                        );
-                        break;
-                    }
-                }
-            };
-            let stream_prepare_started_at = perf_diagnostics::is_enabled().then(Instant::now);
-
-            {
-                let mut ev = make_runtime_event(
-                    "chat_started",
-                    &format!("Started: {}", chat_label),
-                    "chat",
-                    &format!("chat_{}", chat_id),
-                    "started",
-                    None,
-                );
-                ev.chat_id = Some(chat_id.to_string());
-                app.buddy_event_sink.enqueue_event(ev).await;
-                let mut ev = make_runtime_event(
-                    "streaming",
-                    &format!("Generating reply in '{}'", chat_label),
-                    "chat",
-                    &format!("chat_{}", chat_id),
-                    "streaming",
-                    None,
-                );
-                ev.speech_text = Some(format!("Working on your request in '{}'...", chat_label));
-                ev.scene = Some("working".to_string());
-                ev.persistent = true;
-                ev.chat_id = Some(chat_id.to_string());
-                app.buddy_event_sink.enqueue_event(ev).await;
-            }
-
-            let generation_result = run_llm_generation(
-                app.clone(),
-                session_arc.clone(),
-                thread.clone(),
-                chat_id.clone(),
-                abort_flag.clone(),
-                abort_notify.clone(),
-                stream_prepare_started_at,
-            )
-            .await;
-
-            if let Ok(GenerationResult::PausedForUserDecision) = generation_result {
-                maybe_save_trajectory_with_intent(
-                    app.clone(),
-                    session_arc.clone(),
-                    TrajectoryCommitIntent::Checkpoint,
-                )
-                .await;
-                break;
-            }
-
-            if let Err(mut error) = generation_result {
-                let retry_decision = error.retry_decision();
-                let should_retry_network = error.should_retry(network_retry_attempt, &abort_flag);
-                let retry_reason = retry_decision.reason();
-                if should_retry_network {
-                    let delay = super::retry_policy::retry_delay_for_attempt(network_retry_attempt);
-                    network_retry_attempt += 1;
-                    {
-                        let mut session = session_arc.lock().await;
-                        if !session.abort_flag.load(Ordering::SeqCst) {
-                            session.clear_stream_for_retry();
-                            let retry_msg = make_ui_only_retry_status_message(
-                                &error.message,
-                                network_retry_attempt,
-                                super::retry_policy::MAX_LLM_RETRY_ATTEMPTS,
-                                delay.as_secs(),
-                            );
-                            session.add_message(retry_msg);
-                        }
-                    }
-                    {
-                        let mut ev = make_runtime_event(
-                            "chat_retrying",
-                            &format!(
-                                "Retrying '{}' in {}s (attempt {}/{})",
-                                chat_label,
-                                delay.as_secs(),
-                                network_retry_attempt,
-                                super::retry_policy::MAX_LLM_RETRY_ATTEMPTS,
-                            ),
-                            "chat",
-                            &format!("chat_{}", chat_id),
-                            "retrying",
-                            None,
-                        );
-                        ev.chat_id = Some(chat_id.to_string());
-                        ev.persistent = true;
-                        app.buddy_event_sink.enqueue_event(ev).await;
-                    }
-                    warn!(
-                        "Retrying chat generation after retryable LLM error in {}s (attempt {}/{}, reason={})",
-                        delay.as_secs(),
-                        network_retry_attempt,
-                        super::retry_policy::MAX_LLM_RETRY_ATTEMPTS,
-                        retry_reason,
-                    );
-                    if super::retry_policy::sleep_or_abort(delay, abort_flag.clone()).await {
-                        break;
-                    }
-                    continue;
-                }
-                let is_context_limit =
-                    error.retry_decision().is_context_limit() && !abort_flag.load(Ordering::SeqCst);
-                if is_context_limit {
-                    let original_error = error.message.clone();
-                    let round = {
-                        let mut session = session_arc.lock().await;
-                        session.finish_stream_for_rebuild();
-                        let round = session
-                            .thread
-                            .reactive_compact_attempts
-                            .unwrap_or(0)
-                            .saturating_add(1);
-                        session.thread.reactive_compact_attempts = Some(round);
-                        session.increment_version();
-                        session.touch();
-                        round
-                    };
-                    if round == 1
-                        && thread.auto_compact_enabled_effective()
-                        && crate::chat::context_rebuild::apply_context_rebuild_with_reason(
-                            gcx.clone(),
-                            &session_arc,
-                            &thread,
-                            true,
-                            Some(CompressionReason::ContextLengthStop),
-                        )
-                        .await
-                        .applied()
-                    {
-                        continue;
-                    }
-                    error.message = context_limit_final_error_message(&original_error);
-                    {
-                        let mut session = session_arc.lock().await;
-                        crate::chat::goal_monitor::mark_goal_blocked_on_context_limit(&mut session);
-                    }
-                }
-
-                if error.partial_output_emitted && !abort_flag.load(Ordering::SeqCst) {
-                    let original = error.message.clone();
-                    let safe_error = partial_output_stream_error_message(&original);
-                    warn!("{}", safe_error);
-                    error.message = safe_error;
-                }
-
-                let error_message = error.message;
-
-                let task_meta_opt = {
-                    let mut session = session_arc.lock().await;
-                    if !session.abort_flag.load(Ordering::SeqCst) {
-                        let app2 = app.clone();
-                        let err_clone = error_message.clone();
-                        let chat_id2 = chat_id.clone();
-                        let chat_label2 = chat_label.clone();
-                        let model2 = session.thread.model.clone();
-                        tokio::spawn(async move {
-                            let model_ref = Some(model2.as_str()).filter(|m| !m.is_empty());
-                            app2.buddy_event_sink
-                                .report_error_with_model(
-                                    "llm_error",
-                                    &err_clone,
-                                    Some("chat/generation.rs"),
-                                    Some(&chat_id2),
-                                    model_ref,
-                                )
-                                .await;
-                            let short_err: String = err_clone.chars().take(60).collect();
-                            let priority =
-                                refact_buddy_core::diagnostics::diagnostic_priority_label(
-                                    &err_clone,
-                                );
-                            let mut ev = make_runtime_event(
-                                "chat_error",
-                                &format!("Error in '{}': {}", chat_label2, short_err),
-                                "chat",
-                                &format!("chat_{}", chat_id2),
-                                "failed",
-                                Some(priority),
-                            );
-                            ev.chat_id = Some(chat_id2.to_string());
-                            app2.buddy_event_sink.mark_chat_error(ev).await;
-                        });
-                        session.finish_stream_with_error(error_message);
-                    }
-                    session.thread.task_meta.clone()
-                };
-
-                maybe_save_trajectory_with_intent(
-                    app.clone(),
-                    session_arc.clone(),
-                    TrajectoryCommitIntent::Checkpoint,
-                )
-                .await;
-
-                if let Some(task_meta) = task_meta_opt {
-                    let error_msg = {
-                        let session = session_arc.lock().await;
-                        session.task_agent_error.clone()
-                    };
-                    if let Some(error) = error_msg {
-                        super::task_agent_monitor::handle_agent_streaming_error(
-                            app.clone(),
-                            &task_meta,
-                            &error,
-                        )
-                        .await;
-                    }
-                }
-                {
-                    let mut session = session_arc.lock().await;
-                    if session.user_interrupt_flag.load(Ordering::SeqCst) {
-                        session.clear_stream_for_retry();
-                    }
-                }
-                break;
             }
 
             network_retry_attempt = 0;
-
-            {
-                let mut session = session_arc.lock().await;
-                session.provider_usage_stale = false;
-                if session.thread.reactive_compact_attempts.take().is_some() {
-                    session.increment_version();
-                    session.touch();
-                }
-            }
-
-            if abort_flag.load(Ordering::SeqCst) {
-                break;
-            }
-
-            let (mode_id, model_id, context_tokens_cap) = {
-                let session = session_arc.lock().await;
-                (
-                    session.thread.mode.clone(),
-                    session.thread.model.clone(),
-                    session.thread.context_tokens_cap,
-                )
-            };
-
-            let model_id_opt = if model_id.is_empty() {
-                None
-            } else {
-                Some(model_id.as_str())
-            };
-
-            let (effective_n_ctx, image_token_mode) = {
-                let caps =
-                    crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
-                        .await;
-                let model_rec = match caps {
-                    Ok(caps) => crate::caps::resolve_chat_model(caps, &model_id).ok(),
-                    Err(_) => None,
-                };
-                let image_token_mode = model_rec
-                    .as_ref()
-                    .map(|rec| rec.base.image_token_mode)
-                    .unwrap_or_default();
-                let effective_n_ctx = model_rec.map(|rec| {
-                    let model_n_ctx = if rec.base.n_ctx > 0 {
-                        rec.base.n_ctx
-                    } else {
-                        tokens().default_n_ctx
-                    };
-                    match context_tokens_cap {
-                        Some(cap) if cap > 0 => cap.min(model_n_ctx),
-                        _ => model_n_ctx,
-                    }
-                });
-                (effective_n_ctx, image_token_mode)
-            };
-
-            if let Some(effective_n_ctx) = effective_n_ctx {
-                let mut session = session_arc.lock().await;
-                maybe_inject_token_budget_instruction(
-                    &mut session,
-                    effective_n_ctx,
-                    TOKEN_BUDGET_CADENCE,
-                    image_token_mode,
-                );
-            }
-
-            maybe_save_trajectory_background_with_intent(
-                app.clone(),
-                session_arc.clone(),
-                TrajectoryCommitIntent::Checkpoint,
-            );
-
-            match process_tool_calls_once(app.clone(), session_arc.clone(), &mode_id, model_id_opt)
-                .await
-            {
-                ToolStepOutcome::NoToolCalls => {
-                    if handle_task_agent_reasoning_token_stop(
-                        app.clone(),
-                        session_arc.clone(),
-                        effective_n_ctx,
-                        image_token_mode,
-                    )
-                    .await
-                    {
-                        break;
-                    }
-                    if maybe_recover_after_length_stop(
-                        gcx.clone(),
-                        &session_arc,
-                        &thread,
-                        effective_n_ctx,
-                        image_token_mode,
-                    )
-                    .await
-                    {
-                        maybe_save_trajectory_with_intent(
-                            app.clone(),
-                            session_arc.clone(),
-                            TrajectoryCommitIntent::Checkpoint,
-                        )
-                        .await;
-                        continue;
-                    }
-                    if inject_priority_messages_before_llm_if_safe(app.clone(), session_arc.clone())
-                        .await
-                    {
-                        continue;
-                    }
-                    let should_continue = {
-                        let session = session_arc.lock().await;
-                        tail_needs_assistant(&session.messages)
-                    };
-                    if should_continue {
-                        continue;
-                    }
-                    if maybe_record_goal_pursuit_progress(session_arc.clone()).await {
-                        maybe_save_trajectory_with_intent(
-                            app.clone(),
-                            session_arc.clone(),
-                            TrajectoryCommitIntent::Checkpoint,
-                        )
-                        .await;
-                    }
-                    if handle_goal_turn_end(app.clone(), session_arc.clone()).await {
-                        break;
-                    }
-                    spawn_chat_completion_side_effects(
-                        app.clone(),
-                        session_arc.clone(),
-                        chat_id.clone(),
-                        chat_label.clone(),
-                        true,
-                    )
-                    .await;
-                    break;
-                }
-                ToolStepOutcome::Paused => {
-                    let mut ev = make_runtime_event(
-                        "tool_confirmation",
-                        &format!("Waiting for approval: {}", chat_label),
-                        "chat",
-                        &format!("chat_{}", chat_id),
-                        "paused",
-                        None,
-                    );
-                    ev.chat_id = Some(chat_id.to_string());
-                    ev.persistent = true;
-                    let origin = {
-                        let session = session_arc.lock().await;
-                        session.thread.worktree.as_ref().map(|worktree| {
-                            (
-                                worktree.source_workspace_root.clone(),
-                                session.created_at.clone(),
-                                session.event_seq,
-                            )
-                        })
-                    };
-                    let mut correlated = false;
-                    if let Some((root, version, sequence)) = origin {
-                        if let Ok(root) = tokio::fs::canonicalize(root).await {
-                            use refact_buddy_core::operator_events::{
-                                OperatorSignal, OperatorSignalAuthority, OperatorSignalKind,
-                                OPERATOR_SIGNAL_SCHEMA_VERSION_V1,
-                            };
-                            use refact_buddy_core::operator_types::{
-                                NativeSourceIdentity, NativeSourceKind, ProjectIdentity,
-                                ResourceRef,
-                            };
-                            let canonical_root = root.to_string_lossy().into_owned();
-                            let signal = OperatorSignal {
-                                schema_version: OPERATOR_SIGNAL_SCHEMA_VERSION_V1,
-                                kind: OperatorSignalKind::OperationState,
-                                authority: OperatorSignalAuthority::Hint,
-                                project: ProjectIdentity {
-                                    project_id: canonical_root.clone(),
-                                    canonical_root,
-                                },
-                                worker: None,
-                                source: NativeSourceIdentity {
-                                    source_kind: NativeSourceKind::Chat,
-                                    source_id: chat_id.to_string(),
-                                    source_version: version.clone(),
-                                },
-                                source_sequence: Some(sequence),
-                                chat: Some(ResourceRef {
-                                    resource_kind: "chat".into(),
-                                    resource_id: chat_id.to_string(),
-                                    version,
-                                }),
-                                tool: None,
-                                goal: None,
-                                runtime_event: ev.clone(),
-                            };
-                            correlated = app
-                                .buddy_event_sink
-                                .enqueue_operator_signal(signal)
-                                .await
-                                .is_ok();
-                        }
-                    }
-                    if !correlated {
-                        app.buddy_event_sink.enqueue_event(ev).await;
-                    }
-                    break;
-                }
-                ToolStepOutcome::Stop => {
-                    let completed = {
-                        let session = session_arc.lock().await;
-                        session.runtime.state == SessionState::Completed
-                    };
-                    if completed {
-                        spawn_chat_completion_side_effects(
-                            app.clone(),
-                            session_arc.clone(),
-                            chat_id.clone(),
-                            chat_label.clone(),
-                            false,
-                        )
-                        .await;
-                    }
-                    break;
-                }
-                ToolStepOutcome::Continue => {
-                    if inject_priority_messages_before_llm_if_safe(app.clone(), session_arc.clone())
-                        .await
-                    {
-                        continue;
-                    }
-                }
+            match process_successful_generation(&app, &session_arc, &gcx, &context).await {
+                GenerationLoopControl::Continue => continue,
+                GenerationLoopControl::Stop => break,
             }
         }
 
@@ -2243,8 +2322,6 @@ pub fn start_generation(
             session.queue_notify.notify_one();
         }
 
-        // Whole turn is over: release the depth guard, then land `when_idle`
-        // deliveries (and any `append` ones still waiting).
         turn_guard.release().await;
         crate::chat::delivery::drain_deliveries_at_boundary(app.clone(), session_arc.clone()).await;
     })
@@ -2594,6 +2671,775 @@ pub enum GenerationResult {
     PausedForUserDecision,
 }
 
+enum StreamCollectorEventPayload {
+    DeltaOps(Vec<DeltaOp>),
+    Usage(ChatUsage),
+}
+
+struct SessionCollector {
+    tx: tokio::sync::mpsc::Sender<StreamCollectorEventPayload>,
+    overflow_usage: Arc<std::sync::Mutex<Option<ChatUsage>>>,
+    overflow_ops: Arc<std::sync::Mutex<Vec<DeltaOp>>>,
+}
+
+impl StreamCollector for SessionCollector {
+    fn on_delta_ops(&mut self, _choice_idx: usize, ops: Vec<DeltaOp>) {
+        match self.tx.try_send(StreamCollectorEventPayload::DeltaOps(ops)) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(event)) => {
+                if let StreamCollectorEventPayload::DeltaOps(ops) = event {
+                    if let Ok(mut guard) = self.overflow_ops.lock() {
+                        guard.extend(ops);
+                    }
+                }
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_event)) => {}
+        }
+    }
+
+    fn on_usage(&mut self, usage: &ChatUsage) {
+        let usage_clone = usage.clone();
+        match self
+            .tx
+            .try_send(StreamCollectorEventPayload::Usage(usage_clone.clone()))
+        {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_event)) => {
+                if let Ok(mut guard) = self.overflow_usage.lock() {
+                    *guard = Some(usage_clone);
+                }
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_event)) => {}
+        }
+    }
+
+    fn on_finish(&mut self, _choice_idx: usize, _finish_reason: Option<String>) {}
+}
+
+fn spawn_stream_delta_emitter(
+    mut rx: tokio::sync::mpsc::Receiver<StreamCollectorEventPayload>,
+    overflow_ops: Arc<std::sync::Mutex<Vec<DeltaOp>>>,
+    overflow_usage: Arc<std::sync::Mutex<Option<ChatUsage>>>,
+    session_arc_emitter: Arc<AMutex<ChatSession>>,
+    first_content_started_at: Option<Instant>,
+    emitter_chat_id: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        fn merge_events(
+            events: &mut Vec<StreamCollectorEventPayload>,
+            batched_ops: &mut Vec<DeltaOp>,
+            latest_usage: &mut Option<ChatUsage>,
+        ) {
+            for event in events.drain(..) {
+                match event {
+                    StreamCollectorEventPayload::DeltaOps(ops) => {
+                        batched_ops.extend(ops);
+                    }
+                    StreamCollectorEventPayload::Usage(usage) => {
+                        *latest_usage = Some(usage);
+                    }
+                }
+            }
+        }
+        let mut pending = Vec::<StreamCollectorEventPayload>::new();
+        let mut first_visible_delta_emitted = false;
+        let mut first_content_delta_recorded = false;
+
+        while let Some(first_event) = rx.recv().await {
+            let flush_immediately = match &first_event {
+                StreamCollectorEventPayload::Usage(_) => true,
+                StreamCollectorEventPayload::DeltaOps(ops) => {
+                    !first_visible_delta_emitted && delta_ops_contain_visible_content(ops)
+                        || ops.iter().any(|op| !delta_is_coalescible_text(op))
+                }
+            };
+            pending.push(first_event);
+
+            if !flush_immediately {
+                let deadline = tokio::time::Instant::now() + DELTA_COALESCE_WINDOW;
+                while pending.len() < MAX_DELTA_BATCH_EVENTS {
+                    match tokio::time::timeout_at(deadline, rx.recv()).await {
+                        Ok(Some(event)) => {
+                            let must_flush = match &event {
+                                StreamCollectorEventPayload::Usage(_) => true,
+                                StreamCollectorEventPayload::DeltaOps(ops) => {
+                                    (!first_visible_delta_emitted
+                                        && delta_ops_contain_visible_content(ops))
+                                        || ops.iter().any(|op| !delta_is_coalescible_text(op))
+                                }
+                            };
+                            pending.push(event);
+                            if must_flush {
+                                break;
+                            }
+                        }
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+            }
+
+            let mut batched_ops = Vec::new();
+            let mut latest_usage: Option<ChatUsage> = None;
+            merge_events(&mut pending, &mut batched_ops, &mut latest_usage);
+
+            if let Ok(mut guard) = overflow_ops.lock() {
+                if !guard.is_empty() {
+                    let mut drained = std::mem::take(&mut *guard);
+                    batched_ops.append(&mut drained);
+                }
+            }
+            if let Ok(mut guard) = overflow_usage.lock() {
+                if let Some(usage) = guard.take() {
+                    latest_usage = Some(usage);
+                }
+            }
+
+            let batched_ops = batch_stream_delta_ops(batched_ops);
+
+            let mut session = session_arc_emitter.lock().await;
+            if !batched_ops.is_empty() {
+                for ops in batched_ops {
+                    let carries_content = delta_ops_contain_assistant_content(&ops);
+                    first_visible_delta_emitted |= delta_ops_contain_visible_content(&ops);
+                    session.emit_stream_delta(ops);
+                    if carries_content && !first_content_delta_recorded {
+                        if let Some(started_at) = first_content_started_at {
+                            perf_diagnostics::record(
+                                PerfComponent::StreamFirstContentDelta,
+                                Some(&emitter_chat_id),
+                                PerfOutcome::Success,
+                                started_at
+                                    .elapsed()
+                                    .as_micros()
+                                    .try_into()
+                                    .unwrap_or(u64::MAX),
+                                None,
+                                None,
+                                None,
+                            );
+                        }
+                        first_content_delta_recorded = true;
+                    }
+                }
+            }
+            if let Some(usage) = latest_usage {
+                session.draft_usage = Some(usage);
+            }
+        }
+
+        let mut final_ops = Vec::new();
+        let mut final_usage: Option<ChatUsage> = None;
+        if let Ok(mut guard) = overflow_ops.lock() {
+            if !guard.is_empty() {
+                final_ops = std::mem::take(&mut *guard);
+            }
+        }
+        if let Ok(mut guard) = overflow_usage.lock() {
+            if let Some(usage) = guard.take() {
+                final_usage = Some(usage);
+            }
+        }
+
+        if !final_ops.is_empty() || final_usage.is_some() {
+            let final_ops = batch_stream_delta_ops(final_ops);
+
+            let mut session = session_arc_emitter.lock().await;
+            if !final_ops.is_empty() {
+                for ops in final_ops {
+                    let carries_content = delta_ops_contain_assistant_content(&ops);
+                    session.emit_stream_delta(ops);
+                    if carries_content && !first_content_delta_recorded {
+                        if let Some(started_at) = first_content_started_at {
+                            perf_diagnostics::record(
+                                PerfComponent::StreamFirstContentDelta,
+                                Some(&emitter_chat_id),
+                                PerfOutcome::Success,
+                                started_at
+                                    .elapsed()
+                                    .as_micros()
+                                    .try_into()
+                                    .unwrap_or(u64::MAX),
+                                None,
+                                None,
+                                None,
+                            );
+                        }
+                        first_content_delta_recorded = true;
+                    }
+                }
+            }
+            if let Some(usage) = final_usage {
+                session.draft_usage = Some(usage);
+            }
+        }
+    })
+}
+
+struct StreamAttemptResult {
+    results: Result<Vec<ChoiceFinal>, LlmStreamError>,
+    cloud_input_usage: Option<crate::chat::cloud_token_count::CloudInputTokenCount>,
+    duration_ms: u64,
+    call_ts_start: String,
+    call_ts_end: String,
+}
+
+enum StreamAttemptOutcome {
+    Paused,
+    Completed(StreamAttemptResult),
+}
+
+async fn run_stream_attempt(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    llm_request: &LlmRequest,
+    model_rec: &crate::caps::ChatModelRecord,
+    abort_flag: &Arc<AtomicBool>,
+    abort_notify: &Arc<tokio::sync::Notify>,
+    stream_prepare_started_at: Option<Instant>,
+    chat_id: &str,
+) -> StreamAttemptOutcome {
+    let params = StreamRunParams {
+        llm_request: llm_request.clone(),
+        model_rec: model_rec.base.clone(),
+        chat_id: Some(chat_id.to_string()),
+        allow_websocket: true,
+        abort_flag: Some(abort_flag.clone()),
+        abort_notify: Some(abort_notify.clone()),
+        supports_tools: model_rec.supports_tools,
+        supports_reasoning: model_rec.has_reasoning_support(),
+        reasoning_type: model_rec.reasoning_type_string(),
+        supports_temperature: model_rec.supports_temperature,
+    };
+
+    let mut cloud_input_usage_task = crate::chat::cloud_token_count::spawn_input_token_count_task(
+        app.gcx.clone(),
+        app.runtime.http_client.clone(),
+        &llm_request,
+        &model_rec.base,
+        Some(chat_id.to_string()),
+    );
+
+    const EMITTER_QUEUE_CAPACITY: usize = 256;
+    let (tx, rx) =
+        tokio::sync::mpsc::channel::<StreamCollectorEventPayload>(EMITTER_QUEUE_CAPACITY);
+    let overflow_usage = Arc::new(std::sync::Mutex::new(None::<ChatUsage>));
+    let overflow_ops = Arc::new(std::sync::Mutex::new(Vec::<DeltaOp>::new()));
+
+    let mut collector = SessionCollector {
+        tx,
+        overflow_usage: overflow_usage.clone(),
+        overflow_ops: overflow_ops.clone(),
+    };
+
+    let session_arc_emitter = session_arc.clone();
+    let first_content_started_at = stream_prepare_started_at;
+    let emitter_chat_id = chat_id.to_string();
+    let emitter_task = spawn_stream_delta_emitter(
+        rx,
+        overflow_ops.clone(),
+        overflow_usage.clone(),
+        session_arc_emitter,
+        first_content_started_at,
+        emitter_chat_id,
+    );
+
+    let call_ts_start = chrono::Utc::now().to_rfc3339();
+    let call_start = std::time::Instant::now();
+
+    let stream_outcome = super::stream_core::run_llm_stream_with_prepare_started(
+        app.clone(),
+        params,
+        &mut collector,
+        stream_prepare_started_at,
+    )
+    .await;
+    let mut cloud_input_usage = None;
+    if stream_outcome.is_err() {
+        if let Some(mut handle) = cloud_input_usage_task.take() {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), &mut handle).await {
+                Ok(Ok(usage)) => cloud_input_usage = usage,
+                Ok(Err(_)) => {}
+                Err(_) => handle.abort(),
+            }
+        }
+    } else if let Some(handle) = cloud_input_usage_task.take() {
+        match handle.await {
+            Ok(usage) => {
+                cloud_input_usage = usage;
+            }
+            Err(err) => {
+                if !err.is_cancelled() {
+                    tracing::warn!(error = %err, "cloud token count task failed");
+                }
+            }
+        }
+    }
+    drop(collector);
+    let _ = emitter_task.await;
+
+    if let Ok(LlmStreamOutcome::PausedForCacheGuard) = stream_outcome {
+        tracing::info!("Generation paused by cache guard");
+        return StreamAttemptOutcome::Paused;
+    }
+
+    let results = stream_outcome
+        .map(|o| match o {
+            LlmStreamOutcome::Choices(c) => c,
+            LlmStreamOutcome::PausedForCacheGuard => unreachable!(),
+        })
+        .map_err(|error| {
+            synthesize_responses_context_cutoff_error_if_needed(
+                error,
+                &model_rec.base,
+                &llm_request.messages,
+                llm_request.params.n_ctx.unwrap_or(model_rec.base.n_ctx),
+                true,
+            )
+        });
+    let duration_ms = call_start.elapsed().as_millis() as u64;
+    let call_ts_end = chrono::Utc::now().to_rfc3339();
+    StreamAttemptOutcome::Completed(StreamAttemptResult {
+        results,
+        cloud_input_usage,
+        duration_ms,
+        call_ts_start,
+        call_ts_end,
+    })
+}
+
+fn recover_stream_tool_calls(
+    result: &mut ChoiceFinal,
+    tools: &Option<Vec<serde_json::Value>>,
+) -> Result<(), LlmStreamError> {
+    let allowed_tools = tool_call_recovery::allowed_tool_names(tools);
+
+    if !result.tool_calls_raw.is_empty() {
+        result.tool_calls_raw = tool_call_recovery::unwrap_multi_tool_use_parallel(
+            &result.tool_calls_raw,
+            &allowed_tools,
+        );
+    }
+
+    if result.tool_calls_raw.is_empty() && !allowed_tools.is_empty() {
+        if let Some((cleaned_content, recovered_calls)) =
+            tool_call_recovery::recover_tool_calls_from_chatml_content(
+                &result.raw_content,
+                &allowed_tools,
+            )
+        {
+            warn!(
+                "tool_call_recovery: recovered {} tool call(s) from garbled content",
+                recovered_calls.len()
+            );
+            result.content = cleaned_content;
+            result.tool_calls_raw = recovered_calls;
+        }
+    }
+
+    if result.tool_calls_raw.is_empty() && !allowed_tools.is_empty() {
+        if let Some((cleaned_content, recovered_calls, source)) =
+            tool_call_recovery_oss::recover_tool_calls_from_oss_text(
+                &result.raw_content,
+                &allowed_tools,
+            )
+        {
+            warn!(
+                "tool_call_recovery_oss: recovered {} tool call(s) via {}",
+                recovered_calls.len(),
+                source
+            );
+            result
+                .extra
+                .insert("_tool_call_recovery_source".to_string(), json!(source));
+            result.content = cleaned_content;
+            result.tool_calls_raw = recovered_calls;
+        }
+    }
+
+    if !result.tool_calls_raw.is_empty() {
+        let parsed: Vec<_> = result
+            .tool_calls_raw
+            .iter()
+            .filter_map(|tc| normalize_tool_call(tc))
+            .collect();
+        if parsed.is_empty() {
+            let has_content = !result.content.trim().is_empty()
+                || !result.reasoning.trim().is_empty()
+                || !result.server_content_blocks.is_empty()
+                || !result.citations.is_empty();
+            let names: Vec<_> = result
+                .tool_calls_raw
+                .iter()
+                .filter_map(|tc| {
+                    tc.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                })
+                .collect();
+            tracing::warn!(
+                "All {} tool calls unparsable, names={:?}",
+                result.tool_calls_raw.len(),
+                names,
+            );
+            if !has_content {
+                return Err("Model returned tool_calls but none were parsable"
+                    .to_string()
+                    .into());
+            }
+            result.tool_calls_raw.clear();
+        } else if parsed.len() < result.tool_calls_raw.len() {
+            let dropped_names: Vec<_> = result
+                .tool_calls_raw
+                .iter()
+                .filter(|tc| normalize_tool_call(tc).is_none())
+                .filter_map(|tc| {
+                    tc.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                })
+                .collect();
+            tracing::warn!(
+                "Dropped {}/{} tool calls during normalization, names={:?}",
+                dropped_names.len(),
+                result.tool_calls_raw.len(),
+                dropped_names,
+            );
+        }
+    }
+
+    maybe_downgrade_bogus_tool_calls_finish_reason(result, "post_tool_normalization");
+    Ok(())
+}
+
+enum AttemptResult {
+    Retry,
+    Success(ChoiceFinal, LlmCallEvent),
+}
+
+async fn complete_stream_generation(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    model_rec: &crate::caps::ChatModelRecord,
+    result: ChoiceFinal,
+    pending_success_event: LlmCallEvent,
+) {
+    let (model_id, usage_for_pricing) = {
+        let session = session_arc.lock().await;
+        (model_rec.base.id.clone(), session.draft_usage.clone())
+    };
+    let metering_usd = if let Some(ref usage) = usage_for_pricing {
+        generation_metering_usd(app, &model_id, usage).await
+    } else {
+        None
+    };
+
+    {
+        let mut success_event = pending_success_event;
+        success_event.cost_usd = metering_usd.as_ref().map(|m| m.total_usd);
+        if let Some(sender) = &app.model.llm_stats_sender {
+            if sender.try_send(success_event).is_err() {
+                tracing::warn!("stats: channel full, dropping LLM call event");
+            }
+        }
+    }
+
+    let mut session = session_arc.lock().await;
+    if let Some(ref mut draft) = session.draft_message {
+        draft.content = ChatContent::SimpleText(result.content);
+
+        if !result.tool_calls_raw.is_empty() {
+            info!(
+                "Parsing {} accumulated tool calls",
+                result.tool_calls_raw.len()
+            );
+            let parsed: Vec<_> = result
+                .tool_calls_raw
+                .iter()
+                .filter_map(|tc| normalize_tool_call(tc))
+                .collect();
+            info!("Successfully parsed {} tool calls", parsed.len());
+            if !parsed.is_empty() {
+                draft.tool_calls = Some(parsed);
+            }
+        }
+
+        if !result.reasoning.is_empty() {
+            draft.reasoning_content = Some(result.reasoning);
+        }
+        if !result.thinking_blocks.is_empty() {
+            draft.thinking_blocks = Some(result.thinking_blocks);
+        }
+        if !result.citations.is_empty() {
+            draft.citations = result.citations;
+        }
+        if !result.server_content_blocks.is_empty() {
+            draft.server_content_blocks = result.server_content_blocks;
+        }
+        if !result.extra.is_empty() {
+            draft.extra = result.extra;
+        }
+    }
+
+    let is_chatgpt_backend = model_rec.base.endpoint.contains("chatgpt.com/backend-api");
+    if model_rec.base.wire_format == crate::llm::WireFormat::OpenaiResponses && !is_chatgpt_backend
+    {
+        if let Some(resp_id) = session
+            .draft_message
+            .as_ref()
+            .and_then(|m| m.extra.get("openai_response_id"))
+            .and_then(|v| v.as_str())
+        {
+            if session.thread.previous_response_id.as_deref() != Some(resp_id) {
+                session.thread.previous_response_id = Some(resp_id.to_string());
+                session.increment_version();
+            }
+        }
+    }
+
+    if let Some(ref mut usage) = session.draft_usage {
+        usage.metering_usd = metering_usd;
+    }
+
+    let next_state = if session
+        .draft_message
+        .as_ref()
+        .and_then(|m| m.tool_calls.as_ref())
+        .is_some_and(|tool_calls| !tool_calls.is_empty())
+    {
+        SessionState::ExecutingTools
+    } else {
+        SessionState::Idle
+    };
+    session.finish_stream_with_next_state(result.finish_reason, next_state);
+}
+
+async fn finish_stream_attempt(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    llm_request: &LlmRequest,
+    chat_id: &str,
+    root_chat_id: &Option<String>,
+    mode_for_stats: &str,
+    task_id: &Option<String>,
+    task_role: &Option<String>,
+    agent_id: &Option<String>,
+    card_id: &Option<String>,
+    attempt: usize,
+    max_attempts: usize,
+    can_retry_with_temp_bump: bool,
+    cloud_input_usage: &Option<crate::chat::cloud_token_count::CloudInputTokenCount>,
+    duration_ms: u64,
+    call_ts_start: String,
+    call_ts_end: String,
+    results: Result<Vec<ChoiceFinal>, LlmStreamError>,
+) -> Result<AttemptResult, LlmStreamError> {
+    const TEMPERATURE_BUMP: f32 = 0.1;
+    const MAX_RETRY_TEMPERATURE: f32 = 0.5;
+
+    let model_id_for_stats = llm_request.model_id.clone();
+    let messages_count = llm_request.messages.len();
+    let tools_count = llm_request.tools.as_ref().map(|t| t.len()).unwrap_or(0);
+    let temperature_for_stats = llm_request.params.temperature;
+    let max_tokens_for_stats = llm_request.params.max_tokens;
+    let results = match results {
+        Err(error) => {
+            let usage_for_error = {
+                let session = session_arc.lock().await;
+                session.draft_usage.clone()
+            }
+            .or_else(|| cloud_input_usage.as_ref().map(|count| count.usage.clone()));
+            let (provider, model) = split_model_provider(&model_id_for_stats);
+            let event = LlmCallEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                ts_start: call_ts_start.clone(),
+                ts_end: call_ts_end.clone(),
+                duration_ms,
+                chat_id: chat_id.to_string(),
+                root_chat_id: root_chat_id.clone(),
+                mode: mode_for_stats.to_string(),
+                task_id: task_id.clone(),
+                task_role: task_role.clone(),
+                agent_id: agent_id.clone(),
+                card_id: card_id.clone(),
+                model_id: model_id_for_stats.clone(),
+                provider,
+                model,
+                messages_count,
+                tools_count,
+                max_tokens: max_tokens_for_stats,
+                temperature: temperature_for_stats,
+                success: false,
+                error_message: Some(error.message.chars().take(200).collect()),
+                finish_reason: None,
+                attempt_n: attempt,
+                retry_reason: None,
+                prompt_tokens: usage_for_error
+                    .as_ref()
+                    .map(|u| u.prompt_tokens)
+                    .unwrap_or(0),
+                completion_tokens: usage_for_error
+                    .as_ref()
+                    .map(|u| u.completion_tokens)
+                    .unwrap_or(0),
+                cache_read_tokens: usage_for_error.as_ref().and_then(|u| u.cache_read_tokens),
+                cache_creation_tokens: usage_for_error
+                    .as_ref()
+                    .and_then(|u| u.cache_creation_tokens),
+                total_tokens: usage_for_error
+                    .as_ref()
+                    .map(|u| u.total_tokens)
+                    .unwrap_or(0),
+                cost_usd: None,
+            };
+            if let Some(sender) = &app.model.llm_stats_sender {
+                if sender.try_send(event).is_err() {
+                    tracing::warn!("stats: channel full, dropping LLM call event");
+                }
+            }
+            return Err(error);
+        }
+        Ok(results) => results,
+    };
+
+    let mut result = results.into_iter().next().unwrap_or_default();
+
+    if result.usage.is_none() {
+        if let Some(count) = cloud_input_usage.clone() {
+            result.usage = Some(count.usage);
+        }
+    }
+    if let Some(usage) = result.usage.clone() {
+        let mut session = session_arc.lock().await;
+        session.draft_usage = Some(usage);
+    }
+
+    if is_result_empty(&result) {
+        let draft_usage = {
+            let session = session_arc.lock().await;
+            session.draft_usage.clone()
+        };
+        let (provider, model) = split_model_provider(&model_id_for_stats);
+        let event = LlmCallEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            ts_start: call_ts_start,
+            ts_end: call_ts_end,
+            duration_ms,
+            chat_id: chat_id.to_string(),
+            root_chat_id: root_chat_id.clone(),
+            mode: mode_for_stats.to_string(),
+            task_id: task_id.clone(),
+            task_role: task_role.clone(),
+            agent_id: agent_id.clone(),
+            card_id: card_id.clone(),
+            model_id: model_id_for_stats,
+            provider,
+            model,
+            messages_count,
+            tools_count,
+            max_tokens: max_tokens_for_stats,
+            temperature: temperature_for_stats,
+            success: false,
+            error_message: Some("empty_response".to_string()),
+            finish_reason: result.finish_reason.clone(),
+            attempt_n: attempt,
+            retry_reason: Some("empty_response".to_string()),
+            prompt_tokens: draft_usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
+            completion_tokens: draft_usage
+                .as_ref()
+                .map(|u| u.completion_tokens)
+                .unwrap_or(0),
+            cache_read_tokens: draft_usage.as_ref().and_then(|u| u.cache_read_tokens),
+            cache_creation_tokens: draft_usage.as_ref().and_then(|u| u.cache_creation_tokens),
+            total_tokens: draft_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0),
+            cost_usd: draft_usage
+                .as_ref()
+                .and_then(|u| u.metering_usd.as_ref())
+                .map(|m| m.total_usd),
+        };
+        if let Some(sender) = &app.model.llm_stats_sender {
+            if sender.try_send(event).is_err() {
+                tracing::warn!("stats: channel full, dropping LLM call event");
+            }
+        }
+
+        if attempt < max_attempts && can_retry_with_temp_bump {
+            let current_temp_display = if attempt == 1 {
+                "default".to_string()
+            } else {
+                format!("{:.1}", TEMPERATURE_BUMP * (attempt - 2) as f32)
+            };
+            let next_temp = (TEMPERATURE_BUMP * (attempt - 1) as f32).min(MAX_RETRY_TEMPERATURE);
+            warn!(
+                "Empty assistant response at T={}, retrying with T={:.1} (attempt {}/{})",
+                current_temp_display, next_temp, attempt, max_attempts
+            );
+            {
+                let mut session = session_arc.lock().await;
+                if let Some(ref mut draft) = session.draft_message {
+                    draft.content = ChatContent::SimpleText(String::new());
+                    draft.tool_calls = None;
+                    draft.reasoning_content = None;
+                    draft.thinking_blocks = None;
+                    draft.citations = Vec::new();
+                    draft.server_content_blocks = Vec::new();
+                    draft.extra = serde_json::Map::new();
+                }
+                session.draft_usage = None;
+            }
+            return Ok(AttemptResult::Retry);
+        } else {
+            let effective_temp = llm_request.params.temperature.unwrap_or(0.0);
+            return Err(format!(
+                "Empty assistant response after {} attempts (T={:.1})",
+                max_attempts, effective_temp
+            )
+            .into());
+        }
+    }
+
+    recover_stream_tool_calls(&mut result, &llm_request.tools)?;
+
+    let draft_usage_for_success = {
+        let session = session_arc.lock().await;
+        session.draft_usage.clone()
+    };
+    let usage_for_event = result.usage.as_ref().or(draft_usage_for_success.as_ref());
+    let (provider, model) = split_model_provider(&model_id_for_stats);
+    let pending_success_event = LlmCallEvent {
+        id: uuid::Uuid::new_v4().to_string(),
+        ts_start: call_ts_start,
+        ts_end: call_ts_end,
+        duration_ms,
+        chat_id: chat_id.to_string(),
+        root_chat_id: root_chat_id.clone(),
+        mode: mode_for_stats.to_string(),
+        task_id: task_id.clone(),
+        task_role: task_role.clone(),
+        agent_id: agent_id.clone(),
+        card_id: card_id.clone(),
+        model_id: model_id_for_stats,
+        provider,
+        model,
+        messages_count,
+        tools_count,
+        max_tokens: max_tokens_for_stats,
+        temperature: temperature_for_stats,
+        success: true,
+        error_message: None,
+        finish_reason: result.finish_reason.clone(),
+        attempt_n: attempt,
+        retry_reason: None,
+        prompt_tokens: usage_for_event.map(|u| u.prompt_tokens).unwrap_or(0),
+        completion_tokens: usage_for_event.map(|u| u.completion_tokens).unwrap_or(0),
+        cache_read_tokens: usage_for_event.and_then(|u| u.cache_read_tokens),
+        cache_creation_tokens: usage_for_event.and_then(|u| u.cache_creation_tokens),
+        total_tokens: usage_for_event.map(|u| u.total_tokens).unwrap_or(0),
+        cost_usd: None,
+    };
+
+    Ok(AttemptResult::Success(result, pending_success_event))
+}
+
 async fn run_streaming_generation(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
@@ -2642,707 +3488,56 @@ async fn run_streaming_generation(
             llm_request.params.temperature = Some(retry_temp.min(MAX_RETRY_TEMPERATURE));
         }
 
-        let params = StreamRunParams {
-            llm_request: llm_request.clone(),
-            model_rec: model_rec.base.clone(),
-            chat_id: Some(chat_id.clone()),
-            allow_websocket: true,
-            abort_flag: Some(abort_flag.clone()),
-            abort_notify: Some(abort_notify.clone()),
-            supports_tools: model_rec.supports_tools,
-            supports_reasoning: model_rec.has_reasoning_support(),
-            reasoning_type: model_rec.reasoning_type_string(),
-            supports_temperature: model_rec.supports_temperature,
-        };
-
-        let mut cloud_input_usage_task =
-            crate::chat::cloud_token_count::spawn_input_token_count_task(
-                app.gcx.clone(),
-                app.runtime.http_client.clone(),
-                &llm_request,
-                &model_rec.base,
-                Some(chat_id.clone()),
-            );
-
-        enum CollectorEventPayload {
-            DeltaOps(Vec<DeltaOp>),
-            Usage(ChatUsage),
-        }
-
-        const EMITTER_QUEUE_CAPACITY: usize = 256;
-        let (tx, mut rx) =
-            tokio::sync::mpsc::channel::<CollectorEventPayload>(EMITTER_QUEUE_CAPACITY);
-        let overflow_usage = Arc::new(std::sync::Mutex::new(None::<ChatUsage>));
-        let overflow_ops = Arc::new(std::sync::Mutex::new(Vec::<DeltaOp>::new()));
-
-        struct SessionCollector {
-            tx: tokio::sync::mpsc::Sender<CollectorEventPayload>,
-            overflow_usage: Arc<std::sync::Mutex<Option<ChatUsage>>>,
-            overflow_ops: Arc<std::sync::Mutex<Vec<DeltaOp>>>,
-        }
-
-        impl StreamCollector for SessionCollector {
-            fn on_delta_ops(&mut self, _choice_idx: usize, ops: Vec<DeltaOp>) {
-                match self.tx.try_send(CollectorEventPayload::DeltaOps(ops)) {
-                    Ok(()) => {}
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(event)) => {
-                        if let CollectorEventPayload::DeltaOps(ops) = event {
-                            if let Ok(mut guard) = self.overflow_ops.lock() {
-                                guard.extend(ops);
-                            }
-                        }
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_event)) => {}
-                }
-            }
-
-            fn on_usage(&mut self, usage: &ChatUsage) {
-                let usage_clone = usage.clone();
-                match self
-                    .tx
-                    .try_send(CollectorEventPayload::Usage(usage_clone.clone()))
-                {
-                    Ok(()) => {}
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_event)) => {
-                        if let Ok(mut guard) = self.overflow_usage.lock() {
-                            *guard = Some(usage_clone);
-                        }
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_event)) => {}
-                }
-            }
-
-            fn on_finish(&mut self, _choice_idx: usize, _finish_reason: Option<String>) {}
-        }
-
-        let mut collector = SessionCollector {
-            tx,
-            overflow_usage: overflow_usage.clone(),
-            overflow_ops: overflow_ops.clone(),
-        };
-
-        let session_arc_emitter = session_arc.clone();
-        let first_content_started_at = stream_prepare_started_at;
-        let emitter_chat_id = chat_id.clone();
-        let emitter_task = tokio::spawn(async move {
-            fn merge_events(
-                events: &mut Vec<CollectorEventPayload>,
-                batched_ops: &mut Vec<DeltaOp>,
-                latest_usage: &mut Option<ChatUsage>,
-            ) {
-                for event in events.drain(..) {
-                    match event {
-                        CollectorEventPayload::DeltaOps(ops) => {
-                            batched_ops.extend(ops);
-                        }
-                        CollectorEventPayload::Usage(usage) => {
-                            *latest_usage = Some(usage);
-                        }
-                    }
-                }
-            }
-            let mut pending = Vec::<CollectorEventPayload>::new();
-            let mut first_visible_delta_emitted = false;
-            let mut first_content_delta_recorded = false;
-
-            while let Some(first_event) = rx.recv().await {
-                let flush_immediately = match &first_event {
-                    CollectorEventPayload::Usage(_) => true,
-                    CollectorEventPayload::DeltaOps(ops) => {
-                        !first_visible_delta_emitted && delta_ops_contain_visible_content(ops)
-                            || ops.iter().any(|op| !delta_is_coalescible_text(op))
-                    }
-                };
-                pending.push(first_event);
-
-                if !flush_immediately {
-                    let deadline = tokio::time::Instant::now() + DELTA_COALESCE_WINDOW;
-                    while pending.len() < MAX_DELTA_BATCH_EVENTS {
-                        match tokio::time::timeout_at(deadline, rx.recv()).await {
-                            Ok(Some(event)) => {
-                                let must_flush = match &event {
-                                    CollectorEventPayload::Usage(_) => true,
-                                    CollectorEventPayload::DeltaOps(ops) => {
-                                        (!first_visible_delta_emitted
-                                            && delta_ops_contain_visible_content(ops))
-                                            || ops.iter().any(|op| !delta_is_coalescible_text(op))
-                                    }
-                                };
-                                pending.push(event);
-                                if must_flush {
-                                    break;
-                                }
-                            }
-                            Ok(None) | Err(_) => break,
-                        }
-                    }
-                }
-
-                let mut batched_ops = Vec::new();
-                let mut latest_usage: Option<ChatUsage> = None;
-                merge_events(&mut pending, &mut batched_ops, &mut latest_usage);
-
-                if let Ok(mut guard) = overflow_ops.lock() {
-                    if !guard.is_empty() {
-                        let mut drained = std::mem::take(&mut *guard);
-                        batched_ops.append(&mut drained);
-                    }
-                }
-                if let Ok(mut guard) = overflow_usage.lock() {
-                    if let Some(usage) = guard.take() {
-                        latest_usage = Some(usage);
-                    }
-                }
-
-                let batched_ops = batch_stream_delta_ops(batched_ops);
-
-                let mut session = session_arc_emitter.lock().await;
-                if !batched_ops.is_empty() {
-                    for ops in batched_ops {
-                        let carries_content = delta_ops_contain_assistant_content(&ops);
-                        first_visible_delta_emitted |= delta_ops_contain_visible_content(&ops);
-                        session.emit_stream_delta(ops);
-                        if carries_content && !first_content_delta_recorded {
-                            if let Some(started_at) = first_content_started_at {
-                                perf_diagnostics::record(
-                                    PerfComponent::StreamFirstContentDelta,
-                                    Some(&emitter_chat_id),
-                                    PerfOutcome::Success,
-                                    started_at
-                                        .elapsed()
-                                        .as_micros()
-                                        .try_into()
-                                        .unwrap_or(u64::MAX),
-                                    None,
-                                    None,
-                                    None,
-                                );
-                            }
-                            first_content_delta_recorded = true;
-                        }
-                    }
-                }
-                if let Some(usage) = latest_usage {
-                    session.draft_usage = Some(usage);
-                }
-            }
-
-            let mut final_ops = Vec::new();
-            let mut final_usage: Option<ChatUsage> = None;
-            if let Ok(mut guard) = overflow_ops.lock() {
-                if !guard.is_empty() {
-                    final_ops = std::mem::take(&mut *guard);
-                }
-            }
-            if let Ok(mut guard) = overflow_usage.lock() {
-                if let Some(usage) = guard.take() {
-                    final_usage = Some(usage);
-                }
-            }
-
-            if !final_ops.is_empty() || final_usage.is_some() {
-                let final_ops = batch_stream_delta_ops(final_ops);
-
-                let mut session = session_arc_emitter.lock().await;
-                if !final_ops.is_empty() {
-                    for ops in final_ops {
-                        let carries_content = delta_ops_contain_assistant_content(&ops);
-                        session.emit_stream_delta(ops);
-                        if carries_content && !first_content_delta_recorded {
-                            if let Some(started_at) = first_content_started_at {
-                                perf_diagnostics::record(
-                                    PerfComponent::StreamFirstContentDelta,
-                                    Some(&emitter_chat_id),
-                                    PerfOutcome::Success,
-                                    started_at
-                                        .elapsed()
-                                        .as_micros()
-                                        .try_into()
-                                        .unwrap_or(u64::MAX),
-                                    None,
-                                    None,
-                                    None,
-                                );
-                            }
-                            first_content_delta_recorded = true;
-                        }
-                    }
-                }
-                if let Some(usage) = final_usage {
-                    session.draft_usage = Some(usage);
-                }
-            }
-        });
-
-        let call_ts_start = chrono::Utc::now().to_rfc3339();
-        let call_start = std::time::Instant::now();
-
-        let stream_outcome = super::stream_core::run_llm_stream_with_prepare_started(
-            app.clone(),
-            params,
-            &mut collector,
+        let attempt_result = run_stream_attempt(
+            &app,
+            &session_arc,
+            &llm_request,
+            model_rec,
+            &abort_flag,
+            &abort_notify,
             stream_prepare_started_at,
+            &chat_id,
         )
         .await;
-        let mut cloud_input_usage = None;
-        if stream_outcome.is_err() {
-            if let Some(mut handle) = cloud_input_usage_task.take() {
-                match tokio::time::timeout(std::time::Duration::from_secs(2), &mut handle).await {
-                    Ok(Ok(usage)) => cloud_input_usage = usage,
-                    Ok(Err(_)) => {}
-                    Err(_) => handle.abort(),
-                }
-            }
-        } else if let Some(handle) = cloud_input_usage_task.take() {
-            match handle.await {
-                Ok(usage) => {
-                    cloud_input_usage = usage;
-                }
-                Err(err) => {
-                    if !err.is_cancelled() {
-                        tracing::warn!(error = %err, "cloud token count task failed");
-                    }
-                }
-            }
-        }
-        drop(collector);
-        let _ = emitter_task.await;
-
-        if let Ok(LlmStreamOutcome::PausedForCacheGuard) = stream_outcome {
-            tracing::info!("Generation paused by cache guard");
+        let StreamAttemptOutcome::Completed(attempt_result) = attempt_result else {
             return Ok(GenerationResult::PausedForUserDecision);
-        }
-
-        let results = stream_outcome
-            .map(|o| match o {
-                LlmStreamOutcome::Choices(c) => c,
-                LlmStreamOutcome::PausedForCacheGuard => unreachable!(),
-            })
-            .map_err(|error| {
-                synthesize_responses_context_cutoff_error_if_needed(
-                    error,
-                    &model_rec.base,
-                    &llm_request.messages,
-                    llm_request.params.n_ctx.unwrap_or(model_rec.base.n_ctx),
-                    true,
-                )
-            });
-
-        let duration_ms = call_start.elapsed().as_millis() as u64;
-        let call_ts_end = chrono::Utc::now().to_rfc3339();
-
-        let (
-            model_id_for_stats,
-            messages_count,
-            tools_count,
-            temperature_for_stats,
-            max_tokens_for_stats,
-        ) = (
-            llm_request.model_id.clone(),
-            llm_request.messages.len(),
-            llm_request.tools.as_ref().map(|t| t.len()).unwrap_or(0),
-            llm_request.params.temperature,
-            llm_request.params.max_tokens,
-        );
-
-        match &results {
-            Err(e) => {
-                let usage_for_error = {
-                    let session = session_arc.lock().await;
-                    session.draft_usage.clone()
-                }
-                .or_else(|| cloud_input_usage.as_ref().map(|count| count.usage.clone()));
-                let (provider, model) = split_model_provider(&model_id_for_stats);
-                let event = LlmCallEvent {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    ts_start: call_ts_start.clone(),
-                    ts_end: call_ts_end.clone(),
-                    duration_ms,
-                    chat_id: chat_id.clone(),
-                    root_chat_id: root_chat_id.clone(),
-                    mode: mode_for_stats.clone(),
-                    task_id: task_id.clone(),
-                    task_role: task_role.clone(),
-                    agent_id: agent_id.clone(),
-                    card_id: card_id.clone(),
-                    model_id: model_id_for_stats.clone(),
-                    provider,
-                    model,
-                    messages_count,
-                    tools_count,
-                    max_tokens: max_tokens_for_stats,
-                    temperature: temperature_for_stats,
-                    success: false,
-                    error_message: Some(e.message.chars().take(200).collect()),
-                    finish_reason: None,
-                    attempt_n: attempt,
-                    retry_reason: None,
-                    prompt_tokens: usage_for_error
-                        .as_ref()
-                        .map(|u| u.prompt_tokens)
-                        .unwrap_or(0),
-                    completion_tokens: usage_for_error
-                        .as_ref()
-                        .map(|u| u.completion_tokens)
-                        .unwrap_or(0),
-                    cache_read_tokens: usage_for_error.as_ref().and_then(|u| u.cache_read_tokens),
-                    cache_creation_tokens: usage_for_error
-                        .as_ref()
-                        .and_then(|u| u.cache_creation_tokens),
-                    total_tokens: usage_for_error
-                        .as_ref()
-                        .map(|u| u.total_tokens)
-                        .unwrap_or(0),
-                    cost_usd: None,
-                };
-                if let Some(sender) = &app.model.llm_stats_sender {
-                    if sender.try_send(event).is_err() {
-                        tracing::warn!("stats: channel full, dropping LLM call event");
-                    }
-                }
-            }
-            Ok(_) => {}
-        }
-
-        let results = results?;
-
-        let mut result = results.into_iter().next().unwrap_or_default();
-
-        if result.usage.is_none() {
-            if let Some(count) = cloud_input_usage.clone() {
-                result.usage = Some(count.usage);
-            }
-        }
-        if let Some(usage) = result.usage.clone() {
-            let mut session = session_arc.lock().await;
-            session.draft_usage = Some(usage);
-        }
-
-        if is_result_empty(&result) {
-            let draft_usage = {
-                let session = session_arc.lock().await;
-                session.draft_usage.clone()
-            };
-            let (provider, model) = split_model_provider(&model_id_for_stats);
-            let event = LlmCallEvent {
-                id: uuid::Uuid::new_v4().to_string(),
-                ts_start: call_ts_start,
-                ts_end: call_ts_end,
-                duration_ms,
-                chat_id: chat_id.clone(),
-                root_chat_id: root_chat_id.clone(),
-                mode: mode_for_stats.clone(),
-                task_id: task_id.clone(),
-                task_role: task_role.clone(),
-                agent_id: agent_id.clone(),
-                card_id: card_id.clone(),
-                model_id: model_id_for_stats,
-                provider,
-                model,
-                messages_count,
-                tools_count,
-                max_tokens: max_tokens_for_stats,
-                temperature: temperature_for_stats,
-                success: false,
-                error_message: Some("empty_response".to_string()),
-                finish_reason: result.finish_reason.clone(),
-                attempt_n: attempt,
-                retry_reason: Some("empty_response".to_string()),
-                prompt_tokens: draft_usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
-                completion_tokens: draft_usage
-                    .as_ref()
-                    .map(|u| u.completion_tokens)
-                    .unwrap_or(0),
-                cache_read_tokens: draft_usage.as_ref().and_then(|u| u.cache_read_tokens),
-                cache_creation_tokens: draft_usage.as_ref().and_then(|u| u.cache_creation_tokens),
-                total_tokens: draft_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0),
-                cost_usd: draft_usage
-                    .as_ref()
-                    .and_then(|u| u.metering_usd.as_ref())
-                    .map(|m| m.total_usd),
-            };
-            if let Some(sender) = &app.model.llm_stats_sender {
-                if sender.try_send(event).is_err() {
-                    tracing::warn!("stats: channel full, dropping LLM call event");
-                }
-            }
-
-            if attempt < max_attempts && can_retry_with_temp_bump {
-                let current_temp_display = if attempt == 1 {
-                    "default".to_string()
-                } else {
-                    format!("{:.1}", TEMPERATURE_BUMP * (attempt - 2) as f32)
-                };
-                let next_temp =
-                    (TEMPERATURE_BUMP * (attempt - 1) as f32).min(MAX_RETRY_TEMPERATURE);
-                warn!(
-                    "Empty assistant response at T={}, retrying with T={:.1} (attempt {}/{})",
-                    current_temp_display, next_temp, attempt, max_attempts
-                );
-                {
-                    let mut session = session_arc.lock().await;
-                    if let Some(ref mut draft) = session.draft_message {
-                        draft.content = ChatContent::SimpleText(String::new());
-                        draft.tool_calls = None;
-                        draft.reasoning_content = None;
-                        draft.thinking_blocks = None;
-                        draft.citations = Vec::new();
-                        draft.server_content_blocks = Vec::new();
-                        draft.extra = serde_json::Map::new();
-                    }
-                    session.draft_usage = None;
-                }
-                continue;
-            } else {
-                let effective_temp = llm_request.params.temperature.unwrap_or(0.0);
-                return Err(format!(
-                    "Empty assistant response after {} attempts (T={:.1})",
-                    max_attempts, effective_temp
-                )
-                .into());
-            }
-        }
-
-        // --- Tool call recovery ---
-        // GPT-5 Codex models occasionally leak tool calls into text content instead of
-        // emitting structured function_call events. Detect and recover them.
-        let allowed_tools = tool_call_recovery::allowed_tool_names(&llm_request.tools);
-
-        // 1. Unwrap multi_tool_use.parallel wrappers in structured tool_calls
-        if !result.tool_calls_raw.is_empty() {
-            result.tool_calls_raw = tool_call_recovery::unwrap_multi_tool_use_parallel(
-                &result.tool_calls_raw,
-                &allowed_tools,
-            );
-        }
-
-        // 2. Recover tool calls from garbled ChatML content (when no structured calls exist)
-        if result.tool_calls_raw.is_empty() && !allowed_tools.is_empty() {
-            if let Some((cleaned_content, recovered_calls)) =
-                tool_call_recovery::recover_tool_calls_from_chatml_content(
-                    &result.raw_content,
-                    &allowed_tools,
-                )
-            {
-                warn!(
-                    "tool_call_recovery: recovered {} tool call(s) from garbled content",
-                    recovered_calls.len()
-                );
-                result.content = cleaned_content;
-                result.tool_calls_raw = recovered_calls;
-            }
-        }
-
-        if result.tool_calls_raw.is_empty() && !allowed_tools.is_empty() {
-            if let Some((cleaned_content, recovered_calls, source)) =
-                tool_call_recovery_oss::recover_tool_calls_from_oss_text(
-                    &result.raw_content,
-                    &allowed_tools,
-                )
-            {
-                warn!(
-                    "tool_call_recovery_oss: recovered {} tool call(s) via {}",
-                    recovered_calls.len(),
-                    source
-                );
-                result
-                    .extra
-                    .insert("_tool_call_recovery_source".to_string(), json!(source));
-                result.content = cleaned_content;
-                result.tool_calls_raw = recovered_calls;
-            }
-        }
-
-        if !result.tool_calls_raw.is_empty() {
-            let parsed: Vec<_> = result
-                .tool_calls_raw
-                .iter()
-                .filter_map(|tc| normalize_tool_call(tc))
-                .collect();
-            if parsed.is_empty() {
-                let has_content = !result.content.trim().is_empty()
-                    || !result.reasoning.trim().is_empty()
-                    || !result.server_content_blocks.is_empty()
-                    || !result.citations.is_empty();
-                let names: Vec<_> = result
-                    .tool_calls_raw
-                    .iter()
-                    .filter_map(|tc| {
-                        tc.get("function")
-                            .and_then(|f| f.get("name"))
-                            .and_then(|n| n.as_str())
-                    })
-                    .collect();
-                tracing::warn!(
-                    "All {} tool calls unparsable, names={:?}",
-                    result.tool_calls_raw.len(),
-                    names,
-                );
-                if !has_content {
-                    return Err("Model returned tool_calls but none were parsable"
-                        .to_string()
-                        .into());
-                }
-                // Has useful content — discard unparsable tool calls and continue
-                result.tool_calls_raw.clear();
-            } else if parsed.len() < result.tool_calls_raw.len() {
-                let dropped_names: Vec<_> = result
-                    .tool_calls_raw
-                    .iter()
-                    .filter(|tc| normalize_tool_call(tc).is_none())
-                    .filter_map(|tc| {
-                        tc.get("function")
-                            .and_then(|f| f.get("name"))
-                            .and_then(|n| n.as_str())
-                    })
-                    .collect();
-                tracing::warn!(
-                    "Dropped {}/{} tool calls during normalization, names={:?}",
-                    dropped_names.len(),
-                    result.tool_calls_raw.len(),
-                    dropped_names,
-                );
-            }
-        }
-
-        maybe_downgrade_bogus_tool_calls_finish_reason(&mut result, "post_tool_normalization");
-
-        let draft_usage_for_success = {
-            let session = session_arc.lock().await;
-            session.draft_usage.clone()
         };
-        let usage_for_event = result.usage.as_ref().or(draft_usage_for_success.as_ref());
-        let (provider, model) = split_model_provider(&model_id_for_stats);
-        let pending_success_event = LlmCallEvent {
-            id: uuid::Uuid::new_v4().to_string(),
-            ts_start: call_ts_start,
-            ts_end: call_ts_end,
+        let StreamAttemptResult {
+            results,
+            cloud_input_usage,
             duration_ms,
-            chat_id: chat_id.clone(),
-            root_chat_id: root_chat_id.clone(),
-            mode: mode_for_stats.clone(),
-            task_id: task_id.clone(),
-            task_role: task_role.clone(),
-            agent_id: agent_id.clone(),
-            card_id: card_id.clone(),
-            model_id: model_id_for_stats,
-            provider,
-            model,
-            messages_count,
-            tools_count,
-            max_tokens: max_tokens_for_stats,
-            temperature: temperature_for_stats,
-            success: true,
-            error_message: None,
-            finish_reason: result.finish_reason.clone(),
-            attempt_n: attempt,
-            retry_reason: None,
-            prompt_tokens: usage_for_event.map(|u| u.prompt_tokens).unwrap_or(0),
-            completion_tokens: usage_for_event.map(|u| u.completion_tokens).unwrap_or(0),
-            cache_read_tokens: usage_for_event.and_then(|u| u.cache_read_tokens),
-            cache_creation_tokens: usage_for_event.and_then(|u| u.cache_creation_tokens),
-            total_tokens: usage_for_event.map(|u| u.total_tokens).unwrap_or(0),
-            cost_usd: None,
-        };
+            call_ts_start,
+            call_ts_end,
+        } = attempt_result;
 
-        break (result, pending_success_event);
-    };
-
-    let (model_id, usage_for_pricing) = {
-        let session = session_arc.lock().await;
-        (model_rec.base.id.clone(), session.draft_usage.clone())
-    };
-    let metering_usd = if let Some(ref usage) = usage_for_pricing {
-        generation_metering_usd(&app, &model_id, usage).await
-    } else {
-        None
-    };
-
-    {
-        let mut success_event = pending_success_event;
-        success_event.cost_usd = metering_usd.as_ref().map(|m| m.total_usd);
-        if let Some(sender) = &app.model.llm_stats_sender {
-            if sender.try_send(success_event).is_err() {
-                tracing::warn!("stats: channel full, dropping LLM call event");
-            }
-        }
-    }
-
-    {
-        let mut session = session_arc.lock().await;
-        if let Some(ref mut draft) = session.draft_message {
-            draft.content = ChatContent::SimpleText(result.content);
-
-            if !result.tool_calls_raw.is_empty() {
-                info!(
-                    "Parsing {} accumulated tool calls",
-                    result.tool_calls_raw.len()
-                );
-                let parsed: Vec<_> = result
-                    .tool_calls_raw
-                    .iter()
-                    .filter_map(|tc| normalize_tool_call(tc))
-                    .collect();
-                info!("Successfully parsed {} tool calls", parsed.len());
-                if !parsed.is_empty() {
-                    draft.tool_calls = Some(parsed);
-                }
-            }
-
-            if !result.reasoning.is_empty() {
-                draft.reasoning_content = Some(result.reasoning);
-            }
-            if !result.thinking_blocks.is_empty() {
-                draft.thinking_blocks = Some(result.thinking_blocks);
-            }
-            if !result.citations.is_empty() {
-                draft.citations = result.citations;
-            }
-            if !result.server_content_blocks.is_empty() {
-                draft.server_content_blocks = result.server_content_blocks;
-            }
-            if !result.extra.is_empty() {
-                draft.extra = result.extra;
-            }
-        }
-
-        // Store previous_response_id for stateful multi-turn on Platform API only.
-        // ChatGPT backend doesn't support previous_response_id, so don't store it —
-        // otherwise prepare_chat_passthrough activates tail-only mode and the server
-        // receives function_call_output without matching function_call items.
-        let is_chatgpt_backend = model_rec.base.endpoint.contains("chatgpt.com/backend-api");
-        if model_rec.base.wire_format == crate::llm::WireFormat::OpenaiResponses
-            && !is_chatgpt_backend
+        match finish_stream_attempt(
+            &app,
+            &session_arc,
+            &llm_request,
+            &chat_id,
+            &root_chat_id,
+            &mode_for_stats,
+            &task_id,
+            &task_role,
+            &agent_id,
+            &card_id,
+            attempt,
+            max_attempts,
+            can_retry_with_temp_bump,
+            &cloud_input_usage,
+            duration_ms,
+            call_ts_start,
+            call_ts_end,
+            results,
+        )
+        .await?
         {
-            if let Some(resp_id) = session
-                .draft_message
-                .as_ref()
-                .and_then(|m| m.extra.get("openai_response_id"))
-                .and_then(|v| v.as_str())
-            {
-                if session.thread.previous_response_id.as_deref() != Some(resp_id) {
-                    session.thread.previous_response_id = Some(resp_id.to_string());
-                    session.increment_version();
-                }
-            }
+            AttemptResult::Retry => continue,
+            AttemptResult::Success(result, event) => break (result, event),
         }
+    };
 
-        if let Some(ref mut usage) = session.draft_usage {
-            usage.metering_usd = metering_usd;
-        }
-
-        let next_state = if session
-            .draft_message
-            .as_ref()
-            .and_then(|m| m.tool_calls.as_ref())
-            .is_some_and(|tool_calls| !tool_calls.is_empty())
-        {
-            SessionState::ExecutingTools
-        } else {
-            SessionState::Idle
-        };
-        session.finish_stream_with_next_state(result.finish_reason, next_state);
-    }
+    complete_stream_generation(&app, &session_arc, model_rec, result, pending_success_event).await;
 
     Ok(GenerationResult::Completed)
 }
