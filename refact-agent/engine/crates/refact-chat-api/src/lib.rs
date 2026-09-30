@@ -213,6 +213,7 @@ pub enum CompressionReason {
     TransientFailure,
     SourceChanged,
     InsufficientSavings,
+    PreCompactDenied,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

@@ -7,6 +7,8 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 use crate::call_validation::ChatMessage;
 use crate::global_context::GlobalContext;
+use crate::ext::hooks::HookEvent;
+use crate::ext::hooks_runner::{ControlVerdict, HookPayload, get_project_dir_string};
 use crate::chat::types::{
     ChatSession, ThreadParams, SessionState, CompressionPhase, CompressionReason,
     TrajectoryCommitIntent,
@@ -102,7 +104,11 @@ fn idle(session: &ChatSession) -> bool {
         && !session.abort_flag.load(Ordering::SeqCst)
 }
 
-fn status(session: &mut ChatSession, phase: CompressionPhase, reason: Option<CompressionReason>) {
+pub(super) fn status(
+    session: &mut ChatSession,
+    phase: CompressionPhase,
+    reason: Option<CompressionReason>,
+) {
     let running = matches!(
         phase,
         CompressionPhase::Checking | CompressionPhase::Running
@@ -413,6 +419,134 @@ where
     Ok(())
 }
 
+fn bounded_precompact_reason(reason: &str, max_bytes: usize) -> String {
+    let message = format!("blocked by PreCompact hook: {reason}");
+    if message.len() <= max_bytes {
+        return message;
+    }
+    let mut end = max_bytes;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message[..end].to_string()
+}
+
+pub(super) async fn precompact_control(
+    gcx: Arc<GlobalContext>,
+    thread: &ThreadParams,
+    trigger: &str,
+    messages_before: usize,
+) -> ControlVerdict {
+    if !gcx.hooks_config.enabled {
+        return ControlVerdict::Allow;
+    }
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    let project_dir = match &thread.worktree {
+        Some(worktree) => worktree.root.to_string_lossy().into_owned(),
+        None => get_project_dir_string(app.clone()).await,
+    };
+    let mut payload = HookPayload::new(&HookEvent::PreCompact, thread.id.clone(), project_dir);
+    payload.extra.insert(
+        "trigger".into(),
+        serde_json::Value::String(trigger.to_string()),
+    );
+    payload.extra.insert(
+        "messages_before".into(),
+        serde_json::Value::from(messages_before),
+    );
+    crate::ext::hooks_runner::run_control_hooks(app, HookEvent::PreCompact, payload).await
+}
+
+pub(super) async fn postcompact_observation(
+    gcx: Arc<GlobalContext>,
+    thread: &ThreadParams,
+    trigger: &str,
+    messages_before: usize,
+    messages_after: usize,
+) {
+    if !gcx.hooks_config.enabled {
+        return;
+    }
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    let project_dir = match &thread.worktree {
+        Some(worktree) => worktree.root.to_string_lossy().into_owned(),
+        None => get_project_dir_string(app.clone()).await,
+    };
+    let mut payload = HookPayload::new(&HookEvent::PostCompact, thread.id.clone(), project_dir);
+    payload.extra.insert(
+        "trigger".into(),
+        serde_json::Value::String(trigger.to_string()),
+    );
+    payload.extra.insert(
+        "messages_before".into(),
+        serde_json::Value::from(messages_before),
+    );
+    payload.extra.insert(
+        "messages_after".into(),
+        serde_json::Value::from(messages_after),
+    );
+    payload.extra.insert(
+        "outcome".into(),
+        serde_json::Value::String("applied".into()),
+    );
+    crate::ext::hooks_runner::run_observation_hooks(app, HookEvent::PostCompact, payload).await;
+}
+
+pub(super) async fn commit_report_then_observe<F, Fut>(
+    gcx: Arc<GlobalContext>,
+    session_arc: &Arc<Mutex<ChatSession>>,
+    report: ChatMessage,
+    version: u64,
+    attempt: u64,
+    thread: &ThreadParams,
+    deliveries: &[refact_core::chat_types::PendingDelivery],
+    abort: &AtomicBool,
+    trigger: &str,
+    messages_before: usize,
+    persist: F,
+) -> Result<(), String>
+where
+    F: FnOnce(crate::chat::trajectories::TrajectorySnapshot) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let (result, messages_after) = {
+        let mut session = session_arc.lock().await;
+        let result = commit_report(
+            &mut session,
+            report,
+            version,
+            attempt,
+            thread,
+            deliveries,
+            abort,
+            persist,
+        )
+        .await;
+        if session.active_compression_attempt == Some(attempt) {
+            status(
+                &mut session,
+                if result.is_ok() {
+                    CompressionPhase::Applied
+                } else {
+                    CompressionPhase::Failed
+                },
+                result
+                    .as_ref()
+                    .err()
+                    .map(|_| CompressionReason::SourceChanged),
+            );
+        }
+        let messages_after = active_context(&session.messages)
+            .map(|view| view.messages.len())
+            .unwrap_or(session.messages.len());
+        (result, messages_after)
+    };
+    if result.is_ok() {
+        postcompact_observation(gcx, thread, trigger, messages_before, messages_after).await;
+    }
+    result
+}
+
 async fn resolve_model(
     gcx: Arc<GlobalContext>,
     thread: &ThreadParams,
@@ -494,18 +628,25 @@ pub async fn rebuild_session(
     expected_version: Option<u64>,
     explicit: bool,
 ) -> Result<(), String> {
-    let (messages, thread, version, attempt, abort, save_mutex, deliveries, catalog) = {
-        let mut session = session_arc.lock().await;
+    let (hook_messages, hook_thread, hook_version, hook_deliveries) = {
+        let session = session_arc.lock().await;
         if expected_version.is_some_and(|v| v != session.trajectory_version) {
             return Err("Chat changed since preview; preview again".into());
         }
         if session.pending_mode_handoff.is_some() || session.pending_context_rebuild.is_some() {
             return Err("Another context operation is pending".into());
         }
-        if explicit {
-            prepare_explicit_idle(&mut session);
-        }
-        if !idle(&session) || compression_attempt_active(&session) {
+        let explicit_idle = explicit
+            && matches!(
+                session.runtime.state,
+                SessionState::Idle | SessionState::Error | SessionState::Completed
+            )
+            && !session.closed
+            && !compression_attempt_active(&session)
+            && session.draft_message.is_none()
+            && session.draft_usage.is_none()
+            && session.stream_started_at.is_none();
+        if !explicit_idle && (!idle(&session) || compression_attempt_active(&session)) {
             return Err("Rebuild requires an idle session with no active stream".into());
         }
         if !explicit && requires_explicit_rebuild(&session.messages) {
@@ -523,6 +664,89 @@ pub async fn rebuild_session(
         if !explicit && session.last_rebuild_attempt_version == Some(session.trajectory_version) {
             return Err("Rebuild was already attempted for this context".into());
         }
+        (
+            messages,
+            session.thread.clone(),
+            session.trajectory_version,
+            session.pending_deliveries_for_snapshot(),
+        )
+    };
+    match precompact_control(
+        gcx.clone(),
+        &hook_thread,
+        &request.trigger,
+        hook_messages.len(),
+    )
+    .await
+    {
+        ControlVerdict::Deny(reason) => {
+            let mut session = session_arc.lock().await;
+            if session.trajectory_version == hook_version
+                && serde_json::to_value(&session.thread).ok()
+                    == serde_json::to_value(&hook_thread).ok()
+                && session.pending_deliveries_for_snapshot() == hook_deliveries
+                && session.active_compression_attempt.is_none()
+            {
+                if !explicit {
+                    session.last_rebuild_attempt_version = Some(hook_version);
+                }
+                status(
+                    &mut session,
+                    CompressionPhase::Skipped,
+                    Some(CompressionReason::PreCompactDenied),
+                );
+            }
+            return Err(bounded_precompact_reason(
+                &reason,
+                crate::ext::hooks_runner::HookLimits::from(&gcx.hooks_config).max_output_bytes,
+            ));
+        }
+        ControlVerdict::Rewrite(_) => tracing::debug!(
+            "PreCompact hook rewrite ignored for session {}",
+            hook_thread.id
+        ),
+        ControlVerdict::Allow => {}
+    }
+    let (
+        messages,
+        thread,
+        version,
+        attempt,
+        abort,
+        save_mutex,
+        deliveries,
+        catalog,
+        messages_before,
+    ) = {
+        let mut session = session_arc.lock().await;
+        if session.trajectory_version != hook_version
+            || serde_json::to_value(&session.thread).ok() != serde_json::to_value(&hook_thread).ok()
+            || session.pending_deliveries_for_snapshot() != hook_deliveries
+        {
+            return Err("Chat changed while PreCompact hook was running".into());
+        }
+        if session.pending_mode_handoff.is_some() || session.pending_context_rebuild.is_some() {
+            return Err("Another context operation is pending".into());
+        }
+        if explicit {
+            prepare_explicit_idle(&mut session);
+        }
+        if !idle(&session) || compression_attempt_active(&session) {
+            return Err("Rebuild requires an idle session with no active stream".into());
+        }
+        let messages = if explicit && requires_explicit_rebuild(&session.messages) {
+            legacy_rebuild_input(&session.messages)
+        } else {
+            active_context(&session.messages).map(|v| v.messages)
+        }
+        .map_err(|e| e.to_string())?;
+        if messages.is_empty() || pending_tools(&messages) {
+            return Err("Rebuild requires nonempty context and completed tool results".into());
+        }
+        if serde_json::to_value(&messages).ok() != serde_json::to_value(&hook_messages).ok() {
+            return Err("Chat changed while PreCompact hook was running".into());
+        }
+        let messages_before = messages.len();
         session.last_rebuild_attempt_version = Some(session.trajectory_version);
         session.compression_attempt_generation =
             session.compression_attempt_generation.wrapping_add(1);
@@ -542,6 +766,7 @@ pub async fn rebuild_session(
             session.trajectory_save_mutex.clone(),
             session.pending_deliveries_for_snapshot(),
             session.tool_catalog.clone(),
+            messages_before,
         )
     };
     let _guard = AttemptGuard {
@@ -640,7 +865,7 @@ pub async fn rebuild_session(
             target_mode: &thread.mode,
             target_mode_description: "Continue the current conversation in the same mode",
             parent_chat_id: Some(&thread.id),
-            model_override: request.model,
+            model_override: request.model.clone(),
             chat_model: Some(thread.model.clone()),
             abort_flag: Some(abort.clone()),
             hints: None,
@@ -669,33 +894,33 @@ pub async fn rebuild_session(
         ReconstructionMetadata {
             source_version: Some(version),
             model: Some(outcome.model),
-            trigger: Some(request.trigger),
+            trigger: Some(request.trigger.clone()),
             from_mode: Some(thread.mode.clone()),
             to_mode: Some(thread.mode.clone()),
             metrics: Some(metrics.to_json()),
         },
     )
     .map_err(|e| e.to_string());
-    // Shield the disk-only commit from caller cancellation once it starts. The
-    // guard still aborts/checks before this boundary; persistence and publication
-    // then finish together under the existing writer/session locks.
     let session_arc = session_arc.clone();
     tokio::spawn(async move {
         let _writer = save_mutex.lock().await;
-        let mut session = session_arc.lock().await;
-        let result = match report {
+        match report {
             Ok(report) => {
-                commit_report(
-                    &mut session,
+                let persist_gcx = gcx.clone();
+                commit_report_then_observe(
+                    gcx,
+                    &session_arc,
                     report,
                     version,
                     attempt,
                     &thread,
                     &deliveries,
                     &abort,
+                    &request.trigger,
+                    messages_before,
                     |snapshot| async move {
                         crate::chat::trajectories::persist_trajectory_snapshot_with_intent(
-                            gcx,
+                            persist_gcx,
                             snapshot,
                             TrajectoryCommitIntent::Required,
                         )
@@ -704,23 +929,18 @@ pub async fn rebuild_session(
                 )
                 .await
             }
-            Err(error) => Err(error),
-        };
-        if session.active_compression_attempt == Some(attempt) {
-            status(
-                &mut session,
-                if result.is_ok() {
-                    CompressionPhase::Applied
-                } else {
-                    CompressionPhase::Failed
-                },
-                result
-                    .as_ref()
-                    .err()
-                    .map(|_| CompressionReason::SourceChanged),
-            );
+            Err(error) => {
+                let mut session = session_arc.lock().await;
+                if session.active_compression_attempt == Some(attempt) {
+                    status(
+                        &mut session,
+                        CompressionPhase::Failed,
+                        Some(CompressionReason::SourceChanged),
+                    );
+                }
+                Err(error)
+            }
         }
-        result
     })
     .await
     .map_err(|e| e.to_string())?
@@ -856,6 +1076,9 @@ pub async fn apply_context_rebuild_with_reason(
         Ok(()) => CompactionOutcome::Applied,
         Err(e) => {
             let mut s = session.lock().await;
+            if e.starts_with("blocked by PreCompact hook:") {
+                return CompactionOutcome::NothingToCompact;
+            }
             if compression_attempt_active(&s) || s.abort_flag.load(Ordering::SeqCst) {
                 return CompactionOutcome::NothingToCompact;
             }
