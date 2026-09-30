@@ -593,10 +593,12 @@ describe("buddy UI polish", () => {
     const section = await screen.findByTestId("buddy-job-telemetry");
     expect(section).toHaveTextContent("JOB TELEMETRY");
     expect(section).toHaveTextContent("2 jobs");
-    expect(section).toHaveTextContent("refact_error_detective");
+    expect(section).toHaveTextContent("Refact error detective");
+    expect(section).not.toHaveTextContent("refact_error_detective");
     expect(section).toHaveTextContent("125k");
     expect(section).toHaveTextContent("9.4k");
-    expect(section).toHaveTextContent("buddy_voice");
+    expect(section).toHaveTextContent("Buddy voice");
+    expect(section).not.toHaveTextContent("buddy_voice");
     expect(section).toHaveTextContent("2026-07-01 10:05");
   });
 
