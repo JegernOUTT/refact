@@ -225,7 +225,9 @@ fn plain_text(value: &str) -> String {
 /// language; the machine payload stays in the legacy file it came from.
 fn describe_action(action: &BuddyAction) -> Option<String> {
     let described = match action {
-        BuddyAction::OpenPage { .. } => return None,
+        BuddyAction::OpenPage { page } => {
+            return super::opportunity_copy::page_action(page).map(str::to_owned);
+        }
         BuddyAction::LaunchInvestigationChat { .. } => "Start an investigation chat".to_string(),
         BuddyAction::DraftSkill { label, .. } => format!("Draft a skill: {}", plain_line(label)),
         BuddyAction::DraftCommand { label, .. } => {
@@ -832,12 +834,12 @@ fn import_record(
     let title = super::actor::redact_sensitive(title);
     let conclusion = super::actor::redact_sensitive(conclusion);
     let body = super::actor::redact_sensitive(body);
+    let uncertainty = super::opportunity_copy::uncertainty_for_body(body.trim());
     if current_artifact.as_ref().is_some_and(|artifact| {
         artifact.value.title == title.trim()
             && artifact.value.conclusion == conclusion.trim()
             && artifact.value.body == body.trim()
-            && artifact.value.uncertainty.as_deref()
-                == Some("Buddy has not changed anything and cannot carry out the suggested steps from here.")
+            && artifact.value.uncertainty.as_deref() == Some(uncertainty)
     }) {
         if let Some(current) = &current {
             let severity = super::opportunity_labels::severity_for_import(triage);
@@ -894,10 +896,7 @@ fn import_record(
         delta: String::new(),
         body,
         // The untrusted fact itself lives on provenance below, which the UI can badge.
-        uncertainty: Some(
-            "Buddy has not changed anything and cannot carry out the suggested steps from here."
-                .into(),
-        ),
+        uncertainty: Some(uncertainty.into()),
         proposed_action_ids: vec![],
         evidence: vec![],
     }
@@ -1161,6 +1160,46 @@ mod migration_regressions {
         );
     }
 
+    #[test]
+    fn default_models_action_is_not_dropped_from_the_imported_body() {
+        let input = opportunity_with(
+            "config_drift",
+            "Default model not configured",
+            "provider:default-model",
+            "new",
+            serde_json::json!([
+                {"kind": "open_page", "page": {"type": "default_models"}},
+                {"kind": "dismiss"}
+            ]),
+        );
+        let body = opportunity_body(&input);
+        assert_eq!(
+            body,
+            "Default model not configured\n\nSuggested next steps:\n- Open Default models in Settings"
+        );
+        assert_eq!(
+            super::super::opportunity_copy::uncertainty_for_body(&body),
+            "Buddy has not changed anything and cannot carry out these steps from here."
+        );
+    }
+
+    #[test]
+    fn dismissal_only_has_no_steps_and_uses_truthful_uncertainty() {
+        let input = opportunity_with(
+            "config_drift",
+            "A settings signal needs review",
+            "settings:review",
+            "new",
+            serde_json::json!([{"kind": "dismiss"}]),
+        );
+        let body = opportunity_body(&input);
+        assert_eq!(body, input.summary);
+        assert_eq!(
+            super::super::opportunity_copy::uncertainty_for_body(&body),
+            "Buddy noticed this from project signals and has not changed anything."
+        );
+    }
+
     fn current_opportunity_copy_reports_the_finding_and_only_useful_next_steps_with_conclusion(
         expected_conclusion: &str,
     ) {
@@ -1192,11 +1231,16 @@ mod migration_regressions {
         ] {
             assert!(!content.contains("earlier"), "unexpected copy: {content}");
         }
-        assert!(artifact
-            .uncertainty
-            .as_deref()
-            .unwrap()
-            .contains("has not changed anything"));
+        assert_eq!(
+            artifact.uncertainty.as_deref(),
+            Some("Buddy has not changed anything and cannot carry out these steps from here.")
+        );
+        assert_eq!(
+            artifact.uncertainty.as_deref(),
+            Some(super::super::opportunity_copy::uncertainty_for_body(
+                &artifact.body
+            ))
+        );
     }
 
     #[test]
@@ -1218,6 +1262,10 @@ mod migration_regressions {
         assert_eq!(artifact.body, "Diff growing fast");
         assert!(!artifact.body.contains("Open a Buddy page"));
         assert!(!artifact.body.contains("dismiss it"));
+        assert_eq!(
+            artifact.uncertainty.as_deref(),
+            Some("Buddy noticed this from project signals and has not changed anything.")
+        );
     }
 
     #[test]
@@ -1287,6 +1335,92 @@ mod migration_regressions {
         assert_eq!(
             store
                 .get_work_item(&first.value.id)
+                .unwrap()
+                .unwrap()
+                .change_seq,
+            work_seq
+        );
+    }
+
+    #[test]
+    fn existing_opportunity_gets_one_copy_revision_then_becomes_a_noop() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let input = opportunity_with(
+            "config_drift",
+            "Default model not configured",
+            "provider:default-model",
+            "new",
+            serde_json::json!([
+                {"kind": "open_page", "page": {"type": "default_models"}},
+                {"kind": "dismiss"}
+            ]),
+        );
+        let producer_id = format!("producer:{}", stable_hash(&[&input.cooldown_key]));
+        let old_body = "Default model not configured";
+        import_record(
+            &mut store,
+            &worker(),
+            "legacy_opportunity",
+            &producer_id,
+            &sanitize_title(&input.summary),
+            &opportunity_conclusion(&input.summary),
+            old_body,
+            &input.created_at.to_rfc3339(),
+            WorkItemState::NeedsAttention,
+            super::super::opportunity_labels::ImportTriage::Opportunity {
+                priority: input.priority,
+                kind: input.kind,
+            },
+        )
+        .unwrap();
+        let original = store.list_work_items(None, 10).unwrap().entries.remove(0);
+        let artifact_id = original.value.current_artifact_id.clone().unwrap();
+        let original_revision = store
+            .get_artifact_revision(&artifact_id, None)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            migrate_batch(&mut store, &worker(), &[input.clone()], &[])
+                .unwrap()
+                .imported,
+            1
+        );
+        let revised = store
+            .get_artifact_revision(&artifact_id, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(revised.value.revision, original_revision.value.revision + 1);
+        assert_eq!(
+            revised.value.body,
+            "Default model not configured\n\nSuggested next steps:\n- Open Default models in Settings"
+        );
+        assert_eq!(
+            revised.value.uncertainty.as_deref(),
+            Some("Buddy has not changed anything and cannot carry out these steps from here.")
+        );
+        let work_seq = store
+            .get_work_item(&original.value.id)
+            .unwrap()
+            .unwrap()
+            .change_seq;
+        let artifact_seq = revised.change_seq;
+
+        let repeated = migrate_batch(&mut store, &worker(), &[input], &[]).unwrap();
+        assert_eq!(repeated.imported, 0);
+        assert_eq!(repeated.already_imported, 1);
+        assert_eq!(
+            store
+                .get_artifact_revision(&artifact_id, None)
+                .unwrap()
+                .unwrap()
+                .change_seq,
+            artifact_seq
+        );
+        assert_eq!(
+            store
+                .get_work_item(&original.value.id)
                 .unwrap()
                 .unwrap()
                 .change_seq,

@@ -27,6 +27,7 @@ pub mod operator_observability;
 pub mod operator_runtime;
 pub mod operator_store;
 pub mod opportunities;
+pub(crate) mod opportunity_copy;
 pub(crate) mod opportunity_labels;
 pub mod outcome_runtime;
 pub mod policy;
