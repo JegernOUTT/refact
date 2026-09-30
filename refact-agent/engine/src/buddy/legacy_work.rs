@@ -412,6 +412,7 @@ pub fn migrate_batch(
             &body,
             &draft.created_at.to_rfc3339(),
             WorkItemState::NeedsAttention,
+            super::opportunity_labels::ImportTriage::Draft(draft.kind),
         )?;
         progress.record(imported);
     }
@@ -473,6 +474,10 @@ pub fn migrate_batch(
             &body,
             &created_at,
             state,
+            super::opportunity_labels::ImportTriage::Opportunity {
+                priority: opportunity.priority,
+                kind: opportunity.kind,
+            },
         )?;
         progress.record(imported);
     }
@@ -817,6 +822,7 @@ fn import_record(
     body: &str,
     created_at: &str,
     state: WorkItemState,
+    triage: super::opportunity_labels::ImportTriage,
 ) -> Result<bool, OperatorStoreError> {
     let project = store.identity().clone();
     let subject = SubjectKey::new(&project, kind, id, "legacy-import-v1", "1")
@@ -833,6 +839,16 @@ fn import_record(
             && artifact.value.uncertainty.as_deref()
                 == Some("Buddy has not changed anything and cannot carry out the suggested steps from here.")
     }) {
+        if let Some(current) = &current {
+            let severity = super::opportunity_labels::severity_for_import(triage);
+            let scope = super::opportunity_labels::scope_for_import(triage).map(str::to_owned);
+            if current.value.severity != severity || current.value.scope != scope {
+                let mut updated = current.value.clone();
+                updated.severity = severity;
+                updated.scope = scope;
+                store.upsert_work_item(&updated, Some(current.revision))?;
+            }
+        }
         return Ok(false);
     }
     let revision = current_artifact
@@ -864,9 +880,9 @@ fn import_record(
         state,
         native_sources: vec![],
         last_material_change_at: created_at.into(),
-        severity: Some(refact_buddy_core::operator_types::WorkItemSeverity::Unknown),
+        severity: super::opportunity_labels::severity_for_import(triage),
         problem_summary: problem_summary_from_title(&title),
-        scope: None,
+        scope: super::opportunity_labels::scope_for_import(triage).map(str::to_owned),
     }
     .build()
     .map_err(|_| OperatorStoreError::Conflict("invalid legacy work item"))?;
@@ -1228,6 +1244,10 @@ mod migration_regressions {
             "Default model not configured\n\nSuggested next steps:\n- dismiss it",
             &input.created_at.to_rfc3339(),
             WorkItemState::NeedsAttention,
+            super::super::opportunity_labels::ImportTriage::Opportunity {
+                priority: input.priority,
+                kind: input.kind,
+            },
         )
         .unwrap();
         let first = store.list_work_items(None, 10).unwrap().entries.remove(0);
@@ -1614,5 +1634,114 @@ mod migration_regressions {
             .unwrap();
         assert_eq!(doc.revision, 1);
         assert!(!doc.value.to_string().contains("retained-private-content"));
+    }
+
+    #[test]
+    fn live_opportunity_import_maps_priority_and_kind_on_the_admission_path() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let mut input = opportunity_with(
+            "git_hygiene",
+            "Review the growing diff",
+            "git:diff-growing",
+            "new",
+            serde_json::json!([]),
+        );
+        input.priority = BuddyPriority::Critical;
+
+        assert_eq!(
+            migrate_batch(&mut store, &worker(), &[input], &[])
+                .unwrap()
+                .imported,
+            1
+        );
+        let work = store.list_work_items(None, 10).unwrap().entries.remove(0);
+        assert_eq!(
+            work.value.severity,
+            Some(refact_buddy_core::operator_types::WorkItemSeverity::Critical)
+        );
+        assert_eq!(work.value.scope.as_deref(), Some("Git"));
+    }
+
+    #[test]
+    fn triage_import_repair_is_idempotent_without_an_artifact_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let mut input = opportunity_with(
+            "provider_tuning",
+            "Reconnect the provider",
+            "provider:reconnect",
+            "new",
+            serde_json::json!([]),
+        );
+        input.priority = BuddyPriority::High;
+        migrate_batch(&mut store, &worker(), &[input.clone()], &[]).unwrap();
+        let mut work = store.list_work_items(None, 10).unwrap().entries.remove(0);
+        let artifact_id = work.value.current_artifact_id.clone().unwrap();
+        work.value.severity = Some(refact_buddy_core::operator_types::WorkItemSeverity::Unknown);
+        work.value.scope = None;
+        work = store
+            .upsert_work_item(&work.value, Some(work.revision))
+            .unwrap();
+        let artifact_seq = store
+            .get_artifact_revision(&artifact_id, None)
+            .unwrap()
+            .unwrap()
+            .change_seq;
+
+        migrate_batch(&mut store, &worker(), &[input.clone()], &[]).unwrap();
+        let repaired = store.get_work_item(&work.value.id).unwrap().unwrap();
+        assert_eq!(
+            repaired.value.severity,
+            Some(refact_buddy_core::operator_types::WorkItemSeverity::High)
+        );
+        assert_eq!(repaired.value.scope.as_deref(), Some("Providers"));
+        let repaired_work_seq = repaired.change_seq;
+        let artifact = store
+            .get_artifact_revision(&artifact_id, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(artifact.value.revision, 1);
+        assert_eq!(artifact.change_seq, artifact_seq);
+
+        let repeated = migrate_batch(&mut store, &worker(), &[input], &[]).unwrap();
+        assert_eq!(repeated.imported, 0);
+        assert_eq!(repeated.already_imported, 1);
+        assert_eq!(
+            store
+                .get_work_item(&work.value.id)
+                .unwrap()
+                .unwrap()
+                .change_seq,
+            repaired_work_seq
+        );
+        let artifact = store
+            .get_artifact_revision(&artifact_id, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(artifact.value.revision, 1);
+        assert_eq!(artifact.change_seq, artifact_seq);
+    }
+
+    #[test]
+    fn drafts_keep_only_the_scope_implied_by_their_kind() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let draft = BuddyDraft {
+            id: "draft-pulse".into(),
+            kind: super::super::types::DraftKind::PulseReport,
+            title: "Workspace pulse".into(),
+            yaml_or_json: "{}".into(),
+            explanation: "A general workspace report".into(),
+            created_at: chrono::Utc::now(),
+            expires_at: chrono::Utc::now() + chrono::Duration::days(1),
+        };
+        migrate_batch(&mut store, &worker(), &[], &[draft]).unwrap();
+        let work = store.list_work_items(None, 10).unwrap().entries.remove(0);
+        assert_eq!(work.value.scope, None);
+        assert_eq!(
+            work.value.severity,
+            Some(refact_buddy_core::operator_types::WorkItemSeverity::Unknown)
+        );
     }
 }
