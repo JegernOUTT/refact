@@ -70,6 +70,8 @@ src/
   bin/refact.rs        — alternate entry point
 ```
 
+See [the staged crate-split plan](docs/crate-split-plan.md) for the target engine DAG, port boundaries, and migration sequence.
+
 ### Daemon upgrade safety
 
 Daemon clients automatically replace a running daemon when its version is older. An equal-version executable-SHA mismatch is replaced only by a release build and only when `REFACT_DAEMON_NO_UPGRADE` is unset or empty; set `REFACT_DAEMON_NO_UPGRADE=1` to keep that daemon. Debug builds always keep equal-version hash mismatches, preventing local binaries from replacing an active developer daemon. Every actual replacement writes a warning naming the running daemon PID and address before shutdown.
