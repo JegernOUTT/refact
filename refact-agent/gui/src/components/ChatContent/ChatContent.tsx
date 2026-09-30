@@ -91,6 +91,9 @@ function compressionProgressText(
   if (phase === "applied") return "Context compacted";
   if (phase === "failed") return "Context compaction failed";
   if (phase === "skipped") {
+    if (reason === "pre_compact_denied") {
+      return "Compaction blocked by a PreCompact hook";
+    }
     if (reason === "no_eligible_segment") return "Nothing safe to compact";
     return "Context already compact enough";
   }

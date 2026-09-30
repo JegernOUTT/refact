@@ -40,7 +40,8 @@ export type CompressionReason =
   | "no_summary_model"
   | "input_too_large"
   | "transient_failure"
-  | "source_changed";
+  | "source_changed"
+  | "pre_compact_denied";
 
 export type ThreadParams = {
   id: string;

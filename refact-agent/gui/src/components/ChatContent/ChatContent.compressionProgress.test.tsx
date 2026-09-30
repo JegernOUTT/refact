@@ -201,6 +201,21 @@ describe("ChatContent compression progress", () => {
     );
   });
 
+  it("renders skipped PreCompact hook denial pulse status", () => {
+    vi.useFakeTimers({ now: 0 });
+    renderChatContent(
+      makeChatState({
+        compressionPhase: "skipped",
+        compressionReason: "pre_compact_denied",
+        compressionPulseSeq: "skipped-pulse",
+      }),
+    );
+
+    expect(screen.getByTestId("compression-progress")).toHaveTextContent(
+      "Compaction blocked by a PreCompact hook",
+    );
+  });
+
   it("renders skipped no eligible segment pulse status", () => {
     vi.useFakeTimers({ now: 0 });
     renderChatContent(

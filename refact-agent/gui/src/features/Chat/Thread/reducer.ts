@@ -446,7 +446,8 @@ function normalizeCompressionReason(
     value === "no_summary_model" ||
     value === "input_too_large" ||
     value === "transient_failure" ||
-    value === "source_changed"
+    value === "source_changed" ||
+    value === "pre_compact_denied"
   ) {
     return value;
   }

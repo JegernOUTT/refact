@@ -7,6 +7,8 @@ mod cache_stability_tests;
 pub mod cloud_token_count;
 #[cfg(test)]
 mod compaction_hook_tests;
+#[cfg(test)]
+mod compression_vocabulary_tests;
 pub mod config;
 mod content;
 pub mod context_rebuild;

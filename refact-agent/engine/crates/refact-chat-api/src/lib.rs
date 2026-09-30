@@ -216,6 +216,26 @@ pub enum CompressionReason {
     PreCompactDenied,
 }
 
+impl CompressionReason {
+    pub const ALL: [Self; 15] = [
+        Self::AutoCompactDisabled,
+        Self::SessionCompactionDisabled,
+        Self::MaxAttemptsReached,
+        Self::PendingToolCalls,
+        Self::NoEligibleSegment,
+        Self::EffectiveContextUnknown,
+        Self::ProviderLengthStop,
+        Self::ContextLengthStop,
+        Self::PressureLow,
+        Self::NoSummaryModel,
+        Self::InputTooLarge,
+        Self::TransientFailure,
+        Self::SourceChanged,
+        Self::InsufficientSavings,
+        Self::PreCompactDenied,
+    ];
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalStatus {
