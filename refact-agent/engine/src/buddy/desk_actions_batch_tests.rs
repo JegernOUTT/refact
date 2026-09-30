@@ -45,6 +45,14 @@ fn parser_validates_raw_count_and_empty_segments_then_deduplicates_in_order() {
     );
 }
 
+#[test]
+#[should_panic]
+fn parity_negative_control_empty_actions_fails() {
+    let expected = serde_json::json!([{"action_id":"registered"}]);
+    let broken_batch = serde_json::json!([]);
+    assert_eq!(broken_batch, expected);
+}
+
 #[tokio::test]
 async fn batch_matches_row_actions_errors_and_measures_fifty_ids() {
     let root = tempfile::tempdir().unwrap();

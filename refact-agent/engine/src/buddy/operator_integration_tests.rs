@@ -120,6 +120,23 @@ async fn batch_http_endpoint_is_static_and_keeps_row_action_parity_for_fifty_ite
         serde_json::from_slice(&hyper::body::to_bytes(response.into_body()).await.unwrap())
             .unwrap();
     assert_eq!(batch["data"].as_array().unwrap().len(), 50);
+    let duplicate = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!(
+                    "/v1/buddy/work/actions?project_id={}&ids={},{}",
+                    project.project_id, ids[0], ids[0]
+                ))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let duplicate: serde_json::Value =
+        serde_json::from_slice(&hyper::body::to_bytes(duplicate.into_body()).await.unwrap())
+            .unwrap();
+    assert_eq!(duplicate["data"].as_array().unwrap().len(), 1);
     for query in [
         format!(
             "/v1/buddy/work/actions?project_id={}&ids=",
