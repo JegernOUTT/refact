@@ -225,7 +225,7 @@ fn plain_text(value: &str) -> String {
 /// language; the machine payload stays in the legacy file it came from.
 fn describe_action(action: &BuddyAction) -> Option<String> {
     let described = match action {
-        BuddyAction::OpenPage { .. } => "Open a Buddy page".to_string(),
+        BuddyAction::OpenPage { .. } => return None,
         BuddyAction::LaunchInvestigationChat { .. } => "Start an investigation chat".to_string(),
         BuddyAction::DraftSkill { label, .. } => format!("Draft a skill: {}", plain_line(label)),
         BuddyAction::DraftCommand { label, .. } => {
@@ -252,7 +252,7 @@ fn describe_action(action: &BuddyAction) -> Option<String> {
         }
         BuddyAction::AcceptQuest { .. } => "Accept a quest".to_string(),
         BuddyAction::OpenBuddyConversation { .. } => "Open a Buddy conversation".to_string(),
-        BuddyAction::Dismiss => "dismiss it".to_string(),
+        BuddyAction::Dismiss => return None,
     };
     (!described.trim().is_empty()).then_some(described)
 }
@@ -273,7 +273,33 @@ fn opportunity_body(opportunity: &BuddyOpportunity) -> String {
         .map(|suggestion| format!("- {suggestion}"))
         .collect::<Vec<_>>()
         .join("\n");
-    format!("{summary}\n\nThe earlier Buddy suggested:\n{rendered}")
+    format!("{summary}\n\nSuggested next steps:\n{rendered}")
+}
+
+fn opportunity_conclusion(summary: &str) -> String {
+    summary
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(plain_line)
+        .unwrap_or_default()
+}
+
+fn draft_conclusion(draft: &BuddyDraft) -> String {
+    let target = match draft.kind {
+        super::types::DraftKind::Skill => "a skill",
+        super::types::DraftKind::Command => "a command",
+        super::types::DraftKind::Delegate => "a subagent",
+        super::types::DraftKind::Mode => "a mode",
+        super::types::DraftKind::AgentsMd => "AGENTS.md",
+        super::types::DraftKind::DefaultsModel => "model defaults",
+        super::types::DraftKind::Hook => "a hook",
+        super::types::DraftKind::PulseReport => "a pulse report",
+    };
+    format!(
+        "This draft proposes changes to {target}: {}.",
+        plain_line(&draft.title)
+    )
 }
 
 /// A legacy status is the user's own last answer, so it still decides the state.
@@ -382,6 +408,7 @@ pub fn migrate_batch(
             "legacy_draft",
             &draft.id,
             &sanitize_title(&draft.title),
+            &draft_conclusion(draft),
             &body,
             &draft.created_at.to_rfc3339(),
             WorkItemState::NeedsAttention,
@@ -436,7 +463,17 @@ pub fn migrate_batch(
                 ("legacy_opportunity", owner)
             }
         };
-        let imported = import_record(store, worker, kind, &id, &title, &body, &created_at, state)?;
+        let imported = import_record(
+            store,
+            worker,
+            kind,
+            &id,
+            &title,
+            &opportunity_conclusion(&opportunity.summary),
+            &body,
+            &created_at,
+            state,
+        )?;
         progress.record(imported);
     }
     Ok(progress)
@@ -776,6 +813,7 @@ fn import_record(
     kind: &str,
     id: &str,
     title: &str,
+    conclusion: &str,
     body: &str,
     created_at: &str,
     state: WorkItemState,
@@ -786,9 +824,14 @@ fn import_record(
     let current = store.get_work_item(&subject.work_item_id())?;
     let current_artifact = store.get_artifact_revision(&subject.artifact_id(), None)?;
     let title = super::actor::redact_sensitive(title);
+    let conclusion = super::actor::redact_sensitive(conclusion);
     let body = super::actor::redact_sensitive(body);
     if current_artifact.as_ref().is_some_and(|artifact| {
-        artifact.value.title == title.trim() && artifact.value.body == body.trim()
+        artifact.value.title == title.trim()
+            && artifact.value.conclusion == conclusion.trim()
+            && artifact.value.body == body.trim()
+            && artifact.value.uncertainty.as_deref()
+                == Some("Buddy has not changed anything and cannot carry out the suggested steps from here.")
     }) {
         return Ok(false);
     }
@@ -831,11 +874,14 @@ fn import_record(
         subject,
         source_run_ids: vec![outcome.run_id.clone()],
         title,
-        conclusion: "Saved from an earlier Buddy. Nothing here has been checked or run.".into(),
+        conclusion,
         delta: String::new(),
         body,
         // The untrusted fact itself lives on provenance below, which the UI can badge.
-        uncertainty: Some("Kept for reference only — Buddy cannot act on it.".into()),
+        uncertainty: Some(
+            "Buddy has not changed anything and cannot carry out the suggested steps from here."
+                .into(),
+        ),
         proposed_action_ids: vec![],
         evidence: vec![],
     }
@@ -1013,7 +1059,7 @@ mod migration_regressions {
     }
 
     #[test]
-    fn retained_actions_remain_reference_only_and_do_not_duplicate() {
+    fn desk_actions_are_not_repeated_in_imported_body() {
         let root = tempfile::tempdir().unwrap();
         let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
         let input = opportunity(1);
@@ -1023,7 +1069,7 @@ mod migration_regressions {
             .get_artifact_revision(work.value.current_artifact_id.as_ref().unwrap(), None)
             .unwrap()
             .unwrap();
-        assert!(artifact.value.body.contains("dismiss"));
+        assert_eq!(artifact.value.body, input.summary);
         assert!(artifact.value.proposed_action_ids.is_empty());
         assert!(project_opportunity(&work, false)
             .proposed_actions
@@ -1090,6 +1136,166 @@ mod migration_regressions {
         assert!(!artifact.body.contains("\"kind\""));
         assert!(artifact.body.contains("- Patch AGENTS.md"));
         assert!(artifact.body.contains("- Tidy 97 memory entries"));
+    }
+
+    #[test]
+    fn current_opportunity_copy_reports_the_finding_and_only_useful_next_steps() {
+        current_opportunity_copy_reports_the_finding_and_only_useful_next_steps_with_conclusion(
+            "Default model not configured",
+        );
+    }
+
+    fn current_opportunity_copy_reports_the_finding_and_only_useful_next_steps_with_conclusion(
+        expected_conclusion: &str,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let input = opportunity_with(
+            "config_drift",
+            "Default model not configured\n\nMore context about the missing model.",
+            "provider:default-model",
+            "new",
+            serde_json::json!([
+                {"kind": "open_page", "page": {"type": "buddy"}},
+                {"kind": "dismiss"},
+                {"kind": "draft_skill", "draft_id": "skill-1", "label": "Safer shell"}
+            ]),
+        );
+        migrate_batch(&mut store, &worker(), &[input.clone()], &[]).unwrap();
+        let artifact = only_artifact(&store);
+        assert_eq!(artifact.conclusion, expected_conclusion);
+        assert_eq!(
+            artifact.body,
+            "Default model not configured\n\nMore context about the missing model.\n\nSuggested next steps:\n- Draft a skill: Safer shell"
+        );
+        for content in [
+            artifact.title.as_str(),
+            artifact.conclusion.as_str(),
+            artifact.body.as_str(),
+            artifact.uncertainty.as_deref().unwrap(),
+        ] {
+            assert!(!content.contains("earlier"), "unexpected copy: {content}");
+        }
+        assert!(artifact
+            .uncertainty
+            .as_deref()
+            .unwrap()
+            .contains("has not changed anything"));
+    }
+
+    #[test]
+    fn desk_redundant_actions_leave_only_the_opportunity_summary() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let input = opportunity_with(
+            "config_drift",
+            "Diff growing fast",
+            "git:diff-growing",
+            "new",
+            serde_json::json!([
+                {"kind": "open_page", "page": {"type": "buddy"}},
+                {"kind": "dismiss"}
+            ]),
+        );
+        migrate_batch(&mut store, &worker(), &[input], &[]).unwrap();
+        let artifact = only_artifact(&store);
+        assert_eq!(artifact.body, "Diff growing fast");
+        assert!(!artifact.body.contains("Open a Buddy page"));
+        assert!(!artifact.body.contains("dismiss it"));
+    }
+
+    #[test]
+    fn updated_migration_copy_appends_one_revision_then_becomes_a_noop() {
+        let root = tempfile::tempdir().unwrap();
+        let project = identity(root.path());
+        let mut store = OperatorStore::open(root.path(), &project).unwrap();
+        let input = opportunity_with(
+            "config_drift",
+            "Default model not configured",
+            "provider:default-model",
+            "new",
+            serde_json::json!([{"kind": "dismiss"}]),
+        );
+        let title = sanitize_title(&input.summary);
+        let producer_id = format!("producer:{}", stable_hash(&[&input.cooldown_key]));
+        import_record(
+            &mut store,
+            &worker(),
+            "legacy_opportunity",
+            &producer_id,
+            &title,
+            "Legacy saved report",
+            "Default model not configured\n\nSuggested next steps:\n- dismiss it",
+            &input.created_at.to_rfc3339(),
+            WorkItemState::NeedsAttention,
+        )
+        .unwrap();
+        let first = store.list_work_items(None, 10).unwrap().entries.remove(0);
+        let artifact_id = first.value.current_artifact_id.clone().unwrap();
+        let old_revision = store
+            .get_artifact_revision(&artifact_id, None)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            migrate_batch(&mut store, &worker(), &[input.clone()], &[])
+                .unwrap()
+                .imported,
+            1
+        );
+        let revised = store
+            .get_artifact_revision(&artifact_id, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(revised.value.revision, old_revision.value.revision + 1);
+        assert!(revised.change_seq > old_revision.change_seq);
+        let work = store.get_work_item(&first.value.id).unwrap().unwrap();
+        let artifact_seq = revised.change_seq;
+        let work_seq = work.change_seq;
+
+        let progress = migrate_batch(&mut store, &worker(), &[input], &[]).unwrap();
+        assert_eq!(progress.imported, 0);
+        assert_eq!(progress.already_imported, 1);
+        assert_eq!(
+            store
+                .get_artifact_revision(&artifact_id, None)
+                .unwrap()
+                .unwrap()
+                .change_seq,
+            artifact_seq
+        );
+        assert_eq!(
+            store
+                .get_work_item(&first.value.id)
+                .unwrap()
+                .unwrap()
+                .change_seq,
+            work_seq
+        );
+    }
+
+    #[test]
+    fn draft_import_has_a_factual_conclusion() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let draft = BuddyDraft {
+            id: "draft-skill".into(),
+            kind: super::super::types::DraftKind::Skill,
+            title: "Safer shell workflow".into(),
+            yaml_or_json: "name: safer-shell".into(),
+            explanation: "Adds a reviewed shell workflow".into(),
+            created_at: chrono::Utc::now(),
+            expires_at: chrono::Utc::now() + chrono::Duration::days(1),
+        };
+        migrate_batch(&mut store, &worker(), &[], &[draft]).unwrap();
+        let artifact = only_artifact(&store);
+        assert_eq!(
+            artifact.conclusion,
+            "This draft proposes changes to a skill: Safer shell workflow."
+        );
+        assert!(!artifact.conclusion.contains("earlier"));
+        assert!(!artifact.conclusion.contains("reference only"));
+        assert!(!artifact.conclusion.contains("has not been checked"));
     }
 
     #[test]
