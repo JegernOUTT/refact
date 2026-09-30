@@ -18,10 +18,12 @@ import { Button, Icon, Surface, Text } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
   useGetBuddyDeskActionsQuery,
+  useGetBuddyDeskActionsBatchQuery,
   useGetBuddyOperatorArtifactQuery,
   useGetBuddyOperatorWorkQuery,
   useGetBuddyOperatorWorkItemQuery,
   buddyOperatorIdentity,
+  type DeskActionBatchEntry,
   type OperatorRecord,
 } from "../../services/refact/buddyOperator";
 import type { WorkItem, WorkItemState } from "./operatorTypes";
@@ -65,6 +67,7 @@ const emptyView: Record<WorkView, string> = {
 const NO_RESULT_YET = "No result yet";
 const NO_ACTION = "No action to take";
 const ACTION_STATUS_UNAVAILABLE = "Action status unavailable";
+const ROW_GROUP_SIZE = 50;
 
 const opaqueIdentifier = /[0-9a-f]{24,}/i;
 const uuidLikeIdentifier = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
@@ -156,6 +159,7 @@ function WorkRow({
   endpointIdentity,
   showState,
   showActionVerb,
+  rowActions,
   selected,
   onOpen,
   onActionVerb,
@@ -164,6 +168,15 @@ function WorkRow({
   endpointIdentity: string;
   showState: boolean;
   showActionVerb: boolean;
+  rowActions:
+    | { mode: "per_row" }
+    | {
+        mode: "batch";
+        entry: DeskActionBatchEntry | undefined;
+        loaded: boolean;
+        pending: boolean;
+        failed: boolean;
+      };
   selected: boolean;
   onOpen: (item: WorkItem, trigger: HTMLButtonElement) => void;
   onActionVerb: (id: string, verb: string) => void;
@@ -175,18 +188,31 @@ function WorkRow({
       project_id: item.project.project_id,
       endpoint_identity: endpointIdentity,
     },
-    { skip: !artifactId },
+    { skip: !artifactId || rowActions.mode !== "per_row" },
   );
-  const action = currentData?.data.find(
+  const actions =
+    rowActions.mode === "per_row"
+      ? currentData?.data
+      : rowActions.entry?.actions;
+  const action = actions?.find(
     (candidate) =>
       candidate.artifact_id === artifactId &&
       candidate.artifact_revision === item.current_artifact_revision &&
       candidate.spec.project.canonical_root === item.project.canonical_root,
   );
-  const pending = isFetching && !currentData;
+  const failed =
+    rowActions.mode === "per_row"
+      ? Boolean(error)
+      : rowActions.failed ||
+        (rowActions.loaded &&
+          (rowActions.entry === undefined || rowActions.entry.error !== null));
+  const pending =
+    rowActions.mode === "per_row"
+      ? isFetching && !currentData
+      : rowActions.pending;
   let verb: string | null = NO_ACTION;
   if (!artifactId) verb = NO_RESULT_YET;
-  else if (error) verb = ACTION_STATUS_UNAVAILABLE;
+  else if (failed) verb = ACTION_STATUS_UNAVAILABLE;
   else if (pending) verb = null;
   else if (action) verb = action.label;
   const changed = changedAt(item.last_material_change_at);
@@ -281,6 +307,73 @@ function WorkRow({
         />
       </button>
     </li>
+  );
+}
+
+function WorkRowGroup({
+  records,
+  endpointIdentity,
+  showState,
+  showActionVerb,
+  selectedId,
+  onOpen,
+  onActionVerb,
+}: {
+  records: OperatorRecord<WorkItem>[];
+  endpointIdentity: string;
+  showState: boolean;
+  showActionVerb: boolean;
+  selectedId: string | null;
+  onOpen: (item: WorkItem, trigger: HTMLButtonElement) => void;
+  onActionVerb: (id: string, verb: string) => void;
+}) {
+  const projectId = records[0].value.project.project_id;
+  const ids = records
+    .filter(
+      ({ value }) =>
+        Boolean(value.current_artifact_id) &&
+        value.project.project_id === projectId,
+    )
+    .map(({ value }) => value.id);
+  const batch = useGetBuddyDeskActionsBatchQuery(
+    { ids, project_id: projectId, endpoint_identity: endpointIdentity },
+    { skip: ids.length === 0 },
+  );
+  const status =
+    batch.error && typeof batch.error === "object" && "status" in batch.error
+      ? batch.error.status
+      : undefined;
+  const perRow = status === 404 || status === 405;
+  return (
+    <>
+      {records.map(({ value }) => (
+        <WorkRow
+          key={value.id}
+          item={value}
+          endpointIdentity={endpointIdentity}
+          showState={showState}
+          showActionVerb={showActionVerb}
+          rowActions={
+            perRow
+              ? { mode: "per_row" }
+              : {
+                  mode: "batch",
+                  entry: batch.currentData?.data.find(
+                    (entry) => entry.work_id === value.id,
+                  ),
+                  loaded: batch.currentData !== undefined,
+                  pending: batch.isFetching && !batch.currentData,
+                  failed:
+                    batch.error !== undefined ||
+                    value.project.project_id !== projectId,
+                }
+          }
+          selected={selectedId === value.id}
+          onOpen={onOpen}
+          onActionVerb={onActionVerb}
+        />
+      ))}
+    </>
   );
 }
 
@@ -1041,14 +1134,21 @@ function DeskContent({
                 </Text>
               )}
               <ul className={styles.items}>
-                {filtered.map(({ value }) => (
-                  <WorkRow
-                    key={value.id}
-                    item={value}
+                {Array.from(
+                  { length: Math.ceil(filtered.length / ROW_GROUP_SIZE) },
+                  (_, index) =>
+                    filtered.slice(
+                      index * ROW_GROUP_SIZE,
+                      (index + 1) * ROW_GROUP_SIZE,
+                    ),
+                ).map((group) => (
+                  <WorkRowGroup
+                    key={group[0].value.id}
+                    records={group}
                     endpointIdentity={endpointIdentity}
                     showState={distinctStates.size > 1}
                     showActionVerb={showActionVerb}
-                    selected={selectedId === value.id}
+                    selectedId={selectedId}
                     onOpen={open}
                     onActionVerb={recordActionVerb}
                   />

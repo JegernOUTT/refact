@@ -20,7 +20,10 @@ import type {
   WorkItem,
   WorkItemState,
 } from "./operatorTypes";
-import type { DeskAction } from "../../services/refact/buddyOperator";
+import {
+  buddyOperatorApi,
+  type DeskAction,
+} from "../../services/refact/buddyOperator";
 import { useGetBuddySnapshotQuery } from "../../services/refact/buddy";
 
 const project = { project_id: "project", canonical_root: "/scratch/project" };
@@ -99,6 +102,21 @@ const envelope = <T,>(data: T, next_cursor: number | null = null) => ({
   next_cursor,
 });
 
+const batchEnvelope = (
+  request: Request,
+  actionsFor: (workId: string) => DeskAction[] = () => [],
+  errorFor: (workId: string) => string | null = () => null,
+) => {
+  const ids = new URL(request.url).searchParams.get("ids")?.split(",") ?? [];
+  return envelope(
+    ids.map((work_id) => ({
+      work_id,
+      actions: actionsFor(work_id),
+      error: errorFor(work_id),
+    })),
+  );
+};
+
 const workStateMatrix: Record<WorkItemState, { view: string; label: string }> =
   {
     needs_attention: { view: "Needs you", label: "Needs attention" },
@@ -124,6 +142,9 @@ const runStatusMatrix: Record<
 describe("BuddyDesk", () => {
   beforeEach(() => {
     server.use(
+      http.get("*/v1/buddy/work/actions", ({ request }) =>
+        HttpResponse.json(batchEnvelope(request)),
+      ),
       http.get("*/v1/buddy/work/:id/snooze", () =>
         HttpResponse.json(envelope(null)),
       ),
@@ -1158,6 +1179,9 @@ describe("BuddyDesk", () => {
           ),
         ),
       ),
+      http.get("*/v1/buddy/work/actions", ({ request }) =>
+        HttpResponse.json(batchEnvelope(request)),
+      ),
       http.get("*/v1/buddy/work/:id/actions", () =>
         HttpResponse.json(envelope([])),
       ),
@@ -1504,6 +1528,9 @@ describe("BuddyDesk", () => {
             : envelope([record(item)], 1),
         );
       }),
+      http.get("*/v1/buddy/work/actions", ({ request }) =>
+        HttpResponse.json(batchEnvelope(request)),
+      ),
     );
     render(<BuddyDesk />, { preloadedState: config });
     fireEvent.click(
@@ -1648,6 +1675,11 @@ describe("BuddyDesk", () => {
       http.get("*/v1/buddy/artifacts/:id", () =>
         HttpResponse.json(envelope(record(artifact))),
       ),
+      http.get("*/v1/buddy/work/actions", ({ request }) =>
+        HttpResponse.json(
+          batchEnvelope(request, (id) => (id === item.id ? [getAction()] : [])),
+        ),
+      ),
       http.get("*/v1/buddy/work/:id/actions", () =>
         HttpResponse.json(envelope([getAction()])),
       ),
@@ -1791,6 +1823,13 @@ describe("BuddyDesk", () => {
         }),
         http.get("*/v1/buddy/artifacts/:id", () =>
           HttpResponse.json(envelope(record(artifact))),
+        ),
+        http.get("*/v1/buddy/work/actions", ({ request }) =>
+          HttpResponse.json(
+            batchEnvelope(request, (id) =>
+              id === item.id ? [dismissAction] : [],
+            ),
+          ),
         ),
         http.get("*/v1/buddy/work/:id/actions", ({ params }) =>
           HttpResponse.json(
@@ -2232,6 +2271,7 @@ describe("BuddyDesk", () => {
       current_artifact_id: null,
       current_artifact_revision: null,
     };
+    const batchIds: string[][] = [];
     const actionRequests: string[] = [];
     server.use(
       http.get("*/v1/buddy/work", () =>
@@ -2243,6 +2283,14 @@ describe("BuddyDesk", () => {
           ]),
         ),
       ),
+      http.get("*/v1/buddy/work/actions", ({ request }) => {
+        batchIds.push(
+          new URL(request.url).searchParams.get("ids")?.split(",") ?? [],
+        );
+        return HttpResponse.json(
+          batchEnvelope(request, (id) => (id === item.id ? [action] : [])),
+        );
+      }),
       http.get("*/v1/buddy/work/:id/actions", ({ params }) => {
         actionRequests.push(String(params.id));
         return HttpResponse.json(
@@ -2269,7 +2317,11 @@ describe("BuddyDesk", () => {
     expect(
       within(unfinished).getByText("No result yet", { exact: true }),
     ).toBeTruthy();
-    expect(actionRequests).not.toContain(withoutResult.id);
+    expect(batchIds).toHaveLength(1);
+    expect(batchIds[0]).not.toContain(withoutResult.id);
+    expect(batchIds[0]).toContain(item.id);
+    expect(batchIds[0]).toContain(withoutAction.id);
+    expect(actionRequests).toHaveLength(0);
   });
 
   it("loads row actions once and stays quiet while the Desk is idle", async () => {
@@ -2279,26 +2331,362 @@ describe("BuddyDesk", () => {
       title: `Idle report ${index}`,
       current_artifact_id: `idle-artifact-${index}`,
     }));
-    const requests: string[] = [];
+    const requests: string[][] = [];
+    const perRowRequests: string[] = [];
     server.use(
       http.get("*/v1/buddy/work", () =>
         HttpResponse.json(envelope(rows.map((row) => record(row)))),
       ),
+      http.get("*/v1/buddy/work/actions", ({ request }) => {
+        requests.push(
+          new URL(request.url).searchParams.get("ids")?.split(",") ?? [],
+        );
+        return HttpResponse.json(batchEnvelope(request));
+      }),
       http.get("*/v1/buddy/work/:id/actions", ({ params }) => {
-        requests.push(String(params.id));
+        perRowRequests.push(String(params.id));
         return HttpResponse.json(envelope([]));
       }),
     );
     const view = render(<BuddyDesk />, { preloadedState: config });
-    await waitFor(() => expect(requests).toHaveLength(8));
-    expect(new Set(requests)).toEqual(new Set(rows.map((row) => row.id)));
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0]).toEqual(rows.map((row) => row.id));
+    expect(perRowRequests).toHaveLength(0);
 
     view.unmount();
     const remounted = render(<BuddyDesk />, { store: view.store });
-    await waitFor(() => expect(requests).toHaveLength(8));
+    await waitFor(() => expect(requests).toHaveLength(1));
 
-    expect(requests).toHaveLength(8);
+    expect(requests).toHaveLength(1);
+    expect(perRowRequests).toHaveLength(0);
     remounted.unmount();
+  });
+
+  describe("Desk row verbs through the batch endpoint", () => {
+    const firstAction = (id: string, revision = 1): DeskAction => ({
+      ...action,
+      spec: {
+        ...action.spec,
+        resource: { ...action.spec.resource, resource_id: id },
+      },
+      artifact_id: `artifact-${id}`,
+      artifact_revision: revision,
+    });
+    const rows = [
+      {
+        ...item,
+        id: "no-artifact",
+        title: "No artifact report",
+        current_artifact_id: null,
+        current_artifact_revision: null,
+      },
+      {
+        ...item,
+        id: "entry-error",
+        title: "Entry error report",
+        current_artifact_id: "artifact-entry-error",
+      },
+      {
+        ...item,
+        id: "matching-action",
+        title: "Matching action report",
+        current_artifact_id: "artifact-matching-action",
+      },
+      {
+        ...item,
+        id: "old-action",
+        title: "Old action report",
+        current_artifact_id: "artifact-old-action",
+      },
+    ];
+    const actionsFor = (id: string): DeskAction[] => {
+      if (id === "matching-action") return [firstAction(id)];
+      if (id === "old-action") return [firstAction(id, 2)];
+      return [];
+    };
+    async function renderRows() {
+      render(<BuddyDesk />, { preloadedState: config });
+      for (const row of rows)
+        await screen.findByRole("button", { name: new RegExp(row.title) });
+    }
+
+    it("loads one page and renders the matching verb states", async () => {
+      const batchIds: string[][] = [];
+      const perRowRequests: string[] = [];
+      server.use(
+        http.get("*/v1/buddy/work", () =>
+          HttpResponse.json(envelope(rows.map(record))),
+        ),
+        http.get("*/v1/buddy/work/actions", ({ request }) => {
+          batchIds.push(
+            new URL(request.url).searchParams.get("ids")?.split(",") ?? [],
+          );
+          return HttpResponse.json(
+            batchEnvelope(request, actionsFor, (id) =>
+              id === "entry-error" ? "unavailable" : null,
+            ),
+          );
+        }),
+        http.get("*/v1/buddy/work/:id/actions", ({ params }) => {
+          perRowRequests.push(String(params.id));
+          return HttpResponse.json(envelope([]));
+        }),
+      );
+      await renderRows();
+      expect({
+        batches: batchIds.length,
+        perRow: perRowRequests.length,
+      }).toEqual({ batches: 1, perRow: 0 });
+      for (const [id, verb] of [
+        [rows[0].id, "No result yet"],
+        [rows[1].id, "Action status unavailable"],
+        [rows[2].id, action.label],
+        [rows[3].id, "No action to take"],
+      ]) {
+        const row = screen.getByRole("button", {
+          name: new RegExp(
+            rows.find((candidate) => candidate.id === id)!.title,
+          ),
+        });
+        expect(
+          await within(row).findByText(verb, { exact: true }),
+        ).toBeTruthy();
+      }
+    });
+
+    it.each([404, 405])(
+      "falls back to per-row queries for HTTP %s",
+      async (status) => {
+        const perRowRequests: string[] = [];
+        server.use(
+          http.get("*/v1/buddy/work", () =>
+            HttpResponse.json(envelope(rows.map(record))),
+          ),
+          http.get("*/v1/buddy/work/actions", () =>
+            HttpResponse.json({ detail: "not supported" }, { status }),
+          ),
+          http.get("*/v1/buddy/work/:id/actions", ({ params }) => {
+            const id = String(params.id);
+            perRowRequests.push(id);
+            return HttpResponse.json(
+              envelope(id === "matching-action" ? [firstAction(id)] : []),
+            );
+          }),
+        );
+        await renderRows();
+        expect(perRowRequests.sort()).toEqual(
+          rows
+            .filter((row) => row.current_artifact_id)
+            .map((row) => row.id)
+            .sort(),
+        );
+        expect(
+          within(
+            screen.getByRole("button", { name: /No artifact report/ }),
+          ).getByText("No result yet", { exact: true }),
+        ).toBeTruthy();
+        expect(
+          await within(
+            screen.getByRole("button", { name: /Entry error report/ }),
+          ).findByText("No action to take", { exact: true }),
+        ).toBeTruthy();
+        expect(
+          await within(
+            screen.getByRole("button", { name: /Matching action report/ }),
+          ).findByText(action.label, { exact: true }),
+        ).toBeTruthy();
+        expect(
+          await within(
+            screen.getByRole("button", { name: /Old action report/ }),
+          ).findByText("No action to take", { exact: true }),
+        ).toBeTruthy();
+      },
+    );
+
+    it.each([503, "network"])(
+      "does not fall back after batch failure %s",
+      async (failure) => {
+        const perRowRequests: string[] = [];
+        server.use(
+          http.get("*/v1/buddy/work", () =>
+            HttpResponse.json(envelope(rows.map(record))),
+          ),
+          http.get("*/v1/buddy/work/actions", () =>
+            failure === "network"
+              ? HttpResponse.error()
+              : HttpResponse.json(
+                  { detail: "unavailable" },
+                  { status: typeof failure === "number" ? failure : 503 },
+                ),
+          ),
+          http.get("*/v1/buddy/work/:id/actions", ({ params }) => {
+            perRowRequests.push(String(params.id));
+            return HttpResponse.json(envelope([]));
+          }),
+        );
+        await renderRows();
+        for (const row of rows) {
+          const verb = row.current_artifact_id
+            ? "Action status unavailable"
+            : "No result yet";
+          expect(
+            await within(
+              screen.getByRole("button", { name: new RegExp(row.title) }),
+            ).findByText(verb, { exact: true }),
+          ).toBeTruthy();
+        }
+        expect(perRowRequests).toHaveLength(0);
+      },
+    );
+
+    it("sends only ids and project_id with artifact ids in row order", async () => {
+      let requestUrl: URL | undefined;
+      server.use(
+        http.get("*/v1/buddy/work", () =>
+          HttpResponse.json(envelope(rows.map(record))),
+        ),
+        http.get("*/v1/buddy/work/actions", ({ request }) => {
+          requestUrl = new URL(request.url);
+          return HttpResponse.json(batchEnvelope(request));
+        }),
+      );
+      await renderRows();
+      await waitFor(() => expect(requestUrl).toBeDefined());
+      if (!requestUrl) throw new Error("batch request was not captured");
+      expect([...requestUrl.searchParams.keys()].sort()).toEqual([
+        "ids",
+        "project_id",
+      ]);
+      expect(requestUrl.searchParams.get("ids")).toBe(
+        rows
+          .filter((row) => row.current_artifact_id)
+          .map((row) => row.id)
+          .join(","),
+      );
+    });
+
+    it("requests each appended page once without re-requesting prior ids", async () => {
+      const firstPage = Array.from({ length: 50 }, (_, index) => ({
+        ...item,
+        id: `page-one-${index}`,
+        title: `Page one report ${index}`,
+        current_artifact_id: `page-one-artifact-${index}`,
+      }));
+      const secondPage = Array.from({ length: 3 }, (_, index) => ({
+        ...item,
+        id: `page-two-${index}`,
+        title: `Page two report ${index}`,
+        current_artifact_id: `page-two-artifact-${index}`,
+      }));
+      const batchIds: string[][] = [];
+      server.use(
+        http.get("*/v1/buddy/work", ({ request }) => {
+          const cursor = new URL(request.url).searchParams.get("cursor");
+          return HttpResponse.json(
+            cursor
+              ? envelope(secondPage.map(record))
+              : envelope(firstPage.map(record), 50),
+          );
+        }),
+        http.get("*/v1/buddy/work/actions", ({ request }) => {
+          batchIds.push(
+            new URL(request.url).searchParams.get("ids")?.split(",") ?? [],
+          );
+          return HttpResponse.json(batchEnvelope(request));
+        }),
+      );
+      render(<BuddyDesk />, { preloadedState: config });
+      await screen.findByRole("button", { name: /Page one report 0/ });
+      await waitFor(() => expect(batchIds).toHaveLength(1));
+      fireEvent.click(screen.getByRole("button", { name: "Load more work" }));
+      await screen.findByRole("button", { name: /Page two report 0/ });
+      await waitFor(() => expect(batchIds).toHaveLength(2));
+      expect(batchIds).toEqual([
+        firstPage.map((row) => row.id),
+        secondPage.map((row) => row.id),
+      ]);
+    });
+
+    it("marks a missing requested entry unavailable without affecting its siblings", async () => {
+      const twoRows = [
+        { ...item, title: "Present entry report" },
+        { ...item, id: "missing-entry", title: "Missing entry report" },
+      ];
+      server.use(
+        http.get("*/v1/buddy/work", () =>
+          HttpResponse.json(envelope(twoRows.map(record))),
+        ),
+        http.get("*/v1/buddy/work/actions", () =>
+          HttpResponse.json(
+            envelope([{ work_id: item.id, actions: [action], error: null }]),
+          ),
+        ),
+      );
+      render(<BuddyDesk />, { preloadedState: config });
+      const present = await screen.findByRole("button", {
+        name: /Present entry report/,
+      });
+      expect(
+        await within(present).findByText(action.label, { exact: true }),
+      ).toBeTruthy();
+      const missing = await screen.findByRole("button", {
+        name: /Missing entry report/,
+      });
+      expect(
+        await within(missing).findByText("Action status unavailable", {
+          exact: true,
+        }),
+      ).toBeTruthy();
+    });
+
+    it("refetches the row batch after a successful action execution", async () => {
+      const batchRequests: string[][] = [];
+      server.use(
+        http.get("*/v1/buddy/work", () =>
+          HttpResponse.json(envelope([record(item)])),
+        ),
+        http.get("*/v1/buddy/work/:id/actions", () =>
+          HttpResponse.json(envelope([action])),
+        ),
+        http.get("*/v1/buddy/work/actions", ({ request }) => {
+          batchRequests.push(
+            new URL(request.url).searchParams.get("ids")?.split(",") ?? [],
+          );
+          return HttpResponse.json(batchEnvelope(request, () => [action]));
+        }),
+        http.get("*/v1/buddy/artifacts/:id", () =>
+          HttpResponse.json(envelope(record(artifact))),
+        ),
+        http.post(
+          "*/v1/buddy/work/:id/actions/:action/execute",
+          async ({ request }) => {
+            const body = (await request.json()) as {
+              idempotency_key: string;
+            };
+            return HttpResponse.json(
+              envelope(record(receipt(body.idempotency_key))),
+            );
+          },
+        ),
+      );
+      const { store } = render(<BuddyDesk />, { preloadedState: config });
+      await waitFor(() => expect(batchRequests).toHaveLength(1));
+      await openReport();
+      await store.dispatch(
+        buddyOperatorApi.endpoints.executeBuddyDeskAction.initiate({
+          id: item.id,
+          action_id: action.spec.action_id,
+          project_id: project.project_id,
+          canonical_root: project.canonical_root,
+          work_revision: action.work_revision,
+          artifact_id: action.artifact_id,
+          artifact_revision: action.artifact_revision,
+          spec_hash: action.spec_hash,
+          idempotency_key: "batch-invalidation",
+        }),
+      );
+      await waitFor(() => expect(batchRequests).toHaveLength(2));
+    });
   });
 
   it("hides an action verb that would be repeated on every row", async () => {
@@ -2310,6 +2698,22 @@ describe("BuddyDesk", () => {
     server.use(
       http.get("*/v1/buddy/work", () =>
         HttpResponse.json(envelope([record(item), record(second)])),
+      ),
+      http.get("*/v1/buddy/work/actions", ({ request }) =>
+        HttpResponse.json(
+          batchEnvelope(request, (id) => [
+            {
+              ...action,
+              spec: {
+                ...action.spec,
+                resource: {
+                  ...action.spec.resource,
+                  resource_id: id,
+                },
+              },
+            },
+          ]),
+        ),
       ),
       http.get("*/v1/buddy/work/:id/actions", ({ params }) =>
         HttpResponse.json(

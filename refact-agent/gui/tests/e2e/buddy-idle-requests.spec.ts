@@ -47,6 +47,15 @@ async function openDesk(
       await route.fulfill({ json: envelope(rows) });
       return;
     }
+    if (url.pathname === "/v1/buddy/work/actions") {
+      const ids = url.searchParams.get("ids")?.split(",") ?? [];
+      await route.fulfill({
+        json: envelope(
+          ids.map((work_id) => ({ work_id, actions: [], error: null })),
+        ),
+      });
+      return;
+    }
     if (/^\/v1\/buddy\/work\/[^/]+\/actions$/.test(url.pathname))
       return route.fulfill({ json: envelope([]) });
     if (url.pathname === "/v1/buddy/decisions/current")
@@ -117,7 +126,9 @@ test.describe("Buddy idle request behavior", () => {
     let phase = "setup";
     const requests: RequestRecord[] = [];
     await openDesk(page, requests, () => phase);
-    const actionRequests = () =>
+    const batchActionRequests = () =>
+      requests.filter(({ path }) => path === "/v1/buddy/work/actions");
+    const perRowActionRequests = () =>
       requests.filter(({ path }) =>
         /^\/v1\/buddy\/work\/[^/]+\/actions$/.test(path),
       );
@@ -126,9 +137,14 @@ test.describe("Buddy idle request behavior", () => {
         ({ path, phase: requestPhase }) =>
           path === "/v1/buddy/native-work" && requestPhase === name,
       );
-    expect(actionRequests()).toHaveLength(rows.length);
-    for (const request of actionRequests())
-      expect(request.search).toContain("project_id=showcase");
+    expect(batchActionRequests()).toHaveLength(1);
+    expect(perRowActionRequests()).toHaveLength(0);
+    const batchUrl = new URLSearchParams(batchActionRequests()[0].search);
+    expect([...batchUrl.keys()].sort()).toEqual(["ids", "project_id"]);
+    expect(batchUrl.get("project_id")).toBe("showcase");
+    expect(batchUrl.get("ids")).toBe(
+      rows.map(({ value }) => value.id).join(","),
+    );
     expect(nativeWorkRequests("setup").length).toBeGreaterThan(0);
 
     phase = "visible";
@@ -160,7 +176,8 @@ test.describe("Buddy idle request behavior", () => {
       visibleCount = nativeWorkRequests("visible").length;
     }
     expect(visibleCount).toBeGreaterThanOrEqual(2);
-    expect(actionRequests()).toHaveLength(rows.length);
+    expect(batchActionRequests()).toHaveLength(1);
+    expect(perRowActionRequests()).toHaveLength(0);
 
     phase = "hidden";
     await page.evaluate(() => {
@@ -187,7 +204,8 @@ test.describe("Buddy idle request behavior", () => {
       ).toHaveLength(hiddenBaseline);
     }
     expect(nativeWorkRequests("hidden")).toHaveLength(0);
-    expect(actionRequests()).toHaveLength(rows.length);
+    expect(batchActionRequests()).toHaveLength(1);
+    expect(perRowActionRequests()).toHaveLength(0);
 
     phase = "resumed";
     await page.evaluate(() => {
@@ -205,6 +223,7 @@ test.describe("Buddy idle request behavior", () => {
     await expect
       .poll(() => nativeWorkRequests("resumed").length)
       .toBeGreaterThanOrEqual(1);
-    expect(actionRequests()).toHaveLength(rows.length);
+    expect(batchActionRequests()).toHaveLength(1);
+    expect(perRowActionRequests()).toHaveLength(0);
   });
 });

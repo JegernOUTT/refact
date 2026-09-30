@@ -272,6 +272,18 @@ export type DeskAction = {
   latest_execution: OperatorRecord<ActionExecution> | null;
 };
 
+export type DeskActionBatchEntry = {
+  work_id: string;
+  actions: DeskAction[];
+  error: string | null;
+};
+
+export type DeskActionBatchArgs = {
+  ids: string[];
+  project_id: string;
+  endpoint_identity: string;
+};
+
 export type DeskActionExecuteArgs = OperatorDetailArgs & {
   action_id: string;
   project_id: string;
@@ -867,6 +879,86 @@ export const buddyOperatorApi = buddyApi.injectEndpoints({
         }
       },
     }),
+    getBuddyDeskActionsBatch: builder.query<
+      OperatorPage<DeskActionBatchEntry[]>,
+      DeskActionBatchArgs
+    >({
+      queryFn: async (args, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyOperatorState;
+        const result = await baseQuery(
+          buildApiUrlFromState(state, "/v1/buddy/work/actions", {
+            project_id: args.project_id,
+            ids: args.ids.join(","),
+          }),
+        );
+        if (result.error) return { error: result.error };
+        try {
+          const data = parseEnvelope(
+            result.data,
+            (value) => {
+              if (!Array.isArray(value))
+                throw new InvalidOperatorContract("invalid Desk actions batch");
+              const seen = new Set<string>();
+              return value.map((entry) => {
+                if (!entry || typeof entry !== "object" || Array.isArray(entry))
+                  throw new InvalidOperatorContract(
+                    "invalid Desk actions entry",
+                  );
+                const row = entry as Record<string, unknown>;
+                if (
+                  Object.keys(row).length !== 3 ||
+                  Object.keys(row).some(
+                    (key) => !["work_id", "actions", "error"].includes(key),
+                  ) ||
+                  typeof row.work_id !== "string" ||
+                  !args.ids.includes(row.work_id) ||
+                  seen.has(row.work_id) ||
+                  !Array.isArray(row.actions) ||
+                  (row.error !== null && typeof row.error !== "string")
+                )
+                  throw new InvalidOperatorContract(
+                    "invalid Desk actions entry",
+                  );
+                const workId = row.work_id;
+                const actions = row.actions;
+                const entryError = row.error;
+                seen.add(workId);
+                return {
+                  work_id: workId,
+                  actions: actions.map((action) =>
+                    parseDeskAction(action, args.project_id, workId),
+                  ),
+                  error: entryError,
+                };
+              });
+            },
+            args.project_id,
+          );
+          if (
+            data.data.some((entry) =>
+              entry.actions.some(
+                (action) =>
+                  action.spec.project.canonical_root !==
+                  data.project.canonical_root,
+              ),
+            )
+          )
+            throw new InvalidOperatorContract("Desk action project mismatch");
+          return { data };
+        } catch (error) {
+          return invalidResponse(error);
+        }
+      },
+      serializeQueryArgs: ({ endpointName, queryArgs }) =>
+        !Array.isArray(queryArgs.ids)
+          ? endpointName
+          : `${endpointName}:${JSON.stringify({
+              endpoint_identity: queryArgs.endpoint_identity,
+              project_id: queryArgs.project_id,
+              ids: [...queryArgs.ids].sort(),
+            })}`,
+      providesTags: ["BuddyDeskActions"],
+    }),
     executeBuddyDeskAction: builder.mutation<
       OperatorPage<OperatorRecord<ActionExecution>>,
       DeskActionExecuteArgs
@@ -924,7 +1016,7 @@ export const buddyOperatorApi = buddyApi.injectEndpoints({
           return invalidResponse(error);
         }
       },
-      invalidatesTags: ["BuddySnapshot"],
+      invalidatesTags: ["BuddySnapshot", "BuddyDeskActions"],
     }),
     getBuddyOperatorWork: builder.query<
       OperatorPage<OperatorRecord<WorkItem>[]>,
@@ -1065,6 +1157,7 @@ export const {
   useGetBuddyWorkReadStateQuery,
   useMarkBuddyWorkReadMutation,
   useGetBuddyDeskActionsQuery,
+  useGetBuddyDeskActionsBatchQuery,
   useExecuteBuddyDeskActionMutation,
   useGetBuddyOperatorWorkQuery,
   useGetBuddyOperatorWorkItemQuery,

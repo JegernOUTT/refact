@@ -390,3 +390,85 @@ describe("operator status runtime contract", () => {
     expect(() => parseOperatorStatus(value)).toThrow(),
   );
 });
+
+describe("Desk actions batch response contract", () => {
+  const project = { project_id: "project-1", canonical_root: "/repo" };
+  const action = (workId: string, canonicalRoot = project.canonical_root) => ({
+    spec: {
+      schema_version: 1,
+      action_id: "check_saved_evidence",
+      kind: "check_saved_evidence",
+      adapter: "operator.saved_evidence",
+      project: { ...project, canonical_root: canonicalRoot },
+      resource: {
+        resource_kind: "saved_report",
+        resource_id: workId,
+        version: "digest",
+      },
+      expected_version: "digest",
+      parameter_ref: null,
+      availability: "available",
+      confirmation: "none",
+      authority_class: "read_only",
+      capabilities: {
+        can_preview: true,
+        can_execute: true,
+        can_verify: false,
+        can_recover: false,
+        can_cancel: false,
+      },
+    },
+    spec_hash: "hash",
+    work_revision: 1,
+    artifact_id: "artifact-1",
+    artifact_revision: 1,
+    label: "Check evidence",
+    description: "Checks retained evidence.",
+    latest_execution: null,
+  });
+  const entry = (workId: string, registeredAction = action(workId)) => ({
+    work_id: workId,
+    actions: [registeredAction],
+    error: null,
+  });
+  const args = {
+    ids: ["work-1", "work-2"],
+    project_id: project.project_id,
+    endpoint_identity: "test-identity",
+  };
+
+  async function query(data: unknown) {
+    const fetch = vi.fn<FetchLike>();
+    vi.stubGlobal("fetch", fetch);
+    fetch.mockResolvedValueOnce(
+      response({ schema_version: 1, project, data, next_cursor: null }),
+    );
+    const testStore = store({ host: "ide", lspPort: 8123, apiKey: null });
+    const result = await testStore.dispatch(
+      buddyOperatorApi.endpoints.getBuddyDeskActionsBatch.initiate(args),
+    );
+    testStore.dispatch(buddyApi.util.resetApiState());
+    return result;
+  }
+
+  test("accepts a valid page", async () => {
+    const result = await query([entry("work-1"), entry("work-2")]);
+    expect(result.data?.data.map(({ work_id }) => work_id)).toEqual([
+      "work-1",
+      "work-2",
+    ]);
+  });
+
+  test.each([
+    ["an entry with an extra key", [{ ...entry("work-1"), extra: true }]],
+    ["an unrequested work id", [entry("other-work")]],
+    ["a duplicate work id", [entry("work-1"), entry("work-1")]],
+    [
+      "an action from another canonical root",
+      [entry("work-1", action("work-1", "/other"))],
+    ],
+  ])("rejects %s", async (_name, data) => {
+    const result = await query(data);
+    expect(result.error).toMatchObject({ status: "PARSING_ERROR" });
+  });
+});

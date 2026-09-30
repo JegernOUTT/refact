@@ -391,6 +391,7 @@ export const buddyApi = createApi({
   reducerPath: "buddyApi",
   tagTypes: [
     "BuddySnapshot",
+    "BuddyDeskActions",
     "BuddyOpportunities",
     "BuddyPulse",
     "BuddyDrafts",
