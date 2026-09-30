@@ -16,6 +16,9 @@ use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 use crate::llm::{LlmRequest, LlmStreamDelta, WireFormat, get_adapter, safe_truncate};
 use crate::llm::adapter::{AdapterSettings, HttpParts, StreamParseError};
 use crate::privacy::destinations::clear_for_model;
+use refact_providers::pressure::{
+    FailureReport, Outcome as ProviderPressureOutcome, Permit, RequestPriority,
+};
 
 use super::openai_codex_ws::{OpenAICodexWebSocketResponseTracker, OpenAICodexWebSocketSession};
 use super::types::{DeltaOp, stream_heartbeat, stream_idle_timeout, stream_total_timeout};
@@ -122,12 +125,14 @@ pub struct StreamRunParams {
     pub supports_reasoning: bool,
     pub reasoning_type: Option<String>,
     pub supports_temperature: bool,
+    pub priority: RequestPriority,
 }
 
 #[derive(Clone, Debug)]
 pub struct LlmStreamError {
     pub message: String,
     pub partial_output_emitted: bool,
+    pub pressure_failure: Option<(String, FailureReport)>,
 }
 
 impl LlmStreamError {
@@ -135,7 +140,13 @@ impl LlmStreamError {
         Self {
             message: message.into(),
             partial_output_emitted,
+            pressure_failure: None,
         }
+    }
+
+    fn with_pressure_failure(mut self, bucket: &str, report: FailureReport) -> Self {
+        self.pressure_failure = Some((bucket.to_string(), report));
+        self
     }
 
     pub fn retry_decision(&self) -> RetryDecision {
@@ -223,6 +234,24 @@ fn abort_requested(abort_flag: Option<&Arc<AtomicBool>>) -> bool {
 }
 
 pub(crate) const ABORT_ERROR_MESSAGE: &str = "Aborted";
+
+fn provider_pressure_bucket(model_rec: &BaseModelRecord) -> String {
+    let provider_id = model_rec
+        .id
+        .split_once('/')
+        .map(|(provider, _)| provider)
+        .unwrap_or(&model_rec.id);
+    let credential = [
+        &model_rec.api_key,
+        &model_rec.auth_token,
+        &model_rec.endpoint,
+    ]
+    .into_iter()
+    .find(|value| !value.trim().is_empty())
+    .map(String::as_str)
+    .unwrap_or("");
+    refact_providers::pressure::bucket_key(provider_id, credential)
+}
 
 fn is_abort_error(error: &str) -> bool {
     error == ABORT_ERROR_MESSAGE
@@ -2342,6 +2371,61 @@ pub(crate) async fn run_llm_stream_with_prepare_started<C: StreamCollector>(
     collector: &mut C,
     prepare_started_at: Option<Instant>,
 ) -> Result<LlmStreamOutcome, LlmStreamError> {
+    let bucket = provider_pressure_bucket(&params.model_rec);
+    let mut permit = None;
+    let result = run_llm_stream_with_prepare_started_inner(
+        app,
+        params,
+        collector,
+        prepare_started_at,
+        &bucket,
+        &mut permit,
+    )
+    .await;
+    match (permit, result) {
+        (Some(permit), Ok(outcome @ LlmStreamOutcome::Choices(_))) => {
+            permit.complete(ProviderPressureOutcome::Success);
+            Ok(outcome)
+        }
+        (Some(permit), Ok(outcome @ LlmStreamOutcome::PausedForCacheGuard)) => {
+            drop(permit);
+            Ok(outcome)
+        }
+        (Some(permit), Err(mut error)) => {
+            if let Some((_, report)) = error.pressure_failure.clone() {
+                permit.complete(ProviderPressureOutcome::Failure(report));
+            } else if is_abort_error(&error.message) {
+                drop(permit);
+            } else if error.message.starts_with("LLM request failed:")
+                || error
+                    .message
+                    .starts_with("LLM HTTP SSE response header timeout")
+                || error.message.starts_with("Stream error:")
+                || error.message.contains("stream ended unexpectedly")
+                || error.message.contains("LLM stream timeout")
+                || error.message.contains("LLM stream stalled")
+                || error.message.contains("WebSocket")
+            {
+                let report = FailureReport::transport(&error.message);
+                permit.complete(ProviderPressureOutcome::Failure(report.clone()));
+                error.pressure_failure = Some((bucket, report));
+            } else {
+                drop(permit);
+            }
+            Err(error)
+        }
+        (None, result) => result,
+    }
+}
+
+async fn run_llm_stream_with_prepare_started_inner<C: StreamCollector>(
+    app: AppState,
+    params: StreamRunParams,
+    collector: &mut C,
+    prepare_started_at: Option<Instant>,
+    provider_bucket: &str,
+    pressure_permit: &mut Option<Permit>,
+) -> Result<LlmStreamOutcome, LlmStreamError> {
     let mut partial_output_emitted = false;
 
     if params.llm_request.params.n.unwrap_or(1) != 1 {
@@ -2446,6 +2530,15 @@ pub(crate) async fn run_llm_stream_with_prepare_started<C: StreamCollector>(
             partial_output_emitted,
         ));
     }
+
+    *pressure_permit = crate::llm::pressure::acquire(
+        provider_bucket,
+        params.priority,
+        params.abort_flag.clone(),
+        params.abort_notify.clone(),
+    )
+    .await
+    .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
 
     tracing::debug!(
         url = %http_parts.url,
@@ -2806,6 +2899,11 @@ pub(crate) async fn run_llm_stream_with_prepare_started<C: StreamCollector>(
     }
 
     if !status.is_success() {
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let text = tokio::select! {
             body = read_error_body_bounded(response) => body,
             _ = wait_for_abort_signal(params.abort_flag.clone(), params.abort_notify.clone()) => {
@@ -2819,10 +2917,16 @@ pub(crate) async fn run_llm_stream_with_prepare_started<C: StreamCollector>(
             text,
             rejected_command_credential.as_deref(),
         );
-        return Err(LlmStreamError::new(
+        let error = LlmStreamError::new(
             format_llm_error_body(&format!("{}", status), &text, command_credential.as_deref()),
             partial_output_emitted,
-        ));
+        );
+        if let Some(report) =
+            FailureReport::from_http(status.as_u16(), retry_after.as_deref(), &text)
+        {
+            return Err(error.with_pressure_failure(provider_bucket, report));
+        }
+        return Err(error);
     }
 
     commit_cache_guard_snapshot_if_needed(snapshot_for_commit).await;
@@ -2835,7 +2939,7 @@ pub(crate) async fn run_llm_stream_with_prepare_started<C: StreamCollector>(
     };
 
     if wire_format == WireFormat::OllamaNative {
-        return run_llm_ndjson_request(
+        let result = run_llm_ndjson_request(
             response,
             adapter,
             &params.model_rec.auth_token,
@@ -2848,6 +2952,13 @@ pub(crate) async fn run_llm_stream_with_prepare_started<C: StreamCollector>(
         .await
         .map_err(|e| LlmStreamError::new(e, *tracking_collector.partial_output_emitted))
         .map(LlmStreamOutcome::Choices);
+        return result.map_err(|mut error| {
+            if !is_abort_error(&error.message) {
+                let report = FailureReport::transport(&error.message);
+                error.pressure_failure = Some((provider_bucket.to_string(), report));
+            }
+            error
+        });
     }
 
     let mut stream = response.bytes_stream().eventsource();
@@ -3195,7 +3306,7 @@ mod tests {
     use refact_privacy::{Attribution, FileRecord, PolicyLoad, PrivacyPolicy, PrivacyRecord};
     use refact_privacy::{ShellBehavior, SubagentPolicy, Zone};
 
-    fn privacy_policy(allowed_provider: &str) -> PrivacyPolicy {
+    pub(super) fn privacy_policy(allowed_provider: &str) -> PrivacyPolicy {
         PrivacyPolicy {
             blocked: Vec::new(),
             zones: vec![
@@ -3233,7 +3344,7 @@ mod tests {
         LlmRequest::new("model".to_string(), vec![message])
     }
 
-    fn model_record(provider: &str) -> BaseModelRecord {
+    pub(super) fn model_record(provider: &str) -> BaseModelRecord {
         BaseModelRecord {
             id: format!("{provider}/model"),
             name: "model".to_string(),
@@ -3275,7 +3386,7 @@ mod tests {
         assert!(!is_litellm_model(&model_record("custom")));
     }
 
-    async fn app_with_privacy_policy(policy: PrivacyPolicy) -> AppState {
+    pub(super) async fn app_with_privacy_policy(policy: PrivacyPolicy) -> AppState {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.privacy_policy_load.write().unwrap() = PolicyLoad {
             policy: Arc::new(policy),
@@ -3355,6 +3466,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[serial_test::serial(provider_pressure, coordination_metrics)]
     async fn command_credential_retries_once_after_unauthorized() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -3403,6 +3515,11 @@ mod tests {
         );
         let mut model = model_record(provider_id);
         model.endpoint = format!("http://{address}/v1/chat/completions");
+        let bucket = provider_pressure_bucket(&model);
+        crate::llm::pressure::install_provider_pressure(
+            &refact_work_core::CoordinationSettings::default(),
+        )
+        .unwrap();
         model.credential = Some(CredentialSpec::Command {
             command: "sh".to_string(),
             args: vec!["-c".to_string(), helper],
@@ -3425,6 +3542,7 @@ mod tests {
             supports_reasoning: false,
             reasoning_type: None,
             supports_temperature: true,
+            priority: RequestPriority::Interactive,
         };
         let app = app_with_privacy_policy(privacy_policy(provider_id)).await;
         let mut collector = ReplayCollector::default();
@@ -3435,7 +3553,221 @@ mod tests {
             LlmStreamOutcome::PausedForCacheGuard => panic!("unexpected cache guard pause"),
         }
         server.await.unwrap();
+        let snapshot = refact_providers::pressure::pressure_registry()
+            .unwrap()
+            .snapshot(&bucket)
+            .unwrap();
+        assert_eq!(snapshot.in_flight, 0);
+        assert_eq!(snapshot.consecutive_successes, 1);
+        assert_eq!(snapshot.consecutive_retryable_failures, 0);
+        refact_providers::pressure::uninstall_pressure_registry();
         crate::providers::credential::invalidate(provider_id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(provider_pressure, coordination_metrics)]
+    async fn http_rate_limit_updates_pressure_and_open_breaker_prevents_next_send() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let provider_id = "pressure-test-provider";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_hits = hits.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            server_hits.fetch_add(1, Ordering::SeqCst);
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let count = socket.read(&mut chunk).await.unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = r#"{"error":{"message":"rate limit"}}"#;
+            let response = format!(
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 2\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut settings = refact_work_core::CoordinationSettings::default();
+        settings.provider_initial_concurrency = 4;
+        settings.provider_max_concurrency = 4;
+        settings.provider_breaker_failure_threshold = 1;
+        crate::llm::pressure::install_provider_pressure(&settings).unwrap();
+
+        let mut model = model_record(provider_id);
+        model.api_key = "credential-for-pressure-test".to_string();
+        model.endpoint = format!("http://{address}/v1/chat/completions");
+        let bucket = provider_pressure_bucket(&model);
+        let params = || StreamRunParams {
+            llm_request: LlmRequest::new(
+                format!("{provider_id}/model"),
+                vec![ChatMessage::new("user".to_string(), "hello".to_string())],
+            ),
+            model_rec: model.clone(),
+            chat_id: None,
+            allow_websocket: false,
+            abort_flag: None,
+            abort_notify: None,
+            supports_tools: false,
+            supports_reasoning: false,
+            reasoning_type: None,
+            supports_temperature: true,
+            priority: RequestPriority::Interactive,
+        };
+        let app = app_with_privacy_policy(privacy_policy(provider_id)).await;
+        let mut collector = ReplayCollector::default();
+        let first_result = run_llm_stream(app.clone(), params(), &mut collector).await;
+        let first_error = match first_result {
+            Ok(_) => panic!("rate-limited request unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        let (reported_bucket, report) = first_error.pressure_failure.as_ref().unwrap();
+        assert_eq!(reported_bucket, &bucket);
+        assert_eq!(
+            report.class,
+            refact_providers::pressure::PressureClass::RateLimit
+        );
+        assert_eq!(report.retry_after.as_deref(), Some("2"));
+        server.await.unwrap();
+
+        let snapshot = refact_providers::pressure::pressure_registry()
+            .unwrap()
+            .snapshot(&bucket)
+            .unwrap();
+        assert_eq!(snapshot.limit, 2);
+        let next_result = run_llm_stream(app, params(), &mut collector).await;
+        let next_error = match next_result {
+            Ok(_) => panic!("open breaker admitted a request"),
+            Err(error) => error,
+        };
+        assert!(next_error.message.contains("is blocked"));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        refact_providers::pressure::uninstall_pressure_registry();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(provider_pressure, coordination_metrics)]
+    async fn acquisition_waiting_aborts_before_http_send() {
+        refact_providers::pressure::uninstall_pressure_registry();
+        let mut settings = refact_work_core::CoordinationSettings::default();
+        settings.provider_initial_concurrency = 1;
+        settings.provider_min_concurrency = 1;
+        settings.provider_max_concurrency = 1;
+        settings.provider_interactive_reserved_slots = 0;
+        crate::llm::pressure::install_provider_pressure(&settings).unwrap();
+
+        let first =
+            crate::llm::pressure::admit("abort-stream/credential", RequestPriority::Interactive)
+                .unwrap()
+                .unwrap();
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        let abort_notify = Arc::new(tokio::sync::Notify::new());
+        let waiting_flag = abort_flag.clone();
+        let waiting_notify = abort_notify.clone();
+        let waiter = tokio::spawn(async move {
+            crate::llm::pressure::acquire(
+                "abort-stream/credential",
+                RequestPriority::Interactive,
+                Some(waiting_flag),
+                Some(waiting_notify),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        abort_flag.store(true, Ordering::SeqCst);
+        abort_notify.notify_one();
+        assert_eq!(waiter.await.unwrap().unwrap_err(), ABORT_ERROR_MESSAGE);
+        drop(first);
+        refact_providers::pressure::uninstall_pressure_registry();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(provider_pressure, coordination_metrics)]
+    async fn pressure_disabled_keeps_the_http_stream_unmanaged() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        refact_providers::pressure::uninstall_pressure_registry();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let count = socket.read(&mut chunk).await.unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let header_end = request
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .unwrap()
+                        + 4;
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap();
+                    if request.len() >= header_end + length {
+                        break;
+                    }
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.contains("hello"));
+            let body = b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.write_all(body).await.unwrap();
+        });
+
+        assert!(refact_providers::pressure::pressure_registry().is_none());
+        let mut model = model_record("pressure-disabled");
+        model.endpoint = format!("http://{address}/v1/chat/completions");
+        let params = StreamRunParams {
+            llm_request: LlmRequest::new(
+                model.id.clone(),
+                vec![ChatMessage::new("user".to_string(), "hello".to_string())],
+            ),
+            model_rec: model,
+            chat_id: None,
+            allow_websocket: false,
+            abort_flag: None,
+            abort_notify: None,
+            supports_tools: false,
+            supports_reasoning: false,
+            reasoning_type: None,
+            supports_temperature: true,
+            priority: RequestPriority::Interactive,
+        };
+        let app = app_with_privacy_policy(privacy_policy("pressure-disabled")).await;
+        let mut collector = ReplayCollector::default();
+        let outcome = run_llm_stream(app, params, &mut collector).await.unwrap();
+        match outcome {
+            LlmStreamOutcome::Choices(choices) => assert_eq!(choices[0].content, "ok"),
+            LlmStreamOutcome::PausedForCacheGuard => panic!("unexpected cache guard pause"),
+        }
+        server.await.unwrap();
+        assert!(refact_providers::pressure::pressure_registry().is_none());
     }
 
     #[test]
@@ -3819,6 +4151,7 @@ mod tests {
         let error = LlmStreamError {
             message: "LLM error (503 Service Unavailable): overloaded".to_string(),
             partial_output_emitted: true,
+            pressure_failure: None,
         };
 
         assert!(matches!(
@@ -3834,6 +4167,7 @@ mod tests {
         let error = LlmStreamError {
             message: "LLM error (503 Service Unavailable): overloaded".to_string(),
             partial_output_emitted: false,
+            pressure_failure: None,
         };
 
         assert!(matches!(
@@ -3849,6 +4183,7 @@ mod tests {
         let error = LlmStreamError {
             message: ABORT_ERROR_MESSAGE.to_string(),
             partial_output_emitted: true,
+            pressure_failure: None,
         };
 
         assert!(error.retry_decision().is_user_cancelled());
@@ -3861,6 +4196,7 @@ mod tests {
         let error = LlmStreamError {
             message: "LLM stream ended unexpectedly without completion signal".to_string(),
             partial_output_emitted: true,
+            pressure_failure: None,
         };
 
         assert!(matches!(
@@ -5307,3 +5643,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "stream_core_pressure_tests.rs"]
+mod pressure_tests;

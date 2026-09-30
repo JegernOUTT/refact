@@ -3622,6 +3622,7 @@ async fn subchat_stream(
             supports_reasoning: model_rec.has_reasoning_support(),
             reasoning_type: model_rec.reasoning_type_string(),
             supports_temperature: model_rec.supports_temperature,
+            priority: refact_providers::pressure::RequestPriority::Background,
         };
 
         let mut collector = SubchatProgressCollector::new(
@@ -3644,6 +3645,7 @@ async fn subchat_stream(
                 Err(crate::chat::stream_core::LlmStreamError {
                     message: "subchat generation paused by cache guard; retry".to_string(),
                     partial_output_emitted: false,
+                    pressure_failure: None,
                 })
             }
         });

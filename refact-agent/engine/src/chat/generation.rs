@@ -2709,6 +2709,11 @@ async fn run_streaming_generation(
             supports_reasoning: model_rec.has_reasoning_support(),
             reasoning_type: model_rec.reasoning_type_string(),
             supports_temperature: model_rec.supports_temperature,
+            priority: if task_role.as_deref() == Some("agents") {
+                refact_providers::pressure::RequestPriority::Background
+            } else {
+                refact_providers::pressure::RequestPriority::Interactive
+            },
         };
 
         let mut cloud_input_usage_task =
@@ -3738,6 +3743,7 @@ mod tests {
         LlmStreamError {
             message: message.to_string(),
             partial_output_emitted,
+            pressure_failure: None,
         }
     }
 

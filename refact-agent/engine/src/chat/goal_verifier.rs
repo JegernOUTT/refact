@@ -759,6 +759,7 @@ pub async fn run_goal_verifier(
         supports_reasoning: model_rec.has_reasoning_support(),
         reasoning_type: model_rec.reasoning_type_string(),
         supports_temperature: model_rec.supports_temperature,
+        priority: refact_providers::pressure::RequestPriority::Background,
     };
     let mut collector = GoalVerifierCollector;
     let choices = run_llm_stream(app, params, &mut collector)

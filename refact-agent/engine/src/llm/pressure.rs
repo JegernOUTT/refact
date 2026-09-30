@@ -1,6 +1,8 @@
 //! Bridges coordination settings onto the provider pressure controller, and is
 //! the seam where admission and retry decisions become measurable.
 
+use std::time::Duration;
+
 use refact_providers::pressure::{
     install_pressure_registry, pressure_registry, uninstall_pressure_registry, AdmissionRefusal,
     FailureReport, Permit, PressureConfig, RequestPriority, RetryDecision,
@@ -124,6 +126,135 @@ pub fn admit(bucket: &str, priority: RequestPriority) -> Option<Result<Permit, A
     }
     metrics::sample_provider_pressure();
     Some(decided)
+}
+
+pub fn admit_recheck(
+    bucket: &str,
+    priority: RequestPriority,
+) -> Option<Result<Permit, AdmissionRefusal>> {
+    let registry = pressure_registry()?;
+    let decided = registry.try_admit(bucket, priority);
+    if decided.is_ok() {
+        metrics::count(
+            metrics::PERMITS,
+            vec![
+                ("bucket", bucket.to_string()),
+                ("kind", "granted".to_string()),
+            ],
+        );
+        metrics::sample_provider_pressure();
+    }
+    Some(decided)
+}
+
+pub async fn acquire(
+    bucket: &str,
+    priority: RequestPriority,
+    abort_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    abort_notify: Option<std::sync::Arc<tokio::sync::Notify>>,
+) -> Result<Option<Permit>, String> {
+    let Some(first) = admit(bucket, priority) else {
+        return Ok(None);
+    };
+    let mut refusal = match first {
+        Ok(permit) => return Ok(Some(permit)),
+        Err(refusal) => refusal,
+    };
+    let mut backoff_ms = 25u64;
+
+    loop {
+        match refusal {
+            AdmissionRefusal::CoolingDown { reason, until_ms } => {
+                let registry = pressure_registry().ok_or_else(|| {
+                    "provider pressure registry was removed while waiting".to_string()
+                })?;
+                let snapshot = registry.snapshot(bucket);
+                if snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.breaker.is_some())
+                {
+                    return Err(format!(
+                        "provider bucket {bucket} is blocked: {reason} until {until_ms}"
+                    ));
+                }
+                let remaining_ms = until_ms.saturating_sub(registry.now_ms());
+                if remaining_ms > registry.config().max_backoff_ms {
+                    return Err(format!(
+                        "provider bucket {bucket} is cooling down: {reason} until {until_ms} (longer than the {} ms admission wait bound)",
+                        registry.config().max_backoff_ms
+                    ));
+                }
+                wait_abortable(
+                    Duration::from_millis(remaining_ms.max(25).min(backoff_ms)),
+                    abort_flag.clone(),
+                    abort_notify.clone(),
+                )
+                .await?;
+                backoff_ms = (backoff_ms * 2).min(500);
+            }
+            AdmissionRefusal::AtCapacity { .. } | AdmissionRefusal::BackgroundReserved { .. } => {
+                wait_abortable(
+                    Duration::from_millis(backoff_ms),
+                    abort_flag.clone(),
+                    abort_notify.clone(),
+                )
+                .await?;
+                backoff_ms = (backoff_ms * 2).min(500);
+            }
+        }
+
+        let Some(next) = admit_recheck(bucket, priority) else {
+            return Ok(None);
+        };
+        match next {
+            Ok(permit) => return Ok(Some(permit)),
+            Err(next_refusal) => refusal = next_refusal,
+        }
+    }
+}
+
+async fn wait_abortable(
+    duration: std::time::Duration,
+    abort_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    abort_notify: Option<std::sync::Arc<tokio::sync::Notify>>,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+
+    if abort_flag
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    {
+        return Err("Aborted".to_string());
+    }
+    let deadline = tokio::time::Instant::now() + duration;
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_millis(50));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        if abort_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        {
+            return Err("Aborted".to_string());
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        if let Some(notify) = abort_notify.as_ref() {
+            let notified = notify.notified();
+            tokio::pin!(notified);
+            tokio::select! {
+                _ = tokio::time::sleep(remaining) => return Ok(()),
+                _ = &mut notified => return Err("Aborted".to_string()),
+                _ = heartbeat.tick() => {},
+            }
+        } else {
+            tokio::select! {
+                _ = tokio::time::sleep(remaining) => return Ok(()),
+                _ = heartbeat.tick() => {},
+            }
+        }
+    }
 }
 
 /// Ask the controller whether to retry and record the rule behind the answer.
@@ -273,5 +404,89 @@ mod tests {
         disabled.provider_pressure_enabled = false;
         install_provider_pressure(&disabled).unwrap();
         assert!(pressure_registry().is_none());
+    }
+
+    #[tokio::test]
+    #[serial(provider_pressure, coordination_metrics)]
+    async fn acquire_without_registry_returns_none_without_waiting() {
+        uninstall_pressure_registry();
+        let permit = acquire(
+            "provider/anonymous",
+            RequestPriority::Interactive,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(permit.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial(provider_pressure, coordination_metrics)]
+    async fn waiting_for_capacity_is_abortable() {
+        uninstall_pressure_registry();
+        let mut settings = CoordinationSettings::default();
+        settings.provider_initial_concurrency = 1;
+        settings.provider_min_concurrency = 1;
+        settings.provider_max_concurrency = 1;
+        settings.provider_interactive_reserved_slots = 0;
+        install_provider_pressure(&settings).unwrap();
+
+        let bucket = "abort-wait/credential";
+        let permit = admit(bucket, RequestPriority::Interactive)
+            .unwrap()
+            .unwrap();
+        let abort_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let abort_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let waiting_flag = abort_flag.clone();
+        let waiting_notify = abort_notify.clone();
+        let waiter = tokio::spawn(async move {
+            acquire(
+                bucket,
+                RequestPriority::Interactive,
+                Some(waiting_flag),
+                Some(waiting_notify),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        abort_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        abort_notify.notify_one();
+        assert_eq!(waiter.await.unwrap().unwrap_err(), "Aborted");
+        drop(permit);
+        uninstall_pressure_registry();
+    }
+
+    #[tokio::test]
+    #[serial(provider_pressure, coordination_metrics)]
+    async fn short_retry_after_window_is_waited_out_then_admitted() {
+        uninstall_pressure_registry();
+        let mut settings = CoordinationSettings::default();
+        settings.provider_retry_max_backoff_ms = 1_000;
+        settings.provider_max_retry_after_ms = 5_000;
+        settings.provider_breaker_failure_threshold = 8;
+        install_provider_pressure(&settings).unwrap();
+
+        let bucket = "short-retry-after/credential";
+        let permit = admit(bucket, RequestPriority::Interactive)
+            .unwrap()
+            .unwrap();
+        permit.complete(refact_providers::pressure::Outcome::Failure(
+            FailureReport::from_http(429, Some("1"), "rate limit").unwrap(),
+        ));
+        let until_ms = pressure_registry()
+            .unwrap()
+            .snapshot(bucket)
+            .unwrap()
+            .retry_after_until_ms
+            .unwrap();
+
+        let acquired = acquire(bucket, RequestPriority::Interactive, None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(pressure_registry().unwrap().now_ms() >= until_ms);
+        drop(acquired);
+        uninstall_pressure_registry();
     }
 }
