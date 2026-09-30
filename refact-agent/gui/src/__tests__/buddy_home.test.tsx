@@ -5305,6 +5305,7 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
             kind: "system",
             title: "System maintenance note",
             badge: "System",
+            status: "active",
             message_count: 0,
           }),
         ]),

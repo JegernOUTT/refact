@@ -36,7 +36,7 @@ describe("BuddyRecentChats", () => {
     const entries = Array.from({ length: 60 }, (_, index) => {
       const workflow = Math.floor(index / 12);
       const ids = [
-        "refact_error_detective",
+        "buddy_error_detective",
         "buddy_pr_issue_matchmaker",
         "kg_deprecate",
         "privacy_observation_degraded",
@@ -137,7 +137,7 @@ describe("BuddyRecentChats", () => {
       id: "workflow-custom",
       kind: "workflow",
       title: "Fix login (urgent)",
-      badge: "Fix Login",
+      badge: "Workflow",
       message_count: 1,
     });
     server.use(
@@ -183,5 +183,122 @@ describe("BuddyRecentChats", () => {
 
     expect(await screen.findByText(/5 entries/)).toBeInTheDocument();
     expect(screen.queryByText(/5 messages/)).not.toBeInTheDocument();
+  });
+
+  it("renders API-shaped workflow history with one name, visible failure status, and matching actions", async () => {
+    const entries = [
+      makeConversation({
+        id: "memo_extraction",
+        kind: "system",
+        title: "Memo",
+        created_at: "2026-09-24T14:14:29.963146380+00:00",
+        updated_at: "2026-09-24T14:14:29.963146380+00:00",
+        status: "failed",
+        message_count: 100,
+        icon: "🧠",
+        badge: "Memo",
+      }),
+      makeConversation({
+        id: "kg_deprecate",
+        kind: "system",
+        title: "Knowledge",
+        created_at: "2026-09-24T05:54:38.312631790+00:00",
+        updated_at: "2026-09-24T05:54:38.312631790+00:00",
+        status: "failed",
+        message_count: 100,
+        icon: "📚",
+        badge: "Knowledge",
+      }),
+      makeConversation({
+        id: "commit_message",
+        kind: "workflow",
+        title: "Commit Msg",
+        created_at: "2026-09-22T18:50:59.124159204+00:00",
+        updated_at: "2026-09-22T18:50:59.124159204+00:00",
+        status: "failed",
+        message_count: 100,
+        icon: "🔄",
+        badge: "Commit Msg",
+      }),
+      makeConversation({
+        id: "55b749c2-540e-45f2-99ce-d852698a4f2a",
+        kind: "system",
+        title: "Privacy observation degraded",
+        created_at: "2026-09-21T12:51:39.536239200+00:00",
+        updated_at: "2026-09-21T12:51:39.536239200+00:00",
+        status: "active",
+        message_count: 1,
+        icon: "🔄",
+        badge: null,
+      }),
+      makeConversation({
+        id: "title_generation",
+        kind: "workflow",
+        title: "Title generation",
+        created_at: "2026-06-03T05:55:03.452956309+00:00",
+        updated_at: "2026-06-03T05:55:03.452956309+00:00",
+        status: "completed",
+        message_count: 100,
+        icon: "🔄",
+        badge: null,
+      }),
+    ];
+    server.use(
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json(entries)),
+      http.get("*/v1/trajectories/:id", ({ params }) =>
+        HttpResponse.json({
+          id: String(params.id),
+          title: "Memo",
+          created_at: entries[0].created_at,
+          updated_at: entries[0].updated_at,
+          model: "",
+          mode: "buddy",
+          tool_use: "agent",
+          messages: [],
+        }),
+      ),
+    );
+
+    const { store, user } = render(
+      <BuddyRecentChats compact showFilters={false} />,
+      { preloadedState: CONFIG_STATE },
+    );
+
+    const rows = await screen.findAllByRole("listitem");
+    expect(rows).toHaveLength(entries.length);
+    for (const [index, entry] of entries.entries()) {
+      const rowText = rows[index].textContent ?? "";
+      const name = entry.badge ?? entry.title;
+      const nameOccurrences =
+        rowText.toLowerCase().split(name.toLowerCase()).length - 1;
+      expect(nameOccurrences, `row ${index} name ${name}: ${rowText}`).toBe(1);
+      if (entry.status === "active") {
+        expect(rows[index].querySelector("button")).toBeNull();
+        expect(rows[index]).toHaveTextContent("1 message");
+      } else {
+        expect(
+          screen.getByRole("button", { name: `Open ${name}` }),
+        ).toBeInTheDocument();
+      }
+      if (entry.status === "failed") {
+        expect(rows[index]).toHaveTextContent("Failed");
+        expect(rows[index]).toHaveTextContent("100 entries");
+      } else if (entry.status === "completed") {
+        expect(rows[index]).toHaveTextContent("100 entries");
+        expect(rows[index]).not.toHaveTextContent("Failed");
+      }
+    }
+    expect(screen.getAllByText("Failed")).toHaveLength(3);
+    await user.click(screen.getByRole("button", { name: "Open Memo" }));
+    await waitFor(() => {
+      expect(store.getState().chat.current_thread_id).toBe("memo_extraction");
+      expect(
+        store.getState().chat.threads.memo_extraction?.thread.buddy_meta,
+      ).toEqual({
+        is_buddy_chat: true,
+        buddy_chat_kind: "workflow",
+        workflow_id: "memo_extraction",
+      });
+    });
   });
 });

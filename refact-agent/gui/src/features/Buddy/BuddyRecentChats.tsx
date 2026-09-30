@@ -43,6 +43,15 @@ const FILTER_OPTIONS: { value: FilterKind; label: string }[] = [
 
 const STALE_EMPTY_PLACEHOLDER_MS = 24 * 60 * 60 * 1000;
 
+function isWorkflowHistory(entry: BuddyConversationEntry): boolean {
+  return (
+    entry.kind === "workflow" ||
+    (entry.kind === "system" &&
+      entry.badge !== null &&
+      entry.status !== "active")
+  );
+}
+
 function isStaleEmptyPlaceholder(entry: BuddyConversationEntry): boolean {
   if (entry.kind !== "chat") return false;
   if (entry.message_count > 0) return false;
@@ -63,17 +72,16 @@ const EntryRow: React.FC<EntryRowProps> = ({
   onClick,
   duplicateCount,
 }) => {
+  const workflowHistory = isWorkflowHistory(entry);
   const clickable =
-    entry.kind === "chat" ||
-    entry.kind === "setup" ||
-    entry.kind === "workflow";
-  const title =
-    entry.kind === "workflow"
-      ? entry.badge &&
-        entry.title === `${entry.id.replace(/_/g, " ")} (${entry.badge})`
-        ? entry.badge
-        : entry.title || "Untitled"
-      : entry.title || "Untitled";
+    entry.kind === "chat" || entry.kind === "setup" || workflowHistory;
+  const title = workflowHistory
+    ? entry.badge &&
+      (entry.title === `${entry.id.replace(/_/g, " ")} (${entry.badge})` ||
+        entry.title.toLowerCase().includes(entry.badge.toLowerCase()))
+      ? entry.badge
+      : entry.title || "Untitled"
+    : entry.title || "Untitled";
   const content = (
     <>
       <span className={styles.entryIcon}>
@@ -94,18 +102,29 @@ const EntryRow: React.FC<EntryRowProps> = ({
               {countLabel(duplicateCount, "chat", "chats")}
             </Badge>
           )}
-          {entry.badge && entry.kind !== "workflow" && (
-            <Badge size="xs" tone="muted" className={styles.entryBadge}>
-              {entry.badge}
-            </Badge>
-          )}
+          {entry.badge &&
+            !title.toLowerCase().includes(entry.badge.toLowerCase()) && (
+              <Badge size="xs" tone="muted" className={styles.entryBadge}>
+                {entry.badge}
+              </Badge>
+            )}
         </span>
         <Text size="1" color="gray" className={styles.entryMeta}>
+          {workflowHistory && entry.status === "failed" && (
+            <>
+              <Text size="1" color="red">
+                Failed
+              </Text>
+              {entry.message_count > 0 ? " · " : ""}
+            </>
+          )}
           {entry.message_count > 0
-            ? entry.kind === "chat" || entry.kind === "setup"
-              ? countLabel(entry.message_count, "message", "messages")
-              : countLabel(entry.message_count, "entry", "entries")
-            : entry.status}
+            ? workflowHistory
+              ? countLabel(entry.message_count, "entry", "entries")
+              : countLabel(entry.message_count, "message", "messages")
+            : workflowHistory && entry.status === "failed"
+              ? null
+              : entry.status}
           {entry.updated_at ? ` · ${formatRelativeTime(entry.updated_at)}` : ""}
         </Text>
       </span>
@@ -175,7 +194,7 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
   const collapsedConversations = React.useMemo(
     () =>
       collapseConsecutive(conversations, (entry) => {
-        if (entry.kind !== "workflow") return `${entry.kind}\u0000${entry.id}`;
+        if (!isWorkflowHistory(entry)) return `${entry.kind}\u0000${entry.id}`;
         return `${entry.badge ?? entry.id}\u0000${entry.title}`;
       }),
     [conversations],
@@ -186,7 +205,13 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
   );
   const handleOpen = useCallback(
     (entry: BuddyConversationEntry) => {
-      void dispatch(openExistingBuddyChat(entry));
+      void dispatch(
+        openExistingBuddyChat(
+          isWorkflowHistory(entry) && entry.kind === "system"
+            ? { ...entry, kind: "workflow" }
+            : entry,
+        ),
+      );
     },
     [dispatch],
   );

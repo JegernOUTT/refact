@@ -320,43 +320,105 @@ const buddyConversations: BuddyConversationEntry[] = [
 const activityFixtureParam = new URLSearchParams(window.location.search).has(
   "activity_fixture",
 );
+const realConversationsFixtureParam = new URLSearchParams(
+  window.location.search,
+).has("conversations_fixture");
+const realConversationsFixture: BuddyConversationEntry[] = [
+  {
+    id: "memo_extraction",
+    kind: "system",
+    title: "Memo",
+    created_at: "2026-09-24T14:14:29.963146380+00:00",
+    updated_at: "2026-09-24T14:14:29.963146380+00:00",
+    status: "failed",
+    message_count: 100,
+    icon: "🧠",
+    badge: "Memo",
+  },
+  {
+    id: "kg_deprecate",
+    kind: "system",
+    title: "Knowledge",
+    created_at: "2026-09-24T05:54:38.312631790+00:00",
+    updated_at: "2026-09-24T05:54:38.312631790+00:00",
+    status: "failed",
+    message_count: 100,
+    icon: "📚",
+    badge: "Knowledge",
+  },
+  {
+    id: "commit_message",
+    kind: "workflow",
+    title: "Commit Msg",
+    created_at: "2026-09-22T18:50:59.124159204+00:00",
+    updated_at: "2026-09-22T18:50:59.124159204+00:00",
+    status: "failed",
+    message_count: 100,
+    icon: "🔄",
+    badge: "Commit Msg",
+  },
+  {
+    id: "55b749c2-540e-45f2-99ce-d852698a4f2a",
+    kind: "system",
+    title: "Privacy observation degraded",
+    created_at: "2026-09-21T12:51:39.536239200+00:00",
+    updated_at: "2026-09-21T12:51:39.536239200+00:00",
+    status: "active",
+    message_count: 1,
+    icon: "🔄",
+    badge: null,
+  },
+  {
+    id: "title_generation",
+    kind: "workflow",
+    title: "Title generation",
+    created_at: "2026-06-03T05:55:03.452956309+00:00",
+    updated_at: "2026-06-03T05:55:03.452956309+00:00",
+    status: "completed",
+    message_count: 100,
+    icon: "🔄",
+    badge: null,
+  },
+];
 const buddyActivityConversations: BuddyConversationEntry[] =
-  activityFixtureParam
-    ? Array.from({ length: 60 }, (_, index) => {
-        const workflowIndex = Math.floor(index / 12);
-        const ids = [
-          "refact_error_detective",
-          "buddy_pr_issue_matchmaker",
-          "kg_deprecate",
-          "privacy_observation_degraded",
-          "commit_message",
-        ];
-        const badges = [
-          "Error Detective",
-          "PR Matchmaker",
-          "Knowledge",
-          "Privacy observation degraded",
-          "Commit message",
-        ];
-        const id = ids[workflowIndex];
-        const badge = badges[workflowIndex];
-        const title =
-          index % 12 < 2
-            ? `${id.replace(/_/g, " ")} (${badge})`
-            : `${badge} report ${index}`;
-        return {
-          id: index % 12 < 2 ? id : `${id}-${index}`,
-          kind: "workflow",
-          title,
-          created_at: now,
-          updated_at: now,
-          status: "completed",
-          message_count: index === 0 ? 1 : 2,
-          icon: "⚙️",
-          badge,
-        };
-      })
-    : buddyConversations;
+  realConversationsFixtureParam
+    ? realConversationsFixture
+    : activityFixtureParam
+      ? Array.from({ length: 60 }, (_, index) => {
+          const workflowIndex = Math.floor(index / 12);
+          const ids = [
+            "refact_error_detective",
+            "buddy_pr_issue_matchmaker",
+            "kg_deprecate",
+            "privacy_observation_degraded",
+            "commit_message",
+          ];
+          const badges = [
+            "Error Detective",
+            "PR Matchmaker",
+            "Knowledge",
+            "Privacy observation degraded",
+            "Commit message",
+          ];
+          const id = ids[workflowIndex];
+          const badge = badges[workflowIndex];
+          const title =
+            index % 12 < 2
+              ? `${id.replace(/_/g, " ")} (${badge})`
+              : `${badge} report ${index}`;
+          return {
+            id: index % 12 < 2 ? id : `${id}-${index}`,
+            kind: "workflow",
+            title,
+            created_at: now,
+            updated_at: now,
+            status: "completed",
+            message_count: index === 0 ? 1 : 2,
+            icon: "⚙️",
+            badge,
+          };
+        })
+      : buddyConversations;
 
 const buddySnapshot: BuddySnapshot = {
   state: {
