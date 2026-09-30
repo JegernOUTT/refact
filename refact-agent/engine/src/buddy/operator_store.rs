@@ -1771,10 +1771,7 @@ impl OperatorStore {
                 &active.start.input_fingerprint,
             )
             .map_err(|_| OperatorStoreError::InvalidInput("invalid active run subject"))?;
-            let title = format!(
-                "{} — interrupted",
-                super::workflow_display::workflow_display_name(&active.start.workflow)
-            );
+            let title = super::workflow_display::workflow_interrupted_title(&active.start.workflow);
             let mut outcome = super::outcome_runtime::build_workflow_outcome(
                 active.start,
                 active.checkpoint,

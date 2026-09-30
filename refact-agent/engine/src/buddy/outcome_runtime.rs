@@ -685,6 +685,16 @@ impl OutcomeRuntime {
                 "buddy: stored legacy proposal copy refresh was incomplete; it will be retried on the next open"
             ),
         }
+        match super::workflow_display::backfill_workflow_display(&mut store) {
+            Ok(0) => {}
+            Ok(updated) => {
+                tracing::info!(updated, "buddy: refreshed stored workflow display fields")
+            }
+            Err(error) => tracing::warn!(
+                %error,
+                "buddy: workflow display refresh was incomplete; it will be retried on the next open"
+            ),
+        }
         Ok(Self::from_store(store, project, worker))
     }
 
