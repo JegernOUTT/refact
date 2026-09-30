@@ -289,11 +289,17 @@ function WorkDetail({
   endpointIdentity,
   onBack,
   onSnoozeChange,
+  onDismiss,
+  onDismissPending,
+  onDismissFailure,
 }: {
   item: WorkItem;
   endpointIdentity: string;
   onBack: () => void;
   onSnoozeChange: () => void;
+  onDismiss: (item: WorkItem) => void;
+  onDismissPending: (item: WorkItem) => void;
+  onDismissFailure: (item: WorkItem) => void;
 }) {
   const { currentData, isFetching, error, refetch } =
     useGetBuddyOperatorArtifactQuery(
@@ -396,6 +402,9 @@ function WorkDetail({
               item={item}
               artifact={artifact}
               endpointIdentity={endpointIdentity}
+              onDismiss={onDismiss}
+              onDismissPending={onDismissPending}
+              onDismissFailure={onDismissFailure}
             />
             <div className={styles.embedded}>
               <BuddyReportReadState
@@ -499,6 +508,7 @@ function DeskContent({
   const [selectedOverride, setSelectedOverride] = useState<WorkItem | null>(
     null,
   );
+  const dismissSnapshotRef = useRef<WorkItem | null>(null);
   const [expanded, setExpanded] = useState(false);
   const linkedWork = useGetBuddyOperatorWorkItemQuery(
     {
@@ -521,8 +531,14 @@ function DeskContent({
   const refreshStartedAt = useRef<number | null>(null);
   const [refreshPending, setRefreshPending] = useState(false);
   const [refreshNotice, setRefreshNotice] = useState(false);
+  const [dismissalNotice, setDismissalNotice] = useState<string | null>(null);
   const refreshFocusPending = useRef(false);
   const snoozeFocusPending = useRef(false);
+  const dismissalPendingId = useRef<string | null>(null);
+  const dismissalFocusPending = useRef<{ id: string; index: number } | null>(
+    null,
+  );
+  const dismissedSelectionId = useRef<string | null>(null);
   const snoozedSelectionId = useRef<string | null>(null);
   const {
     currentData,
@@ -563,7 +579,10 @@ function DeskContent({
     selectedId === workId
       ? linkedWork.currentData?.data.value
       : records.find((record) => record.value.id === selectedId)?.value ??
-        (selectedOverride?.id === selectedId ? selectedOverride : undefined);
+        (selectedOverride?.id === selectedId ? selectedOverride : undefined) ??
+        (dismissSnapshotRef.current?.id === selectedId
+          ? dismissSnapshotRef.current
+          : undefined);
   const query = search.trim().toLocaleLowerCase();
   const filtered = records.filter(
     ({ value }) => viewForState[value.state] === view,
@@ -644,6 +663,16 @@ function DeskContent({
       selectedId !== workId &&
       !currentData.data.some(({ value }) => value.id === selectedId)
     ) {
+      if (dismissalPendingId.current === selectedId) {
+        refreshStartedAt.current = null;
+        setRefreshPending(false);
+        refreshFocusPending.current = false;
+        return;
+      }
+      if (dismissedSelectionId.current === selectedId) {
+        refreshFocusPending.current = false;
+        return;
+      }
       if (snoozedSelectionId.current === selectedId) return;
       refreshFocusPending.current = true;
       trigger.current = null;
@@ -683,11 +712,30 @@ function DeskContent({
     snoozeFocusPending.current = false;
   }, [isFetching, records, selectedId]);
 
+  useLayoutEffect(() => {
+    const pending = dismissalFocusPending.current;
+    if (
+      !pending ||
+      selectedId !== null ||
+      records.some(({ value }) => value.id === pending.id)
+    )
+      return;
+    const rows =
+      listRef.current?.querySelectorAll<HTMLButtonElement>("ul li button");
+    const target = rows?.[pending.index] ?? rows?.[pending.index - 1];
+    (target ?? refreshButton.current ?? expandButton.current)?.focus({
+      preventScroll: true,
+    });
+    dismissalFocusPending.current = null;
+    dismissedSelectionId.current = null;
+  }, [records, selectedId]);
+
   const refresh = () => {
     setPrevious([]);
     refreshStartedAt.current = Date.now();
     setRefreshPending(true);
     setRefreshNotice(false);
+    setDismissalNotice(null);
     if (cursor === undefined) void refetch();
     else setCursor(undefined);
   };
@@ -712,10 +760,51 @@ function DeskContent({
   };
   const open = (item: WorkItem, source: HTMLButtonElement) => {
     trigger.current = source;
+    setDismissalNotice(null);
     setSelectedOverride(null);
+    dismissedSelectionId.current = null;
     snoozedSelectionId.current = null;
     setSelectedId(item.id);
     updateLink(item);
+  };
+  const onDismissPending = (item: WorkItem) => {
+    const index = filtered.findIndex(({ value }) => value.id === item.id);
+    dismissalPendingId.current = item.id;
+    dismissalFocusPending.current = { id: item.id, index };
+    dismissSnapshotRef.current = item;
+    setSelectedOverride(item);
+    refreshStartedAt.current = null;
+    setRefreshPending(false);
+    void refetch();
+  };
+  const onDismissFailure = (item: WorkItem) => {
+    if (dismissalPendingId.current !== item.id) return;
+    dismissalPendingId.current = null;
+    dismissSnapshotRef.current = null;
+    dismissalFocusPending.current = null;
+    setSelectedOverride(item);
+  };
+  const onDismiss = (item: WorkItem) => {
+    dismissalPendingId.current = null;
+    dismissSnapshotRef.current = null;
+    dismissalFocusPending.current ??= {
+      id: item.id,
+      index: filtered.findIndex(({ value }) => value.id === item.id),
+    };
+    dismissedSelectionId.current = item.id;
+    trigger.current = null;
+    setSelectedOverride(null);
+    setRefreshNotice(false);
+    setDismissalNotice(
+      `Dismissed "${headline(item.title)}". You can find it under Delivered.`,
+    );
+    setSelectedId(null);
+    if (config.host === "web" && config.engineServed) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("buddy_work");
+      url.searchParams.delete("buddy_project");
+      window.history.replaceState(window.history.state, "", url);
+    }
   };
   const onSnoozeChange = () => {
     if (!selected) return;
@@ -737,8 +826,13 @@ function DeskContent({
         aria-label="Buddy Desk"
         data-detail-open={false}
       >
-        <Text size="2" color="gray" className={styles.collapsedText}>
-          Nothing needs you right now.
+        <Text
+          size="2"
+          color="gray"
+          className={styles.collapsedText}
+          role={dismissalNotice !== null ? "status" : undefined}
+        >
+          {dismissalNotice ?? "Nothing needs you right now."}
         </Text>
         <Button
           ref={expandButton}
@@ -776,9 +870,14 @@ function DeskContent({
           Refresh work
         </Button>
       </header>
-      {refreshNotice && (
+      {refreshNotice && !dismissalNotice && (
         <Text as="p" size="1" color="gray" role="status">
           That item is no longer in this view.
+        </Text>
+      )}
+      {dismissalNotice && (
+        <Text as="p" size="1" color="gray" role="status">
+          {dismissalNotice}
         </Text>
       )}
       {selectedId === workId && linkedWork.isFetching && (
@@ -945,6 +1044,9 @@ function DeskContent({
             endpointIdentity={endpointIdentity}
             onBack={back}
             onSnoozeChange={onSnoozeChange}
+            onDismiss={onDismiss}
+            onDismissPending={onDismissPending}
+            onDismissFailure={onDismissFailure}
           />
         ) : (
           filtered.length > 0 && (

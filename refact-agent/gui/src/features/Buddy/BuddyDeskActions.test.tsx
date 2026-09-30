@@ -293,7 +293,9 @@ describe("BuddyDeskActions", () => {
     ).toBeTruthy();
     expect(screen.queryByText(/saved evidence/i)).toBeNull();
     release?.();
-    expect(await screen.findByText(/Dismissed from Needs you/)).toBeTruthy();
+    expect(
+      await screen.findByText(/Dismissed from Needs you: Completed/i),
+    ).toBeTruthy();
     expect(screen.queryByText(/saved evidence/i)).toBeNull();
   });
 });

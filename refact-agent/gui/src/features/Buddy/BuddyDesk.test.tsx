@@ -1751,11 +1751,234 @@ describe("BuddyDesk", () => {
     expect(keys[0]).toBe(keys[1]);
   });
 
-  it("executes dismissal and removes the row from Needs you", async () => {
+  it.each([
+    {
+      name: "next row",
+      rows: [
+        { ...item, id: "work-before", title: "Earlier finding" },
+        { ...item, title: "Dismissed finding\nextra details" },
+        { ...item, id: "work-after", title: "Following finding" },
+      ],
+      focusTitle: "Following finding",
+    },
+    {
+      name: "previous row when the dismissed row was last",
+      rows: [
+        { ...item, id: "work-before", title: "Earlier finding" },
+        { ...item, title: "Dismissed finding\nextra details" },
+      ],
+      focusTitle: "Earlier finding",
+    },
+    {
+      name: "Browse saved work when the dismissed row was the only row",
+      rows: [{ ...item, title: "Dismissed finding\nextra details" }],
+      focusTitle: null,
+    },
+  ])(
+    "announces dismissal and focuses the $name",
+    async ({ rows, focusTitle }) => {
+      let currentRows = rows;
+      let executions = 0;
+      let releaseExecution: (() => void) | undefined;
+      let releaseWorkRefresh: (() => void) | undefined;
+      const pendingExecution = new Promise<void>((resolve) => {
+        releaseExecution = resolve;
+      });
+      const pendingWorkRefresh = new Promise<void>((resolve) => {
+        releaseWorkRefresh = resolve;
+      });
+      let workRequests = 0;
+      server.use(
+        http.get("*/v1/buddy/work", async () => {
+          workRequests += 1;
+          if (workRequests > 1) await pendingWorkRefresh;
+          return HttpResponse.json(envelope(currentRows.map(record)));
+        }),
+        http.get("*/v1/buddy/artifacts/:id", () =>
+          HttpResponse.json(envelope(record(artifact))),
+        ),
+        http.get("*/v1/buddy/work/:id/actions", ({ params }) =>
+          HttpResponse.json(
+            envelope(params.id === item.id ? [dismissAction] : []),
+          ),
+        ),
+        http.post(
+          "*/v1/buddy/work/:id/actions/:action/execute",
+          async ({ params, request }) => {
+            expect(params.action).toBe("dismiss_not_a_problem");
+            const body = (await request.json()) as { idempotency_key: string };
+            executions += 1;
+            currentRows = currentRows.filter((row) => row.id !== item.id);
+            releaseWorkRefresh?.();
+            await pendingExecution;
+            return HttpResponse.json(
+              envelope(record(dismissalReceipt(body.idempotency_key))),
+            );
+          },
+        ),
+      );
+      render(<BuddyDesk />, { preloadedState: config });
+      const dismissed = await screen.findByRole("button", {
+        name: /Dismissed finding/,
+      });
+      fireEvent.click(dismissed);
+      fireEvent.click(
+        await screen.findByRole("button", { name: dismissAction.label }),
+      );
+      await waitFor(() => expect(executions).toBe(1));
+      await waitFor(() => expect(workRequests).toBe(2));
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("button", { name: /Dismissed finding/ }),
+        ).toBeNull(),
+      );
+      expect(screen.getByRole("article", { name: "Work detail" })).toBeTruthy();
+      expect(
+        screen.queryByText("That item is no longer in this view."),
+      ).toBeNull();
+      releaseExecution?.();
+      const message =
+        'Dismissed "Dismissed finding". You can find it under Delivered.';
+      expect(await screen.findByText(message)).toBeTruthy();
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("button", { name: /Dismissed finding/ }),
+        ).toBeNull(),
+      );
+      expect(screen.getAllByText(message)).toHaveLength(1);
+      expect(
+        screen.queryByText("That item is no longer in this view."),
+      ).toBeNull();
+      if (focusTitle) {
+        const focusedRow = await screen.findByRole("button", {
+          name: new RegExp(focusTitle),
+        });
+        await waitFor(() => expect(document.activeElement).toBe(focusedRow));
+      } else {
+        const browse = screen.getByRole("button", {
+          name: "Browse saved work",
+        });
+        await waitFor(() => expect(document.activeElement).toBe(browse));
+      }
+      expect(executions).toBe(1);
+    },
+  );
+
+  it("focuses Refresh work when dismissal removes the only row from an expanded Desk", async () => {
+    let currentRows: WorkItem[] = [];
     let workRequests = 0;
+    let releaseExecution: (() => void) | undefined;
+    let releaseWorkRefresh: (() => void) | undefined;
+    const pendingExecution = new Promise<void>((resolve) => {
+      releaseExecution = resolve;
+    });
+    const pendingWorkRefresh = new Promise<void>((resolve) => {
+      releaseWorkRefresh = resolve;
+    });
+    server.use(
+      http.get("*/v1/buddy/work", async () => {
+        workRequests += 1;
+        if (workRequests === 3) await pendingWorkRefresh;
+        return HttpResponse.json(envelope(currentRows.map(record)));
+      }),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+      http.get("*/v1/buddy/work/:id/actions", () =>
+        HttpResponse.json(envelope([dismissAction])),
+      ),
+      http.post(
+        "*/v1/buddy/work/:id/actions/:action/execute",
+        async ({ request }) => {
+          const body = (await request.json()) as { idempotency_key: string };
+          currentRows = [];
+          releaseWorkRefresh?.();
+          await pendingExecution;
+          return HttpResponse.json(
+            envelope(record(dismissalReceipt(body.idempotency_key))),
+          );
+        },
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Browse saved work" }),
+    );
+    currentRows = [item];
+    fireEvent.click(screen.getByRole("button", { name: "Refresh work" }));
+    const row = await screen.findByRole("button", {
+      name: /Provider setup diagnosis/,
+    });
+    fireEvent.click(row);
+    fireEvent.click(
+      await screen.findByRole("button", { name: dismissAction.label }),
+    );
+    await waitFor(() => expect(workRequests).toBe(3));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", {
+          name: /Provider setup diagnosis/,
+        }),
+      ).toBeNull(),
+    );
+    expect(screen.getByRole("article", { name: "Work detail" })).toBeTruthy();
+    releaseExecution?.();
+    expect(
+      await screen.findByText(
+        'Dismissed "Provider setup diagnosis". You can find it under Delivered.',
+      ),
+    ).toBeTruthy();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "Refresh work" }),
+      ),
+    );
+    expect(
+      screen.queryByText("That item is no longer in this view."),
+    ).toBeNull();
+  });
+
+  it("keeps a failed dismissal open without an announcement", async () => {
     server.use(
       http.get("*/v1/buddy/work", () =>
-        HttpResponse.json(envelope(workRequests++ === 0 ? [record(item)] : [])),
+        HttpResponse.json(envelope([record(item)])),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(artifact))),
+      ),
+      http.get("*/v1/buddy/work/:id/actions", () =>
+        HttpResponse.json(envelope([dismissAction])),
+      ),
+      http.post("*/v1/buddy/work/:id/actions/:action/execute", () =>
+        HttpResponse.json({ detail: "unavailable" }, { status: 503 }),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    const dismiss = await screen.findByRole("button", {
+      name: dismissAction.label,
+    });
+    fireEvent.click(dismiss);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "No acknowledged result was received.",
+    );
+    expect(screen.getByRole("article", { name: "Work detail" })).toBeTruthy();
+    expect(
+      screen.queryByText(
+        /^Dismissed ".*"\. You can find it under Delivered\.$/,
+      ),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /Provider setup diagnosis/ }),
+    ).toBeTruthy();
+  });
+
+  it("does not announce or close dismissal without a completed execution", async () => {
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(item)])),
       ),
       http.get("*/v1/buddy/artifacts/:id", () =>
         HttpResponse.json(envelope(record(artifact))),
@@ -1765,11 +1988,15 @@ describe("BuddyDesk", () => {
       ),
       http.post(
         "*/v1/buddy/work/:id/actions/:action/execute",
-        async ({ params, request }) => {
-          expect(params.action).toBe("dismiss_not_a_problem");
+        async ({ request }) => {
           const body = (await request.json()) as { idempotency_key: string };
           return HttpResponse.json(
-            envelope(record(dismissalReceipt(body.idempotency_key))),
+            envelope(
+              record({
+                ...dismissalReceipt(body.idempotency_key),
+                status: "running",
+              }),
+            ),
           );
         },
       ),
@@ -1781,12 +2008,21 @@ describe("BuddyDesk", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: dismissAction.label }),
     );
-    await waitFor(() =>
-      expect(
-        screen.queryByRole("button", { name: /Provider setup diagnosis/ }),
-      ).toBeNull(),
-    );
-    expect(workRequests).toBeGreaterThanOrEqual(2);
+    expect(
+      await screen.findByText("Dismissed from Needs you: Running"),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText(
+        /^Dismissed "Provider setup diagnosis"\. You can find it under Delivered\.$/,
+      ),
+    ).toBeNull();
+    expect(screen.getByRole("article", { name: "Work detail" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /Provider setup diagnosis/ }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText("That item is no longer in this view."),
+    ).toBeNull();
   });
 
   it("does not enable an unsupported action or one for an old report revision", async () => {
