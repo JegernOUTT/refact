@@ -112,7 +112,7 @@ jobs:
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang libclang-dev lld mold libssl-dev pkg-config
+          sudo apt-get install -y build-essential clang cmake libclang-dev lld mold libssl-dev pkg-config
 
       - name: Restore cached cargo
         uses: swatinem/rust-cache@v2

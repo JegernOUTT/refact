@@ -184,6 +184,8 @@ jobs:
         run: |
           mkdir -p "$HOME/.cargo/registry" "$HOME/.cargo/git"
           docker run --rm --platform linux/arm64 \
+            -e HOST_UID="$(id -u)" \
+            -e HOST_GID="$(id -g)" \
             -e CARGO_HOME=/cargo \
             -e RUSTUP_HOME=/rustup \
             -e CARGO_PROFILE_CI_RELEASE_LTO \
@@ -195,8 +197,19 @@ jobs:
             -v "$HOME/.cargo/git:/cargo/git" \
             -w /workspace/refact-agent/engine \
             ubuntu:20.04 bash -euo pipefail -c '
+              restore_host_ownership() {
+                status=$?
+                for path in /workspace/refact-agent/engine/target /cargo/registry /cargo/git /workspace/refact-lsp /workspace/refact; do
+                  if [ -e "$path" ]; then
+                    chown -R "$HOST_UID:$HOST_GID" "$path" || status=$?
+                  fi
+                done
+                exit "$status"
+              }
+              trap restore_host_ownership EXIT
+              mkdir -p target "$CARGO_HOME/registry" "$CARGO_HOME/git"
               apt-get update
-              DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates clang curl git libclang-dev libssl-dev lld mold pkg-config unzip
+              DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates clang cmake curl git libclang-dev libssl-dev lld pkg-config unzip
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain stable
               export PATH="$CARGO_HOME/bin:$PATH"
               rustup target add aarch64-unknown-linux-gnu
