@@ -578,6 +578,32 @@ impl OutcomeRuntime {
             .await
     }
 
+    pub async fn desk_actions_batch(
+        &self,
+        work_ids: Vec<String>,
+    ) -> Result<Vec<super::desk_actions_batch::WorkDeskActions>, OperatorStoreError> {
+        self.read(move |store| {
+            Ok(work_ids
+                .into_iter()
+                .map(
+                    |work_id| match super::desk_actions::actions_for_work(store, &work_id) {
+                        Ok(actions) => super::desk_actions_batch::WorkDeskActions {
+                            work_id,
+                            actions,
+                            error: None,
+                        },
+                        Err(error) => super::desk_actions_batch::WorkDeskActions {
+                            work_id,
+                            actions: Vec::new(),
+                            error: Some(error.to_string()),
+                        },
+                    },
+                )
+                .collect())
+        })
+        .await
+    }
+
     pub async fn execute_desk_action(
         &self,
         work_id: String,

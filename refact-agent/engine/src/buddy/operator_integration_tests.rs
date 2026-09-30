@@ -72,6 +72,113 @@ use crate::{app_state::AppState, global_context::tests::make_test_gcx_with_dirs}
 use tempfile::TempDir;
 use tokio::sync::broadcast;
 
+#[tokio::test]
+async fn batch_http_endpoint_is_static_and_keeps_row_action_parity_for_fifty_items() {
+    let harness = BuddyOperatorHarness::new();
+    let project = harness.project_identity();
+    let worker = harness.worker_identity();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../crates/refact-buddy-core/tests/fixtures/operator_contract_v1.json"
+    ))
+    .unwrap();
+    let mut store = OperatorStore::open(harness.project_root(), &project).unwrap();
+    let mut ids = Vec::new();
+    for index in 0..50 {
+        let mut work: WorkItem = serde_json::from_value(fixture["work_item"].clone()).unwrap();
+        work.id = format!("batch-http-{index}");
+        work.project = project.clone();
+        work.subject.resource_id = format!("batch-http-subject-{index}");
+        work.current_artifact_id = None;
+        work.current_artifact_revision = None;
+        store.upsert_work_item(&work, None).unwrap();
+        ids.push(work.id);
+    }
+    drop(store);
+    let runtime = OutcomeRuntime::open(harness.project_root(), project.clone(), worker).unwrap();
+    let router = harness.operator_router(Some(runtime.clone())).await;
+    let started = std::time::Instant::now();
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!(
+                    "/v1/buddy/work/actions?project_id={}&ids={}",
+                    project.project_id,
+                    ids.join(",")
+                ))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    eprintln!(
+        "R-21 batch HTTP measurement: ids=50, elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
+    assert_eq!(response.status(), hyper::StatusCode::OK);
+    let batch: serde_json::Value =
+        serde_json::from_slice(&hyper::body::to_bytes(response.into_body()).await.unwrap())
+            .unwrap();
+    assert_eq!(batch["data"].as_array().unwrap().len(), 50);
+    for query in [
+        format!(
+            "/v1/buddy/work/actions?project_id={}&ids=",
+            project.project_id
+        ),
+        format!(
+            "/v1/buddy/work/actions?project_id={}&ids={}",
+            project.project_id,
+            std::iter::repeat_n("too-many", 101)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    ] {
+        let invalid = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(query)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), hyper::StatusCode::BAD_REQUEST);
+    }
+    let item = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!(
+                    "/v1/buddy/work/{}?project_id={}",
+                    ids[0], project.project_id
+                ))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(item.status(), hyper::StatusCode::OK);
+    let row = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!(
+                    "/v1/buddy/work/{}/actions?project_id={}",
+                    ids[0], project.project_id
+                ))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.status(), hyper::StatusCode::OK);
+    let row: serde_json::Value =
+        serde_json::from_slice(&hyper::body::to_bytes(row.into_body()).await.unwrap()).unwrap();
+    assert_eq!(batch["data"][0]["actions"], row["data"]);
+    runtime.shutdown().await;
+}
+
 pub struct BuddyOperatorHarness {
     project: TempDir,
     user_config: TempDir,
@@ -180,6 +287,10 @@ impl BuddyOperatorHarness {
             .route(
                 "/v1/buddy/work",
                 get(crate::http::routers::v1::buddy_operator::handle_v1_buddy_operator_work_list),
+            )
+            .route(
+                "/v1/buddy/work/actions",
+                get(crate::http::routers::v1::buddy_operator::handle_v1_buddy_operator_actions_batch),
             )
             .route(
                 "/v1/buddy/work/:id",

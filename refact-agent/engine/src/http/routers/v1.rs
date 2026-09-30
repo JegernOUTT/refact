@@ -1465,6 +1465,10 @@ fn buddy_operator_routes() -> Router<AppState> {
             get(buddy_operator::handle_v1_buddy_operator_work_list),
         )
         .route(
+            "/buddy/work/actions",
+            get(buddy_operator::handle_v1_buddy_operator_actions_batch),
+        )
+        .route(
             "/buddy/operator/diagnostics",
             get(buddy_observability::handle_summary),
         )
@@ -1657,6 +1661,25 @@ mod router_tests {
     use crate::app_state::AppState;
 
     #[tokio::test]
+    async fn batch_actions_is_matched_before_the_work_id_route() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let router = make_v1_router(app.clone()).with_state(app);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/buddy/work/actions?ids=missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("buddy operator runtime is unavailable"));
+    }
+
+    #[tokio::test]
     async fn v1_router_routes_each_domain_and_keeps_shared_layers() {
         let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
         let router = make_v1_router(app.clone()).with_state(app);
@@ -1706,6 +1729,7 @@ mod router_tests {
             ("GET", "/buddy"),
             ("GET", "/buddy/opportunities"),
             ("GET", "/buddy/native-work"),
+            ("GET", "/buddy/work/actions?ids=missing"),
             ("GET", "/shell-policy"),
         ];
 

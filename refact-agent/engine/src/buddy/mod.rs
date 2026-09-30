@@ -7,6 +7,7 @@ pub mod briefing;
 pub mod chat_reactions;
 pub mod conversation_ledger;
 pub mod desk_actions;
+pub mod desk_actions_batch;
 pub mod diagnostics;
 pub mod drafts;
 pub mod editorial;
