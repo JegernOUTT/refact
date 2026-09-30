@@ -49,4 +49,32 @@ test.describe("Buddy Recent errors", () => {
       await expect(list.getByRole("listitem")).toHaveCount(27);
     });
   }
+
+  test("keeps all 27 warnings after Buddy plays through the runtime queue", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(ROUTE);
+    await page.getByRole("tab", { name: "Recent errors", exact: true }).click();
+
+    const list = page.getByRole("list", { name: "Recent warnings" });
+    await expect(list.getByRole("listitem")).toHaveCount(20);
+    await page.getByRole("button", { name: "Show more" }).click();
+    await expect(list.getByRole("listitem")).toHaveCount(27);
+    await page.evaluate(() => {
+      const buddyStore = (
+        window as unknown as {
+          __routeShowcaseBuddyStore: {
+            dispatch: (action: { type: string }) => void;
+          };
+        }
+      ).__routeShowcaseBuddyStore;
+      for (let index = 0; index < 27; index += 1) {
+        buddyStore.dispatch({ type: "buddy/dequeueRuntimeEvent" });
+        buddyStore.dispatch({ type: "buddy/clearNowPlaying" });
+      }
+    });
+
+    await expect(list.getByRole("listitem")).toHaveCount(27);
+  });
 });

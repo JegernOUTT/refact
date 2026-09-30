@@ -21,6 +21,8 @@ import {
   addOpportunity,
   addBuddySuggestion,
   defaultBuddySettings,
+  clearNowPlaying,
+  dequeueRuntimeEvent,
   selectHomeSnoozedUntil,
   selectSeenNotificationIds,
 } from "../features/Buddy/buddySlice";
@@ -72,8 +74,10 @@ import type {
   BuddyConversationEntry,
   BuddyActivityEntry,
   BuddySpeechItem,
+  DiagnosticContext,
 } from "../features/Buddy/types";
 import type React from "react";
+import { act } from "react-dom/test-utils";
 
 const operatorStatus = (
   mode: "disabled" | "enabled" | "unavailable",
@@ -2014,6 +2018,229 @@ describe("BuddyHome_operator_surface", () => {
     expect(screen.getByTestId("buddy-home-hero").className).not.toContain(
       "heroCardDemoted",
     );
+  });
+
+  it("keeps operator warnings visible while runtime events are dequeued and cleared", async () => {
+    const createdAt = new Date().toISOString();
+    const runtimeEvents = ["alpha", "beta", "gamma"].map((suffix) => ({
+      id: `persistent-warning-${suffix}`,
+      signal_type: "chat_error",
+      title: `Persistent warning ${suffix}`,
+      description: `Diagnostic details ${suffix}`,
+      source: "provider",
+      status: "failed",
+      failure_summary: `Diagnostic details ${suffix}`,
+      priority: "high",
+      created_at: createdAt,
+      chat_id: "persistent-warning-chat",
+    })) satisfies BuddyRuntimeEvent[];
+    const diagnostics = ["alpha", "beta", "gamma"].map((suffix) => ({
+      error_type: "provider_error",
+      error_message: `Diagnostic details ${suffix}`,
+      source_file: null,
+      tool_name: null,
+      chat_id: "persistent-warning-chat",
+      diagnostic_id: `persistent-diagnostic-${suffix}`,
+      collected_at: createdAt,
+      severity: "high",
+    })) satisfies DiagnosticContext[];
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get("*/v1/buddy/work", () => HttpResponse.json(envelope([]))),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(makePulse(), {
+          recent_diagnostics: diagnostics,
+          runtime_queue: runtimeEvents,
+          now_playing: runtimeEvents[0],
+        }),
+      ),
+    );
+
+    const actEnvironment = globalThis as typeof globalThis & {
+      IS_REACT_ACT_ENVIRONMENT?: boolean;
+    };
+    const previousActEnvironment = actEnvironment.IS_REACT_ACT_ENVIRONMENT;
+    actEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
+    try {
+      const { user } = render(<BuddyHome />, { store });
+      await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+      const list = await screen.findByRole("list", {
+        name: "Recent warnings",
+      });
+      expect(within(list).getAllByRole("listitem")).toHaveLength(3);
+
+      act(() => {
+        for (const _event of runtimeEvents) {
+          store.dispatch(dequeueRuntimeEvent());
+          store.dispatch(clearNowPlaying());
+        }
+      });
+      expect(store.getState().buddy.runtimeQueue).toHaveLength(0);
+      expect(store.getState().buddy.nowPlaying).toBeNull();
+      const currentList = screen.getByRole("list", {
+        name: "Recent warnings",
+      });
+      expect(within(currentList).getAllByRole("listitem")).toHaveLength(3);
+    } finally {
+      actEnvironment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+    }
+  });
+
+  it("keeps diagnostics out of legacy Recent errors and dismisses runtime ids", async () => {
+    const createdAt = new Date().toISOString();
+    const runtimeEvents = ["first", "second"].map((suffix) => ({
+      id: `legacy-runtime-${suffix}`,
+      signal_type: "chat_error",
+      title: `Legacy warning ${suffix}`,
+      description: `Runtime details ${suffix}`,
+      source: "provider",
+      status: "failed",
+      priority: "high",
+      created_at: createdAt,
+    })) satisfies BuddyRuntimeEvent[];
+    const dismissedIds: string[] = [];
+    server.use(
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("disabled")),
+      ),
+      http.get("*/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [] }),
+      ),
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
+      http.get("*/v1/stats/llm/summary", () =>
+        HttpResponse.json({
+          totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
+        }),
+      ),
+      http.get("*/v1/setup/status", () =>
+        HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+      ),
+      http.post("*/v1/buddy/runtime/:id/dismiss", ({ params }) => {
+        dismissedIds.push(String(params.id));
+        return HttpResponse.json({ detail: "dismissed" });
+      }),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(makePulse(), {
+          runtime_queue: runtimeEvents,
+          recent_diagnostics: [
+            {
+              error_type: "provider_error",
+              error_message: "Diagnostic-only warning",
+              source_file: null,
+              tool_name: null,
+              chat_id: "diagnostic-only-chat",
+              diagnostic_id: "legacy-diagnostic-only",
+              collected_at: createdAt,
+              severity: "high",
+            },
+          ],
+        }),
+      ),
+    );
+
+    const { user } = render(<BuddyHome />, { store });
+    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+    const panel = await screen.findByTestId("buddy-recent-errors-panel");
+    expect(panel.querySelectorAll("[data-priority]")).toHaveLength(2);
+    expect(within(panel).getByText("Legacy warning first")).toBeInTheDocument();
+    expect(
+      within(panel).getByText("Legacy warning second"),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).queryByText("Diagnostic-only warning"),
+    ).not.toBeInTheDocument();
+
+    for (const event of runtimeEvents) {
+      const row = within(panel)
+        .getByText(event.title)
+        .closest<HTMLElement>("[data-priority]");
+      if (!row) throw new Error("Expected a legacy runtime warning row");
+      await user.click(within(row).getByRole("button", { name: "Shoo" }));
+      await waitFor(() => {
+        const currentEvent = store
+          .getState()
+          .buddy.runtimeQueue.find((candidate) => candidate.id === event.id);
+        const activeEvent = store.getState().buddy.nowPlaying;
+        expect(currentEvent?.dismissed ?? activeEvent?.dismissed).toBe(true);
+      });
+    }
+    expect(dismissedIds).toEqual(runtimeEvents.map((event) => event.id));
+  });
+
+  it("limits operator diagnostics to six hours and merges matches with runtime warnings", async () => {
+    const createdAt = new Date().toISOString();
+    const runtimeEvent = {
+      id: "diagnostic-runtime-match",
+      signal_type: "chat_error",
+      title: "Provider unavailable",
+      description: "Model endpoint returned an error",
+      source: "provider",
+      status: "failed",
+      failure_summary: "Model endpoint returned an error",
+      priority: "high",
+      created_at: createdAt,
+      chat_id: "diagnostic-chat",
+    } satisfies BuddyRuntimeEvent;
+    const diagnostic = (
+      id: string,
+      overrides: Partial<DiagnosticContext> = {},
+    ): DiagnosticContext => ({
+      error_type: "provider_error",
+      error_message: "Model endpoint returned an error",
+      source_file: null,
+      tool_name: null,
+      chat_id: "diagnostic-chat",
+      diagnostic_id: id,
+      collected_at: createdAt,
+      severity: "high",
+      occurrences: 2,
+      ...overrides,
+    });
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get("*/v1/buddy/work", () => HttpResponse.json(envelope([]))),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(makePulse(), {
+          runtime_queue: [runtimeEvent],
+          recent_diagnostics: [
+            diagnostic("matched-diagnostic"),
+            diagnostic("old-diagnostic", {
+              error_type: "old_provider_error",
+              error_message: "Old diagnostic is outside the window",
+              collected_at: new Date(
+                Date.now() - 7 * 60 * 60 * 1000,
+              ).toISOString(),
+            }),
+          ],
+        }),
+      ),
+    );
+
+    const { user } = render(<BuddyHome />, { store });
+    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+    const list = await screen.findByRole("list", { name: "Recent warnings" });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(1);
+    expect(
+      within(list).getByText("Provider unavailable ×2", { exact: true }),
+    ).toBeInTheDocument();
+    expect(
+      within(list).queryByText("Old diagnostic is outside the window"),
+    ).not.toBeInTheDocument();
   });
 
   it.each([

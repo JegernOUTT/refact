@@ -51,6 +51,7 @@ import type {
   BuddyRuntimeEvent,
   BuddySettings,
   BuddySnapshot,
+  DiagnosticContext,
 } from "../../src/features/Buddy/types";
 import type {
   CapsResponse,
@@ -291,6 +292,44 @@ const buddyRecentErrorsFixture: BuddyRuntimeEvent[] = [
   })),
 ];
 
+const buddyRecentErrorDiagnostics: DiagnosticContext[] =
+  recentErrorsFixtureParam
+    ? [
+        {
+          error_type: "model_unavailable",
+          error_message: "Model unavailable",
+          source_file: null,
+          tool_name: null,
+          chat_id: "showcase-chat",
+          diagnostic_id: "recent-error-diagnostic-model",
+          collected_at: new Date(Date.now() - 1000).toISOString(),
+          severity: "high",
+        },
+        ...Array.from({ length: 3 }, (_, index) => ({
+          error_type: "provider_unavailable",
+          error_message: "Provider unavailable — retry later",
+          source_file: null,
+          tool_name: null,
+          chat_id: "showcase-chat",
+          diagnostic_id: `recent-error-diagnostic-repeat-${index}`,
+          collected_at: new Date(Date.now() - 2000).toISOString(),
+          severity: "high" as const,
+        })),
+        ...Array.from({ length: 25 }, (_, index) => ({
+          error_type: `distinct_warning_${index}`,
+          error_message: `Additional detail ${index}`,
+          source_file: null,
+          tool_name: null,
+          chat_id: "showcase-chat",
+          diagnostic_id: `recent-error-diagnostic-distinct-${index}`,
+          collected_at: new Date(
+            Date.now() - 3000 - index * 1000,
+          ).toISOString(),
+          severity: "high" as const,
+        })),
+      ]
+    : [];
+
 const buddyConversations: BuddyConversationEntry[] = [
   {
     id: "showcase-buddy-chat",
@@ -502,7 +541,9 @@ const buddySnapshot: BuddySnapshot = {
     buddy_dir: "/workspace/refact/.refact/buddy",
     settings_path: "/workspace/refact/.refact/buddy/settings.json",
   },
-  recent_diagnostics: [],
+  recent_diagnostics: recentErrorsFixtureParam
+    ? buddyRecentErrorDiagnostics
+    : [],
   active_speech: sceneSpeechParam
     ? {
         id: "showcase-scene-speech",
@@ -1870,6 +1911,11 @@ const preloadedState: Partial<RootState> = {
 };
 
 const store = setUpStore(preloadedState);
+if (recentErrorsFixtureParam) {
+  Object.defineProperty(window, "__routeShowcaseBuddyStore", {
+    get: () => store,
+  });
+}
 if (rebuildRoute) {
   Object.defineProperty(window, "__rebuildFixtureState", {
     get: () => store.getState().chat,
