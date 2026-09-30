@@ -1,5 +1,6 @@
 import { http, HttpResponse } from "msw";
-import { describe, it, expect, vi } from "vitest";
+import { setupListeners } from "@reduxjs/toolkit/query";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   act,
   render,
@@ -10,6 +11,7 @@ import {
 import { server } from "../../utils/mockServer";
 import { BuddyNativeDecisions } from "./BuddyNativeDecisions";
 import { parseNativeDecisionSnapshot } from "../../services/refact/buddyDecisions";
+import { setUpStore } from "../../app/store";
 
 const question = {
   tool_call_id: "ask-1",
@@ -49,6 +51,21 @@ const work = {
 const config = {
   config: { host: "vscode" as const, lspPort: 8001, themeProps: {} },
 };
+
+const originalVisibilityState = Object.getOwnPropertyDescriptor(
+  document,
+  "visibilityState",
+);
+const originalHidden = Object.getOwnPropertyDescriptor(document, "hidden");
+
+afterEach(() => {
+  vi.useRealTimers();
+  if (originalVisibilityState)
+    Object.defineProperty(document, "visibilityState", originalVisibilityState);
+  else Reflect.deleteProperty(document, "visibilityState");
+  if (originalHidden) Object.defineProperty(document, "hidden", originalHidden);
+  else Reflect.deleteProperty(document, "hidden");
+});
 
 describe("Buddy native decisions", () => {
   it("rejects unknown versions, invalid choices and duplicate question IDs", () => {
@@ -413,6 +430,139 @@ describe("Buddy native decisions", () => {
       expect(lists).toBe(settled);
     } finally {
       vi.useRealTimers();
+      view.unmount();
+    }
+  });
+
+  it("pauses decision polling while hidden and refetches on resume", async () => {
+    let reads = 0;
+    let visibility: DocumentVisibilityState = "visible";
+    let hidden = false;
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => hidden,
+    });
+    server.use(
+      http.get("*/v1/buddy/decisions/current", () => {
+        reads += 1;
+        return HttpResponse.json(snapshot);
+      }),
+      http.get("*/v1/buddy/decisions/questions/chat-a/ask-1", () =>
+        HttpResponse.json(row),
+      ),
+    );
+    vi.useFakeTimers();
+    const store = setUpStore(config);
+    const stopListeners = setupListeners(store.dispatch);
+    const view = render(<BuddyNativeDecisions />, { store });
+    try {
+      await vi.waitFor(async () => {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(10);
+        });
+        expect(reads).toBe(1);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(12500);
+      });
+      const visibleReads = reads;
+      expect(visibleReads).toBeGreaterThanOrEqual(3);
+
+      act(() => {
+        visibility = "hidden";
+        hidden = true;
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("visibilitychange"));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      const hiddenReads = reads;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15000);
+      });
+      expect(reads).toBe(hiddenReads);
+      expect(hiddenReads).toBeLessThanOrEqual(visibleReads + 1);
+
+      act(() => {
+        visibility = "visible";
+        hidden = false;
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("visibilitychange"));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      expect(reads).toBe(visibleReads + 1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(reads).toBe(visibleReads + 2);
+    } finally {
+      stopListeners();
+      view.unmount();
+    }
+  });
+
+  it("pauses question-status polling while hidden and refetches on resume", async () => {
+    let statusReads = 0;
+    let visibility: DocumentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    server.use(
+      http.get("*/v1/buddy/decisions/current", () =>
+        HttpResponse.json(snapshot),
+      ),
+      http.get("*/v1/buddy/decisions/questions/chat-a/ask-1", () => {
+        statusReads += 1;
+        return HttpResponse.json(row);
+      }),
+    );
+    vi.useFakeTimers();
+    const store = setUpStore(config);
+    const stopListeners = setupListeners(store.dispatch);
+    const view = render(<BuddyNativeDecisions />, { store });
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6500);
+      });
+      const visibleReads = statusReads;
+      expect(visibleReads).toBeGreaterThanOrEqual(3);
+
+      act(() => {
+        visibility = "hidden";
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("visibilitychange"));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9000);
+      });
+      expect(statusReads).toBe(visibleReads);
+
+      act(() => {
+        visibility = "visible";
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("visibilitychange"));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      expect(statusReads).toBe(visibleReads + 1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(statusReads).toBe(visibleReads + 2);
+    } finally {
+      stopListeners();
       view.unmount();
     }
   });

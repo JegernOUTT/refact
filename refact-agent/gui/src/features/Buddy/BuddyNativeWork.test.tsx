@@ -1,8 +1,16 @@
 import { http, HttpResponse } from "msw";
-import { describe, it, expect } from "vitest";
-import { render, screen, fireEvent, waitFor } from "../../utils/test-utils";
+import { setupListeners } from "@reduxjs/toolkit/query";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import {
+  act,
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+} from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { BuddyNativeWork } from "./BuddyNativeWork";
+import { setUpStore } from "../../app/store";
 import { parseNativeWork } from "../../services/refact/buddyNativeWork";
 
 const session = {
@@ -52,6 +60,27 @@ const config = {
 };
 
 describe("Native work status", () => {
+  const originalVisibilityState = Object.getOwnPropertyDescriptor(
+    document,
+    "visibilityState",
+  );
+  let visibilityState: DocumentVisibilityState = "visible";
+
+  beforeEach(() => {
+    visibilityState = "visible";
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (originalVisibilityState)
+      Object.defineProperty(
+        document,
+        "visibilityState",
+        originalVisibilityState,
+      );
+    else Reflect.deleteProperty(document, "visibilityState");
+  });
+
   it("loads on demand and keeps worker completion separate from goal verification", async () => {
     let reads = 0;
     server.use(
@@ -77,6 +106,78 @@ describe("Native work status", () => {
     expect(screen.getByText(/2 tool or privacy approvals/)).toBeTruthy();
     expect(screen.getByText(/Verification is blocked/)).toBeTruthy();
     await waitFor(() => expect(reads).toBe(1));
+  });
+
+  it("pauses native-work polling while hidden and refetches on resume", async () => {
+    let reads = 0;
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibilityState,
+    });
+    server.use(
+      http.get("*/v1/buddy/native-work", () => {
+        reads += 1;
+        return HttpResponse.json(snapshot);
+      }),
+    );
+    vi.useFakeTimers();
+    const store = setUpStore(config);
+    const stopListeners = setupListeners(store.dispatch);
+    const view = render(<BuddyNativeWork />, { store });
+    const details = screen
+      .getByText("Live chats, goals and workers")
+      .closest("details");
+    if (!details) throw new Error("native work disclosure missing");
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    await vi.waitFor(async () => {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10);
+      });
+      expect(reads).toBeGreaterThan(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(12500);
+    });
+    const visibleReads = reads;
+    expect(visibleReads).toBeGreaterThanOrEqual(3);
+    const subscriptionState = store.getState().buddyApi as unknown as {
+      subscriptions: Record<
+        string,
+        Record<string, { pollingInterval?: number }>
+      >;
+    };
+    expect(
+      Object.values(subscriptionState.subscriptions)
+        .flatMap(Object.values)
+        .some((s) => s.pollingInterval === 5000),
+    ).toBe(true);
+
+    act(() => {
+      visibilityState = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("visibilitychange"));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15000);
+    });
+    expect(reads).toBe(visibleReads);
+
+    act(() => {
+      visibilityState = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("visibilitychange"));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(reads).toBe(visibleReads + 1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(reads).toBe(visibleReads + 2);
+    stopListeners();
+    view.unmount();
   });
 
   it("rejects unsupported states, unsafe counts and duplicate native identities", () => {

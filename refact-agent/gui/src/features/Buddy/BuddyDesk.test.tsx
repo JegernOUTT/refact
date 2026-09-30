@@ -2227,6 +2227,35 @@ describe("BuddyDesk", () => {
     expect(actionRequests).not.toContain(withoutResult.id);
   });
 
+  it("loads row actions once and stays quiet while the Desk is idle", async () => {
+    const rows = Array.from({ length: 8 }, (_, index) => ({
+      ...item,
+      id: `idle-work-${index}`,
+      title: `Idle report ${index}`,
+      current_artifact_id: `idle-artifact-${index}`,
+    }));
+    const requests: string[] = [];
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope(rows.map((row) => record(row)))),
+      ),
+      http.get("*/v1/buddy/work/:id/actions", ({ params }) => {
+        requests.push(String(params.id));
+        return HttpResponse.json(envelope([]));
+      }),
+    );
+    const view = render(<BuddyDesk />, { preloadedState: config });
+    await waitFor(() => expect(requests).toHaveLength(8));
+    expect(new Set(requests)).toEqual(new Set(rows.map((row) => row.id)));
+
+    view.unmount();
+    const remounted = render(<BuddyDesk />, { store: view.store });
+    await waitFor(() => expect(requests).toHaveLength(8));
+
+    expect(requests).toHaveLength(8);
+    remounted.unmount();
+  });
+
   it("hides an action verb that would be repeated on every row", async () => {
     const second: WorkItem = {
       ...item,

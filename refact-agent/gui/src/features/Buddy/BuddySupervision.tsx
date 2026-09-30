@@ -80,7 +80,8 @@ function Controls({
   identity: string;
   fresh: boolean;
 }) {
-  const visible = useIsDocumentVisible();
+  const statusRefetchRef = useRef<() => void>(() => undefined);
+  const visible = useIsDocumentVisible(() => statusRefetchRef.current());
   const [change] = useChangeBuddySupervisionMutation();
   const [model, setModel] = useState("");
   const [turns, setTurns] = useState("10");
@@ -126,6 +127,9 @@ function Controls({
       refetchOnReconnect: true,
     },
   );
+  statusRefetchRef.current = () => {
+    if (observe && !status.error) void status.refetch();
+  };
   const snapshot =
     !fresh || status.error || status.isFetching
       ? undefined
@@ -787,8 +791,9 @@ function Controls({
   );
 }
 function Supervision({ identity }: { identity: string }) {
-  const visible = useIsDocumentVisible();
   const [halted, setHalted] = useState(false);
+  const refetchRef = useRef<() => void>(() => undefined);
+  const visible = useIsDocumentVisible(() => refetchRef.current());
   const query = useGetBuddySupervisionContextQuery(
     { endpoint_identity: identity },
     {
@@ -799,6 +804,9 @@ function Supervision({ identity }: { identity: string }) {
       refetchOnReconnect: true,
     },
   );
+  refetchRef.current = () => {
+    if (!halted && !query.error) void query.refetch();
+  };
   const context = query.currentData;
   const failed = Boolean(query.error);
   useEffect(() => {

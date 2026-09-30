@@ -3,7 +3,9 @@ import { act } from "@testing-library/react";
 import { useBuddyEditorialDelivery } from "./useBuddyEditorialDelivery";
 import { updateConfig } from "../Config/configSlice";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { setupListeners } from "@reduxjs/toolkit/query";
+import { describe, expect, it, vi } from "vitest";
+import { setUpStore } from "../../app/store";
 import { fireEvent, render, screen, waitFor } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { BuddySupervision } from "./BuddySupervision";
@@ -96,6 +98,163 @@ describe("Buddy supervision controls", () => {
       screen.queryByRole("button", { name: "Grant bounded mandate" }),
     ).toBeNull();
     expect(writes).toBe(0);
+  });
+
+  it("pauses context polling while hidden and resumes immediately when visible", async () => {
+    let reads = 0;
+    const originalVisibility = Object.getOwnPropertyDescriptor(
+      document,
+      "visibilityState",
+    );
+    let visibility: DocumentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    server.use(
+      http.get("*/v1/buddy/supervision/context", () => {
+        reads += 1;
+        return HttpResponse.json(context);
+      }),
+    );
+    vi.useFakeTimers();
+    const store = setUpStore(config);
+    const stopListeners = setupListeners(store.dispatch);
+    const view = render(<BuddySupervision />, { store });
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(12500);
+      });
+      const visibleReads = reads;
+      expect(visibleReads).toBeGreaterThanOrEqual(3);
+      act(() => {
+        visibility = "hidden";
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("visibilitychange"));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15000);
+      });
+      expect(reads).toBe(visibleReads);
+      act(() => {
+        visibility = "visible";
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("visibilitychange"));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      expect(reads).toBe(visibleReads + 1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(reads).toBe(visibleReads + 2);
+    } finally {
+      stopListeners();
+      view.unmount();
+      vi.useRealTimers();
+      if (originalVisibility)
+        Object.defineProperty(document, "visibilityState", originalVisibility);
+      else Reflect.deleteProperty(document, "visibilityState");
+    }
+  });
+
+  it("pauses mandate-status polling while hidden and resumes immediately", async () => {
+    let statusReads = 0;
+    const originalVisibility = Object.getOwnPropertyDescriptor(
+      document,
+      "visibilityState",
+    );
+    let visibility: DocumentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    const link = {
+      schema_version: 1,
+      project: context.project,
+      worker: context.worker,
+      mandate_id: "mandate-1",
+      chat_id: "native-chat",
+      command_acknowledged: true,
+      dispatch_attempted: false,
+      revoked: false,
+      escalation: null,
+      delivery_run_id: null,
+      pause_requested: false,
+    };
+    server.use(
+      http.get("*/v1/buddy/supervision/context", () =>
+        HttpResponse.json(context),
+      ),
+      http.get("*/v1/buddy/supervision/mandates/mandate-1/status", () => {
+        statusReads += 1;
+        return HttpResponse.json({
+          project: context.project,
+          worker: context.worker,
+          link,
+          native_goal: { status: "paused" },
+          native_worker: null,
+          native_worker_goal: null,
+          coverage: "Native observations only",
+          host_wake_supported: false,
+          daemon_wake_supported: false,
+        });
+      }),
+    );
+    const store = setUpStore(config);
+    const stopListeners = setupListeners(store.dispatch);
+    const view = render(<BuddySupervision />, { store });
+    try {
+      await openGrantForm();
+      fireEvent.change(screen.getByLabelText("Existing mandate ID"), {
+        target: { value: "mandate-1" },
+      });
+      vi.useFakeTimers();
+      fireEvent.click(
+        screen.getByRole("button", { name: "Observe existing mandate" }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(12500);
+      });
+      const visibleReads = statusReads;
+      expect(visibleReads).toBeGreaterThanOrEqual(3);
+      act(() => {
+        visibility = "hidden";
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("visibilitychange"));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15000);
+      });
+      expect(statusReads).toBe(visibleReads);
+      act(() => {
+        visibility = "visible";
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("visibilitychange"));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      expect(statusReads).toBe(visibleReads + 1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(statusReads).toBe(visibleReads + 2);
+    } finally {
+      stopListeners();
+      view.unmount();
+      vi.useRealTimers();
+      if (originalVisibility)
+        Object.defineProperty(document, "visibilityState", originalVisibility);
+      else Reflect.deleteProperty(document, "visibilityState");
+    }
   });
 
   it("surfaces a failed context load as an error with a retry, never as a silent panel", async () => {

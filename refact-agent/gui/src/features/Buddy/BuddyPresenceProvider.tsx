@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useRef, type ReactNode } from "react";
 import { useAppSelector } from "../../hooks";
 import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import { buddyOperatorIdentity } from "../../services/refact/buddyOperator";
@@ -20,7 +20,8 @@ export function BuddyPresenceProvider({
   lowPower?: boolean;
 }) {
   const identity = useAppSelector(buddyOperatorIdentity);
-  const visible = useIsDocumentVisible();
+  const refetchRef = useRef<() => void>(() => undefined);
+  const visible = useIsDocumentVisible(() => refetchRef.current());
   const [textOnly] = useBuddyTextPresence();
   const options = {
     pollingInterval: visible ? PRESENCE_POLLING_INTERVAL_MS : 0,
@@ -36,6 +37,10 @@ export function BuddyPresenceProvider({
     { endpoint_identity: identity },
     options,
   );
+  refetchRef.current = () => {
+    void native.refetch();
+    void questions.refetch();
+  };
   const sessions = native.currentData?.sessions;
   const pendingQuestion = questions.currentData?.questions.some(
     (row) => row.question.status === "pending",

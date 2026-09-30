@@ -305,8 +305,9 @@ function ApprovalSession({
 }
 
 function Approvals({ identity }: { identity: string }) {
-  const visible = useIsDocumentVisible();
   const [halted, setHalted] = useState(false);
+  const refetchRef = useRef<() => void>(() => undefined);
+  const visible = useIsDocumentVisible(() => refetchRef.current());
   const query = useGetBuddyNativeApprovalsQuery(
     { endpoint_identity: identity },
     {
@@ -317,6 +318,9 @@ function Approvals({ identity }: { identity: string }) {
       refetchOnReconnect: true,
     },
   );
+  refetchRef.current = () => {
+    if (!halted && !query.error) void query.refetch();
+  };
   const work = useGetBuddyNativeWorkQuery(
     { endpoint_identity: identity },
     {

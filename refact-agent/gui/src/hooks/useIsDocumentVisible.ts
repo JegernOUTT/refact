@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 function isDocumentVisible(): boolean {
   return (
@@ -6,11 +6,20 @@ function isDocumentVisible(): boolean {
   );
 }
 
-export function useIsDocumentVisible(): boolean {
+export function useIsDocumentVisible(onVisible?: () => void): boolean {
   const [visible, setVisible] = useState(isDocumentVisible);
+  const wasVisible = useRef(visible);
+  const onVisibleRef = useRef(onVisible);
+  onVisibleRef.current = onVisible;
 
   useEffect(() => {
-    const onVisibilityChange = () => setVisible(isDocumentVisible());
+    const onVisibilityChange = () => {
+      const nextVisible = isDocumentVisible();
+      const resumed = nextVisible && !wasVisible.current;
+      wasVisible.current = nextVisible;
+      setVisible(nextVisible);
+      if (resumed) onVisibleRef.current?.();
+    };
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () =>
       document.removeEventListener("visibilitychange", onVisibilityChange);

@@ -1,8 +1,16 @@
 import { http, HttpResponse } from "msw";
-import { describe, it, expect } from "vitest";
-import { render, screen, fireEvent, waitFor } from "../../utils/test-utils";
+import { setupListeners } from "@reduxjs/toolkit/query";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import {
+  act,
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+} from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { BuddyNativeApprovals } from "./BuddyNativeApprovals";
+import { setUpStore } from "../../app/store";
 
 const session = {
   chat_id: "chat-a",
@@ -31,6 +39,21 @@ const snapshot = {
 const config = {
   config: { host: "vscode" as const, lspPort: 8001, themeProps: {} },
 };
+
+const originalVisibilityState = Object.getOwnPropertyDescriptor(
+  document,
+  "visibilityState",
+);
+const originalHidden = Object.getOwnPropertyDescriptor(document, "hidden");
+
+afterEach(() => {
+  vi.useRealTimers();
+  if (originalVisibilityState)
+    Object.defineProperty(document, "visibilityState", originalVisibilityState);
+  else Reflect.deleteProperty(document, "visibilityState");
+  if (originalHidden) Object.defineProperty(document, "hidden", originalHidden);
+  else Reflect.deleteProperty(document, "hidden");
+});
 
 describe("Buddy native approvals without intelligence", () => {
   it("requires an explicit selection and never treats queue acceptance as resolution", async () => {
@@ -403,5 +426,76 @@ describe("Buddy native approvals without intelligence", () => {
       ),
     );
     expect(choice).toBeDisabled();
+  });
+
+  it("pauses approval polling while hidden and refetches on resume", async () => {
+    let reads = 0;
+    let visibility: DocumentVisibilityState = "visible";
+    let hidden = false;
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => hidden,
+    });
+    server.use(
+      http.get("*/v1/buddy/approvals/current", () => {
+        reads += 1;
+        return HttpResponse.json(snapshot);
+      }),
+    );
+    vi.useFakeTimers();
+    const store = setUpStore(config);
+    const stopListeners = setupListeners(store.dispatch);
+    const view = render(<BuddyNativeApprovals />, { store });
+    try {
+      await vi.waitFor(async () => {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(10);
+        });
+        expect(reads).toBe(1);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(12500);
+      });
+      const visibleReads = reads;
+      expect(visibleReads).toBeGreaterThanOrEqual(3);
+
+      act(() => {
+        visibility = "hidden";
+        hidden = true;
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("visibilitychange"));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      const hiddenReads = reads;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15000);
+      });
+      expect(reads).toBe(hiddenReads);
+      expect(hiddenReads).toBeLessThanOrEqual(visibleReads + 1);
+
+      act(() => {
+        visibility = "visible";
+        hidden = false;
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("visibilitychange"));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      expect(reads).toBe(visibleReads + 1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(reads).toBe(visibleReads + 2);
+    } finally {
+      stopListeners();
+      view.unmount();
+    }
   });
 });

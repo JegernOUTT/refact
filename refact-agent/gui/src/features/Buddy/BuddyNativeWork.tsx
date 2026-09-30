@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
+import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import { buddyOperatorIdentity } from "../../services/refact/buddyOperator";
 import { useGetBuddyNativeWorkQuery } from "../../services/refact/buddyNativeWork";
 import { humanizeIdentifier } from "../../utils/displayNames";
@@ -9,15 +10,20 @@ import styles from "./BuddyNativeDecisions.module.css";
 function NativeWork({ identity }: { identity: string }) {
   const [open, setOpen] = useState(false);
   const [after, setAfter] = useState<string>();
+  const refetchRef = useRef<() => void>(() => undefined);
+  const visible = useIsDocumentVisible(() => refetchRef.current());
   const query = useGetBuddyNativeWorkQuery(
     { endpoint_identity: identity, after },
     {
       skip: !open,
-      pollingInterval: 5000,
+      pollingInterval: visible ? 5000 : 0,
       skipPollingIfUnfocused: true,
       refetchOnMountOrArgChange: true,
     },
   );
+  refetchRef.current = () => {
+    if (open) void query.refetch();
+  };
   return (
     <details onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary>Live chats, goals and workers</summary>
