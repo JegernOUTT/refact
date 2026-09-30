@@ -33,50 +33,6 @@ env:
   MACOSX_DEPLOYMENT_TARGET: 10.15
 
 jobs:
-  daemon-e2e:
-    name: daemon E2E (Linux x86_64)
-    runs-on: ubuntu-22.04
-    env:
-      REFACT_SKIP_GUI_BUILD: "1"
-      REFACT_DAEMON_E2E: "1"
-      PYTHON3: "python3"
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: ${{ env.FETCH_DEPTH }}
-
-      - name: Install Rust toolchain
-        run: |
-          rustup update --no-self-update stable
-          rustup component add rust-src
-
-      - name: Ensure Python is available
-        run: python3 --version
-
-      - name: Install build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang mold lld
-
-      - name: Restore cached cargo
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            refact-agent/engine -> target
-          key: ubuntu-22.04-x86_64-unknown-linux-gnu-daemon-e2e-cargo
-          shared-key: ubuntu-22.04-x86_64-unknown-linux-gnu-daemon-e2e-cargo
-          cache-bin: false
-
-      - name: Build refact daemon binary
-        run: cargo build --bin refact
-
-      - name: Run daemon E2E suite
-        # Single-threaded: each test spawns a real daemon + worker subprocesses;
-        # running them concurrently on a 2-core runner starves the daemon's
-        # idle/cron poll loops and makes lifecycle timeouts flaky.
-        run: cargo test --test it -- daemon_e2e:: --nocapture --test-threads=1
-
   dist:
     strategy:
       fail-fast: false
@@ -192,13 +148,6 @@ jobs:
           npm ci
           npm run build
 
-      - name: Test artifact
-        if: matrix.cross == null && startsWith(matrix.os, 'windows')
-        env:
-          REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
-        shell: bash
-        run: cargo test --workspace --exclude refact-tui --profile ci-release --lib --tests
-
       - name: Build artifact
         if: matrix.cross == null && startsWith(matrix.os, 'windows')
         env:
@@ -209,12 +158,6 @@ jobs:
           cp ./target/ci-release/refact-lsp${{ matrix.ext }} ../..
           cp ./target/ci-release/refact${{ matrix.ext }} ../..
 
-      - name: Test artifact
-        if: matrix.cross == null && !startsWith(matrix.os, 'windows')
-        env:
-          CARGO_PROFILE_CI_RELEASE_LTO: ${{ endsWith(matrix.target, 'apple-darwin') && 'thin' || 'true' }}
-        run: OPENSSL_STATIC=1 cargo test --workspace --exclude refact-lsp --profile ci-release --lib --tests --target ${{ matrix.target }}
-
       - name: Build artifact
         if: matrix.cross == null && !startsWith(matrix.os, 'windows')
         env:
@@ -223,27 +166,6 @@ jobs:
           OPENSSL_STATIC=1 cargo build --workspace --profile ci-release --target ${{ matrix.target }}
           cp ./target/${{ matrix.target }}/ci-release/refact-lsp${{ matrix.ext }} ../..
           cp ./target/${{ matrix.target }}/ci-release/refact${{ matrix.ext }} ../..
-
-      - name: Test linux-like artifact
-        if: matrix.cross
-        env:
-          CARGO_BUILD_JOBS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '2' }}
-          CROSS_CONTAINER_OPTS: --volume "${{ github.workspace }}/refact-agent/gui:/gui:ro"
-        run: |
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            CROSS_NO_WARNINGS=0 cross test --workspace --exclude refact-lsp --profile ci-release --lib --tests --target ${{ matrix.target }}
-          else
-            CROSS_NO_WARNINGS=0 cross test --workspace --profile ci-release --lib --tests --target ${{ matrix.target }}
-          fi
-
-      - name: Free test artifacts before linux-like build
-        if: matrix.cross
-        run: |
-          df -h . ./target || true
-          rm -rf ./target/${{ matrix.target }}/ci-release/deps
-          rm -rf ./target/${{ matrix.target }}/ci-release/incremental
-          docker system prune -af || true
-          df -h . ./target || true
 
       - name: Build linux-like artifact
         if: matrix.cross

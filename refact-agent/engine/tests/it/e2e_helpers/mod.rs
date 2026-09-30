@@ -160,6 +160,9 @@ pub fn refact_bin() -> PathBuf {
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_refact") {
         return PathBuf::from(path);
     }
+    if let Some(path) = option_env!("CARGO_BIN_EXE_refact") {
+        return PathBuf::from(path);
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("debug")
