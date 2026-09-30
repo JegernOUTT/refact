@@ -13,6 +13,10 @@ use serde_json::Value;
 use tracing::{info, warn};
 use url::Url;
 
+use crate::html_dom::{
+    attribute as node_attribute, descendant_nodes, element_name as node_element_name,
+};
+
 pub use refact_core::chat_types::{SearchResult, format_search_results};
 
 const DDG_HTML_URL: &str = "https://html.duckduckgo.com/html/";
@@ -650,22 +654,6 @@ pub fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
     results
 }
 
-fn descendant_nodes(node: &Handle) -> Vec<Handle> {
-    let mut nodes = Vec::new();
-    let mut pending = node
-        .children
-        .borrow()
-        .iter()
-        .rev()
-        .cloned()
-        .collect::<Vec<_>>();
-    while let Some(node) = pending.pop() {
-        pending.extend(node.children.borrow().iter().rev().cloned());
-        nodes.push(node);
-    }
-    nodes
-}
-
 fn matching_nodes(nodes: &[Handle], class: &str) -> Vec<Handle> {
     nodes
         .iter()
@@ -694,24 +682,6 @@ fn find_element_nodes(nodes: &[Handle], name: &str) -> Vec<Handle> {
         .filter(|node| node_element_name(node) == Some(name))
         .cloned()
         .collect()
-}
-
-fn node_element_name(node: &Handle) -> Option<&str> {
-    match &node.data {
-        NodeData::Element { name, .. } => Some(name.local.as_ref()),
-        _ => None,
-    }
-}
-
-fn node_attribute(node: &Handle, name: &str) -> Option<String> {
-    match &node.data {
-        NodeData::Element { attrs, .. } => attrs
-            .borrow()
-            .iter()
-            .find(|attribute| attribute.name.local.as_ref() == name)
-            .map(|attribute| attribute.value.to_string()),
-        _ => None,
-    }
 }
 
 fn node_has_class(node: &Handle, class: &str) -> bool {

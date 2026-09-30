@@ -9,9 +9,10 @@ use tokio::sync::Mutex as AMutex;
 use html5ever::tendril::TendrilSink;
 use html5ever::{parse_document, serialize};
 use html2text::render::text_renderer::{TaggedLine, TextDecorator};
-use markup5ever_rcdom::{Handle, NodeData, RcDom, SerializableHandle};
+use markup5ever_rcdom::{Handle, RcDom, SerializableHandle};
 use serde_json::Value;
 use refact_chat_api::sanitize_http_url;
+use refact_at_web::html_dom::{attribute, descendant_nodes, element_name};
 
 use crate::at_commands::at_commands::{AtCommand, AtCommandsContext, AtParam};
 use crate::at_commands::execute_at::AtCommandMember;
@@ -364,40 +365,6 @@ fn find_content(html: String) -> String {
         return serialize_node(node);
     }
     html
-}
-
-fn descendant_nodes(node: &Handle) -> Vec<Handle> {
-    let mut nodes = Vec::new();
-    let mut pending = node
-        .children
-        .borrow()
-        .iter()
-        .rev()
-        .cloned()
-        .collect::<Vec<_>>();
-    while let Some(node) = pending.pop() {
-        pending.extend(node.children.borrow().iter().rev().cloned());
-        nodes.push(node);
-    }
-    nodes
-}
-
-fn element_name(node: &Handle) -> Option<&str> {
-    match &node.data {
-        NodeData::Element { name, .. } => Some(name.local.as_ref()),
-        _ => None,
-    }
-}
-
-fn attribute(node: &Handle, attribute_name: &str) -> Option<String> {
-    match &node.data {
-        NodeData::Element { attrs, .. } => attrs
-            .borrow()
-            .iter()
-            .find(|attribute| attribute.name.local.as_ref() == attribute_name)
-            .map(|attribute| attribute.value.to_string()),
-        _ => None,
-    }
 }
 
 fn serialize_node(node: &Handle) -> String {
