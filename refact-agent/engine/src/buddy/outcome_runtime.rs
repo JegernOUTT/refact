@@ -27,6 +27,10 @@ mod supersede_tests;
 #[path = "outcome_open_backlog_tests.rs"]
 mod open_backlog_tests;
 
+#[cfg(test)]
+#[path = "outcome_workflow_display_tests.rs"]
+mod workflow_display_tests;
+
 /// The one coverage string a housekeeping subject ever uses. Housekeeping does
 /// not report per-run coverage because it does not report per-run at all.
 pub const HOUSEKEEPING_COVERAGE: &str =
@@ -1103,7 +1107,7 @@ fn publish_report_in_store_owned_with_uncertainty(
     let current_artifact = store
         .get_artifact_revision(&subject.artifact_id(), None)
         .map_err(|error| error.to_string())?;
-    let (conclusion, state) = match outcome.status {
+    let (default_conclusion, state) = match outcome.status {
         RunStatus::Failed => (
             "Run failed.",
             refact_buddy_core::operator_types::WorkItemState::Blocked,
@@ -1132,6 +1136,11 @@ fn publish_report_in_store_owned_with_uncertainty(
             "Assessment ready.",
             refact_buddy_core::operator_types::WorkItemState::NeedsAttention,
         ),
+    };
+    let conclusion = if outcome.failure_class.as_deref() == Some("engine_interrupted") {
+        "The engine stopped before this run finished; nothing it was checking was confirmed."
+    } else {
+        default_conclusion
     };
     let artifact = ArtifactDraft {
         subject: subject.clone(),
@@ -1166,7 +1175,9 @@ fn publish_report_in_store_owned_with_uncertainty(
             .unwrap_or_else(|| outcome.started_at.clone()),
         severity: Some(WorkItemSeverity::Unknown),
         problem_summary: problem_summary_from_title(&title),
-        scope: Some(outcome.coverage.clone()),
+        scope: Some(super::workflow_display::workflow_display_scope(
+            outcome.workflow.as_deref().unwrap_or_default(),
+        )),
     }
     .build()
     .map_err(|error| error.to_string())?;

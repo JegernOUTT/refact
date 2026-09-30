@@ -50,6 +50,7 @@ pub mod user_activity;
 pub mod voice_service;
 pub mod work_items;
 pub(crate) mod workflow_deliverables;
+pub(crate) mod workflow_display;
 pub mod workflows;
 
 #[cfg(test)]

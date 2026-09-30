@@ -919,7 +919,7 @@ mod tests {
         assert_eq!(items[0].subject.version, "workflow:commit_message");
         assert_eq!(
             items[0].scope.as_deref(),
-            Some("workflow invocation and terminal result")
+            Some("Latest run of Commit message generation")
         );
         assert_ne!(items[0].state, WorkItemState::Cancelled);
         runtime.shutdown().await;
