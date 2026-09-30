@@ -468,6 +468,80 @@ async fn different_coverage_or_workflow_is_not_a_sibling() {
 }
 
 #[tokio::test]
+async fn numeric_coverage_changes_supersede_but_text_changes_and_failures_do_not() {
+    let root = TempDir::new().unwrap();
+    let runtime = runtime(&root);
+    let older = publish_at(
+        &runtime,
+        "diagnostics-five",
+        "security_whisperer",
+        "Secret-pattern scan under /project (text files up to 65536 bytes), plus 5 recent diagnostics",
+        "2026-09-01T00:00:00Z",
+        WorkflowTerminal::Inconclusive,
+    )
+    .await;
+    let newer_failure = publish_at(
+        &runtime,
+        "diagnostics-eight-failure",
+        "security_whisperer",
+        "Secret-pattern scan under /project (text files up to 65536 bytes), plus 8 recent diagnostics",
+        "2026-09-02T00:00:00Z",
+        WorkflowTerminal::Failed {
+            failure_class: Some("provider_transient".into()),
+        },
+    )
+    .await;
+    assert_eq!(older.state, WorkItemState::NeedsAttention);
+    assert_eq!(newer_failure.state, WorkItemState::Blocked);
+
+    let newer_assessment = publish_at(
+        &runtime,
+        "diagnostics-eight-assessment",
+        "security_whisperer",
+        "Secret-pattern scan under /project (text files up to 65536 bytes), plus 8 recent diagnostics",
+        "2026-09-03T00:00:00Z",
+        WorkflowTerminal::Inconclusive,
+    )
+    .await;
+    assert_eq!(newer_assessment.state, WorkItemState::NeedsAttention);
+    let newer_assessment_id = newer_assessment.id.clone();
+    for id in [older.id, newer_failure.id] {
+        assert_eq!(
+            runtime
+                .get_work_item(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .value
+                .state,
+            WorkItemState::Cancelled
+        );
+    }
+
+    let other_root = publish_at(
+        &runtime,
+        "other-root",
+        "security_whisperer",
+        "Secret-pattern scan under /other/root (text files up to 65536 bytes), plus 9 recent diagnostics",
+        "2026-09-04T00:00:00Z",
+        WorkflowTerminal::Inconclusive,
+    )
+    .await;
+    assert_eq!(other_root.state, WorkItemState::NeedsAttention);
+    assert_eq!(
+        runtime
+            .get_work_item(newer_assessment_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .value
+            .state,
+        WorkItemState::NeedsAttention
+    );
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn equal_observation_time_uses_lexicographically_larger_work_id_as_newer() {
     let root = TempDir::new().unwrap();
     let runtime = runtime(&root);

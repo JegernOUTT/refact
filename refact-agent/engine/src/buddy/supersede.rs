@@ -16,6 +16,22 @@ pub(crate) struct Candidate {
     pub eligible: bool,
 }
 
+pub(crate) fn coverage_class(coverage: &str) -> String {
+    let mut class = String::with_capacity(coverage.len());
+    let mut characters = coverage.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character.is_ascii_digit() {
+            while matches!(characters.peek(), Some(next) if next.is_ascii_digit()) {
+                characters.next();
+            }
+            class.push('#');
+        } else {
+            class.push(character);
+        }
+    }
+    class
+}
+
 pub(crate) fn retire_ids(candidates: &[Candidate]) -> Vec<String> {
     #[cfg(test)]
     if PUBLICATION_BYPASS.with(std::cell::Cell::get) {
@@ -178,5 +194,31 @@ mod tests {
         assert_eq!(retire_ids(&candidates), vec!["a"]);
         candidates[1].eligible = false;
         assert!(retire_ids(&candidates).is_empty());
+    }
+
+    #[test]
+    fn real_security_whisperer_coverage_counts_share_a_class() {
+        let coverages = [5, 5, 10, 10, 11, 11, 11, 11, 11, 13, 0, 6, 7, 8]
+            .map(|count| {
+                format!(
+                    "Secret-pattern scan of staged and working-tree contents of every changed path under [REDACTED_PATH] (text files up to 65536 bytes), plus {count} recent diagnostics"
+                )
+            });
+        let expected = "Secret-pattern scan of staged and working-tree contents of every changed path under [REDACTED_PATH] (text files up to # bytes), plus # recent diagnostics";
+        assert!(coverages
+            .iter()
+            .all(|coverage| coverage_class(coverage) == expected));
+    }
+
+    #[test]
+    fn coverage_class_preserves_non_digit_text() {
+        let redacted = "source under [REDACTED_PATH] plus 11 diagnostics";
+        let other_root = "source under /other/root plus 8 diagnostics";
+        assert_ne!(coverage_class(redacted), coverage_class(other_root));
+        assert_ne!(
+            coverage_class("knowledge base"),
+            coverage_class("source tree")
+        );
+        assert_ne!(coverage_class("coverage-a"), coverage_class("coverage-b"));
     }
 }

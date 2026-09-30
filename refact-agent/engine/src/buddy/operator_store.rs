@@ -2626,19 +2626,22 @@ impl OperatorStore {
             let Some(observed_at) = observed_at else {
                 continue;
             };
-            groups.entry((workflow, coverage)).or_default().push((
-                Stored {
-                    value: work.clone(),
-                    revision,
-                    change_seq,
-                },
-                super::supersede::Candidate {
-                    id: work.id,
-                    status,
-                    observed_at,
-                    eligible: true,
-                },
-            ));
+            groups
+                .entry((workflow, super::supersede::coverage_class(&coverage)))
+                .or_default()
+                .push((
+                    Stored {
+                        value: work.clone(),
+                        revision,
+                        change_seq,
+                    },
+                    super::supersede::Candidate {
+                        id: work.id,
+                        status,
+                        observed_at,
+                        eligible: true,
+                    },
+                ));
         }
 
         let mut retired = 0;
@@ -4080,7 +4083,9 @@ fn retire_workflow_siblings_in_tx(
                 None,
             )
         };
-        if coverage != outcome.coverage {
+        if super::supersede::coverage_class(&coverage)
+            != super::supersede::coverage_class(&outcome.coverage)
+        {
             continue;
         }
         let observed_at = match observed_at {

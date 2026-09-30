@@ -355,6 +355,97 @@ async fn advanced_states_and_other_coverage_are_untouched() {
 }
 
 #[tokio::test]
+async fn open_pass_groups_security_whisperer_coverage_counts_and_keeps_history() {
+    let root = TempDir::new().unwrap();
+    let project = identity(root.path());
+    let mut store =
+        super::super::operator_store::OperatorStore::open(root.path(), &project).unwrap();
+    let rows = [
+        (5, "2026-09-14T23:47:16Z"),
+        (5, "2026-09-15T00:25:18Z"),
+        (10, "2026-09-15T02:44:22Z"),
+        (10, "2026-09-15T03:14:51Z"),
+        (11, "2026-09-15T03:50:11Z"),
+        (11, "2026-09-15T04:54:27Z"),
+        (11, "2026-09-15T05:24:50Z"),
+        (11, "2026-09-15T05:54:51Z"),
+        (11, "2026-09-15T07:56:13Z"),
+        (13, "2026-09-16T02:43:12Z"),
+        (0, "2026-09-25T03:03:14Z"),
+        (6, "2026-09-30T03:42:21Z"),
+        (7, "2026-09-30T10:34:01Z"),
+        (8, "2026-09-30T13:15:23Z"),
+    ];
+    let ids: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, (count, started_at))| {
+            let coverage = format!(
+                "Secret-pattern scan of staged and working-tree contents of every changed path under [REDACTED_PATH] (text files up to 65536 bytes), plus {count} recent diagnostics"
+            );
+            let item = super::super::supersede::with_publication_bypass(|| {
+                seed(
+                    &mut store,
+                    &project,
+                    &format!("security-whisperer-{index}"),
+                    "security_whisperer",
+                    &coverage,
+                    started_at,
+                    WorkflowTerminal::Partial {
+                        failure_class: Some("partial_source_coverage".into()),
+                    },
+                )
+            });
+            item.id
+        })
+        .collect();
+    drop(store);
+
+    let runtime = OutcomeRuntime::open(root.path(), project, worker()).unwrap();
+    let open: Vec<_> = runtime
+        .list_work_items(None, 100)
+        .await
+        .unwrap()
+        .entries
+        .into_iter()
+        .filter(|row| {
+            matches!(
+                row.value.state,
+                WorkItemState::NeedsAttention | WorkItemState::Watching | WorkItemState::Blocked
+            )
+        })
+        .collect();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].value.id, ids[13]);
+    for id in &ids[..13] {
+        let retired = runtime.get_work_item(id.clone()).await.unwrap().unwrap();
+        assert_eq!(retired.value.state, WorkItemState::Cancelled);
+        assert_eq!(
+            runtime
+                .list_work_outcomes(id.clone(), None, 10)
+                .await
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        assert!(runtime
+            .get_artifact_revision(retired.value.current_artifact_id.unwrap(), Some(1))
+            .await
+            .unwrap()
+            .is_some());
+    }
+    assert_eq!(
+        runtime
+            .with_store(|store| store.retire_superseded_backlog())
+            .await
+            .unwrap(),
+        0
+    );
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn backlog_pass_cost_for_110_rows_across_11_groups() {
     let pass_root = TempDir::new().unwrap();
     let (pass_project, _) = seed_backlog(&pass_root, 11, 10);
