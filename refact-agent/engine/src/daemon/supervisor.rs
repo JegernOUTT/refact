@@ -941,7 +941,10 @@ impl Supervisor {
         let lease_root = workspace_lease_root(root);
         let deadline = Instant::now() + SELF_HELD_LEASE_WAIT;
         loop {
-            let conflict = probe_workspace_lease(&lease_root)?;
+            let probe_root = lease_root.clone();
+            let conflict = tokio::task::spawn_blocking(move || probe_workspace_lease(&probe_root))
+                .await
+                .expect("workspace lease probe task panicked")?;
             if !self.lease_holder_is_our_dying_child(&conflict) {
                 return Some(conflict);
             }
@@ -1069,7 +1072,7 @@ impl Supervisor {
                     return Ok(info);
                 }
                 ReadinessOutcome::Exited(exit_code) if is_workspace_busy_exit(exit_code) => {
-                    let conflict = workspace_busy_conflict(&spec.root);
+                    let conflict = workspace_busy_conflict(&spec.root).await;
                     return Ok(self.mark_workspace_busy(&slot, &spec, &conflict).await);
                 }
                 ReadinessOutcome::Exited(exit_code) if is_port_busy_exit(exit_code) => {
@@ -1457,7 +1460,7 @@ impl Supervisor {
                 return;
             }
             if is_workspace_busy_exit(exit_code) {
-                let conflict = workspace_busy_conflict(&spec.root);
+                let conflict = workspace_busy_conflict(&spec.root).await;
                 self.mark_workspace_busy(&slot, &spec, &conflict).await;
                 return;
             }
@@ -2066,13 +2069,18 @@ fn workspace_lease_root(root: &Path) -> PathBuf {
     .unwrap_or_else(|| root.to_path_buf())
 }
 
-fn workspace_busy_conflict(root: &Path) -> WorkspaceLeaseConflict {
-    let root = workspace_lease_root(root);
-    probe_workspace_lease(&root).unwrap_or_else(|| WorkspaceLeaseConflict {
-        path: crate::daemon::lock::workspace_lease_path(&root),
-        root,
-        holder: None,
+async fn workspace_busy_conflict(root: &Path) -> WorkspaceLeaseConflict {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let root = workspace_lease_root(&root);
+        probe_workspace_lease(&root).unwrap_or_else(|| WorkspaceLeaseConflict {
+            path: crate::daemon::lock::workspace_lease_path(&root),
+            root,
+            holder: None,
+        })
     })
+    .await
+    .expect("workspace lease probe task panicked")
 }
 
 fn push_crash(history: &mut VecDeque<u64>, now: u64) {

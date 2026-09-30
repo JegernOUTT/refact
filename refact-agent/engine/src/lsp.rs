@@ -172,7 +172,18 @@ pub(crate) struct WorkspaceLeaseOutcome {
     pub rejected: Vec<RejectedWorkspaceRoot>,
 }
 
-pub(crate) fn acquire_workspace_leases(
+pub(crate) async fn acquire_workspace_leases(
+    gcx: &Arc<GlobalContext>,
+    roots: &[PathBuf],
+) -> WorkspaceLeaseOutcome {
+    let gcx = gcx.clone();
+    let roots = roots.to_vec();
+    tokio::task::spawn_blocking(move || acquire_workspace_leases_blocking(&gcx, &roots))
+        .await
+        .expect("workspace lease acquisition task panicked")
+}
+
+fn acquire_workspace_leases_blocking(
     gcx: &Arc<GlobalContext>,
     roots: &[PathBuf],
 ) -> WorkspaceLeaseOutcome {
@@ -457,7 +468,7 @@ impl LanguageServer for LspBackend {
             }
         }
         let lease_outcome =
-            acquire_workspace_leases(&self.gcx, &canonical_workspace_roots(&folders));
+            acquire_workspace_leases(&self.gcx, &canonical_workspace_roots(&folders)).await;
         let folders = canonical_workspace_roots(&lease_outcome.accepted);
         // Deliberately non-fatal: refusing the whole session because one of several folders is
         // busy is worse than serving the rest, and the multi-root case is exactly when this fires.
@@ -653,7 +664,7 @@ impl LanguageServer for LspBackend {
             };
             removed.push(path);
         }
-        let lease_outcome = acquire_workspace_leases(&self.gcx, &added);
+        let lease_outcome = acquire_workspace_leases(&self.gcx, &added).await;
         // Same silent-drop pattern as initialize(): a folder added later must not disappear
         // without a word either.
         self.report_rejected_workspace_roots(&lease_outcome.rejected)
@@ -1074,7 +1085,7 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = acquire_workspace_leases(&gcx, &[free_root.clone(), busy_root.clone()]);
+        let outcome = acquire_workspace_leases(&gcx, &[free_root.clone(), busy_root.clone()]).await;
 
         assert_eq!(outcome.accepted, vec![free_root]);
         assert_eq!(outcome.rejected.len(), 1, "busy root must be reported");
@@ -1108,7 +1119,7 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = acquire_workspace_leases(&gcx, std::slice::from_ref(&busy_root));
+        let outcome = acquire_workspace_leases(&gcx, std::slice::from_ref(&busy_root)).await;
 
         let message = outcome.rejected[0].client_message();
         assert!(message.contains(&busy_root.display().to_string()));
@@ -1137,7 +1148,7 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = acquire_workspace_leases(&gcx, std::slice::from_ref(&busy_root));
+        let outcome = acquire_workspace_leases(&gcx, std::slice::from_ref(&busy_root)).await;
 
         assert_eq!(outcome.accepted, vec![busy_root]);
         assert!(outcome.rejected.is_empty());
@@ -1155,7 +1166,7 @@ mod tests {
         let free = tempfile::tempdir().unwrap();
         let free_root = crate::files_correction::canonical_path(free.path().to_string_lossy());
 
-        let outcome = acquire_workspace_leases(&gcx, std::slice::from_ref(&free_root));
+        let outcome = acquire_workspace_leases(&gcx, std::slice::from_ref(&free_root)).await;
         assert_eq!(outcome.accepted, vec![free_root.clone()]);
         assert!(outcome.rejected.is_empty());
         assert!(
@@ -1164,7 +1175,7 @@ mod tests {
             "the lease must actually be held"
         );
 
-        let again = acquire_workspace_leases(&gcx, std::slice::from_ref(&free_root));
+        let again = acquire_workspace_leases(&gcx, std::slice::from_ref(&free_root)).await;
         assert_eq!(again.accepted, vec![free_root.clone()]);
         assert!(again.rejected.is_empty());
 
