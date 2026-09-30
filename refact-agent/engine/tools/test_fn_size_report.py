@@ -23,6 +23,27 @@ class FunctionSizeReportTests(unittest.TestCase):
         functions = fn_size_report.functions_in_source(source, "fixture.rs")
         self.assertEqual([(function.name, function.lines) for function in functions], [("kept", 10)])
 
+    def test_adjacent_literals_comments_and_lifetimes_do_not_corrupt_delimiters(self):
+        source = r'''fn kept<'a, 'static>() {
+    let a=&"{";
+    let b=x,"{";
+    let c=&r#"{ "#;
+    let d=br#"{"#;
+    let e='"';
+    let f=b'{';
+    foo// {
+    bar/* { */
+    let _borrow = &'a { };
+}
+'''
+        functions = fn_size_report.functions_in_source(source, "fixture.rs")
+        self.assertEqual([(function.name, function.lines) for function in functions], [("kept", 11)])
+
+    def test_literal_prefixes_are_not_recognized_inside_identifiers(self):
+        source = 'fn kept() { let text = xbr#"{"#; let raw = xr#"{"#; }\n'
+        functions = fn_size_report.functions_in_source(source, "fixture.rs")
+        self.assertEqual([(function.name, function.lines) for function in functions], [("kept", 1)])
+
     def test_nested_functions_are_found_but_closures_are_not(self):
         source = """fn outer() {
     let closure = || {
@@ -47,6 +68,34 @@ mod tests {
             ["production"],
         )
 
+    def test_cfg_test_module_allows_intervening_attributes(self):
+        source = """#[cfg(test)]
+#[allow(dead_code)]
+/// tests live here
+mod tests { fn hidden() {} }
+#[cfg(all(test, unix))]
+mod platform_tests { fn also_hidden() {} }
+fn production() {}
+"""
+        self.assertEqual(
+            [function.name for function in fn_size_report.functions_in_source(source, "lib.rs")],
+            ["production"],
+        )
+
+    def test_test_attribute_functions_are_excluded(self):
+        source = """#[test]
+fn regular_test() {}
+#[tokio::test]
+async fn async_test() {}
+#[framework::test]
+fn framework_test() {}
+fn production() {}
+"""
+        self.assertEqual(
+            [function.name for function in fn_size_report.functions_in_source(source, "lib.rs")],
+            ["production"],
+        )
+
     def test_impl_methods_are_qualified(self):
         source = """impl<T> Tool<T> {
     pub(crate) async fn run(&self) {}
@@ -63,6 +112,18 @@ mod tests {
             (root / "tests.rs").write_text("fn skipped() {}\n", encoding="utf-8")
             (root / "module_tests.rs").write_text("fn skipped_too() {}\n", encoding="utf-8")
             (root / "nested" / "tests" / "fixture.rs").write_text("fn skipped_dir() {}\n", encoding="utf-8")
+            count, functions = fn_size_report.scan_roots([root], root.parent)
+        self.assertEqual(count, 1)
+        self.assertEqual([function.name for function in functions], ["kept"])
+
+    def test_out_of_line_cfg_test_module_file_is_excluded(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "src"
+            root.mkdir()
+            (root / "lib.rs").write_text(
+                "#[cfg(test)]\nmod helpers;\nfn kept() {}\n", encoding="utf-8"
+            )
+            (root / "helpers.rs").write_text("fn hidden() {}\n", encoding="utf-8")
             count, functions = fn_size_report.scan_roots([root], root.parent)
         self.assertEqual(count, 1)
         self.assertEqual([function.name for function in functions], ["kept"])

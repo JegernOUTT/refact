@@ -8,27 +8,21 @@ import bisect
 import glob
 import re
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
 ENGINE_DIR = Path(__file__).resolve().parent.parent
-
 TOKEN_PATTERN = re.compile(
-    r"(?P<space>\s+)|(?P<line>//[^\n]*(?:\n|$))|(?P<block>/\*)|"
-    r'(?P<raw>br(?P<byte_hashes>#+)?"|r(?P<hashes>#+)?")|'
-    r'(?P<string>b?"(?:\\.|[^"\\])*")|'
-    r"(?P<char>'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.)|[^'\\\r\n])')|"
-    r"(?P<keyword>\b(?:fn|mod|cfg|test|pub|crate|unsafe|async)\b)|"
-    r"(?P<punct>->|=>|[{}()\[\]#;<>-])|(?P<apostrophe>')|(?P<other>[^\s{}()\[\]#;<>-]+)",
+    r'(?P<line>//)|(?P<block>/\*)|(?P<raw>(?<![\w#])(?:br|r)(?P<hashes>#+)?")|'
+    r'(?P<string>")|'
+    r"(?P<char>b?'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.)|[^'\\\r\n])')|"
+    r'(?P<keyword>(?<![\w#])(?:fn|mod|cfg|test|any|all|pub)\b)|'
+    r'(?P<punct>[{}()\[\]#;<>=])',
     re.UNICODE,
 )
-
-
-@dataclass(frozen=True)
-class Token:
-    text: str
-    line: int
-    offset: int
+FN_NAME_PATTERN = re.compile(r"\s+(?:r#)?([A-Za-z_]\w*)", re.UNICODE)
+MOD_DECL_PATTERN = re.compile(r"\s+([A-Za-z_]\w*)\s*;")
 
 
 @dataclass(frozen=True)
@@ -39,29 +33,39 @@ class Function:
     name: str
 
 
-def tokenize(source: str) -> list[Token]:
-    starts = [0]
-    starts.extend(i + 1 for i, char in enumerate(source) if char == "\n")
-    tokens: list[Token] = []
+def quoted_literal_end(source: str, start: int, quote: str) -> int:
+    position = start + 1
+    while position < len(source):
+        if source[position] == "\\":
+            position += 2
+        elif source[position] == quote:
+            return position + 1
+        else:
+            position += 1
+    return len(source)
+
+
+def tokenize(source: str) -> list[tuple[str, int]]:
+    tokens: list[tuple[str, int]] = []
     skip_to = 0
     for match in TOKEN_PATTERN.finditer(source):
-        if match.start() < skip_to:
+        start = match.start()
+        if start < skip_to:
             continue
         kind = match.lastgroup
-        if kind == "space":
-            continue
+        end = match.end()
         if kind == "line":
-            newline = source.find("\n", match.start())
+            newline = source.find("\n", end)
             skip_to = len(source) if newline < 0 else newline + 1
             continue
         if kind == "block":
             depth = 1
-            position = match.end()
+            position = end
             while depth:
                 opening = source.find("/*", position)
                 closing = source.find("*/", position)
                 if closing < 0:
-                    position = len(source)
+                    skip_to = len(source)
                     break
                 if opening >= 0 and opening < closing:
                     depth += 1
@@ -69,50 +73,53 @@ def tokenize(source: str) -> list[Token]:
                 else:
                     depth -= 1
                     position = closing + 2
-            skip_to = position
+                    if depth == 0:
+                        skip_to = position
             continue
-        token_line = bisect.bisect_right(starts, match.start())
         if kind == "raw":
-            hashes = match.groupdict().get("b_hashes") or match.groupdict().get("hashes") or ""
+            hashes = match.group("hashes") or ""
             terminator = '"' + hashes
-            closing = source.find(terminator, match.end())
+            closing = source.find(terminator, end)
             skip_to = len(source) if closing < 0 else closing + len(terminator)
-            tokens.append(Token("<literal>", token_line, match.start()))
             continue
-        elif kind in ("string", "char"):
-            tokens.append(Token("<literal>", token_line, match.start()))
-        else:
-            tokens.append(Token(match.group(), token_line, match.start()))
+        if kind == "string":
+            skip_to = quoted_literal_end(source, start, '"')
+            continue
+        if kind == "char":
+            continue
+        tokens.append((match.group(), start))
     return tokens
 
 
-def delimiter_pairs(tokens: list[Token]) -> dict[int, int]:
+def delimiter_pairs(tokens: list[tuple[str, int]]) -> dict[int, int]:
     opening = {"{": "}", "[": "]", "(": ")"}
     closing = {value: key for key, value in opening.items()}
     stack: list[tuple[str, int]] = []
     pairs: dict[int, int] = {}
-    for index, token in enumerate(tokens):
-        if token.text in opening:
-            stack.append((token.text, index))
-        elif token.text in closing and stack and stack[-1][0] == closing[token.text]:
+    for index, (text, _) in enumerate(tokens):
+        if text in opening:
+            stack.append((text, index))
+        elif text in closing and stack and stack[-1][0] == closing[text]:
             _, start = stack.pop()
             pairs[start] = index
             pairs[index] = start
     return pairs
 
 
-def function_body(tokens: list[Token], pairs: dict[int, int], start: int) -> int | None:
+def function_body(tokens: list[tuple[str, int]], pairs: dict[int, int], start: int) -> int | None:
     angle_depth = 0
     index = start
     while index < len(tokens):
-        text = tokens[index].text
+        text = tokens[index][0]
         if text in ("(", "[") and index in pairs:
             index = pairs[index] + 1
             continue
-        if text == "<":
+        if text == "<" and index + 1 < len(tokens) and tokens[index + 1][0] not in ("=", "<"):
             angle_depth += 1
-        elif text == ">" and (index == 0 or tokens[index - 1].text not in ("-", "=")):
+        elif text == ">" and (index == 0 or tokens[index - 1][0] not in ("-", "=")):
             angle_depth = max(0, angle_depth - 1)
+        elif text == "=" and index + 1 < len(tokens) and tokens[index + 1][0] == ">":
+            angle_depth = 0
         elif text == "{" and angle_depth == 0:
             return index if index in pairs else None
         elif text == ";" and angle_depth == 0:
@@ -121,55 +128,127 @@ def function_body(tokens: list[Token], pairs: dict[int, int], start: int) -> int
     return None
 
 
-def test_module_ranges(tokens: list[Token], pairs: dict[int, int]) -> list[tuple[int, int]]:
-    ranges = []
-    for index, token in enumerate(tokens):
-        if token.text != "#" or index + 1 >= len(tokens) or tokens[index + 1].text != "[":
+def attribute_end(tokens: list[tuple[str, int]], pairs: dict[int, int], start: int) -> int | None:
+    if start + 1 >= len(tokens) or tokens[start][0] != "#" or tokens[start + 1][0] != "[":
+        return None
+    return pairs.get(start + 1)
+
+
+def is_cfg_test_attribute(items: list[tuple[str, int]]) -> bool:
+    texts = [text for text, _ in items]
+    return texts == ["cfg", "(", "test", ")"] or (
+        len(texts) >= 6
+        and texts[:3] in (["cfg", "(", "any"], ["cfg", "(", "all"])
+        and texts[-1] == ")"
+        and "test" in texts[3:-1]
+    )
+
+
+def test_module_declarations(
+    source: str, tokens: list[tuple[str, int]], pairs: dict[int, int]
+) -> tuple[list[tuple[int, int]], list[str]]:
+    ranges: list[tuple[int, int]] = []
+    out_of_line: list[str] = []
+    for index, (text, _) in enumerate(tokens):
+        if text != "#":
             continue
-        attribute = index + 1
-        if attribute not in pairs:
-            continue
-        end = pairs[attribute]
-        if [item.text for item in tokens[attribute + 1 : end]] != ["cfg", "(", "test", ")"]:
+        end = attribute_end(tokens, pairs, index)
+        if end is None or not is_cfg_test_attribute(tokens[index + 2 : end]):
             continue
         module = end + 1
-        if module < len(tokens) and tokens[module].text == "pub":
+        while module < len(tokens):
+            next_end = attribute_end(tokens, pairs, module)
+            if next_end is None:
+                break
+            module = next_end + 1
+        if module < len(tokens) and tokens[module][0] == "pub":
             module += 1
-            if module < len(tokens) and tokens[module].text == "(":
+            if module < len(tokens) and tokens[module][0] == "(":
                 module = pairs.get(module, module) + 1
-        if module < len(tokens) and tokens[module].text == "mod":
-            body = function_body(tokens, pairs, module + 1)
-            if body is not None:
-                ranges.append((body, pairs[body]))
-    return ranges
+        if module >= len(tokens) or tokens[module][0] != "mod":
+            continue
+        declaration = MOD_DECL_PATTERN.match(source, tokens[module][1] + 3)
+        body = function_body(tokens, pairs, module + 1)
+        if body is not None:
+            ranges.append((body, pairs[body]))
+        elif declaration is not None:
+            out_of_line.append(declaration.group(1))
+    return ranges, out_of_line
 
 
-def functions_in_source(source: str, path: str) -> list[Function]:
+def has_test_attribute(tokens: list[tuple[str, int]], pairs: dict[int, int], fn_index: int) -> bool:
+    cursor = fn_index
+    while cursor > 0 and tokens[cursor - 1][0] in ("async", "unsafe", "const", "extern"):
+        cursor -= 1
+    found = False
+    while cursor > 0 and tokens[cursor - 1][0] == "]":
+        close = cursor - 1
+        opening = pairs.get(close)
+        if opening is None or opening == 0 or tokens[opening - 1][0] != "#":
+            break
+        contents = tokens[opening + 1 : close]
+        if contents and contents[-1][0] == "test":
+            found = True
+        cursor = opening - 1
+    return found
+
+
+def analyze_source(source: str, path: str) -> tuple[list[Function], list[str]]:
     tokens = tokenize(source)
     pairs = delimiter_pairs(tokens)
-    excluded = test_module_ranges(tokens, pairs)
-    functions = []
-    for index, token in enumerate(tokens):
-        if token.text != "fn" or any(start < index < end for start, end in excluded):
+    excluded, out_of_line = test_module_declarations(source, tokens, pairs)
+    excluded.sort()
+    candidates: list[tuple[int, int, str]] = []
+    range_index = 0
+    for index, (text, offset) in enumerate(tokens):
+        while range_index < len(excluded) and excluded[range_index][1] <= index:
+            range_index += 1
+        in_test_module = range_index < len(excluded) and excluded[range_index][0] < index < excluded[range_index][1]
+        if text != "fn" or has_test_attribute(tokens, pairs, index) or in_test_module:
             continue
-        name_offset = token.offset + 2
-        while name_offset < len(source) and source[name_offset].isspace():
-            name_offset += 1
-        if source.startswith("r#", name_offset):
-            name_offset += 2
-        name_match = re.match(r"[A-Za-z_]\w*", source[name_offset:], re.UNICODE)
+        name_match = FN_NAME_PATTERN.match(source, offset + 2)
         if name_match is None:
             continue
         body = function_body(tokens, pairs, index + 1)
         if body is None:
             continue
         end = pairs[body]
-        functions.append(Function(tokens[end].line - token.line + 1, path, token.line, name_match.group()))
-    return functions
+        candidates.append((end, offset, name_match.group(1)))
+    if not candidates:
+        return [], out_of_line
+    line_starts = [0]
+    cursor = 0
+    while (cursor := source.find("\n", cursor)) >= 0:
+        line_starts.append(cursor + 1)
+        cursor += 1
+    result: list[Function] = []
+    for close_index, fn_token_offset, name in candidates:
+        close_offset = tokens[close_index][1]
+        fn_line = bisect.bisect_right(line_starts, fn_token_offset)
+        close_line = bisect.bisect_right(line_starts, close_offset)
+        result.append(Function(close_line - fn_line + 1, path, fn_line, name))
+    return result, out_of_line
+
+
+def functions_in_source(source: str, path: str) -> list[Function]:
+    return analyze_source(source, path)[0]
 
 
 def is_test_file(path: Path) -> bool:
     return path.name == "tests.rs" or path.name.endswith("_tests.rs") or "tests" in path.parts
+
+
+def process_source_file(arguments: tuple[str, str]) -> tuple[str, list[Function], list[str]]:
+    path_text, base_text = arguments
+    file_path = Path(path_text)
+    base_dir = Path(base_text)
+    try:
+        relative = file_path.relative_to(base_dir).as_posix()
+    except ValueError:
+        relative = file_path.as_posix()
+    with file_path.open("r", encoding="utf-8", buffering=256 * 1024) as source_file:
+        found, out_of_line = analyze_source(source_file.read(), relative)
+    return relative, found, out_of_line
 
 
 def scan_roots(roots: list[Path], base_dir: Path) -> tuple[int, list[Function]]:
@@ -177,16 +256,48 @@ def scan_roots(roots: list[Path], base_dir: Path) -> tuple[int, list[Function]]:
     for root in roots:
         if not root.is_dir():
             raise FileNotFoundError(f"Rust source root does not exist: {root}")
-        files.update(file for file in root.rglob("*.rs") if not is_test_file(file))
-    functions = []
-    for file_path in sorted(files):
+        files.update(file for file in root.rglob("*.rs") if not is_test_file(file.relative_to(root)))
+    functions: list[Function] = []
+    excluded_files: set[Path] = set()
+    paths = sorted(files)
+    arguments = [(str(file_path), str(base_dir)) for file_path in paths]
+
+    try:
+        with ProcessPoolExecutor(max_workers=min(8, len(paths))) as executor:
+            for relative, found, out_of_line in executor.map(process_source_file, arguments, chunksize=16):
+                functions.extend(found)
+                file_path = base_dir / relative
+                for name in out_of_line:
+                    candidates = (
+                        file_path.parent / f"{name}.rs",
+                        file_path.parent / name / "mod.rs",
+                        file_path.parent / file_path.stem / f"{name}.rs",
+                        file_path.parent / file_path.stem / name / "mod.rs",
+                    )
+                    excluded_files.update(candidate.resolve() for candidate in candidates if candidate.exists())
+    except (OSError, RuntimeError):
+        functions.clear()
+        excluded_files.clear()
+        for file_path, argument in zip(paths, arguments):
+            relative, found, out_of_line = process_source_file(argument)
+            functions.extend(found)
+            for name in out_of_line:
+                candidates = (
+                    file_path.parent / f"{name}.rs",
+                    file_path.parent / name / "mod.rs",
+                    file_path.parent / file_path.stem / f"{name}.rs",
+                    file_path.parent / file_path.stem / name / "mod.rs",
+                )
+                excluded_files.update(candidate.resolve() for candidate in candidates if candidate.exists())
+    excluded_files.intersection_update(files)
+    excluded_relative = set()
+    for file_path in excluded_files:
         try:
-            relative = file_path.relative_to(base_dir).as_posix()
+            excluded_relative.add(file_path.relative_to(base_dir).as_posix())
         except ValueError:
-            relative = file_path.as_posix()
-        with file_path.open("r", encoding="utf-8", buffering=256 * 1024) as source_file:
-            functions.extend(functions_in_source(source_file.read(), relative))
-    return len(files), functions
+            excluded_relative.add(file_path.as_posix())
+    functions = [function for function in functions if function.path not in excluded_relative]
+    return len(files) - len(excluded_files), functions
 
 
 def default_roots() -> list[Path]:
