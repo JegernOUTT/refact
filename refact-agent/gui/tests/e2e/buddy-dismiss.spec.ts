@@ -85,6 +85,32 @@ for (const width of [360, 1280]) {
       if (!url.pathname.startsWith("/v1/")) return route.continue();
       if (url.pathname === "/v1/buddy/work")
         return route.fulfill({ json: envelope(activeRows.map(record)) });
+      if (url.pathname === "/v1/buddy/work/actions") {
+        const ids = url.searchParams.get("ids")?.split(",") ?? [];
+        return route.fulfill({
+          json: envelope(
+            ids.map((work_id) => ({
+              work_id,
+              actions:
+                work_id === "dismiss-work-1"
+                  ? [
+                      {
+                        spec: actionSpec,
+                        spec_hash: "dismiss-hash",
+                        work_revision: 1,
+                        artifact_id: artifacts[1].artifact_id,
+                        artifact_revision: 1,
+                        label: "Dismiss — not a problem",
+                        description: "Moves this item out of Needs you.",
+                        latest_execution: null,
+                      },
+                    ]
+                  : [],
+              error: work_id === "dismiss-work-1" ? null : "Fixture only",
+            })),
+          ),
+        });
+      }
       if (url.pathname.startsWith("/v1/buddy/artifacts/")) {
         const artifactId = url.pathname.split("/").at(-1);
         const value = artifacts.find(

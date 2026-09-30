@@ -99,6 +99,28 @@ for (const width of [240, 360, 768, 1280]) {
       if (!url.pathname.startsWith("/v1/")) return route.continue();
       if (url.pathname === "/v1/buddy/work")
         return route.fulfill({ json: envelope([record(work)]) });
+      if (url.pathname === "/v1/buddy/work/actions")
+        return route.fulfill({
+          json: envelope([
+            {
+              work_id: "work",
+              actions: [
+                {
+                  spec,
+                  spec_hash: "hash",
+                  work_revision: 1,
+                  artifact_id: "report",
+                  artifact_revision: 1,
+                  label: "Check saved evidence links",
+                  description:
+                    "Checks stored metadata only; no findings are verified and no fix is applied.",
+                  latest_execution: receipt,
+                },
+              ],
+              error: null,
+            },
+          ]),
+        });
       if (url.pathname === "/v1/buddy/artifacts/report")
         return route.fulfill({ json: envelope(record(artifact)) });
       if (url.pathname === "/v1/buddy/artifacts/report/revisions")

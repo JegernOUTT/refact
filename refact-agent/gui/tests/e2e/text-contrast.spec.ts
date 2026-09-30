@@ -75,6 +75,18 @@ async function installBuddyRoutes(page: Page) {
       };
       return route.fulfill({ json: envelope([record(work)]) });
     }
+    if (path === "/v1/buddy/work/actions") {
+      const ids = url.searchParams.get("ids")?.split(",") ?? [];
+      return route.fulfill({
+        json: envelope(
+          ids.map((work_id) => ({
+            work_id,
+            actions: [],
+            error: "Fixture action error",
+          })),
+        ),
+      });
+    }
     if (path === `/v1/buddy/artifacts/${ARTIFACT_ID}`) {
       const artifact = {
         schema_version: 1,

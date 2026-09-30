@@ -414,6 +414,22 @@ async function installOperatorRoutes(
       });
     }
 
+    if (path === "/v1/buddy/work/actions") {
+      const ids = url.searchParams.get("ids")?.split(",") ?? [];
+      return route.fulfill({
+        json: envelope(
+          ids.map((work_id) => {
+            const seed = seedById(work_id);
+            return {
+              work_id,
+              actions: seed?.action ? [deskAction(seed)] : [],
+              error: seed?.actionFails ? "unavailable" : null,
+            };
+          }),
+        ),
+      });
+    }
+
     const work = /^\/v1\/buddy\/work\/([^/]+)(\/[a-z]+)?$/.exec(path);
     if (work) {
       const seed = seedById(decodeURIComponent(work[1]));

@@ -61,6 +61,18 @@ async function openDesk(page: Page, width: number) {
     const url = new URL(route.request().url());
     if (url.pathname === "/v1/buddy/work")
       return route.fulfill({ json: envelope(rows.map(workRecord)) });
+    if (url.pathname === "/v1/buddy/work/actions") {
+      const ids = url.searchParams.get("ids")?.split(",") ?? [];
+      return route.fulfill({
+        json: envelope(
+          ids.map((work_id) => ({
+            work_id,
+            actions: [],
+            error: "fixture only",
+          })),
+        ),
+      });
+    }
     const actions = /^\/v1\/buddy\/work\/([^/]+)\/actions$/.exec(url.pathname);
     if (actions)
       return route.fulfill({ status: 503, json: { detail: "fixture only" } });
