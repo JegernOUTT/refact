@@ -321,6 +321,23 @@ pub struct ControlDecision {
     pub decided_by: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionDecisionResult {
+    pub accepted: bool,
+    pub denial_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionDecisionRequest {
+    pub tool_name: String,
+    pub tool_input: serde_json::Value,
+    pub accepted: bool,
+    pub source: String,
+    pub request_id: Option<String>,
+    pub tool_call_id: String,
+    pub reason_type: String,
+}
+
 /// Deny always wins, whatever the order the outcomes arrive in and whatever
 /// their timing. A timeout or a shutdown cancellation is a deny, never a
 /// fallthrough to allow. A non-blocking hook failure stays advisory.
@@ -375,6 +392,14 @@ fn referenced_tool_names(args: &serde_json::Value) -> Vec<String> {
     let mut found = Vec::new();
     collect_tool_names(args, &mut found);
     found
+}
+
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
 }
 
 fn collect_tool_names(value: &serde_json::Value, found: &mut Vec<String>) {
@@ -559,6 +584,20 @@ static HOOK_ACTIVITY: OnceLock<HookActivityLog> = OnceLock::new();
 
 pub fn hook_activity() -> &'static HookActivityLog {
     HOOK_ACTIVITY.get_or_init(|| HookActivityLog::new(HOOK_ACTIVITY_CAPACITY))
+}
+
+#[cfg(test)]
+pub(crate) fn clear_hook_cache_for_tests() {
+    if let Some(cache) = HOOKS_CACHE.get() {
+        if let Ok(mut guard) = cache.try_write() {
+            *guard = None;
+        }
+    }
+    if let Some(activity) = HOOK_ACTIVITY.get() {
+        if let Ok(mut entries) = activity.entries.lock() {
+            entries.clear();
+        }
+    }
 }
 
 fn unix_now_ms() -> u64 {
@@ -1013,11 +1052,19 @@ async fn matching_hooks(
 pub async fn run_control_hooks(
     app: AppState,
     event: HookEvent,
-    mut payload: HookPayload,
+    payload: HookPayload,
 ) -> ControlVerdict {
+    run_control_hooks_with_decider(app, event, payload).await.0
+}
+
+async fn run_control_hooks_with_decider(
+    app: AppState,
+    event: HookEvent,
+    mut payload: HookPayload,
+) -> (ControlVerdict, Option<String>) {
     let config = app.gcx.hooks_config.clone();
     if !config.enabled {
-        return ControlVerdict::Allow;
+        return (ControlVerdict::Allow, None);
     }
     let limits = HookLimits::from(&config);
     if let Err(error) = check_hook_recursion(&event, payload.depth, limits.max_recursion_depth) {
@@ -1027,11 +1074,11 @@ pub async fn run_control_hooks(
             payload.tool_name.as_deref(),
             &error,
         ));
-        return ControlVerdict::Deny(error.to_string());
+        return (ControlVerdict::Deny(error.to_string()), None);
     }
     let shutdown = app.gcx.shutdown_flag.clone();
     if shutdown.load(Ordering::Relaxed) {
-        return ControlVerdict::Allow;
+        return (ControlVerdict::Allow, None);
     }
     let tool_name = payload.tool_name.clone();
     let hooks = matching_hooks(
@@ -1043,7 +1090,7 @@ pub async fn run_control_hooks(
     .await;
     let control_hooks: Vec<ControlHook> = hooks.into_iter().filter_map(ControlHook::new).collect();
     if control_hooks.is_empty() {
-        return ControlVerdict::Allow;
+        return (ControlVerdict::Allow, None);
     }
     apply_privacy_filter(&app, &mut payload).await;
     let futs: Vec<_> = control_hooks
@@ -1064,7 +1111,84 @@ pub async fn run_control_hooks(
         &config.trusted_projects,
         &decision,
     ));
-    decision.verdict
+    let decided_by = decision
+        .decided_by
+        .and_then(|index| configs.get(index))
+        .map(|config| config.command.clone());
+    (decision.verdict, decided_by)
+}
+
+pub async fn apply_permission_decision(
+    app: AppState,
+    session_id: String,
+    project_dir: String,
+    request: PermissionDecisionRequest,
+) -> PermissionDecisionResult {
+    if !app.gcx.hooks_config.enabled {
+        return PermissionDecisionResult {
+            accepted: request.accepted,
+            denial_reason: None,
+        };
+    }
+    let event = HookEvent::PermissionDecision;
+    let mut payload = HookPayload::new(&event, session_id, project_dir)
+        .with_tool(&request.tool_name, Some(request.tool_input));
+    payload.extra.insert(
+        "decision".into(),
+        serde_json::json!(if request.accepted {
+            "approve"
+        } else {
+            "reject"
+        }),
+    );
+    payload
+        .extra
+        .insert("source".into(), serde_json::json!(request.source));
+    payload
+        .extra
+        .insert("reason_type".into(), serde_json::json!(request.reason_type));
+    payload.extra.insert(
+        "tool_call_id".into(),
+        serde_json::json!(request.tool_call_id),
+    );
+    if let Some(request_id) = request.request_id {
+        payload
+            .extra
+            .insert("request_id".into(), serde_json::json!(request_id));
+    }
+    if !request.accepted {
+        run_control_hooks_with_decider(app, event, payload).await;
+        return PermissionDecisionResult {
+            accepted: false,
+            denial_reason: None,
+        };
+    }
+    let raw_decision = request.accepted;
+    let denial_limit = HookLimits::from(&app.gcx.hooks_config).max_output_bytes;
+    let (verdict, hook) = run_control_hooks_with_decider(app, event, payload).await;
+    match verdict {
+        ControlVerdict::Deny(reason) => {
+            let denial_reason = match hook {
+                Some(hook) => format!("denied by PermissionDecision hook '{hook}': {reason}"),
+                None => format!("denied by PermissionDecision hook: {reason}"),
+            };
+            PermissionDecisionResult {
+                accepted: false,
+                denial_reason: Some(truncate_utf8_bytes(&denial_reason, denial_limit)),
+            }
+        }
+        ControlVerdict::Rewrite(_) => {
+            tracing::warn!("hooks_runner: ignored rewrite for PermissionDecision event");
+            PermissionDecisionResult {
+                accepted: raw_decision,
+                denial_reason: None,
+            }
+        }
+        ControlVerdict::Allow => PermissionDecisionResult {
+            accepted: true,
+            denial_reason: None,
+        },
+    }
 }
 
 /// Run every observation hook registered for `event`. Observation hooks are
@@ -1302,6 +1426,21 @@ mod tests {
         payload
     }
 
+    async fn test_app(
+        config_dir: &std::path::Path,
+        workspace: &std::path::Path,
+        enabled: bool,
+    ) -> AppState {
+        let mut gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            workspace.join("cache"),
+            config_dir.to_path_buf(),
+        )
+        .await;
+        Arc::get_mut(&mut gcx).unwrap().hooks_config.enabled = enabled;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace.into()];
+        AppState::from_gcx(gcx).await
+    }
+
     fn make_hook_config(event: HookEvent, matcher: Option<&str>, command: &str) -> HookConfig {
         HookConfig {
             event,
@@ -1310,6 +1449,18 @@ mod tests {
             timeout: Some(5),
             source: CommandSource::GlobalRefact,
         }
+    }
+
+    fn permission_config(config_dir: &std::path::Path, command: &str) {
+        std::fs::create_dir_all(config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("hooks.yaml"),
+            format!(
+                "hooks:\n  PermissionDecision:\n    - hooks:\n        - type: command\n          command: {command:?}\n"
+            ),
+        )
+        .unwrap();
+        clear_hook_cache_for_tests();
     }
 
     fn stderr_exit_command(message: &str, code: i32) -> String {
@@ -2200,6 +2351,104 @@ mod tests {
     fn test_hooks_config_default_trusts_no_projects() {
         assert!(HooksConfig::default().trusted_projects.is_empty());
         assert!(HooksConfig::default().enabled);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial(permission_decision_hooks)]
+    async fn permission_decision_deny_names_hook_and_records_single_event() {
+        let workspace = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let app = test_app(config.path(), workspace.path(), true).await;
+        let marker = workspace.path().join("permission-hook-count");
+        permission_config(
+            config.path(),
+            &format!("echo blocked >&2; touch '{}'; exit 2", marker.display()),
+        );
+        let request = PermissionDecisionRequest {
+            tool_name: "shell".into(),
+            tool_input: serde_json::json!({"command":"touch forbidden"}),
+            accepted: true,
+            source: "user_confirmation".into(),
+            request_id: None,
+            tool_call_id: "call".into(),
+            reason_type: "confirmation".into(),
+        };
+        let result = apply_permission_decision(
+            app.clone(),
+            "session".into(),
+            workspace.path().to_string_lossy().into_owned(),
+            request,
+        )
+        .await;
+        assert!(!result.accepted);
+        assert!(result
+            .denial_reason
+            .as_deref()
+            .unwrap()
+            .contains("PermissionDecision hook"));
+        assert!(marker.exists());
+        assert_eq!(
+            hook_activity()
+                .recent(10)
+                .iter()
+                .filter(|entry| entry.event == "PermissionDecision")
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial(permission_decision_hooks)]
+    async fn permission_decision_reject_is_not_widened_by_allow_hook_and_disabled_hooks_are_silent()
+    {
+        let workspace = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let app = test_app(config.path(), workspace.path(), true).await;
+        permission_config(config.path(), "exit 0");
+        let request = PermissionDecisionRequest {
+            tool_name: "shell".into(),
+            tool_input: serde_json::json!({"command":"echo no"}),
+            accepted: false,
+            source: "user_confirmation".into(),
+            request_id: None,
+            tool_call_id: "call".into(),
+            reason_type: "confirmation".into(),
+        };
+        let result = apply_permission_decision(
+            app.clone(),
+            "session".into(),
+            workspace.path().display().to_string(),
+            request.clone(),
+        )
+        .await;
+        assert!(!result.accepted);
+        assert_eq!(
+            hook_activity()
+                .recent(5)
+                .iter()
+                .filter(|entry| entry.event == "PermissionDecision")
+                .count(),
+            1
+        );
+        let disabled_app = test_app(config.path(), workspace.path(), false).await;
+        let result = apply_permission_decision(
+            disabled_app,
+            "session".into(),
+            workspace.path().display().to_string(),
+            request,
+        )
+        .await;
+        assert!(!result.accepted);
+        assert_eq!(
+            hook_activity()
+                .recent(5)
+                .iter()
+                .filter(|entry| entry.event == "PermissionDecision")
+                .count(),
+            1
+        );
     }
 
     #[test]

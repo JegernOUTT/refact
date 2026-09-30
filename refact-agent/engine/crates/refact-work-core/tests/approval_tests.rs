@@ -158,3 +158,71 @@ fn parent_listing_filters_owners() {
         vec!["a"]
     );
 }
+
+#[test]
+fn denial_reason_is_attached_to_rejection_and_dropped_with_entry() {
+    let registry = ApprovalRegistry::new(4);
+    registry.register(pending("hook"), 0).unwrap();
+    registry
+        .decide_with_reason(
+            "parent",
+            7,
+            "hook",
+            false,
+            Some("denied by PermissionDecision hook: blocked".into()),
+            1,
+        )
+        .unwrap();
+    assert_eq!(
+        registry.denial_reason("hook").as_deref(),
+        Some("denied by PermissionDecision hook: blocked")
+    );
+    assert_eq!(registry.wait_now("hook", 1), Ok(ApprovalDecision::Rejected));
+    registry.expire(11);
+    assert_eq!(registry.denial_reason("hook"), None);
+}
+
+#[test]
+fn repeated_rejection_preserves_original_denial_reason() {
+    let registry = ApprovalRegistry::new(4);
+    registry.register(pending("hook"), 0).unwrap();
+    registry
+        .decide_with_reason(
+            "parent",
+            7,
+            "hook",
+            false,
+            Some("denied by PermissionDecision hook: original".into()),
+            1,
+        )
+        .unwrap();
+    assert_eq!(
+        registry.decide_with_reason("parent", 7, "hook", false, None, 2),
+        Ok(ApprovalDecision::Rejected)
+    );
+    assert_eq!(
+        registry.denial_reason("hook").as_deref(),
+        Some("denied by PermissionDecision hook: original")
+    );
+}
+
+#[test]
+fn repeated_rejection_attaches_reason_when_first_decision_had_none() {
+    let registry = ApprovalRegistry::new(4);
+    registry.register(pending("hook"), 0).unwrap();
+    registry.decide("parent", 7, "hook", false, 1).unwrap();
+    registry
+        .decide_with_reason(
+            "parent",
+            7,
+            "hook",
+            false,
+            Some("denied by PermissionDecision hook: later".into()),
+            2,
+        )
+        .unwrap();
+    assert_eq!(
+        registry.denial_reason("hook").as_deref(),
+        Some("denied by PermissionDecision hook: later")
+    );
+}

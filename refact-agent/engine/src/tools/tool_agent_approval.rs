@@ -13,6 +13,10 @@ pub struct ToolAgentApproval {
     pub config_path: String,
 }
 
+#[cfg(test)]
+#[path = "tool_agent_approval_hook_tests.rs"]
+mod permission_hook_tests;
+
 fn requested<'a>(args: &'a HashMap<String, Value>, name: &str) -> Result<&'a str, String> {
     args.get(name)
         .and_then(Value::as_str)
@@ -173,17 +177,55 @@ impl Tool for ToolAgentApproval {
                     ).map_err(|_| "This command requires explicit user approval; the parent cannot approve beyond its delegated command authority.".to_string())?;
                 }
             }
+            let (session_id, project_dir) = {
+                let session = app
+                    .chat
+                    .sessions
+                    .read()
+                    .await
+                    .get(&chat_id)
+                    .cloned()
+                    .ok_or("parent session unavailable")?;
+                let session = session.lock().await;
+                let session_id = session.chat_id.clone();
+                drop(session);
+                let project_dir =
+                    crate::ext::hooks_runner::get_project_dir_string(app.clone()).await;
+                (session_id, project_dir)
+            };
+            let decision_at = crate::agents::approval::now_ms();
+            let hook_decision = crate::ext::hooks_runner::apply_permission_decision(
+                app.clone(),
+                session_id,
+                project_dir,
+                crate::ext::hooks_runner::PermissionDecisionRequest {
+                    tool_name: pending.tool_name.clone(),
+                    tool_input: pending.args.clone(),
+                    accepted: action == "approve",
+                    source: "child_approval".into(),
+                    request_id: Some(id.to_string()),
+                    tool_call_id: pending.tool_call_id.clone(),
+                    reason_type: "agent_approval".into(),
+                },
+            )
+            .await;
             let decision = app
                 .agent_approvals
-                .decide(
+                .decide_with_reason(
                     &chat_id,
                     pending.run_generation,
                     id,
-                    action == "approve",
-                    now,
+                    hook_decision.accepted,
+                    hook_decision.denial_reason.clone(),
+                    decision_at,
                 )
                 .map_err(|e| format!("approval decision: {e:?}"))?;
-            serde_json::json!({"request_id":id,"agent_id":pending.child_work_id,"decision":format!("{decision:?}").to_lowercase(),"scope":"once"})
+            let mut response = serde_json::json!({"request_id":id,"agent_id":pending.child_work_id,"decision":format!("{decision:?}").to_lowercase(),"scope":"once"});
+            if let Some(reason) = hook_decision.denial_reason {
+                response["hook_overrode_approval"] = serde_json::Value::Bool(true);
+                response["denial_reason"] = serde_json::Value::String(reason);
+            }
+            response
         };
         Ok((
             false,

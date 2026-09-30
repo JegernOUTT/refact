@@ -67,6 +67,7 @@ struct UserOnceGrant {
 struct Entry {
     pending: PendingApproval,
     decision: Option<ApprovalDecision>,
+    denial_reason: Option<String>,
     user_once: Option<UserOnceGrant>,
     consumed: bool,
 }
@@ -129,6 +130,7 @@ impl ApprovalRegistry {
             Entry {
                 pending,
                 decision: None,
+                denial_reason: None,
                 user_once: None,
                 consumed: false,
             },
@@ -219,6 +221,26 @@ impl ApprovalRegistry {
         approve: bool,
         now: u64,
     ) -> Result<ApprovalDecision, ApprovalError> {
+        self.decide_with_reason(caller_parent, expected_generation, id, approve, None, now)
+    }
+
+    pub fn denial_reason(&self, id: &str) -> Option<String> {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(|entry| entry.denial_reason.clone())
+    }
+
+    pub fn decide_with_reason(
+        &self,
+        caller_parent: &str,
+        expected_generation: u64,
+        id: &str,
+        approve: bool,
+        denial_reason: Option<String>,
+        now: u64,
+    ) -> Result<ApprovalDecision, ApprovalError> {
         let mut entries = self.entries.lock().unwrap();
         self.expire_locked(&mut entries, now);
         let entry = entries.get_mut(id).ok_or(ApprovalError::NotFound)?;
@@ -237,6 +259,11 @@ impl ApprovalRegistry {
             ApprovalDecision::Rejected
         };
         if let Some(existing) = entry.decision {
+            if existing == wanted && wanted == ApprovalDecision::Rejected {
+                if entry.denial_reason.is_none() {
+                    entry.denial_reason = denial_reason;
+                }
+            }
             return if existing == wanted {
                 Ok(existing)
             } else {
@@ -244,6 +271,11 @@ impl ApprovalRegistry {
             };
         }
         entry.decision = Some(wanted);
+        entry.denial_reason = if wanted == ApprovalDecision::Rejected {
+            denial_reason
+        } else {
+            None
+        };
         entry.user_once = None;
         self.notify.notify_waiters();
         Ok(wanted)
@@ -407,6 +439,7 @@ impl ApprovalRegistry {
         for entry in entries.values_mut() {
             if entry.pending.expires_at <= now {
                 entry.decision = Some(ApprovalDecision::Expired);
+                entry.denial_reason = None;
                 entry.user_once = None;
             }
         }

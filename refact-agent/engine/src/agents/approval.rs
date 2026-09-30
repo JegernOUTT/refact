@@ -297,9 +297,14 @@ pub async fn request(
         pending_guard.abort = None;
         Ok(true)
     } else {
+        let denial = app.agent_approvals.denial_reason(&request_id);
         pending_guard.execution = None;
         pending_guard.abort = None;
-        Ok(false)
+        if let Some(denial) = denial {
+            Err(denial)
+        } else {
+            Ok(false)
+        }
     }
 }
 
@@ -385,7 +390,7 @@ pub async fn parent_command_policy(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use refact_privacy::{Attribution, FileRecord, PrivacyAudited};
 
@@ -463,24 +468,29 @@ mod tests {
         }
     }
 
-    struct Fixture {
-        dir: tempfile::TempDir,
-        app: AppState,
-        ccx: Arc<Mutex<AtCommandsContext>>,
-        agent_id: String,
-        generation: u64,
+    pub(crate) struct Fixture {
+        pub(crate) dir: tempfile::TempDir,
+        pub(crate) app: AppState,
+        pub(crate) ccx: Arc<Mutex<AtCommandsContext>>,
+        pub(crate) agent_id: String,
+        pub(crate) generation: u64,
         execution: Arc<crate::agents::execution::RunExecution>,
     }
 
-    async fn fixture() -> Fixture {
+    pub(crate) async fn fixture() -> Fixture {
+        fixture_with_hooks(true).await
+    }
+
+    pub(crate) async fn fixture_with_hooks(enabled: bool) -> Fixture {
         use crate::agents::types::{CreateAgentRequest, BgAgentKind};
         use refact_work_core::{AdmissionRequest, WorkKey, WorkScope, ProjectKey, CheckoutKey};
         let dir = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+        let mut gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             dir.path().join("cache"),
             dir.path().join("config"),
         )
         .await;
+        Arc::get_mut(&mut gcx).unwrap().hooks_config.enabled = enabled;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
         let (root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
         let mut caps = crate::caps::CodeAssistantCaps::default();
@@ -624,13 +634,13 @@ mod tests {
     }
 
     impl Fixture {
-        fn call(&self, tool: &str) -> ChatToolCall {
+        pub(crate) fn call(&self, tool: &str) -> ChatToolCall {
             serde_json::from_value(serde_json::json!({"id":"command","type":"function","function":{
                 "name":tool, "arguments":serde_json::json!({"command":"echo approved >> approval.txt", "description":"Record approval", "workdir":self.dir.path(), "tty":false, "needs_confirmation":true}).to_string()
             }})).unwrap()
         }
 
-        async fn waiting<F: std::future::Future<Output = Result<bool, String>>>(
+        pub(crate) async fn waiting<F: std::future::Future<Output = Result<bool, String>>>(
             &self,
             mut future: std::pin::Pin<&mut F>,
         ) -> PendingApproval {
