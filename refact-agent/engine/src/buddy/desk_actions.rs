@@ -264,7 +264,7 @@ pub fn actions_for_work(
     });
     if matches!(
         work.value.state,
-        WorkItemState::NeedsAttention | WorkItemState::Blocked
+        WorkItemState::NeedsAttention | WorkItemState::Blocked | WorkItemState::Watching
     ) {
         let dismissal_spec = ActionSpec {
             schema_version: OPERATOR_SCHEMA_VERSION_V1,
@@ -299,8 +299,9 @@ pub fn actions_for_work(
             artifact_id: id.clone(),
             artifact_revision: revision,
             label: "Dismiss — not a problem".into(),
-            description: "Moves this item out of Needs you. Saved evidence remains available."
-                .into(),
+            description:
+                "Moves this item out of Needs you or Watching. Saved evidence remains available."
+                    .into(),
             latest_execution: store.latest_execution_for_spec(&dismissal_hash)?,
         });
     }
@@ -763,6 +764,183 @@ mod resource_origin_tests {
         assert_eq!(actions[0].label, "Preview markdown change");
         assert_eq!(actions[1].label, "Verify saved evidence");
         assert_eq!(actions[2].spec.action_id, DISMISS_NOT_A_PROBLEM);
+    }
+
+    #[test]
+    fn watching_row_offers_dismiss_as_its_last_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = refact_buddy_core::operator_types::ProjectIdentity {
+            project_id: "watching-actions".into(),
+            canonical_root: dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let mut store = OperatorStore::open(dir.path(), &project).unwrap();
+        let (work, _) = seed_work(&mut store, &project, "watching-work", "provider_health");
+        let current = store.get_work_item(&work.id).unwrap().unwrap();
+        let mut watching = current.value;
+        watching.state = WorkItemState::Watching;
+        store
+            .upsert_work_item(&watching, Some(current.revision))
+            .unwrap();
+
+        let actions = actions_for_work(&store, &work.id).unwrap();
+        assert_eq!(
+            actions.last().unwrap().spec.action_id,
+            DISMISS_NOT_A_PROBLEM
+        );
+        assert_eq!(actions.last().unwrap().label, "Dismiss — not a problem");
+    }
+
+    #[test]
+    fn dismissing_watching_item_preserves_evidence_and_records_a_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = refact_buddy_core::operator_types::ProjectIdentity {
+            project_id: "watching-dismissal".into(),
+            canonical_root: dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let mut store = OperatorStore::open(dir.path(), &project).unwrap();
+        let (work, artifact) =
+            seed_work(&mut store, &project, "watching-dismiss", "provider_health");
+        let current = store.get_work_item(&work.id).unwrap().unwrap();
+        let mut watching = current.value;
+        watching.state = WorkItemState::Watching;
+        store
+            .upsert_work_item(&watching, Some(current.revision))
+            .unwrap();
+        let actions = actions_for_work(&store, &work.id).unwrap();
+        let action = actions.last().unwrap();
+        assert_eq!(action.spec.action_id, DISMISS_NOT_A_PROBLEM);
+
+        let execution = execute_action(
+            &mut store,
+            worker(),
+            &work.id,
+            DISMISS_NOT_A_PROBLEM,
+            dismissal_request(&project, action, "watching-dismiss-once"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.get_work_item(&work.id).unwrap().unwrap().value.state,
+            WorkItemState::Cancelled
+        );
+        assert_eq!(
+            store
+                .get_artifact_revision(&artifact.artifact_id, Some(artifact.revision))
+                .unwrap()
+                .unwrap()
+                .value,
+            artifact
+        );
+        assert_eq!(
+            store
+                .list_work_outcomes(&work.id, None, 10)
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        assert_eq!(execution.value.requester, dismissal_requester());
+        assert_eq!(
+            execution.value.status,
+            refact_buddy_core::operator_types::ActionExecutionState::Completed
+        );
+        assert_eq!(
+            store
+                .get_execution(&execution.value.execution_id)
+                .unwrap()
+                .unwrap(),
+            execution
+        );
+    }
+
+    #[test]
+    fn working_delivered_and_cancelled_rows_do_not_offer_dismiss() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = refact_buddy_core::operator_types::ProjectIdentity {
+            project_id: "dismiss-terminal-states".into(),
+            canonical_root: dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let mut store = OperatorStore::open(dir.path(), &project).unwrap();
+        for (id, state) in [
+            ("working", WorkItemState::Working),
+            ("delivered", WorkItemState::Delivered),
+            ("cancelled", WorkItemState::Cancelled),
+        ] {
+            let (work, _) = seed_work(&mut store, &project, id, "provider_health");
+            let current = store.get_work_item(&work.id).unwrap().unwrap();
+            let mut updated = current.value;
+            updated.state = state;
+            store
+                .upsert_work_item(&updated, Some(current.revision))
+                .unwrap();
+
+            let actions = actions_for_work(&store, &work.id).unwrap();
+            assert!(actions
+                .iter()
+                .all(|action| action.spec.action_id != DISMISS_NOT_A_PROBLEM));
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_watching_actions_match_per_row_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = refact_buddy_core::operator_types::ProjectIdentity {
+            project_id: "watching-batch".into(),
+            canonical_root: dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let mut store = OperatorStore::open(dir.path(), &project).unwrap();
+        let (work, _) = seed_work(
+            &mut store,
+            &project,
+            "watching-batch-work",
+            "provider_health",
+        );
+        let current = store.get_work_item(&work.id).unwrap().unwrap();
+        let mut watching = current.value;
+        watching.state = WorkItemState::Watching;
+        store
+            .upsert_work_item(&watching, Some(current.revision))
+            .unwrap();
+        let runtime =
+            super::super::outcome_runtime::OutcomeRuntime::from_store(store, project, worker());
+
+        let per_row = runtime.desk_actions(work.id.clone()).await.unwrap();
+        let batch = runtime
+            .desk_actions_batch(vec![work.id.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].error, None);
+        assert!(batch[0]
+            .actions
+            .iter()
+            .any(|action| action.spec.action_id == DISMISS_NOT_A_PROBLEM));
+        assert_eq!(
+            serde_json::to_value(&batch[0].actions).unwrap(),
+            serde_json::to_value(&per_row).unwrap()
+        );
+        runtime.shutdown().await;
     }
 }
 
