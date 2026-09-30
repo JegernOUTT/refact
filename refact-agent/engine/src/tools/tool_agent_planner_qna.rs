@@ -926,7 +926,9 @@ mod tests {
     #[tokio::test]
     async fn agent_ask_planner_records_question_and_block_marker() {
         let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(temp.path(), vec![test_card("T-40", "QnA", vec![])]).await;
+        let mut card = test_card("T-40", "QnA", vec![]);
+        card.agent_chat_id = None;
+        let gcx = write_task(temp.path(), vec![card]).await;
         let ccx = task_ccx(gcx.clone(), "agents", Some("T-40")).await;
 
         let output = output_text(

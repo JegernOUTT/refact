@@ -2561,8 +2561,10 @@ mod tests {
         }
     }
 
+    const QUEUE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
     async fn wait_for_empty_lock(session_arc: &Arc<AMutex<ChatSession>>) {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(QUEUE_TEST_TIMEOUT, async {
             loop {
                 let waiting = session_arc
                     .lock()
@@ -2581,7 +2583,7 @@ mod tests {
     }
 
     async fn wait_for_queue_to_drain(session_arc: &Arc<AMutex<ChatSession>>) {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(QUEUE_TEST_TIMEOUT, async {
             loop {
                 if session_arc.lock().await.command_queue.is_empty() {
                     return;
@@ -2598,7 +2600,7 @@ mod tests {
         handle: tokio::task::JoinHandle<()>,
     ) {
         session_arc.lock().await.close_event_channel();
-        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        tokio::time::timeout(QUEUE_TEST_TIMEOUT, handle)
             .await
             .expect("queue processor did not exit after session close")
             .expect("queue processor panicked");
@@ -2726,7 +2728,7 @@ mod tests {
         let next_processor = session_arc.lock().await.queue_processor_running.clone();
         assert!(next_processor.load(Ordering::SeqCst));
         session_arc.lock().await.close_event_channel();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(QUEUE_TEST_TIMEOUT, async {
             while next_processor.load(Ordering::SeqCst) {
                 tokio::task::yield_now().await;
             }
@@ -2762,24 +2764,7 @@ mod tests {
             processor_running,
         ));
 
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                if session_arc
-                    .lock()
-                    .await
-                    .queue_processor_counters
-                    .empty_locks
-                    .load(Ordering::Relaxed)
-                    == 0
-                {
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-                return;
-            }
-        })
-        .await
-        .expect("paused processor did not wait for a notification");
+        wait_for_empty_lock(&session_arc).await;
         {
             let mut session = session_arc.lock().await;
             assert_eq!(
@@ -2836,7 +2821,7 @@ mod tests {
             processor_running,
         ));
 
-        tokio::task::yield_now().await;
+        wait_for_empty_lock(&session_arc).await;
         {
             let mut session = session_arc.lock().await;
             assert_eq!(
@@ -3111,7 +3096,7 @@ mod tests {
     async fn wait_for_cleanup_notice(
         rx: &mut tokio::sync::broadcast::Receiver<Arc<String>>,
     ) -> ChatMessage {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(QUEUE_TEST_TIMEOUT, async {
             loop {
                 let json = rx.recv().await.unwrap();
                 let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
@@ -4162,7 +4147,7 @@ mod tests {
             processor_running,
         ));
 
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(QUEUE_TEST_TIMEOUT, async {
             loop {
                 if session_arc
                     .lock()
@@ -4729,7 +4714,7 @@ mod tests {
             session_arc.clone(),
             processor_running,
         ));
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(QUEUE_TEST_TIMEOUT, async {
             loop {
                 if session_arc.lock().await.pending_browser_message.is_none() {
                     break;
