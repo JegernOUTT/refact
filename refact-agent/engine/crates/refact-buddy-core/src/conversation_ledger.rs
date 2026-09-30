@@ -8,6 +8,7 @@ use crate::autonomous_workflows::{
     BUDDY_SKILL_AUTHOR_WORKFLOW_ID, BUDDY_TEST_COVERAGE_WATCHER_WORKFLOW_ID,
     ERROR_DETECTIVE_WORKFLOW_ID,
 };
+use crate::workflows::workflow_label;
 
 use crate::types::BuddyConversationEntry;
 
@@ -470,6 +471,14 @@ fn humanize_workflow_stem(stem: &str) -> String {
     first.to_uppercase().chain(chars).collect()
 }
 
+fn capitalize_workflow_label(label: &str) -> String {
+    let mut chars = label.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    first.to_uppercase().chain(chars).collect()
+}
+
 fn workflow_entry_from_value(stem: String, val: &serde_json::Value) -> BuddyConversationEntry {
     let mapping = workflow_id_to_mapping(&stem);
     let entries = val.get("entries").and_then(|v| v.as_array());
@@ -487,8 +496,10 @@ fn workflow_entry_from_value(stem: String, val: &serde_json::Value) -> BuddyConv
         Some(true) | None => "completed",
         Some(false) => "failed",
     };
+    let label = workflow_label(&stem);
     let title = autonomous_workflow_meta(&stem)
         .map(|meta| meta.title.to_string())
+        .or_else(|| (label != stem).then(|| capitalize_workflow_label(label)))
         .or_else(|| mapping.badge.map(ToString::to_string))
         .unwrap_or_else(|| humanize_workflow_stem(&stem));
     BuddyConversationEntry {
@@ -649,6 +660,8 @@ mod tests {
         )
         .await;
         write_workflow_value(&wf_dir, "buddy_humor", serde_json::json!({ "entries": [] })).await;
+        write_valid_workflow(&wf_dir, "kg_enrich", "2026-01-06T00:00:00Z").await;
+        write_valid_workflow(&wf_dir, "kg_deprecate", "2026-01-07T00:00:00Z").await;
         write_workflow_value(
             &wf_dir,
             "custom_workflow",
@@ -692,6 +705,12 @@ mod tests {
 
         let absent_success = find("missing_success_workflow");
         assert_eq!(absent_success.status, "completed");
+
+        assert_eq!(find("kg_enrich").title, "Knowledge graph enrichment");
+        assert_eq!(find("kg_deprecate").title, "Knowledge cleanup");
+        assert_ne!(find("kg_enrich").title, find("kg_deprecate").title);
+        assert_eq!(find("kg_enrich").badge.as_deref(), Some("Knowledge"));
+        assert_eq!(find("kg_deprecate").badge.as_deref(), Some("Knowledge"));
     }
 
     #[tokio::test]
