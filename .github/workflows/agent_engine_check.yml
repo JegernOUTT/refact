@@ -83,6 +83,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           - os: macos-14
@@ -106,6 +108,12 @@ jobs:
         if: startsWith(matrix.os, 'macos')
         run: brew install llvm
 
+      - name: Install Linux ARM build tools
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang libclang-dev lld mold libssl-dev pkg-config
+
       - name: Restore cached cargo
         uses: swatinem/rust-cache@v2
         with:
@@ -128,6 +136,12 @@ jobs:
           OPENSSL_STATIC: "1"
         run: cargo test --workspace --exclude refact-lsp --profile ci-test --lib --target ${{ matrix.target }}
 
+      - name: Run workspace library tests (Linux ARM)
+        if: startsWith(matrix.os, 'ubuntu')
+        env:
+          OPENSSL_STATIC: "1"
+        run: cargo test --workspace --exclude refact-lsp --profile ci-test --lib --target ${{ matrix.target }}
+
       - name: Run workspace integration tests (Windows)
         if: startsWith(matrix.os, 'windows')
         env:
@@ -137,6 +151,12 @@ jobs:
 
       - name: Run workspace integration tests (macOS)
         if: startsWith(matrix.os, 'macos')
+        env:
+          OPENSSL_STATIC: "1"
+        run: cargo test --workspace --exclude refact-lsp --profile ci-test --test '*' --target ${{ matrix.target }}
+
+      - name: Run workspace integration tests (Linux ARM)
+        if: startsWith(matrix.os, 'ubuntu')
         env:
           OPENSSL_STATIC: "1"
         run: cargo test --workspace --exclude refact-lsp --profile ci-test --test '*' --target ${{ matrix.target }}
