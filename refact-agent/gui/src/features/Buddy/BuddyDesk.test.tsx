@@ -1780,18 +1780,13 @@ describe("BuddyDesk", () => {
       let currentRows = rows;
       let executions = 0;
       let releaseExecution: (() => void) | undefined;
-      let releaseWorkRefresh: (() => void) | undefined;
       const pendingExecution = new Promise<void>((resolve) => {
         releaseExecution = resolve;
       });
-      const pendingWorkRefresh = new Promise<void>((resolve) => {
-        releaseWorkRefresh = resolve;
-      });
       let workRequests = 0;
       server.use(
-        http.get("*/v1/buddy/work", async () => {
+        http.get("*/v1/buddy/work", () => {
           workRequests += 1;
-          if (workRequests > 1) await pendingWorkRefresh;
           return HttpResponse.json(envelope(currentRows.map(record)));
         }),
         http.get("*/v1/buddy/artifacts/:id", () =>
@@ -1809,7 +1804,6 @@ describe("BuddyDesk", () => {
             const body = (await request.json()) as { idempotency_key: string };
             executions += 1;
             currentRows = currentRows.filter((row) => row.id !== item.id);
-            releaseWorkRefresh?.();
             await pendingExecution;
             return HttpResponse.json(
               envelope(record(dismissalReceipt(body.idempotency_key))),
@@ -1826,7 +1820,10 @@ describe("BuddyDesk", () => {
         await screen.findByRole("button", { name: dismissAction.label }),
       );
       await waitFor(() => expect(executions).toBe(1));
-      await waitFor(() => expect(workRequests).toBe(2));
+      const requestsBeforeRefresh = workRequests;
+      expect(requestsBeforeRefresh).toBe(1);
+      fireEvent.click(screen.getByRole("button", { name: "Refresh work" }));
+      await waitFor(() => expect(workRequests).toBe(requestsBeforeRefresh + 1));
       await waitFor(() =>
         expect(
           screen.queryByRole("button", { name: /Dismissed finding/ }),
@@ -1861,24 +1858,21 @@ describe("BuddyDesk", () => {
         await waitFor(() => expect(document.activeElement).toBe(browse));
       }
       expect(executions).toBe(1);
+      await waitFor(() => expect(workRequests).toBe(requestsBeforeRefresh + 2));
     },
   );
 
   it("focuses Refresh work when dismissal removes the only row from an expanded Desk", async () => {
     let currentRows: WorkItem[] = [];
     let workRequests = 0;
+    let executions = 0;
     let releaseExecution: (() => void) | undefined;
-    let releaseWorkRefresh: (() => void) | undefined;
     const pendingExecution = new Promise<void>((resolve) => {
       releaseExecution = resolve;
     });
-    const pendingWorkRefresh = new Promise<void>((resolve) => {
-      releaseWorkRefresh = resolve;
-    });
     server.use(
-      http.get("*/v1/buddy/work", async () => {
+      http.get("*/v1/buddy/work", () => {
         workRequests += 1;
-        if (workRequests === 3) await pendingWorkRefresh;
         return HttpResponse.json(envelope(currentRows.map(record)));
       }),
       http.get("*/v1/buddy/artifacts/:id", () =>
@@ -1891,8 +1885,8 @@ describe("BuddyDesk", () => {
         "*/v1/buddy/work/:id/actions/:action/execute",
         async ({ request }) => {
           const body = (await request.json()) as { idempotency_key: string };
+          executions += 1;
           currentRows = [];
-          releaseWorkRefresh?.();
           await pendingExecution;
           return HttpResponse.json(
             envelope(record(dismissalReceipt(body.idempotency_key))),
@@ -1913,7 +1907,11 @@ describe("BuddyDesk", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: dismissAction.label }),
     );
-    await waitFor(() => expect(workRequests).toBe(3));
+    await waitFor(() => expect(executions).toBe(1));
+    const requestsBeforeRefresh = workRequests;
+    expect(requestsBeforeRefresh).toBe(2);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh work" }));
+    await waitFor(() => expect(workRequests).toBe(requestsBeforeRefresh + 1));
     await waitFor(() =>
       expect(
         screen.queryByRole("button", {
@@ -1922,6 +1920,9 @@ describe("BuddyDesk", () => {
       ).toBeNull(),
     );
     expect(screen.getByRole("article", { name: "Work detail" })).toBeTruthy();
+    expect(
+      screen.queryByText("That item is no longer in this view."),
+    ).toBeNull();
     releaseExecution?.();
     expect(
       await screen.findByText(
@@ -1936,6 +1937,50 @@ describe("BuddyDesk", () => {
     expect(
       screen.queryByText("That item is no longer in this view."),
     ).toBeNull();
+    await waitFor(() => expect(workRequests).toBe(requestsBeforeRefresh + 2));
+  });
+
+  it("does not refetch the Desk list when dismissal starts", async () => {
+    setupActions(() => dismissAction);
+    let workRequests = 0;
+    let executions = 0;
+    let releaseExecution: (() => void) | undefined;
+    const pendingExecution = new Promise<void>((resolve) => {
+      releaseExecution = resolve;
+    });
+    server.use(
+      http.get("*/v1/buddy/work", () => {
+        workRequests += 1;
+        return HttpResponse.json(envelope([record(item)]));
+      }),
+      http.post(
+        "*/v1/buddy/work/:id/actions/:action/execute",
+        async ({ request }) => {
+          const body = (await request.json()) as { idempotency_key: string };
+          executions += 1;
+          await pendingExecution;
+          return HttpResponse.json(
+            envelope(record(dismissalReceipt(body.idempotency_key))),
+          );
+        },
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: dismissAction.label }),
+    );
+    await waitFor(() => expect(executions).toBe(1));
+    expect(workRequests).toBe(1);
+    releaseExecution?.();
+    expect(
+      await screen.findByText(
+        'Dismissed "Provider setup diagnosis". You can find it under Delivered.',
+      ),
+    ).toBeTruthy();
+    await waitFor(() => expect(workRequests).toBe(2));
   });
 
   it("keeps a failed dismissal open without an announcement", async () => {

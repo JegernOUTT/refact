@@ -775,7 +775,6 @@ function DeskContent({
     setSelectedOverride(item);
     refreshStartedAt.current = null;
     setRefreshPending(false);
-    void refetch();
   };
   const onDismissFailure = (item: WorkItem) => {
     if (dismissalPendingId.current !== item.id) return;
