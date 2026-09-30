@@ -32,7 +32,7 @@ import { BuddyReportReadState } from "./BuddyReportReadState";
 import { BuddyArtifactBody } from "./BuddyArtifactBody";
 import { BuddyReportHistory } from "./BuddyReportHistory";
 import { BuddyWorkSnooze } from "./BuddyWorkSnooze";
-import { headline } from "./buddyUtils";
+import { headline, sameText } from "./buddyUtils";
 import styles from "./BuddyDesk.module.css";
 
 const views = ["Needs you", "Working on", "Delivered", "Watching"] as const;
@@ -315,6 +315,37 @@ function WorkDetail({
   const artifactMatches =
     artifact?.project.project_id === item.project.project_id &&
     artifact.project.canonical_root === item.project.canonical_root;
+  const artifactHeadline = artifact ? headline(artifact.title) : "";
+  const showConclusion =
+    Boolean(artifact?.conclusion.trim()) &&
+    !sameText(artifact?.conclusion ?? "", artifactHeadline);
+  let artifactBody: string | null = artifact?.body.trim() || null;
+  if (
+    artifactBody &&
+    (sameText(artifactBody, artifactHeadline) ||
+      sameText(artifactBody, artifact?.conclusion ?? ""))
+  ) {
+    artifactBody = null;
+  } else if (artifactBody) {
+    const paragraphBreak = /\r?\n[ \t]*\r?\n/.exec(artifactBody);
+    const firstParagraph = paragraphBreak
+      ? artifactBody.slice(0, paragraphBreak.index)
+      : artifactBody;
+    if (sameText(firstParagraph, artifactHeadline)) {
+      artifactBody = paragraphBreak
+        ? artifactBody
+            .slice(paragraphBreak.index + paragraphBreak[0].length)
+            .trim() || null
+        : null;
+    }
+    if (
+      artifactBody &&
+      (sameText(artifactBody, artifactHeadline) ||
+        sameText(artifactBody, artifact?.conclusion ?? ""))
+    ) {
+      artifactBody = null;
+    }
+  }
   const backButton = useRef<HTMLButtonElement>(null);
   const subject = readableSubject(item);
   const remainder = artifact
@@ -386,11 +417,13 @@ function WorkDetail({
             className={styles.headline}
           >
             <Text as="h3" size="3" weight="bold" className={styles.title}>
-              {headline(artifact.title)}
+              {artifactHeadline}
             </Text>
-            <Text as="p" size="3" className={styles.conclusion}>
-              {artifact.conclusion}
-            </Text>
+            {showConclusion && (
+              <Text as="p" size="3" className={styles.conclusion}>
+                {artifact.conclusion}
+              </Text>
+            )}
             {artifact.delta && (
               <Text as="p" size="2" color="gray" className={styles.delta}>
                 {artifact.delta}
@@ -430,7 +463,7 @@ function WorkDetail({
                   {remainder}
                 </Text>
               )}
-              <BuddyArtifactBody body={artifact.body} />
+              {artifactBody && <BuddyArtifactBody body={artifactBody} />}
               {artifact.uncertainty && (
                 <section aria-label="Limitations" className={styles.limits}>
                   <Text as="p" size="1" color="orange" weight="medium">

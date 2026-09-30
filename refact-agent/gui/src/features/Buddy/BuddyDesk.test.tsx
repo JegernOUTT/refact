@@ -2539,4 +2539,98 @@ describe("BuddyDesk", () => {
       await screen.findByText("Nothing here matches those filters."),
     ).toBeTruthy();
   });
+
+  it("shows a one-line finding once and keeps its limitations", async () => {
+    const oneLineArtifact = {
+      ...artifact,
+      title: "Default model not configured",
+      conclusion: "Default model not configured",
+      body: "Default model not configured",
+      uncertainty:
+        "The configured model list was not checked against the server.",
+    };
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(item)])),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(oneLineArtifact))),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    await screen.findByRole("heading", {
+      level: 3,
+      name: "Default model not configured",
+    });
+    expect(screen.getAllByText("Default model not configured")).toHaveLength(1);
+    expect(
+      screen.getByText(
+        "The configured model list was not checked against the server.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText("What this did not cover")).toBeTruthy();
+  });
+
+  it("removes a repeated headline paragraph and keeps the rest of the write-up", async () => {
+    const multilineArtifact = {
+      ...artifact,
+      title: "Default model not configured",
+      conclusion: "Default model not configured",
+      body: "Default model not configured\n\nMore context about the missing model.\n\nSuggested next steps:\n- Draft a skill: Safer shell",
+    };
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(item)])),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(multilineArtifact))),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    await screen.findByRole("heading", {
+      level: 3,
+      name: "Default model not configured",
+    });
+    expect(screen.getAllByText("Default model not configured")).toHaveLength(1);
+    expect(
+      screen.getByText("More context about the missing model."),
+    ).toBeTruthy();
+    expect(screen.getByText("Draft a skill: Safer shell")).toBeTruthy();
+  });
+
+  it("shows a workflow conclusion when it adds information beyond the title", async () => {
+    const workflowArtifact = {
+      ...artifact,
+      title: "Dependency review",
+      conclusion: "Three dependencies have known vulnerabilities.",
+      body: "The report covers the current lockfile.",
+    };
+    server.use(
+      http.get("*/v1/buddy/work", () =>
+        HttpResponse.json(envelope([record(item)])),
+      ),
+      http.get("*/v1/buddy/artifacts/:id", () =>
+        HttpResponse.json(envelope(record(workflowArtifact))),
+      ),
+    );
+    render(<BuddyDesk />, { preloadedState: config });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Provider setup diagnosis/ }),
+    );
+    expect(
+      await screen.findByRole("heading", {
+        level: 3,
+        name: "Dependency review",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText("Three dependencies have known vulnerabilities."),
+    ).toBeTruthy();
+  });
 });

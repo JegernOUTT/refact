@@ -10,6 +10,12 @@ export function headline(title: string): string {
   );
 }
 
+export function sameText(a: string, b: string): boolean {
+  const normalize = (value: string) =>
+    value.trim().replace(/\s+/g, " ").toLowerCase();
+  return normalize(a) === normalize(b);
+}
+
 export function computeXpFill(xp: number, xpNext: number): number {
   if (!Number.isFinite(xp)) return 0;
   if (!Number.isFinite(xpNext)) return xp > 0 ? 100 : 0;
