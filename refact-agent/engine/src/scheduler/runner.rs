@@ -37,6 +37,17 @@ const IDLE_DEFER_MS: u64 = 30_000;
 const INVALID_TARGET_DEFER_MS: u64 = 60_000;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
+enum DueFireOutcome {
+    Fired,
+    Deferred,
+}
+
+impl DueFireOutcome {
+    fn did_fire(self) -> bool {
+        matches!(self, Self::Fired)
+    }
+}
+
 pub struct CronRunner {
     pub store: Arc<dyn CronStore>,
     pub gcx: SharedGlobalContext,
@@ -360,40 +371,66 @@ impl CronRunner {
 
         let chat_id = match runnable_chat_id(&task) {
             Ok(chat_id) => chat_id,
-            Err("missing chat_id") => {
-                self.handle_unfireable_task(&task, now, "missing chat_id")
-                    .await;
-                return false;
-            }
             Err(reason) => {
                 self.handle_unfireable_task(&task, now, reason).await;
                 return false;
             }
         };
+        if !self.ensure_chat_target_fireable(&task, chat_id, now).await {
+            return false;
+        }
 
+        let final_fire = task_final_after_fire(&task, now);
+        self.fire_agent_task(&task, final_fire, now)
+            .await
+            .did_fire()
+    }
+
+    async fn ensure_chat_target_fireable(&mut self, task: &Job, chat_id: &str, now: u64) -> bool {
         match chat_fire_status(&self.gcx, chat_id).await {
-            ChatFireStatus::Fireable => {}
-            ChatFireStatus::Busy => {}
-            ChatFireStatus::Missing => {
-                if task.durable {
-                    let app = AppState::from_gcx(self.gcx.clone()).await;
-                    let restored = try_restore_session_if_trajectory_exists(
-                        app,
-                        &self.gcx.chat_sessions,
-                        chat_id,
-                    )
-                    .await;
-                    if !restored {
+            ChatFireStatus::Fireable | ChatFireStatus::Busy => true,
+            ChatFireStatus::Missing if task.durable => {
+                let app = AppState::from_gcx(self.gcx.clone()).await;
+                let restored =
+                    try_restore_session_if_trajectory_exists(app, &self.gcx.chat_sessions, chat_id)
+                        .await;
+                if !restored {
+                    tracing::warn!(
+                        "durable task {} deferred: no trajectory found for chat {}",
+                        task.id,
+                        chat_id
+                    );
+                    if let Err(error) = self
+                        .record_run(
+                            &task.id,
+                            "deferred",
+                            Some("no trajectory found".to_string()),
+                            now,
+                        )
+                        .await
+                    {
                         tracing::warn!(
-                            "durable task {} deferred: no trajectory found for chat {}",
+                            "failed to record deferred scheduled task {}: {}",
                             task.id,
-                            chat_id
+                            error
+                        );
+                    }
+                    self.defer_invalid_target_task(task, now);
+                    return false;
+                }
+                match chat_fire_status(&self.gcx, chat_id).await {
+                    ChatFireStatus::Fireable | ChatFireStatus::Busy => true,
+                    status => {
+                        tracing::warn!(
+                            "durable task {} deferred after session restore ({:?})",
+                            task.id,
+                            status
                         );
                         if let Err(error) = self
                             .record_run(
                                 &task.id,
                                 "deferred",
-                                Some("no trajectory found".to_string()),
+                                Some(format!("session restore status: {status:?}")),
                                 now,
                             )
                             .await
@@ -404,116 +441,22 @@ impl CronRunner {
                                 error
                             );
                         }
-                        self.defer_invalid_target_task(&task, now);
-                        return false;
+                        self.defer_invalid_target_task(task, now);
+                        false
                     }
-                    match chat_fire_status(&self.gcx, chat_id).await {
-                        ChatFireStatus::Fireable => {}
-                        ChatFireStatus::Busy => {}
-                        status => {
-                            tracing::warn!(
-                                "durable task {} deferred after session restore ({:?})",
-                                task.id,
-                                status
-                            );
-                            if let Err(error) = self
-                                .record_run(
-                                    &task.id,
-                                    "deferred",
-                                    Some(format!("session restore status: {status:?}")),
-                                    now,
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    "failed to record deferred scheduled task {}: {}",
-                                    task.id,
-                                    error
-                                );
-                            }
-                            self.defer_invalid_target_task(&task, now);
-                            return false;
-                        }
-                    }
-                } else {
-                    self.handle_unfireable_task(&task, now, "chat session not found")
-                        .await;
-                    return false;
                 }
+            }
+            ChatFireStatus::Missing => {
+                self.handle_unfireable_task(task, now, "chat session not found")
+                    .await;
+                false
             }
             ChatFireStatus::Closed => {
-                self.handle_unfireable_task(&task, now, "chat session is closed")
+                self.handle_unfireable_task(task, now, "chat session is closed")
                     .await;
-                return false;
+                false
             }
         }
-
-        let final_fire = task_final_after_fire(&task, now);
-        match self.fire(&task, final_fire, now).await {
-            Ok(true) => {}
-            Ok(false) => {
-                if self.record_skipped_after_advance(&task, now).await {
-                    return false;
-                }
-                if let Err(error) = self.record_run(&task.id, "deferred", None, now).await {
-                    tracing::warn!(
-                        "failed to record deferred scheduled task {}: {}",
-                        task.id,
-                        error
-                    );
-                }
-                self.defer_task(&task, now);
-                return false;
-            }
-            Err(error) => {
-                tracing::warn!("failed to fire scheduled task {}: {}", task.id, error);
-                if let Err(store_error) = self
-                    .record_run(&task.id, "deferred", Some(error), now)
-                    .await
-                {
-                    tracing::warn!(
-                        "failed to record deferred task {}: {}",
-                        task.id,
-                        store_error
-                    );
-                }
-                self.defer_task(&task, now);
-                return false;
-            }
-        }
-
-        if let Err(error) = self.record_run(&task.id, "fired", None, now).await {
-            tracing::warn!(
-                "failed to record fired scheduled task {}: {}",
-                task.id,
-                error
-            );
-        }
-        if final_fire {
-            match self.store.remove(&task.id).await {
-                Ok(true) => self.emit_auto_expired_notice(&task).await,
-                Ok(false) => {
-                    tracing::warn!("expired scheduled task {} was already removed", task.id);
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        "failed to remove expired scheduled task {}: {}",
-                        task.id,
-                        error
-                    );
-                }
-            }
-        } else if !task.recurring {
-            if let Err(error) = self.remove_task(&task).await {
-                tracing::warn!(
-                    "failed to remove fired one-shot scheduled task {}: {}",
-                    task.id,
-                    error
-                );
-            }
-        }
-        self.deferred_until_ms.remove(&task.id);
-        true
     }
 
     async fn handle_due_command_task(&mut self, task: Job, now: u64) -> bool {
@@ -529,78 +472,113 @@ impl CronRunner {
             self.handle_unfireable_task(&task, now, reason).await;
             return false;
         }
-        if matches!(task.delivery, Delivery::Chat) {
-            if let AgentTarget::ExistingChat { chat_id } = &cmd.target {
-                if chat_id.is_empty() {
-                    self.handle_unfireable_task(&task, now, "missing chat_id")
-                        .await;
-                    return false;
-                }
-                match chat_fire_status(&self.gcx, chat_id).await {
-                    ChatFireStatus::Fireable => {}
-                    ChatFireStatus::Busy => {}
-                    ChatFireStatus::Missing => {
-                        if task.durable {
-                            let app = AppState::from_gcx(self.gcx.clone()).await;
-                            let restored = try_restore_session_if_trajectory_exists(
-                                app,
-                                &self.gcx.chat_sessions,
-                                chat_id,
-                            )
-                            .await;
-                            if !restored {
-                                if let Err(error) = self
-                                    .record_run(
-                                        &task.id,
-                                        "deferred",
-                                        Some("no trajectory found".to_string()),
-                                        now,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        "failed to record deferred scheduled task {}: {}",
-                                        task.id,
-                                        error
-                                    );
-                                }
-                                self.defer_invalid_target_task(&task, now);
-                                return false;
-                            }
-                        } else {
-                            self.handle_unfireable_task(&task, now, "chat session not found")
-                                .await;
-                            return false;
-                        }
-                    }
-                    ChatFireStatus::Closed => {
-                        self.handle_unfireable_task(&task, now, "chat session is closed")
-                            .await;
-                        return false;
-                    }
-                }
-            }
+        if !self
+            .ensure_command_chat_target_fireable(&task, &cmd, now)
+            .await
+        {
+            return false;
         }
 
         let final_fire = task_final_after_fire(&task, now);
-        let result = match self
-            .fire_command_with_missed(&task, &cmd, final_fire, now, false)
+        let Some(result) = self.run_due_command(&task, &cmd, final_fire, now).await else {
+            return false;
+        };
+        self.complete_command_fire(&task, result, final_fire, now)
+            .await
+            .did_fire()
+    }
+
+    async fn ensure_command_chat_target_fireable(
+        &mut self,
+        task: &Job,
+        cmd: &CommandSpec,
+        now: u64,
+    ) -> bool {
+        if !matches!(task.delivery, Delivery::Chat) {
+            return true;
+        }
+        let AgentTarget::ExistingChat { chat_id } = &cmd.target else {
+            return true;
+        };
+        if chat_id.is_empty() {
+            self.handle_unfireable_task(task, now, "missing chat_id")
+                .await;
+            return false;
+        }
+        match chat_fire_status(&self.gcx, chat_id).await {
+            ChatFireStatus::Fireable | ChatFireStatus::Busy => true,
+            ChatFireStatus::Missing if task.durable => {
+                let app = AppState::from_gcx(self.gcx.clone()).await;
+                let restored =
+                    try_restore_session_if_trajectory_exists(app, &self.gcx.chat_sessions, chat_id)
+                        .await;
+                if restored {
+                    true
+                } else {
+                    if let Err(error) = self
+                        .record_run(
+                            &task.id,
+                            "deferred",
+                            Some("no trajectory found".to_string()),
+                            now,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            "failed to record deferred scheduled task {}: {}",
+                            task.id,
+                            error
+                        );
+                    }
+                    self.defer_invalid_target_task(task, now);
+                    false
+                }
+            }
+            ChatFireStatus::Missing => {
+                self.handle_unfireable_task(task, now, "chat session not found")
+                    .await;
+                false
+            }
+            ChatFireStatus::Closed => {
+                self.handle_unfireable_task(task, now, "chat session is closed")
+                    .await;
+                false
+            }
+        }
+    }
+
+    async fn run_due_command(
+        &mut self,
+        task: &Job,
+        cmd: &CommandSpec,
+        final_fire: bool,
+        now: u64,
+    ) -> Option<CommandRunResult> {
+        match self
+            .fire_command_with_missed(task, cmd, final_fire, now, false)
             .await
         {
-            Ok(result) => result,
+            Ok(result) => Some(result),
             Err(error) => {
                 tracing::warn!("failed to fire scheduled task {}: {}", task.id, error);
-                if self
-                    .handle_classifiable_fire_error(&task, final_fire, now, &error)
+                if !self
+                    .handle_classifiable_fire_error(task, final_fire, now, &error)
                     .await
                 {
-                    return false;
+                    self.handle_unfireable_task(task, now, &error).await;
                 }
-                self.handle_unfireable_task(&task, now, &error).await;
-                return false;
+                None
             }
-        };
+        }
+    }
 
+    async fn complete_command_fire(
+        &mut self,
+        task: &Job,
+        result: CommandRunResult,
+        final_fire: bool,
+        now: u64,
+    ) -> DueFireOutcome {
         let error = (result.status == "error").then(|| command_record_error(&result));
         if let Err(store_error) = self.record_run(&task.id, &result.status, error, now).await {
             tracing::warn!(
@@ -612,12 +590,12 @@ impl CronRunner {
         }
         if result.status == "error" && command_failure_can_retry(&result) {
             match self
-                .schedule_retry(&task, now, &command_retry_text(&result))
+                .schedule_retry(task, now, &command_retry_text(&result))
                 .await
             {
                 Ok(true) => {
                     self.deferred_until_ms.remove(&task.id);
-                    return false;
+                    return DueFireOutcome::Deferred;
                 }
                 Ok(false) => {}
                 Err(error) => {
@@ -625,31 +603,12 @@ impl CronRunner {
                 }
             }
         }
-        if final_fire {
-            match self.store.remove(&task.id).await {
-                Ok(true) => self.emit_auto_expired_notice(&task).await,
-                Ok(false) => {
-                    tracing::warn!("expired scheduled task {} was already removed", task.id);
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        "failed to remove expired scheduled task {}: {}",
-                        task.id,
-                        error
-                    );
-                }
-            }
-        } else if !task.recurring {
-            if let Err(error) = self.remove_task(&task).await {
-                tracing::warn!(
-                    "failed to remove fired one-shot scheduled task {}: {}",
-                    task.id,
-                    error
-                );
-            }
+        self.finish_task_after_fire(task, final_fire).await;
+        if result.status == "fired" {
+            DueFireOutcome::Fired
+        } else {
+            DueFireOutcome::Deferred
         }
-        self.deferred_until_ms.remove(&task.id);
-        result.status == "fired"
     }
 
     async fn handle_due_isolated_task(&mut self, task: Job, now: u64) -> bool {
@@ -659,11 +618,27 @@ impl CronRunner {
         }
 
         let final_fire = task_final_after_fire(&task, now);
-        match self.fire(&task, final_fire, now).await {
-            Ok(true) => {}
+        self.fire_agent_task(&task, final_fire, now)
+            .await
+            .did_fire()
+    }
+
+    async fn fire_agent_task(&mut self, task: &Job, final_fire: bool, now: u64) -> DueFireOutcome {
+        match self.fire(task, final_fire, now).await {
+            Ok(true) => {
+                if let Err(error) = self.record_run(&task.id, "fired", None, now).await {
+                    tracing::warn!(
+                        "failed to record fired scheduled task {}: {}",
+                        task.id,
+                        error
+                    );
+                }
+                self.finish_task_after_fire(task, final_fire).await;
+                DueFireOutcome::Fired
+            }
             Ok(false) => {
-                if self.record_skipped_after_advance(&task, now).await {
-                    return false;
+                if self.record_skipped_after_advance(task, now).await {
+                    return DueFireOutcome::Deferred;
                 }
                 if let Err(error) = self.record_run(&task.id, "deferred", None, now).await {
                     tracing::warn!(
@@ -672,8 +647,8 @@ impl CronRunner {
                         error
                     );
                 }
-                self.defer_task(&task, now);
-                return false;
+                self.defer_task(task, now);
+                DueFireOutcome::Deferred
             }
             Err(error) => {
                 tracing::warn!("failed to fire scheduled task {}: {}", task.id, error);
@@ -687,21 +662,16 @@ impl CronRunner {
                         store_error
                     );
                 }
-                self.defer_task(&task, now);
-                return false;
+                self.defer_task(task, now);
+                DueFireOutcome::Deferred
             }
         }
+    }
 
-        if let Err(error) = self.record_run(&task.id, "fired", None, now).await {
-            tracing::warn!(
-                "failed to record fired scheduled task {}: {}",
-                task.id,
-                error
-            );
-        }
+    async fn finish_task_after_fire(&mut self, task: &Job, final_fire: bool) {
         if final_fire {
             match self.store.remove(&task.id).await {
-                Ok(true) => self.emit_auto_expired_notice(&task).await,
+                Ok(true) => self.emit_auto_expired_notice(task).await,
                 Ok(false) => {
                     tracing::warn!("expired scheduled task {} was already removed", task.id);
                 }
@@ -714,7 +684,7 @@ impl CronRunner {
                 }
             }
         } else if !task.recurring {
-            if let Err(error) = self.remove_task(&task).await {
+            if let Err(error) = self.remove_task(task).await {
                 tracing::warn!(
                     "failed to remove fired one-shot scheduled task {}: {}",
                     task.id,
@@ -723,7 +693,6 @@ impl CronRunner {
             }
         }
         self.deferred_until_ms.remove(&task.id);
-        true
     }
 
     async fn handle_unfireable_task(&mut self, task: &Job, now: u64, reason: &str) {
