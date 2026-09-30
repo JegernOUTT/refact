@@ -222,14 +222,16 @@ pub fn review_verdict(report: &ReviewReport) -> (EvidenceVerdict, VerificationOu
 }
 
 pub fn review_spec(defaults: &EvidenceDefaults) -> VerificationSpec {
-    VerificationSpec::propose(
+    let mut spec = VerificationSpec::propose(
         GOAL_REVIEW_SPEC_ID,
         GOAL_REVIEW_COMMAND,
         SpecAuthority::AgentProposal {
             agent: GOAL_REVIEW_AUTHOR.to_string(),
         },
         defaults,
-    )
+    );
+    spec.criterion_ids = vec![GOAL_REVIEW_SPEC_ID.to_string()];
+    spec
 }
 
 pub fn review_evidence_record(report: &ReviewReport, spec: &VerificationSpec) -> EvidenceRecord {

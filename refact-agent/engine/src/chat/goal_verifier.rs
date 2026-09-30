@@ -14,6 +14,10 @@ use crate::chat::evidence::{
     EvidenceContext, EvidenceDefaults, EvidenceRecord, EvidenceService, EvidenceVerdict, GateBlock,
     GateOutcome, SystemEvidenceRunner, VerificationSpec,
 };
+use crate::chat::goal_review::{
+    self, GoalReviewOutcome, GoalReviewRequest, GoalReviewResult, GoalReviewSettings, GoalReviewer,
+};
+use std::future::Future;
 use crate::chat::internal_roles::{self, EventSubkind};
 use crate::chat::prepare::{prepare_chat_passthrough, ChatPrepareOptions, ToolChoice};
 use crate::chat::stream_core::{
@@ -971,12 +975,178 @@ pub async fn run_goal_verification(
     };
     let mut evidence =
         resolve_goal_evidence(app.gcx.clone(), &criteria, &author, worktree_root, scope).await;
-    merge_sub_goal_gates(&mut evidence.gates, &sub_goals);
-    if !evidence.gates.judge_allowed() {
-        return Ok(goal_verdict_from_evidence(&evidence, None));
+    let settings = GoalReviewSettings::from_settings();
+    if settings.enabled {
+        let (request, attempts_used) = {
+            let session = session_arc.lock().await;
+            let goal_text = goal_text_for_verifier(&session)?;
+            let what_to_check = session.goal.as_ref().map(|goal| {
+                goal.criteria
+                    .iter()
+                    .fold(goal_text.clone(), |mut text, criterion| {
+                        text.push_str(&format!("\n- [{}] {}", criterion.id, criterion.text));
+                        text
+                    })
+            });
+            let plan = refact_chat_api::plan_role::try_synthesize_current_plan(&session)?;
+            let attempts_used = session
+                .goal
+                .as_ref()
+                .map(goal_review_attempts_used)
+                .unwrap_or_default();
+            let base = session.thread.worktree.as_ref().and_then(|worktree| {
+                worktree
+                    .base_commit
+                    .clone()
+                    .or_else(|| worktree.base_branch.clone())
+            });
+            (
+                GoalReviewRequest {
+                    what_to_check,
+                    plan,
+                    base,
+                    files: Vec::new(),
+                },
+                attempts_used,
+            )
+        };
+        let result = maybe_run_goal_review::<goal_review::PipelineReviewer, _, _>(
+            &settings,
+            request,
+            attempts_used,
+            || goal_review::reviewer_for_session(app.gcx.clone(), &session_arc),
+        )
+        .await;
+        return review_then_judge(&mut evidence, &sub_goals, result, || {
+            run_goal_verifier(app, session_arc)
+        })
+        .await;
     }
-    let judged = run_goal_verifier(app, session_arc).await?;
-    Ok(goal_verdict_from_evidence(&evidence, Some(judged)))
+    merge_sub_goal_gates(&mut evidence.gates, &sub_goals);
+    judge_after_evidence(&evidence, || run_goal_verifier(app, session_arc)).await
+}
+
+pub(super) fn goal_review_attempts_used(goal: &GoalSnapshot) -> usize {
+    goal.attempts
+        .iter()
+        .filter(|attempt| {
+            attempt.criteria_verdicts.iter().any(|verdict| {
+                verdict.id == goal_review::GOAL_REVIEW_SPEC_ID
+                    && !verdict.met
+                    && verdict.evidence.as_ref().is_some_and(|evidence| {
+                        evidence.spec_id == goal_review::GOAL_REVIEW_SPEC_ID
+                            && evidence.verdict == EvidenceVerdict::Failed.label()
+                    })
+            })
+        })
+        .count()
+}
+
+pub(super) async fn maybe_run_goal_review<R, F, Fut>(
+    settings: &GoalReviewSettings,
+    request: GoalReviewRequest,
+    attempts_used: usize,
+    construct: F,
+) -> GoalReviewResult
+where
+    R: GoalReviewer,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<R, String>>,
+{
+    if !settings.enabled {
+        return GoalReviewResult {
+            outcome: GoalReviewOutcome::Skipped {
+                reason: goal_review::GOAL_REVIEW_DISABLED.to_string(),
+            },
+            report: None,
+            evidence: None,
+        };
+    }
+    match construct().await {
+        Ok(mut reviewer) => {
+            goal_review::review_goal_work(settings, &mut reviewer, request, attempts_used).await
+        }
+        Err(error) => unavailable_goal_review(&error),
+    }
+}
+
+pub(super) async fn judge_after_evidence<F, Fut>(
+    evidence: &GoalEvidence,
+    judge: F,
+) -> Result<GoalVerifierReply, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<GoalVerifierReply, String>>,
+{
+    if !evidence.gates.judge_allowed() {
+        return Ok(goal_verdict_from_evidence(evidence, None));
+    }
+    Ok(goal_verdict_from_evidence(evidence, Some(judge().await?)))
+}
+
+fn unavailable_goal_review(error: &str) -> GoalReviewResult {
+    let spec = goal_review::review_spec(&EvidenceDefaults::from_settings());
+    let reason = format!("reviewer construction failed: {error}");
+    let record = unexecuted_record(
+        &spec,
+        EvidenceVerdict::Unavailable,
+        VerificationOutcome::InfrastructureFailed,
+        reason.clone(),
+    );
+    GoalReviewResult {
+        outcome: GoalReviewOutcome::Unavailable { reason },
+        report: None,
+        evidence: Some((spec, record)),
+    }
+}
+
+pub(super) fn apply_goal_review_result(
+    evidence: &mut GoalEvidence,
+    sub_goals: &refact_chat_api::SubGoalRollup,
+    result: GoalReviewResult,
+) -> Option<GoalVerifierReply> {
+    if let Some((spec, record)) = result.evidence {
+        goal_review::attach_review_evidence(evidence, spec, record);
+    }
+    merge_sub_goal_gates(&mut evidence.gates, sub_goals);
+    let (findings, escalation) = match result.outcome {
+        GoalReviewOutcome::Repair { findings, .. } => (Some(findings), None),
+        GoalReviewOutcome::Unavailable { .. } => (Some(Vec::new()), None),
+        GoalReviewOutcome::Escalated { attempts, findings } => (Some(findings), Some(attempts)),
+        GoalReviewOutcome::Skipped { .. } | GoalReviewOutcome::Clean => (None, None),
+    };
+    let findings = findings?;
+    let mut reply = goal_verdict_from_evidence(evidence, None);
+    let mut gaps = match reply.verdict {
+        GoalVerdict::Unmet(gaps) => gaps,
+        _ => Vec::new(),
+    };
+    if let Some(attempts) = escalation {
+        gaps.insert(
+            0,
+            format!("review escalated after {attempts} repair attempts"),
+        );
+    }
+    gaps.extend(findings.into_iter().map(|finding| finding.title));
+    reply.verdict = GoalVerdict::Unmet(gaps.clone());
+    reply.verifier_reply = format!("GOAL: UNMET\n- {}", gaps.join("\n- "));
+    Some(reply)
+}
+
+pub(super) async fn review_then_judge<F, Fut>(
+    evidence: &mut GoalEvidence,
+    sub_goals: &refact_chat_api::SubGoalRollup,
+    result: GoalReviewResult,
+    judge: F,
+) -> Result<GoalVerifierReply, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<GoalVerifierReply, String>>,
+{
+    if let Some(reply) = apply_goal_review_result(evidence, sub_goals, result) {
+        return Ok(reply);
+    }
+    judge_after_evidence(evidence, judge).await
 }
 
 /// Applies a verifier verdict only when the parent chat history is still the
@@ -1023,6 +1193,10 @@ pub fn apply_goal_verdict(
     apply_goal_verdict_with_delivery(session, trigger, reply, epoch, PushMode::Append, None)
 }
 
+fn review_escalated(reply: &GoalVerifierReply) -> bool {
+    matches!(&reply.verdict, GoalVerdict::Unmet(gaps) if gaps.first().is_some_and(|gap| gap.starts_with("review escalated after ")))
+}
+
 fn apply_goal_verdict_with_delivery(
     session: &mut ChatSession,
     trigger: &str,
@@ -1049,6 +1223,7 @@ fn apply_goal_verdict_with_delivery(
         _ => None,
     };
 
+    let escalation = review_escalated(&reply);
     let at_ms = epoch_ms_now();
     session.goal_record_verifier_attempt(reply.tokens);
     let rearm_candidate = held_status.is_none() && trigger != "validate_goal";
@@ -1134,7 +1309,13 @@ fn apply_goal_verdict_with_delivery(
                     &attempt.verifier_reply,
                 );
             }
-            if let Some(status) = held_status {
+            if escalation {
+                session.goal_set_status(GoalStatus::NoProgress);
+                if trigger != "validate_goal" {
+                    session.set_runtime_state(SessionState::Completed, None);
+                }
+                GoalVerificationApplyOutcome::Stalled
+            } else if let Some(status) = held_status {
                 session.goal_set_status(status);
                 session.set_runtime_state(SessionState::Idle, None);
                 GoalVerificationApplyOutcome::Continued

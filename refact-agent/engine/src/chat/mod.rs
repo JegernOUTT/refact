@@ -18,6 +18,8 @@ pub(crate) mod evidence_cache;
 pub(crate) mod evidence_revision;
 pub mod goal_monitor;
 pub mod goal_review;
+#[cfg(test)]
+mod goal_review_wiring_tests;
 pub mod goal_role;
 pub mod goal_verifier;
 pub mod goal_wait;
