@@ -23,6 +23,8 @@ Dev profile keeps workspace crates debuggable but optimizes CodeGraph's parser a
 
 `cargo build`, `cargo run`, and release builds normally rebuild and embed GUI assets. `REFACT_SKIP_GUI_BUILD=1` skips that refresh only for API-only developer builds.
 
+Run `python3 tools/fn_size_report.py` to list the largest non-test Rust functions. This report is advisory only, not a check or CI gate. Splitting the largest async functions cut cold root-crate compile time by only 1.6%; incremental checks were usually 13–22 s, with the clearest win editing inside a 677-line `#[async_trait]` method (21.7 s → 14.2 s).
+
 ### Worktree delivery
 
 Run checks in the worktree before landing its changes. `merge_worktree` squash-merges a worktree into the local `main` branch; it does not publish anything. Push separately afterward with `git push origin main`.
