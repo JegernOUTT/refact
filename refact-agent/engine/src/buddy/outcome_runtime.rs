@@ -674,6 +674,17 @@ impl OutcomeRuntime {
                 ),
             }
         }
+        match super::legacy_work::rerender_legacy_copy(&mut store, &worker) {
+            Ok(0) => {}
+            Ok(rerendered) => tracing::info!(
+                rerendered,
+                "buddy: refreshed stored legacy proposal copy; prior artifact revisions remain readable"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                "buddy: stored legacy proposal copy refresh was incomplete; it will be retried on the next open"
+            ),
+        }
         Ok(Self::from_store(store, project, worker))
     }
 

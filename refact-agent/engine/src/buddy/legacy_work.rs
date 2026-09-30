@@ -17,6 +17,9 @@ use super::types::{
 use super::work_items::{problem_summary_from_title, stable_hash, SubjectKey, WorkItemDraft};
 
 pub const MAX_MIGRATION_BATCH: usize = 128;
+const LEGACY_SAVED_CONCLUSION: &str =
+    "Saved from an earlier Buddy. Nothing here has been checked or run.";
+const LEGACY_SUGGESTIONS_MARKER: &str = "\n\nThe earlier Buddy suggested:";
 /// Namespaces for retained legacy history. These are read-only projections of
 /// files the migration never edits or deletes.
 pub const LEGACY_RECEIPT_NAMESPACE: &str = "legacy_receipt";
@@ -926,6 +929,165 @@ fn import_record(
         Some(&artifact),
     )?;
     Ok(true)
+}
+
+pub fn rerender_legacy_copy(
+    store: &mut OperatorStore,
+    worker: &WorkerIdentity,
+) -> Result<usize, OperatorStoreError> {
+    let mut after = None;
+    let mut candidates = Vec::new();
+    loop {
+        let page = store.list_work_items(after, 200)?;
+        candidates.extend(page.entries.into_iter().filter(|work| {
+            matches!(
+                work.value.subject.resource_kind.as_str(),
+                "legacy_opportunity" | "legacy_draft"
+            )
+        }));
+        after = page.next_after;
+        if after.is_none() {
+            break;
+        }
+    }
+
+    let mut rerendered = 0;
+    let mut unrecognised = 0;
+    for stored in candidates {
+        let work = stored.value;
+        let (Some(artifact_id), Some(artifact_revision)) = (
+            work.current_artifact_id.as_deref(),
+            work.current_artifact_revision,
+        ) else {
+            continue;
+        };
+        let Some(current_artifact) =
+            store.get_artifact_revision(artifact_id, Some(artifact_revision))?
+        else {
+            continue;
+        };
+        if current_artifact.value.conclusion != LEGACY_SAVED_CONCLUSION {
+            continue;
+        }
+
+        let subject = match SubjectKey::new(
+            store.identity(),
+            &work.subject.resource_kind,
+            &work.subject.resource_id,
+            "legacy-import-v1",
+            "1",
+        ) {
+            Ok(subject)
+                if subject.work_item_id() == work.id
+                    && Some(subject.artifact_id()) == work.current_artifact_id =>
+            {
+                subject
+            }
+            _ => {
+                unrecognised += 1;
+                continue;
+            }
+        };
+        let (body, conclusion) = match work.subject.resource_kind.as_str() {
+            "legacy_opportunity" => {
+                let (summary, suggestions) = match current_artifact
+                    .value
+                    .body
+                    .split_once(LEGACY_SUGGESTIONS_MARKER)
+                {
+                    Some((summary, suggestions)) => (summary.trim(), suggestions),
+                    None => (current_artifact.value.body.as_str(), ""),
+                };
+                let steps = suggestions
+                    .lines()
+                    .filter(|line| {
+                        line.starts_with("- ")
+                            && *line != "- dismiss it"
+                            && *line != "- Open a Buddy page"
+                    })
+                    .collect::<Vec<_>>();
+                let body = if steps.is_empty() {
+                    summary.to_string()
+                } else {
+                    format!("{summary}\n\nSuggested next steps:\n{}", steps.join("\n"))
+                };
+                (body, opportunity_conclusion(summary))
+            }
+            "legacy_draft" => {
+                let body = current_artifact.value.body.clone();
+                let conclusion = opportunity_conclusion(&body);
+                (body, conclusion)
+            }
+            _ => continue,
+        };
+        let uncertainty = super::opportunity_copy::uncertainty_for_body(&body).to_string();
+        let next_revision =
+            current_artifact
+                .value
+                .revision
+                .checked_add(1)
+                .ok_or(OperatorStoreError::Conflict(
+                    "legacy artifact revision exhausted",
+                ))?;
+        let run_id = format!("legacy-import:{}:{next_revision}", subject.stable_hash());
+        let timestamp = work.last_material_change_at.clone();
+        let outcome = RunOutcome {
+            schema_version: OPERATOR_SCHEMA_VERSION_V1,
+            run_id: run_id.clone(),
+            work_id: work.id.clone(),
+            parent_run_id: None,
+            project: store.identity().clone(),
+            worker: worker.clone(),
+            origin: "legacy_import".into(),
+            workflow: None,
+            input_fingerprint: stable_hash(&[&current_artifact.value.title, &body]),
+            coverage: "Legacy proposal import only; effects and conclusions are unverified".into(),
+            started_at: timestamp.clone(),
+            ended_at: Some(timestamp),
+            status: RunStatus::Inconclusive,
+            evidence: vec![],
+            effects: vec![],
+            failure_class: None,
+        };
+        let artifact = ArtifactDraft {
+            subject,
+            source_run_ids: vec![run_id],
+            title: current_artifact.value.title.clone(),
+            conclusion,
+            delta: String::new(),
+            body,
+            uncertainty: Some(uncertainty),
+            proposed_action_ids: vec![],
+            evidence: vec![],
+        }
+        .materialize(
+            std::slice::from_ref(&outcome),
+            Some(&current_artifact.value),
+        )
+        .map_err(|_| OperatorStoreError::Conflict("legacy copy revision is invalid"))?;
+        let ArtifactMaterialization::Revision(mut artifact) = artifact else {
+            return Err(OperatorStoreError::Conflict(
+                "legacy copy revision unexpectedly folded",
+            ));
+        };
+        artifact.provenance.contains_untrusted_source = true;
+        let mut updated_work = work;
+        updated_work.current_artifact_revision = Some(artifact.revision);
+        store.append_outcome_work_item_artifact(
+            &outcome,
+            &updated_work,
+            Some(stored.revision),
+            Some(&artifact),
+        )?;
+        rerendered += 1;
+    }
+    if unrecognised > 0 {
+        tracing::warn!(
+            unrecognised,
+            "buddy: skipped stored legacy proposal copy with an unrecognised subject identity"
+        );
+    }
+    Ok(rerendered)
 }
 
 /// Compatibility projection; never copies legacy status/actions back over Work authority.
@@ -1877,5 +2039,370 @@ mod migration_regressions {
             work.value.severity,
             Some(refact_buddy_core::operator_types::WorkItemSeverity::Unknown)
         );
+    }
+}
+
+#[cfg(test)]
+mod legacy_copy_regressions {
+    use super::*;
+
+    fn identity(root: &std::path::Path) -> ProjectIdentity {
+        ProjectIdentity {
+            project_id: "legacy-copy-fixture".into(),
+            canonical_root: root.to_string_lossy().into_owned(),
+        }
+    }
+
+    fn worker() -> WorkerIdentity {
+        WorkerIdentity {
+            worker_id: "worker".into(),
+            engine_instance_id: "engine".into(),
+            epoch: 1,
+        }
+    }
+
+    fn seed(
+        store: &mut OperatorStore,
+        kind: &str,
+        id: &str,
+        title: &str,
+        conclusion: &str,
+        body: &str,
+        state: WorkItemState,
+    ) -> String {
+        let subject = SubjectKey::new(store.identity(), kind, id, "legacy-import-v1", "1").unwrap();
+        let run_id = format!("legacy-import:{}:1", subject.stable_hash());
+        let timestamp = "2026-09-10T00:00:00Z";
+        let outcome = RunOutcome {
+            schema_version: OPERATOR_SCHEMA_VERSION_V1,
+            run_id: run_id.clone(),
+            work_id: subject.work_item_id(),
+            parent_run_id: None,
+            project: store.identity().clone(),
+            worker: worker(),
+            origin: "legacy_import".into(),
+            workflow: None,
+            input_fingerprint: stable_hash(&[title, body]),
+            coverage: "Legacy proposal import only; effects and conclusions are unverified".into(),
+            started_at: timestamp.into(),
+            ended_at: Some(timestamp.into()),
+            status: RunStatus::Inconclusive,
+            evidence: vec![],
+            effects: vec![],
+            failure_class: None,
+        };
+        let artifact = ArtifactDraft {
+            subject: subject.clone(),
+            source_run_ids: vec![run_id],
+            title: title.into(),
+            conclusion: conclusion.into(),
+            delta: String::new(),
+            body: body.into(),
+            uncertainty: Some("Kept for reference only — Buddy cannot act on it.".into()),
+            proposed_action_ids: vec![],
+            evidence: vec![],
+        }
+        .materialize(std::slice::from_ref(&outcome), None)
+        .unwrap();
+        let ArtifactMaterialization::Revision(mut artifact) = artifact else {
+            panic!("fixture artifact unexpectedly folded");
+        };
+        artifact.provenance.contains_untrusted_source = true;
+        let mut work = WorkItemDraft {
+            project: store.identity().clone(),
+            subject,
+            kind: kind.into(),
+            title: title.into(),
+            state,
+            native_sources: vec![],
+            last_material_change_at: timestamp.into(),
+            severity: Some(refact_buddy_core::operator_types::WorkItemSeverity::High),
+            problem_summary: problem_summary_from_title(title),
+            scope: Some("Configuration".into()),
+        }
+        .build()
+        .unwrap();
+        work.current_artifact_id = Some(artifact.artifact_id.clone());
+        work.current_artifact_revision = Some(artifact.revision);
+        store
+            .append_outcome_work_item_artifact(&outcome, &work, None, Some(&artifact))
+            .unwrap();
+        work.id
+    }
+
+    #[test]
+    fn stored_legacy_copy_refreshes_once_and_preserves_fields_and_desk_order() {
+        let root = tempfile::tempdir().unwrap();
+        let project = identity(root.path());
+        let mut store = OperatorStore::open(root.path(), &project).unwrap();
+        let ids = [
+            seed(
+                &mut store,
+                "legacy_opportunity",
+                "trajectory-counts",
+                "Too many chat trajectories",
+                LEGACY_SAVED_CONCLUSION,
+                "Too many chat trajectories\n\nThe earlier Buddy suggested:\n- Write a pulse report\n- dismiss it",
+                WorkItemState::NeedsAttention,
+            ),
+            seed(
+                &mut store,
+                "legacy_opportunity",
+                "warmup",
+                "Warm up this workspace",
+                LEGACY_SAVED_CONCLUSION,
+                "Warm up this workspace\n\nsunny starter: I am on the trail now.",
+                WorkItemState::Watching,
+            ),
+            seed(
+                &mut store,
+                "legacy_opportunity",
+                "only-ui-actions",
+                "A short finding",
+                LEGACY_SAVED_CONCLUSION,
+                "A short finding\n\nThe earlier Buddy suggested:\n- Open a Buddy page\n- dismiss it",
+                WorkItemState::Blocked,
+            ),
+            seed(
+                &mut store,
+                "legacy_draft",
+                "handbook-memory",
+                "Handbook: memory",
+                LEGACY_SAVED_CONCLUSION,
+                "Distilled 9061 recurring 'memory' insights into one handbook page.\n\n# Handbook: memory\n\nContent remains unchanged.",
+                WorkItemState::Cancelled,
+            ),
+        ];
+        let current_id = seed(
+            &mut store,
+            "legacy_opportunity",
+            "already-current",
+            "Already current",
+            "Already current",
+            "Already current",
+            WorkItemState::NeedsAttention,
+        );
+        let mut before = Vec::new();
+        let mut old_artifacts = Vec::new();
+        for id in ids.iter().chain(std::iter::once(&current_id)) {
+            let mut work = store.get_work_item(id).unwrap().unwrap();
+            work.value.severity =
+                Some(refact_buddy_core::operator_types::WorkItemSeverity::Critical);
+            work.value.scope = Some("Preserved scope".into());
+            work.value.problem_summary = Some("Preserved problem summary".into());
+            work.value.native_sources =
+                vec![refact_buddy_core::operator_types::NativeSourceIdentity {
+                    source_kind: refact_buddy_core::operator_types::NativeSourceKind::Check,
+                    source_id: format!("source:{id}"),
+                    source_version: "v7".into(),
+                }];
+            let work = store
+                .upsert_work_item(&work.value, Some(work.revision))
+                .unwrap();
+            old_artifacts.push(
+                store
+                    .get_artifact_revision(
+                        work.value.current_artifact_id.as_ref().unwrap(),
+                        work.value.current_artifact_revision,
+                    )
+                    .unwrap()
+                    .unwrap(),
+            );
+            before.push(work);
+        }
+        let desk_before = store
+            .search_work_items(None, 20, Some("needs_you"), None)
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|work| work.value.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rerender_legacy_copy(&mut store, &worker()).unwrap(), 4);
+
+        for (previous, old_artifact) in before.iter().zip(old_artifacts.iter()) {
+            let current = store.get_work_item(&previous.value.id).unwrap().unwrap();
+            assert_eq!(current.value.state, previous.value.state);
+            assert_eq!(current.value.severity, previous.value.severity);
+            assert_eq!(current.value.scope, previous.value.scope);
+            assert_eq!(
+                current.value.problem_summary,
+                previous.value.problem_summary
+            );
+            assert_eq!(current.value.native_sources, previous.value.native_sources);
+            assert_eq!(current.value.title, previous.value.title);
+            assert_eq!(
+                current.value.last_material_change_at,
+                previous.value.last_material_change_at
+            );
+            assert_eq!(
+                current.value.current_artifact_id,
+                previous.value.current_artifact_id
+            );
+            let expected_revision =
+                old_artifact.value.revision + u32::from(previous.value.id != current_id);
+            assert_eq!(
+                current.value.current_artifact_revision,
+                Some(expected_revision)
+            );
+            assert!(store
+                .get_artifact_revision(
+                    current.value.current_artifact_id.as_ref().unwrap(),
+                    Some(old_artifact.value.revision),
+                )
+                .unwrap()
+                .is_some());
+        }
+
+        let revised = |index: usize, store: &OperatorStore| {
+            let work = store.get_work_item(&ids[index]).unwrap().unwrap();
+            store
+                .get_artifact_revision(
+                    work.value.current_artifact_id.as_ref().unwrap(),
+                    work.value.current_artifact_revision,
+                )
+                .unwrap()
+                .unwrap()
+                .value
+        };
+        let opportunity = revised(0, &store);
+        assert_eq!(
+            opportunity.body,
+            "Too many chat trajectories\n\nSuggested next steps:\n- Write a pulse report"
+        );
+        assert_eq!(opportunity.conclusion, "Too many chat trajectories");
+        assert_eq!(
+            opportunity.uncertainty.as_deref(),
+            Some("Buddy has not changed anything and cannot carry out these steps from here.")
+        );
+        let no_marker = revised(1, &store);
+        assert_eq!(
+            no_marker.body,
+            "Warm up this workspace\n\nsunny starter: I am on the trail now."
+        );
+        assert_eq!(no_marker.conclusion, "Warm up this workspace");
+        assert_eq!(
+            no_marker.uncertainty.as_deref(),
+            Some("Buddy noticed this from project signals and has not changed anything.")
+        );
+        let no_steps = revised(2, &store);
+        assert_eq!(no_steps.body, "A short finding");
+        assert_eq!(
+            no_steps.uncertainty.as_deref(),
+            Some("Buddy noticed this from project signals and has not changed anything.")
+        );
+        let draft = revised(3, &store);
+        assert_eq!(
+            draft.body,
+            "Distilled 9061 recurring 'memory' insights into one handbook page.\n\n# Handbook: memory\n\nContent remains unchanged."
+        );
+        assert_eq!(
+            draft.conclusion,
+            "Distilled 9061 recurring 'memory' insights into one handbook page."
+        );
+        assert_eq!(
+            draft.uncertainty.as_deref(),
+            Some("Buddy noticed this from project signals and has not changed anything.")
+        );
+        assert!(opportunity.provenance.contains_untrusted_source);
+        assert_eq!(
+            store
+                .list_work_outcomes(&ids[0], None, 10)
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .get_work_item(&current_id)
+                .unwrap()
+                .unwrap()
+                .value
+                .current_artifact_revision,
+            Some(1)
+        );
+        assert_eq!(
+            store
+                .search_work_items(None, 20, Some("needs_you"), None)
+                .unwrap()
+                .entries
+                .into_iter()
+                .map(|work| work.value.id)
+                .collect::<Vec<_>>(),
+            desk_before
+        );
+        assert_eq!(rerender_legacy_copy(&mut store, &worker()).unwrap(), 0);
+        assert_eq!(
+            store
+                .list_artifact_revisions(
+                    before[0].value.current_artifact_id.as_ref().unwrap(),
+                    None,
+                    10,
+                )
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn outcome_runtime_open_refreshes_legacy_copy_once() {
+        let root = tempfile::tempdir().unwrap();
+        let project = identity(root.path());
+        let worker = worker();
+        let mut store = OperatorStore::open(root.path(), &project).unwrap();
+        let id = seed(
+            &mut store,
+            "legacy_opportunity",
+            "open-time-copy",
+            "Stored finding",
+            LEGACY_SAVED_CONCLUSION,
+            "Stored finding\n\nThe earlier Buddy suggested:\n- dismiss it",
+            WorkItemState::NeedsAttention,
+        );
+        drop(store);
+
+        let runtime = super::super::outcome_runtime::OutcomeRuntime::open(
+            root.path(),
+            project.clone(),
+            worker.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            runtime
+                .get_work_item(id.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .value
+                .current_artifact_revision,
+            Some(2)
+        );
+        runtime.shutdown().await;
+        let reopened =
+            super::super::outcome_runtime::OutcomeRuntime::open(root.path(), project, worker)
+                .unwrap();
+        assert_eq!(
+            reopened
+                .get_work_item(id.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .value
+                .current_artifact_revision,
+            Some(2)
+        );
+        assert_eq!(
+            reopened
+                .list_work_outcomes(id, None, 10)
+                .await
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+        reopened.shutdown().await;
     }
 }
