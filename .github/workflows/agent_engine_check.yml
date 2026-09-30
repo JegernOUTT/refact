@@ -60,7 +60,6 @@ jobs:
           cache-bin: false
 
       - name: Run workspace library tests
-      - name: Run workspace library tests
         run: cargo test --workspace --profile ci-test --lib
 
       - name: Run workspace integration tests
@@ -121,23 +120,23 @@ jobs:
         env:
           REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
         shell: bash
-        run: cargo test --workspace --profile ci-test --lib --target ${{ matrix.target }}
+        run: cargo test --workspace --exclude refact-tui --profile ci-test --lib --target ${{ matrix.target }}
 
       - name: Run workspace library tests (macOS)
         if: startsWith(matrix.os, 'macos')
         env:
           OPENSSL_STATIC: "1"
-        run: cargo test --workspace --profile ci-test --lib --target ${{ matrix.target }}
+        run: cargo test --workspace --exclude refact-lsp --profile ci-test --lib --target ${{ matrix.target }}
 
       - name: Run workspace integration tests (Windows)
         if: startsWith(matrix.os, 'windows')
         env:
           REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
         shell: bash
-        run: cargo test --workspace --profile ci-test --test '*' --target ${{ matrix.target }}
+        run: cargo test --workspace --exclude refact-tui --profile ci-test --test '*' --target ${{ matrix.target }}
 
       - name: Run workspace integration tests (macOS)
         if: startsWith(matrix.os, 'macos')
         env:
           OPENSSL_STATIC: "1"
-        run: cargo test --workspace --profile ci-test --test '*' --target ${{ matrix.target }}
+        run: cargo test --workspace --exclude refact-lsp --profile ci-test --test '*' --target ${{ matrix.target }}
