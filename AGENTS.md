@@ -92,6 +92,7 @@ If you changed **both**: run both sets.
 
 | Workflow | Trigger paths | Checks |
 |---|---|---|
+| `agent_engine_check` | `refact-agent/engine/**` | Linux x86_64 `ci-test` workspace library, integration, and documentation tests |
 | `agent_engine_build` | `refact-agent/engine/**` | `cargo test --release` on 7 targets (Win/Linux/macOS × x86_64/aarch64) |
 | `agent_gui_build` | `refact-agent/gui/**` | `npm test` → `format:check` → `types` → `lint` → `build` (Node LTS + latest) |
 | `server_build` | `refact-server/**` | Docker multi-arch build |

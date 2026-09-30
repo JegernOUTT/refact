@@ -1,0 +1,58 @@
+name: Refact Agent Engine CI check
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "refact-agent/engine/**"
+      - ".github/workflows/agent_engine_check.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "refact-agent/engine/**"
+      - ".github/workflows/agent_engine_check.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: engine-check-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: refact-agent/engine
+
+env:
+  REFACT_SKIP_GUI_BUILD: "1"
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+
+jobs:
+  check:
+    name: Engine correctness (Linux x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup update --no-self-update stable
+
+      - name: Restore cached cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            refact-agent/engine -> target
+          key: ci-test-linux-x64
+          shared-key: ci-test-linux-x64
+          cache-bin: false
+
+      - name: Run workspace library tests
+        run: cargo test --workspace --profile ci-test --lib
+
+      - name: Run workspace integration tests
+        run: cargo test --workspace --profile ci-test --test '*'
+
+      - name: Run workspace documentation tests
+        run: cargo test --workspace --profile ci-test --doc

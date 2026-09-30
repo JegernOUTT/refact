@@ -17,6 +17,8 @@ bash tools/compile_bench.sh               # compile-time before/after benchmark
 
 Release profile: `opt-level = "z"`, `lto = true`, `strip = true`. It does not configure `codegen-units`; the separate `ci-release` profile inherits release settings, then overrides `strip = false`, `lto = "thin"`, and `codegen-units = 16`.
 
+The `ci-test` profile inherits `dev` with debug info and incremental compilation disabled for CI tests.
+
 Dev profile keeps workspace crates debuggable but optimizes CodeGraph's parser and SQLite dependencies with `[profile.dev.package.*] opt-level = 3`: tree-sitter core, every tree-sitter grammar crate, `tree-sitter-language`, `rusqlite`, `tokio-rusqlite`, `libsqlite3-sys`, and `sqlite-vec`. This makes `target/debug/refact-lsp` indexing close to release speed for parse-dominated cold indexes; the first dev build is slower because these dependencies compile optimized, and the shared sccache setup mitigates repeated work across worktrees.
 
 `cargo build`, `cargo run`, and release builds normally rebuild and embed GUI assets. `REFACT_SKIP_GUI_BUILD=1` skips that refresh only for API-only developer builds.

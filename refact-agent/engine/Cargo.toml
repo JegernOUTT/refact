@@ -120,6 +120,11 @@ strip = false
 lto = "thin"
 codegen-units = 16
 
+[profile.ci-test]
+inherits = "dev"
+debug = false
+incremental = false
+
 [profile.dev]
 debug = "line-tables-only"
 
@@ -404,7 +409,7 @@ zerocopy.workspace = true
 
 # There you can use a local copy
 # rmcp = { path = "../../../rust-sdk/crates/rmcp/", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
-# Pinned to a known-good rmcp rev because upstream main drifts and Cargo.lock is gitignored.
+# Pinned to a known-good rmcp rev because upstream main drifts; the engine Cargo.lock is tracked.
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "63583b164f54ec6ed2f17c98450487c747d34aeb", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
 oauth2 = { version = "5.0", default-features = false }
 dirs.workspace = true
