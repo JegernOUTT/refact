@@ -82,7 +82,7 @@ describe("BuddyRecentChats", () => {
     );
     expect(document.body.textContent).not.toContain("1 message");
     expect(
-      screen.getAllByRole("button", { name: /Open PR Matchmaker/ })[0],
+      screen.getByRole("button", { name: "Open Error Detective report 2" }),
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Show more" }));
@@ -154,6 +154,19 @@ describe("BuddyRecentChats", () => {
       await screen.findByRole("button", { name: "Open Error Detective" }),
     ).toBeInTheDocument();
     expect(
+      screen.getByRole("button", { name: "Open Error Detective" }).textContent,
+    ).toContain("Error Detective");
+    expect(
+      screen
+        .getByRole("button", { name: "Open Error Detective" })
+        .textContent?.match(/Error Detective/g),
+    ).toHaveLength(1);
+    expect(
+      screen
+        .getByRole("button", { name: "Open Error Detective" })
+        .querySelectorAll('[class*="entryBadge"]'),
+    ).toHaveLength(0);
+    expect(
       screen.getByRole("button", { name: "Open Fix login (urgent)" }),
     ).toBeInTheDocument();
     expect(
@@ -185,12 +198,50 @@ describe("BuddyRecentChats", () => {
     expect(screen.queryByText(/5 messages/)).not.toBeInTheDocument();
   });
 
+  it("renders distinct knowledge workflow titles exactly once without a Knowledge chip", async () => {
+    const entries = [
+      makeConversation({
+        id: "kg_enrich",
+        kind: "system",
+        title: "Knowledge graph enrichment",
+        status: "failed",
+        message_count: 100,
+        badge: "Knowledge",
+      }),
+      makeConversation({
+        id: "kg_deprecate",
+        kind: "system",
+        title: "Knowledge cleanup",
+        status: "failed",
+        message_count: 100,
+        badge: "Knowledge",
+      }),
+    ];
+    server.use(
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json(entries)),
+    );
+
+    render(<BuddyRecentChats compact showFilters={false} />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    const rows = await screen.findAllByRole("listitem");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("Knowledge graph enrichment");
+    expect(rows[1]).toHaveTextContent("Knowledge cleanup");
+    for (const row of rows) {
+      const rowText = row.textContent ?? "";
+      expect(rowText.match(/Knowledge/g)).toHaveLength(1);
+      expect(row.querySelectorAll('[class*="entryBadge"]')).toHaveLength(0);
+    }
+  });
+
   it("renders API-shaped workflow history with one name, visible failure status, and matching actions", async () => {
     const entries = [
       makeConversation({
         id: "memo_extraction",
         kind: "system",
-        title: "Memo",
+        title: "Memo extraction",
         created_at: "2026-09-24T14:14:29.963146380+00:00",
         updated_at: "2026-09-24T14:14:29.963146380+00:00",
         status: "failed",
@@ -199,9 +250,20 @@ describe("BuddyRecentChats", () => {
         badge: "Memo",
       }),
       makeConversation({
+        id: "kg_enrich",
+        kind: "system",
+        title: "Knowledge graph enrichment",
+        created_at: "2026-09-24T06:54:38.312631790+00:00",
+        updated_at: "2026-09-24T06:54:38.312631790+00:00",
+        status: "failed",
+        message_count: 100,
+        icon: "📚",
+        badge: "Knowledge",
+      }),
+      makeConversation({
         id: "kg_deprecate",
         kind: "system",
-        title: "Knowledge",
+        title: "Knowledge cleanup",
         created_at: "2026-09-24T05:54:38.312631790+00:00",
         updated_at: "2026-09-24T05:54:38.312631790+00:00",
         status: "failed",
@@ -212,7 +274,7 @@ describe("BuddyRecentChats", () => {
       makeConversation({
         id: "commit_message",
         kind: "workflow",
-        title: "Commit Msg",
+        title: "Commit message generation",
         created_at: "2026-09-22T18:50:59.124159204+00:00",
         updated_at: "2026-09-22T18:50:59.124159204+00:00",
         status: "failed",
@@ -268,7 +330,7 @@ describe("BuddyRecentChats", () => {
     expect(rows).toHaveLength(entries.length);
     for (const [index, entry] of entries.entries()) {
       const rowText = rows[index].textContent ?? "";
-      const name = entry.badge ?? entry.title;
+      const name = entry.title;
       const nameOccurrences =
         rowText.toLowerCase().split(name.toLowerCase()).length - 1;
       expect(nameOccurrences, `row ${index} name ${name}: ${rowText}`).toBe(1);
@@ -288,8 +350,20 @@ describe("BuddyRecentChats", () => {
         expect(rows[index]).not.toHaveTextContent("Failed");
       }
     }
-    expect(screen.getAllByText("Failed")).toHaveLength(3);
-    await user.click(screen.getByRole("button", { name: "Open Memo" }));
+    expect(screen.getAllByText("Failed")).toHaveLength(4);
+    expect(rows[0].querySelectorAll('[class*="entryBadge"]')).toHaveLength(0);
+    expect(rows[1].querySelectorAll('[class*="entryBadge"]')).toHaveLength(0);
+    expect(rows[2].querySelectorAll('[class*="entryBadge"]')).toHaveLength(0);
+    expect(rows[3].querySelector('[class*="entryBadge"]')).toHaveTextContent(
+      "Commit Msg",
+    );
+    expect(rows[0]).toHaveTextContent("Memo extraction");
+    expect(rows[0].textContent?.match(/Memo/g)).toHaveLength(1);
+    expect(rows[1]).toHaveTextContent("Knowledge graph enrichment");
+    expect(rows[2]).toHaveTextContent("Knowledge cleanup");
+    await user.click(
+      screen.getByRole("button", { name: "Open Memo extraction" }),
+    );
     await waitFor(() => {
       expect(store.getState().chat.current_thread_id).toBe("memo_extraction");
       expect(

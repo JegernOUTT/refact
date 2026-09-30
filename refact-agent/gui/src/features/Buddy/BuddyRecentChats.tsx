@@ -75,13 +75,12 @@ const EntryRow: React.FC<EntryRowProps> = ({
   const workflowHistory = isWorkflowHistory(entry);
   const clickable =
     entry.kind === "chat" || entry.kind === "setup" || workflowHistory;
-  const title = workflowHistory
-    ? entry.badge &&
-      (entry.title === `${entry.id.replace(/_/g, " ")} (${entry.badge})` ||
-        entry.title.toLowerCase().includes(entry.badge.toLowerCase()))
+  const title =
+    workflowHistory &&
+    entry.badge &&
+    entry.title === `${entry.id.replace(/_/g, " ")} (${entry.badge})`
       ? entry.badge
-      : entry.title || "Untitled"
-    : entry.title || "Untitled";
+      : entry.title || "Untitled";
   const content = (
     <>
       <span className={styles.entryIcon}>

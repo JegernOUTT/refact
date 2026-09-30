@@ -45,16 +45,17 @@ test.describe("Buddy Activity conversation history", () => {
 
       const panel = page.getByTestId("buddy-recent-chats");
       const rows = panel.getByRole("listitem");
-      await expect(rows).toHaveCount(5);
+      await expect(rows).toHaveCount(6);
       const expectedNames = [
-        { index: 0, name: "Memo" },
-        { index: 1, name: "Knowledge" },
-        { index: 2, name: "Commit Msg" },
-        { index: 3, name: "Privacy observation degraded" },
-        { index: 4, name: "Title generation" },
+        { index: 0, name: "Memo extraction" },
+        { index: 1, name: "Knowledge graph enrichment" },
+        { index: 2, name: "Knowledge cleanup" },
+        { index: 3, name: "Commit message generation" },
+        { index: 4, name: "Privacy observation degraded" },
+        { index: 5, name: "Title generation" },
       ];
       const rowButtons = panel.getByRole("button", { name: /^Open / });
-      await expect(rowButtons).toHaveCount(4);
+      await expect(rowButtons).toHaveCount(5);
 
       for (const { index, name } of expectedNames) {
         const rowText = await rows.nth(index).innerText();
@@ -65,11 +66,12 @@ test.describe("Buddy Activity conversation history", () => {
       await expect(rows.nth(0)).toContainText("Failed");
       await expect(rows.nth(1)).toContainText("Failed");
       await expect(rows.nth(2)).toContainText("Failed");
-      await expect(rows.nth(3)).toContainText("1 message");
-      await expect(rows.nth(3)).not.toContainText("Failed");
+      await expect(rows.nth(3)).toContainText("Failed");
+      await expect(rows.nth(4)).toContainText("1 message");
       await expect(rows.nth(4)).not.toContainText("Failed");
+      await expect(rows.nth(5)).not.toContainText("Failed");
       await expect(
-        rows.nth(3).getByRole("button", { name: /^Open / }),
+        rows.nth(4).getByRole("button", { name: /^Open / }),
       ).toHaveCount(0);
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth),
