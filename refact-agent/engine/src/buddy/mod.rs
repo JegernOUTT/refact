@@ -40,6 +40,7 @@ pub mod snapshot;
 pub mod speech_policy;
 pub mod state;
 pub mod storage;
+pub(crate) mod supersede;
 pub mod supervision;
 pub mod supervision_authority;
 pub mod supervision_proof;

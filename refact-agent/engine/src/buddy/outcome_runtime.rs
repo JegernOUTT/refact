@@ -23,6 +23,10 @@ pub const MAX_OUTCOME_EVIDENCE: usize = 12;
 #[path = "outcome_supersede_tests.rs"]
 mod supersede_tests;
 
+#[cfg(test)]
+#[path = "outcome_open_backlog_tests.rs"]
+mod open_backlog_tests;
+
 /// The one coverage string a housekeeping subject ever uses. Housekeeping does
 /// not report per-run coverage because it does not report per-run at all.
 pub const HOUSEKEEPING_COVERAGE: &str =
@@ -616,6 +620,29 @@ impl OutcomeRuntime {
                 %error,
                 "buddy: collapsed housekeeping row was not retired; it stays readable and will be retried on the next open"
             ),
+        }
+        let backlog_pass = {
+            #[cfg(test)]
+            {
+                super::supersede::open_pass_enabled()
+            }
+            #[cfg(not(test))]
+            {
+                true
+            }
+        };
+        if backlog_pass {
+            match store.retire_superseded_backlog() {
+                Ok(0) => {}
+                Ok(retired) => tracing::info!(
+                    retired,
+                    "buddy: retired superseded workflow backlog rows; their artifacts and outcomes are retained"
+                ),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "buddy: superseded workflow backlog pass was incomplete; it will be retried on the next open"
+                ),
+            }
         }
         Ok(Self::from_store(store, project, worker))
     }

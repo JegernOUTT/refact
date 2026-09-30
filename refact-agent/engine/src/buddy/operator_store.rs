@@ -2541,6 +2541,155 @@ impl OperatorStore {
         Ok(state)
     }
 
+    pub(crate) fn retire_superseded_backlog(&mut self) -> Result<usize, OperatorStoreError> {
+        use refact_buddy_core::operator_types::{RunStatus, WorkItemState};
+        use std::collections::BTreeMap;
+        #[cfg(test)]
+        if !super::supersede::open_pass_enabled() {
+            return Ok(0);
+        }
+
+        let rows = {
+            let mut statement = self.connection.prepare(
+                "SELECT payload,revision,change_seq FROM work_items WHERE json_extract(payload,'$.project.project_id')=?1 AND json_extract(payload,'$.project.canonical_root')=?2 AND json_extract(payload,'$.subject.resource_kind')='workflow' AND json_extract(payload,'$.state') IN ('needs_attention','watching','blocked') ORDER BY id",
+            )?;
+            let rows = statement.query_map(
+                params![self.identity.project_id, self.identity.canonical_root],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, u64>(2)?,
+                    ))
+                },
+            )?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let mut groups: BTreeMap<
+            (String, String),
+            Vec<(Stored<WorkItem>, super::supersede::Candidate)>,
+        > = BTreeMap::new();
+        for (payload, revision, change_seq) in rows {
+            let work: WorkItem = decode(&payload)?;
+            if work.project != self.identity
+                || work.subject.resource_kind != "workflow"
+                || !matches!(
+                    work.state,
+                    WorkItemState::NeedsAttention
+                        | WorkItemState::Watching
+                        | WorkItemState::Blocked
+                )
+            {
+                continue;
+            }
+            let workflow = work.subject.resource_id.clone();
+            let latest: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT payload FROM run_outcomes WHERE json_extract(payload,'$.work_id')=?1 AND json_extract(payload,'$.workflow')=?2 ORDER BY change_seq DESC LIMIT 1",
+                    params![work.id, workflow],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let run = match latest {
+                Some(payload) => match decode::<RunOutcome>(&payload) {
+                    Ok(run) => Some(run),
+                    Err(_) => None,
+                },
+                None => None,
+            };
+            let (status, coverage, outcome_time) = match run {
+                Some(run) => (
+                    run.status,
+                    run.coverage,
+                    chrono::DateTime::parse_from_rfc3339(&run.started_at).ok(),
+                ),
+                None => (
+                    match work.state {
+                        WorkItemState::Blocked => RunStatus::Blocked,
+                        WorkItemState::NeedsAttention | WorkItemState::Watching => {
+                            RunStatus::Inconclusive
+                        }
+                        _ => continue,
+                    },
+                    work.scope.clone().unwrap_or_default(),
+                    None,
+                ),
+            };
+            let observed_at = outcome_time.or_else(|| {
+                chrono::DateTime::parse_from_rfc3339(&work.last_material_change_at).ok()
+            });
+            let Some(observed_at) = observed_at else {
+                continue;
+            };
+            groups.entry((workflow, coverage)).or_default().push((
+                Stored {
+                    value: work.clone(),
+                    revision,
+                    change_seq,
+                },
+                super::supersede::Candidate {
+                    id: work.id,
+                    status,
+                    observed_at,
+                    eligible: true,
+                },
+            ));
+        }
+
+        let mut retired = 0;
+        #[cfg(test)]
+        let mut processed_groups = 0;
+        for (_, group) in groups {
+            let candidates: Vec<_> = group
+                .iter()
+                .map(|(_, candidate)| candidate.clone())
+                .collect();
+            let retire_ids = super::supersede::retire_ids(&candidates);
+            let tx = self.connection.transaction()?;
+            let mut group_retired = 0;
+            for (stored, _) in &group {
+                if !retire_ids.contains(&stored.value.id) {
+                    continue;
+                }
+                let Some(current) =
+                    stored_mutable_in_tx::<WorkItem>(&tx, "work_items", &stored.value.id)?
+                else {
+                    continue;
+                };
+                if !matches!(
+                    current.value.state,
+                    WorkItemState::NeedsAttention
+                        | WorkItemState::Watching
+                        | WorkItemState::Blocked
+                ) {
+                    continue;
+                }
+                let mut retired_item = current.value;
+                retired_item.state = WorkItemState::Cancelled;
+                upsert_work_item_in_tx(
+                    &tx,
+                    &retired_item,
+                    &encode(&retired_item)?,
+                    Some(current.revision),
+                )?;
+                group_retired += 1;
+            }
+            tx.commit()?;
+            retired += group_retired;
+            #[cfg(test)]
+            {
+                processed_groups += 1;
+                if super::supersede::should_interrupt_after_group(processed_groups) {
+                    return Err(OperatorStoreError::Conflict(
+                        "interrupted superseded backlog pass",
+                    ));
+                }
+            }
+        }
+        Ok(retired)
+    }
+
     pub fn list_work_items(
         &self,
         after_seq: Option<u64>,
@@ -3786,31 +3935,28 @@ fn retire_workflow_siblings_in_tx(
     outcome: &RunOutcome,
     item: &mut WorkItem,
 ) -> Result<(), OperatorStoreError> {
-    use refact_buddy_core::operator_types::{RunStatus, WorkItemState};
+    use refact_buddy_core::operator_types::WorkItemState;
 
     if item.subject.resource_kind != "workflow"
         || outcome.workflow.as_deref() != Some(item.subject.resource_id.as_str())
     {
         return Ok(());
     }
-    #[derive(Clone)]
-    struct Candidate {
-        work: Stored<WorkItem>,
-        status: RunStatus,
-        observed_at: chrono::DateTime<chrono::FixedOffset>,
-    }
-    let mut candidates = Vec::new();
     let outcome_time = chrono::DateTime::parse_from_rfc3339(&outcome.started_at)
         .map_err(|_| OperatorStoreError::InvalidInput("invalid workflow start timestamp"))?;
-    candidates.push(Candidate {
-        work: Stored {
+    let mut records = vec![(
+        Stored {
             value: item.clone(),
             revision: 0,
             change_seq: 0,
         },
-        status: outcome.status.clone(),
-        observed_at: outcome_time,
-    });
+        super::supersede::Candidate {
+            id: item.id.clone(),
+            status: outcome.status.clone(),
+            observed_at: outcome_time,
+            eligible: true,
+        },
+    )];
     let sibling_rows: Vec<(Stored<WorkItem>, Option<RunOutcome>)> = {
         let mut statement = tx.prepare(
             "SELECT payload,revision,change_seq FROM work_items WHERE id<>?1 AND json_extract(payload,'$.project.project_id')=?2 AND json_extract(payload,'$.project.canonical_root')=?3 AND json_extract(payload,'$.subject.resource_kind')='workflow' AND json_extract(payload,'$.subject.resource_id')=?4 AND json_extract(payload,'$.state') IN ('needs_attention','watching','blocked')",
@@ -3847,14 +3993,13 @@ fn retire_workflow_siblings_in_tx(
                     |row| row.get(0),
                 )
                 .optional()?;
-            let latest = latest.map(|payload| decode(&payload)).transpose()?;
             candidates.push((
                 Stored {
                     value: sibling,
                     revision,
                     change_seq,
                 },
-                latest,
+                latest.map(|payload| decode(&payload)).transpose()?,
             ));
         }
         candidates
@@ -3869,8 +4014,10 @@ fn retire_workflow_siblings_in_tx(
             )
         } else {
             let status = match &sibling.value.state {
-                WorkItemState::NeedsAttention | WorkItemState::Watching => RunStatus::Inconclusive,
-                WorkItemState::Blocked => RunStatus::Blocked,
+                WorkItemState::NeedsAttention | WorkItemState::Watching => {
+                    refact_buddy_core::operator_types::RunStatus::Inconclusive
+                }
+                WorkItemState::Blocked => refact_buddy_core::operator_types::RunStatus::Blocked,
                 _ => continue,
             };
             (
@@ -3891,80 +4038,32 @@ fn retire_workflow_siblings_in_tx(
                 }
             }
         };
-        candidates.push(Candidate {
-            work: sibling,
-            status,
-            observed_at,
-        });
+        records.push((
+            sibling.clone(),
+            super::supersede::Candidate {
+                id: sibling.value.id.clone(),
+                status,
+                observed_at,
+                eligible: true,
+            },
+        ));
     }
 
-    let supersedes = |newer: &RunStatus, older: &RunStatus| {
-        let newer_assessment = matches!(
-            newer,
-            RunStatus::Completed
-                | RunStatus::Inconclusive
-                | RunStatus::NoChange
-                | RunStatus::Partial
-        );
-        let older_assessment = matches!(
-            older,
-            RunStatus::Completed
-                | RunStatus::Inconclusive
-                | RunStatus::NoChange
-                | RunStatus::Partial
-        );
-        let newer_failure = matches!(
-            newer,
-            RunStatus::Failed | RunStatus::Blocked | RunStatus::Cancelled
-        );
-        let older_failure = matches!(
-            older,
-            RunStatus::Failed | RunStatus::Blocked | RunStatus::Cancelled
-        );
-        (newer_assessment && (older_assessment || older_failure))
-            || (newer_failure && older_failure)
-    };
-    let newer_than = |newer: &Candidate, older: &Candidate| {
-        newer.observed_at > older.observed_at
-            || (newer.observed_at == older.observed_at && newer.work.value.id > older.work.value.id)
-    };
-    let eligible: Vec<_> = candidates
+    let candidates: Vec<_> = records
         .iter()
-        .filter(|candidate| {
-            candidate.work.value.id == item.id
-                || matches!(
-                    candidate.work.value.state,
-                    WorkItemState::NeedsAttention
-                        | WorkItemState::Watching
-                        | WorkItemState::Blocked
-                )
-        })
+        .map(|(_, candidate)| candidate.clone())
         .collect();
-    let retire_ids: Vec<String> = eligible
-        .iter()
-        .filter(|row| {
-            eligible
-                .iter()
-                .any(|other| newer_than(other, row) && supersedes(&other.status, &row.status))
-        })
-        .map(|candidate| candidate.work.value.id.clone())
-        .collect();
-
-    for candidate in candidates {
-        if !retire_ids.contains(&candidate.work.value.id) {
+    let retire_ids = super::supersede::retire_ids(&candidates);
+    for (candidate, _) in records {
+        if !retire_ids.contains(&candidate.value.id) {
             continue;
         }
-        if candidate.work.value.id == item.id {
+        if candidate.value.id == item.id {
             item.state = WorkItemState::Cancelled;
         } else {
-            let mut retired = candidate.work.value;
+            let mut retired = candidate.value;
             retired.state = WorkItemState::Cancelled;
-            upsert_work_item_in_tx(
-                tx,
-                &retired,
-                &encode(&retired)?,
-                Some(candidate.work.revision),
-            )?;
+            upsert_work_item_in_tx(tx, &retired, &encode(&retired)?, Some(candidate.revision))?;
         }
     }
     Ok(())
