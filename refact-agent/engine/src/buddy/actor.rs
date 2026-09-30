@@ -2057,7 +2057,16 @@ impl BuddyService {
                 self.state.suggestion_state.remove(pos);
             }
         }
-        self.state.suggestion_state.push(suggestion.clone());
+        if let Some(existing) = self
+            .state
+            .suggestion_state
+            .iter_mut()
+            .find(|existing| existing.id == suggestion.id)
+        {
+            *existing = suggestion.clone();
+        } else {
+            self.state.suggestion_state.push(suggestion.clone());
+        }
         self.last_suggestion_at = Some(Instant::now());
         self.dirty = true;
         let _ = self

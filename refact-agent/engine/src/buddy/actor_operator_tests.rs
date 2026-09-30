@@ -863,3 +863,218 @@ fn operator_store_growth_check_runs_once_per_hourly_tick() {
     assert!(!operator_store_growth_check_due(3601));
     assert!(operator_store_growth_check_due(7200));
 }
+
+#[test]
+fn suggestion_state_replaces_an_existing_id_instead_of_appending() {
+    let root = tempfile::tempdir().unwrap();
+    let mut svc = service(root.path());
+    for title in ["5681 uncommitted files", "12170 uncommitted files"] {
+        svc.add_suggestion(BuddySuggestion {
+            id: "git-uncommitted".into(),
+            suggestion_type: "git_commit".into(),
+            title: title.into(),
+            description: "Review the changes".into(),
+            created_at: Utc::now().to_rfc3339(),
+            dismissed: false,
+            controls: vec![],
+            quest: None,
+        });
+    }
+    assert_eq!(svc.state.suggestion_state.len(), 1);
+    assert_eq!(
+        svc.state.suggestion_state[0].title,
+        "12170 uncommitted files"
+    );
+}
+
+#[tokio::test]
+async fn stable_condition_producer_ids_fold_changed_emissions_into_revisions() {
+    let root = tempfile::tempdir().unwrap();
+    let mut svc = service(root.path());
+    svc.operator_features.storage = true;
+    let store = runtime(root.path());
+    svc.outcome_runtime = Some(store.clone());
+    let buddy = Arc::new(tokio::sync::Mutex::new(Some(svc)));
+    let created_at = Utc::now();
+    let producers = [
+        (
+            "git-uncommitted",
+            "5681 uncommitted files",
+            "12170 uncommitted files",
+        ),
+        (
+            "worktree-cleanup",
+            "2 clean abandoned worktrees",
+            "9 clean abandoned worktrees",
+        ),
+        (
+            "stats-errors",
+            "5 fresh error gremlins in the last hour",
+            "12 fresh error gremlins in the last hour",
+        ),
+        (
+            "health-no-models",
+            "No AI models configured",
+            "Still no AI models configured",
+        ),
+    ];
+
+    for (id, initial_title, updated_title) in producers {
+        for (title, created) in [
+            (initial_title, created_at),
+            (updated_title, created_at + chrono::Duration::hours(1)),
+        ] {
+            let suggestion = BuddySuggestion {
+                id: id.into(),
+                suggestion_type: "condition".into(),
+                title: title.into(),
+                description: "Condition details".into(),
+                created_at: created.to_rfc3339(),
+                dismissed: false,
+                controls: vec![],
+                quest: None,
+            };
+            let admission = buddy
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .prepare_suggestion(suggestion)
+                .unwrap();
+            admission.commit(&buddy).await.unwrap();
+        }
+    }
+
+    let items = store.list_work_items(None, 10).await.unwrap().entries;
+    assert_eq!(items.len(), producers.len());
+    for (id, _, updated_title) in producers {
+        let item = items
+            .iter()
+            .find(|item| item.value.title == updated_title)
+            .unwrap();
+        assert_eq!(item.value.current_artifact_revision, Some(2));
+        assert!(item.value.id.starts_with("work:"), "producer {id}");
+        let revisions = store
+            .list_artifact_revisions(item.value.current_artifact_id.clone().unwrap(), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(revisions.entries.len(), 2, "producer {id}");
+        assert_eq!(revisions.entries[1].value.title, updated_title);
+    }
+    store.shutdown().await;
+}
+
+#[test]
+fn adding_suggestion_with_existing_id_replaces_retained_entry() {
+    let root = tempfile::tempdir().unwrap();
+    let mut svc = service(root.path());
+    for title in ["5681 uncommitted files", "12170 uncommitted files"] {
+        svc.add_suggestion(BuddySuggestion {
+            id: "git-uncommitted".into(),
+            suggestion_type: "git_commit".into(),
+            title: title.into(),
+            description: "Review the changes".into(),
+            created_at: Utc::now().to_rfc3339(),
+            dismissed: false,
+            controls: vec![],
+            quest: None,
+        });
+    }
+
+    assert_eq!(svc.state.suggestion_state.len(), 1);
+    assert_eq!(
+        svc.state.suggestion_state[0].title,
+        "12170 uncommitted files"
+    );
+}
+
+#[tokio::test]
+async fn repeated_suggestion_id_revises_one_dismissed_work_item() {
+    let root = tempfile::tempdir().unwrap();
+    let mut svc = service(root.path());
+    svc.operator_features.storage = true;
+    let store = runtime(root.path());
+    svc.outcome_runtime = Some(store.clone());
+    let buddy = Arc::new(tokio::sync::Mutex::new(Some(svc)));
+    let first_created_at = Utc::now();
+    let first = BuddySuggestion {
+        id: "git-uncommitted".into(),
+        suggestion_type: "git_commit".into(),
+        title: "5681 uncommitted files".into(),
+        description: "Review the changes".into(),
+        created_at: first_created_at.to_rfc3339(),
+        dismissed: false,
+        controls: vec![],
+        quest: None,
+    };
+    let admission = buddy
+        .lock()
+        .await
+        .as_mut()
+        .unwrap()
+        .prepare_suggestion(first)
+        .unwrap();
+    admission.commit(&buddy).await.unwrap();
+
+    let first_work = store
+        .list_work_items(None, 10)
+        .await
+        .unwrap()
+        .entries
+        .remove(0);
+    let work_id = first_work.value.id.clone();
+    let dismissed_work_id = work_id.clone();
+    let artifact_id = first_work.value.current_artifact_id.clone().unwrap();
+    store
+        .with_store(move |store| {
+            let mut item = store.get_work_item(&dismissed_work_id)?.unwrap();
+            item.value.state = refact_buddy_core::operator_types::WorkItemState::Cancelled;
+            store.upsert_work_item(&item.value, Some(item.revision))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let first_artifact = store
+        .get_artifact_revision(artifact_id.clone(), Some(1))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let second = BuddySuggestion {
+        id: "git-uncommitted".into(),
+        suggestion_type: "git_commit".into(),
+        title: "12170 uncommitted files".into(),
+        description: "Review the changes".into(),
+        created_at: (first_created_at + chrono::Duration::hours(1)).to_rfc3339(),
+        dismissed: false,
+        controls: vec![],
+        quest: None,
+    };
+    let admission = buddy
+        .lock()
+        .await
+        .as_mut()
+        .unwrap()
+        .prepare_suggestion(second)
+        .unwrap();
+    admission.commit(&buddy).await.unwrap();
+
+    let second_artifact = store
+        .get_artifact_revision(artifact_id, Some(2))
+        .await
+        .unwrap()
+        .unwrap();
+    let revised = store.get_work_item(work_id).await.unwrap().unwrap();
+    assert_eq!(
+        revised.value.state,
+        refact_buddy_core::operator_types::WorkItemState::Cancelled
+    );
+    assert_eq!(revised.value.current_artifact_revision, Some(2));
+    assert_eq!(second_artifact.value.title, "12170 uncommitted files");
+    assert_eq!(first_artifact.value.title, "5681 uncommitted files");
+    assert_eq!(
+        store.list_work_items(None, 10).await.unwrap().entries.len(),
+        1
+    );
+    store.shutdown().await;
+}
