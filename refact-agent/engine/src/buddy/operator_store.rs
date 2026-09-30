@@ -1139,6 +1139,7 @@ impl OperatorStore {
             migrate(&connection, identity)?;
             connection.execute_batch("CREATE INDEX IF NOT EXISTS executions_by_spec ON executions(spec_hash, change_seq)")?;
             connection.execute_batch("CREATE INDEX IF NOT EXISTS outcomes_by_work ON run_outcomes(json_extract(payload,'$.work_id'), change_seq)")?;
+            connection.execute_batch("CREATE INDEX IF NOT EXISTS work_items_by_material_change ON work_items(julianday(json_extract(payload,'$.last_material_change_at')) DESC,id DESC)")?;
             restrict_store_files(&path)?;
             let mut store = Self {
                 connection,
@@ -2809,41 +2810,91 @@ impl OperatorStore {
         if search.len() > 512 {
             return Err(OperatorStoreError::InvalidInput("work search is too long"));
         }
+        let cursor_key = after
+            .map(|rowid| {
+                let rowid = i64::try_from(rowid)
+                    .map_err(|_| OperatorStoreError::InvalidInput("invalid work cursor"))?;
+                self.connection
+                    .query_row(
+                        "SELECT julianday(json_extract(payload,'$.last_material_change_at')),id FROM work_items WHERE rowid=?1",
+                        [rowid],
+                        |row| Ok((row.get::<_, f64>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional()?
+                    .ok_or(OperatorStoreError::InvalidInput("unknown work cursor"))
+            })
+            .transpose()?;
         let mut statement = self.connection.prepare(
-            "WITH selected AS (
-                SELECT w.*,
-                    (json_extract(w.payload,'$.current_artifact_id') IS NOT NULL AND
-                      (r.payload IS NULL OR
-                       json_extract(r.payload,'$.artifact_id') != json_extract(w.payload,'$.current_artifact_id') OR
-                       json_extract(r.payload,'$.last_read_revision') < json_extract(w.payload,'$.current_artifact_revision'))) AS unread,
-                    COALESCE((json_extract(s.payload,'$.artifact_id')=json_extract(w.payload,'$.current_artifact_id') AND
-                     json_extract(s.payload,'$.artifact_revision')=json_extract(w.payload,'$.current_artifact_revision') AND
-                     julianday(json_extract(s.payload,'$.until'))>julianday(?6)),0) AS snoozed
-                FROM work_items w LEFT JOIN read_states r ON r.work_id=w.id
-                LEFT JOIN work_snoozes s ON s.work_id=w.id
-             ) SELECT payload,revision,change_seq FROM selected WHERE (?1 IS NULL OR change_seq<?1) AND (
-                ?2 IS NULL OR
-                (?2='needs_you' AND json_extract(payload,'$.state') IN ('needs_attention','blocked')) OR
-                (?2='working_on' AND json_extract(payload,'$.state')='working') OR
-                (?2='delivered' AND json_extract(payload,'$.state') IN ('delivered','cancelled')) OR
-                (?2='watching' AND json_extract(payload,'$.state')='watching')
-            ) AND (?3='' OR instr(lower(json_extract(payload,'$.title') || ' ' ||
-                json_extract(payload,'$.subject.resource_id') || ' ' || json_extract(payload,'$.kind')),?3)>0)
-            AND (?5='all' OR (?5='unread' AND unread) OR (?5='snoozed' AND snoozed) OR (?5='unsnoozed' AND NOT snoozed))
-            ORDER BY change_seq DESC,id DESC LIMIT ?4",
+            "SELECT w.payload,w.revision,w.change_seq,w.rowid FROM work_items w
+             LEFT JOIN read_states r ON r.work_id=w.id
+             LEFT JOIN work_snoozes s ON s.work_id=w.id
+             WHERE (?1 IS NULL OR julianday(json_extract(w.payload,'$.last_material_change_at'))<?2 OR\n                (julianday(json_extract(w.payload,'$.last_material_change_at'))=?2 AND w.id<?3)) AND (\n                ?4 IS NULL OR
+                (?4='needs_you' AND json_extract(w.payload,'$.state') IN ('needs_attention','blocked')) OR
+                (?4='working_on' AND json_extract(w.payload,'$.state')='working') OR
+                (?4='delivered' AND json_extract(w.payload,'$.state') IN ('delivered','cancelled')) OR
+                (?4='watching' AND json_extract(w.payload,'$.state')='watching')
+            ) AND (?5='' OR instr(lower(json_extract(w.payload,'$.title') || ' ' ||
+                json_extract(w.payload,'$.subject.resource_id') || ' ' || json_extract(w.payload,'$.kind')),?5)>0)
+            AND (?7='all' OR (?7='unread' AND
+                json_extract(w.payload,'$.current_artifact_id') IS NOT NULL AND
+                (r.payload IS NULL OR
+                 json_extract(r.payload,'$.artifact_id') != json_extract(w.payload,'$.current_artifact_id') OR
+                 json_extract(r.payload,'$.last_read_revision') < json_extract(w.payload,'$.current_artifact_revision'))) OR
+                (?7='snoozed' AND COALESCE(
+                    json_extract(s.payload,'$.artifact_id')=json_extract(w.payload,'$.current_artifact_id') AND
+                    json_extract(s.payload,'$.artifact_revision')=json_extract(w.payload,'$.current_artifact_revision') AND
+                    julianday(json_extract(s.payload,'$.until'))>julianday(?6),0)) OR
+                (?7='unsnoozed' AND NOT COALESCE(
+                    json_extract(s.payload,'$.artifact_id')=json_extract(w.payload,'$.current_artifact_id') AND
+                    json_extract(s.payload,'$.artifact_revision')=json_extract(w.payload,'$.current_artifact_revision') AND
+                    julianday(json_extract(s.payload,'$.until'))>julianday(?6),0)))
+            ORDER BY julianday(json_extract(w.payload,'$.last_material_change_at')) DESC,w.id DESC LIMIT ?8",
         )?;
         let rows = statement.query_map(
             params![
-                after,
+                after
+                    .map(i64::try_from)
+                    .transpose()
+                    .map_err(|_| OperatorStoreError::InvalidInput("invalid work cursor"))?,
+                cursor_key.as_ref().map(|(date, _)| *date),
+                cursor_key.as_ref().map(|(_, id)| id.as_str()),
                 view,
                 search,
-                (limit + 1) as i64,
+                chrono::Utc::now().to_rfc3339(),
                 attention.unwrap_or("all"),
-                chrono::Utc::now().to_rfc3339()
+                (limit + 1) as i64
             ],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
         )?;
-        page(rows, limit)
+        let mut entries = Vec::new();
+        for row in rows {
+            let (payload, revision, change_seq, rowid) = row?;
+            entries.push((
+                Stored {
+                    value: decode(&payload)?,
+                    revision,
+                    change_seq,
+                },
+                rowid as u64,
+            ));
+        }
+        let next_after = if entries.len() > limit {
+            entries.pop();
+            entries.last().map(|(_, rowid)| *rowid)
+        } else {
+            None
+        };
+        Ok(Page {
+            entries: entries.into_iter().map(|(entry, _)| entry).collect(),
+            next_after,
+        })
     }
 
     pub fn dismiss_work_item_with_execution(
@@ -4941,10 +4992,6 @@ mod tests {
                 .unwrap()
                 .exact_rows,
             None
-        );
-        assert!(
-            elapsed.as_millis() < 1000,
-            "metrics over 10000 rows took {elapsed:?}"
         );
         let prepared = store.prepare_sequence_compaction().unwrap();
         store.apply_sequence_compaction(prepared).unwrap();

@@ -70,6 +70,10 @@ fn newest_first_pages_cover_needs_you_once_with_exclusive_cursors() {
         let id = format!("work-{index:03}");
         let mut item = work(&id, &format!("Item {index}"), state_name, &project);
         item.state = state;
+        item.last_material_change_at =
+            (chrono::DateTime::parse_from_rfc3339("2026-09-05T00:00:00Z").unwrap()
+                + chrono::Duration::seconds(index))
+            .to_rfc3339();
         let stored = store.upsert_work_item(&item, None).unwrap();
         assert!(previous_seq.is_none_or(|previous| stored.change_seq > previous));
         previous_seq = Some(stored.change_seq);
@@ -81,15 +85,21 @@ fn newest_first_pages_cover_needs_you_once_with_exclusive_cursors() {
 
     let mut cursor = None;
     let mut actual = Vec::new();
-    let mut previous = None;
+    let mut previous_key: Option<(chrono::DateTime<chrono::FixedOffset>, String)> = None;
     loop {
         let page = store
             .search_work_items(cursor, 50, Some("needs_you"), None)
             .unwrap();
         assert!(!page.entries.is_empty());
         for entry in &page.entries {
-            assert!(previous.is_none_or(|seq| entry.change_seq < seq));
-            previous = Some(entry.change_seq);
+            let key = (
+                chrono::DateTime::parse_from_rfc3339(&entry.value.last_material_change_at).unwrap(),
+                entry.value.id.clone(),
+            );
+            assert!(previous_key.as_ref().is_none_or(
+                |previous| key.0 < previous.0 || (key.0 == previous.0 && key.1 < previous.1)
+            ));
+            previous_key = Some(key);
             actual.push((entry.value.id.clone(), entry.change_seq));
         }
         cursor = page.next_after;
@@ -123,6 +133,7 @@ fn updating_a_returned_item_moves_it_to_page_one_without_repeating_it_later() {
     let updated_id = first.entries[1].value.id.clone();
     let mut updated = first.entries[1].value.clone();
     updated.title = "Updated after first page".into();
+    updated.last_material_change_at = "2026-09-06T00:00:00Z".into();
     let changed = store
         .upsert_work_item(&updated, Some(first.entries[1].revision))
         .unwrap();
@@ -253,4 +264,135 @@ fn filtered_desk_queries_reject_invalid_filters() {
         store.search_work_items_with_attention(None, 10, None, None, Some("unknown")),
         Err(OperatorStoreError::InvalidInput(_))
     ));
+}
+
+#[test]
+fn non_material_update_does_not_make_an_older_item_newest() {
+    let root = TempDir::new().unwrap();
+    let (project, mut store) = open_store(&root);
+    let mut older = work("older", "Older", "needs_attention", &project);
+    older.last_material_change_at = "2026-09-01T00:00:00Z".into();
+    let older = store.upsert_work_item(&older, None).unwrap();
+    let mut newer = work("newer", "Newer", "needs_attention", &project);
+    newer.last_material_change_at = "2026-09-08T00:00:00Z".into();
+    store.upsert_work_item(&newer, None).unwrap();
+
+    let mut updated = older.value.clone();
+    updated.title = "Older, with a non-material edit".into();
+    store
+        .upsert_work_item(&updated, Some(older.revision))
+        .unwrap();
+
+    let page = store
+        .search_work_items(None, 2, Some("needs_you"), None)
+        .unwrap();
+    assert_eq!(ids(page.entries), ["newer", "older"]);
+}
+
+#[test]
+fn non_material_writes_between_pages_do_not_duplicate_or_skip_rows() {
+    let root = TempDir::new().unwrap();
+    let (project, mut store) = open_store(&root);
+    let mut revisions = Vec::new();
+    for index in 0..6 {
+        let id = format!("work-{index}");
+        let mut item = work(&id, &id, "needs_attention", &project);
+        item.last_material_change_at = format!("2026-09-05T00:{:02}:00Z", 5 - index);
+        revisions.push(store.upsert_work_item(&item, None).unwrap());
+    }
+
+    let first = store
+        .search_work_items(None, 2, Some("needs_you"), None)
+        .unwrap();
+    assert_eq!(ids(first.entries.clone()), ["work-0", "work-1"]);
+    let cursor = first.next_after.unwrap();
+    let mut cursor_item = first.entries[1].value.clone();
+    cursor_item.current_artifact_revision = Some(3);
+    cursor_item.title = "Cursor row updated without a material change".into();
+    store
+        .upsert_work_item(&cursor_item, Some(first.entries[1].revision))
+        .unwrap();
+    let mut older_item = revisions[5].value.clone();
+    older_item.title = "Old row updated without a material change".into();
+    store
+        .upsert_work_item(&older_item, Some(revisions[5].revision))
+        .unwrap();
+
+    let mut cursor = Some(cursor);
+    let mut actual = ids(first.entries);
+    while let Some(after) = cursor {
+        let page = store
+            .search_work_items(Some(after), 2, Some("needs_you"), None)
+            .unwrap();
+        actual.extend(ids(page.entries));
+        cursor = page.next_after;
+    }
+    assert_eq!(
+        actual,
+        (0..6)
+            .map(|index| format!("work-{index}"))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn desk_material_order_uses_an_index_without_a_temporary_sort() {
+    let root = TempDir::new().unwrap();
+    let (_project, store) = open_store(&root);
+    store
+        .connection
+        .execute(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+             INSERT INTO work_items(id,payload,revision,change_seq)
+             SELECT printf('work-%05d',x),json_object(
+                 'last_material_change_at',printf('2026-09-01T00:%02d:00Z',x%60)),1,x FROM n",
+            [],
+        )
+        .unwrap();
+    let plan: Vec<String> = store
+        .connection
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT w.payload,w.revision,w.change_seq,w.rowid
+             FROM work_items w LEFT JOIN read_states r ON r.work_id=w.id
+             LEFT JOIN work_snoozes s ON s.work_id=w.id
+             WHERE (?1 IS NULL OR julianday(json_extract(w.payload,'$.last_material_change_at'))<?2 OR
+                 (julianday(json_extract(w.payload,'$.last_material_change_at'))=?2 AND w.id<?3)) AND
+                 (?4 IS NULL OR json_extract(w.payload,'$.state') IN ('needs_attention','blocked'))
+             ORDER BY julianday(json_extract(w.payload,'$.last_material_change_at')) DESC,w.id DESC LIMIT ?5",
+        )
+        .unwrap()
+        .query_map(
+            rusqlite::params![None::<i64>, None::<f64>, None::<&str>, None::<&str>, 51],
+            |row| row.get::<_, String>(3),
+        )
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let plan = plan.join(" ").to_ascii_lowercase();
+    eprintln!("R-17 Desk index plan: rows=10000, {plan}");
+    assert!(plan.contains("work_items_by_material_change"), "{plan}");
+    assert!(!plan.contains("temp b-tree"), "{plan}");
+}
+
+#[test]
+fn desk_order_compares_timestamps_by_instant_across_offsets() {
+    let root = TempDir::new().unwrap();
+    let (project, mut store) = open_store(&root);
+    let mut older = work("older-offset", "Older", "needs_attention", &project);
+    older.last_material_change_at = "2026-09-05T02:00:00+02:00".into();
+    store.upsert_work_item(&older, None).unwrap();
+    let mut newer = work("newer-offset", "Newer", "needs_attention", &project);
+    newer.last_material_change_at = "2026-09-05T01:00:01+01:00".into();
+    store.upsert_work_item(&newer, None).unwrap();
+    let mut latest = work("latest-offset", "Latest", "needs_attention", &project);
+    latest.last_material_change_at = "2026-09-05T00:00:02Z".into();
+    store.upsert_work_item(&latest, None).unwrap();
+
+    let page = store
+        .search_work_items(None, 10, Some("needs_you"), None)
+        .unwrap();
+    assert_eq!(
+        ids(page.entries),
+        ["latest-offset", "newer-offset", "older-offset"]
+    );
 }
