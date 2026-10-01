@@ -10,7 +10,6 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::attention::{AttentionPriority, AttentionRequest};
-use crate::http::routers::v1::sidebar::{NotificationEvent, NotificationQuestion};
 use refact_chat_api::{QuestionContract, QuestionKind};
 use crate::chat::trajectories::try_save_trajectory_with_intent;
 use crate::chat::types::{
@@ -176,7 +175,6 @@ impl Tool for ToolAskQuestions {
         let waiter = format!("{chat_id}:{tool_call_id}");
         let budget = app.attention();
         let mut contracts: Vec<QuestionContract> = Vec::with_capacity(questions.len());
-        let mut unasked: Vec<&QuestionItem> = Vec::with_capacity(questions.len());
         for question in &questions {
             let priority = match question.priority.as_deref() {
                 Some(priority) => crate::attention::parse_priority(priority)?,
@@ -193,14 +191,22 @@ impl Tool for ToolAskQuestions {
                     )
                     .with_options(question.options.clone())
                     .with_priority(priority)
-                    .with_default_answer(question.default.clone()),
+                    .with_default_answer(question.default.clone())
+                    .with_delivery(Some(crate::attention::PromptDelivery {
+                        chat_id: chat_id.clone(),
+                        tool_call_id: tool_call_id.clone(),
+                        asked_at_ms,
+                        question: crate::attention::PromptDeliveryQuestion {
+                            id: question.id.clone(),
+                            question_type: question.question_type.clone(),
+                            text: question.text.clone(),
+                            options: question.options.clone(),
+                        },
+                    })),
                     &waiter,
                     asked_at,
                 )
                 .map_err(|error| error.to_string())?;
-            if !admission.shared {
-                unasked.push(question);
-            }
             contracts.push(
                 budget
                     .questions()
@@ -234,29 +240,6 @@ impl Tool for ToolAskQuestions {
         {
             let ccx_lock = ccx.lock().await;
             ccx_lock.abort_flag.store(true, Ordering::SeqCst);
-        }
-
-        {
-            let gcx = app.gcx.clone();
-            if let Some(ref tx) = gcx.notification_events_tx {
-                let notification_questions: Vec<NotificationQuestion> = unasked
-                    .iter()
-                    .map(|q| NotificationQuestion {
-                        id: q.id.clone(),
-                        question_type: q.question_type.clone(),
-                        text: q.text.clone(),
-                        options: q.options.clone(),
-                    })
-                    .collect();
-                if !notification_questions.is_empty() {
-                    let _ = tx.send(NotificationEvent::AskQuestions {
-                        chat_id: chat_id.clone(),
-                        tool_call_id: tool_call_id.clone(),
-                        questions: notification_questions,
-                        asked_at_ms: Some(asked_at_ms),
-                    });
-                }
-            }
         }
 
         let result = serde_json::json!({

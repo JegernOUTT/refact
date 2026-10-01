@@ -92,7 +92,7 @@ pub mod buddy;
 pub mod file_edit;
 #[cfg(test)]
 pub(crate) mod settings_guard;
-mod tool_ask_questions;
+pub(crate) mod tool_ask_questions;
 pub(crate) mod tool_buddy_create_draft;
 pub(crate) mod tool_buddy_create_issue;
 pub(crate) mod tool_buddy_get_context;

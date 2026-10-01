@@ -168,6 +168,23 @@ pub struct AttentionRequest {
     pub priority: AttentionPriority,
     pub irreversible: bool,
     pub default_answer: Option<String>,
+    pub delivery: Option<PromptDelivery>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptDelivery {
+    pub chat_id: String,
+    pub tool_call_id: String,
+    pub asked_at_ms: u64,
+    pub question: PromptDeliveryQuestion,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptDeliveryQuestion {
+    pub id: String,
+    pub question_type: String,
+    pub text: String,
+    pub options: Option<Vec<String>>,
 }
 
 impl AttentionRequest {
@@ -188,6 +205,7 @@ impl AttentionRequest {
             priority: AttentionPriority::Normal,
             irreversible: false,
             default_answer: None,
+            delivery: None,
         }
     }
 
@@ -208,6 +226,11 @@ impl AttentionRequest {
 
     pub fn with_default_answer(mut self, default_answer: Option<String>) -> Self {
         self.default_answer = default_answer;
+        self
+    }
+
+    pub fn with_delivery(mut self, delivery: Option<PromptDelivery>) -> Self {
+        self.delivery = delivery;
         self
     }
 
@@ -305,6 +328,7 @@ pub struct AttentionPrompt {
     /// the wait-for graph of card T-12 has not landed, so nothing transitive is
     /// counted here.
     pub blocked_runs: usize,
+    pub deliveries: Vec<PromptDelivery>,
 }
 
 struct Tracked {
@@ -315,6 +339,7 @@ struct Tracked {
     /// in `waiters` was deduped into it.
     origin: String,
     waiters: BTreeSet<String>,
+    deliveries: Vec<(String, PromptDelivery)>,
     presented: bool,
 }
 
@@ -516,6 +541,17 @@ impl AttentionBudget {
         if let Some(id) = state.by_key.get(&key).cloned() {
             if let Some(tracked) = state.tracked.get_mut(&id) {
                 tracked.waiters.insert(waiter.to_string());
+                if let Some(delivery) = request.delivery {
+                    if !tracked
+                        .deliveries
+                        .iter()
+                        .any(|(existing_waiter, existing)| {
+                            existing_waiter == waiter && *existing == delivery
+                        })
+                    {
+                        tracked.deliveries.push((waiter.to_string(), delivery));
+                    }
+                }
                 tracked.priority = tracked.priority.max(request.priority);
                 return Ok(AttentionAdmission {
                     question_id: id,
@@ -563,6 +599,10 @@ impl AttentionBudget {
                 priority: request.priority,
                 origin: waiter.to_string(),
                 waiters: BTreeSet::from([waiter.to_string()]),
+                deliveries: request
+                    .delivery
+                    .map(|delivery| vec![(waiter.to_string(), delivery)])
+                    .unwrap_or_default(),
                 presented: false,
             },
         );
@@ -709,6 +749,11 @@ impl AttentionBudget {
                 scope: tracked.scope.clone(),
                 priority: tracked.priority,
                 blocked_runs: tracked.waiters.len(),
+                deliveries: tracked
+                    .deliveries
+                    .iter()
+                    .map(|(_, delivery)| delivery.clone())
+                    .collect(),
             });
         }
         if batch_due {

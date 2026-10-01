@@ -162,6 +162,8 @@ pub async fn start_full_soak_background_tasks(gcx: Arc<GlobalContext>) -> Backgr
     let cache_maintenance_app = app_state.clone();
     let outbox_app = app_state.clone();
     let outbox_shutdown = gcx.shutdown_flag.clone();
+    let attention_app = app_state.clone();
+    let attention_shutdown = gcx.shutdown_flag.clone();
     let provenance_app = app_state.clone();
     let provenance_shutdown = gcx.shutdown_flag.clone();
     let background_agent_monitor_shutdown = gcx.shutdown_flag.clone();
@@ -195,6 +197,12 @@ pub async fn start_full_soak_background_tasks(gcx: Arc<GlobalContext>) -> Backgr
                 crate::coordination::outbox::outbox_recovery_background_task(
                     outbox_app,
                     outbox_shutdown,
+                ),
+            ),
+            tokio::spawn(
+                crate::attention_delivery::attention_delivery_background_task(
+                    attention_app,
+                    attention_shutdown,
                 ),
             ),
             tokio::spawn(
@@ -251,6 +259,8 @@ pub async fn start_background_tasks(
     let cache_maintenance_app = app_state.clone();
     let outbox_app = app_state.clone();
     let outbox_shutdown = gcx.shutdown_flag.clone();
+    let attention_app = app_state.clone();
+    let attention_shutdown = gcx.shutdown_flag.clone();
     let provenance_app = app_state.clone();
     let provenance_shutdown = gcx.shutdown_flag.clone();
     let background_agent_monitor_shutdown = gcx.shutdown_flag.clone();
@@ -302,6 +312,12 @@ pub async fn start_background_tasks(
                 crate::coordination::outbox::outbox_recovery_background_task(
                     outbox_app,
                     outbox_shutdown,
+                ),
+            ),
+            tokio::spawn(
+                crate::attention_delivery::attention_delivery_background_task(
+                    attention_app,
+                    attention_shutdown,
                 ),
             ),
             tokio::spawn(
@@ -429,6 +445,26 @@ mod tests {
                     })
             })
             .count()
+    }
+
+    #[test]
+    fn both_wiring_paths_spawn_attention_delivery_exactly_once() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/background_tasks.rs"),
+        )
+        .unwrap();
+        for signature in [
+            "\npub async fn start_background_tasks(",
+            "\npub async fn start_full_soak_background_tasks(",
+        ] {
+            assert_eq!(
+                wiring_body(&source, signature)
+                    .matches("crate::attention_delivery::attention_delivery_background_task(")
+                    .count(),
+                1,
+                "{signature} must spawn attention delivery exactly once"
+            );
+        }
     }
 
     #[test]
