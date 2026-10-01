@@ -1687,11 +1687,12 @@ async fn spawn_and_wait_returns_terminal_record_within_timeout() {
         .result_summary
         .as_deref()
         .is_some_and(|summary| summary.contains("Completed Edit src/frog.rs")));
-    let persisted = app
+    let mut persisted = app
         .agents
         .get("parent-wait-terminal", &completed.agent_id)
         .await
         .expect("persisted");
+    persisted.stop_hook_generation = completed.stop_hook_generation;
     assert_eq!(persisted, completed);
 }
 
