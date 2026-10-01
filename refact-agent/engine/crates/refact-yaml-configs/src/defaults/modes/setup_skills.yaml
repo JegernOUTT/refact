@@ -219,6 +219,7 @@ tools:
   - subagent
   - agents_overview
   - agent_message
+  - agent_mailbox
   - agent_peer_grant
   - tasks_set
   - task_done

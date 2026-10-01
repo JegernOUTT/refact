@@ -113,6 +113,7 @@ tools:
   - subagent
   - agents_overview
   - agent_message
+  - agent_mailbox
   - agent_peer_grant
   - agent_list
   - agent_status

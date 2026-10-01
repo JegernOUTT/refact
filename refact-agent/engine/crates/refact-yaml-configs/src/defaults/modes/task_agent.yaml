@@ -251,6 +251,7 @@ tools:
   - subagent
   - agents_overview
   - agent_message
+  - agent_mailbox
   - agent_peer_grant
   - progress_report
   - agent_list

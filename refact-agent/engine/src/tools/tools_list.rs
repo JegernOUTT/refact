@@ -1948,6 +1948,7 @@ mod tests {
             "agent_cancel",
             "agent_resume",
             "agent_message",
+            "agent_mailbox",
             "agent_peer_grant",
             "progress_report",
             "board_claim",
@@ -2024,6 +2025,43 @@ mod tests {
             !agent_tools.contains(&"board_claim".to_string()),
             "{agent_tools:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_mailbox_is_available_wherever_agent_message_is() {
+        let gcx = task_prompt_contract_gcx().await;
+
+        for mode in [
+            "agent",
+            "ask",
+            "brainstorming",
+            "debug",
+            "design",
+            "explore",
+            "learn",
+            "past_work",
+            "plan",
+            "setup_agents_md",
+            "setup_commands",
+            "setup_skills",
+            "setup_subagents",
+            "task_agent",
+            "task_planner",
+        ] {
+            let tool_names = get_tools_for_mode(gcx.clone(), mode, None)
+                .await
+                .into_iter()
+                .map(|tool| tool.tool_description().name)
+                .collect::<Vec<_>>();
+            assert!(
+                tool_names.contains(&"agent_message".to_string()),
+                "{mode}: {tool_names:?}"
+            );
+            assert!(
+                tool_names.contains(&"agent_mailbox".to_string()),
+                "{mode}: {tool_names:?}"
+            );
+        }
     }
 
     struct PromptContractVecdb;
