@@ -924,6 +924,7 @@ mod tests {
             last_activity_at: Some(ts),
             final_report: None,
             last_tool_name: None,
+            attention: None,
             change_seq: ts.timestamp() as u64,
         }
     }

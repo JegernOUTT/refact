@@ -241,6 +241,7 @@ mod tests {
             last_activity_at: None,
             final_report: (column == "done").then(|| "done".to_string()),
             last_tool_name: None,
+            attention: None,
             change_seq: 0,
         }
     }

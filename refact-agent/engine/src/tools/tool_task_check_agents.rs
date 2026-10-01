@@ -9,7 +9,7 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::tasks::storage;
-use crate::tasks::types::{AbVariantInfo, BoardCard, TaskBoard};
+use crate::tasks::types::{AbVariantInfo, BoardCard, CardAttention, TaskBoard};
 use crate::tools::task_tool_helpers::{human_age, require_bound_planner_task, truncate_chars};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use refact_runtime_api::{ChatSessionFacade, SessionState};
@@ -37,6 +37,7 @@ pub(crate) struct AgentStatus {
     pub(crate) last_activity_at: Option<DateTime<Utc>>,
     pub(crate) final_report: Option<String>,
     pub(crate) last_tool_name: Option<String>,
+    pub(crate) attention: Option<CardAttention>,
     pub(crate) change_seq: u64,
 }
 
@@ -98,6 +99,7 @@ enum AgentGroupBy {
 pub(crate) struct AgentStatusQuery {
     format: AgentReportFormat,
     status_filter: Option<HashSet<AgentStateKind>>,
+    status_filter_explicit: bool,
     card_ids: Option<HashSet<String>>,
     priority_filter: Option<HashSet<String>>,
     min_age_minutes: Option<i64>,
@@ -127,6 +129,7 @@ impl AgentStatusQuery {
         Self {
             format,
             status_filter: default_status_filter,
+            status_filter_explicit: false,
             card_ids: None,
             priority_filter: None,
             min_age_minutes: None,
@@ -206,6 +209,7 @@ pub(crate) fn parse_agent_status_query(
 
     if let Some(statuses) = parse_string_list(args, "status_filter")? {
         query.status_filter = parse_status_filter(&statuses)?;
+        query.status_filter_explicit = true;
     }
     if let Some(card_ids) = parse_string_list(args, "card_ids")? {
         query.card_ids = Some(card_ids.into_iter().collect());
@@ -489,6 +493,7 @@ fn agent_status_from_card(
         last_activity_at,
         final_report: card.final_report.clone(),
         last_tool_name,
+        attention: card.attention.clone(),
         change_seq,
     }
 }
@@ -542,6 +547,7 @@ fn agent_status_from_ab_variant(
         last_activity_at,
         final_report,
         last_tool_name,
+        attention: card.attention.clone(),
         change_seq,
     }
 }
@@ -698,6 +704,10 @@ fn format_agent_status_detail_at(status: &AgentStatus, now: DateTime<Utc>) -> St
         status.agent_chat_id
     );
 
+    if let Some(attention) = &status.attention {
+        result.push_str(&format!("{}\n", format_attention(attention)));
+    }
+
     if let Some(variant_key) = status.variant_key.as_deref() {
         result.push_str(&format!(
             "**A/B variant:** {}\n",
@@ -836,7 +846,10 @@ fn filtered_statuses<'a>(
                 }
             }
             if let Some(status_filter) = &query.status_filter {
-                if !status_filter.contains(&classify_agent_status(status, now)) {
+                let attention_card = !query.status_filter_explicit
+                    && status.column == "doing"
+                    && status.attention.is_some();
+                if !attention_card && !status_filter.contains(&classify_agent_status(status, now)) {
                     return false;
                 }
             }
@@ -913,12 +926,20 @@ struct AgentAlerts {
     stuck: usize,
     failed: usize,
     paused: usize,
+    needing_attention: usize,
 }
 
 impl AgentAlerts {
     fn from_statuses(statuses: &[AgentStatus], now: DateTime<Utc>) -> Self {
         let mut alerts = AgentAlerts::default();
+        let mut attention_cards = HashSet::new();
         for status in statuses {
+            if status.column == "doing"
+                && status.attention.is_some()
+                && attention_cards.insert(status.card_id.as_str())
+            {
+                alerts.needing_attention += 1;
+            }
             match classify_agent_status(status, now) {
                 AgentStateKind::Stuck => alerts.stuck += 1,
                 AgentStateKind::Failed => alerts.failed += 1,
@@ -932,8 +953,17 @@ impl AgentAlerts {
 
 fn format_alerts(alerts: &AgentAlerts) -> String {
     format!(
-        "⚠️  Alerts: {} stuck, {} failed, {} needing approval\n\n",
-        alerts.stuck, alerts.failed, alerts.paused
+        "⚠️  Alerts: {} stuck, {} failed, {} needing approval, {} needing attention\n\n",
+        alerts.stuck, alerts.failed, alerts.paused, alerts.needing_attention
+    )
+}
+
+fn format_attention(attention: &CardAttention) -> String {
+    format!(
+        "⚠ needs attention: {} (since {}, ×{})",
+        truncate_chars(&attention.reason, 120),
+        attention.since,
+        attention.count
     )
 }
 
@@ -970,10 +1000,20 @@ fn format_summary(statuses: &[&AgentStatus], now: DateTime<Utc>) -> String {
         .collect::<Vec<_>>()
         .join(", ");
 
-    format!(
+    let mut result = format!(
         "Total: {} | Running: {} | Stuck: {} | Failed: {} | Done: {} | Paused: {} | Queued: {} | Parked: {}\nBy priority: {}\n",
         statuses.len(), running, stuck, failed, done, paused, queued, parked, priority_text
-    )
+    );
+    for status in statuses {
+        if let Some(attention) = &status.attention {
+            result.push_str(&format!(
+                "{}: {}\n",
+                status.card_id,
+                format_attention(attention)
+            ));
+        }
+    }
+    result
 }
 
 fn format_detail(
@@ -1040,7 +1080,7 @@ fn format_compact_line(status: &AgentStatus, now: DateTime<Utc>) -> String {
     let priority = status.priority.to_ascii_uppercase();
     let last_tool = status.last_tool_name.as_deref().unwrap_or("?");
 
-    match kind {
+    let mut line = match kind {
         AgentStateKind::Queued => format!(
             "{:<2} ⏳  {:<5} {:<22} | queued | waiting for capacity",
             priority,
@@ -1101,7 +1141,11 @@ fn format_compact_line(status: &AgentStatus, now: DateTime<Utc>) -> String {
                 last_tool
             )
         }
+    };
+    if let Some(attention) = &status.attention {
+        line.push_str(&format!(" | {}", format_attention(attention)));
     }
+    line
 }
 
 fn compact_title(title: &str, limit: usize) -> String {
@@ -1296,13 +1340,24 @@ mod tests {
                 None
             },
             last_tool_name: Some("cat".to_string()),
+            attention: None,
             change_seq: ts.timestamp() as u64,
+        }
+    }
+
+    fn attention() -> CardAttention {
+        CardAttention {
+            reason: "Worker is waiting on an external dependency".to_string(),
+            kind: "stall".to_string(),
+            since: "2026-05-21T23:30:00Z".to_string(),
+            count: 3,
         }
     }
 
     fn query(format: AgentReportFormat) -> AgentStatusQuery {
         let mut query = AgentStatusQuery::default_for_format(format);
         query.status_filter = None;
+        query.status_filter_explicit = false;
         query.group_by = AgentGroupBy::None;
         query
     }
@@ -1498,6 +1553,45 @@ mod tests {
     }
 
     #[test]
+    fn attention_card_is_rendered_and_counted() {
+        let mut status = status("T-ATTN", "P1", "doing", Some(SessionState::Paused), 3);
+        status.attention = Some(attention());
+
+        let output = format_agent_statuses_at(
+            &[status.clone()],
+            &AgentStatusQuery::default_for_format(AgentReportFormat::Compact),
+            now(),
+        )
+        .unwrap();
+
+        assert!(output.contains("⚠ needs attention: Worker is waiting on an external dependency (since 2026-05-21T23:30:00Z, ×3)"));
+        assert!(output
+            .starts_with("⚠️  Alerts: 0 stuck, 0 failed, 1 needing approval, 1 needing attention"));
+        assert!(card_lines(&output)
+            .iter()
+            .any(|line| line.contains("T-ATTN")));
+        for format in [AgentReportFormat::Summary, AgentReportFormat::Detail] {
+            let rendered =
+                format_agent_statuses_at(&[status.clone()], &query(format), now()).unwrap();
+            assert!(
+                rendered.contains("⚠ needs attention: Worker is waiting on an external dependency")
+            );
+        }
+    }
+
+    #[test]
+    fn card_without_attention_renders_unchanged() {
+        let status = status("T-1", "P1", "doing", Some(SessionState::Generating), 3);
+        let output =
+            format_agent_statuses_at(&[status], &query(AgentReportFormat::Compact), now()).unwrap();
+
+        assert_eq!(
+            output,
+            "⚠️  Alerts: 0 stuck, 0 failed, 0 needing approval, 0 needing attention\n\nP1 🔄  T-1   t-1-title              | generating |  3m ago | last: cat\n\nshowing 1 of 1; no more pages\n"
+        );
+    }
+
+    #[test]
     fn active_generation_loop_is_not_stuck_only_because_activity_is_old() {
         let statuses = vec![
             status("T-1", "P0", "doing", Some(SessionState::Generating), 30),
@@ -1506,7 +1600,8 @@ mod tests {
         let output =
             format_agent_statuses_at(&statuses, &query(AgentReportFormat::Compact), now()).unwrap();
 
-        assert!(output.starts_with("⚠️  Alerts: 0 stuck, 0 failed, 0 needing approval"));
+        assert!(output
+            .starts_with("⚠️  Alerts: 0 stuck, 0 failed, 0 needing approval, 0 needing attention"));
         assert!(!output.contains("STUCK"));
         assert!(output.contains("generating"));
         assert!(output.contains("exec tools"));
@@ -1518,7 +1613,8 @@ mod tests {
         let output =
             format_agent_statuses_at(&statuses, &query(AgentReportFormat::Compact), now()).unwrap();
 
-        assert!(output.starts_with("⚠️  Alerts: 1 stuck, 0 failed, 0 needing approval"));
+        assert!(output
+            .starts_with("⚠️  Alerts: 1 stuck, 0 failed, 0 needing approval, 0 needing attention"));
         assert!(output.contains("STUCK"));
     }
 
@@ -1723,7 +1819,8 @@ mod tests {
         query.card_ids = Some(HashSet::from(["missing".to_string()]));
         let output = format_agent_statuses_at(&statuses, &query, now()).unwrap();
 
-        assert!(output.starts_with("⚠️  Alerts: 1 stuck, 1 failed, 0 needing approval"));
+        assert!(output
+            .starts_with("⚠️  Alerts: 1 stuck, 1 failed, 0 needing approval, 0 needing attention"));
         assert!(card_lines(&output).is_empty());
     }
 
