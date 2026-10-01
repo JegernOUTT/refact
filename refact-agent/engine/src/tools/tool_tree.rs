@@ -72,6 +72,9 @@ impl Tool for ToolTree {
                 ),
             )
         };
+        if let Some(scope) = execution_scope.as_ref() {
+            scope.ensure_active_root()?;
+        }
         let mut build_budget = BuildBudget::new(MAX_TREE_PATHS, Some(abort_flag.clone()));
         let scoped_enforced = execution_scope
             .as_ref()

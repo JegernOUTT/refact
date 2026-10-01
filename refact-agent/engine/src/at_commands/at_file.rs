@@ -481,6 +481,9 @@ impl AtCommand for AtFile {
         cmd: &mut AtCommandMember,
         args: &mut Vec<AtCommandMember>,
     ) -> Result<(Vec<ContextEnum>, String), String> {
+        if let Some(scope) = ccx.lock().await.execution_scope.clone() {
+            scope.ensure_active_root()?;
+        }
         let (gcx, top_n, is_preview, execution_scope) = {
             let ccx_lock = ccx.lock().await;
             (

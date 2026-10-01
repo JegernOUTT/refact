@@ -77,10 +77,13 @@ impl ExecutionScope {
 
     fn active_root_missing_error(&self) -> String {
         format!(
-            "⚠️ Active worktree is missing or stale: '{}'. Worktree-scoped filesystem tools are fail-closed and will not fallback to source workspace '{}'. Recreate or reopen the active worktree before continuing.",
-            self.root.display(),
-            self.source_workspace_root.display()
+            "This chat's worktree '{}' no longer exists; it was merged or removed. Do not continue editing; report back or ask your parent to resume you.",
+            self.root.display()
         )
+    }
+
+    pub fn is_engine_state_path(&self, path: &Path) -> bool {
+        path.starts_with(self.source_workspace_root.join(".refact"))
     }
 
     pub fn resolve_path(&self, raw: &Path) -> Result<ScopedPath, String> {
@@ -117,6 +120,15 @@ impl ExecutionScope {
         }
 
         let normalized_raw = normalize_existing_or_lexical(raw);
+        if self.is_engine_state_path(&normalized_raw) {
+            return Ok(PathCandidate {
+                path: normalized_raw,
+                used_absolute_path,
+                remapped_from: None,
+                outside_absolute_path: true,
+            });
+        }
+
         if normalized_raw.starts_with(&self.root) {
             return Ok(PathCandidate {
                 path: normalized_raw,
@@ -161,11 +173,13 @@ impl ExecutionScope {
         require_dir: bool,
         allow_missing_parent: bool,
     ) -> Result<ScopedPath, String> {
-        let path = if allow_missing_parent && !candidate.outside_absolute_path {
-            resolve_creatable_final_path(&candidate.path)?
-        } else {
-            resolve_final_path(&candidate.path, require_existing)?
-        };
+        let engine_state_path = self.is_engine_state_path(&candidate.path);
+        let path =
+            if allow_missing_parent && (!candidate.outside_absolute_path || engine_state_path) {
+                resolve_creatable_final_path(&candidate.path)?
+            } else {
+                resolve_final_path(&candidate.path, require_existing)?
+            };
         if require_dir && !path.is_dir() {
             return Err(format!("Path '{}' is not a directory", path.display()));
         }
@@ -390,6 +404,18 @@ mod tests {
     }
 
     #[test]
+    fn worktree_execution_scope_keeps_engine_state_paths_literal() {
+        let (_temp, root, source, repo, _outside) = setup_dirs();
+        let scope = make_scope(&root, &source, &repo);
+        fs::create_dir_all(source.join(".refact/tasks/task")).unwrap();
+        let raw = source.join(".refact/tasks/task/report.md");
+        let resolved = scope.resolve_creatable_path(&raw).unwrap();
+        assert_eq!(resolved.path, raw);
+        assert!(resolved.outside_absolute_path);
+        assert!(resolved.remapped_from.is_none());
+    }
+
+    #[test]
     fn worktree_execution_scope_marks_outside_absolute_existing_path() {
         let (_temp, root, source, repo, outside) = setup_dirs();
         let scope = make_scope(&root, &source, &repo);
@@ -487,8 +513,8 @@ mod tests {
         let result = scope.resolve_existing_path(Path::new("src/main.rs"));
         let error = result.unwrap_err();
 
-        assert!(error.contains("Active worktree is missing or stale"));
-        assert!(error.contains("will not fallback to source workspace"));
+        assert!(error.contains("This chat's worktree"));
+        assert!(error.contains("Do not continue editing"));
         assert!(error.contains(&root.to_string_lossy().to_string()));
     }
 

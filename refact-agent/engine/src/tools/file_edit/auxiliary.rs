@@ -43,6 +43,11 @@ pub fn resolve_path_with_scope(
     execution_scope: Option<&ExecutionScope>,
     require_existing: bool,
 ) -> Option<Result<ResolvedToolPath, String>> {
+    if let Some(scope) = execution_scope {
+        if let Err(error) = scope.ensure_active_root() {
+            return Some(Err(error));
+        }
+    }
     let scope = active_execution_scope(execution_scope)?;
     let scoped = if require_existing {
         scope.resolve_existing_path(raw_path)

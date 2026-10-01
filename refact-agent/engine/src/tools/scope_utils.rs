@@ -78,6 +78,7 @@ async fn resolve_existing_path_with_execution_scope_impl(
     let Some(scope) = execution_scope else {
         return Ok(None);
     };
+    scope.ensure_active_root()?;
     if !scope.is_enforced() {
         return Ok(None);
     }
@@ -342,6 +343,7 @@ pub async fn resolve_scope_with_execution_scope(
             notices: vec![],
         });
     };
+    execution_scope.ensure_active_root()?;
     if !execution_scope.is_enforced() {
         return Ok(ScopedFiles {
             files: resolve_scope_legacy(gcx, scope).await?,
@@ -458,6 +460,7 @@ async fn resolve_scope_with_execution_scope_limited_impl(
         }
         return resolve_scope_legacy_limited(gcx, scope, max_entries, abort).await;
     };
+    execution_scope.ensure_active_root()?;
     if !execution_scope.is_enforced() {
         if for_model_context {
             let scoped =
@@ -738,6 +741,7 @@ async fn create_scope_filter_with_execution_scope_impl(
             notices: vec![],
         });
     };
+    execution_scope.ensure_active_root()?;
     if !execution_scope.is_enforced() {
         return Ok(ScopedScopeFilter {
             filter: create_scope_filter_legacy(gcx, scope).await?,
@@ -814,6 +818,7 @@ async fn remap_context_file_for_execution_scope_impl(
         }
         return Ok(Some((context_file, vec![])));
     };
+    execution_scope.ensure_active_root()?;
     if !execution_scope.is_enforced() {
         if for_model_context {
             check_file_privacy_for_model_context(gcx, &PathBuf::from(&context_file.file_name))
@@ -835,6 +840,16 @@ async fn remap_context_file_for_execution_scope_impl(
             check_file_privacy_for_model_context(gcx.clone(), &normalized_path).await?;
         } else {
             check_file_privacy_for_send(gcx.clone(), &normalized_path).await?;
+        }
+        context_file.file_name = path_to_string(&normalized_path);
+        return Ok(Some((context_file, vec![])));
+    }
+
+    if execution_scope.is_engine_state_path(&normalized_path) {
+        if for_model_context {
+            check_file_privacy_for_model_context(gcx, &normalized_path).await?;
+        } else {
+            check_file_privacy_for_send(gcx, &normalized_path).await?;
         }
         context_file.file_name = path_to_string(&normalized_path);
         return Ok(Some((context_file, vec![])));
@@ -1920,20 +1935,13 @@ mod worktree_scope_read_tools {
         };
         let tool_call_id = "cat-call".to_string();
 
-        let (_corrections, results) = tool
+        let text = tool
             .tool_execute(ccx, &tool_call_id, &cat_args("src/lib.rs".to_string()))
             .await
-            .unwrap();
-        let text = tool_text(&results);
+            .unwrap_err();
 
-        assert!(
-            text.contains("Active worktree is missing or stale"),
-            "{text}"
-        );
-        assert!(
-            text.contains("will not fallback to source workspace"),
-            "{text}"
-        );
+        assert!(text.contains("This chat's worktree"), "{text}");
+        assert!(text.contains("Do not continue editing"), "{text}");
         assert!(!text.contains("source_version"), "{text}");
     }
 

@@ -1347,6 +1347,9 @@ impl ToolRegistry for AppToolRegistry {
             .downcast_ref::<Arc<AMutex<crate::at_commands::at_commands::AtCommandsContext>>>()
             .ok_or_else(|| "invalid AtCommandsContext passed to ToolRegistry".to_string())?
             .clone();
+        if let Some(scope) = ccx.lock().await.execution_scope.clone() {
+            scope.ensure_active_root()?;
+        }
         let lookup_span = perf_diagnostics::span(PerfComponent::ToolExecutionLookup, None, None);
         let catalog_desc = match Self::find_catalog_descriptor(catalog, tool_name) {
             Some(desc) => desc,

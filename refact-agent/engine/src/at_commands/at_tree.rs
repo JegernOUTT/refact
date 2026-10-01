@@ -490,6 +490,9 @@ impl AtCommand for AtTree {
         cmd: &mut AtCommandMember,
         args: &mut Vec<AtCommandMember>,
     ) -> Result<(Vec<ContextEnum>, String), String> {
+        if let Some(scope) = ccx.lock().await.execution_scope.clone() {
+            scope.ensure_active_root()?;
+        }
         let (gcx, execution_scope, abort_flag) = {
             let cgcx = ccx.lock().await;
             (

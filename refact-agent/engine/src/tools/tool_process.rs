@@ -1355,6 +1355,9 @@ async fn resolve_process_workdir(
     raw_path: Option<&str>,
     execution_scope: Option<&ExecutionScope>,
 ) -> Result<(Option<PathBuf>, Vec<String>), String> {
+    if let Some(scope) = execution_scope {
+        scope.ensure_active_root()?;
+    }
     if let Some(scope) = active_execution_scope(execution_scope) {
         let scoped = scope.resolve_workdir(raw_path).map_err(|e| {
             format!(

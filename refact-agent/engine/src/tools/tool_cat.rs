@@ -208,6 +208,9 @@ impl Tool for ToolCat {
                 ),
             )
         };
+        if let Some(scope) = execution_scope.as_ref() {
+            scope.ensure_active_root()?;
+        }
         let (
             filenames_present,
             symbols_not_found,
