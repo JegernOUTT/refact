@@ -18,6 +18,8 @@ use crate::app_state::AppState;
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::types::{ChatEvent, GoalBudget, GoalCriterion, TaskMeta};
+use crate::ext::hooks::HookEvent;
+use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_observation_hooks};
 use crate::global_context::GlobalContext;
 use crate::subchat::{
     SubchatConfig, SubchatProgress, SubchatResult, resolve_subchat_config_with_parent,
@@ -2231,6 +2233,7 @@ pub(super) async fn resume_agent_inner(
                     if let Some(intent) = app.agent_executions.launch_intent(&child_chat_id) {
                         intent.acknowledged().await;
                     }
+                    emit_subagent_hook(&app, HookEvent::SubagentStart, &running, true).await;
                     emit_background_agent_update(app.clone(), &running).await;
                     run_background_subchat(app.gcx.clone(), messages, config).await
                 }
@@ -2664,6 +2667,7 @@ async fn run_spawned_agent(
             if let Some(intent) = app.agent_executions.launch_intent(&child_chat_id) {
                 intent.acknowledged().await;
             }
+            emit_subagent_hook(&app, HookEvent::SubagentStart, &record, false).await;
             crate::agents::push::mark_sub_goal_dispatched(&app, &record).await;
             emit_background_agent_update(app.clone(), &record).await;
         }
@@ -3205,7 +3209,70 @@ fn format_notice_files(files: &[String]) -> String {
     }
 }
 
+async fn emit_subagent_hook(
+    app: &AppState,
+    event: HookEvent,
+    record: &BackgroundAgent,
+    resumed: bool,
+) {
+    if !app.gcx.hooks_config.enabled {
+        return;
+    }
+    let project_dir = get_project_dir_string(app.clone()).await;
+    let child_chat_id = record
+        .child_chat_id
+        .clone()
+        .unwrap_or_else(|| record.agent_id.clone());
+    let mut payload = HookPayload::new(&event, child_chat_id, project_dir);
+    payload
+        .extra
+        .insert("agent_id".into(), serde_json::json!(record.agent_id));
+    payload.extra.insert(
+        "run_generation".into(),
+        serde_json::json!(record.run_generation),
+    );
+    payload.extra.insert(
+        "parent_chat_id".into(),
+        serde_json::json!(record.parent_chat_id),
+    );
+    payload.extra.insert(
+        "child_chat_id".into(),
+        serde_json::json!(record.child_chat_id),
+    );
+    payload
+        .extra
+        .insert("profile".into(), serde_json::json!(record.profile_name));
+    if event == HookEvent::SubagentStop {
+        payload
+            .extra
+            .insert("status".into(), serde_json::json!(record.status.as_str()));
+        payload
+            .extra
+            .insert("steps_used".into(), serde_json::json!(record.step_count));
+    } else {
+        payload
+            .extra
+            .insert("resumed".into(), serde_json::json!(resumed));
+    }
+    run_observation_hooks(app.clone(), event, payload).await;
+}
+
 pub async fn emit_background_agent_update(app: AppState, record: &BackgroundAgent) {
+    if app.gcx.hooks_config.enabled
+        && record.status.is_terminal()
+        && app
+            .agents
+            .claim_stop_hook(&record.agent_id, record.run_generation)
+            .await
+    {
+        emit_subagent_hook(
+            &app,
+            HookEvent::SubagentStop,
+            record,
+            record.run_generation > 1,
+        )
+        .await;
+    }
     crate::coordination::decomposition::observe_agent_outcome(&app, record).await;
     if record.status.is_terminal() {
         crate::coordination::causal::record_completion(
@@ -3370,6 +3437,7 @@ fn fallback_failed_record(agent_id: String, req: SpawnRequest, error: String) ->
     BackgroundAgent {
         schema_version: 1,
         run_generation: 1,
+        stop_hook_generation: None,
         agent_id,
         parent_chat_id: req.parent_chat_id,
         parent_root_chat_id: req.parent_root_chat_id,

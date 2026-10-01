@@ -639,6 +639,7 @@ mod tests {
         BackgroundAgent {
             schema_version: 1,
             run_generation: 1,
+            stop_hook_generation: None,
             agent_id: agent_id.to_string(),
             parent_chat_id: "parent".to_string(),
             parent_root_chat_id: None,

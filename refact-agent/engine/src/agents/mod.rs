@@ -27,4 +27,7 @@ mod launch_intent_spawn_tests;
 mod launch_intent_resume_tests;
 
 #[cfg(test)]
+mod subagent_hook_tests;
+
+#[cfg(test)]
 mod tests;

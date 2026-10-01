@@ -184,6 +184,7 @@ async fn legacy_record_without_introspection_fields_deserializes() {
     let mut legacy = serde_json::to_value(record).expect("serialize record");
     let object = legacy.as_object_mut().expect("record object");
     for key in [
+        "stop_hook_generation",
         "model_type",
         "current_tool",
         "goal_summary",
@@ -201,6 +202,7 @@ async fn legacy_record_without_introspection_fields_deserializes() {
     let parsed: BackgroundAgent = serde_json::from_value(legacy).expect("deserialize legacy");
 
     assert_eq!(parsed.model_type, None);
+    assert_eq!(parsed.stop_hook_generation, None);
     assert_eq!(parsed.current_tool, None);
     assert_eq!(parsed.goal_summary, None);
     assert!(!parsed.plan_present);
@@ -513,6 +515,7 @@ fn summary_maps_introspection_and_question_state() {
     let record = BackgroundAgent {
         schema_version: 1,
         run_generation: 1,
+        stop_hook_generation: None,
         agent_id: "agent".to_string(),
         parent_chat_id: "parent".to_string(),
         parent_root_chat_id: None,

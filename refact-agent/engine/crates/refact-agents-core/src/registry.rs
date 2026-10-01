@@ -266,6 +266,7 @@ impl BackgroundAgentRegistry {
         let record = BackgroundAgent {
             schema_version: 1,
             run_generation: 1,
+            stop_hook_generation: None,
             agent_id: agent_id.clone(),
             parent_chat_id: req.parent_chat_id,
             parent_root_chat_id: req.parent_root_chat_id,
@@ -393,6 +394,35 @@ impl BackgroundAgentRegistry {
             Ok(())
         })
         .await
+    }
+
+    pub async fn claim_stop_hook(&self, agent_id: &str, generation: u64) -> bool {
+        let (previous, snapshot) = {
+            let mut records = self.records.write().await;
+            let Some(record) = records.get(agent_id) else {
+                return false;
+            };
+            if record
+                .stop_hook_generation
+                .is_some_and(|previous| previous >= generation)
+            {
+                return false;
+            }
+            let previous = record.stop_hook_generation;
+            records.get_mut(agent_id).unwrap().stop_hook_generation = Some(generation);
+            (previous, records.values().cloned().collect())
+        };
+        if self.flush_records(snapshot).await.is_ok() {
+            return true;
+        }
+        let mut records = self.records.write().await;
+        if records
+            .get(agent_id)
+            .is_some_and(|record| record.stop_hook_generation == Some(generation))
+        {
+            records.get_mut(agent_id).unwrap().stop_hook_generation = previous;
+        }
+        false
     }
 
     pub async fn save_run_config(
@@ -2262,6 +2292,16 @@ mod tests {
             worktree_id: None,
             worktree_branch: None,
         }
+    }
+
+    #[tokio::test]
+    async fn claim_stop_hook_is_once_per_generation() {
+        let (_temp, registry) = registry().await;
+        let record = registry.create(request("parent")).await.unwrap().0;
+
+        assert!(registry.claim_stop_hook(&record.agent_id, 1).await);
+        assert!(!registry.claim_stop_hook(&record.agent_id, 1).await);
+        assert!(registry.claim_stop_hook(&record.agent_id, 2).await);
     }
 
     async fn capped(registry: &Arc<BackgroundAgentRegistry>) -> BackgroundAgent {

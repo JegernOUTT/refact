@@ -129,6 +129,8 @@ pub struct BackgroundAgent {
     pub schema_version: u32,
     #[serde(default = "initial_run_generation")]
     pub run_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_hook_generation: Option<u64>,
     pub agent_id: String,
     pub parent_chat_id: String,
     pub parent_root_chat_id: Option<String>,
