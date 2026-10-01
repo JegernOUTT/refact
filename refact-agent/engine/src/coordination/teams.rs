@@ -207,6 +207,7 @@ pub enum RoleRefusal {
         recipient_root: String,
         requested: PeerAuthority,
     },
+    MemberIsAssigner,
     IndistinctIdentities,
 }
 
@@ -232,6 +233,9 @@ impl fmt::Display for RoleRefusal {
                 f,
                 "`{assigner_root}` does not hold {requested:?} toward `{recipient_root}` and cannot confer it"
             ),
+            RoleRefusal::MemberIsAssigner => {
+                write!(f, "a role grant cannot target the assigner's own root")
+            }
             RoleRefusal::IndistinctIdentities => {
                 write!(f, "role grant identities must be distinct and nonempty")
             }
@@ -252,6 +256,9 @@ pub fn propose_role_grant(
     requested: PeerAuthority,
     now_ms: u64,
 ) -> Result<RoleGrantProposal, RoleRefusal> {
+    if assignment.member_root == assignment.assigner_root {
+        return Err(RoleRefusal::MemberIsAssigner);
+    }
     if assignment.project.trim().is_empty()
         || assignment.assigner_root.trim().is_empty()
         || assignment.member_root.trim().is_empty()
@@ -272,19 +279,25 @@ pub fn propose_role_grant(
             requested,
         });
     }
-    if !registry.allows(
+    let assigner_grant = registry.get(
         assignment.project,
         assignment.assigner_root,
         assignment.recipient_root,
-        requested,
         now_ms,
-    ) {
+    );
+    let Some(assigner_grant) = assigner_grant.filter(|grant| grant.authority.allows(requested))
+    else {
         return Err(RoleRefusal::AssignerLacksAuthority {
             assigner_root: assignment.assigner_root.to_string(),
             recipient_root: assignment.recipient_root.to_string(),
             requested,
         });
-    }
+    };
+    let max_expiry = now_ms.saturating_add(
+        refact_work_core::coordination_settings()
+            .peer_grant_max_ttl_secs
+            .saturating_mul(1000),
+    );
     Ok(RoleGrantProposal {
         grant: PeerGrant {
             project: assignment.project.to_string(),
@@ -295,7 +308,10 @@ pub fn propose_role_grant(
                 "role:{}/{} assigned by {}",
                 assignment.team, role.name, assignment.assigner_root
             ),
-            expires_at_ms: now_ms.saturating_add(role.peer_mail_ttl_secs.saturating_mul(1000)),
+            expires_at_ms: now_ms
+                .saturating_add(role.peer_mail_ttl_secs.saturating_mul(1000))
+                .min(assigner_grant.expires_at_ms)
+                .min(max_expiry),
         },
     })
 }
@@ -905,6 +921,14 @@ pub async fn load_team(
                 role = role.with_ceiling(ceiling);
             }
             if let Some(ttl_secs) = config.peer_mail_ttl_secs {
+                let max_ttl_secs =
+                    refact_work_core::coordination_settings().peer_grant_max_ttl_secs;
+                if !(1..=max_ttl_secs).contains(&ttl_secs) {
+                    return Err(format!(
+                        "team `{name}` role `{}` has peer_mail_ttl_secs {ttl_secs} outside 1..={max_ttl_secs}",
+                        role.name
+                    ));
+                }
                 role = role.with_peer_mail_ttl_secs(ttl_secs);
             }
             Ok(role)

@@ -46,6 +46,8 @@ mod team_config_tests;
 #[cfg(test)]
 mod team_registry_tests;
 pub mod teams;
+#[cfg(test)]
+mod teams_delegation_tests;
 pub mod types;
 #[cfg(test)]
 mod work_vocabulary_tests;

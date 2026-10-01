@@ -99,6 +99,25 @@ impl PeerGrantRegistry {
             .is_some_and(|grant| grant.authority.allows(required))
     }
 
+    pub fn get(
+        &self,
+        project: &str,
+        sender_root: &str,
+        recipient_root: &str,
+        now_ms: u64,
+    ) -> Option<PeerGrant> {
+        self.grants
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&(
+                project.to_string(),
+                sender_root.to_string(),
+                recipient_root.to_string(),
+            ))
+            .filter(|grant| grant.expires_at_ms > now_ms)
+            .cloned()
+    }
+
     pub fn revoke(&self, project: &str, sender_root: &str, recipient_root: &str) -> bool {
         self.grants
             .lock()
