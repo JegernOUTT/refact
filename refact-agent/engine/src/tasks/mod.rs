@@ -9,3 +9,6 @@ pub mod overlap_order;
 pub mod storage;
 pub mod types;
 pub mod waves;
+
+#[cfg(test)]
+mod dependency_gate_paths_tests;

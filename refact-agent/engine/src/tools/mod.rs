@@ -123,7 +123,7 @@ pub mod tool_task_memory;
 mod tool_task_merge_agent;
 mod tool_task_overview;
 mod tool_task_restart_agent;
-mod tool_task_spawn_agent;
+pub(crate) mod tool_task_spawn_agent;
 mod tool_task_verify_card;
 mod tool_task_wait_for_agents;
 mod tool_tasks;

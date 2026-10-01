@@ -1134,6 +1134,9 @@ impl Tool for ToolTaskSpawnAgent {
                 card_id, card.agent_chat_id.as_ref().unwrap()
             ));
         }
+        board
+            .dependency_gate(card_id)
+            .map_err(storage::violation_error)?;
 
         let agent_id = Uuid::new_v4().to_string();
         let agent_chat_id = format!("agent-{}-{}", card_id, &agent_id[..8]);
@@ -1183,6 +1186,9 @@ impl Tool for ToolTaskSpawnAgent {
                 let (_, starting_new_run) =
                     storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
                         let starting = storage::active_agent_count(&board.cards) == 0;
+                        board
+                            .dependency_gate(&claim_card)
+                            .map_err(storage::violation_error)?;
                         let card = board
                             .get_card_mut(&claim_card)
                             .ok_or("card removed before claim")?;

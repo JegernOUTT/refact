@@ -504,13 +504,16 @@ pub async fn handle_patch_board(
                 }
             }
             BoardPatch::MoveCard { id, column } => {
-                let card = board
-                    .get_card_mut(&id)
-                    .ok_or_else(|| format!("Card {} not found", id))?;
                 let valid_columns = ["planned", "doing", "done", "failed", "regressed"];
                 if !valid_columns.contains(&column.as_str()) {
                     return Err(format!("Invalid column: {}", column));
                 }
+                board
+                    .ensure_column_move_allowed(&id, &column)
+                    .map_err(storage::violation_error)?;
+                let card = board
+                    .get_card_mut(&id)
+                    .ok_or_else(|| format!("Card {} not found", id))?;
                 if column == "doing" && card.started_at.is_none() {
                     card.started_at = Some(now.clone());
                 }
