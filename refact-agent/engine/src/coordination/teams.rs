@@ -843,6 +843,76 @@ impl TeamRegistry {
     }
 }
 
+pub const TEAM_CONFIG_KEY: &str = "team";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TeamConfig {
+    roles: Vec<RoleConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoleConfig {
+    name: String,
+    #[serde(default)]
+    default_profile: Option<String>,
+    #[serde(default)]
+    authority_ceiling: Option<String>,
+    #[serde(default)]
+    peer_mail_ttl_secs: Option<u64>,
+}
+
+pub async fn load_team(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    name: &str,
+) -> Result<TeamSpec, String> {
+    let unknown = format!(
+        "team `{name}` is not defined; define a `team` block in a subagent config before referencing it"
+    );
+    let registry = crate::yaml_configs::customization_registry::get_project_registry(gcx)
+        .await
+        .ok_or_else(|| unknown.clone())?;
+    let subagent = registry
+        .subagents
+        .get(name)
+        .ok_or_else(|| unknown.clone())?;
+    let declaration = subagent
+        .extra
+        .get(TEAM_CONFIG_KEY)
+        .ok_or_else(|| format!("subagent `{name}` has no `{TEAM_CONFIG_KEY}` definition"))?;
+    let config: TeamConfig = serde_yaml::from_value(declaration.clone())
+        .map_err(|error| format!("team `{name}` is malformed: {error}"))?;
+    let roles = config
+        .roles
+        .into_iter()
+        .map(|config| {
+            let mut role = RoleSpec::new(config.name);
+            if let Some(profile) = config.default_profile {
+                role = role.with_profile(profile);
+            }
+            if let Some(ceiling) = config.authority_ceiling {
+                let ceiling = match ceiling.as_str() {
+                    "metadata" => PeerAuthority::Metadata,
+                    "mail" => PeerAuthority::Mail,
+                    "control" => PeerAuthority::Control,
+                    _ => {
+                        return Err(format!(
+                            "team `{name}` has unknown authority ceiling `{ceiling}`"
+                        ));
+                    }
+                };
+                role = role.with_ceiling(ceiling);
+            }
+            if let Some(ttl_secs) = config.peer_mail_ttl_secs {
+                role = role.with_peer_mail_ttl_secs(ttl_secs);
+            }
+            Ok(role)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    TeamSpec::new(name, roles).map_err(|refusal| refusal.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
