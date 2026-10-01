@@ -862,6 +862,9 @@ async fn get_builtin_tools(
         Box::new(crate::tools::tool_team::ToolTeamSeat {
             config_path: config_path.clone(),
         }),
+        Box::new(crate::tools::tool_team::ToolTeamRoleGrant {
+            config_path: config_path.clone(),
+        }),
         Box::new(crate::tools::tool_agent_interact::ToolProgressReport {
             config_path: config_path.clone(),
         }),
@@ -1954,6 +1957,7 @@ mod tests {
             "agent_mailbox",
             "agent_peer_grant",
             "team_seat",
+            "team_role_grant",
             "progress_report",
             "board_claim",
             "board_discover",
@@ -1973,6 +1977,7 @@ mod tests {
             );
         }
         assert_eq!(builtin("team_seat"), vec![(true, false)]);
+        assert_eq!(builtin("team_role_grant"), vec![(true, false)]);
     }
 
     #[tokio::test]

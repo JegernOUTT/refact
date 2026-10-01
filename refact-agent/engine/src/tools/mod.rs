@@ -93,6 +93,8 @@ pub mod tool_work_inspect;
 pub mod tool_work_overview;
 
 #[cfg(test)]
+mod tool_team_role_grant_tests;
+#[cfg(test)]
 mod tool_team_tests;
 
 pub mod buddy;

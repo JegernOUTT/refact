@@ -7,11 +7,16 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
-use crate::coordination::teams::{live_chat_ids, TeamRefusal};
+use crate::coordination::teams::{live_chat_ids, RoleAssignment, TeamRefusal};
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
 pub struct ToolTeamSeat {
+    pub config_path: String,
+}
+
+/// Delegates the assigner's existing peer authority toward a recipient to a seated team member.
+pub struct ToolTeamRoleGrant {
     pub config_path: String,
 }
 
@@ -202,6 +207,230 @@ impl Tool for ToolTeamSeat {
         };
         message.extra.insert("team_seat".into(), response);
         Ok((false, vec![ContextEnum::ChatMessage(message)]))
+    }
+
+    fn tool_depends_on(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+fn peer_authority(
+    value: Option<&str>,
+) -> Result<crate::coordination::peer_authority::PeerAuthority, String> {
+    match value {
+        Some("metadata") => Ok(crate::coordination::peer_authority::PeerAuthority::Metadata),
+        Some("mail") => Ok(crate::coordination::peer_authority::PeerAuthority::Mail),
+        Some("control") => Ok(crate::coordination::peer_authority::PeerAuthority::Control),
+        _ => Err("authority must be metadata, mail or control".to_string()),
+    }
+}
+
+fn address(
+    args: &HashMap<String, Value>,
+    agent_key: &str,
+    chat_key: &str,
+) -> Result<(Option<String>, Option<String>), String> {
+    let has_agent_id = args.contains_key(agent_key);
+    let has_chat_id = args.contains_key(chat_key);
+    if has_agent_id == has_chat_id {
+        return Err(format!(
+            "exactly one of '{agent_key}' or '{chat_key}' is required"
+        ));
+    }
+    let agent_id = has_agent_id
+        .then(|| required_string(args, agent_key))
+        .transpose()?;
+    let chat_id = has_chat_id
+        .then(|| required_string(args, chat_key))
+        .transpose()?;
+    Ok((agent_id, chat_id))
+}
+
+fn root_for_address(
+    rows: &[crate::coordination::types::WorkRow],
+    agent_id: Option<&str>,
+    chat_id: Option<&str>,
+    label: &str,
+) -> Result<(String, Option<String>), String> {
+    let row = match (agent_id, chat_id) {
+        (Some(agent_id), None) => rows.iter().find(|row| {
+            row.key.runtime == refact_work_core::RuntimeKind::BackgroundAgent
+                && row.key.id == agent_id
+        }),
+        (None, Some(chat_id)) => rows
+            .iter()
+            .find(|row| row.chat_id.as_deref() == Some(chat_id)),
+        _ => None,
+    }
+    .ok_or_else(|| format!("{label} is not visible in this project"))?;
+    let root = row
+        .root_chat_id
+        .as_deref()
+        .or(row.parent_chat_id.as_deref())
+        .or(row.chat_id.as_deref())
+        .unwrap_or(&row.key.id)
+        .to_string();
+    let chat = chat_id.map(str::to_string).or_else(|| row.chat_id.clone());
+    Ok((root, chat))
+}
+
+#[async_trait]
+impl Tool for ToolTeamRoleGrant {
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: "team_role_grant".into(),
+            display_name: "Team Role Grant".into(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: self.config_path.clone(),
+            },
+            experimental: false,
+            allow_parallel: false,
+            description: "Grant a seated team member time-bounded peer authority toward a visible same-project recipient. The role ceiling and the assigner's existing authority both limit the grant; user confirmation is required.".into(),
+            input_schema: json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "team": {"type": "string", "minLength": 1},
+                    "role": {"type": "string", "minLength": 1},
+                    "member_agent_id": {"type": "string", "minLength": 1},
+                    "member_chat_id": {"type": "string", "minLength": 1},
+                    "recipient_agent_id": {"type": "string", "minLength": 1},
+                    "recipient_chat_id": {"type": "string", "minLength": 1},
+                    "authority": {"type": "string", "enum": ["metadata", "mail", "control"]}
+                },
+                "required": ["team", "role", "authority"],
+                "allOf": [
+                    {"oneOf": [
+                        {"required": ["member_agent_id"], "not": {"required": ["member_chat_id"]}},
+                        {"required": ["member_chat_id"], "not": {"required": ["member_agent_id"]}}
+                    ]},
+                    {"oneOf": [
+                        {"required": ["recipient_agent_id"], "not": {"required": ["recipient_chat_id"]}},
+                        {"required": ["recipient_chat_id"], "not": {"required": ["recipient_agent_id"]}}
+                    ]}
+                ]
+            }),
+            output_schema: None,
+            annotations: None,
+        }
+    }
+
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let team = required_string(args, "team")?;
+        let role = required_string(args, "role")?;
+        let authority = peer_authority(args.get("authority").and_then(Value::as_str))?;
+        let (member_agent_id, member_chat_id) = address(args, "member_agent_id", "member_chat_id")?;
+        let (recipient_agent_id, recipient_chat_id) =
+            address(args, "recipient_agent_id", "recipient_chat_id")?;
+        let (app, chat_id, root_chat_id, background_agent_id, model) = {
+            let ccx = ccx.lock().await;
+            (
+                ccx.app.clone(),
+                ccx.chat_id.clone(),
+                ccx.root_chat_id.clone(),
+                ccx.background_agent_id.clone(),
+                ccx.current_model.clone(),
+            )
+        };
+        if background_agent_id.is_some() {
+            return Err("Only a top-level root can change peer authority.".to_string());
+        }
+        let assigner_root = root_chat_id;
+        let caller = crate::coordination::scope::model_caller(&app, &chat_id, &model)
+            .await
+            .map_err(|error| error.to_string())?;
+        let project = crate::coordination::roots::project_identity(&caller.source_root);
+        let team_spec = crate::coordination::teams::load_team(app.gcx.clone(), &team).await?;
+        app.teams
+            .register(team_spec)
+            .map_err(|refusal: TeamRefusal| refusal.to_string())?;
+        let catalog =
+            crate::coordination::catalog::build_catalog(&app, caller.source_root.to_str()).await?;
+        let rows = catalog.all_rows();
+        let (member_root, member_chat) = root_for_address(
+            &rows,
+            member_agent_id.as_deref(),
+            member_chat_id.as_deref(),
+            "member",
+        )?;
+        let member_chat =
+            member_chat.ok_or_else(|| "member agent has no visible chat".to_string())?;
+        let (recipient_root, _) = root_for_address(
+            &rows,
+            recipient_agent_id.as_deref(),
+            recipient_chat_id.as_deref(),
+            "recipient",
+        )?;
+        let role_spec = app
+            .teams
+            .with_roster(&project, &team, |spec, roster| {
+                let role_spec = spec
+                    .role(&role)
+                    .ok_or_else(|| format!("team `{team}` does not define role `{role}`"))?;
+                if !roster
+                    .seat(&role)
+                    .is_some_and(|seat| seat.member_chat_id == member_chat)
+                {
+                    return Err(format!("member does not hold {role} in {team}"));
+                }
+                Ok::<_, String>(role_spec.clone())
+            })
+            .map_err(|refusal| refusal.to_string())??;
+        // The assigner delegates an existing grant toward the chosen recipient to the seated member.
+        let assignment = RoleAssignment {
+            team: &team,
+            project: &project,
+            assigner_root: &assigner_root,
+            member_root: &member_root,
+            recipient_root: &recipient_root,
+        };
+        let now = now_ms();
+        let proposal = crate::coordination::teams::propose_role_grant(
+            &app.peer_grants,
+            &role_spec,
+            &assignment,
+            authority,
+            now,
+        )
+        .map_err(|refusal| refusal.to_string())?;
+        crate::coordination::teams::apply_role_grant(&app.peer_grants, proposal, now)?;
+        let response = json!({
+            "team": team,
+            "role": role,
+            "member_root": member_root,
+            "recipient_root": recipient_root,
+            "authority": authority,
+        });
+        let mut message = ChatMessage {
+            role: "tool".into(),
+            tool_call_id: tool_call_id.clone(),
+            content: ChatContent::SimpleText(format!(
+                "Granted {authority:?} authority to team member `{member_root}` toward `{recipient_root}` through `{team}` role `{role}`."
+            )),
+            preserve: Some(true),
+            output_filter: Some(OutputFilter::no_limits()),
+            ..Default::default()
+        };
+        message.extra.insert("team_role_grant".into(), response);
+        Ok((false, vec![ContextEnum::ChatMessage(message)]))
+    }
+
+    async fn match_against_confirm_deny(
+        &self,
+        _ccx: Arc<AMutex<AtCommandsContext>>,
+        _args: &HashMap<String, Value>,
+    ) -> Result<crate::tools::tools_description::MatchConfirmDeny, String> {
+        Ok(crate::tools::tools_description::MatchConfirmDeny {
+            result: crate::tools::tools_description::MatchConfirmDenyResult::CONFIRMATION,
+            command: "grant team role peer authority".to_string(),
+            rule: "explicit_user_consent".to_string(),
+        })
     }
 
     fn tool_depends_on(&self) -> Vec<String> {

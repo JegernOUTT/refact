@@ -392,6 +392,7 @@ tools:
   - agent_mailbox
   - agent_peer_grant
   - team_seat
+  - team_role_grant
   - progress_report
   - agent_list
   - agent_status
@@ -530,6 +531,8 @@ tool_confirm:
       action: ask
     - match: "team_seat"
       action: auto
+    - match: "team_role_grant"
+      action: ask
     - match: "progress_report"
       action: auto
     - match: "agent_list"
