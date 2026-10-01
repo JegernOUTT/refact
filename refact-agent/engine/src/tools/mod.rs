@@ -19,6 +19,7 @@ mod tests_schema;
 pub mod tool_helpers;
 pub mod tool_name_alias;
 
+mod role_history;
 mod tool_activate_skill;
 mod tool_add_workspace_folder;
 pub mod tool_agent_approval;
@@ -73,6 +74,8 @@ mod tool_set_trajectory_label;
 mod tool_shell;
 pub(crate) use tool_shell::approval_request as shell_approval_request;
 pub(crate) use tool_process::approval_request as process_approval_request;
+#[cfg(test)]
+mod plan_history_archive_tests;
 pub(crate) mod tool_sleep;
 pub(crate) mod tool_spawn_ab;
 mod tool_subagent;

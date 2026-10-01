@@ -23,6 +23,7 @@ impl ToolGetPlan {
 
 fn plan_value(
     session: &ChatSession,
+    archive: &[ChatMessage],
     message: &ChatMessage,
     include_history: bool,
 ) -> Result<Value, String> {
@@ -56,10 +57,15 @@ fn plan_value(
     });
     if include_history {
         value["history"] = Value::Array(
-            plan_role::plan_delta_history(session)
-                .into_iter()
-                .map(|(revision, note)| json!({"seq": revision, "content": note}))
-                .collect(),
+            super::role_history::archived_delta_history(
+                archive,
+                &session.messages,
+                &message.message_id,
+                "plan_delta",
+            )
+            .into_iter()
+            .map(|(revision, note)| json!({"seq": revision, "content": note}))
+            .collect(),
         );
     }
     Ok(value)
@@ -126,9 +132,10 @@ impl Tool for ToolGetPlan {
             .get(&chat_id)
             .cloned()
             .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
-        let session = session_arc.lock().await.try_accepted_control_projection()?;
+        let live = session_arc.lock().await;
+        let session = live.try_accepted_control_projection()?;
         let plan = match plan_role::try_current_base_plan(&session)? {
-            Some(message) => plan_value(&session, &message, include_history)?,
+            Some(message) => plan_value(&session, &live.messages, &message, include_history)?,
             None => Value::Null,
         };
         Ok((

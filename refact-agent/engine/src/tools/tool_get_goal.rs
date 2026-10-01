@@ -24,6 +24,7 @@ impl ToolGetGoal {
 
 fn goal_value(
     session: &ChatSession,
+    archive: &[ChatMessage],
     message: &ChatMessage,
     live: Option<&GoalSnapshot>,
     include_history: bool,
@@ -64,10 +65,15 @@ fn goal_value(
     });
     if include_history {
         value["history"] = Value::Array(
-            goal_role::goal_delta_history(session)
-                .into_iter()
-                .map(|(revision, note)| json!({"seq": revision, "content": note}))
-                .collect(),
+            super::role_history::archived_delta_history(
+                archive,
+                &session.messages,
+                &message.message_id,
+                "goal_delta",
+            )
+            .into_iter()
+            .map(|(revision, note)| json!({"seq": revision, "content": note}))
+            .collect(),
         );
     }
     Ok(value)
@@ -137,7 +143,13 @@ impl Tool for ToolGetGoal {
         let live = session_arc.lock().await;
         let session = live.try_accepted_control_projection()?;
         let goal = match goal_role::current_base_goal(&session) {
-            Some(message) => goal_value(&session, &message, live.goal.as_ref(), include_history)?,
+            Some(message) => goal_value(
+                &session,
+                &live.messages,
+                &message,
+                live.goal.as_ref(),
+                include_history,
+            )?,
             None => Value::Null,
         };
         Ok((
