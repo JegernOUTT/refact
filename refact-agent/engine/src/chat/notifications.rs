@@ -13,6 +13,8 @@ use refact_core::chat_types::{DeliveryOutcome, PendingDelivery, PushMode};
 use crate::call_validation::ChatMessage;
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::types::ChatEvent;
+use crate::ext::hooks::HookEvent;
+use crate::ext::hooks_runner::{get_project_dir_string, HookPayload};
 #[cfg(test)]
 use crate::chat::types::ChatSession;
 use crate::exec::{ExecStatus, ProcessCompletionEvent, ProcessSpawnEvent};
@@ -116,6 +118,22 @@ pub(crate) async fn deliver_process_completion(
         process_completion_delivery(event),
     )
     .await;
+    if matches!(
+        &outcome,
+        Ok(DeliveryOutcome::Delivered | DeliveryOutcome::Queued)
+    ) {
+        let summary = process_completion_message(event)
+            .content
+            .content_text_only();
+        emit_notification_hook(
+            app.clone(),
+            &chat_id,
+            "process_completion",
+            "exec.registry",
+            &summary,
+        )
+        .await;
+    }
     crate::chat::goal_wait::settle_goal_wait(
         app,
         &chat_id,
@@ -126,6 +144,36 @@ pub(crate) async fn deliver_process_completion(
     )
     .await;
     outcome
+}
+
+async fn emit_notification_hook(
+    app: crate::app_state::AppState,
+    chat_id: &str,
+    kind: &str,
+    source: &str,
+    summary: &str,
+) {
+    if !app.gcx.hooks_config.enabled {
+        return;
+    }
+    let project_dir = get_project_dir_string(app.clone()).await;
+    let mut payload = HookPayload::new(&HookEvent::Notification, chat_id.to_string(), project_dir);
+    payload
+        .extra
+        .insert("kind".into(), serde_json::Value::String(kind.to_string()));
+    payload.extra.insert(
+        "source".into(),
+        serde_json::Value::String(source.to_string()),
+    );
+    payload.extra.insert(
+        "chat_id".into(),
+        serde_json::Value::String(chat_id.to_string()),
+    );
+    payload.extra.insert(
+        "summary".into(),
+        serde_json::Value::String(summary.to_string()),
+    );
+    crate::ext::hooks_runner::run_observation_hooks(app, HookEvent::Notification, payload).await;
 }
 
 pub(crate) fn process_completion_delivery(event: &ProcessCompletionEvent) -> PendingDelivery {
