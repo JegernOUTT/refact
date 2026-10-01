@@ -2977,6 +2977,13 @@ pub(crate) async fn handle_tool_decisions_guarded(
     native_guard: Option<&refact_chat_api::NativeApprovalGuard>,
     request_id: &str,
 ) {
+    let hooked = crate::chat::permission_decision_hooks::apply_confirmation_permission_hooks(
+        &app,
+        &session_arc,
+        decisions,
+    )
+    .await;
+    let decisions: &[ToolDecisionItem] = &hooked.decisions;
     let root = native_guard_root(&app, native_guard).await;
     let is_shell_privacy_pause = {
         let session = session_arc.lock().await;
@@ -3165,7 +3172,8 @@ pub(crate) async fn handle_tool_decisions_guarded(
         }
         let auto_approved = session.runtime.auto_approved_tool_ids.clone();
         let paused_msg_idx = session.runtime.paused_message_index;
-        let outcome = session.process_tool_decisions(decisions);
+        let outcome =
+            session.process_tool_decisions_with_reasons(decisions, &hooked.denial_reasons);
         let any_rejected = !outcome.denied_ids.is_empty();
 
         for id in &outcome.denied_ids {

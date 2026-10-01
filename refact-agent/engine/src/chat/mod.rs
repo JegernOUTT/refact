@@ -40,6 +40,9 @@ pub mod perf_diagnostics;
 #[cfg(any(test, feature = "bench"))]
 pub mod perf_harness;
 pub mod perf_telemetry;
+pub(crate) mod permission_decision_hooks;
+#[cfg(test)]
+mod permission_decision_hooks_tests;
 pub mod plan_role;
 pub mod post_merge_check;
 pub mod prepare;

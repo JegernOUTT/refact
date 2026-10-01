@@ -4031,6 +4031,14 @@ impl ChatSession {
         &mut self,
         decisions: &[ToolDecisionItem],
     ) -> ToolDecisionOutcome {
+        self.process_tool_decisions_with_reasons(decisions, &HashMap::new())
+    }
+
+    pub fn process_tool_decisions_with_reasons(
+        &mut self,
+        decisions: &[ToolDecisionItem],
+        denial_reasons: &HashMap<String, String>,
+    ) -> ToolDecisionOutcome {
         let mut accepted_ids = Vec::new();
         let mut denied_ids = Vec::new();
         let mut seen_ids = HashSet::new();
@@ -4084,7 +4092,10 @@ impl ChatSession {
             }
             self.add_message(ChatMessage {
                 role: "tool".to_string(),
-                content: ChatContent::SimpleText("Tool call denied by user.".to_string()),
+                content: ChatContent::SimpleText(denial_reasons.get(denied_id).map_or_else(
+                    || "Tool call denied by user.".to_string(),
+                    |reason| format!("Tool call denied by PermissionDecision hook: {reason}"),
+                )),
                 tool_call_id: denied_id.clone(),
                 ..Default::default()
             });
