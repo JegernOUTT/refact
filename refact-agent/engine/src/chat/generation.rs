@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use serde_json::json;
 use tokio::sync::{Mutex as AMutex};
 use tracing::{info, warn};
@@ -389,6 +389,58 @@ fn make_runtime_event(
         chat_id: None,
         dismissed: false,
     }
+}
+
+async fn announce_generation_retry(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    chat_id: &str,
+    chat_label: &str,
+    error_message: &str,
+    attempt: usize,
+    max_attempts: usize,
+    delay: Duration,
+    reason: &str,
+) {
+    {
+        let mut session = session_arc.lock().await;
+        if !session.abort_flag.load(Ordering::SeqCst) {
+            session.clear_stream_for_retry();
+            let retry_msg = make_ui_only_retry_status_message(
+                error_message,
+                attempt,
+                max_attempts,
+                delay.as_secs(),
+            );
+            session.add_message(retry_msg);
+        }
+    }
+    {
+        let mut ev = make_runtime_event(
+            "chat_retrying",
+            &format!(
+                "Retrying '{}' in {}s (attempt {}/{})",
+                chat_label,
+                delay.as_secs(),
+                attempt,
+                max_attempts,
+            ),
+            "chat",
+            &format!("chat_{}", chat_id),
+            "retrying",
+            None,
+        );
+        ev.chat_id = Some(chat_id.to_string());
+        ev.persistent = true;
+        app.buddy_event_sink.enqueue_event(ev).await;
+    }
+    warn!(
+        "Retrying chat generation after retryable LLM error in {}s (attempt {}/{}, reason={})",
+        delay.as_secs(),
+        attempt,
+        max_attempts,
+        reason,
+    );
 }
 
 fn maybe_inject_token_budget_instruction(
@@ -1887,45 +1939,18 @@ pub fn start_generation(
                 if should_retry_network && !is_context_limit {
                     let delay = super::retry_policy::retry_delay_for_attempt(network_retry_attempt);
                     network_retry_attempt += 1;
-                    {
-                        let mut session = session_arc.lock().await;
-                        if !session.abort_flag.load(Ordering::SeqCst) {
-                            session.clear_stream_for_retry();
-                            let retry_msg = make_ui_only_retry_status_message(
-                                &error.message,
-                                network_retry_attempt,
-                                super::retry_policy::MAX_LLM_RETRY_ATTEMPTS,
-                                delay.as_secs(),
-                            );
-                            session.add_message(retry_msg);
-                        }
-                    }
-                    {
-                        let mut ev = make_runtime_event(
-                            "chat_retrying",
-                            &format!(
-                                "Retrying '{}' in {}s (attempt {}/{})",
-                                chat_label,
-                                delay.as_secs(),
-                                network_retry_attempt,
-                                super::retry_policy::MAX_LLM_RETRY_ATTEMPTS,
-                            ),
-                            "chat",
-                            &format!("chat_{}", chat_id),
-                            "retrying",
-                            None,
-                        );
-                        ev.chat_id = Some(chat_id.to_string());
-                        ev.persistent = true;
-                        app.buddy_event_sink.enqueue_event(ev).await;
-                    }
-                    warn!(
-                        "Retrying chat generation after retryable LLM error in {}s (attempt {}/{}, reason={})",
-                        delay.as_secs(),
+                    announce_generation_retry(
+                        &app,
+                        &session_arc,
+                        &chat_id,
+                        &chat_label,
+                        &error.message,
                         network_retry_attempt,
                         super::retry_policy::MAX_LLM_RETRY_ATTEMPTS,
+                        delay,
                         retry_reason,
-                    );
+                    )
+                    .await;
                     if super::retry_policy::sleep_or_abort(delay, abort_flag.clone()).await {
                         break;
                     }
@@ -1967,11 +1992,33 @@ pub fn start_generation(
                     }
                 }
 
-                if let Some(crate::llm::pressure::PressureRetry::Retry { delay_ms, .. }) =
-                    pressure_retry.as_ref()
+                if let Some(crate::llm::pressure::PressureRetry::Retry {
+                    delay_ms,
+                    honoured_retry_after,
+                    attempt,
+                    max_attempts,
+                    ..
+                }) = pressure_retry.as_ref()
                 {
                     network_retry_attempt += 1;
-                    session_arc.lock().await.clear_stream_for_retry();
+                    let delay = Duration::from_millis(*delay_ms);
+                    let reason = if *honoured_retry_after {
+                        "provider_pressure.honoured_retry_after"
+                    } else {
+                        "provider_pressure.retryable_class_backoff"
+                    };
+                    announce_generation_retry(
+                        &app,
+                        &session_arc,
+                        &chat_id,
+                        &chat_label,
+                        &error.message,
+                        *attempt as usize,
+                        *max_attempts as usize,
+                        delay,
+                        reason,
+                    )
+                    .await;
                     if super::retry_policy::sleep_or_abort(
                         std::time::Duration::from_millis(*delay_ms),
                         abort_flag.clone(),

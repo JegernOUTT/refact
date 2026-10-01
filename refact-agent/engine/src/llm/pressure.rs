@@ -16,6 +16,8 @@ pub enum PressureRetry {
     Retry {
         delay_ms: u64,
         honoured_retry_after: bool,
+        attempt: u32,
+        max_attempts: u32,
     },
     GiveUp {
         cause: String,
@@ -31,10 +33,15 @@ pub fn pressure_retry(
         RetryDecision::Retry {
             delay_ms,
             honoured_retry_after,
+            attempt,
             ..
         } => Some(PressureRetry::Retry {
             delay_ms,
             honoured_retry_after,
+            attempt,
+            max_attempts: refact_providers::pressure::pressure_registry()?
+                .config()
+                .max_retry_attempts,
         }),
         RetryDecision::GiveUp { cause, .. } => Some(PressureRetry::GiveUp { cause }),
     }

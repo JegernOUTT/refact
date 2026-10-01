@@ -43,6 +43,9 @@ fn pressure_retry_honours_retry_after() {
         Some(PressureRetry::Retry {
             delay_ms: 3_000..,
             honoured_retry_after: true,
+            attempt: 1,
+            max_attempts: 4,
+            ..
         })
     ));
     uninstall_pressure_registry();
@@ -147,19 +150,20 @@ async fn serve_statuses(
 async fn run_generation(
     statuses: Vec<(u16, Option<&'static str>, &'static str)>,
     max_pressure_retries: usize,
-) -> (usize, String) {
+    pressure_enabled: bool,
+) -> (usize, String, Vec<ChatMessage>) {
     uninstall_pressure_registry();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (hits, server) = serve_statuses(listener, statuses).await;
 
     let mut settings = CoordinationSettings::default();
-    settings.provider_pressure_enabled = true;
+    settings.provider_pressure_enabled = pressure_enabled;
     settings.provider_retry_max_attempts = max_pressure_retries;
     settings.provider_retry_base_backoff_ms = 1;
     settings.provider_retry_max_backoff_ms = 1;
     settings.provider_retry_jitter_per_mille = 0;
-    settings.provider_max_retry_after_ms = 10;
+    settings.provider_max_retry_after_ms = 10_000;
     settings.provider_breaker_failure_threshold = 20;
     install_provider_pressure(&settings).unwrap();
 
@@ -223,21 +227,23 @@ async fn run_generation(
         .messages
         .iter()
         .rev()
-        .find(|message| message.role == "error")
+        .find(|message| message.role == "error" && message.extra.get("retry_status").is_none())
         .map(|message| message.content.content_text_only())
         .unwrap_or_else(|| session.runtime.error.clone().unwrap_or_default());
+    let messages = session.messages.clone();
     let count = hits.load(Ordering::SeqCst);
     drop(session);
     uninstall_pressure_registry();
-    (count, error)
+    (count, error, messages)
 }
 
 #[tokio::test]
 #[serial(provider_pressure, coordination_metrics)]
 async fn generation_401_is_sent_once() {
-    let (count, error) = run_generation(
+    let (count, error, _) = run_generation(
         vec![(401, None, r#"{"error":{"message":"invalid api key"}}"#)],
         2,
+        true,
     )
     .await;
 
@@ -248,7 +254,7 @@ async fn generation_401_is_sent_once() {
 #[tokio::test]
 #[serial(provider_pressure, coordination_metrics)]
 async fn generation_persistent_503_stops_at_pressure_attempt_limit() {
-    let (count, error) = run_generation(
+    let (count, error, messages) = run_generation(
         vec![
             (
                 503,
@@ -258,9 +264,91 @@ async fn generation_persistent_503_stops_at_pressure_attempt_limit() {
             8
         ],
         2,
+        true,
     )
     .await;
 
     assert_eq!(count, 3);
     assert!(error.contains("not retried: HTTP 503"), "{error}");
+    let retry_statuses = retry_statuses(&messages);
+    assert_eq!(retry_statuses.len(), count - 1);
+    assert_eq!(
+        retry_statuses
+            .iter()
+            .map(|status| status["attempt"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert!(retry_statuses
+        .iter()
+        .all(|status| status["max_attempts"] == 2));
+    assert!(messages
+        .iter()
+        .filter(|message| message.extra.get("retry_status").is_some())
+        .all(|message| crate::chat::diagnostics::is_ui_only_message(message)));
+}
+
+fn retry_statuses(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .filter_map(|message| message.extra.get("retry_status"))
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+#[serial(provider_pressure, coordination_metrics)]
+async fn generation_retry_after_status_reports_honoured_delay() {
+    let (count, _, messages) = run_generation(
+        vec![
+            (429, Some("2"), r#"{"error":{"message":"rate limit"}}"#),
+            (
+                503,
+                None,
+                r#"{"error":{"message":"temporarily unavailable"}}"#,
+            ),
+        ],
+        1,
+        true,
+    )
+    .await;
+
+    assert_eq!(count, 2);
+    let retry_statuses = retry_statuses(&messages);
+    assert_eq!(retry_statuses.len(), 1);
+    assert_eq!(retry_statuses[0]["attempt"], 1);
+    assert_eq!(retry_statuses[0]["max_attempts"], 1);
+    assert_eq!(retry_statuses[0]["delay_secs"], 2);
+}
+
+#[tokio::test(start_paused = true)]
+#[serial(provider_pressure, coordination_metrics)]
+async fn generation_without_pressure_registry_uses_legacy_retry_status_budget() {
+    let (count, _, messages) = run_generation(
+        vec![
+            (
+                503,
+                None,
+                r#"{"error":{"message":"temporarily unavailable"}}"#
+            );
+            8
+        ],
+        2,
+        false,
+    )
+    .await;
+
+    assert_eq!(count, 6);
+    let retry_statuses = retry_statuses(&messages);
+    assert_eq!(retry_statuses.len(), count - 1);
+    assert_eq!(
+        retry_statuses
+            .iter()
+            .map(|status| status["attempt"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5]
+    );
+    assert!(retry_statuses.iter().all(|status| {
+        status["max_attempts"] == crate::chat::retry_policy::MAX_LLM_RETRY_ATTEMPTS
+    }));
 }
