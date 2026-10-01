@@ -335,7 +335,11 @@ pub async fn verify_card(
         .iter()
         .map(EvidenceRecord::to_verification_result)
         .collect::<Vec<_>>();
-    let gates = evaluate_gates(&specs, &evidence);
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let mut gates = evaluate_gates(&specs, &evidence);
+    gates
+        .blocks
+        .extend(crate::coordination::disagreement::completion_gate_blocks(&app).await);
     let reported_success = card
         .final_report_structured
         .as_ref()

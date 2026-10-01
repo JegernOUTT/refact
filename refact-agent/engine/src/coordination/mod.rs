@@ -16,6 +16,8 @@ pub mod causal_view;
 pub mod deadlock;
 pub mod decomposition;
 pub mod disagreement;
+#[cfg(test)]
+mod disagreement_gate_tests;
 pub mod error;
 pub mod fact_ledger;
 pub mod file_provenance;

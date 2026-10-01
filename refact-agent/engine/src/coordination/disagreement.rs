@@ -130,6 +130,62 @@ pub fn completion_gate(records: &[DisagreementRecord], blocks: bool) -> Completi
     }
 }
 
+/// Open dissent as completion blocks, when the project's policy makes it a blocker.
+pub async fn completion_gate_blocks(app: &AppState) -> Vec<crate::chat::evidence::GateBlock> {
+    use crate::chat::evidence::{EvidenceVerdict, GateBlock};
+
+    if !blocks_completion() {
+        return Vec::new();
+    }
+    let settings = crate::file_activity::settings();
+    if !settings.enabled {
+        return Vec::new();
+    }
+    let unavailable = || {
+        vec![GateBlock {
+            spec_id: "disagreement:unavailable".to_string(),
+            command: String::new(),
+            verdict: EvidenceVerdict::Unavailable,
+            exit_code: None,
+            reason: "disagreement ledger unavailable; cannot confirm there is no open dissent"
+                .to_string(),
+            from_cache: false,
+        }]
+    };
+    let Some(ledger) = ledger_for(app).await else {
+        return unavailable();
+    };
+    let records = match ledger.list(Some(DisagreementStatus::Open)).await {
+        Ok(records) => records,
+        Err(_) => return unavailable(),
+    };
+    let gate = completion_gate(&records, true);
+    gate.open
+        .into_iter()
+        .filter_map(|record_id| {
+            let record = records
+                .iter()
+                .find(|record| record.record_id == record_id)?;
+            let reason = format!(
+                "open disagreement {} on {}: {}",
+                record.record_id, record.subject, record.claim
+            )
+            .chars()
+            .take(500)
+            .collect();
+            Some(GateBlock {
+                spec_id: format!("disagreement:{record_id}"),
+                command: String::new(),
+                // An open dispute blocks completion; it does not prove either position failed.
+                verdict: EvidenceVerdict::Blocked,
+                exit_code: None,
+                reason,
+                from_cache: false,
+            })
+        })
+        .collect()
+}
+
 fn render_evidence(evidence: &[EvidenceRef]) -> String {
     if evidence.is_empty() {
         return "none presented".to_string();
