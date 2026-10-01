@@ -39,6 +39,7 @@ fn card(id: &str, depends_on: &[&str]) -> BoardCard {
         target_files: vec![],
         scope_guard_mode: Default::default(),
         team_members: vec![],
+        attention: None,
     }
 }
 

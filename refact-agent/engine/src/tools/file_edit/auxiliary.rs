@@ -1296,6 +1296,7 @@ mod tests {
                 team_members: vec![],
                 target_files: vec!["src/allowed.rs".to_string()],
                 scope_guard_mode: mode,
+                attention: None,
             }
         }
 

@@ -912,6 +912,7 @@ mod tests {
             team_members: vec![],
             target_files: Vec::new(),
             scope_guard_mode: Default::default(),
+            attention: None,
         }
     }
 

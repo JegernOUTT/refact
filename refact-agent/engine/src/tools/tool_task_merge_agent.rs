@@ -2158,6 +2158,7 @@ mod worktree_merge_tool_tests {
             team_members: vec![],
             target_files: vec![],
             scope_guard_mode: Default::default(),
+            attention: None,
         }
     }
 

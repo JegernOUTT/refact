@@ -1332,6 +1332,7 @@ mod tests {
                     team_members: vec![],
                     target_files: Vec::new(),
                     scope_guard_mode: Default::default(),
+                    attention: None,
                 }],
                 ..Default::default()
             },
@@ -1498,6 +1499,7 @@ mod tests {
                 team_members: vec![],
                 target_files: vec![],
                 scope_guard_mode: Default::default(),
+                attention: None,
             }
         }
         fn variant(key: &str, finished: bool) -> AbVariantInfo {
@@ -1625,6 +1627,7 @@ mod tests {
                         team_members: vec![],
                         target_files: vec![],
                         scope_guard_mode: Default::default(),
+                        attention: None,
                     });
                     Ok(())
                 })
@@ -1818,6 +1821,7 @@ mod tests {
             team_members: vec![],
             target_files: vec![],
             scope_guard_mode: Default::default(),
+            attention: None,
         }
     }
 

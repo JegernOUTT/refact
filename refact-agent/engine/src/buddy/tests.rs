@@ -4847,6 +4847,7 @@ fn make_board_card(
         team_members: vec![],
         target_files: vec![],
         scope_guard_mode: Default::default(),
+        attention: None,
     }
 }
 
@@ -9212,6 +9213,7 @@ async fn task_abandoned_not_emitted_when_only_session_missing() {
         team_members: vec![],
         target_files: vec![],
         scope_guard_mode: Default::default(),
+        attention: None,
     });
     save_board(gcx.clone(), &task_meta.id, &board)
         .await
@@ -9282,6 +9284,7 @@ async fn task_cluster_duplicate_emits_with_real_touched_files() {
             team_members: vec![],
             target_files: vec!["src/auth.rs".to_string()],
             scope_guard_mode: Default::default(),
+            attention: None,
         });
         save_board(gcx.clone(), task_id, &board).await.unwrap();
     }

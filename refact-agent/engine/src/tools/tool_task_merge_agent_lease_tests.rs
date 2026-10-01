@@ -70,6 +70,7 @@ fn card(worktree_id: &str, branch: &str, root: &Path) -> BoardCard {
         team_members: Vec::new(),
         target_files: Vec::new(),
         scope_guard_mode: Default::default(),
+        attention: None,
     }
 }
 

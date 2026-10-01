@@ -865,6 +865,7 @@ fn build_fix_card(
         target_files: source_card.target_files.clone(),
         scope_guard_mode: source_card.scope_guard_mode,
         team_members: Vec::new(),
+        attention: None,
     }
 }
 
@@ -1082,6 +1083,7 @@ mod tests {
             target_files: vec!["src/lib.rs".to_string()],
             scope_guard_mode: ScopeGuardMode::Off,
             team_members: vec![],
+            attention: None,
         }
     }
 

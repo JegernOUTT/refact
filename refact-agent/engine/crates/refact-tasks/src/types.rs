@@ -179,6 +179,16 @@ pub struct BoardReviewAttestation {
     pub report: VerifierReport,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardAttention {
+    pub reason: String,
+    /// "transient" | "stall" | "no_session" | "unknown"
+    pub kind: String,
+    /// RFC 3339 timestamp of the first flag in the current episode
+    pub since: String,
+    pub count: u32,
+}
+
 pub const OUTCOME_FRAGMENT_SUMMARY: &str = "summary";
 pub const OUTCOME_FRAGMENT_FILES_CHANGED: &str = "files_changed";
 pub const OUTCOME_FRAGMENT_TESTS: &str = "tests_added_or_updated";
@@ -1045,6 +1055,8 @@ pub struct BoardCard {
     pub target_files: Vec<String>,
     #[serde(default)]
     pub scope_guard_mode: ScopeGuardMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<CardAttention>,
 }
 
 fn default_priority() -> String {
@@ -1821,6 +1833,7 @@ mod tests {
             team_members: vec![],
             target_files: vec![],
             scope_guard_mode: ScopeGuardMode::Off,
+            attention: None,
         }
     }
 
@@ -1916,6 +1929,44 @@ mod tests {
         .unwrap();
 
         assert!(card.comments.is_empty());
+    }
+
+    #[test]
+    fn board_card_without_attention_loads_and_does_not_serialize_the_field() {
+        let card: BoardCard = serde_json::from_str(
+            r#"{
+                "id": "T-1",
+                "title": "Legacy card",
+                "column": "planned",
+                "created_at": "2026-05-16T00:00:00Z",
+                "started_at": null,
+                "completed_at": null,
+                "assignee": null,
+                "agent_chat_id": null
+            }"#,
+        )
+        .unwrap();
+
+        assert!(card.attention.is_none());
+        let encoded = serde_json::to_value(&card).unwrap();
+        assert!(encoded.get("attention").is_none());
+    }
+
+    #[test]
+    fn board_card_attention_round_trips() {
+        let mut card = card("T-1", "Attention card", "doing", vec![]);
+        let attention = CardAttention {
+            reason: "Agent has stopped responding".into(),
+            kind: "stall".into(),
+            since: "2026-05-16T00:00:00Z".into(),
+            count: 2,
+        };
+        card.attention = Some(attention.clone());
+
+        let encoded = serde_json::to_string(&card).unwrap();
+        let decoded: BoardCard = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded.attention.as_ref(), Some(&attention));
     }
 
     #[test]

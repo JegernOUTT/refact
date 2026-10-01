@@ -196,6 +196,7 @@ pub async fn handle_create_task(
                 target_files: req.target_files,
                 scope_guard_mode: Default::default(),
                 team_members: vec![],
+                attention: None,
             });
             Ok(())
         })
@@ -474,6 +475,7 @@ pub async fn handle_patch_board(
                     target_files,
                     scope_guard_mode: Default::default(),
                     team_members: vec![],
+                    attention: None,
                 });
             }
             BoardPatch::UpdateCard {
