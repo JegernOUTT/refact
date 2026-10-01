@@ -2030,6 +2030,10 @@ pub(super) async fn resume_agent_inner(
             raised_max_steps.is_some(),
         )
         .await?;
+    let launch_intent = crate::coordination::launch_intents::LaunchIntentSlot::persist_for_agent(
+        &app, agent_id, generation,
+    )
+    .await;
     app.agent_executions.remember_scope(agent_id, accepted_root);
     let (notice_source, notice_text) = continuation_notice(old.status);
     messages.push(event(
@@ -2059,6 +2063,7 @@ pub(super) async fn resume_agent_inner(
     config.abort_flag = Some(abort.clone());
     config.step_progress = None;
     if let Err(error) = persist_run_config(&app, agent_id, &config).await {
+        launch_intent.settle().await;
         finish_resume_error(&app, agent_id, error.clone(), false).await;
         return Err(error);
     }
@@ -2072,9 +2077,12 @@ pub(super) async fn resume_agent_inner(
     let parent_chat_id = parent_chat_id.to_string();
     let rejected_app = app.clone();
     let rejected_agent = agent_id.clone();
+    let task_intent = launch_intent.clone();
     let registration =
         executions.spawn_owned(task_chat, abort.clone(), notify.clone(), async move {
             if !wait_for_acceptance(start_receive, &abort, &notify).await {
+                task_intent.settle().await;
+                app.agent_executions.forget_launch_intent(&child_chat_id);
                 finish_resume_error(
                     &app,
                     &agent_id,
@@ -2101,6 +2109,8 @@ pub(super) async fn resume_agent_inner(
             let permit = match admission {
                 Ok(permit) => permit,
                 Err(error) => {
+                    task_intent.settle().await;
+                    app.agent_executions.forget_launch_intent(&child_chat_id);
                     finish_resume_error(
                         &app,
                         &agent_id,
@@ -2113,17 +2123,24 @@ pub(super) async fn resume_agent_inner(
                 }
             };
             if abort.load(Ordering::Relaxed) || launch_stopping(&app) {
+                task_intent.settle().await;
+                app.agent_executions.forget_launch_intent(&child_chat_id);
                 finish_resume_error(&app, &agent_id, "Cancelled while queued".into(), true).await;
                 return;
             }
             let execution = match app.agent_executions.install(&child_chat_id, permit) {
                 Ok(execution) => execution,
                 Err(error) => {
+                    task_intent.settle().await;
+                    app.agent_executions.forget_launch_intent(&child_chat_id);
                     finish_resume_error(&app, &agent_id, error, true).await;
                     return;
                 }
             };
             let _registration = app.agent_executions.registration(&child_chat_id);
+            app.agent_executions
+                .remember_launch_intent(&child_chat_id, task_intent.clone());
+            task_intent.dispatched().await;
             let validation = async {
                 let current_config = recover_run_config(&app, &parent_chat_id, &agent_id)
                     .await?
@@ -2192,6 +2209,8 @@ pub(super) async fn resume_agent_inner(
             }
             .await;
             if let Err(error) = validation {
+                task_intent.settle().await;
+                app.agent_executions.forget_launch_intent(&child_chat_id);
                 finish_resume_error(&app, &agent_id, error, false).await;
                 return;
             }
@@ -2209,6 +2228,9 @@ pub(super) async fn resume_agent_inner(
                         && !abort.load(Ordering::Relaxed)
                         && !launch_stopping(&app) =>
                 {
+                    if let Some(intent) = app.agent_executions.launch_intent(&child_chat_id) {
+                        intent.acknowledged().await;
+                    }
                     emit_background_agent_update(app.clone(), &running).await;
                     run_background_subchat(app.gcx.clone(), messages, config).await
                 }
@@ -2258,6 +2280,8 @@ pub(super) async fn resume_agent_inner(
                 }
                 Err(error) => app.agents.mark_failed(&agent_id, error).await,
             };
+            task_intent.settle().await;
+            app.agent_executions.forget_launch_intent(&child_chat_id);
             if let Ok(mut record) = terminal {
                 if record.worktree_id.is_some() && record.merge_status.is_none() {
                     if let Ok(updated) = app.agents.set_merge_status(&agent_id, "skipped").await {
@@ -2270,6 +2294,7 @@ pub(super) async fn resume_agent_inner(
             drop(execution);
         });
     if let Err(error) = registration {
+        launch_intent.settle().await;
         finish_resume_error(&rejected_app, &rejected_agent, error.clone(), true).await;
         return Err(error);
     }

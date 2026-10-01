@@ -24,4 +24,7 @@ mod spawn_lifecycle_tests;
 mod launch_intent_spawn_tests;
 
 #[cfg(test)]
+mod launch_intent_resume_tests;
+
+#[cfg(test)]
 mod tests;
