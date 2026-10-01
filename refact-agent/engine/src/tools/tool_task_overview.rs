@@ -34,6 +34,7 @@ impl ToolTaskOverview {
 
 struct OverviewContext {
     task_id: String,
+    task_meta: Option<crate::chat::types::TaskMeta>,
     gcx: Arc<GlobalContext>,
     chat_facade: Arc<dyn ChatSessionFacade>,
     messages: Vec<ChatMessage>,
@@ -98,6 +99,7 @@ async fn overview_context(
         .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())?;
     Ok(OverviewContext {
         task_id,
+        task_meta: ccx_lock.task_meta.clone(),
         gcx: ccx_lock.app.gcx.clone(),
         chat_facade: ccx_lock.app.chat.facade.clone(),
         messages: ccx_lock.messages.clone(),
@@ -410,7 +412,10 @@ async fn markdown_files_in(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-async fn load_memory_pulse(task_dir: &Path) -> Result<MemoryPulse, String> {
+async fn load_memory_pulse(
+    task_dir: &Path,
+    access: &crate::tools::tool_task_memory::MemoryAccessContext,
+) -> Result<MemoryPulse, String> {
     let memories_dir = task_dir.join("memories");
     let archived_dir = memories_dir.join("archived");
     let mut pulse = MemoryPulse::default();
@@ -418,7 +423,27 @@ async fn load_memory_pulse(task_dir: &Path) -> Result<MemoryPulse, String> {
     for (dir, force_archived) in [(&memories_dir, false), (&archived_dir, true)] {
         for path in markdown_files_in(dir).await? {
             let raw = fs::read_to_string(&path).await.unwrap_or_default();
-            let mapping = parse_yaml_mapping(&raw).unwrap_or_default();
+            let Some(mapping) = parse_yaml_mapping(&raw) else {
+                continue;
+            };
+            let namespace: crate::tools::tool_task_memory::MemoryNamespace =
+                match yaml_field(&mapping, "namespace") {
+                    Some(YamlValue::String(value)) => match value.parse() {
+                        Ok(namespace) => namespace,
+                        Err(_) => continue,
+                    },
+                    Some(_) => continue,
+                    None => crate::tools::tool_task_memory::MemoryNamespace::default(),
+                };
+            match access.decide(&namespace) {
+                crate::tools::tool_task_memory::MemoryAccessDecision::Allowed => {}
+                crate::tools::tool_task_memory::MemoryAccessDecision::SupervisorOverride => {
+                    access
+                        .audit_supervisor_grant("task_overview", &path, &namespace)
+                        .await;
+                }
+                crate::tools::tool_task_memory::MemoryAccessDecision::Denied => continue,
+            }
             let status = if force_archived {
                 "archived".to_string()
             } else {
@@ -755,7 +780,13 @@ impl Tool for ToolTaskOverview {
         )
         .await?;
         let task_dir = storage::find_task_dir(context.gcx.clone(), &context.task_id).await?;
-        let memory_pulse = load_memory_pulse(&task_dir).await?;
+        let access = crate::tools::tool_task_memory::memory_access_context(
+            context.gcx.clone(),
+            context.task_meta.as_ref(),
+            &context.task_id,
+        )
+        .await;
+        let memory_pulse = load_memory_pulse(&task_dir, &access).await?;
         let (documents, document_activities) = load_documents(&task_dir).await?;
         let mut activities = card_activity_entries(&board);
         activities.extend(memory_pulse.activities.clone());
@@ -987,3 +1018,7 @@ mod tests {
         assert!(output.chars().count() <= MAX_REPORT_CHARS);
     }
 }
+
+#[cfg(test)]
+#[path = "tool_task_overview_memory_tests.rs"]
+mod memory_pulse_tests;

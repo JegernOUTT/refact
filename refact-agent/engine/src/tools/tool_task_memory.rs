@@ -663,7 +663,7 @@ impl MemoryAccessContext {
         }
     }
 
-    async fn audit_supervisor_grant(
+    pub(crate) async fn audit_supervisor_grant(
         &self,
         surface: &str,
         path: &Path,
