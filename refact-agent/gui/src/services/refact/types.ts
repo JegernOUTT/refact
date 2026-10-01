@@ -114,6 +114,31 @@ export type DeliverableStatus = {
   evidence_missing: boolean;
 };
 
+export type HandoffGapCategory =
+  | "missing_file"
+  | "missing_decision"
+  | "missing_message_context"
+  | "ambiguous_requirement"
+  | "missing_verification_command"
+  | "expected_discovery"
+  | "other";
+
+export type HandoffGap = {
+  category: HandoffGapCategory;
+  detail: string;
+  path?: string;
+  extra_steps?: number;
+};
+
+export type HandoffReport = {
+  sufficiency: "unknown" | "sufficient" | "gaps_reported";
+  source: string;
+  claimed_by: string;
+  claimed_at_ms: number;
+  gaps: HandoffGap[];
+  notes: string[];
+};
+
 export interface BackgroundAgentToolFields {
   background_agent_id?: string;
   background_agent_kind?: BackgroundAgentKind;
@@ -157,6 +182,7 @@ export interface BackgroundAgentSummary {
   cost_usd?: number | null;
   deliverable?: DeliverableContract | null;
   deliverable_status?: DeliverableStatus | null;
+  handoff?: HandoffReport;
 }
 
 function isToolCall(call: unknown): call is ToolCall {

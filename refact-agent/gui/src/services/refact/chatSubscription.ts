@@ -2,6 +2,9 @@ import { buildApiUrl, type EngineApiConfig } from "./apiUrl";
 import type {
   BackgroundAgentSummary,
   ChatMessage,
+  HandoffGap,
+  HandoffGapCategory,
+  HandoffReport,
   GoalSnapshot,
   PendingQuestionSet,
   GoalStatus,
@@ -153,6 +156,7 @@ type BackgroundAgentSummaryWithDefaults = Omit<
   | "title"
   | "deliverable"
   | "deliverable_status"
+  | "handoff"
 > & {
   target_files?: unknown;
   edited_files?: unknown;
@@ -172,6 +176,7 @@ type BackgroundAgentSummaryWithDefaults = Omit<
   title?: unknown;
   deliverable?: unknown;
   deliverable_status?: unknown;
+  handoff?: unknown;
 };
 
 export type BackgroundAgentSummaryWire =
@@ -210,6 +215,7 @@ type BackgroundAgentSummaryCamelCase = {
   costUsd?: number | null;
   deliverable?: unknown;
   deliverableStatus?: unknown;
+  handoff?: unknown;
 };
 
 export type DeltaOp =
@@ -1067,6 +1073,86 @@ function normalizeDeliverableStatus(
   };
 }
 
+const HANDOFF_GAP_CATEGORIES: readonly HandoffGapCategory[] = [
+  "missing_file",
+  "missing_decision",
+  "missing_message_context",
+  "ambiguous_requirement",
+  "missing_verification_command",
+  "expected_discovery",
+  "other",
+];
+
+function normalizeHandoffGap(value: unknown): HandoffGap | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const row = value as Record<string, unknown>;
+  if (
+    typeof row.category !== "string" ||
+    !HANDOFF_GAP_CATEGORIES.includes(row.category as HandoffGapCategory) ||
+    typeof row.detail !== "string" ||
+    (row.path !== undefined &&
+      row.path !== null &&
+      typeof row.path !== "string") ||
+    (row.extra_steps !== undefined &&
+      row.extra_steps !== null &&
+      (typeof row.extra_steps !== "number" ||
+        !Number.isSafeInteger(row.extra_steps) ||
+        row.extra_steps < 0))
+  ) {
+    return undefined;
+  }
+  return {
+    category: row.category as HandoffGapCategory,
+    detail: Array.from(row.detail).slice(0, 300).join(""),
+    ...(typeof row.path === "string"
+      ? { path: Array.from(row.path).slice(0, 300).join("") }
+      : {}),
+    ...(typeof row.extra_steps === "number"
+      ? { extra_steps: row.extra_steps }
+      : {}),
+  };
+}
+
+function normalizeHandoff(value: unknown): HandoffReport | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) return undefined;
+  const row = value as Record<string, unknown>;
+  if (
+    (row.sufficiency !== "unknown" &&
+      row.sufficiency !== "sufficient" &&
+      row.sufficiency !== "gaps_reported") ||
+    typeof row.source !== "string" ||
+    typeof row.claimed_by !== "string" ||
+    typeof row.claimed_at_ms !== "number" ||
+    !Number.isSafeInteger(row.claimed_at_ms) ||
+    !Array.isArray(row.gaps) ||
+    row.gaps.length > 100 ||
+    (row.notes !== undefined &&
+      (!Array.isArray(row.notes) ||
+        row.notes.length > 100 ||
+        !row.notes.every((note) => typeof note === "string")))
+  ) {
+    return undefined;
+  }
+  const notes = row.notes ?? [];
+  const gaps: HandoffGap[] = [];
+  for (const value of row.gaps) {
+    const gap = normalizeHandoffGap(value);
+    if (gap === undefined) return undefined;
+    gaps.push(gap);
+  }
+  return {
+    sufficiency: row.sufficiency,
+    source: row.source,
+    claimed_by: row.claimed_by,
+    claimed_at_ms: row.claimed_at_ms,
+    gaps,
+    notes: notes.map((note) => Array.from(note).slice(0, 300).join("")),
+  };
+}
+
 function safeAgent(agent: BackgroundAgentSummaryWire): BackgroundAgentSummary {
   if (!("agent_id" in agent)) {
     return safeAgent({
@@ -1101,6 +1187,7 @@ function safeAgent(agent: BackgroundAgentSummaryWire): BackgroundAgentSummary {
       cost_usd: agent.costUsd,
       deliverable: agent.deliverable,
       deliverable_status: agent.deliverableStatus,
+      handoff: agent.handoff,
     });
   }
 
@@ -1144,6 +1231,7 @@ function safeAgent(agent: BackgroundAgentSummaryWire): BackgroundAgentSummary {
         : normalizeNonNegativeNumber(agent.cost_usd),
     deliverable: normalizeDeliverable(agent.deliverable),
     deliverable_status: normalizeDeliverableStatus(agent.deliverable_status),
+    handoff: normalizeHandoff(agent.handoff),
   };
 }
 

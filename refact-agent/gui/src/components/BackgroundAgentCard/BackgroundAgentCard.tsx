@@ -12,6 +12,7 @@ import type {
   BackgroundAgentMergeStatus,
   BackgroundAgentSummary,
   DeliverableStatus,
+  HandoffGap,
 } from "../../services/refact/types";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import { selectBackgroundAgent } from "../../features/Chat/Thread/selectors";
@@ -132,6 +133,67 @@ function deliverableTitle(status: DeliverableStatus): string {
   }
   return parts.join(" · ");
 }
+
+function handoffItem(gap: HandoffGap): string {
+  const detail = gap.detail.trim() || gap.category.replace(/_/g, " ");
+  const item = gap.path ? `${detail} (${gap.path})` : detail;
+  const characters = Array.from(item);
+  return characters.length > 300
+    ? `${characters.slice(0, 299).join("")}…`
+    : item;
+}
+
+const HandoffSection: React.FC<{ agent: BackgroundAgentSummary }> = ({
+  agent,
+}) => {
+  const gaps = agent.handoff?.gaps ?? [];
+  const discovered = gaps.filter(
+    (gap) =>
+      gap.category !== "missing_decision" &&
+      gap.category !== "ambiguous_requirement",
+  );
+  const guessed = gaps.filter(
+    (gap) =>
+      gap.category === "missing_decision" ||
+      gap.category === "ambiguous_requirement",
+  );
+  const groups = [
+    { label: "Had to discover", items: discovered },
+    { label: "Had to guess", items: guessed },
+  ];
+
+  return (
+    <section className={styles.handoffSection} aria-label="Handoff">
+      <h3 className={styles.detailLabel}>Handoff</h3>
+      {groups.every(({ items }) => items.length === 0) ? (
+        <p className={styles.handoffEmpty}>Nothing declared</p>
+      ) : (
+        groups.map(({ label, items }) =>
+          items.length === 0 ? null : (
+            <div className={styles.handoffListGroup} key={label}>
+              <h4 className={styles.handoffListLabel}>{label}</h4>
+              <ul className={styles.handoffList}>
+                {items.slice(0, 10).map((gap, index) => (
+                  <li
+                    className={styles.handoffItem}
+                    key={`${gap.category}-${index}`}
+                  >
+                    {handoffItem(gap)}
+                  </li>
+                ))}
+              </ul>
+              {items.length > 10 && (
+                <span className={styles.handoffMore}>
+                  +{items.length - 10} more
+                </span>
+              )}
+            </div>
+          ),
+        )
+      )}
+    </section>
+  );
+};
 
 function formatUsage(agent: BackgroundAgentSummary): string | null {
   const hasTokens = (agent.tokens_used ?? 0) > 0;
@@ -448,6 +510,8 @@ const ExpandedDetail: React.FC<{
           )}
         </div>
       )}
+
+      {isTerminal && <HandoffSection agent={agent} />}
 
       {usage && <span className={styles.detailUsage}>{usage}</span>}
 
