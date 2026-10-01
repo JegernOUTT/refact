@@ -1203,6 +1203,15 @@ impl BackgroundAgentRegistry {
             .map(|record| record.agent_id.clone())
     }
 
+    pub fn find_agent_id_by_child_chat_id_now(&self, chat_id: &str) -> Option<String> {
+        self.records
+            .try_read()
+            .ok()?
+            .values()
+            .find(|record| record.child_chat_id.as_deref() == Some(chat_id))
+            .map(|record| record.agent_id.clone())
+    }
+
     pub async fn list_descendants(&self, agent_id: &str) -> Vec<BackgroundAgent> {
         let records = self.records.read().await;
         let Some(root) = records.get(agent_id) else {

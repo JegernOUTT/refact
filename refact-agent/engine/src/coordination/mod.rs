@@ -14,6 +14,8 @@ pub mod catalog;
 pub mod causal;
 pub mod causal_view;
 pub mod deadlock;
+#[cfg(test)]
+mod deadlock_identity_tests;
 pub mod decomposition;
 pub mod disagreement;
 #[cfg(test)]

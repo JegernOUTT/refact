@@ -1384,10 +1384,21 @@ impl Tool for ToolAgentWait {
             settings.agent_wait_default_ms,
             settings.agent_wait_max_ms,
         )?;
-        let (app, parent_chat_id) = background_agent_context(&ccx).await;
-        let waiting =
-            crate::coordination::deadlock::declare_agent_wait(&app, &parent_chat_id, &targets);
+        let (app, parent_chat_id, background_agent_id) = {
+            let context = ccx.lock().await;
+            (
+                context.app.clone(),
+                context.chat_id.clone(),
+                context.background_agent_id.clone(),
+            )
+        };
         if targets.len() == 1 {
+            let waiting = crate::coordination::deadlock::declare_agent_wait(
+                &app,
+                &parent_chat_id,
+                background_agent_id.as_deref(),
+                &targets,
+            );
             let agent_id = &targets[0];
             let record = tokio::select! {
                 settled = app
@@ -1422,6 +1433,12 @@ impl Tool for ToolAgentWait {
                 already_terminal = Some((agent_id.clone(), record));
             }
         }
+        let waiting = crate::coordination::deadlock::declare_agent_wait(
+            &app,
+            &parent_chat_id,
+            background_agent_id.as_deref(),
+            &targets,
+        );
         let waits = targets.iter().map(|agent_id| {
             let app = app.clone();
             let parent_chat_id = parent_chat_id.clone();

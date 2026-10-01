@@ -55,6 +55,7 @@ pub fn resolve(app: &AppState, principal: &str) -> Option<RunKey> {
 pub fn declare_agent_wait(
     app: &AppState,
     waiter: &str,
+    background_agent_id: Option<&str>,
     targets: &[String],
 ) -> refact_work_core::WaitHandle {
     let tickets = app.work_scheduler.snapshot().tickets;
@@ -62,11 +63,21 @@ pub fn declare_agent_wait(
         .iter()
         .map(|ticket| (ticket.run.work.id.as_str(), &ticket.run))
         .collect();
+    let waiter_id = background_agent_id
+        .map(|agent_id| agent_id.to_string())
+        .or_else(|| app.agents.find_agent_id_by_child_chat_id_now(waiter))
+        .unwrap_or_else(|| waiter.to_string());
     let from = by_id
-        .get(waiter)
+        .get(waiter_id.as_str())
         .map(|run| (*run).clone())
-        .unwrap_or_else(|| refact_work_core::WorkKey::trajectory(waiter).run(0));
-    let selected: Vec<WaitTarget> = match by_id.contains_key(waiter) {
+        .unwrap_or_else(|| {
+            if waiter_id != waiter {
+                refact_work_core::WorkKey::background_agent(waiter_id.clone()).run(0)
+            } else {
+                refact_work_core::WorkKey::trajectory(waiter).run(0)
+            }
+        });
+    let selected: Vec<WaitTarget> = match by_id.contains_key(waiter_id.as_str()) {
         true => targets
             .iter()
             .filter_map(|id| by_id.get(id.as_str()))
@@ -130,7 +141,11 @@ pub fn capture(app: &AppState) -> WaitGraph {
         let target = if question.kind == QuestionKind::UserInput {
             Some(WaitTarget::User)
         } else {
-            target_for(&question.answerer, &by_id)
+            let answerer = app
+                .agents
+                .find_agent_id_by_child_chat_id_now(&question.answerer)
+                .unwrap_or_else(|| question.answerer.clone());
+            target_for(&answerer, &by_id)
         };
         let Some(target) = target else {
             continue;
@@ -507,6 +522,7 @@ mod tests {
         let waiting = declare_agent_wait(
             &app,
             "parent",
+            None,
             &[
                 "first".to_string(),
                 "second".to_string(),
@@ -533,7 +549,7 @@ mod tests {
         drop(waiting);
         assert!(app.wait_graph.edges().is_empty());
 
-        let untracked = declare_agent_wait(&app, "never-admitted", &["first".to_string()]);
+        let untracked = declare_agent_wait(&app, "never-admitted", None, &["first".to_string()]);
         assert!(!untracked.is_tracked());
         assert!(app.wait_graph.edges().is_empty());
     }
