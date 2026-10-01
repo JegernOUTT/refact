@@ -80,7 +80,12 @@ pub(crate) async fn dispatch_authorized_calls(
             .with_tool(call.tool, Some(arguments));
         match run_control_hooks(app.clone(), HookEvent::PreToolUse, payload).await {
             ControlVerdict::Allow => {}
-            ControlVerdict::Deny(reason) => return Err(format!("Blocked by hook: {reason}")),
+            ControlVerdict::Deny(reason) => {
+                return Err(format!(
+                    "code mode call {index} ({}) Blocked by hook: {reason}",
+                    call.tool
+                ));
+            }
             ControlVerdict::Rewrite(value) => {
                 let rewritten =
                     revalidate_rewritten_tool_call(call.tool, &value, hook_authority.as_ref())

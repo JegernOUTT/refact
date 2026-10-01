@@ -865,6 +865,9 @@ async fn get_builtin_tools(
         Box::new(crate::tools::tool_team::ToolTeamRoleGrant {
             config_path: config_path.clone(),
         }),
+        Box::new(crate::tools::tool_code_mode::ToolCodeMode {
+            config_path: config_path.clone(),
+        }),
         Box::new(crate::tools::tool_agent_interact::ToolProgressReport {
             config_path: config_path.clone(),
         }),

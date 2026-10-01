@@ -281,6 +281,7 @@ tools:
   - agents_overview
   - agent_message
   - agent_mailbox
+  - code_mode
   - agent_peer_grant
   - team_seat
   - team_role_grant
@@ -379,6 +380,8 @@ tool_confirm:
     - match: "team_seat"
       action: auto
     - match: "team_role_grant"
+      action: ask
+    - match: "code_mode"
       action: ask
     - match: "progress_report"
       action: auto
