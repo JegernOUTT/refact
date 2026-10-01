@@ -160,7 +160,7 @@ pub async fn store_verifier_report(
     let expected_state = expected_state.cloned();
     match storage::update_board_atomic(gcx, task_id, move |board| {
         let board_rev = board.rev;
-        let Some(card) = board.get_card_mut(&card_id) else {
+        let Some(card) = board.get_card(&card_id) else {
             if expected_state.is_some() {
                 return Err(stale_verifier_error(&task_id_owned, &card_id));
             }
@@ -171,6 +171,10 @@ pub async fn store_verifier_report(
                 return Err(stale_verifier_error(&task_id_owned, &card_id));
             }
         }
+        board.review_attestations.remove(&card_id);
+        let card = board
+            .get_card_mut(&card_id)
+            .ok_or_else(|| format!("Card {} not found", card_id))?;
         card.verifier_report = Some(report.clone());
         append_verifier_status(card, &report);
         board.attach_card_evidence(

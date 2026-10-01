@@ -70,7 +70,9 @@ impl Tool for ToolTaskBoardAuthority {
             "add_reviewer" | "remove_reviewer" | "transfer_owner" => {
                 Some(verified_target(gcx.clone(), &task_id, args).await?)
             }
-            "claim_owner" | "set_review_policy" | "get" | "override_dependencies" => None,
+            "claim_owner" | "set_review_policy" | "get" | "override_dependencies" | "attest" => {
+                None
+            }
             other => return Err(format!("Unknown board authority action '{other}'")),
         };
         let policy = (action == "set_review_policy")
@@ -114,6 +116,29 @@ impl Tool for ToolTaskBoardAuthority {
                 "overridden_by": actor,
                 "reason": reason,
                 "unsatisfied_dependencies": unsatisfied,
+                "rev": board.rev,
+            });
+            return Ok((
+                false,
+                vec![ContextEnum::ChatMessage(ChatMessage {
+                    role: "tool".to_string(),
+                    content: ChatContent::SimpleText(receipt.to_string()),
+                    tool_call_id: tool_call_id.clone(),
+                    ..Default::default()
+                })],
+            ));
+        }
+        if action == "attest" {
+            let card_id = required_string(args, "card_id")?;
+            let (board, attestation) =
+                storage::attest_card_review(gcx, &task_id, &card_id, &actor).await?;
+            let receipt = json!({
+                "type": "task_board_authority",
+                "action": action,
+                "task_id": task_id,
+                "card_id": card_id,
+                "reviewer_chat_id": attestation.reviewer_chat_id,
+                "reviewed_at": attestation.reviewed_at,
                 "rev": board.rev,
             });
             return Ok((
@@ -201,15 +226,15 @@ impl Tool for ToolTaskBoardAuthority {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Claim or transfer task-board ownership, manage authenticated reviewers, set the explicit self-review policy, record an explicit dependency override for one card, or inspect current board authority.".to_string(),
+            description: "Claim or transfer task-board ownership, manage authenticated reviewers, set the explicit self-review policy, attest a done card's passing verifier report as an assigned reviewer, record an explicit dependency override for one card, or inspect current board authority.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["get", "claim_owner", "add_reviewer", "remove_reviewer", "transfer_owner", "set_review_policy", "override_dependencies"]},
+                    "action": {"type": "string", "enum": ["get", "claim_owner", "add_reviewer", "remove_reviewer", "transfer_owner", "set_review_policy", "override_dependencies", "attest"]},
                     "task_id": {"type": "string"},
                     "target_chat_id": {"type": "string"},
                     "review_policy": {"type": "string", "enum": ["owner_allowed", "independent_required"]},
-                    "card_id": {"type": "string", "description": "Card whose unsatisfied dependencies are overridden by override_dependencies"},
+                    "card_id": {"type": "string", "description": "Card targeted by override_dependencies or attest"},
                     "reason": {"type": "string", "description": "Recorded justification for override_dependencies"}
                 },
                 "required": ["action"]

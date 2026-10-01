@@ -13,8 +13,8 @@ use crate::global_context::GlobalContext;
 use crate::files_correction::get_project_dirs;
 use super::board_lock::{self, BoardLockGuard, BOARD_LOCK_FILE};
 use super::types::{
-    BoardCard, BoardReviewPolicy, BoardRuleViolation, CardClaim, ClaimOutcome, DependencyOverride,
-    TaskBoard, TaskMeta, TaskStatus, TrajectoryInfo,
+    BoardCard, BoardReviewAttestation, BoardReviewPolicy, BoardRuleViolation, CardClaim,
+    ClaimOutcome, DependencyOverride, TaskBoard, TaskMeta, TaskStatus, TrajectoryInfo,
 };
 use crate::coordination::error::WorkError;
 use super::events::{emit_task_event, emit_task_updated, TaskEvent};
@@ -410,6 +410,59 @@ where
         Some(reviewer_chat_id.to_string()),
         updater,
     )
+    .await
+}
+
+pub async fn attest_card_review(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    card_id: &str,
+    reviewer_chat_id: &str,
+) -> Result<(TaskBoard, BoardReviewAttestation), String> {
+    let allow_self_review = board_allows_self_review(gcx.clone(), task_id).await?;
+    let card_id = card_id.to_string();
+    let reviewer_chat_id = reviewer_chat_id.to_string();
+    let reviewer_for_auth = reviewer_chat_id.clone();
+    let reviewer_for_update = reviewer_chat_id.clone();
+    update_board_atomic_as_reviewer(gcx, task_id, &reviewer_for_auth, move |board| {
+        if board.owner_chat_id.as_deref() == Some(reviewer_for_update.as_str()) {
+            return Err("task board owner cannot attest a review".to_string());
+        }
+        let card = board
+            .get_card(&card_id)
+            .ok_or_else(|| format!("Card {} not found", card_id))?;
+        if card.column != "done" {
+            return Err("only a done card can be attested".to_string());
+        }
+        let report = card
+            .verifier_report
+            .clone()
+            .ok_or_else(|| "no verifier report to attest; wait for the verifier".to_string())?;
+        if !report.passed {
+            return Err("cannot attest a failing verifier report".to_string());
+        }
+        if !allow_self_review
+            && board
+                .card_claims
+                .get(&card_id)
+                .is_some_and(|claim| claim.claimant_chat_id == reviewer_for_update)
+        {
+            return Err("task review policy refuses self-review by the card claimant".to_string());
+        }
+        let reviewed_at = Utc::now().to_rfc3339();
+        board.attest_review(
+            &card_id,
+            &reviewer_for_update,
+            &report,
+            reviewed_at,
+            allow_self_review,
+        )?;
+        board
+            .review_attestations
+            .get(&card_id)
+            .cloned()
+            .ok_or_else(|| "review attestation was not stored".to_string())
+    })
     .await
 }
 
