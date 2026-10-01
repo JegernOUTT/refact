@@ -17,6 +17,7 @@ use refact_core::active_context::{
     active_context, legacy_rebuild_input, requires_explicit_rebuild, make_reconstruction_report,
     ReconstructionMetadata,
 };
+use refact_chat_api::role_projection::{fold_role_messages, ProjectedRole, ProjectionLimits};
 
 #[derive(Clone, Debug)]
 pub struct PendingContextRebuild {
@@ -93,6 +94,14 @@ fn pending_tools(messages: &[ChatMessage]) -> bool {
         }
     }
     !pending.is_empty()
+}
+
+pub(crate) fn fold_controls_for_rebuild(
+    messages: Vec<ChatMessage>,
+    limits: ProjectionLimits,
+) -> Vec<ChatMessage> {
+    let messages = fold_role_messages(ProjectedRole::Plan, &messages, limits);
+    fold_role_messages(ProjectedRole::Goal, &messages, limits)
 }
 
 fn idle(session: &ChatSession) -> bool {
@@ -709,6 +718,7 @@ pub async fn rebuild_session(
     }
     let (
         messages,
+        rebuild_input,
         thread,
         version,
         attempt,
@@ -746,6 +756,10 @@ pub async fn rebuild_session(
         if serde_json::to_value(&messages).ok() != serde_json::to_value(&hook_messages).ok() {
             return Err("Chat changed while PreCompact hook was running".into());
         }
+        let rebuild_input = fold_controls_for_rebuild(
+            messages.clone(),
+            crate::runtime_settings::plan_projection_limits(),
+        );
         let messages_before = messages.len();
         session.last_rebuild_attempt_version = Some(session.trajectory_version);
         session.compression_attempt_generation =
@@ -759,6 +773,7 @@ pub async fn rebuild_session(
         status(&mut session, CompressionPhase::Running, None);
         (
             messages,
+            rebuild_input,
             session.thread.clone(),
             session.trajectory_version,
             attempt,
@@ -861,7 +876,7 @@ pub async fn rebuild_session(
     let outcome = crate::agentic::mode_transition::reconstruct_context(
         gcx.clone(),
         crate::agentic::mode_transition::ReconstructionRequest {
-            messages: &messages,
+            messages: &rebuild_input,
             target_mode: &thread.mode,
             target_mode_description: "Continue the current conversation in the same mode",
             parent_chat_id: Some(&thread.id),

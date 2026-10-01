@@ -1014,7 +1014,7 @@ fn goal_base_exists_including_pending(session: &ChatSession) -> bool {
 }
 
 fn goal_delta_count_including_pending(session: &ChatSession) -> usize {
-    crate::chat::goal_role::goal_delta_events(&session.accepted_control_projection()).len()
+    crate::chat::goal_role::effective_goal_delta_count(&session.accepted_control_projection())
 }
 
 fn update_goal_result(

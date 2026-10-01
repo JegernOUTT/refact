@@ -134,7 +134,9 @@ fn has_base_plan_including_queued(session: &ChatSession) -> Result<bool, String>
 }
 
 fn plan_delta_count_including_queued(session: &ChatSession) -> Result<usize, String> {
-    Ok(plan_role::try_plan_delta_events(&session.try_accepted_control_projection()?)?.len())
+    Ok(plan_role::effective_plan_delta_count(
+        &session.try_accepted_control_projection()?,
+    ))
 }
 
 fn string_arg(args: &HashMap<String, Value>, name: &str) -> Result<String, String> {

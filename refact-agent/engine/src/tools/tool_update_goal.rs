@@ -114,7 +114,9 @@ fn has_base_goal_including_queued(session: &ChatSession) -> Result<bool, String>
 }
 
 fn goal_delta_count_including_queued(session: &ChatSession) -> Result<usize, String> {
-    Ok(goal_role::goal_delta_events(&session.try_accepted_control_projection()?).len())
+    Ok(goal_role::effective_goal_delta_count(
+        &session.try_accepted_control_projection()?,
+    ))
 }
 
 fn string_arg(args: &HashMap<String, Value>, name: &str) -> Result<String, String> {

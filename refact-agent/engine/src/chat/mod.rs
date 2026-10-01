@@ -21,6 +21,8 @@ pub(crate) mod goal_validation_hook;
 #[cfg(test)]
 mod goal_validation_hook_tests;
 #[cfg(test)]
+mod plan_fold_compaction_tests;
+#[cfg(test)]
 pub(crate) use generation::prepare_project_work_context;
 pub(crate) mod evidence;
 pub(crate) mod evidence_cache;
