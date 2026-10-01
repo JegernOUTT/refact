@@ -9,8 +9,11 @@
 use refact_core::chat_types::ChatMessage;
 use serde::{Deserialize, Serialize};
 
+use crate::internal_roles::{self, EventSubkind};
+
 pub const DEFAULT_CHECKPOINT_DELTA_THRESHOLD: usize = 24;
 pub const DEFAULT_PROJECTION_MAX_CHARS: usize = 32 * 1024;
+pub const CHECKPOINT_SOURCE: &str = "context_rebuild.checkpoint";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectionLimits {
@@ -100,13 +103,39 @@ pub fn delta_revision(message: &ChatMessage, index: usize) -> u64 {
         .unwrap_or(index as u64 + 1)
 }
 
+pub fn checkpoint_provenance(message: &ChatMessage) -> Option<CheckpointProvenance> {
+    if message.role != internal_roles::EVENT_ROLE {
+        return None;
+    }
+    let event = message.extra.get("event")?;
+    if !matches!(
+        event.get("subkind").and_then(serde_json::Value::as_str),
+        Some("plan_delta" | "goal_delta")
+    ) || event.get("source").and_then(serde_json::Value::as_str) != Some(CHECKPOINT_SOURCE)
+    {
+        return None;
+    }
+    serde_json::from_value(event.get("payload")?.get("checkpoint")?.clone()).ok()
+}
+
 pub fn project_role(
     role: ProjectedRole,
     base: &ApprovedBase<'_>,
     deltas: &[ProjectedDelta<'_>],
     limits: ProjectionLimits,
 ) -> RoleProjection {
-    let delta_count = deltas.len();
+    project_role_with_prefold(role, base, None, deltas, limits)
+}
+
+pub fn project_role_with_prefold(
+    role: ProjectedRole,
+    base: &ApprovedBase<'_>,
+    prefold: Option<&CheckpointProvenance>,
+    deltas: &[ProjectedDelta<'_>],
+    limits: ProjectionLimits,
+) -> RoleProjection {
+    let prefold_count = prefold.map_or(0, |checkpoint| checkpoint.folded_deltas);
+    let delta_count = prefold_count + deltas.len();
     if delta_count == 0 {
         return RoleProjection {
             text: base.body.to_string(),
@@ -114,40 +143,47 @@ pub fn project_role(
             checkpoint: None,
         };
     }
-    let full = format!(
-        "{}{}{}{}{}",
-        base.body,
-        BASE_SEPARATOR,
-        role.updates_heading(),
-        NOTE_SEPARATOR,
-        join_notes(deltas)
-    );
-    if delta_count <= limits.checkpoint_after_deltas && full.chars().count() <= limits.max_chars {
-        return RoleProjection {
-            text: full,
-            delta_count,
-            checkpoint: None,
-        };
+    if prefold.is_none() && !deltas.is_empty() {
+        let full = format!(
+            "{}{}{}{}{}",
+            base.body,
+            BASE_SEPARATOR,
+            role.updates_heading(),
+            NOTE_SEPARATOR,
+            join_notes(deltas)
+        );
+        if delta_count <= limits.checkpoint_after_deltas && full.chars().count() <= limits.max_chars
+        {
+            return RoleProjection {
+                text: full,
+                delta_count,
+                checkpoint: None,
+            };
+        }
     }
-    checkpointed_projection(role, base, deltas, limits)
+    checkpointed_projection(role, base, prefold, deltas, limits)
 }
 
 fn checkpointed_projection(
     role: ProjectedRole,
     base: &ApprovedBase<'_>,
+    prefold: Option<&CheckpointProvenance>,
     deltas: &[ProjectedDelta<'_>],
     limits: ProjectionLimits,
 ) -> RoleProjection {
-    let delta_count = deltas.len();
+    let prefold_count = prefold.map_or(0, |checkpoint| checkpoint.folded_deltas);
+    let delta_count = prefold_count + deltas.len();
     let base_chars = base.body.chars().count() + BASE_SEPARATOR.chars().count();
-    let max_kept = limits.checkpoint_after_deltas.min(delta_count);
+    let max_kept = limits.checkpoint_after_deltas.min(deltas.len());
     let mut kept = 0usize;
     let mut kept_chars = 0usize;
     for next in 1..=max_kept {
-        let note_chars = deltas[delta_count - next].note.chars().count();
+        let note_chars = deltas[deltas.len() - next].note.chars().count();
         let grown = kept_chars + note_chars + if next == 1 { 0 } else { 2 };
-        let folded = delta_count - next;
-        let header = checkpoint_header(role, base, deltas, folded, delta_count);
+        let folded_new = deltas.len() - next;
+        let folded = prefold_count + folded_new;
+        let revision = revision_for_fold(prefold, deltas, folded_new);
+        let header = checkpoint_header(role, base, revision, folded, delta_count);
         let total = base_chars + header.chars().count() + 2 + grown;
         if total > limits.max_chars {
             break;
@@ -155,22 +191,24 @@ fn checkpointed_projection(
         kept = next;
         kept_chars = grown;
     }
-    let folded = delta_count - kept;
+    let folded_new = deltas.len() - kept;
+    let folded = prefold_count + folded_new;
+    let revision = revision_for_fold(prefold, deltas, folded_new);
     let mut text = format!(
         "{}{}{}",
         base.body,
         BASE_SEPARATOR,
-        checkpoint_header(role, base, deltas, folded, delta_count)
+        checkpoint_header(role, base, revision, folded, delta_count)
     );
     if kept > 0 {
         text.push_str(NOTE_SEPARATOR);
-        text.push_str(&join_notes(&deltas[folded..]));
+        text.push_str(&join_notes(&deltas[folded_new..]));
     }
     RoleProjection {
         text,
         delta_count,
         checkpoint: Some(CheckpointProvenance {
-            revision: revision_at(deltas, folded),
+            revision,
             folded_deltas: folded,
             approved_message_id: base.message_id.to_string(),
             approved_version: base.version,
@@ -183,7 +221,7 @@ fn checkpointed_projection(
 fn checkpoint_header(
     role: ProjectedRole,
     base: &ApprovedBase<'_>,
-    deltas: &[ProjectedDelta<'_>],
+    revision: u64,
     folded: usize,
     total: usize,
 ) -> String {
@@ -192,7 +230,7 @@ fn checkpoint_header(
 approved base v{} installed by {} at {}; the full delta history stays on disk and is available \
 from get_{}(include_history=true)]",
         role.updates_heading(),
-        revision_at(deltas, folded),
+        revision,
         total,
         folded,
         role.noun(),
@@ -201,6 +239,18 @@ from get_{}(include_history=true)]",
         base.created_at_ms,
         role.noun(),
     )
+}
+
+fn revision_for_fold(
+    prefold: Option<&CheckpointProvenance>,
+    deltas: &[ProjectedDelta<'_>],
+    folded_new: usize,
+) -> u64 {
+    if folded_new == 0 {
+        prefold.map_or(0, |checkpoint| checkpoint.revision)
+    } else {
+        revision_at(deltas, folded_new)
+    }
 }
 
 fn revision_at(deltas: &[ProjectedDelta<'_>], folded: usize) -> u64 {
@@ -217,6 +267,198 @@ fn join_notes(deltas: &[ProjectedDelta<'_>]) -> String {
         .map(|delta| delta.note)
         .collect::<Vec<_>>()
         .join(NOTE_SEPARATOR)
+}
+
+pub fn fold_role_messages(
+    role: ProjectedRole,
+    messages: &[ChatMessage],
+    limits: ProjectionLimits,
+) -> Vec<ChatMessage> {
+    let Some((base_index, base_message)) = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            role_base_version(role, message).map(|version| (index, version, message))
+        })
+        .max_by_key(|(index, version, _)| (*version, *index))
+        .map(|(index, _, message)| (index, message))
+    else {
+        return messages.to_vec();
+    };
+    let base_meta = base_message.extra.get(role.noun());
+    let body = base_message.content.content_text_only();
+    let base = ApprovedBase {
+        message_id: &base_message.message_id,
+        mode: base_meta
+            .and_then(|meta| meta.get("mode"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+        version: role_base_version(role, base_message).unwrap_or(1),
+        created_at_ms: base_meta
+            .and_then(|meta| meta.get("created_at_ms"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        body: &body,
+    };
+    let checkpoint_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(index, message)| {
+            *index > base_index
+                && is_role_checkpoint(role, message)
+                && checkpoint_provenance(message)
+                    .is_some_and(|checkpoint| checkpoint.approved_message_id == base.message_id)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let checkpoint_index = checkpoint_indices.last().copied();
+    let prefold = checkpoint_index.and_then(|index| checkpoint_provenance(&messages[index]));
+    let delta_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(index, message)| {
+            *index > base_index
+                && checkpoint_index.map_or(true, |checkpoint_index| *index > checkpoint_index)
+                && is_delta_kind(message, role.delta_subkind())
+                && checkpoint_provenance(message).is_none()
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let notes: Vec<String> = delta_indices
+        .iter()
+        .map(|index| messages[*index].content.content_text_only())
+        .collect();
+    let deltas: Vec<ProjectedDelta<'_>> = delta_indices
+        .iter()
+        .enumerate()
+        .map(|(index, message_index)| ProjectedDelta {
+            seq: delta_revision(
+                &messages[*message_index],
+                prefold
+                    .as_ref()
+                    .map_or(0, |checkpoint| checkpoint.folded_deltas)
+                    + index,
+            ),
+            note: &notes[index],
+        })
+        .collect();
+    let projection = project_role_with_prefold(role, &base, prefold.as_ref(), &deltas, limits);
+    let Some(provenance) = projection.checkpoint else {
+        return messages.to_vec();
+    };
+    let folded_before = prefold
+        .as_ref()
+        .map_or(0, |checkpoint| checkpoint.folded_deltas);
+    let newly_folded = provenance.folded_deltas - folded_before;
+    if newly_folded == 0 {
+        return messages.to_vec();
+    }
+    let folded_indices = &delta_indices[..newly_folded];
+    let last_folded_index = *folded_indices.last().expect("newly folded deltas");
+    let previous_payload = checkpoint_index.map(|index| &messages[index].extra["event"]["payload"]);
+    let first_folded_message_id = previous_payload
+        .and_then(|payload| payload.get("first_folded_message_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| messages[folded_indices[0]].message_id.clone());
+    let checkpoint_message = make_checkpoint_message(
+        role,
+        &base,
+        &provenance,
+        first_folded_message_id,
+        messages[last_folded_index].message_id.clone(),
+    );
+    let folded_indices: std::collections::HashSet<usize> = folded_indices.iter().copied().collect();
+    let checkpoint_indices: std::collections::HashSet<usize> =
+        checkpoint_indices.into_iter().collect();
+    let mut output = Vec::with_capacity(messages.len() - newly_folded + 1);
+    for (index, message) in messages.iter().enumerate() {
+        if index == last_folded_index {
+            output.push(checkpoint_message.clone());
+        }
+        if folded_indices.contains(&index) || checkpoint_indices.contains(&index) {
+            continue;
+        }
+        output.push(message.clone());
+    }
+    output
+}
+
+impl ProjectedRole {
+    fn delta_subkind(self) -> &'static str {
+        match self {
+            ProjectedRole::Plan => "plan_delta",
+            ProjectedRole::Goal => "goal_delta",
+        }
+    }
+}
+
+fn role_base_version(role: ProjectedRole, message: &ChatMessage) -> Option<u32> {
+    let expected_role = match role {
+        ProjectedRole::Plan => "plan",
+        ProjectedRole::Goal => "goal",
+    };
+    if message.role != expected_role {
+        return None;
+    }
+    message
+        .extra
+        .get(role.noun())?
+        .get("version")?
+        .as_u64()
+        .and_then(|version| u32::try_from(version).ok())
+}
+
+fn is_delta_kind(message: &ChatMessage, subkind: &str) -> bool {
+    message.role == internal_roles::EVENT_ROLE
+        && message
+            .extra
+            .get("event")
+            .and_then(|event| event.get("subkind"))
+            .and_then(serde_json::Value::as_str)
+            == Some(subkind)
+}
+
+fn is_role_checkpoint(role: ProjectedRole, message: &ChatMessage) -> bool {
+    is_delta_kind(message, role.delta_subkind()) && checkpoint_provenance(message).is_some()
+}
+
+fn make_checkpoint_message(
+    role: ProjectedRole,
+    base: &ApprovedBase<'_>,
+    provenance: &CheckpointProvenance,
+    first_folded_message_id: String,
+    last_folded_message_id: String,
+) -> ChatMessage {
+    let (subkind, id_prefix) = match role {
+        ProjectedRole::Plan => (EventSubkind::PlanDelta, "plan"),
+        ProjectedRole::Goal => (EventSubkind::GoalDelta, "goal"),
+    };
+    let mut message = internal_roles::event(
+        subkind,
+        CHECKPOINT_SOURCE,
+        serde_json::json!({
+            "seq": provenance.revision,
+            "checkpoint": provenance,
+            "first_folded_message_id": first_folded_message_id,
+            "last_folded_message_id": last_folded_message_id,
+        }),
+        format!(
+            "[checkpoint: {} earlier {} updates folded at revision {}; approved base v{} installed by {} at {}; full history: get_{}(include_history=true)]",
+            provenance.folded_deltas,
+            role.noun(),
+            provenance.revision,
+            base.version,
+            base.mode,
+            base.created_at_ms,
+            role.noun(),
+        ),
+    );
+    message.message_id = format!(
+        "{id_prefix}-checkpoint-{}-{}",
+        base.message_id, provenance.revision
+    );
+    message
 }
 
 #[cfg(test)]

@@ -3,8 +3,8 @@ use refact_core::chat_types::ChatMessage;
 use crate::GoalBudget;
 use crate::internal_roles::{self, EVENT_ROLE, GOAL_ROLE};
 use crate::role_projection::{
-    delta_revision, project_role, ApprovedBase, ProjectedDelta, ProjectedRole, ProjectionLimits,
-    RoleProjection,
+    checkpoint_provenance, delta_revision, project_role_with_prefold, ApprovedBase, ProjectedDelta,
+    ProjectedRole, ProjectionLimits, RoleProjection,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,16 +95,39 @@ pub fn synthesize_current_goal<S: GoalRoleSession + ?Sized>(session: &S) -> Opti
 /// The complete append-only audit trail: every delta note with its revision,
 /// in order. Checkpointing never removes an entry from this list.
 pub fn goal_delta_history<S: GoalRoleSession + ?Sized>(session: &S) -> Vec<(u64, String)> {
+    let base_id = current_base_goal(session).map(|base| base.message_id.as_str());
+    let folded = base_id
+        .and_then(|base_id| {
+            goal_delta_events(session)
+                .into_iter()
+                .filter_map(checkpoint_provenance)
+                .find(|checkpoint| checkpoint.approved_message_id == base_id)
+        })
+        .map_or(0, |checkpoint| checkpoint.folded_deltas);
+    let mut revision_index = folded;
     goal_delta_events(session)
         .into_iter()
-        .enumerate()
-        .map(|(index, message)| {
-            (
-                delta_revision(message, index),
-                message.content.content_text_only(),
-            )
+        .filter_map(|message| {
+            if checkpoint_provenance(message).is_some() {
+                return None;
+            }
+            let revision = delta_revision(message, revision_index);
+            revision_index += 1;
+            Some((revision, message.content.content_text_only()))
         })
         .collect()
+}
+
+pub fn effective_goal_delta_count<S: GoalRoleSession + ?Sized>(session: &S) -> usize {
+    let folded = current_base_goal(session)
+        .and_then(|base| {
+            goal_delta_events(session)
+                .into_iter()
+                .filter_map(checkpoint_provenance)
+                .find(|checkpoint| checkpoint.approved_message_id == base.message_id)
+        })
+        .map_or(0, |checkpoint| checkpoint.folded_deltas);
+    folded + goal_delta_history(session).len()
 }
 
 /// Bounded, deterministic projection of the approved base plus its deltas.
@@ -136,9 +159,14 @@ pub fn project_current_goal<S: GoalRoleSession + ?Sized>(
             note,
         })
         .collect();
-    Some(project_role(
+    let prefold = goal_delta_events(session)
+        .into_iter()
+        .filter_map(checkpoint_provenance)
+        .find(|checkpoint| checkpoint.approved_message_id == base.message_id);
+    Some(project_role_with_prefold(
         ProjectedRole::Goal,
         &approved,
+        prefold.as_ref(),
         &deltas,
         limits,
     ))

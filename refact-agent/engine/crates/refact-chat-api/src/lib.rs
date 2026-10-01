@@ -13,6 +13,8 @@ pub mod internal_roles;
 pub mod notification_event;
 pub mod plan_role;
 pub mod question;
+#[cfg(test)]
+mod role_checkpoint_tests;
 pub mod role_projection;
 pub mod sub_goal;
 pub mod tool_enrichment;
