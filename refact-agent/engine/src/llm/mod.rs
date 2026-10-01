@@ -12,3 +12,6 @@ pub use refact_llm::{
 
 pub mod adapters;
 pub mod pressure;
+
+#[cfg(test)]
+mod pressure_reconfigure_tests;

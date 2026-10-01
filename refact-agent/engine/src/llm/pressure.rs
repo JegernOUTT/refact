@@ -90,6 +90,7 @@ pub fn pressure_config(settings: &CoordinationSettings) -> Result<PressureConfig
     Ok(config)
 }
 
+/// Settings saves reconfigure the live registry without discarding provider bucket state.
 pub fn install_provider_pressure(settings: &CoordinationSettings) -> Result<(), String> {
     if !settings.provider_pressure_enabled {
         uninstall_pressure_registry();

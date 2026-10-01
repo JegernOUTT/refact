@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -470,12 +470,18 @@ impl BucketState {
 
 #[derive(Debug)]
 struct Shared {
-    config: PressureConfig,
+    config: RwLock<PressureConfig>,
     env: Arc<dyn PressureEnv>,
     buckets: Mutex<HashMap<String, BucketState>>,
 }
 
 impl Shared {
+    fn config(&self) -> RwLockReadGuard<'_, PressureConfig> {
+        self.config
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn buckets(&self) -> MutexGuard<'_, HashMap<String, BucketState>> {
         self.buckets
             .lock()
@@ -494,17 +500,15 @@ impl Shared {
 
     fn record(&self, bucket: &str, outcome: Outcome) {
         let now_ms = self.env.now_ms();
+        let config = self.config();
         let mut buckets = self.buckets();
-        let state = bucket_entry(&mut buckets, &self.config, bucket, now_ms);
+        let state = bucket_entry(&mut buckets, &config, bucket, now_ms);
         match outcome {
             Outcome::Success => {
                 state.consecutive_retryable_failures = 0;
                 state.consecutive_successes = state.consecutive_successes.saturating_add(1);
-                if state.consecutive_successes >= self.config.increase_after_successes {
-                    state.limit = state
-                        .limit
-                        .saturating_add(1)
-                        .min(self.config.max_concurrency);
+                if state.consecutive_successes >= config.increase_after_successes {
+                    state.limit = state.limit.saturating_add(1).min(config.max_concurrency);
                     state.consecutive_successes = 0;
                 }
             }
@@ -515,17 +519,16 @@ impl Shared {
                     .as_deref()
                     .and_then(|raw| retry_after_delay_ms(raw, now_ms))
                 {
-                    let until_ms =
-                        now_ms.saturating_add(delay_ms.min(self.config.max_retry_after_ms));
+                    let until_ms = now_ms.saturating_add(delay_ms.min(config.max_retry_after_ms));
                     state.retry_after_until_ms =
                         Some(state.retry_after_until_ms.unwrap_or(0).max(until_ms));
                 }
                 if report.class.drives_concurrency_decrease() {
                     let cooled = state.last_decrease_ms.is_none_or(|last| {
-                        now_ms.saturating_sub(last) >= self.config.decrease_cooldown_ms
+                        now_ms.saturating_sub(last) >= config.decrease_cooldown_ms
                     });
                     if cooled {
-                        state.limit = (state.limit / 2).max(self.config.min_concurrency);
+                        state.limit = (state.limit / 2).max(config.min_concurrency);
                         state.last_decrease_ms = Some(now_ms);
                     }
                 }
@@ -533,11 +536,10 @@ impl Shared {
                     state.consecutive_retryable_failures =
                         state.consecutive_retryable_failures.saturating_add(1);
                     if state.breaker.is_none()
-                        && state.consecutive_retryable_failures
-                            >= self.config.breaker_failure_threshold
+                        && state.consecutive_retryable_failures >= config.breaker_failure_threshold
                     {
                         let until_ms = now_ms
-                            .saturating_add(self.config.breaker_cooldown_ms)
+                            .saturating_add(config.breaker_cooldown_ms)
                             .max(state.retry_after_until_ms.unwrap_or(0));
                         state.breaker = Some(BreakerState {
                             class: report.class,
@@ -615,7 +617,7 @@ impl PressureRegistry {
         config.validate()?;
         Ok(PressureRegistry {
             shared: Arc::new(Shared {
-                config,
+                config: RwLock::new(config),
                 env,
                 buckets: Mutex::new(HashMap::new()),
             }),
@@ -626,8 +628,30 @@ impl PressureRegistry {
         PressureRegistry::new(config, Arc::new(SystemPressureEnv))
     }
 
-    pub fn config(&self) -> &PressureConfig {
-        &self.shared.config
+    pub fn config(&self) -> PressureConfig {
+        self.shared.config().clone()
+    }
+
+    pub fn reconfigure(&self, config: PressureConfig) -> Result<(), String> {
+        config.validate()?;
+        let mut current = self
+            .shared
+            .config
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now_ms = self.shared.env.now_ms();
+        let mut buckets = self.shared.buckets();
+        let retry_after_limit = now_ms.saturating_add(config.max_retry_after_ms);
+        for state in buckets.values_mut() {
+            state.limit = state
+                .limit
+                .clamp(config.min_concurrency, config.max_concurrency);
+            state.retry_after_until_ms = state
+                .retry_after_until_ms
+                .map(|until_ms| until_ms.min(retry_after_limit));
+        }
+        *current = config;
+        Ok(())
     }
 
     pub fn now_ms(&self) -> u64 {
@@ -640,9 +664,9 @@ impl PressureRegistry {
         priority: RequestPriority,
     ) -> Result<Permit, AdmissionRefusal> {
         let now_ms = self.shared.env.now_ms();
-        let config = &self.shared.config;
+        let config = self.shared.config();
         let mut buckets = self.shared.buckets();
-        let state = bucket_entry(&mut buckets, config, bucket, now_ms);
+        let state = bucket_entry(&mut buckets, &config, bucket, now_ms);
         if let Some(open) = &state.breaker {
             return Err(AdmissionRefusal::CoolingDown {
                 reason: open.reason.clone(),
@@ -687,7 +711,7 @@ impl PressureRegistry {
     /// An explicit `Retry-After` outranks the computed backoff; a class that
     /// cannot be fixed by waiting is never retried and keeps its cause.
     pub fn retry_decision(&self, report: &FailureReport, completed_attempts: u32) -> RetryDecision {
-        let config = &self.shared.config;
+        let config = self.shared.config();
         if !report.class.retryable() || completed_attempts >= config.max_retry_attempts {
             return RetryDecision::GiveUp {
                 class: report.class,
@@ -772,10 +796,15 @@ fn global_slot() -> &'static RwLock<Option<Arc<PressureRegistry>>> {
 }
 
 pub fn install_pressure_registry(config: PressureConfig) -> Result<Arc<PressureRegistry>, String> {
-    let registry = Arc::new(PressureRegistry::with_system_env(config)?);
+    config.validate()?;
     let mut guard = global_slot()
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(registry) = guard.as_ref() {
+        registry.reconfigure(config)?;
+        return Ok(registry.clone());
+    }
+    let registry = Arc::new(PressureRegistry::with_system_env(config)?);
     *guard = Some(registry.clone());
     Ok(registry)
 }
