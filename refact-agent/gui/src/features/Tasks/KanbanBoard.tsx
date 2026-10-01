@@ -8,6 +8,7 @@ import type {
   BoardColumn,
 } from "../../services/refact/tasks";
 import { BranchIcon } from "../Worktrees/BranchIcon";
+import { CardOutcomeBadge } from "./CardOutcomeBadge";
 import styles from "./Tasks.module.css";
 
 type BadgeTone = React.ComponentProps<typeof Badge>["tone"];
@@ -40,12 +41,14 @@ function columnToneClass(columnId: string): string {
 
 interface KanbanCardProps {
   card: BoardCard;
+  cardOutcomes?: TaskBoard["card_outcomes"];
   onClick?: (card: BoardCard) => void;
   onAgentClick?: (card: BoardCard) => void;
 }
 
 const KanbanCard: React.FC<KanbanCardProps> = ({
   card,
+  cardOutcomes,
   onClick,
   onAgentClick,
 }) => {
@@ -122,6 +125,7 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
               {card.status_updates.length}
             </Badge>
           )}
+          <CardOutcomeBadge cardId={card.id} cardOutcomes={cardOutcomes} />
         </div>
       </div>
     </Card>
@@ -131,6 +135,7 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
 interface KanbanColumnProps {
   column: BoardColumn;
   cards: BoardCard[];
+  cardOutcomes?: TaskBoard["card_outcomes"];
   onCardClick?: (card: BoardCard) => void;
   onAgentClick?: (card: BoardCard) => void;
 }
@@ -138,6 +143,7 @@ interface KanbanColumnProps {
 const KanbanColumn: React.FC<KanbanColumnProps> = ({
   column,
   cards,
+  cardOutcomes,
   onCardClick,
   onAgentClick,
 }) => {
@@ -158,6 +164,7 @@ const KanbanColumn: React.FC<KanbanColumnProps> = ({
           <KanbanCard
             key={card.id}
             card={card}
+            cardOutcomes={cardOutcomes}
             onClick={onCardClick}
             onAgentClick={onAgentClick}
           />
@@ -192,6 +199,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
           key={column.id}
           column={column}
           cards={getCardsForColumn(column.id)}
+          cardOutcomes={board.card_outcomes}
           onCardClick={onCardClick}
           onAgentClick={onAgentClick}
         />

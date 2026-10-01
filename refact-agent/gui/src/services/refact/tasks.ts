@@ -31,6 +31,109 @@ export interface BoardColumn {
   title: string;
 }
 
+export interface OutcomeRequirement {
+  fragment: string;
+  requires_evidence: boolean;
+}
+
+export type OutcomeFragmentReview =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "contradicted";
+
+export interface OutcomeFragment {
+  name: string;
+  content: string;
+  provenance: {
+    source_run: string | null;
+    evidence_spec_ids: string[];
+  };
+  review: OutcomeFragmentReview;
+  reviewer_chat_id: string | null;
+  reviewed_at: string | null;
+  review_note: string | null;
+}
+
+export interface CardOutcome {
+  required: OutcomeRequirement[];
+  fragments: OutcomeFragment[];
+  finalized: { finalized_by: string; finalized_at: string } | null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((item) => typeof item === "string")
+  );
+}
+
+function isOutcomeRequirement(value: unknown): value is OutcomeRequirement {
+  return (
+    isRecord(value) &&
+    typeof value.fragment === "string" &&
+    typeof value.requires_evidence === "boolean"
+  );
+}
+
+function isOutcomeFragment(value: unknown): value is OutcomeFragment {
+  if (!isRecord(value) || !isRecord(value.provenance)) return false;
+  return (
+    typeof value.name === "string" &&
+    typeof value.content === "string" &&
+    (typeof value.provenance.source_run === "string" ||
+      value.provenance.source_run === null) &&
+    isStringArray(value.provenance.evidence_spec_ids) &&
+    (value.review === "pending" ||
+      value.review === "approved" ||
+      value.review === "rejected" ||
+      value.review === "contradicted") &&
+    (typeof value.reviewer_chat_id === "string" ||
+      value.reviewer_chat_id === null) &&
+    (typeof value.reviewed_at === "string" || value.reviewed_at === null) &&
+    (typeof value.review_note === "string" || value.review_note === null)
+  );
+}
+
+function isCardOutcome(value: unknown): value is CardOutcome {
+  if (!isRecord(value)) return false;
+  const finalized = value.finalized;
+  return (
+    Array.isArray(value.required) &&
+    value.required.every(isOutcomeRequirement) &&
+    Array.isArray(value.fragments) &&
+    value.fragments.every(isOutcomeFragment) &&
+    (finalized === null ||
+      (isRecord(finalized) &&
+        typeof finalized.finalized_by === "string" &&
+        typeof finalized.finalized_at === "string"))
+  );
+}
+
+export function normalizeCardOutcomes(
+  value: unknown,
+): Record<string, CardOutcome> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) return undefined;
+
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, CardOutcome] =>
+      isCardOutcome(entry[1]),
+    ),
+  );
+}
+
+export function normalizeTaskBoard(value: unknown): TaskBoard | null {
+  if (!isRecord(value) || !Array.isArray(value.cards)) return null;
+  return {
+    ...(value as unknown as TaskBoard),
+    card_outcomes: normalizeCardOutcomes(value.card_outcomes),
+  };
+}
+
 export interface StatusUpdate {
   timestamp: string;
   message: string;
@@ -92,6 +195,7 @@ export interface TaskBoard {
   rev: number;
   columns: BoardColumn[];
   cards: BoardCard[];
+  card_outcomes?: Record<string, CardOutcome>;
 }
 
 export interface ReadyCardsResult {
@@ -214,11 +318,8 @@ export const tasksApi = createApi({
         });
         if (result.error) return { error: result.error };
         const raw = result.data;
-        if (
-          typeof raw !== "object" ||
-          raw === null ||
-          !Array.isArray((raw as Record<string, unknown>).cards)
-        ) {
+        const board = normalizeTaskBoard(raw);
+        if (!board) {
           return {
             error: {
               status: "CUSTOM_ERROR" as const,
@@ -229,7 +330,7 @@ export const tasksApi = createApi({
             },
           };
         }
-        return { data: raw as unknown as TaskBoard };
+        return { data: board };
       },
       providesTags: (_result, _error, taskId) => [
         { type: "Board", id: taskId },

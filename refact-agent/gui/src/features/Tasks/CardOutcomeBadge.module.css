@@ -1,0 +1,5 @@
+.badge {
+  gap: var(--rf-space-1);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
