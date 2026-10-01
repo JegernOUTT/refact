@@ -986,6 +986,10 @@ async fn run_goal_verification_inner(
     };
     let mut evidence =
         resolve_goal_evidence(app.gcx.clone(), &criteria, &author, worktree_root, scope).await;
+    evidence
+        .gates
+        .blocks
+        .extend(crate::coordination::disagreement::completion_gate_blocks(&app).await);
     let settings = GoalReviewSettings::from_settings();
     if settings.enabled {
         let (request, attempts_used) = {

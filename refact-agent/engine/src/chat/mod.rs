@@ -17,6 +17,8 @@ pub mod diagnostics;
 mod generation;
 #[cfg(test)]
 mod generation_pressure_retry_tests;
+#[cfg(test)]
+mod goal_disagreement_gate_tests;
 pub(crate) mod goal_validation_hook;
 #[cfg(test)]
 mod goal_validation_hook_tests;
