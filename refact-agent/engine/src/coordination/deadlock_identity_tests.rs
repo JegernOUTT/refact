@@ -62,27 +62,29 @@ async fn create_running_record(
     app: &crate::app_state::AppState,
     parent_chat_id: &str,
     child_chat_id: &str,
+    agent_id: Option<&str>,
 ) -> String {
-    let (record, _, _) = app
-        .agents
-        .create(crate::agents::types::CreateAgentRequest {
-            parent_chat_id: parent_chat_id.to_string(),
-            parent_root_chat_id: Some("wait-root".to_string()),
-            parent_tool_call_id: None,
-            kind: BgAgentKind::Subagent,
-            config_name: "test_spawn".to_string(),
-            title: "Identity test".to_string(),
-            prompt: "Identity test".to_string(),
-            target_files: Vec::new(),
-            model: "openai/gpt-4o".to_string(),
-            model_type: None,
-            goal_summary: None,
-            plan_present: false,
-            worktree_id: None,
-            worktree_branch: None,
-        })
-        .await
-        .unwrap();
+    let request = crate::agents::types::CreateAgentRequest {
+        parent_chat_id: parent_chat_id.to_string(),
+        parent_root_chat_id: Some("wait-root".to_string()),
+        parent_tool_call_id: None,
+        kind: BgAgentKind::Subagent,
+        config_name: "test_spawn".to_string(),
+        title: "Identity test".to_string(),
+        prompt: "Identity test".to_string(),
+        target_files: Vec::new(),
+        model: "openai/gpt-4o".to_string(),
+        model_type: None,
+        goal_summary: None,
+        plan_present: false,
+        worktree_id: None,
+        worktree_branch: None,
+    };
+    let created = match agent_id {
+        Some(agent_id) => app.agents.create_with_id(request, agent_id).await,
+        None => app.agents.create(request).await,
+    };
+    let (record, _, _) = created.unwrap();
     app.agents
         .mark_running(&record.agent_id, child_chat_id.to_string())
         .await
@@ -272,88 +274,101 @@ async fn background_agent_waiting_on_its_own_child_is_tracked() {
 #[tokio::test]
 #[serial_test::serial(runtime_settings)]
 async fn background_agent_cycle_is_detected_and_refused() {
-    let (mut app, _temp) = app_with_workspace().await;
-    app.work_scheduler = Arc::new(refact_work_core::AdmissionScheduler::new(
-        CoordinationSettings {
-            max_active_engine: 4,
-            max_active_project: 4,
-            max_active_root: 4,
-            ..CoordinationSettings::default()
-        },
-    ));
-    let x_id = create_running_record(&app, "wait-root", "subchat-cycle-x").await;
-    let y_id = create_running_record(&app, "subchat-cycle-x", "subchat-cycle-y").await;
-    let x_chat = "subchat-cycle-x";
-    let _x_ticket = parked_ticket(&app, parked_run(&x_id)).await;
-    let _y_ticket = parked_ticket(&app, parked_run(&y_id)).await;
-    app.questions()
-        .ask(
-            AskQuestion::new(
-                QuestionKind::AgentParent,
-                &y_id,
-                x_chat,
-                "cycle-question",
-                "May I continue?",
-            ),
-            chrono::Utc::now(),
-        )
-        .unwrap();
-    let ccx = Arc::new(Mutex::new(
-        AtCommandsContext::new_from_app(
-            app.clone(),
-            4096,
-            20,
-            false,
-            Vec::new(),
-            x_chat.to_string(),
-            Some("wait-root".to_string()),
-            "openai/gpt-4o".to_string(),
-            None,
-            None,
-        )
-        .await,
-    ));
-    let waited_agent_id = y_id.clone();
-    let tool = tokio::spawn(async move {
-        ToolAgentWait {
-            config_path: String::new(),
-        }
-        .tool_execute(
-            ccx,
-            &"cycle-wait".to_string(),
-            &HashMap::from([
-                ("agent_id".to_string(), serde_json::json!(waited_agent_id)),
-                ("timeout_ms".to_string(), serde_json::json!(30_000)),
-            ]),
-        )
-        .await
-    });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if app.wait_graph.edges().iter().any(|edge| {
-                edge.from.work.id == x_id && edge.to.run().is_some_and(|run| run.work.id == y_id)
-            }) {
-                break;
+    for (x_id, y_id) in [
+        (
+            "bgagent-00000000-0000-0000-0000-000000000001",
+            "bgagent-00000000-0000-0000-0000-000000000002",
+        ),
+        (
+            "bgagent-00000000-0000-0000-0000-000000000002",
+            "bgagent-00000000-0000-0000-0000-000000000001",
+        ),
+    ] {
+        let (mut app, _temp) = app_with_workspace().await;
+        app.work_scheduler = Arc::new(refact_work_core::AdmissionScheduler::new(
+            CoordinationSettings {
+                max_active_engine: 4,
+                max_active_project: 4,
+                max_active_root: 4,
+                ..CoordinationSettings::default()
+            },
+        ));
+        let x_id = create_running_record(&app, "wait-root", "subchat-cycle-x", Some(x_id)).await;
+        let y_id =
+            create_running_record(&app, "subchat-cycle-x", "subchat-cycle-y", Some(y_id)).await;
+        let x_chat = "subchat-cycle-x";
+        let _x_ticket = parked_ticket(&app, parked_run(&x_id)).await;
+        let _y_ticket = parked_ticket(&app, parked_run(&y_id)).await;
+        app.questions()
+            .ask(
+                AskQuestion::new(
+                    QuestionKind::AgentParent,
+                    &y_id,
+                    x_chat,
+                    "cycle-question",
+                    "May I continue?",
+                ),
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        let ccx = Arc::new(Mutex::new(
+            AtCommandsContext::new_from_app(
+                app.clone(),
+                4096,
+                20,
+                false,
+                Vec::new(),
+                x_chat.to_string(),
+                Some("wait-root".to_string()),
+                "openai/gpt-4o".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ));
+        let waited_agent_id = y_id.clone();
+        let tool = tokio::spawn(async move {
+            ToolAgentWait {
+                config_path: String::new(),
             }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("X declares its wait on Y");
+            .tool_execute(
+                ccx,
+                &"cycle-wait".to_string(),
+                &HashMap::from([
+                    ("agent_id".to_string(), serde_json::json!(waited_agent_id)),
+                    ("timeout_ms".to_string(), serde_json::json!(30_000)),
+                ]),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if app.wait_graph.edges().iter().any(|edge| {
+                    edge.from.work.id == x_id
+                        && edge.to.run().is_some_and(|run| run.work.id == y_id)
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("X declares its wait on Y");
 
-    let report = match crate::coordination::deadlock::scan(&app) {
-        refact_work_core::Detection::Deadlock(report) => report,
-        other => panic!("expected a deadlock, got {other:?}"),
-    };
-    assert!(report.involves(&parked_run(&x_id)));
-    assert!(report.involves(&parked_run(&y_id)));
-    let error = tool.await.unwrap().unwrap_err();
-    assert!(
-        error.starts_with(refact_work_core::DEADLOCK_CODE),
-        "{error}"
-    );
-    assert!(error.contains(&x_id), "{error}");
-    assert!(error.contains(&y_id), "{error}");
+        let report = match crate::coordination::deadlock::scan(&app) {
+            refact_work_core::Detection::Deadlock(report) => report,
+            other => panic!("expected a deadlock, got {other:?}"),
+        };
+        assert!(report.involves(&parked_run(&x_id)));
+        assert!(report.involves(&parked_run(&y_id)));
+        let error = tool.await.unwrap().unwrap_err();
+        assert!(
+            error.starts_with(refact_work_core::DEADLOCK_CODE),
+            "{error}"
+        );
+        assert!(error.contains(&x_id), "{error}");
+        assert!(error.contains(&y_id), "{error}");
+    }
 }
 
 #[tokio::test]
@@ -376,8 +391,8 @@ async fn await_any_with_unauthorized_id_declares_no_edge() {
         .acquire()
         .await
         .unwrap();
-    let own_id = create_running_record(&app, "wait-root", "subchat-own").await;
-    let foreign_id = create_running_record(&app, "foreign-root", "subchat-foreign").await;
+    let own_id = create_running_record(&app, "wait-root", "subchat-own", None).await;
+    let foreign_id = create_running_record(&app, "foreign-root", "subchat-foreign", None).await;
     let _own_ticket = parked_ticket(&app, parked_run(&own_id)).await;
     let _foreign_ticket = parked_ticket(&app, parked_run(&foreign_id)).await;
     let ccx = Arc::new(Mutex::new(

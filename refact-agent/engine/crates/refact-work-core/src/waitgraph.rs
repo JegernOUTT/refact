@@ -572,20 +572,36 @@ impl WaitRegistry {
         self.inner.lock().waits.len()
     }
 
-    /// Record the finding and refuse the newest edge that closed the loop.
+    /// Record the finding and refuse the matching registered wait that closed
+    /// the loop, or the first matching wait in cycle order.
     /// Whether the refused waiter is also cancelled is policy, decided by the
     /// caller; the registry only ever reports.
-    pub fn refuse(&self, report: &DeadlockReport) -> bool {
+    pub fn refuse(&self, report: &DeadlockReport) -> Option<RunKey> {
         let mut state = self.inner.lock();
         state.latest = Some(report.clone());
-        let group = report.closing_edge.group;
-        let refused = match group.and_then(|group| state.waits.get_mut(&group)) {
-            Some(wait) if wait.from == report.closing_edge.from => {
+        let closing_wait = report.closing_edge.group.and_then(|group| {
+            state
+                .waits
+                .get(&group)
+                .filter(|wait| wait.from == report.closing_edge.from)
+                .map(|wait| (group, wait.from.clone()))
+        });
+        let selected = closing_wait.or_else(|| {
+            report.cycle.iter().find_map(|edge| {
+                let group = edge.group?;
+                state
+                    .waits
+                    .get(&group)
+                    .filter(|wait| wait.from == edge.from)
+                    .map(|wait| (group, wait.from.clone()))
+            })
+        });
+        let refused = selected.map(|(group, waiter)| {
+            if let Some(wait) = state.waits.get_mut(&group) {
                 wait.refusal = Some(report.clone());
-                true
             }
-            _ => false,
-        };
+            waiter
+        });
         drop(state);
         self.inner.notify.notify_waiters();
         refused
@@ -938,9 +954,36 @@ mod tests {
             .with_group(closing.group().unwrap()),
             attempts: 1,
         };
-        assert!(registry.refuse(&report));
+        assert_eq!(registry.refuse(&report), Some(run("b")));
         assert_eq!(closing.refusal().as_ref(), Some(&report));
         assert!(other.refusal().is_none());
         assert_eq!(registry.latest_report().as_ref(), Some(&report));
+    }
+
+    #[tokio::test]
+    async fn refusal_targets_a_registered_wait_when_the_closing_edge_is_not_refusable() {
+        for (a, b, closing_is_wait) in [("a", "b", false), ("z", "a", true)] {
+            let registry = WaitRegistry::default();
+            let waiting = registry.declare(
+                run(a),
+                WaitKind::AgentWait,
+                vec![WaitTarget::Run(run(b))],
+                "agent_wait",
+            );
+            let mut edges = registry.edges();
+            edges.push(edge(b, a, WaitKind::Question));
+            let graph = graph(vec![(a, blocked(1)), (b, blocked(1))], edges);
+            let report = match detect(&graph) {
+                Detection::Deadlock(report) => report,
+                other => panic!("expected a deadlock, got {other:?}"),
+            };
+            assert_eq!(
+                report.closing_edge.from,
+                if closing_is_wait { run(a) } else { run(b) }
+            );
+            assert_eq!(report.closing_edge.group.is_some(), closing_is_wait);
+            assert_eq!(registry.refuse(&report), Some(run(a)));
+            assert_eq!(waiting.refused().await, report);
+        }
     }
 }

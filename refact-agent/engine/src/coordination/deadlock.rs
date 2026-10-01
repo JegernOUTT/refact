@@ -209,17 +209,19 @@ pub fn capture(app: &AppState) -> WaitGraph {
     WaitGraph::build(runs, edges, bounds)
 }
 
-/// Detect on demand. A positive finding is recorded and the newest edge that
-/// closed the loop is refused; cancelling the refused waiter stays opt-in.
+/// Detect on demand. A positive finding is recorded and a refusable wait in
+/// the cycle is refused; cancelling the refused waiter stays opt-in. If no
+/// cycle edge has a registered wait, auto-cancel retains the closing-edge source.
 pub fn scan(app: &AppState) -> Detection {
     let settings = refact_work_core::coordination_settings();
     let outcome = detect_stable(|| capture(app), settings.deadlock_detection_attempts);
     match &outcome {
         Detection::Deadlock(report) => {
             tracing::warn!("{report}");
-            app.wait_graph.refuse(report);
+            let refused_waiter = app.wait_graph.refuse(report);
             if settings.deadlock_auto_cancel {
-                app.work_scheduler.cancel(&report.closing_edge.from);
+                let waiter = refused_waiter.as_ref().unwrap_or(&report.closing_edge.from);
+                app.work_scheduler.cancel(waiter);
             }
         }
         Detection::Incomplete(reason) => tracing::warn!("deadlock detection incomplete: {reason}"),
