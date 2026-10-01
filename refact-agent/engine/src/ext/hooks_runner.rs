@@ -587,6 +587,7 @@ pub fn hook_activity() -> &'static HookActivityLog {
 }
 
 #[cfg(test)]
+/// Every test that configures hooks or asserts hook activity must use `#[serial_test::serial(permission_decision_hooks)]` and call this first.
 pub(crate) fn clear_hook_cache_for_tests() {
     if let Some(cache) = HOOKS_CACHE.get() {
         if let Ok(mut guard) = cache.try_write() {
@@ -891,6 +892,7 @@ struct HooksCacheEntry {
     hooks: Arc<Vec<CompiledHook>>,
     loaded_at: Instant,
     project_key: String,
+    config_key: String,
 }
 
 static HOOKS_CACHE: OnceLock<tokio::sync::RwLock<Option<HooksCacheEntry>>> = OnceLock::new();
@@ -933,11 +935,20 @@ async fn get_compiled_hooks_from_ext_dirs(ext_dirs: &ExtDirs) -> Arc<Vec<Compile
         .first()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let config_key = ext_dirs
+        .global_dirs
+        .iter()
+        .map(|p| p.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("\0");
     let lock = HOOKS_CACHE.get_or_init(|| tokio::sync::RwLock::new(None));
     {
         let read = lock.read().await;
         if let Some(entry) = &*read {
-            if entry.loaded_at.elapsed() < HOOKS_CACHE_TTL && entry.project_key == project_key {
+            if entry.loaded_at.elapsed() < HOOKS_CACHE_TTL
+                && entry.project_key == project_key
+                && entry.config_key == config_key
+            {
                 return Arc::clone(&entry.hooks);
             }
         }
@@ -949,6 +960,7 @@ async fn get_compiled_hooks_from_ext_dirs(ext_dirs: &ExtDirs) -> Arc<Vec<Compile
         hooks: Arc::clone(&compiled),
         loaded_at: Instant::now(),
         project_key,
+        config_key,
     });
     compiled
 }
@@ -2534,7 +2546,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(permission_decision_hooks)]
     async fn test_hooks_cache_project_separation() {
+        clear_hook_cache_for_tests();
         let tmp1 = tempfile::tempdir().unwrap();
         let tmp2 = tempfile::tempdir().unwrap();
 

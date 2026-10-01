@@ -15,6 +15,8 @@ use tokio::sync::Mutex;
 
 async fn test_context() -> (tempfile::TempDir, Arc<GlobalContext>) {
     let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    tokio::fs::create_dir_all(&project_dir).await.unwrap();
     let mut gcx = crate::global_context::tests::make_test_gcx_with_dirs(
         dir.path().join("cache"),
         dir.path().join("config"),
@@ -24,7 +26,7 @@ async fn test_context() -> (tempfile::TempDir, Arc<GlobalContext>) {
         .workspace_folders
         .lock()
         .unwrap()
-        .push(dir.path().join("project"));
+        .push(project_dir);
     Arc::get_mut(&mut gcx).unwrap().hooks_config = HooksConfig::default();
     (dir, gcx)
 }
@@ -67,6 +69,7 @@ fn report() -> ChatMessage {
 
 #[cfg(unix)]
 #[tokio::test]
+#[serial_test::serial(permission_decision_hooks)]
 async fn precompact_deny_preserves_history_records_reason_and_suppresses_automatic_retry() {
     let (dir, gcx) = test_context().await;
     let marker = dir.path().join("precompact-runs");
@@ -75,6 +78,7 @@ async fn precompact_deny_preserves_history_records_reason_and_suppresses_automat
         marker.display()
     );
     write_hooks(&gcx, Some(&command), None).await;
+    crate::ext::hooks_runner::clear_hook_cache_for_tests();
     let (session, before) = rebuild_fixture();
     let session = Arc::new(Mutex::new(session));
     let request = PendingContextRebuild {
@@ -114,11 +118,13 @@ async fn precompact_deny_preserves_history_records_reason_and_suppresses_automat
 
 #[cfg(unix)]
 #[tokio::test]
+#[serial_test::serial(permission_decision_hooks)]
 async fn successful_commit_emits_postcompact_once_with_before_and_after_counts() {
     let (dir, gcx) = test_context().await;
     let marker = dir.path().join("postcompact-payloads");
     let command = format!("cat >> {}", marker.display());
     write_hooks(&gcx, None, Some(&command)).await;
+    crate::ext::hooks_runner::clear_hook_cache_for_tests();
     let mut session = ChatSession::new("postcompact-session".into());
     session.add_message(ChatMessage::new("user".into(), "old context".into()));
     session.active_compression_attempt = Some(1);
@@ -159,11 +165,13 @@ async fn successful_commit_emits_postcompact_once_with_before_and_after_counts()
 
 #[cfg(unix)]
 #[tokio::test]
+#[serial_test::serial(permission_decision_hooks)]
 async fn failed_commit_never_emits_postcompact() {
     let (dir, gcx) = test_context().await;
     let marker = dir.path().join("postcompact-payloads");
     let command = format!("cat >> {}", marker.display());
     write_hooks(&gcx, None, Some(&command)).await;
+    crate::ext::hooks_runner::clear_hook_cache_for_tests();
     let mut session = ChatSession::new("failed-postcompact".into());
     session.add_message(ChatMessage::new("user".into(), "old context".into()));
     session.active_compression_attempt = Some(1);
@@ -191,12 +199,14 @@ async fn failed_commit_never_emits_postcompact() {
 }
 
 #[tokio::test]
+#[serial_test::serial(permission_decision_hooks)]
 async fn disabled_hooks_allow_and_do_not_spawn_processes() {
     let (dir, mut gcx) = test_context().await;
     Arc::get_mut(&mut gcx).unwrap().hooks_config.enabled = false;
     let marker = dir.path().join("should-not-exist");
     let command = format!("touch {}", marker.display());
     write_hooks(&gcx, Some(&command), Some(&command)).await;
+    crate::ext::hooks_runner::clear_hook_cache_for_tests();
     let thread = ChatSession::new("hooks-disabled".into()).thread;
     assert!(matches!(
         precompact_control(gcx.clone(), &thread, "disabled-test", 0).await,

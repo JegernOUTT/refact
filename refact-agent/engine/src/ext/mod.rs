@@ -2,6 +2,8 @@ pub mod competitor_import;
 pub mod config_dirs;
 pub mod extensions_marketplace;
 pub mod hooks;
+#[cfg(test)]
+mod hooks_cache_key_tests;
 pub mod hooks_runner;
 pub mod operator_service;
 pub mod plugins;
