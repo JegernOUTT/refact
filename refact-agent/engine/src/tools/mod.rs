@@ -72,6 +72,7 @@ mod tool_set_goal;
 mod tool_set_plan;
 mod tool_set_trajectory_label;
 mod tool_shell;
+pub mod tool_team;
 pub(crate) use tool_shell::approval_request as shell_approval_request;
 pub(crate) use tool_process::approval_request as process_approval_request;
 #[cfg(test)]
@@ -90,6 +91,9 @@ mod tool_web;
 mod tool_web_search;
 pub mod tool_work_inspect;
 pub mod tool_work_overview;
+
+#[cfg(test)]
+mod tool_team_tests;
 
 pub mod buddy;
 pub mod file_edit;

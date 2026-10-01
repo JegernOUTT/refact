@@ -1,4 +1,4 @@
-schema_version: 26
+schema_version: 27
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -253,6 +253,7 @@ tools:
   - agent_message
   - agent_mailbox
   - agent_peer_grant
+  - team_seat
   - progress_report
   - agent_list
   - agent_status
@@ -330,6 +331,8 @@ tool_confirm:
       action: auto
     - match: "agent_peer_grant"
       action: ask
+    - match: "team_seat"
+      action: auto
     - match: "progress_report"
       action: auto
     - match: "agent_list"

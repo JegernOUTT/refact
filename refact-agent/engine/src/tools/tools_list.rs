@@ -859,6 +859,9 @@ async fn get_builtin_tools(
         Box::new(crate::tools::tool_agent_interact::ToolAgentPeerGrant {
             config_path: config_path.clone(),
         }),
+        Box::new(crate::tools::tool_team::ToolTeamSeat {
+            config_path: config_path.clone(),
+        }),
         Box::new(crate::tools::tool_agent_interact::ToolProgressReport {
             config_path: config_path.clone(),
         }),
@@ -1950,6 +1953,7 @@ mod tests {
             "agent_message",
             "agent_mailbox",
             "agent_peer_grant",
+            "team_seat",
             "progress_report",
             "board_claim",
             "board_discover",
@@ -1968,6 +1972,7 @@ mod tests {
                 "{name} is read-only and parallel"
             );
         }
+        assert_eq!(builtin("team_seat"), vec![(true, false)]);
     }
 
     #[tokio::test]
