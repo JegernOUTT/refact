@@ -952,7 +952,17 @@ fn gate_blocked_reply(
 }
 
 /// Goal verification end to end: gates first, the semantic judge only afterwards.
+/// Runs the GoalValidation observation hooks once per call.
 pub async fn run_goal_verification(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+) -> Result<GoalVerifierReply, String> {
+    let result = run_goal_verification_inner(app.clone(), session_arc.clone()).await;
+    crate::chat::goal_validation_hook::emit_goal_validation(&app, &session_arc, &result).await;
+    result
+}
+
+async fn run_goal_verification_inner(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> Result<GoalVerifierReply, String> {
