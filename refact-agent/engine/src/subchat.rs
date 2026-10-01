@@ -3458,7 +3458,7 @@ pub(crate) fn stable_stream_chat_id(
     }
 }
 
-async fn subchat_stream(
+pub(crate) async fn subchat_stream(
     ccx: Arc<AMutex<AtCommandsContext>>,
     model_id: &str,
     mode_id: &str,
@@ -3662,10 +3662,28 @@ async fn subchat_stream(
                     .is_retryable_transient()
                     .then(|| retry_decision.reason().to_string());
                 let retry_attempt = attempt.saturating_sub(1);
-                let should_retry =
-                    allow_provider_retries && error.should_retry(retry_attempt, &abort_flag);
+                let pressure_retry = if allow_provider_retries
+                    && !retry_decision.is_user_cancelled()
+                    && !retry_decision.is_context_limit()
+                    && !abort_flag.load(Ordering::SeqCst)
+                {
+                    crate::llm::pressure::pressure_retry(
+                        error,
+                        u32::try_from(retry_attempt).unwrap_or(u32::MAX),
+                    )
+                } else {
+                    None
+                };
+                let should_retry = allow_provider_retries
+                    && error.should_retry(retry_attempt, &abort_flag)
+                    && pressure_retry.is_none();
+                let will_retry = should_retry
+                    || matches!(
+                        pressure_retry.as_ref(),
+                        Some(crate::llm::pressure::PressureRetry::Retry { .. })
+                    );
                 if error.partial_output_emitted
-                    && !should_retry
+                    && !will_retry
                     && !retry_decision.is_context_limit()
                     && !abort_flag.load(Ordering::SeqCst)
                 {
@@ -3727,6 +3745,30 @@ async fn subchat_stream(
                         break Err(LlmStreamError::from("aborted".to_string()));
                     }
                     continue;
+                }
+                if let Some(crate::llm::pressure::PressureRetry::Retry { delay_ms, .. }) =
+                    pressure_retry.as_ref()
+                {
+                    last_retry_reason = Some(
+                        retry_reason
+                            .as_deref()
+                            .unwrap_or("provider_pressure_retry")
+                            .to_string(),
+                    );
+                    if sleep_or_abort(
+                        std::time::Duration::from_millis(*delay_ms),
+                        abort_flag.clone(),
+                    )
+                    .await
+                    {
+                        break Err(LlmStreamError::from("aborted".to_string()));
+                    }
+                    continue;
+                }
+                if let Some(crate::llm::pressure::PressureRetry::GiveUp { cause }) =
+                    pressure_retry.as_ref()
+                {
+                    error.message = format!("{} (not retried: {})", error.message, cause);
                 }
             }
             Ok(ref results_ok) => {

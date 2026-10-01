@@ -91,6 +91,8 @@ pub mod scratchpad_abstract;
 pub mod scratchpads;
 pub mod self_update;
 pub mod subchat;
+#[cfg(test)]
+mod subchat_pressure_retry_tests;
 pub mod tokens;
 pub mod tools;
 pub mod vecdb;
