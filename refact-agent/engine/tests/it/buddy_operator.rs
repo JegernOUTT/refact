@@ -5,7 +5,6 @@
 //! Whole-worker acceptance: `sh tools/dev/buddy-operator-test.sh TEST_EXE REFACT_LSP`.
 //! Live IDE parity remains a separate gate.
 
-
 use crate::buddy_operator_common::BuddyOperatorHarness;
 use crate::buddy_operator_common::fixtures::{FixtureEndpoints, FixtureTransport};
 use serde_json::json;

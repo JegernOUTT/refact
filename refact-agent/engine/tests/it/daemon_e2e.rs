@@ -7,7 +7,6 @@
 //! returns before spawning the daemon. The tests set `REFACT_DAEMON_DIR` and `HOME` per process so
 //! daemon state, config, worker logs, and engine user dirs stay inside a temp directory.
 
-
 use std::time::{Duration, SystemTime};
 
 use chrono::{Datelike, Timelike, Utc};
