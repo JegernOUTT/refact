@@ -117,7 +117,7 @@ fn install_single_slot_pressure() {
 }
 
 #[tokio::test]
-#[serial_test::serial(provider_pressure, coordination_metrics)]
+#[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
 async fn second_stream_reaches_the_server_only_after_the_first_permit_is_released() {
     refact_providers::pressure::uninstall_pressure_registry();
     crate::coordination::metrics::recorder().reset();
@@ -205,7 +205,7 @@ async fn second_stream_reaches_the_server_only_after_the_first_permit_is_release
 }
 
 #[tokio::test]
-#[serial_test::serial(provider_pressure, coordination_metrics)]
+#[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
 async fn abort_while_waiting_for_admission_never_reaches_the_server() {
     refact_providers::pressure::uninstall_pressure_registry();
     crate::coordination::metrics::recorder().reset();
@@ -271,7 +271,7 @@ async fn abort_while_waiting_for_admission_never_reaches_the_server() {
 }
 
 #[tokio::test]
-#[serial_test::serial(provider_pressure, coordination_metrics)]
+#[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
 async fn retry_after_header_sets_the_bucket_cooldown_window() {
     refact_providers::pressure::uninstall_pressure_registry();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -329,7 +329,7 @@ async fn retry_after_header_sets_the_bucket_cooldown_window() {
 }
 
 #[tokio::test]
-#[serial_test::serial(provider_pressure, coordination_metrics)]
+#[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
 async fn retry_after_longer_than_the_admission_wait_bound_fails_fast_without_sending() {
     refact_providers::pressure::uninstall_pressure_registry();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

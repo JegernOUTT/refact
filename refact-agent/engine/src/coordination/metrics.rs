@@ -1136,7 +1136,7 @@ mod tests {
     /// Backpressure and retry decisions come from the controller through the
     /// engine seam, never from a hand-written counter.
     #[test]
-    #[serial_test::serial(provider_pressure, coordination_metrics)]
+    #[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
     fn the_real_admission_path_explains_a_backpressure_deferral_and_a_retry() {
         use crate::llm::pressure::{admit, install_provider_pressure, retry_decision};
         use refact_providers::pressure::{FailureReport, RequestPriority};

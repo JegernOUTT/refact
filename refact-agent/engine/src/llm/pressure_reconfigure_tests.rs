@@ -13,7 +13,7 @@ fn fail(bucket: &str, report: FailureReport) {
 }
 
 #[test]
-#[serial(provider_pressure, coordination_metrics)]
+#[serial(provider_pressure, coordination_metrics, runtime_settings)]
 fn reinstall_with_same_settings_preserves_cooldown_and_breaker() {
     uninstall_pressure_registry();
     let settings = CoordinationSettings {
@@ -56,7 +56,7 @@ fn reinstall_with_same_settings_preserves_cooldown_and_breaker() {
 }
 
 #[test]
-#[serial(provider_pressure, coordination_metrics)]
+#[serial(provider_pressure, coordination_metrics, runtime_settings)]
 fn reconfigure_applies_new_limits_and_keeps_state() {
     uninstall_pressure_registry();
     let initial = CoordinationSettings {
@@ -97,7 +97,7 @@ fn reconfigure_applies_new_limits_and_keeps_state() {
 }
 
 #[test]
-#[serial(provider_pressure, coordination_metrics)]
+#[serial(provider_pressure, coordination_metrics, runtime_settings)]
 fn in_flight_count_survives_reinstall() {
     uninstall_pressure_registry();
     let settings = CoordinationSettings::default();
@@ -129,7 +129,7 @@ fn in_flight_count_survives_reinstall() {
 }
 
 #[test]
-#[serial(provider_pressure, coordination_metrics)]
+#[serial(provider_pressure, coordination_metrics, runtime_settings)]
 fn disabling_pressure_uninstalls() {
     uninstall_pressure_registry();
     crate::llm::pressure::install_provider_pressure(&CoordinationSettings::default()).unwrap();

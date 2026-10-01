@@ -141,7 +141,7 @@ async fn run_subchat(status: u16, pressure_attempts: Option<usize>) -> (usize, S
 }
 
 #[tokio::test]
-#[serial_test::serial(provider_pressure, coordination_metrics)]
+#[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
 async fn subchat_401_is_sent_once() {
     let (count, error) = run_subchat(401, Some(2)).await;
 
@@ -150,7 +150,7 @@ async fn subchat_401_is_sent_once() {
 }
 
 #[tokio::test]
-#[serial_test::serial(provider_pressure, coordination_metrics)]
+#[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
 async fn subchat_persistent_503_stops_at_pressure_attempt_limit() {
     let (count, error) = run_subchat(503, Some(2)).await;
 
@@ -159,7 +159,7 @@ async fn subchat_persistent_503_stops_at_pressure_attempt_limit() {
 }
 
 #[tokio::test(start_paused = true)]
-#[serial_test::serial(provider_pressure, coordination_metrics)]
+#[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
 async fn subchat_503_without_registry_keeps_legacy_retry_count() {
     let (count, error) = run_subchat(503, None).await;
 

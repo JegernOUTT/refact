@@ -33,7 +33,7 @@ fn pressure_error(status: u16, retry_after: Option<&str>, body: &str) -> LlmStre
 }
 
 #[test]
-#[serial(provider_pressure, coordination_metrics)]
+#[serial(provider_pressure, coordination_metrics, runtime_settings)]
 fn pressure_retry_honours_retry_after() {
     uninstall_pressure_registry();
     install_provider_pressure(&CoordinationSettings::default()).unwrap();
@@ -52,7 +52,7 @@ fn pressure_retry_honours_retry_after() {
 }
 
 #[test]
-#[serial(provider_pressure, coordination_metrics)]
+#[serial(provider_pressure, coordination_metrics, runtime_settings)]
 fn pressure_retry_gives_up_for_auth_failures() {
     uninstall_pressure_registry();
     install_provider_pressure(&CoordinationSettings::default()).unwrap();
@@ -65,7 +65,7 @@ fn pressure_retry_gives_up_for_auth_failures() {
 }
 
 #[test]
-#[serial(provider_pressure, coordination_metrics)]
+#[serial(provider_pressure, coordination_metrics, runtime_settings)]
 fn pressure_retry_without_pressure_failure_returns_none() {
     uninstall_pressure_registry();
     install_provider_pressure(&CoordinationSettings::default()).unwrap();
@@ -80,7 +80,7 @@ fn pressure_retry_without_pressure_failure_returns_none() {
 }
 
 #[test]
-#[serial(provider_pressure, coordination_metrics)]
+#[serial(provider_pressure, coordination_metrics, runtime_settings)]
 fn pressure_retry_without_registry_returns_none() {
     uninstall_pressure_registry();
 
@@ -92,7 +92,7 @@ fn pressure_retry_without_registry_returns_none() {
 }
 
 #[test]
-#[serial(provider_pressure, coordination_metrics)]
+#[serial(provider_pressure, coordination_metrics, runtime_settings)]
 fn generation_retry_gives_up_when_pressure_attempt_budget_is_exhausted() {
     uninstall_pressure_registry();
     let settings = CoordinationSettings {
@@ -238,7 +238,7 @@ async fn run_generation(
 }
 
 #[tokio::test]
-#[serial(provider_pressure, coordination_metrics)]
+#[serial(provider_pressure, coordination_metrics, runtime_settings)]
 async fn generation_401_is_sent_once() {
     let (count, error, _) = run_generation(
         vec![(401, None, r#"{"error":{"message":"invalid api key"}}"#)],
@@ -252,7 +252,7 @@ async fn generation_401_is_sent_once() {
 }
 
 #[tokio::test]
-#[serial(provider_pressure, coordination_metrics)]
+#[serial(provider_pressure, coordination_metrics, runtime_settings)]
 async fn generation_persistent_503_stops_at_pressure_attempt_limit() {
     let (count, error, messages) = run_generation(
         vec![
@@ -297,7 +297,7 @@ fn retry_statuses(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
 }
 
 #[tokio::test]
-#[serial(provider_pressure, coordination_metrics)]
+#[serial(provider_pressure, coordination_metrics, runtime_settings)]
 async fn generation_retry_after_status_reports_honoured_delay() {
     let (count, _, messages) = run_generation(
         vec![
@@ -322,7 +322,7 @@ async fn generation_retry_after_status_reports_honoured_delay() {
 }
 
 #[tokio::test(start_paused = true)]
-#[serial(provider_pressure, coordination_metrics)]
+#[serial(provider_pressure, coordination_metrics, runtime_settings)]
 async fn generation_without_pressure_registry_uses_legacy_retry_status_budget() {
     let (count, _, messages) = run_generation(
         vec![

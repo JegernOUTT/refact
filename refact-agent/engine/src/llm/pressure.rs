@@ -426,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(provider_pressure)]
+    #[serial(provider_pressure, runtime_settings)]
     fn enabling_installs_a_registry_and_disabling_removes_it() {
         let settings = CoordinationSettings::default();
         install_provider_pressure(&settings).unwrap();
@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(provider_pressure, coordination_metrics)]
+    #[serial(provider_pressure, coordination_metrics, runtime_settings)]
     async fn acquire_without_registry_returns_none_without_waiting() {
         uninstall_pressure_registry();
         let permit = acquire(
@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    #[serial(provider_pressure, coordination_metrics)]
+    #[serial(provider_pressure, coordination_metrics, runtime_settings)]
     async fn waiting_for_capacity_is_abortable() {
         uninstall_pressure_registry();
         let mut settings = CoordinationSettings::default();
@@ -495,7 +495,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(provider_pressure, coordination_metrics)]
+    #[serial(provider_pressure, coordination_metrics, runtime_settings)]
     async fn short_retry_after_window_is_waited_out_then_admitted() {
         uninstall_pressure_registry();
         let mut settings = CoordinationSettings::default();

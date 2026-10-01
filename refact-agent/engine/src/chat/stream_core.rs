@@ -3466,7 +3466,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    #[serial_test::serial(provider_pressure, coordination_metrics)]
+    #[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
     async fn command_credential_retries_once_after_unauthorized() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -3565,7 +3565,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(provider_pressure, coordination_metrics)]
+    #[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
     async fn http_rate_limit_updates_pressure_and_open_breaker_prevents_next_send() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -3656,7 +3656,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(provider_pressure, coordination_metrics)]
+    #[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
     async fn acquisition_waiting_aborts_before_http_send() {
         refact_providers::pressure::uninstall_pressure_registry();
         let mut settings = refact_work_core::CoordinationSettings::default();
@@ -3692,7 +3692,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(provider_pressure, coordination_metrics)]
+    #[serial_test::serial(provider_pressure, coordination_metrics, runtime_settings)]
     async fn pressure_disabled_keeps_the_http_stream_unmanaged() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
