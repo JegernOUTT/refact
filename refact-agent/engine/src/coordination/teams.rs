@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -133,6 +134,7 @@ pub enum TeamRefusal {
     DuplicateRole { role: String },
     TooManyRoles { limit: usize },
     TooManyTeams { limit: usize },
+    UnknownTeam { team: String },
 }
 
 impl fmt::Display for TeamRefusal {
@@ -147,6 +149,7 @@ impl fmt::Display for TeamRefusal {
             TeamRefusal::TooManyTeams { limit } => {
                 write!(f, "at most {limit} teams may be registered")
             }
+            TeamRefusal::UnknownTeam { team } => write!(f, "team `{team}` is not registered"),
         }
     }
 }
@@ -772,6 +775,72 @@ pub fn live_chat_ids(rows: &[WorkRow]) -> BTreeSet<String> {
         .filter(|row| row.metadata.freshness == Freshness::Live)
         .filter_map(|row| row.chat_id.clone())
         .collect()
+}
+
+#[derive(Clone, Default)]
+pub struct TeamRegistry {
+    inner: Arc<Mutex<TeamRegistryState>>,
+}
+
+#[derive(Default)]
+struct TeamRegistryState {
+    catalog: TeamCatalog,
+    rosters: BTreeMap<(String, String), TeamRoster>,
+}
+
+impl TeamRegistry {
+    /// Register or replace a team; changing its specification drops all project rosters for it
+    /// so seats for removed roles cannot survive.
+    pub fn register(&self, team: TeamSpec) -> Result<(), TeamRefusal> {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let changed = state
+            .catalog
+            .get(&team.name)
+            .is_some_and(|existing| existing != &team);
+        let team_name = team.name.clone();
+        state.catalog.register(team)?;
+        if changed {
+            state
+                .rosters
+                .retain(|(_, roster_team), _| roster_team != &team_name);
+        }
+        Ok(())
+    }
+
+    pub fn with_roster<T>(
+        &self,
+        project: &str,
+        team: &str,
+        f: impl FnOnce(&TeamSpec, &mut TeamRoster) -> T,
+    ) -> Result<T, TeamRefusal> {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let spec = state
+            .catalog
+            .get(team)
+            .cloned()
+            .ok_or_else(|| TeamRefusal::UnknownTeam {
+                team: team.to_string(),
+            })?;
+        let roster = state
+            .rosters
+            .entry((project.to_string(), team.to_string()))
+            .or_insert_with(|| TeamRoster::for_team(&spec));
+        Ok(f(&spec, roster))
+    }
+
+    pub fn team_names(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .catalog
+            .names()
+    }
 }
 
 #[cfg(test)]

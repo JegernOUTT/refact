@@ -37,6 +37,8 @@ pub mod scope;
 pub mod service;
 #[cfg(test)]
 mod service_tests;
+#[cfg(test)]
+mod team_registry_tests;
 pub mod teams;
 pub mod types;
 #[cfg(test)]
