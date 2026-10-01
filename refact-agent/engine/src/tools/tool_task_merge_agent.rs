@@ -1125,6 +1125,145 @@ async fn merge_registered_task_worktree(
     )))
 }
 
+struct MergeRequest {
+    gcx: Arc<GlobalContext>,
+    task_id: String,
+    card_id: String,
+    strategy: String,
+    force: bool,
+    auto_revert: bool,
+    auto_revert_timeout: Duration,
+    tool_call_id: String,
+}
+
+struct MergeState {
+    request: MergeRequest,
+    workspace_root: std::path::PathBuf,
+    card: crate::tasks::types::BoardCard,
+    base_branch: String,
+    comparison_base: String,
+    verifier_warning: Option<String>,
+    completion_warning: Option<String>,
+    expected_assignee: Option<String>,
+    expected_agent_chat_id: Option<String>,
+}
+
+async fn resolve_merge_request(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    args: &HashMap<String, Value>,
+    tool_call_id: &str,
+) -> Result<MergeRequest, String> {
+    let ccx_lock = ccx.lock().await;
+    let is_planner = ccx_lock
+        .task_meta
+        .as_ref()
+        .map(|meta| meta.role == "planner")
+        .unwrap_or(false);
+    if !is_planner {
+        return Err("merge_agent can only be called by the task planner. \
+                 Switch to the planner chat to merge agent work."
+            .to_string());
+    }
+    let gcx = ccx_lock.app.gcx.clone();
+    drop(ccx_lock);
+
+    let task_id = require_bound_planner_task(&ccx, args).await?;
+    let card_id = required_string_arg(args, "card_id")?.to_string();
+    let strategy = strategy_arg(args)?.to_string();
+    let force = parse_force(args)?;
+    let auto_revert = parse_auto_revert(args)?;
+    let auto_revert_timeout = parse_auto_revert_timeout(args)?;
+    if strategy != "merge" && strategy != "squash" {
+        return Err(format!(
+            "Invalid strategy '{}', must be 'merge' or 'squash'",
+            strategy
+        ));
+    }
+    Ok(MergeRequest {
+        gcx,
+        task_id,
+        card_id,
+        strategy,
+        force,
+        auto_revert,
+        auto_revert_timeout,
+        tool_call_id: tool_call_id.to_string(),
+    })
+}
+
+async fn resolve_merge_state(request: MergeRequest) -> Result<MergeState, String> {
+    let project_dirs = crate::files_correction::get_project_dirs(request.gcx.clone()).await;
+    let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
+    let is_git_repo = tokio::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(workspace_root)
+        .output()
+        .await
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if !is_git_repo {
+        return Err("Workspace is not a git repository".to_string());
+    }
+
+    let board = storage::load_board(request.gcx.clone(), &request.task_id).await?;
+    let card = board
+        .get_card(&request.card_id)
+        .ok_or(format!("Card {} not found", request.card_id))?;
+    let verifier_warning = ensure_verifier_allows_merge(card, request.force)?;
+    let completion_warning = ensure_card_done_allows_merge(card, request.force)?;
+    let expected_assignee = card.assignee.clone();
+    let expected_agent_chat_id = card.agent_chat_id.clone();
+    let task_meta = storage::load_task_meta(request.gcx.clone(), &request.task_id).await?;
+    let base_branch = card
+        .base_branch
+        .as_ref()
+        .or(task_meta.base_branch.as_ref())
+        .ok_or("Task has no base branch set")?
+        .clone();
+    let comparison_base = card
+        .base_commit
+        .as_deref()
+        .unwrap_or(&base_branch)
+        .to_string();
+
+    Ok(MergeState {
+        request,
+        workspace_root: workspace_root.to_path_buf(),
+        card: card.clone(),
+        base_branch,
+        comparison_base,
+        verifier_warning,
+        completion_warning,
+        expected_assignee,
+        expected_agent_chat_id,
+    })
+}
+
+async fn execute_merge_state(state: MergeState) -> Result<(bool, Vec<ContextEnum>), String> {
+    let request = &state.request;
+    if state.card.agent_worktree_name.is_some() {
+        match merge_registered_task_worktree(
+            request.gcx.clone(),
+            &state.workspace_root,
+            &request.task_id,
+            &request.card_id,
+            &request.strategy,
+            &request.tool_call_id,
+            None,
+            request.force,
+            request.auto_revert,
+            request.auto_revert_timeout,
+        )
+        .await
+        {
+            Ok(Some(result)) => return Ok(result),
+            Ok(None) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    merge_legacy_task_worktree(state).await
+}
+
 pub struct ToolTaskMergeAgent;
 
 impl ToolTaskMergeAgent {
@@ -1173,127 +1312,82 @@ impl Tool for ToolTaskMergeAgent {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let ccx_lock = ccx.lock().await;
+        let request = resolve_merge_request(ccx, args, tool_call_id).await?;
+        let state = resolve_merge_state(request).await?;
+        execute_merge_state(state).await
+    }
 
-        let is_planner = ccx_lock
-            .task_meta
-            .as_ref()
-            .map(|m| m.role == "planner")
-            .unwrap_or(false);
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec![]
+    }
+}
 
-        if !is_planner {
-            return Err("merge_agent can only be called by the task planner. \
-                 Switch to the planner chat to merge agent work."
-                .to_string());
-        }
+enum LegacyPreparationOutcome {
+    Complete((bool, Vec<ContextEnum>)),
+    Ready(LegacyMergePreparation),
+}
 
-        let gcx = ccx_lock.app.gcx.clone();
-        drop(ccx_lock);
+struct LegacyMergePreparation {
+    state: MergeState,
+    agent_branch: String,
+    agent_worktree: String,
+    changed_files: Vec<String>,
+}
 
-        let task_id = require_bound_planner_task(&ccx, args).await?;
+struct LegacyMergeCommit {
+    preparation: LegacyMergePreparation,
+    commit_msg: String,
+    expected_card_state: Option<crate::chat::verifier::ExpectedCardState>,
+}
 
-        let card_id = required_string_arg(args, "card_id")?;
+struct LegacyMergeGitResult {
+    commit: LegacyMergeCommit,
+    squash_nothing_to_commit: bool,
+    merge_commit: Option<String>,
+    conflict_response: Option<String>,
+    agent_worktree_dirty: bool,
+    worktree_removed: bool,
+    branch_deleted: bool,
+}
 
-        let strategy = strategy_arg(args)?;
-        let force = parse_force(args)?;
-        let auto_revert = parse_auto_revert(args)?;
-        let auto_revert_timeout = parse_auto_revert_timeout(args)?;
+async fn merge_legacy_task_worktree(state: MergeState) -> Result<(bool, Vec<ContextEnum>), String> {
+    let preparation = match prepare_legacy_merge(state).await? {
+        LegacyPreparationOutcome::Complete(result) => return Ok(result),
+        LegacyPreparationOutcome::Ready(preparation) => preparation,
+    };
+    let commit = prepare_legacy_merge_commit(preparation).await?;
+    let git_result = run_legacy_git_merge(commit).await?;
+    finish_legacy_merge(git_result).await
+}
 
-        if strategy != "merge" && strategy != "squash" {
-            return Err(format!(
-                "Invalid strategy '{}', must be 'merge' or 'squash'",
-                strategy
-            ));
-        }
+async fn prepare_legacy_merge(state: MergeState) -> Result<LegacyPreparationOutcome, String> {
+    let agent_branch = state.card.agent_branch.clone().ok_or(format!(
+        "Card {} has no agent branch",
+        state.request.card_id
+    ))?;
+    let agent_worktree = state.card.agent_worktree.clone().ok_or(format!(
+        "Card {} has no agent worktree",
+        state.request.card_id
+    ))?;
+    ensure_legacy_agent_worktree_checkout(&state.workspace_root, &agent_worktree, &agent_branch)?;
 
-        let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
-        let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
-
-        let is_git_repo = tokio::process::Command::new("git")
-            .args(["rev-parse", "--is-inside-work-tree"])
-            .current_dir(workspace_root)
-            .output()
+    let merge_in_progress = run_git_in(
+        &state.workspace_root,
+        &["rev-parse", "-q", "--verify", "MERGE_HEAD"],
+    )
+    .await
+    .is_ok();
+    if merge_in_progress {
+        let status = run_git_in(&state.workspace_root, &["status", "--porcelain"])
             .await
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !is_git_repo {
-            return Err("Workspace is not a git repository".to_string());
-        }
-
-        let board = storage::load_board(gcx.clone(), &task_id).await?;
-        let card = board
-            .get_card(card_id)
-            .ok_or(format!("Card {} not found", card_id))?;
-        let verifier_warning = ensure_verifier_allows_merge(card, force)?;
-        let completion_warning = ensure_card_done_allows_merge(card, force)?;
-        let expected_assignee = card.assignee.clone();
-        let expected_agent_chat_id = card.agent_chat_id.clone();
-
-        let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
-        let base_branch = card
-            .base_branch
-            .as_ref()
-            .or(task_meta.base_branch.as_ref())
-            .ok_or("Task has no base branch set")?;
-        let comparison_base = card.base_commit.as_deref().unwrap_or(base_branch);
-
-        if card.agent_worktree_name.is_some() {
-            match merge_registered_task_worktree(
-                gcx.clone(),
-                workspace_root,
-                &task_id,
-                card_id,
-                strategy,
-                tool_call_id,
-                None,
-                force,
-                auto_revert,
-                auto_revert_timeout,
-            )
-            .await
-            {
-                Ok(Some(result)) => return Ok(result),
-                Ok(None) => {}
-                Err(err) => return Err(err),
-            }
-        }
-
-        let agent_branch = card
-            .agent_branch
-            .as_ref()
-            .ok_or(format!("Card {} has no agent branch", card_id))?;
-        let agent_worktree = card
-            .agent_worktree
-            .as_ref()
-            .ok_or(format!("Card {} has no agent worktree", card_id))?;
-
-        ensure_legacy_agent_worktree_checkout(workspace_root, agent_worktree, agent_branch)?;
-
-        let merge_in_progress = run_git_in(
-            workspace_root,
-            &["rev-parse", "-q", "--verify", "MERGE_HEAD"],
-        )
-        .await
-        .is_ok();
-        if merge_in_progress {
-            let status = run_git_in(workspace_root, &["status", "--porcelain"])
-                .await
-                .unwrap_or_default();
-            let conflict_files: Vec<String> = status
-                .lines()
-                .filter(|l| {
-                    let bytes = l.as_bytes();
-                    bytes.len() >= 2
-                        && (bytes[0] == b'U'
-                            || bytes[1] == b'U'
-                            || (bytes[0] == b'A' && bytes[1] == b'A')
-                            || (bytes[0] == b'D' && bytes[1] == b'D'))
-                })
-                .filter_map(|l| l.get(3..).map(|s| s.to_string()))
-                .collect();
-
-            let conflict_msg = format!(
-                r#"# Merge Already In Progress
+            .unwrap_or_default();
+        let conflict_files: Vec<String> = status
+            .lines()
+            .filter(|line| is_merge_conflict_line(line))
+            .filter_map(|line| line.get(3..).map(|file| file.to_string()))
+            .collect();
+        let conflict_msg = format!(
+            r#"# Merge Already In Progress
 
 A previous merge is still in progress with unresolved conflicts.
 
@@ -1312,265 +1406,289 @@ A previous merge is still in progress with unresolved conflicts.
 git merge --abort
 ```
 Then call `merge_agent` again."#,
-                if conflict_files.is_empty() {
-                    "None detected (check `git status`)".to_string()
-                } else {
-                    conflict_files
-                        .iter()
-                        .map(|f| format!("- {}", f))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
-            );
-
-            return Ok((
-                false,
-                vec![ContextEnum::ChatMessage(ChatMessage {
-                    role: "tool".to_string(),
-                    content: ChatContent::SimpleText(conflict_msg),
-                    tool_calls: None,
-                    tool_call_id: tool_call_id.clone(),
-                    ..Default::default()
-                })],
-            ));
-        }
-
-        let main_status = run_git_in(workspace_root, &["status", "--porcelain"])
-            .await
-            .unwrap_or_default();
-        if !main_status.trim().is_empty() {
-            return Err(
-                "Main workspace has uncommitted changes. Please commit or stash before merging."
-                    .to_string(),
-            );
-        }
-
-        let _auto_committed_legacy_worktree = crate::worktrees::git::commit_all(
-            std::path::Path::new(agent_worktree),
-            &format!("Card {}: {}", card_id, card.title),
-        )?;
-
-        let changed_files = crate::chat::task_agent_monitor::git_diff_name_only(
-            std::path::Path::new(agent_worktree),
-            comparison_base,
-            agent_branch,
+            if conflict_files.is_empty() {
+                "None detected (check `git status`)".to_string()
+            } else {
+                conflict_files
+                    .iter()
+                    .map(|file| format!("- {}", file))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
         );
+        return Ok(LegacyPreparationOutcome::Complete((
+            false,
+            vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(conflict_msg),
+                tool_calls: None,
+                tool_call_id: state.request.tool_call_id.clone(),
+                ..Default::default()
+            })],
+        )));
+    }
 
-        let commits_ahead_result = run_git_in(
-            workspace_root,
-            &[
-                "rev-list",
-                "--count",
-                &format!("{}..{}", comparison_base, agent_branch),
-            ],
-        )
-        .await;
-        let commits_ahead = match commits_ahead_result {
-            Ok(output) => output
-                .trim()
-                .parse::<u32>()
-                .map_err(|e| format!("Failed to parse commits ahead count: {}", e))?,
-            Err(e) => {
-                return Err(format!(
-                    "Failed to count commits ahead (base: {}, agent: {}): {}. \
-                    Check that both branches exist and are valid.",
-                    comparison_base, agent_branch, e
-                ));
-            }
-        };
-
-        if commits_ahead == 0 {
-            let worktree_status = if let Some(wt) = card.agent_worktree.as_ref() {
-                tokio::process::Command::new("git")
-                    .args(["status", "--porcelain"])
-                    .current_dir(wt)
-                    .output()
-                    .await
-                    .ok()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-
-            let main_status = run_git_in(workspace_root, &["status", "--porcelain"])
-                .await
-                .unwrap_or_default();
-            let main_dirty = !main_status.trim().is_empty();
-            let worktree_dirty = !worktree_status.is_empty();
-
-            let diagnostic = if main_dirty && !worktree_dirty {
-                "Main workspace has uncommitted changes but agent worktree is clean. Agent likely edited files in the wrong directory."
-            } else if worktree_dirty {
-                "Agent worktree has uncommitted changes. The worktree and branch are preserved; inspect the worktree or use restart_agent(mode=resume)."
-            } else {
-                "Both main workspace and agent worktree are clean. Agent may not have made any changes."
-            };
-
-            let mut cleanup_status = Vec::new();
-            let mut worktree_removed = false;
-            let mut branch_deleted = false;
-            if worktree_dirty {
-                cleanup_status.push(
-                    "cleanup skipped; dirty agent worktree preserved for inspection or restart_agent(mode=resume)",
-                );
-            } else if agent_branch != base_branch {
-                let merge_lock = git_merge_lock(workspace_root);
-                let _guard = merge_lock.lock().await;
-                worktree_removed = run_git_in(
-                    workspace_root,
-                    &["worktree", "remove", agent_worktree, "--force"],
-                )
-                .await
-                .is_ok();
-                branch_deleted = run_git_in(workspace_root, &["branch", "-D", agent_branch])
-                    .await
-                    .is_ok();
-                drop(_guard);
-
-                if worktree_removed {
-                    cleanup_status.push("worktree removed");
-                }
-                if branch_deleted {
-                    cleanup_status.push("branch deleted");
-                }
-            }
-
-            if worktree_removed || branch_deleted || force {
-                let card_id_owned = card_id.to_string();
-                let clear_worktree = worktree_removed;
-                let clear_branch = branch_deleted;
-                let expected_assignee = expected_assignee.clone();
-                let expected_agent_chat_id = expected_agent_chat_id.clone();
-                let (_, stats_changed) =
-                    storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
-                        let Some(card) = board.get_card_mut(&card_id_owned) else {
-                            return Ok(false);
-                        };
-                        if !force_merge_card_matches_current(
-                            card,
-                            expected_assignee.as_deref(),
-                            expected_agent_chat_id.as_deref(),
-                        ) {
-                            return Ok(false);
-                        }
-                        if clear_branch {
-                            card.agent_branch = None;
-                        }
-                        if clear_worktree {
-                            card.agent_worktree = None;
-                            card.agent_worktree_name = None;
-                        }
-                        Ok(force
-                            && finalize_force_merge_card_if_current(
-                                card,
-                                expected_assignee.as_deref(),
-                                expected_agent_chat_id.as_deref(),
-                            ))
-                    })
-                    .await?;
-                if stats_changed {
-                    storage::update_task_stats(gcx.clone(), &task_id).await?;
-                }
-            }
-
-            let cleanup_msg = if cleanup_status.is_empty() {
-                "No cleanup performed.".to_string()
-            } else {
-                format!("Cleanup: {}.", cleanup_status.join(", "))
-            };
-
-            let mut message = format!(
-                "# Nothing to Merge\n\n**Card:** {}\n**Branch:** {}\n**Commits ahead of base:** 0\n\n**Diagnostic:** {}\n\n{}",
-                card_id, agent_branch, diagnostic, cleanup_msg
-            );
-            append_verifier_warning(&mut message, verifier_warning.as_deref());
-
-            return Ok((
-                false,
-                vec![ContextEnum::ChatMessage(ChatMessage {
-                    role: "tool".to_string(),
-                    content: ChatContent::SimpleText(message),
-                    tool_calls: None,
-                    tool_call_id: tool_call_id.clone(),
-                    ..Default::default()
-                })],
-            ));
-        }
-
-        // Generate commit message before acquiring the lock: git diff base...agent is read-only
-        // and produces the same content as git diff --cached after a squash merge.
-        let diff = run_git_in(
-            workspace_root,
-            &["diff", &format!("{}...{}", comparison_base, agent_branch)],
-        )
+    let main_status = run_git_in(&state.workspace_root, &["status", "--porcelain"])
         .await
         .unwrap_or_default();
-        let commit_msg =
-            match crate::agentic::generate_commit_message::generate_commit_message_by_diff(
-                gcx.clone(),
-                &diff,
-                &Some(card.title.clone()),
-                None,
-            )
-            .await
-            {
-                Ok(msg) if !msg.trim().is_empty() => msg,
-                _ => format!("Card {}: {}", card_id, card.title),
-            };
+    if !main_status.trim().is_empty() {
+        return Err(
+            "Main workspace has uncommitted changes. Please commit or stash before merging."
+                .to_string(),
+        );
+    }
+    crate::worktrees::git::commit_all(
+        std::path::Path::new(&agent_worktree),
+        &format!("Card {}: {}", state.request.card_id, state.card.title),
+    )?;
+    let changed_files = crate::chat::task_agent_monitor::git_diff_name_only(
+        std::path::Path::new(&agent_worktree),
+        &state.comparison_base,
+        &agent_branch,
+    );
+    let commits_ahead_result = run_git_in(
+        &state.workspace_root,
+        &[
+            "rev-list",
+            "--count",
+            &format!("{}..{}", state.comparison_base, agent_branch),
+        ],
+    )
+    .await;
+    let commits_ahead = match commits_ahead_result {
+        Ok(output) => output
+            .trim()
+            .parse::<u32>()
+            .map_err(|error| format!("Failed to parse commits ahead count: {}", error))?,
+        Err(error) => {
+            return Err(format!(
+                "Failed to count commits ahead (base: {}, agent: {}): {}. \
+                Check that both branches exist and are valid.",
+                state.comparison_base, agent_branch, error
+            ));
+        }
+    };
 
-        let post_merge_expected_state = if auto_revert {
-            Some(load_expected_card_state(gcx.clone(), &task_id, card_id).await?)
-        } else {
-            None
-        };
+    if commits_ahead == 0 {
+        let result = finish_legacy_nothing_to_merge(&state, &agent_branch, &agent_worktree).await?;
+        return Ok(LegacyPreparationOutcome::Complete(result));
+    }
 
-        let merge_lock = git_merge_lock(workspace_root);
+    Ok(LegacyPreparationOutcome::Ready(LegacyMergePreparation {
+        state,
+        agent_branch,
+        agent_worktree,
+        changed_files,
+    }))
+}
+
+fn is_merge_conflict_line(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() >= 2
+        && (bytes[0] == b'U'
+            || bytes[1] == b'U'
+            || (bytes[0] == b'A' && bytes[1] == b'A')
+            || (bytes[0] == b'D' && bytes[1] == b'D'))
+}
+
+async fn finish_legacy_nothing_to_merge(
+    state: &MergeState,
+    agent_branch: &str,
+    agent_worktree: &str,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    let request = &state.request;
+    let worktree_status = tokio::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(agent_worktree)
+        .output()
+        .await
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default();
+    let main_status = run_git_in(&state.workspace_root, &["status", "--porcelain"])
+        .await
+        .unwrap_or_default();
+    let main_dirty = !main_status.trim().is_empty();
+    let worktree_dirty = !worktree_status.is_empty();
+    let diagnostic = if main_dirty && !worktree_dirty {
+        "Main workspace has uncommitted changes but agent worktree is clean. Agent likely edited files in the wrong directory."
+    } else if worktree_dirty {
+        "Agent worktree has uncommitted changes. The worktree and branch are preserved; inspect the worktree or use restart_agent(mode=resume)."
+    } else {
+        "Both main workspace and agent worktree are clean. Agent may not have made any changes."
+    };
+    let mut cleanup_status = Vec::new();
+    let mut worktree_removed = false;
+    let mut branch_deleted = false;
+    if worktree_dirty {
+        cleanup_status.push(
+            "cleanup skipped; dirty agent worktree preserved for inspection or restart_agent(mode=resume)",
+        );
+    } else if agent_branch != state.base_branch {
+        let merge_lock = git_merge_lock(&state.workspace_root);
         let _guard = merge_lock.lock().await;
-
-        run_git_in(workspace_root, &["checkout", base_branch])
+        worktree_removed = run_git_in(
+            &state.workspace_root,
+            &["worktree", "remove", agent_worktree, "--force"],
+        )
+        .await
+        .is_ok();
+        branch_deleted = run_git_in(&state.workspace_root, &["branch", "-D", agent_branch])
             .await
-            .map_err(|e| format!("Failed to checkout base branch: {}", e))?;
+            .is_ok();
+        drop(_guard);
+        if worktree_removed {
+            cleanup_status.push("worktree removed");
+        }
+        if branch_deleted {
+            cleanup_status.push("branch deleted");
+        }
+    }
 
-        let merge_result = if strategy == "squash" {
-            run_git_in(workspace_root, &["merge", "--squash", agent_branch]).await
-        } else {
-            crate::worktrees::git::run_git_with_refact_author(
-                workspace_root,
-                &[
-                    "merge",
-                    "--no-ff",
-                    "--no-gpg-sign",
-                    agent_branch,
-                    "-m",
-                    &commit_msg,
-                ],
+    if worktree_removed || branch_deleted || request.force {
+        let card_id_owned = request.card_id.clone();
+        let clear_worktree = worktree_removed;
+        let clear_branch = branch_deleted;
+        let expected_assignee = state.expected_assignee.clone();
+        let expected_agent_chat_id = state.expected_agent_chat_id.clone();
+        let force = request.force;
+        let (_, stats_changed) =
+            storage::update_board_atomic(request.gcx.clone(), &request.task_id, move |board| {
+                let Some(card) = board.get_card_mut(&card_id_owned) else {
+                    return Ok(false);
+                };
+                if !force_merge_card_matches_current(
+                    card,
+                    expected_assignee.as_deref(),
+                    expected_agent_chat_id.as_deref(),
+                ) {
+                    return Ok(false);
+                }
+                if clear_branch {
+                    card.agent_branch = None;
+                }
+                if clear_worktree {
+                    card.agent_worktree = None;
+                    card.agent_worktree_name = None;
+                }
+                Ok(force
+                    && finalize_force_merge_card_if_current(
+                        card,
+                        expected_assignee.as_deref(),
+                        expected_agent_chat_id.as_deref(),
+                    ))
+            })
+            .await?;
+        if stats_changed {
+            storage::update_task_stats(request.gcx.clone(), &request.task_id).await?;
+        }
+    }
+    let cleanup_msg = if cleanup_status.is_empty() {
+        "No cleanup performed.".to_string()
+    } else {
+        format!("Cleanup: {}.", cleanup_status.join(", "))
+    };
+    let mut message = format!(
+        "# Nothing to Merge\n\n**Card:** {}\n**Branch:** {}\n**Commits ahead of base:** 0\n\n**Diagnostic:** {}\n\n{}",
+        request.card_id, agent_branch, diagnostic, cleanup_msg
+    );
+    append_verifier_warning(&mut message, state.verifier_warning.as_deref());
+    Ok((
+        false,
+        vec![ContextEnum::ChatMessage(ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(message),
+            tool_calls: None,
+            tool_call_id: request.tool_call_id.clone(),
+            ..Default::default()
+        })],
+    ))
+}
+
+async fn prepare_legacy_merge_commit(
+    preparation: LegacyMergePreparation,
+) -> Result<LegacyMergeCommit, String> {
+    let diff = run_git_in(
+        &preparation.state.workspace_root,
+        &[
+            "diff",
+            &format!(
+                "{}...{}",
+                preparation.state.comparison_base, preparation.agent_branch
+            ),
+        ],
+    )
+    .await
+    .unwrap_or_default();
+    let commit_msg = match crate::agentic::generate_commit_message::generate_commit_message_by_diff(
+        preparation.state.request.gcx.clone(),
+        &diff,
+        &Some(preparation.state.card.title.clone()),
+        None,
+    )
+    .await
+    {
+        Ok(message) if !message.trim().is_empty() => message,
+        _ => format!(
+            "Card {}: {}",
+            preparation.state.request.card_id, preparation.state.card.title
+        ),
+    };
+    let expected_card_state = if preparation.state.request.auto_revert {
+        Some(
+            load_expected_card_state(
+                preparation.state.request.gcx.clone(),
+                &preparation.state.request.task_id,
+                &preparation.state.request.card_id,
             )
-        };
+            .await?,
+        )
+    } else {
+        None
+    };
+    Ok(LegacyMergeCommit {
+        preparation,
+        commit_msg,
+        expected_card_state,
+    })
+}
 
-        if let Err(e) = merge_result {
-            let status = run_git_in(workspace_root, &["status", "--porcelain"])
-                .await
-                .unwrap_or_default();
-            let is_conflict_line = |l: &str| {
-                let bytes = l.as_bytes();
-                bytes.len() >= 2
-                    && (bytes[0] == b'U'
-                        || bytes[1] == b'U'
-                        || (bytes[0] == b'A' && bytes[1] == b'A')
-                        || (bytes[0] == b'D' && bytes[1] == b'D'))
-            };
-            let has_conflicts = status.lines().any(is_conflict_line);
-
-            if has_conflicts {
-                let conflict_files: Vec<String> = status
-                    .lines()
-                    .filter(|l| is_conflict_line(l))
-                    .filter_map(|l| l.get(3..).map(|s| s.to_string()))
-                    .collect();
-
-                let conflict_msg = format!(
-                    r#"# Merge Conflicts Detected
+async fn run_legacy_git_merge(commit: LegacyMergeCommit) -> Result<LegacyMergeGitResult, String> {
+    let state = &commit.preparation.state;
+    let agent_branch = &commit.preparation.agent_branch;
+    let agent_worktree = &commit.preparation.agent_worktree;
+    let merge_lock = git_merge_lock(&state.workspace_root);
+    let _guard = merge_lock.lock().await;
+    run_git_in(&state.workspace_root, &["checkout", &state.base_branch])
+        .await
+        .map_err(|error| format!("Failed to checkout base branch: {}", error))?;
+    let merge_result = if state.request.strategy == "squash" {
+        run_git_in(&state.workspace_root, &["merge", "--squash", agent_branch]).await
+    } else {
+        crate::worktrees::git::run_git_with_refact_author(
+            &state.workspace_root,
+            &[
+                "merge",
+                "--no-ff",
+                "--no-gpg-sign",
+                agent_branch,
+                "-m",
+                &commit.commit_msg,
+            ],
+        )
+    };
+    if let Err(error) = merge_result {
+        let status = run_git_in(&state.workspace_root, &["status", "--porcelain"])
+            .await
+            .unwrap_or_default();
+        if status.lines().any(is_merge_conflict_line) {
+            let conflict_files: Vec<String> = status
+                .lines()
+                .filter(|line| is_merge_conflict_line(line))
+                .filter_map(|line| line.get(3..).map(|file| file.to_string()))
+                .collect();
+            let conflict_msg = format!(
+                r#"# Merge Conflicts Detected
 
 **Card:** {}
 **Branch:** {} → {}
@@ -1604,257 +1722,308 @@ Then investigate why conflicts occurred and create a fix card.
 
 ## Conflict Details
 Use `cat <file>` to see conflict markers in each file."#,
-                    card_id,
-                    agent_branch,
-                    base_branch,
-                    strategy,
-                    conflict_files
-                        .iter()
-                        .map(|f| format!("- {}", f))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    agent_branch
-                );
-
-                return Ok((
-                    false,
-                    vec![ContextEnum::ChatMessage(ChatMessage {
-                        role: "tool".to_string(),
-                        content: ChatContent::SimpleText(conflict_msg),
-                        tool_calls: None,
-                        tool_call_id: tool_call_id.clone(),
-                        ..Default::default()
-                    })],
-                ));
-            }
-            return Err(format!("Merge failed: {}", e));
-        }
-
-        let mut squash_nothing_to_commit = false;
-        if strategy == "squash" {
-            let commit_result = crate::worktrees::git::run_git_with_refact_author(
-                workspace_root,
-                &["commit", "--no-gpg-sign", "-m", &commit_msg],
+                state.request.card_id,
+                agent_branch,
+                state.base_branch,
+                state.request.strategy,
+                conflict_files
+                    .iter()
+                    .map(|file| format!("- {}", file))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                agent_branch
             );
-            if let Err(e) = commit_result {
-                if !e.contains("nothing to commit") {
-                    return Err(format!("Failed to commit squash merge: {}", e));
-                }
-                squash_nothing_to_commit = true;
-            }
+            return Ok(LegacyMergeGitResult {
+                commit,
+                squash_nothing_to_commit: true,
+                merge_commit: None,
+                conflict_response: Some(conflict_msg),
+                agent_worktree_dirty: false,
+                worktree_removed: false,
+                branch_deleted: false,
+            });
         }
+        return Err(format!("Merge failed: {}", error));
+    }
 
-        let merge_commit = if squash_nothing_to_commit {
-            None
-        } else {
-            run_git_in(workspace_root, &["rev-parse", "HEAD"])
-                .await
-                .map(|head| head.trim().to_string())
-                .ok()
-                .filter(|head| !head.is_empty())
-        };
-
-        let agent_worktree_dirty = if agent_branch != base_branch {
-            match tokio::process::Command::new("git")
-                .args(["status", "--porcelain"])
-                .current_dir(agent_worktree)
-                .output()
-                .await
-            {
-                Ok(output) if output.status.success() => {
-                    !String::from_utf8_lossy(&output.stdout).trim().is_empty()
-                }
-                _ => true,
+    let mut squash_nothing_to_commit = false;
+    if state.request.strategy == "squash" {
+        let commit_result = crate::worktrees::git::run_git_with_refact_author(
+            &state.workspace_root,
+            &["commit", "--no-gpg-sign", "-m", &commit.commit_msg],
+        );
+        if let Err(error) = commit_result {
+            if !error.contains("nothing to commit") {
+                return Err(format!("Failed to commit squash merge: {}", error));
             }
-        } else {
-            false
-        };
-
-        let (worktree_removed, branch_deleted) =
-            if agent_branch != base_branch && !agent_worktree_dirty {
-                let wr = run_git_in(
-                    workspace_root,
-                    &["worktree", "remove", agent_worktree, "--force"],
-                )
+            squash_nothing_to_commit = true;
+        }
+    }
+    let merge_commit = if squash_nothing_to_commit {
+        None
+    } else {
+        run_git_in(&state.workspace_root, &["rev-parse", "HEAD"])
+            .await
+            .map(|head| head.trim().to_string())
+            .ok()
+            .filter(|head| !head.is_empty())
+    };
+    let agent_worktree_dirty = if agent_branch != &state.base_branch {
+        match tokio::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(agent_worktree)
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => {
+                !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+            }
+            _ => true,
+        }
+    } else {
+        false
+    };
+    let (worktree_removed, branch_deleted) =
+        if agent_branch != &state.base_branch && !agent_worktree_dirty {
+            let worktree_removed = run_git_in(
+                &state.workspace_root,
+                &["worktree", "remove", agent_worktree, "--force"],
+            )
+            .await
+            .is_ok();
+            let branch_deleted = run_git_in(&state.workspace_root, &["branch", "-D", agent_branch])
                 .await
                 .is_ok();
-                let bd = run_git_in(workspace_root, &["branch", "-D", agent_branch])
-                    .await
-                    .is_ok();
-                (wr, bd)
-            } else {
-                (false, false)
-            };
-
-        drop(_guard);
-
-        let post_merge_check_result = if auto_revert {
-            match merge_commit {
-                Some(merge_commit) => {
-                    let expected_card_state = post_merge_expected_state
-                        .expect("post-merge state is captured whenever auto-revert is enabled");
-                    crate::chat::post_merge_check::post_merge_check(
-                        gcx.clone(),
-                        crate::chat::post_merge_check::PostMergeCheckRequest {
-                            task_id: task_id.clone(),
-                            card_id: card_id.to_string(),
-                            workspace_root: workspace_root.to_path_buf(),
-                            enabled: true,
-                            timeout: auto_revert_timeout,
-                            expected_merge_commit: merge_commit,
-                            expected_card_state: Some(expected_card_state),
-                        },
-                    )
-                    .await
-                    .map(Some)
-                }
-                None => Ok(None),
-            }
+            (worktree_removed, branch_deleted)
         } else {
-            Ok(None)
+            (false, false)
         };
-        let merge_auto_reverted = post_merge_check_result
-            .as_ref()
-            .ok()
-            .and_then(|result| result.as_ref())
-            .map(|result| result.auto_reverted)
-            .unwrap_or(false);
-        let post_merge_check_error = post_merge_check_result.as_ref().err().cloned();
-        let retained_verification_failure =
-            retained_post_merge_verification_failure(&post_merge_check_result);
+    drop(_guard);
+    Ok(LegacyMergeGitResult {
+        commit,
+        squash_nothing_to_commit,
+        merge_commit,
+        conflict_response: None,
+        agent_worktree_dirty,
+        worktree_removed,
+        branch_deleted,
+    })
+}
 
-        if !merge_auto_reverted && !squash_nothing_to_commit {
-            let _ = crate::chat::task_agent_monitor::append_card_target_files(
-                crate::app_state::AppState::from_gcx(gcx.clone()).await,
-                &task_id,
-                card_id,
-                changed_files,
-            )
-            .await;
+async fn finish_legacy_merge(
+    result: LegacyMergeGitResult,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    if let Some(conflict_msg) = result.conflict_response.as_deref() {
+        return Ok((
+            false,
+            vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(conflict_msg.to_string()),
+                tool_calls: None,
+                tool_call_id: result.commit.preparation.state.request.tool_call_id.clone(),
+                ..Default::default()
+            })],
+        ));
+    }
+    let state = &result.commit.preparation.state;
+    let request = &state.request;
+    let post_merge_check_result = if request.auto_revert {
+        match result.merge_commit.clone() {
+            Some(merge_commit) => {
+                let expected_card_state = result
+                    .commit
+                    .expected_card_state
+                    .clone()
+                    .expect("post-merge state is captured whenever auto-revert is enabled");
+                crate::chat::post_merge_check::post_merge_check(
+                    request.gcx.clone(),
+                    crate::chat::post_merge_check::PostMergeCheckRequest {
+                        task_id: request.task_id.clone(),
+                        card_id: request.card_id.clone(),
+                        workspace_root: state.workspace_root.clone(),
+                        enabled: true,
+                        timeout: request.auto_revert_timeout,
+                        expected_merge_commit: merge_commit,
+                        expected_card_state: Some(expected_card_state),
+                    },
+                )
+                .await
+                .map(Some)
+            }
+            None => Ok(None),
         }
+    } else {
+        Ok(None)
+    };
+    let merge_auto_reverted = post_merge_check_result
+        .as_ref()
+        .ok()
+        .and_then(|result| result.as_ref())
+        .map(|result| result.auto_reverted)
+        .unwrap_or(false);
+    let post_merge_check_error = post_merge_check_result.as_ref().err().cloned();
+    let retained_verification_failure =
+        retained_post_merge_verification_failure(&post_merge_check_result);
+    if !merge_auto_reverted && !result.squash_nothing_to_commit {
+        let _ = crate::chat::task_agent_monitor::append_card_target_files(
+            crate::app_state::AppState::from_gcx(request.gcx.clone()).await,
+            &request.task_id,
+            &request.card_id,
+            result.commit.preparation.changed_files.clone(),
+        )
+        .await;
+    }
+    update_legacy_merge_board(
+        &result,
+        &post_merge_check_result,
+        merge_auto_reverted,
+        retained_verification_failure,
+        post_merge_check_error,
+    )
+    .await?;
+    let post_merge_check = post_merge_check_result?;
+    let cleanup_info = legacy_merge_cleanup_message(
+        &result.commit.preparation.agent_branch,
+        &state.base_branch,
+        result.agent_worktree_dirty,
+        result.worktree_removed,
+        result.branch_deleted,
+    );
+    let result_message =
+        legacy_merge_result_message(&result, &cleanup_info, post_merge_check.as_ref());
+    Ok((
+        false,
+        vec![ContextEnum::ChatMessage(ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(result_message),
+            tool_calls: None,
+            tool_call_id: request.tool_call_id.clone(),
+            ..Default::default()
+        })],
+    ))
+}
 
-        if worktree_removed || branch_deleted || force {
-            let card_id_owned = card_id.to_string();
-            let clear_worktree = worktree_removed;
-            let clear_branch = branch_deleted;
-            let expected_assignee = expected_assignee.clone();
-            let expected_agent_chat_id = expected_agent_chat_id.clone();
-            let finalize_force = force_merge_post_check_passed_or_absent(&post_merge_check_result);
-            let (_, stats_changed) =
-                storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
-                    let Some(card) = board.get_card_mut(&card_id_owned) else {
-                        return Ok(false);
-                    };
-                    if !force_merge_card_matches_current(
-                        card,
-                        expected_assignee.as_deref(),
-                        expected_agent_chat_id.as_deref(),
-                    ) {
-                        return Ok(false);
+async fn update_legacy_merge_board(
+    result: &LegacyMergeGitResult,
+    post_merge_check_result: &Result<
+        Option<crate::chat::post_merge_check::PostMergeCheckResult>,
+        String,
+    >,
+    merge_auto_reverted: bool,
+    retained_verification_failure: Option<String>,
+    post_merge_check_error: Option<String>,
+) -> Result<(), String> {
+    let state = &result.commit.preparation.state;
+    let request = &state.request;
+    if result.worktree_removed || result.branch_deleted || request.force {
+        let card_id_owned = request.card_id.clone();
+        let clear_worktree = result.worktree_removed;
+        let clear_branch = result.branch_deleted;
+        let expected_assignee = state.expected_assignee.clone();
+        let expected_agent_chat_id = state.expected_agent_chat_id.clone();
+        let retained_verification_failure = retained_verification_failure.clone();
+        let post_merge_check_error = post_merge_check_error.clone();
+        let finalize_force = force_merge_post_check_passed_or_absent(post_merge_check_result);
+        let (_, stats_changed) = storage::update_board_atomic(
+            request.gcx.clone(),
+            &request.task_id,
+            move |board| {
+                let Some(card) = board.get_card_mut(&card_id_owned) else {
+                    return Ok(false);
+                };
+                if !force_merge_card_matches_current(card, expected_assignee.as_deref(), expected_agent_chat_id.as_deref()) {
+                    return Ok(false);
+                }
+                if clear_branch { card.agent_branch = None; }
+                if clear_worktree { card.agent_worktree = None; card.agent_worktree_name = None; }
+                if request.force && merge_auto_reverted {
+                    card.assignee = None;
+                    card.agent_chat_id = None;
+                    card.status_updates.push(crate::tasks::types::StatusUpdate {
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        message: "Forced merge was auto-reverted after post-merge verification failed; the original card was not marked done and stale worktree, branch, and agent ownership references were cleared.".to_string(),
+                    });
+                    return Ok(true);
+                }
+                if request.force {
+                    if let Some(message) = retained_verification_failure.as_deref() {
+                        return Ok(retain_force_merge_without_finalizing(card, message));
                     }
-                    if clear_branch {
-                        card.agent_branch = None;
-                    }
-                    if clear_worktree {
-                        card.agent_worktree = None;
-                        card.agent_worktree_name = None;
-                    }
-                    if force && merge_auto_reverted {
+                    if let Some(error) = post_merge_check_error.as_deref() {
                         card.assignee = None;
                         card.agent_chat_id = None;
                         card.status_updates.push(crate::tasks::types::StatusUpdate {
                             timestamp: chrono::Utc::now().to_rfc3339(),
-                            message: "Forced merge was auto-reverted after post-merge verification failed; the original card was not marked done and stale worktree, branch, and agent ownership references were cleared.".to_string(),
+                            message: format!("Forced merge remains applied, but post-merge verification failed to run: {}. Stale worktree, branch, and agent ownership references were cleared; merge success was not inferred from verification.", error),
                         });
                         return Ok(true);
                     }
-                    if force {
-                        if let Some(message) = retained_verification_failure.as_deref() {
-                            return Ok(retain_force_merge_without_finalizing(card, message));
-                        }
-                        if let Some(error) = post_merge_check_error.as_deref() {
-                            card.assignee = None;
-                            card.agent_chat_id = None;
-                            card.status_updates.push(crate::tasks::types::StatusUpdate {
-                                timestamp: chrono::Utc::now().to_rfc3339(),
-                                message: format!("Forced merge remains applied, but post-merge verification failed to run: {}. Stale worktree, branch, and agent ownership references were cleared; merge success was not inferred from verification.", error),
-                            });
-                            return Ok(true);
-                        }
-                    }
-                    Ok(force
-                        && finalize_force
-                        && finalize_force_merge_card_if_current(
-                            card,
-                            expected_assignee.as_deref(),
-                            expected_agent_chat_id.as_deref(),
-                        ))
-                })
-                .await?;
-            if stats_changed {
-                storage::update_task_stats(gcx.clone(), &task_id).await?;
-            }
-        }
-
-        let post_merge_check = post_merge_check_result?;
-
-        let cleanup_info = if agent_branch != base_branch {
-            if agent_worktree_dirty {
-                "Worktree retained (uncommitted changes detected; use restart_agent or inspect manually)"
-                    .to_string()
-            } else {
-                match (worktree_removed, branch_deleted) {
-                    (true, true) => "Worktree and branch cleaned up.".to_string(),
-                    (true, false) => "Worktree removed, branch deletion failed.".to_string(),
-                    (false, true) => "Worktree removal failed, branch deleted.".to_string(),
-                    (false, false) => {
-                        "Cleanup failed (worktree and branch still exist).".to_string()
-                    }
                 }
-            }
-        } else {
-            "Cleanup skipped because agent branch matches base branch.".to_string()
-        };
-
-        let mut result_message = if squash_nothing_to_commit {
-            format!(
-                "# Nothing to Merge\n\n**Card:** {}\n**Branch:** {} → {}\n\n**Cleanup:** {}",
-                card_id, agent_branch, base_branch, cleanup_info
-            )
-        } else {
-            format!(
-                r#"# Agent Work Merged
-
-**Card:** {}
-**Strategy:** {}
-**Branch:** {} → {}
-**Cleanup:** {}
-
-The agent's work has been successfully merged back to the main branch."#,
-                card_id, strategy, agent_branch, base_branch, cleanup_info
-            )
-        };
-        append_verifier_warning(&mut result_message, verifier_warning.as_deref());
-        append_completion_warning(&mut result_message, completion_warning.as_deref());
-        if let Some(post_merge_check) = post_merge_check.as_ref() {
-            append_post_merge_check_message(&mut result_message, post_merge_check);
+                Ok(request.force && finalize_force && finalize_force_merge_card_if_current(
+                    card,
+                    expected_assignee.as_deref(),
+                    expected_agent_chat_id.as_deref(),
+                ))
+            },
+        ).await?;
+        if stats_changed {
+            storage::update_task_stats(request.gcx.clone(), &request.task_id).await?;
         }
-
-        Ok((
-            false,
-            vec![ContextEnum::ChatMessage(ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText(result_message),
-                tool_calls: None,
-                tool_call_id: tool_call_id.clone(),
-                ..Default::default()
-            })],
-        ))
     }
+    Ok(())
+}
 
-    fn tool_depends_on(&self) -> Vec<String> {
-        vec![]
+fn legacy_merge_cleanup_message(
+    agent_branch: &str,
+    base_branch: &str,
+    agent_worktree_dirty: bool,
+    worktree_removed: bool,
+    branch_deleted: bool,
+) -> String {
+    if agent_branch == base_branch {
+        return "Cleanup skipped because agent branch matches base branch.".to_string();
     }
+    if agent_worktree_dirty {
+        return "Worktree retained (uncommitted changes detected; use restart_agent or inspect manually)".to_string();
+    }
+    match (worktree_removed, branch_deleted) {
+        (true, true) => "Worktree and branch cleaned up.".to_string(),
+        (true, false) => "Worktree removed, branch deletion failed.".to_string(),
+        (false, true) => "Worktree removal failed, branch deleted.".to_string(),
+        (false, false) => "Cleanup failed (worktree and branch still exist).".to_string(),
+    }
+}
+
+fn legacy_merge_result_message(
+    result: &LegacyMergeGitResult,
+    cleanup_info: &str,
+    post_merge_check: Option<&crate::chat::post_merge_check::PostMergeCheckResult>,
+) -> String {
+    let state = &result.commit.preparation.state;
+    let mut message = if result.squash_nothing_to_commit {
+        format!(
+            "# Nothing to Merge\n\n**Card:** {}\n**Branch:** {} → {}\n\n**Cleanup:** {}",
+            state.request.card_id,
+            result.commit.preparation.agent_branch,
+            state.base_branch,
+            cleanup_info
+        )
+    } else {
+        format!(
+            "# Agent Work Merged\n\n**Card:** {}\n**Strategy:** {}\n**Branch:** {} → {}\n**Cleanup:** {}\n\nThe agent's work has been successfully merged back to the main branch.",
+            state.request.card_id,
+            state.request.strategy,
+            result.commit.preparation.agent_branch,
+            state.base_branch,
+            cleanup_info
+        )
+    };
+    append_verifier_warning(&mut message, state.verifier_warning.as_deref());
+    append_completion_warning(&mut message, state.completion_warning.as_deref());
+    if let Some(post_merge_check) = post_merge_check {
+        append_post_merge_check_message(&mut message, post_merge_check);
+    }
+    message
 }
 
 #[cfg(test)]
