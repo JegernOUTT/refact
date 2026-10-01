@@ -400,6 +400,71 @@ export type OpenAICodexResetRedeemResponse = {
   error?: string | null;
 };
 
+export type ClaudeCodeResetProgram = "cedar_ember" | "juniper_tide";
+
+export type ClaudeCodeResetGrant = {
+  id: string;
+  label: string;
+  resets_total: number;
+  resets_left: number;
+  starts_at?: string | null;
+  ends_at?: string | null;
+  clears: string[];
+  paused: boolean;
+  usable_now: boolean;
+  use_requires_limit: boolean;
+  percent_used: Record<string, number>;
+  blocking: string[];
+};
+
+export type ClaudeCodeSavedResets = {
+  eligible: boolean;
+  ineligible_reason?: string | null;
+  at_limit: boolean;
+  exhausted: string[];
+  grants: ClaudeCodeResetGrant[];
+  next_grant_id?: string | null;
+  weekly_resets_at?: string | null;
+  cooldown_until?: string | null;
+};
+
+export type ClaudeCodeSessionReset = {
+  eligible: boolean;
+  ineligible_reason?: string | null;
+  in_experiment: boolean;
+  arm?: string | null;
+  available: boolean;
+  next_available_at?: string | null;
+  weekly_resets_at?: string | null;
+  resets_per_week: number;
+};
+
+export type ClaudeCodeResetStatusData = {
+  cedar_ember?: ClaudeCodeSavedResets | null;
+  juniper_tide?: ClaudeCodeSessionReset | null;
+};
+
+export type ClaudeCodeResetStatusResponse = {
+  data?: ClaudeCodeResetStatusData | null;
+  error?: string | null;
+};
+
+export type ClaudeCodeResetClaimData = {
+  program: ClaudeCodeResetProgram;
+  result: string;
+  reason?: string | null;
+  resets_left?: number | null;
+  cleared: string[];
+  weekly_resets_at?: string | null;
+  cooldown_until?: string | null;
+  next_available_at?: string | null;
+};
+
+export type ClaudeCodeResetClaimResponse = {
+  data?: ClaudeCodeResetClaimData | null;
+  error?: string | null;
+};
+
 export type OpenRouterAccountInfoResponse = {
   data: {
     key_name?: string | null;

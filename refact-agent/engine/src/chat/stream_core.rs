@@ -1544,6 +1544,19 @@ fn openai_codex_websocket_connection_key(
     key
 }
 
+fn openai_codex_websocket_tls_connector() -> tokio_tungstenite::Connector {
+    let root_certificates =
+        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let client_config = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::aws_lc_rs::default_provider().into(),
+    )
+    .with_safe_default_protocol_versions()
+    .expect("aws-lc-rs supports the safe default protocol versions")
+    .with_root_certificates(root_certificates)
+    .with_no_client_auth();
+    tokio_tungstenite::Connector::Rustls(Arc::new(client_config))
+}
+
 fn openai_codex_body_without_stateful_fields(body: &Value) -> Value {
     let mut cloned = body.clone();
     if let Some(obj) = cloned.as_object_mut() {
@@ -1738,7 +1751,12 @@ async fn ensure_openai_codex_websocket_connected(
 
     let connect = tokio::time::timeout(
         connect_timeout,
-        connect_async_tls_with_config(request, None, false, None),
+        connect_async_tls_with_config(
+            request,
+            None,
+            false,
+            Some(openai_codex_websocket_tls_connector()),
+        ),
     );
     let (websocket, response) = tokio::select! {
         result = connect => result
@@ -1803,7 +1821,7 @@ async fn run_openai_codex_websocket_exchange<C: StreamCollector>(
         .take()
         .ok_or_else(|| "OpenAI Codex WebSocket connection is unavailable".to_string())?;
     let send = websocket.send(tokio_tungstenite::tungstenite::Message::Text(
-        request_body.to_string(),
+        request_body.to_string().into(),
     ));
     tokio::select! {
         result = send => result.map_err(|e| format!("OpenAI Codex WebSocket send failed: {}", e))?,
@@ -1858,11 +1876,12 @@ async fn run_openai_codex_websocket_exchange<C: StreamCollector>(
         last_event_at = Instant::now();
 
         let data = match message {
-            tokio_tungstenite::tungstenite::Message::Text(text) => text,
-            tokio_tungstenite::tungstenite::Message::Binary(bytes) => String::from_utf8(bytes)
-                .map_err(|e| {
+            tokio_tungstenite::tungstenite::Message::Text(text) => text.to_string(),
+            tokio_tungstenite::tungstenite::Message::Binary(bytes) => {
+                String::from_utf8(bytes.to_vec()).map_err(|e| {
                     format!("OpenAI Codex WebSocket binary message was not UTF-8: {}", e)
-                })?,
+                })?
+            }
             tokio_tungstenite::tungstenite::Message::Ping(_)
             | tokio_tungstenite::tungstenite::Message::Pong(_) => continue,
             tokio_tungstenite::tungstenite::Message::Close(_) => {
@@ -3795,6 +3814,13 @@ mod tests {
         model.endpoint = "https://chatgpt.com/backend-api/codex/responses".to_string();
         model.id = "openai/gpt-5.6-codex".to_string();
         assert!(openai_codex_websocket_endpoint(&model).is_none());
+    }
+
+    #[test]
+    fn websocket_tls_connector_builds_with_explicit_crypto_provider() {
+        let connector = openai_codex_websocket_tls_connector();
+
+        assert!(matches!(connector, tokio_tungstenite::Connector::Rustls(_)));
     }
 
     #[test]

@@ -77,6 +77,85 @@ describe("normalizeConversationsPayload", () => {
 });
 
 describe("AutonomousChats", () => {
+  it("uses the badge for the exact legacy title and preserves parenthetical titles", () => {
+    render(
+      <AutonomousChats
+        conversations={[
+          makeWorkflowEntry({
+            id: "refact_error_detective",
+            title: "refact error detective (Error Detective)",
+            badge: "Error Detective",
+          }),
+          makeWorkflowEntry({
+            id: "workflow-custom",
+            title: "Fix login (urgent)",
+            badge: "Fix Login",
+          }),
+        ]}
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Open Error Detective" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open Fix login (urgent)" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("refact error detective (Error Detective)"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders capped semantic workflow lists with display names, plural counts, and duplicate rows", async () => {
+    const entries = Array.from({ length: 60 }, (_, index) => {
+      const workflow = Math.floor(index / 12);
+      const ids = [
+        "refact_error_detective",
+        "buddy_pr_issue_matchmaker",
+        "kg_deprecate",
+        "privacy_observation_degraded",
+        "commit_message",
+      ];
+      const names = [
+        "Error Detective",
+        "PR Matchmaker",
+        "Knowledge",
+        "Privacy observation degraded",
+        "Commit message",
+      ];
+      const id = ids[workflow];
+      const badge = names[workflow];
+      return makeWorkflowEntry({
+        id: index % 12 < 2 ? id : `${id}-${index}`,
+        kind: "workflow",
+        badge,
+        title:
+          index % 12 < 2
+            ? `${id.replace(/_/g, " ")} (${badge})`
+            : `${badge} report ${index}`,
+        message_count: index === 0 ? 1 : 2,
+      });
+    });
+    const { user } = render(<AutonomousChats conversations={entries} />, {
+      preloadedState: CONFIG_STATE,
+    });
+
+    const itemCount = () =>
+      screen.getAllByRole("button", { name: /^Open / }).length;
+    expect(itemCount()).toBe(20);
+    expect(screen.getAllByRole("heading", { level: 3 })).toHaveLength(2);
+    expect(document.body.textContent).toContain("1 entry");
+    expect(document.body.textContent).not.toMatch(/\b[a-z]+(?: [a-z]+){2,} \(/);
+    expect(document.body.textContent).not.toMatch(
+      /\b1 entries\b|\b1 messages\b/,
+    );
+    expect(document.body.textContent).toContain("2 chats");
+    expect(itemCount()).toBeLessThanOrEqual(20);
+    await user.click(screen.getByRole("button", { name: "Show more" }));
+    expect(itemCount()).toBe(40);
+  });
+
   it("renders workflow groups and the corruption chip from diagnostics", async () => {
     server.use(
       http.get("*/v1/buddy/conversations", () =>
@@ -93,7 +172,9 @@ describe("AutonomousChats", () => {
 
     render(<AutonomousChats />, { preloadedState: CONFIG_STATE });
 
-    expect(await screen.findByText("Error Detective")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Error Detective" }),
+    ).toBeInTheDocument();
     const chip = await screen.findByTestId("ledger-corruption-chip");
     expect(chip.textContent).toContain("4 corrupt files quarantined");
   });
@@ -107,7 +188,9 @@ describe("AutonomousChats", () => {
 
     render(<AutonomousChats />, { preloadedState: CONFIG_STATE });
 
-    expect(await screen.findByText("Error Detective")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Error Detective" }),
+    ).toBeInTheDocument();
     expect(screen.queryByTestId("ledger-corruption-chip")).toBeNull();
   });
 });

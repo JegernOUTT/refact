@@ -82,4 +82,14 @@ if [ -n "$gui" ]; then
     --setenv PLAYWRIGHT_BROWSERS_PATH /opt/b02-browsers \
     --setenv B02_BROWSER 1 --setenv REFACT_LSP_URL http://127.0.0.1:39191
 fi
-bwrap "$@" -- /scratch/bin/operator-test --exact whole_worker_entry --nocapture --test-threads=1
+if bwrap "$@" -- /scratch/bin/operator-test --exact buddy_operator::whole_worker_entry --nocapture --test-threads=1 >"$scratch/operator-test.log" 2>&1; then
+  test_status=0
+else
+  test_status=$?
+fi
+cat "$scratch/operator-test.log"
+[ "$test_status" = 0 ] || exit "$test_status"
+if grep -Eq 'running 0 tests|(^|[[:space:]])0 passed([[:space:]]|$)' "$scratch/operator-test.log"; then
+  printf 'B02 REFUSED: operator acceptance filter ran zero tests\n' >&2
+  exit 1
+fi

@@ -1,0 +1,364 @@
+import { expect, test, type Page } from "@playwright/test";
+
+const PROJECT = { project_id: "showcase", canonical_root: "/workspace/refact" };
+const WORK = {
+  value: {
+    schema_version: 1,
+    id: "narrow-layout-check",
+    project: PROJECT,
+    subject: {
+      resource_kind: "workspace",
+      resource_id: "narrow-layout-check",
+      version: "1",
+    },
+    kind: "assessment",
+    title: "Check narrow Buddy layout",
+    state: "needs_attention",
+    native_sources: [],
+    current_artifact_id: null,
+    current_artifact_revision: null,
+    last_material_change_at: new Date().toISOString(),
+  },
+  revision: 1,
+  change_seq: 1,
+};
+
+type Layout = {
+  root: { scrollWidth: number; clientWidth: number };
+  main: { scrollWidth: number; clientWidth: number };
+  desk: {
+    left: number;
+    right: number;
+    width: number;
+    top: number;
+    bottom: number;
+    area: number;
+  };
+  scene: {
+    left: number;
+    right: number;
+    width: number;
+    top: number;
+    bottom: number;
+    area: number;
+    view: string | undefined;
+  };
+  hero: {
+    left: number;
+    right: number;
+    width: number;
+    top: number;
+    bottom: number;
+    area: number;
+  };
+  tabs: {
+    scrollWidth: number;
+    clientWidth: number;
+    labels: Array<{
+      text: string;
+      left: number;
+      right: number;
+      width: number;
+      top: number;
+      bottom: number;
+      area: number;
+    }>;
+  };
+  controls: Array<{
+    name: string | null;
+    left: number;
+    right: number;
+    width: number;
+    top: number;
+    bottom: number;
+    area: number;
+  }>;
+  overflowingControlStrip: Array<{
+    name: string | null;
+    scrollWidth: number;
+    clientWidth: number;
+    scrollbarWidth: string;
+  }>;
+  textWidth: Array<{
+    text: string;
+    width: number;
+    minimumWidth: number;
+    overflowWrap: string;
+    wordBreak: string;
+  }>;
+  brokenWords: string[];
+};
+
+async function openBuddy(
+  page: Page,
+  theme: "dark" | "light",
+  operator: "enabled" | "disabled" = "enabled",
+) {
+  await page.route("**/v1/buddy/work*", (route) =>
+    route.fulfill({
+      json: {
+        schema_version: 1,
+        project: PROJECT,
+        data: [WORK],
+        next_cursor: null,
+      },
+    }),
+  );
+  await page.setViewportSize({ width: 360, height: 900 });
+  await page.goto(
+    `/tests/e2e/route-showcase.html?route=buddy&operator=${operator}&theme=${theme}&scene_speech=1`,
+  );
+  await page.getByTestId("buddy-home-content").waitFor();
+  if (operator === "enabled") {
+    await expect(
+      page.locator('[aria-label="Buddy Desk"] ul li button'),
+    ).toHaveCount(1);
+  }
+}
+
+async function measureLayout(page: Page): Promise<Layout> {
+  return page.evaluate(() => {
+    const main = document.querySelector<HTMLElement>(
+      'main[data-testid="buddy-home-content"]',
+    );
+    const desk = document.querySelector<HTMLElement>(
+      '[aria-label="Buddy Desk"]',
+    );
+    const scene = document.querySelector<HTMLElement>(
+      '[data-testid="buddy-home-scene"]',
+    );
+    const hero = document.querySelector<HTMLElement>(
+      '[data-testid="buddy-home-hero"]',
+    );
+    const tabs = document.querySelector<HTMLElement>('[role="tablist"]');
+    const box = (element: HTMLElement) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        left: rect.left,
+        right: rect.right,
+        width: rect.width,
+        top: rect.top,
+        bottom: rect.bottom,
+        area: rect.width * rect.height,
+      };
+    };
+    const identity = document.querySelector<HTMLElement>(
+      '[data-testid="buddy-presence"] header > :first-child',
+    );
+    const textBlocks = identity
+      ? [...identity.children].filter(
+          (element): element is HTMLElement =>
+            element instanceof HTMLElement && element.innerText.trim() !== "",
+        )
+      : [];
+    const textWidth = textBlocks.map((element) => {
+      const style = getComputedStyle(element);
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d");
+      if (context) context.font = style.font;
+      return {
+        text: element.innerText,
+        width: element.getBoundingClientRect().width,
+        minimumWidth: context?.measureText("M".repeat(12)).width ?? 0,
+        overflowWrap: style.overflowWrap,
+        wordBreak: style.wordBreak,
+      };
+    });
+    const headline = identity?.children.item(1);
+    const textNode = headline?.firstChild;
+    const brokenWords: string[] = [];
+    if (textNode?.nodeType === Node.TEXT_NODE) {
+      const content = textNode.textContent ?? "";
+      for (const match of content.matchAll(/\S+/g)) {
+        const start = match.index;
+        if (start === undefined) continue;
+        const range = document.createRange();
+        range.setStart(textNode, start);
+        range.setEnd(textNode, start + match[0].length);
+        if (range.getClientRects().length > 1) brokenWords.push(match[0]);
+      }
+    }
+    const controls = [
+      ...main!.querySelectorAll<HTMLElement>(
+        'button, [role="tab"], select, input, summary, a[href]',
+      ),
+    ]
+      .filter(
+        (element) =>
+          element.getClientRects().length > 0 &&
+          getComputedStyle(element).visibility !== "hidden",
+      )
+      .map((element) => ({
+        name: element.getAttribute("aria-label") || element.innerText,
+        ...box(element),
+      }));
+    const overflowingControlStrip = [
+      ...main!.querySelectorAll<HTMLElement>("*"),
+    ]
+      .filter((element) => {
+        const style = getComputedStyle(element);
+        return (
+          element.getClientRects().length > 0 &&
+          element.querySelector('button, [role="tab"]') !== null &&
+          ["auto", "scroll"].includes(style.overflowX) &&
+          element.scrollWidth > element.clientWidth + 1
+        );
+      })
+      .map((element) => ({
+        name:
+          element.getAttribute("aria-label") || element.getAttribute("role"),
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth,
+        scrollbarWidth: getComputedStyle(element).scrollbarWidth,
+      }));
+    return {
+      root: {
+        scrollWidth: document.documentElement.scrollWidth,
+        clientWidth: document.documentElement.clientWidth,
+      },
+      main: {
+        scrollWidth: main!.scrollWidth,
+        clientWidth: main!.clientWidth,
+      },
+      desk: box(desk!),
+      scene: { ...box(scene!), view: scene!.dataset.sceneView },
+      hero: box(hero!),
+      tabs: {
+        scrollWidth: tabs!.scrollWidth,
+        clientWidth: tabs!.clientWidth,
+        labels: [...tabs!.querySelectorAll<HTMLElement>('[role="tab"]')].map(
+          (tab) => ({ text: tab.innerText, ...box(tab) }),
+        ),
+      },
+      controls,
+      overflowingControlStrip,
+      textWidth,
+      brokenWords,
+    };
+  });
+}
+
+for (const theme of ["dark", "light"] as const) {
+  test.describe(`Buddy narrow layout at 360px in ${theme}`, () => {
+    test.beforeEach(async ({ page }) => {
+      await openBuddy(page, theme);
+    });
+
+    test("no_interactive_element_renders_off_screen", async ({ page }) => {
+      const layout = await measureLayout(page);
+      expect(
+        layout.controls.filter(
+          (control) => control.left < -1 || control.right > 360,
+        ),
+      ).toEqual([]);
+    });
+
+    test("no_control_strip_is_clipped_without_an_affordance", async ({
+      page,
+    }) => {
+      const layout = await measureLayout(page);
+      expect(layout.overflowingControlStrip).toEqual([]);
+      expect(layout.tabs.scrollWidth).toBeLessThanOrEqual(
+        layout.tabs.clientWidth + 1,
+      );
+      expect(layout.tabs.labels.map((tab) => tab.text)).toEqual([
+        "Recent errors",
+        "Activity",
+        "Play",
+        "Settings",
+      ]);
+      for (const tab of layout.tabs.labels) {
+        expect(tab.left).toBeGreaterThanOrEqual(0);
+        expect(tab.right).toBeLessThanOrEqual(360);
+      }
+    });
+
+    test("no_text_collapses_into_a_ribbon", async ({ page }) => {
+      const layout = await measureLayout(page);
+      expect(layout.textWidth.length).toBeGreaterThan(0);
+      for (const block of layout.textWidth) {
+        expect(
+          block.width,
+          `presence text block is too narrow to read: ${block.text}`,
+        ).toBeGreaterThanOrEqual(block.minimumWidth);
+        expect(block.wordBreak).not.toBe("break-all");
+      }
+      expect(layout.brokenWords).toEqual([]);
+    });
+
+    test("document_has_no_horizontal_overflow_at_360", async ({ page }) => {
+      const layout = await measureLayout(page);
+      expect(layout.root.scrollWidth).toBe(layout.root.clientWidth);
+      expect(layout.main.scrollWidth).toBeLessThanOrEqual(
+        layout.main.clientWidth,
+      );
+    });
+
+    test("keeps the compact scene below the Desk and secondary by area", async ({
+      page,
+    }) => {
+      const layout = await measureLayout(page);
+      expect(layout.scene.view).toBe("strip");
+      expect(layout.hero.width).toBeLessThanOrEqual(72);
+      expect(layout.hero.bottom).toBeLessThanOrEqual(layout.scene.bottom);
+      expect(layout.desk.top).toBeLessThan(layout.scene.top);
+      expect(layout.desk.area).toBeGreaterThan(layout.scene.area);
+    });
+
+    test("wraps the legacy six-tab strip instead of clipping controls", async ({
+      page,
+    }) => {
+      await openBuddy(page, theme, "disabled");
+
+      const layout = await page.evaluate(() => {
+        const tabs = document.querySelector<HTMLElement>('[role="tablist"]');
+        const controls = [
+          ...document.querySelectorAll<HTMLElement>(
+            'main[data-testid="buddy-home-content"] button, main[data-testid="buddy-home-content"] [role="tab"]',
+          ),
+        ].filter(
+          (element) =>
+            element.getClientRects().length > 0 &&
+            getComputedStyle(element).visibility !== "hidden",
+        );
+        return {
+          scrollWidth: tabs!.scrollWidth,
+          clientWidth: tabs!.clientWidth,
+          labels: [...tabs!.querySelectorAll<HTMLElement>('[role="tab"]')].map(
+            (tab) => ({
+              text: tab.innerText,
+              left: tab.getBoundingClientRect().left,
+              right: tab.getBoundingClientRect().right,
+            }),
+          ),
+          offscreenControls: controls
+            .map((element) => ({
+              name: element.getAttribute("aria-label") || element.innerText,
+              left: element.getBoundingClientRect().left,
+              right: element.getBoundingClientRect().right,
+            }))
+            .filter((element) => element.left < -1 || element.right > 360),
+          root: {
+            scrollWidth: document.documentElement.scrollWidth,
+            clientWidth: document.documentElement.clientWidth,
+          },
+        };
+      });
+
+      expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth + 1);
+      expect(layout.labels.map((tab) => tab.text)).toEqual([
+        "Pulse",
+        "Opportunities",
+        "Recent errors",
+        "Activity",
+        "Play",
+        "Settings",
+      ]);
+      expect(
+        layout.labels.every((tab) => tab.left >= 0 && tab.right <= 360),
+      ).toBe(true);
+      expect(layout.offscreenControls).toEqual([]);
+      expect(layout.root.scrollWidth).toBe(layout.root.clientWidth);
+    });
+  });
+}

@@ -99,6 +99,28 @@ for (const width of [240, 360, 768, 1280]) {
       if (!url.pathname.startsWith("/v1/")) return route.continue();
       if (url.pathname === "/v1/buddy/work")
         return route.fulfill({ json: envelope([record(work)]) });
+      if (url.pathname === "/v1/buddy/work/actions")
+        return route.fulfill({
+          json: envelope([
+            {
+              work_id: "work",
+              actions: [
+                {
+                  spec,
+                  spec_hash: "hash",
+                  work_revision: 1,
+                  artifact_id: "report",
+                  artifact_revision: 1,
+                  label: "Check saved evidence links",
+                  description:
+                    "Checks stored metadata only; no findings are verified and no fix is applied.",
+                  latest_execution: receipt,
+                },
+              ],
+              error: null,
+            },
+          ]),
+        });
       if (url.pathname === "/v1/buddy/artifacts/report")
         return route.fulfill({ json: envelope(record(artifact)) });
       if (url.pathname === "/v1/buddy/artifacts/report/revisions")
@@ -261,17 +283,17 @@ for (const width of [240, 360, 768, 1280]) {
     await page
       .getByRole("button", { name: "Check saved evidence links" })
       .click();
-    await expect(page.getByText("Saved check: Partial")).toBeVisible();
+    await expect(page.getByText("Saved evidence check: Partial")).toBeVisible();
     await expect(
       page.getByText("Findings are not independently verified."),
     ).toBeVisible();
     await page.getByRole("button", { name: "Back to work list" }).click();
     await expect(row).toBeFocused();
     await row.click();
-    await expect(page.getByText("Saved check: Partial")).toBeVisible();
+    await expect(page.getByText("Saved evidence check: Partial")).toBeVisible();
     await page.reload();
     await row.click();
-    await expect(page.getByText("Saved check: Partial")).toBeVisible();
+    await expect(page.getByText("Saved evidence check: Partial")).toBeVisible();
     expect(executions).toBe(1);
     await expect(
       page.getByText("This report revision is marked read."),

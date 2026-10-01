@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { Button } from "../../components/ui";
 import { humanizeIdentifier } from "../../utils/displayNames";
+import { formatReportTime, humanizeResourceReference } from "./buddyUtils";
 import type { ActionExecution, ActionSpec } from "./operatorTypes";
 import {
   usePreviewBuddyResourceMutation,
@@ -242,6 +243,7 @@ function ResourceControl({
     execution?.recovery?.available === true &&
     spec.capabilities.can_recover &&
     tracking?.recovery_execution_id == null;
+  const executionTime = formatReportTime(execution?.ended_at);
   return (
     <section className={styles.action} aria-label={label}>
       <h4>{label}</h4>
@@ -253,7 +255,12 @@ function ResourceControl({
         <dt>Project</dt>
         <dd>{spec.project.canonical_root}</dd>
         <dt>Exact target</dt>
-        <dd>{spec.resource.resource_id}</dd>
+        <dd>
+          {humanizeResourceReference(
+            spec.resource.resource_kind,
+            spec.resource.resource_id,
+          )}
+        </dd>
         <dt>Expected version</dt>
         <dd>{spec.expected_version}</dd>
         <dt>Authority</dt>
@@ -331,11 +338,7 @@ function ResourceControl({
       )}
       {(tracking || execution) && (
         <>
-          <p>
-            Tracked execution:{" "}
-            {tracking?.execution_id ?? execution?.execution_id}. This action
-            cannot be replayed from this control.
-          </p>
+          <p>This action cannot be replayed from this control.</p>
           <Button size="sm" disabled={blocked} onClick={() => void refresh()}>
             Refresh saved execution
           </Button>
@@ -347,8 +350,11 @@ function ResourceControl({
           <ul>
             {execution.effects.map((effect, index) => (
               <li key={index}>
-                {effect.resource.resource_id}:{" "}
-                {humanizeIdentifier(effect.state)}
+                {humanizeResourceReference(
+                  effect.resource.resource_kind,
+                  effect.resource.resource_id,
+                )}
+                : {humanizeIdentifier(effect.state)}
               </li>
             ))}
           </ul>
@@ -357,15 +363,23 @@ function ResourceControl({
               <li key={index}>{item}</li>
             ))}
           </ul>
-          <p>{execution.ended_at ?? "No terminal observation recorded."}</p>
+          <p>
+            {execution.ended_at ? (
+              <time title={executionTime.absolute ?? undefined}>
+                {executionTime.relative}
+              </time>
+            ) : (
+              "No terminal observation recorded."
+            )}
+          </p>
         </div>
       )}
       {canRecover && execution && (
         <>
           <p>
-            Recovery applies only to original execution {execution.execution_id}
-            , at post-version {execution.recovery?.expected_post_version}. The
-            server must revalidate availability. Recovery is not a retry.
+            Recovery applies only to the original execution, at post-version{" "}
+            {execution.recovery?.expected_post_version}. The server must
+            revalidate availability. Recovery is not a retry.
           </p>
           <label>
             <input

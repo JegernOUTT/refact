@@ -84,6 +84,12 @@ import { buddyActionResultMessage } from "./hooks/useExecuteBuddyAction";
 import { useBuddyControlAction } from "./hooks/useBuddyControlAction";
 import { BuddyDesk } from "./BuddyDesk";
 import {
+  computeXpFill,
+  formatFailureLabel,
+  formatRelativeTime,
+} from "./buddyUtils";
+import { HISTORY_PAGE_SIZE } from "./buddyHistory";
+import {
   buddyOperatorIdentity,
   useGetBuddyOperatorStatusQuery,
   useGetBuddyOperatorWorkQuery,
@@ -117,10 +123,10 @@ import type {
   BuddyNeeds,
   BuddyPage,
   BuddyRuntimeEvent,
+  DiagnosticContext,
   DraftKind,
 } from "./types";
 import { PALETTES, STAGES } from "./constants";
-import { computeXpFill } from "./buddyUtils";
 import { useGetStatsSummaryQuery } from "../../services/refact/stats";
 import { useGetSetupStatusQuery } from "../../services/refact/setupStatus";
 import { SETUP_MODES } from "../Setup/setupModes";
@@ -265,6 +271,26 @@ type ClipboardWriter = {
 
 const RECENT_ERROR_WINDOW_MS = 6 * 60 * 60 * 1000;
 const RECENT_ERROR_REFRESH_MS = 60 * 1000;
+
+function normalizeRecentErrorText(value: string | null | undefined): string {
+  return (value ?? "").trim().replace(/\s+/g, " ");
+}
+
+function recentErrorDetail(event: RecentBuddyError): string | null {
+  const normalizedTitle = normalizeRecentErrorText(event.title).toLowerCase();
+  return (
+    [event.failure_summary, event.description]
+      .map(normalizeRecentErrorText)
+      .find((detail) => {
+        const normalizedDetail = detail.toLowerCase();
+        return (
+          detail &&
+          normalizedDetail !== normalizedTitle &&
+          !normalizedDetail.startsWith(normalizedTitle)
+        );
+      }) ?? null
+  );
+}
 
 function uniqueRecentErrorIds(event: RecentBuddyError): string[] {
   const ids =
@@ -457,7 +483,7 @@ const BuddyHomeContent: React.FC = () => {
   );
   const activeSpeech = requiresEditorialClaim(rawSpeech) ? null : rawSpeech;
   const suggestions = useAppSelector(selectBuddySuggestions);
-  const diagnostics = useAppSelector(selectBuddyDiagnostics);
+  const recentDiagnostics = useAppSelector(selectBuddyDiagnostics);
   const runtimeQueue = useAppSelector(selectRuntimeQueue);
   const pulse = useAppSelector(selectPulse);
   const unreadOpportunities = useAppSelector(selectUnreadOpportunities);
@@ -472,6 +498,10 @@ const BuddyHomeContent: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [chosenTab, setChosenTab] = useState<BuddyHomeTab | null>(null);
   const [sceneOpen, setSceneOpen] = useState(true);
+  // The scene is decoration with a thumbnail's worth of decision value, so it
+  // starts as a compact strip and the full diorama is opt-in. `sceneOpen` still
+  // owns mount/unmount ("Open Play" / "Close Play"); this only owns size.
+  const [sceneExpanded, setSceneExpanded] = useState(false);
   const legacyTabs = legacyCompatibility || operatorMode === "loading";
   const defaultTab = legacyTabs ? LEGACY_DEFAULT_TAB : OPERATOR_DEFAULT_TAB;
   const tabOrder = useMemo(() => {
@@ -487,7 +517,7 @@ const BuddyHomeContent: React.FC = () => {
       endpoint_identity: operatorIdentity,
       view: "needs_you",
       search: "",
-      attention: "all",
+      attention: "unsnoozed",
     },
     { skip: !operatorEnabled, refetchOnMountOrArgChange: true },
   );
@@ -499,12 +529,18 @@ const BuddyHomeContent: React.FC = () => {
   const verdictReaction = useAppSelector(selectVerdictReaction);
   const [speechIndex, setSpeechIndex] = useState(0);
   const [recentErrorNow, setRecentErrorNow] = useState(() => Date.now());
+  const [recentErrorsVisibleCount, setRecentErrorsVisibleCount] =
+    useState(HISTORY_PAGE_SIZE);
   const [isRetryingBuddySnapshot, setIsRetryingBuddySnapshot] = useState(false);
   const [operatorRetryOutcome, setOperatorRetryOutcome] = useState<
     "recovered" | "unavailable" | "failed" | null
   >(null);
   const [updateSettings, { isLoading: isSavingSettings }] =
     useUpdateBuddySettingsMutation();
+
+  // Play is the one place the scene IS the content, so it always gets the full
+  // diorama regardless of the strip preference the rest of the page uses.
+  const sceneStrip = !sceneExpanded && activeTab !== "play";
 
   useEffect(() => {
     if (activeTab !== "play") return;
@@ -522,6 +558,11 @@ const BuddyHomeContent: React.FC = () => {
     if (sceneOpen && activeTab === "play") setChosenTab(null);
     setSceneOpen(!sceneOpen);
   }, [activeTab, sceneOpen]);
+
+  const handleToggleSceneSize = useCallback(() => {
+    if (activeTab === "play") setChosenTab(null);
+    setSceneExpanded((expanded) => !expanded);
+  }, [activeTab]);
 
   const handleLeavePlay = useCallback(() => {
     setChosenTab(null);
@@ -775,7 +816,7 @@ const BuddyHomeContent: React.FC = () => {
   }, [activeSpeech, heroSpeechCandidates, speechIndex]);
 
   const activeDiagnostic = heroSpeech?.chat_id
-    ? diagnostics.find((diag) => diag.chat_id === heroSpeech.chat_id)
+    ? recentDiagnostics.find((diag) => diag.chat_id === heroSpeech.chat_id)
     : undefined;
 
   const handleSpeechControl = useCallback(
@@ -891,7 +932,211 @@ const BuddyHomeContent: React.FC = () => {
 
   const unlockedSkills = skills?.unlocked ?? state.skills;
 
-  const recentErrors = useMemo<RecentBuddyError[]>(() => {
+  const operatorRecentErrors = useMemo<RecentBuddyError[]>(() => {
+    const cutoff = recentErrorNow - RECENT_ERROR_WINDOW_MS;
+    const runtimeEvents: BuddyRuntimeEvent[] = [];
+    if (
+      nowPlaying &&
+      (nowPlaying.status === "failed" ||
+        nowPlaying.priority === "critical" ||
+        nowPlaying.priority === "high")
+    ) {
+      runtimeEvents.push(nowPlaying);
+    }
+    for (const event of runtimeQueue) {
+      if (
+        event.status === "failed" ||
+        event.priority === "critical" ||
+        event.priority === "high"
+      ) {
+        if (!runtimeEvents.some((candidate) => candidate.id === event.id)) {
+          runtimeEvents.push(event);
+        }
+      }
+    }
+
+    const isWithinWindow = (timestamp: string): boolean => {
+      const time = Date.parse(timestamp);
+      return Number.isFinite(time) && time >= cutoff;
+    };
+    const signature = (parts: (string | null | undefined)[]) =>
+      parts
+        .map((part) => normalizeRecentErrorText(part).toLowerCase())
+        .join("|");
+    const collected = runtimeEvents.filter(
+      (event) =>
+        (isWithinWindow(event.created_at) ||
+          ["started", "progress", "streaming"].includes(event.status)) &&
+        event.status !== "dismissed",
+    );
+    collected.sort(
+      (left, right) =>
+        Date.parse(right.created_at) - Date.parse(left.created_at),
+    );
+
+    const sigMap = new Map<string, RecentBuddyError>();
+    for (const event of collected) {
+      const sig = signature([
+        event.source,
+        event.signal_type,
+        event.title,
+        event.description,
+        event.failure_category,
+        event.failure_summary,
+      ]);
+      const existing = sigMap.get(sig);
+      if (existing) {
+        const existingCreatedAt = Date.parse(existing.created_at);
+        const incomingCreatedAt = Date.parse(event.created_at);
+        const incomingIsNewer = incomingCreatedAt > existingCreatedAt;
+        existing.occurrences = (existing.occurrences ?? 1) + 1;
+        existing.dismissedAny =
+          Boolean(existing.dismissedAny) || Boolean(event.dismissed);
+        existing.dismissedAll =
+          Boolean(existing.dismissedAll) && Boolean(event.dismissed);
+        existing.relatedIds = Array.from(
+          new Set([...(existing.relatedIds ?? [existing.id]), event.id]),
+        );
+        existing.failure_category =
+          event.failure_category ?? existing.failure_category;
+        existing.failure_summary =
+          event.failure_summary ?? existing.failure_summary;
+        if (incomingIsNewer) {
+          existing.description = event.description ?? existing.description;
+          existing.chat_id = event.chat_id ?? existing.chat_id;
+          existing.created_at = event.created_at;
+        }
+        existing.dismissed =
+          Boolean(existing.dismissed) || Boolean(event.dismissed);
+      } else {
+        sigMap.set(sig, {
+          ...event,
+          occurrences: 1,
+          dismissedAny: Boolean(event.dismissed),
+          dismissedAll: Boolean(event.dismissed),
+          relatedIds: [event.id],
+        });
+      }
+    }
+
+    const runtimeEventsByDiagnosticKey = new Map<string, RecentBuddyError>();
+    for (const event of sigMap.values()) {
+      if (event.chat_id == null) continue;
+      for (const value of [
+        event.title,
+        event.description,
+        event.failure_summary,
+      ]) {
+        const messageKey = normalizeRecentErrorText(value).toLowerCase();
+        if (!messageKey) continue;
+        runtimeEventsByDiagnosticKey.set(
+          signature(["cross-source", event.chat_id, messageKey]),
+          event,
+        );
+      }
+    }
+
+    const diagnosticGroups = new Map<
+      string,
+      { diagnostic: DiagnosticContext; occurrences: number }
+    >();
+    for (const diagnostic of recentDiagnostics) {
+      if (!isWithinWindow(diagnostic.collected_at)) continue;
+      const messageKey = normalizeRecentErrorText(
+        diagnostic.error_message,
+      ).toLowerCase();
+      if (!messageKey) continue;
+      const dedupeKey = signature([
+        diagnostic.chat_id,
+        diagnostic.error_type,
+        messageKey,
+      ]);
+      const existing = diagnosticGroups.get(dedupeKey);
+      if (existing) {
+        if (
+          diagnostic.diagnostic_id &&
+          diagnostic.diagnostic_id === existing.diagnostic.diagnostic_id
+        ) {
+          continue;
+        }
+        existing.occurrences += diagnostic.occurrences ?? 1;
+      } else {
+        diagnosticGroups.set(dedupeKey, {
+          diagnostic,
+          occurrences: diagnostic.occurrences ?? 1,
+        });
+      }
+    }
+
+    for (const { diagnostic, occurrences } of diagnosticGroups.values()) {
+      const messageKey = normalizeRecentErrorText(
+        diagnostic.error_message,
+      ).toLowerCase();
+      const crossSourceKey = signature([
+        "cross-source",
+        diagnostic.chat_id,
+        messageKey,
+      ]);
+      const matchingRuntime =
+        diagnostic.chat_id == null
+          ? undefined
+          : runtimeEventsByDiagnosticKey.get(crossSourceKey);
+      if (matchingRuntime) {
+        matchingRuntime.occurrences = Math.max(
+          matchingRuntime.occurrences ?? 1,
+          occurrences,
+        );
+        continue;
+      }
+
+      const title =
+        formatFailureLabel(diagnostic.error_type) ?? diagnostic.error_message;
+      const id =
+        diagnostic.diagnostic_id ??
+        `diagnostic-${signature([
+          diagnostic.chat_id,
+          diagnostic.error_type,
+          messageKey,
+          diagnostic.collected_at,
+        ])}`;
+      const event: RecentBuddyError = {
+        id,
+        signal_type: diagnostic.error_type,
+        title,
+        description: diagnostic.error_message,
+        source: "diagnostic",
+        status: "failed",
+        priority:
+          diagnostic.severity === "critical"
+            ? "critical"
+            : diagnostic.severity === "high"
+              ? "high"
+              : "normal",
+        created_at: diagnostic.collected_at,
+        chat_id: diagnostic.chat_id ?? undefined,
+        occurrences,
+        dismissed: false,
+        dismissedAny: false,
+        dismissedAll: false,
+        relatedIds: [id],
+      };
+      sigMap.set(
+        signature([
+          "diagnostic",
+          diagnostic.chat_id,
+          diagnostic.error_type,
+          messageKey,
+        ]),
+        event,
+      );
+      if (diagnostic.chat_id != null) {
+        runtimeEventsByDiagnosticKey.set(crossSourceKey, event);
+      }
+    }
+
+    return Array.from(sigMap.values());
+  }, [nowPlaying, recentDiagnostics, recentErrorNow, runtimeQueue]);
+  const legacyRecentErrors = useMemo<RecentBuddyError[]>(() => {
     const collected: BuddyRuntimeEvent[] = [];
     if (
       nowPlaying &&
@@ -901,38 +1146,40 @@ const BuddyHomeContent: React.FC = () => {
     ) {
       collected.push(nowPlaying);
     }
-    for (const e of runtimeQueue) {
+    for (const event of runtimeQueue) {
       if (
-        e.status === "failed" ||
-        e.priority === "critical" ||
-        e.priority === "high"
+        event.status === "failed" ||
+        event.priority === "critical" ||
+        event.priority === "high"
       ) {
-        if (!collected.find((x) => x.id === e.id)) collected.push(e);
+        if (!collected.find((candidate) => candidate.id === event.id)) {
+          collected.push(event);
+        }
       }
     }
-    collected.sort((a, b) => {
-      const ta = new Date(a.created_at).getTime() || 0;
-      const tb = new Date(b.created_at).getTime() || 0;
-      return tb - ta;
+    collected.sort((left, right) => {
+      const leftTime = new Date(left.created_at).getTime() || 0;
+      const rightTime = new Date(right.created_at).getTime() || 0;
+      return rightTime - leftTime;
     });
 
     const cutoff = recentErrorNow - RECENT_ERROR_WINDOW_MS;
     const sigMap = new Map<string, RecentBuddyError>();
-    for (const e of collected) {
-      const createdAt = Date.parse(e.created_at);
+    for (const event of collected) {
+      const createdAt = Date.parse(event.created_at);
       if (
         Number.isFinite(createdAt) &&
         createdAt < cutoff &&
-        e.status !== "started" &&
-        e.status !== "progress" &&
-        e.status !== "streaming"
+        event.status !== "started" &&
+        event.status !== "progress" &&
+        event.status !== "streaming"
       ) {
         continue;
       }
-      const sig = `${e.source}|${e.signal_type}|${e.title}|${
-        e.description ?? ""
-      }|${e.failure_category ?? ""}|${e.failure_summary ?? ""}`;
-      const existing = sigMap.get(sig);
+      const signature = `${event.source}|${event.signal_type}|${event.title}|${
+        event.description ?? ""
+      }|${event.failure_category ?? ""}|${event.failure_summary ?? ""}`;
+      const existing = sigMap.get(signature);
       if (existing) {
         const existingCreatedAt = Date.parse(existing.created_at);
         const incomingIsNewer =
@@ -941,35 +1188,61 @@ const BuddyHomeContent: React.FC = () => {
             createdAt > existingCreatedAt);
         existing.occurrences = (existing.occurrences ?? 1) + 1;
         existing.dismissedAny =
-          Boolean(existing.dismissedAny) || Boolean(e.dismissed);
+          Boolean(existing.dismissedAny) || Boolean(event.dismissed);
         existing.dismissedAll =
-          Boolean(existing.dismissedAll) && Boolean(e.dismissed);
+          Boolean(existing.dismissedAll) && Boolean(event.dismissed);
         existing.relatedIds = Array.from(
-          new Set([...(existing.relatedIds ?? [existing.id]), e.id]),
+          new Set([...(existing.relatedIds ?? [existing.id]), event.id]),
         );
         existing.failure_category =
-          e.failure_category ?? existing.failure_category;
+          event.failure_category ?? existing.failure_category;
         existing.failure_summary =
-          e.failure_summary ?? existing.failure_summary;
+          event.failure_summary ?? existing.failure_summary;
         if (incomingIsNewer) {
-          existing.description = e.description ?? existing.description;
-          existing.chat_id = e.chat_id ?? existing.chat_id;
-          existing.created_at = e.created_at;
+          existing.description = event.description ?? existing.description;
+          existing.chat_id = event.chat_id ?? existing.chat_id;
+          existing.created_at = event.created_at;
         }
         existing.dismissed =
-          Boolean(existing.dismissed) || Boolean(e.dismissed);
+          Boolean(existing.dismissed) || Boolean(event.dismissed);
       } else {
-        sigMap.set(sig, {
-          ...e,
+        sigMap.set(signature, {
+          ...event,
           occurrences: 1,
-          dismissedAny: Boolean(e.dismissed),
-          dismissedAll: Boolean(e.dismissed),
-          relatedIds: [e.id],
+          dismissedAny: Boolean(event.dismissed),
+          dismissedAll: Boolean(event.dismissed),
+          relatedIds: [event.id],
         });
       }
     }
-    return Array.from(sigMap.values()).slice(0, 25);
+    return Array.from(sigMap.values());
   }, [nowPlaying, recentErrorNow, runtimeQueue]);
+  const recentErrorRows = useMemo(() => {
+    const rows: {
+      event: RecentBuddyError;
+      detail: string | null;
+      count: number;
+    }[] = [];
+    for (const event of operatorRecentErrors) {
+      const detail = recentErrorDetail(event);
+      const previous = rows.at(-1);
+      if (
+        previous &&
+        normalizeRecentErrorText(previous.event.title).toLowerCase() ===
+          normalizeRecentErrorText(event.title).toLowerCase() &&
+        previous.detail?.toLowerCase() === detail?.toLowerCase()
+      ) {
+        previous.count += event.occurrences ?? 1;
+      } else {
+        rows.push({ event, detail, count: event.occurrences ?? 1 });
+      }
+    }
+    return rows;
+  }, [operatorRecentErrors]);
+  const visibleRecentErrorRows = recentErrorRows.slice(
+    0,
+    recentErrorsVisibleCount,
+  );
 
   const handleInvestigateError = useCallback(
     (event: RecentBuddyError) => {
@@ -978,7 +1251,7 @@ const BuddyHomeContent: React.FC = () => {
         : event.title;
       const diagnostic =
         event.chat_id != null
-          ? diagnostics.find((d) => d.chat_id === event.chat_id) ?? null
+          ? recentDiagnostics.find((d) => d.chat_id === event.chat_id) ?? null
           : null;
       void dispatch(
         startBuddyInvestigation({
@@ -998,7 +1271,7 @@ const BuddyHomeContent: React.FC = () => {
         }
       }
     },
-    [dispatch, diagnostics, dismissRuntimeMutation],
+    [dispatch, recentDiagnostics, dismissRuntimeMutation],
   );
 
   const handleDismissError = useCallback(
@@ -1240,66 +1513,103 @@ const BuddyHomeContent: React.FC = () => {
           />
         )}
 
-        <div ref={presenceRef} tabIndex={-1} className={styles.presenceSlot}>
-          <BuddyPresence
-            state={state}
-            headline={snapshot.state.semantic.headline}
-            speech={activeTab === "play" ? null : heroSpeech}
-            sceneMounted={sceneOpen}
-            sceneToggleLabel={sceneOpen ? "Close Play" : "Open Play"}
-            onToggleScene={handleToggleScene}
-            onControl={handleSpeechControl}
-          />
-        </div>
-
-        {sceneOpen && (
-          <Surface
-            as="section"
-            variant="glass"
-            radius="card"
-            className={classNames(
-              styles.heroCard,
-              activeTab === "play" && styles.heroCardExpanded,
-              deskHasWork && activeTab !== "play" && styles.heroCardDemoted,
-            )}
-            data-testid="buddy-home-hero"
-          >
-            <BuddyErrorBoundary key={worldBoundaryKey}>
-              <BuddyWorld
-                homeDoorDisabled
-                compact={activeTab !== "play"}
-                palette={palette}
-                stage={stage}
-                state={state}
-                pulse={pulse}
-                pet={pet}
-                nowPlaying={nowPlaying}
-                activeQuest={activeQuest}
-                onCanvasEvent={buddy.handleCanvasEvent}
-                activeSpeech={activeTab === "play" ? heroSpeech : null}
-                setupNeeded={setupNeeded}
-                onRunMode={handleRunMode}
-                onDismissSetup={handleDismissSetup}
-                onCare={(action, toy) => void handleCare(action, toy)}
-                onOpenPage={handleOpenWorldPage}
-                onSpeechControl={(control) => void handleSpeechControl(control)}
-                pendingCards={
-                  legacyCompatibility ? unreadOpportunities.length : 0
-                }
-                onOpenInbox={
-                  legacyCompatibility
-                    ? () => setChosenTab("opportunities")
-                    : undefined
-                }
-                verdictReaction={verdictReaction}
-              />
-            </BuddyErrorBoundary>
-          </Surface>
-        )}
-
         <BuddyNativeDecisions />
         <BuddyNativeApprovals />
         <BuddySupervision />
+
+        {/* Prominence, not deletion: the scene follows the Desk and the
+         * decision panels, and renders as a ~56px strip until someone asks for
+         * the diorama. A security finding and a snack request are no longer
+         * adjacent, and seasonal poetry no longer separates the work rows from
+         * the controls that act on them. */}
+        <Surface
+          as="section"
+          variant="plain"
+          radius="none"
+          className={classNames(
+            styles.sceneBlock,
+            sceneStrip && styles.sceneBlockStrip,
+          )}
+          aria-label="Buddy scene"
+          data-testid="buddy-home-scene"
+          data-scene-view={sceneStrip ? "strip" : "scene"}
+        >
+          {sceneOpen && (
+            <Surface
+              as="section"
+              variant="glass"
+              radius="card"
+              className={classNames(
+                styles.heroCard,
+                sceneStrip && styles.heroCardStrip,
+                activeTab === "play" && styles.heroCardExpanded,
+                deskHasWork && activeTab !== "play" && styles.heroCardDemoted,
+              )}
+              id="buddy-home-hero"
+              data-testid="buddy-home-hero"
+            >
+              <BuddyErrorBoundary key={worldBoundaryKey}>
+                <BuddyWorld
+                  homeDoorDisabled
+                  compact={activeTab !== "play"}
+                  palette={palette}
+                  stage={stage}
+                  state={state}
+                  pulse={pulse}
+                  pet={pet}
+                  nowPlaying={nowPlaying}
+                  activeQuest={activeQuest}
+                  onCanvasEvent={buddy.handleCanvasEvent}
+                  activeSpeech={activeTab === "play" ? heroSpeech : null}
+                  setupNeeded={setupNeeded}
+                  onRunMode={handleRunMode}
+                  onDismissSetup={handleDismissSetup}
+                  onCare={(action, toy) => void handleCare(action, toy)}
+                  onOpenPage={handleOpenWorldPage}
+                  onSpeechControl={(control) =>
+                    void handleSpeechControl(control)
+                  }
+                  pendingCards={
+                    legacyCompatibility ? unreadOpportunities.length : 0
+                  }
+                  onOpenInbox={
+                    legacyCompatibility
+                      ? () => setChosenTab("opportunities")
+                      : undefined
+                  }
+                  verdictReaction={verdictReaction}
+                />
+              </BuddyErrorBoundary>
+            </Surface>
+          )}
+
+          <div ref={presenceRef} tabIndex={-1} className={styles.presenceSlot}>
+            <BuddyPresence
+              state={state}
+              headline={snapshot.state.semantic.headline}
+              speech={activeTab === "play" ? null : heroSpeech}
+              sceneMounted={sceneOpen}
+              sceneToggleLabel={sceneOpen ? "Close Play" : "Open Play"}
+              onToggleScene={handleToggleScene}
+              onControl={handleSpeechControl}
+            />
+          </div>
+
+          {sceneOpen && (
+            <div className={styles.sceneSizeActions}>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                aria-expanded={!sceneStrip}
+                aria-controls="buddy-home-hero"
+                onClick={handleToggleSceneSize}
+              >
+                {sceneStrip ? "Expand scene" : "Collapse scene"}
+              </Button>
+            </div>
+          )}
+        </Surface>
 
         {editorial.canFeedback && editorial.speech && (
           <Surface
@@ -1358,6 +1668,7 @@ const BuddyHomeContent: React.FC = () => {
             activeIndex={tabOrder.indexOf(activeTab)}
             itemCount={tabOrder.length}
             className={styles.tabsList}
+            aria-label="Buddy sections"
           >
             {tabOrder.map((tab) => (
               <Tabs.Trigger key={tab} value={tab}>
@@ -1386,7 +1697,7 @@ const BuddyHomeContent: React.FC = () => {
             {legacyCompatibility ? (
               <div className={styles.tabPanel}>
                 <BuddyRecentErrorsPanel
-                  recentErrors={recentErrors}
+                  recentErrors={legacyRecentErrors.slice(0, 25)}
                   onInvestigate={handleInvestigateError}
                   onDismiss={handleDismissError}
                 />
@@ -1394,20 +1705,48 @@ const BuddyHomeContent: React.FC = () => {
             ) : (
               <div className={styles.tabNoticeList}>
                 <Text size="2" color="gray" className={styles.tabNotice}>
-                  {recentErrors.length === 0
+                  {operatorRecentErrors.length === 0
                     ? "No warnings in the last six hours."
                     : "Recent warnings, read-only."}
                 </Text>
-                {recentErrors.map((event) => (
-                  <Text
-                    key={event.id}
-                    size="1"
-                    color="gray"
-                    className={styles.tabNoticeRow}
+                {recentErrorRows.length > 0 && (
+                  <ul
+                    aria-label="Recent warnings"
+                    className={styles.tabNoticeItems}
                   >
-                    {event.title}: {event.failure_summary ?? event.description}
-                  </Text>
-                ))}
+                    {visibleRecentErrorRows.map(({ event, detail, count }) => (
+                      <li key={event.id} className={styles.tabNoticeRow}>
+                        <Text size="1" color="gray">
+                          {event.title}
+                          {count > 1 && ` ×${count}`}
+                        </Text>
+                        {detail && (
+                          <Text size="1" color="gray">
+                            {detail}
+                          </Text>
+                        )}
+                        {event.created_at && (
+                          <Text size="1" color="gray">
+                            {formatRelativeTime(event.created_at)}
+                          </Text>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {visibleRecentErrorRows.length < recentErrorRows.length && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() =>
+                      setRecentErrorsVisibleCount(
+                        (count) => count + HISTORY_PAGE_SIZE,
+                      )
+                    }
+                  >
+                    Show more
+                  </Button>
+                )}
               </div>
             )}
           </Tabs.Content>

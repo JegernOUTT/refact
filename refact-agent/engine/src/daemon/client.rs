@@ -1174,12 +1174,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(daemon)]
     async fn ping_daemon_classifies_connection_refused_as_not_running() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-
-        let status = ping_daemon(&daemon_info(port, None)).await;
+        let status = ping_daemon(&daemon_info(0, None)).await;
 
         assert!(matches!(status, DaemonPingStatus::NotRunning { .. }));
     }

@@ -52,7 +52,7 @@ impl BuddyJob for StatsWatcherJob {
         if recent_error_count >= 5 {
             return BuddyJobResult {
                 suggestion: Some(BuddySuggestion {
-                    id: format!("stats-errors-{}", chrono::Utc::now().timestamp()),
+                    id: "stats-errors".to_string(),
                     suggestion_type: "error_pattern".to_string(),
                     title: format!(
                         "{} fresh error gremlins in the last hour",
@@ -276,6 +276,17 @@ mod tests {
 
         assert!(result.suggestion.is_some());
         assert_eq!(result.last_result.as_deref(), Some("1"));
+    }
+
+    #[tokio::test]
+    async fn stats_error_condition_keeps_one_stable_suggestion_id() {
+        let job = StatsWatcherJob;
+        let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let first = job.execute(gcx.clone(), test_context(1, 5)).await;
+        let second = job.execute(gcx, test_context(2, 8)).await;
+
+        assert_eq!(first.suggestion.unwrap().id, "stats-errors");
+        assert_eq!(second.suggestion.unwrap().id, "stats-errors");
     }
 
     #[tokio::test]

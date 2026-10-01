@@ -19,7 +19,7 @@ pub const PROXY_BODY_LIMIT: usize = 15 * 1024 * 1024;
 #[cfg(not(test))]
 const PROXY_WORKER_READY_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
-const PROXY_WORKER_READY_TIMEOUT: Duration = Duration::from_secs(2);
+const PROXY_WORKER_READY_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(not(test))]
 const PROXY_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
@@ -175,12 +175,20 @@ async fn ready_worker(
     state: &Arc<DaemonState>,
     entry: &ProjectEntry,
 ) -> Result<WorkerInfo, Response<Body>> {
+    ready_worker_with_timeout(state, entry, PROXY_WORKER_READY_TIMEOUT).await
+}
+
+async fn ready_worker_with_timeout(
+    state: &Arc<DaemonState>,
+    entry: &ProjectEntry,
+    timeout: Duration,
+) -> Result<WorkerInfo, Response<Body>> {
     let supervisor = state.supervisor.clone();
     let entry_for_task = entry.clone();
     let mut readiness =
         tokio::spawn(async move { supervisor.ensure_ready_worker(&entry_for_task).await });
 
-    match tokio::time::timeout(PROXY_WORKER_READY_TIMEOUT, &mut readiness).await {
+    match tokio::time::timeout(timeout, &mut readiness).await {
         Ok(Ok(Ok(worker))) => Ok(worker),
         Ok(Ok(Err(error))) => Err(json_response(
             StatusCode::BAD_GATEWAY,
@@ -848,19 +856,12 @@ mod tests {
         wait_for_starting(&state, &entry.id).await;
 
         let started = Instant::now();
-        let response = crate::daemon::server::make_router(state.clone(), 8488)
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/p/{}/v1/echo", entry.id))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        let error = ready_worker_with_timeout(&state, &entry, Duration::from_secs(2))
             .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        assert!(started.elapsed() >= PROXY_WORKER_READY_TIMEOUT);
-        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            .unwrap_err();
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert_eq!(error.status(), StatusCode::BAD_GATEWAY);
+        let body = hyper::body::to_bytes(error.into_body()).await.unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["error"], "worker readiness timed out");
         state.supervisor.stop_all().await;

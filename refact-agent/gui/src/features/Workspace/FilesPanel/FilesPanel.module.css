@@ -72,7 +72,7 @@
 
 .liveEditsToggle:disabled {
   cursor: default;
-  opacity: var(--rf-disabled-opacity);
+  opacity: var(--rf-motion-opacity-muted);
 }
 
 .tree {
@@ -283,12 +283,12 @@
   font-size: var(--rf-text-1);
   background: none;
   border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-1);
+  border-radius: var(--rf-radius-chip);
   cursor: pointer;
 }
 
 .playerSpeed:hover {
-  color: var(--rf-color-text);
+  color: var(--rf-color-fg);
 }
 
 .editorActions {

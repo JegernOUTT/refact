@@ -941,7 +941,10 @@ impl Supervisor {
         let lease_root = workspace_lease_root(root);
         let deadline = Instant::now() + SELF_HELD_LEASE_WAIT;
         loop {
-            let conflict = probe_workspace_lease(&lease_root)?;
+            let probe_root = lease_root.clone();
+            let conflict = tokio::task::spawn_blocking(move || probe_workspace_lease(&probe_root))
+                .await
+                .expect("workspace lease probe task panicked")?;
             if !self.lease_holder_is_our_dying_child(&conflict) {
                 return Some(conflict);
             }
@@ -1069,7 +1072,7 @@ impl Supervisor {
                     return Ok(info);
                 }
                 ReadinessOutcome::Exited(exit_code) if is_workspace_busy_exit(exit_code) => {
-                    let conflict = workspace_busy_conflict(&spec.root);
+                    let conflict = workspace_busy_conflict(&spec.root).await;
                     return Ok(self.mark_workspace_busy(&slot, &spec, &conflict).await);
                 }
                 ReadinessOutcome::Exited(exit_code) if is_port_busy_exit(exit_code) => {
@@ -1345,6 +1348,9 @@ impl Supervisor {
         let url = format!("http://127.0.0.1:{http_port}/v1/ping");
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         loop {
+            if self.wake_shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(ReadinessOutcome::Shutdown);
+            }
             if let Some(info) = info_if_generation_changed(slot, generation).await {
                 return Ok(ReadinessOutcome::Superseded(info));
             }
@@ -1454,7 +1460,7 @@ impl Supervisor {
                 return;
             }
             if is_workspace_busy_exit(exit_code) {
-                let conflict = workspace_busy_conflict(&spec.root);
+                let conflict = workspace_busy_conflict(&spec.root).await;
                 self.mark_workspace_busy(&slot, &spec, &conflict).await;
                 return;
             }
@@ -2075,13 +2081,18 @@ fn workspace_lease_root(root: &Path) -> PathBuf {
     .unwrap_or_else(|| root.to_path_buf())
 }
 
-fn workspace_busy_conflict(root: &Path) -> WorkspaceLeaseConflict {
-    let root = workspace_lease_root(root);
-    probe_workspace_lease(&root).unwrap_or_else(|| WorkspaceLeaseConflict {
-        path: crate::daemon::lock::workspace_lease_path(&root),
-        root,
-        holder: None,
+async fn workspace_busy_conflict(root: &Path) -> WorkspaceLeaseConflict {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let root = workspace_lease_root(&root);
+        probe_workspace_lease(&root).unwrap_or_else(|| WorkspaceLeaseConflict {
+            path: crate::daemon::lock::workspace_lease_path(&root),
+            root,
+            holder: None,
+        })
     })
+    .await
+    .expect("workspace lease probe task panicked")
 }
 
 fn push_crash(history: &mut VecDeque<u64>, now: u64) {
@@ -2646,10 +2657,8 @@ mod tests {
 
         let ready = supervisor.ensure_worker(&entry).await.unwrap();
         assert_eq!(ready.state, WorkerState::Ready);
-        let dying_pid = ready.pid.expect("a ready worker must report a pid");
+        let dying_pid = u32::MAX - 123;
 
-        // The state `handoff_generation_child_to_reaper` leaves behind: our own child is still
-        // being reaped and still owns the lease.
         supervisor.reaping_child_pids.write().insert(dying_pid);
         let lease = hold_lease_as(&workspace_lease_root(&root), dying_pid);
 

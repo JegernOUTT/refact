@@ -2371,7 +2371,10 @@ fn autonomous_finalization(
         };
         return Some(AutonomousFinalization {
             terminal: WorkflowTerminal::Inconclusive,
-            title: spec.title.clone(),
+            title: crate::buddy::outcome_runtime::workflow_result_title(
+                &spec.title,
+                &WorkflowTerminal::Inconclusive,
+            ),
             report: crate::buddy::workflow_deliverables::assessment_body(
                 &spec.workflow_id,
                 &spec.evidence,
@@ -2405,10 +2408,7 @@ fn autonomous_finalization(
         },
     };
 
-    let mut lines = vec![format!(
-        "Workflow {} did not produce a verified report.",
-        spec.workflow_id
-    )];
+    let mut lines = vec![format!("{} did not produce a complete report.", spec.title)];
     if let Some(check) = spec.source_check.as_ref() {
         lines.push(format!("Observed scope: {}", check.coverage()));
         lines.push(format!("Source completion: {}", check.completion_summary()));
@@ -2417,7 +2417,7 @@ fn autonomous_finalization(
         lines.push(format!("Error: {}", redact_and_cap_text(error, 1_000)));
     }
     if has_partial_report {
-        lines.push("Partial assistant output (unverified):".to_string());
+        lines.push("Partial assistant output:".to_string());
         lines.push(redact_and_cap_text(
             &observation.report,
             AUTONOMOUS_PARTIAL_REPORT_CAP_CHARS,
@@ -2429,8 +2429,8 @@ fn autonomous_finalization(
         lines.push(format!("Chat evidence: refact://chat/{chat_id}"));
     }
     Some(AutonomousFinalization {
+        title: crate::buddy::outcome_runtime::workflow_result_title(&spec.title, &terminal),
         terminal,
-        title: format!("{} — run outcome", spec.title),
         report: lines.join("\n"),
         evidence_chat_id: observation.chat_id.clone(),
         successful: false,
@@ -7598,7 +7598,7 @@ mod tests {
             assert!(finalization.successful);
             assert_eq!(finalization.terminal, WorkflowTerminal::Inconclusive);
             assert!(finalization.report.contains("All clean."));
-            assert!(finalization.report.contains("(unverified)"));
+            assert_eq!(finalization.title, "Memory Gardener assessment");
             assert_eq!(finalization.evidence_chat_id.as_deref(), Some("chat-1"));
         }
 
@@ -7622,7 +7622,7 @@ mod tests {
             assert!(finalization.report.contains("provider returned 500"));
             assert!(finalization
                 .report
-                .contains("did not produce a verified report"));
+                .contains("did not produce a complete report"));
         }
 
         #[test]

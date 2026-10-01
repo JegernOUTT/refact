@@ -9,7 +9,6 @@ use refact_lsp::{
     global_context::{create_global_context, CommandLine},
 };
 use serde_json::{json, Value};
-use structopt::StructOpt;
 use tokio::{io::AsyncReadExt, process::Command};
 
 const ROOT: &str = "/scratch/project";
@@ -260,7 +259,7 @@ async fn start(client: &reqwest::Client) -> TestResult<tokio::process::Child> {
     let mut child = Command::new("/scratch/bin/operator-test")
         .args([
             "--exact",
-            "whole_worker_entry",
+            "buddy_operator::whole_worker_entry",
             "--nocapture",
             "--test-threads=1",
         ])
@@ -300,7 +299,7 @@ async fn browser_controller(client: &reqwest::Client) -> TestResult {
     stop(worker).await?;
     {
         let fixture: Value = serde_json::from_str(include_str!(
-            "../../crates/refact-buddy-core/tests/fixtures/operator_contract_v1.json"
+            "../../../crates/refact-buddy-core/tests/fixtures/operator_contract_v1.json"
         ))?;
         let mut work: WorkItem = serde_json::from_value(fixture["work_item"].clone())?;
         let mut artifact: ArtifactRevision =

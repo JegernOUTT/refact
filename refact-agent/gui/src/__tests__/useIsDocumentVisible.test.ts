@@ -53,6 +53,26 @@ describe("useIsDocumentVisible", () => {
     expect(result.current).toBe(false);
   });
 
+  it("runs the visibility callback once when returning to the page", () => {
+    visibilityState = "hidden";
+    const onVisible = vi.fn();
+    const { unmount } = renderHook(() => useIsDocumentVisible(onVisible));
+
+    act(() => {
+      visibilityState = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    expect(onVisible).toHaveBeenCalledTimes(1);
+    unmount();
+
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    expect(onVisible).toHaveBeenCalledTimes(1);
+  });
+
   it("removes the visibility listener on unmount", () => {
     const removeEventListener = vi.spyOn(document, "removeEventListener");
     const { unmount } = renderHook(() => useIsDocumentVisible());

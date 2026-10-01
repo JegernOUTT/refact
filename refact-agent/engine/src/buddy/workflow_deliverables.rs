@@ -1110,8 +1110,8 @@ pub(crate) fn assessment_body(
         ),
     }
     format!(
-        "## {}\n\n### Coverage and limitations\n{}\n\n### Retained source signal\n{}\n\n### Assessment / local proposal (unverified)\n{}\n\n### Next decision\n{}\n\nRead this result here in Buddy Desk. The available Check saved evidence action checks retained links only, not the underlying conclusion. No change, issue publication, or verification is implied. If issue publication is disabled, retain this proposal locally; no issue is required. Missing or malformed evidence remains inconclusive.",
-        contract.kind,
+        "## {} assessment\n\n### Coverage and limitations\n{}\n\n### Retained source signal\n{}\n\n### Assessment / local proposal\n{}\n\n### Next decision\n{}\n\nRead this report in Buddy Desk. Missing or malformed evidence does not support a conclusion.",
+        super::outcome_runtime::workflow_display_title(workflow_id),
         coverage,
         if evidence.trim().is_empty() { "No source signal retained." } else { &evidence },
         if report.trim().is_empty() { "No written assessment retained." } else { &report },
@@ -1261,12 +1261,12 @@ impl SourceCheck {
 
     fn conclusion(&self) -> String {
         if !self.is_grounded() {
-            return "Source check incomplete or evidence invalid; no conclusion. This is not a statement that the source is clean.".to_string();
+            return "Source check incomplete or evidence invalid; no conclusion.".to_string();
         }
         match &self.completion {
             SourceCompletion::Failed { error } => {
                 let mut text = format!(
-                    "The source could not be read: {}\nCoverage is unknown. Nothing may be concluded about this source, including that it has no findings.",
+                    "The source could not be read: {}\nCoverage is unknown.",
                     redact_and_cap_text(error, 1_000)
                 );
                 if !self.findings.is_empty() {
@@ -1276,7 +1276,7 @@ impl SourceCheck {
                 text
             }
             SourceCompletion::NotApplicable { reason } => format!(
-                "This source is not present in this project: {}\nNothing was checked, so nothing was found and nothing is implied.",
+                "This source is not present in this project: {}",
                 redact_and_cap_text(reason, 1_000)
             ),
             SourceCompletion::Partial { uncovered } => {
@@ -1293,7 +1293,7 @@ impl SourceCheck {
                 text
             }
             SourceCompletion::Complete if self.findings.is_empty() => {
-                "No findings within the stated source-check scope, and the whole stated scope was read. This is not a claim about unchecked scope.".to_string()
+                "No findings within the stated source-check scope, and the whole stated scope was read.".to_string()
             }
             SourceCompletion::Complete => self.findings.join("\n"),
         }
@@ -1303,13 +1303,14 @@ impl SourceCheck {
         let terminal = self.terminal();
         let conclusion = self.conclusion();
         let coverage = self.coverage();
+        let title = super::outcome_runtime::workflow_result_title(
+            &super::outcome_runtime::workflow_display_title(workflow_id),
+            &terminal,
+        );
         super::workflows::WorkflowReport {
-            title: workflow_deliverable_contract(workflow_id)
-                .map(|c| c.kind)
-                .unwrap_or("source_check")
-                .into(),
+            title,
             body: format!(
-                "Coverage: {}\n\n{}\n\n### Next action\n{}\n\nSource check only; no change was applied and no fix was verified. Findings here are the engine's own observation, not a model claim.",
+                "Coverage: {}\n\n{}\n\n### Next action\n{}\n\nFindings here are the engine's own observation, not a model claim.",
                 coverage,
                 redact_and_cap_text(&conclusion, 24_000),
                 workflow_next_action(workflow_id).describe(),
@@ -1342,13 +1343,32 @@ pub(crate) enum WorkflowNextAction {
 impl WorkflowNextAction {
     pub(crate) fn describe(&self) -> String {
         match self {
-            WorkflowNextAction::RegisteredResource { adapter, kind, needs_from_reader } => format!(
-                "A corrective change for this category is available as the registered resource action `{adapter}` / `{kind}`. It is not attached to this report: attaching it needs {needs_from_reader}, which this run did not decide for you. Nothing is applied until you review the exact scope and grant permission."
+            WorkflowNextAction::RegisteredResource {
+                adapter,
+                kind,
+                needs_from_reader,
+            } => format!(
+                "Review {} after {needs_from_reader}. Nothing is applied until you approve the exact scope.",
+                resource_action_label(adapter, kind)
             ),
             WorkflowNextAction::ReadOnlyAssessment { why } => format!(
-                "There is no corrective resource action for this category: {why}. This deliverable is read-only; act on it yourself."
+                "No automatic fix for this: {why}. Act on it yourself; this report is read-only."
             ),
         }
+    }
+}
+
+fn resource_action_label(adapter: &str, kind: &str) -> &'static str {
+    match (adapter, kind) {
+        ("memory", "memory_lifecycle") => "the proposed memory changes",
+        ("default_models", "default_model_select") => "the proposed default model change",
+        ("buddy_settings", "buddy_settings_patch") => "the proposed Buddy preference change",
+        ("extensions", "markdown_project_apply") => "the proposed skill or command draft",
+        ("project_customization_file", "customization_file_apply") => {
+            "the proposed project setup change"
+        }
+        ("project_code", "checkpoint_isolated_candidate") => "the reviewed code change",
+        _ => "the proposed resource change",
     }
 }
 
@@ -1364,28 +1384,27 @@ pub(crate) fn workflow_next_action(workflow_id: &str) -> WorkflowNextAction {
         MEMORY_GARDENER_WORKFLOW_ID | KNOWLEDGE_CONFLICT_WORKFLOW_ID => RegisteredResource {
             adapter: "memory",
             kind: "memory_lifecycle",
-            needs_from_reader: "choosing which specific memory files to archive or merge",
+            needs_from_reader: "choosing which memory files to archive or merge",
         },
         MODEL_COST_OPTIMIZER_WORKFLOW_ID => RegisteredResource {
             adapter: "default_models",
             kind: "default_model_select",
-            needs_from_reader:
-                "choosing the replacement model, which is a cost/quality tradeoff only you can make",
+            needs_from_reader: "choosing a replacement model after weighing cost and quality",
         },
         BEHAVIOR_LEARNER_WORKFLOW_ID | USER_HABIT_COACH_WORKFLOW_ID => RegisteredResource {
             adapter: "buddy_settings",
             kind: "buddy_settings_patch",
-            needs_from_reader: "confirming which observed preference should become a setting",
+            needs_from_reader: "confirming which observed preference to save",
         },
         BUDDY_SKILL_AUTHOR_WORKFLOW_ID => RegisteredResource {
             adapter: "extensions",
             kind: "markdown_project_apply",
-            needs_from_reader: "approving the skill body text, which is authored content",
+            needs_from_reader: "reviewing and approving the proposed skill or command text",
         },
         SETUP_COACH_WORKFLOW_ID | BUDDY_ONBOARDING_WORKFLOW_ID => RegisteredResource {
             adapter: "project_customization_file",
             kind: "customization_file_apply",
-            needs_from_reader: "deciding the exact configuration values for this project",
+            needs_from_reader: "choosing the exact setup values for this project",
         },
         ERROR_DETECTIVE_WORKFLOW_ID => ReadOnlyAssessment {
             why: "a diagnostic cluster names no single resource to change",
@@ -1400,7 +1419,7 @@ pub(crate) fn workflow_next_action(workflow_id: &str) -> WorkflowNextAction {
         | DEPENDENCY_RADAR_WORKFLOW_ID => RegisteredResource {
             adapter: "project_code",
             kind: "checkpoint_isolated_candidate",
-            needs_from_reader: "an existing isolated worktree owned by this exact report chat; the report must name that native candidate and you must review its current patch",
+            needs_from_reader: "opening the existing isolated worktree owned by this report and reviewing its current changes",
         },
         BUDDY_DAILY_DIGEST_WORKFLOW_ID
         | BUDDY_FRIDAY_RETRO_WORKFLOW_ID
@@ -2186,11 +2205,30 @@ mod tests {
                 expected.push(action);
             }
             assert_eq!(contract.action_ids, expected.as_slice(), "{}", workflow.id);
+            let report = grounded().into_report(workflow.id);
+            assert!(
+                !report.title.contains('_'),
+                "{}: {}",
+                workflow.id,
+                report.title
+            );
+            assert!(
+                !report.title.contains("run outcome"),
+                "{}: {}",
+                workflow.id,
+                report.title
+            );
+            assert!(
+                report.title.starts_with(workflow.title),
+                "{}: {}",
+                workflow.id,
+                report.title
+            );
             let body =
                 assessment_body(workflow.id, "", "No changes needed; verified success", None);
             assert!(body.contains("No source signal retained."));
-            assert!(body.contains("(unverified)"));
-            assert!(body.contains("remains inconclusive"));
+            assert!(body.contains("Assessment / local proposal"));
+            assert!(body.contains("Missing or malformed evidence does not support a conclusion"));
             assert!(body.contains("not observed by the engine"));
         }
         assert!(workflow_deliverable_contract("unknown").is_none());
@@ -2219,7 +2257,7 @@ mod tests {
             coverage.contains("Source completion: partial; not covered: stopped after 5000 files")
         );
         assert!(body.contains("Everything is fine, no changes needed."));
-        assert!(body.contains("(unverified)"));
+        assert!(body.contains("Assessment / local proposal"));
     }
 
     #[test]
@@ -2276,10 +2314,10 @@ mod tests {
         );
     }
 
-    /// Every workflow must say, in its own deliverable, what the reader can actually do next,
-    /// and the read-only ones must admit that they are read-only rather than imply a fix.
+    /// Every workflow must say, in its own deliverable, what the reader can actually do next.
     #[test]
     fn every_registered_workflow_states_a_concrete_next_action_in_its_source_check_body() {
+        let raw_identifier = regex::Regex::new(r"[a-z]+_[a-z_]+").unwrap();
         for workflow in AUTONOMOUS_BUDDY_WORKFLOWS {
             let action = workflow_next_action(workflow.id);
             let text = action.describe();
@@ -2287,6 +2325,26 @@ mod tests {
             let body = grounded().into_report(workflow.id).body;
             assert!(body.contains("### Next action"), "{}", workflow.id);
             assert!(body.contains(&text), "{}", workflow.id);
+            assert!(!body.contains("project_code"), "{}: {body}", workflow.id);
+            assert!(
+                !body.contains("checkpoint_isolated_candidate"),
+                "{}: {body}",
+                workflow.id
+            );
+            let item = grounded().into_report(workflow.id);
+            assert!(!item.title.contains('_'), "{}: {}", workflow.id, item.title);
+            assert!(
+                !item.title.contains("run outcome"),
+                "{}: {}",
+                workflow.id,
+                item.title
+            );
+            assert!(
+                item.title.starts_with(workflow.title),
+                "{}: {}",
+                workflow.id,
+                item.title
+            );
             match action {
                 WorkflowNextAction::RegisteredResource {
                     needs_from_reader, ..
@@ -2303,11 +2361,41 @@ mod tests {
                     assert!(text.contains("read-only"), "{}", workflow.id);
                 }
             }
+            assert!(!text.contains('`'), "{}: {text}", workflow.id);
+            assert!(!raw_identifier.is_match(&text), "{}: {text}", workflow.id);
+            assert!(
+                text.split_whitespace().count() <= 40,
+                "{}: {text}",
+                workflow.id
+            );
         }
         assert!(matches!(
             workflow_next_action("not_a_workflow"),
             WorkflowNextAction::ReadOnlyAssessment { .. }
         ));
+    }
+
+    #[test]
+    fn next_action_is_plain_language() {
+        let raw_identifier = regex::Regex::new(r"[a-z]+_[a-z_]+").unwrap();
+        for workflow in AUTONOMOUS_BUDDY_WORKFLOWS {
+            let text = workflow_next_action(workflow.id).describe();
+            assert!(!text.contains('`'), "{}: {text}", workflow.id);
+            assert!(!raw_identifier.is_match(&text), "{}: {text}", workflow.id);
+            assert!(
+                text.split_whitespace().count() <= 40,
+                "{}: {text}",
+                workflow.id
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_workflow_title_is_humanized() {
+        assert_eq!(
+            super::super::outcome_runtime::workflow_display_title("custom_workflow_name"),
+            "Custom Workflow Name"
+        );
     }
 
     /// Exercise the production attachment boundary against a real outcome store and real
@@ -2634,42 +2722,33 @@ mod tests {
 
     #[test]
     fn representative_source_signals_and_local_proposals_are_readable_without_chat() {
-        for (id, signal, kind) in [
+        for (id, signal) in [
             (
                 SECURITY_WHISPERER_WORKFLOW_ID,
                 "src/auth.rs: redacted finding",
-                "security_assessment",
             ),
-            (
-                DEPENDENCY_RADAR_WORKFLOW_ID,
-                "Cargo.toml modified",
-                "dependency_proposal",
-            ),
+            (DEPENDENCY_RADAR_WORKFLOW_ID, "Cargo.toml modified"),
             (
                 DOCS_GARDENER_WORKFLOW_ID,
                 "README present; src/api.rs modified",
-                "documentation_proposal",
             ),
             (
                 BUDDY_REFACTOR_HUNTER_WORKFLOW_ID,
                 "src/parser.rs nested branch",
-                "refactor_proposal",
             ),
             (
                 BUDDY_IDLE_SUGGESTER_WORKFLOW_ID,
                 "Open question: parser compatibility",
-                "research_brief",
             ),
-            (
-                BUDDY_DAILY_DIGEST_WORKFLOW_ID,
-                "Retained run: partial",
-                "daily_digest",
-            ),
+            (BUDDY_DAILY_DIGEST_WORKFLOW_ID, "Retained run: partial"),
         ] {
             let body = assessment_body(id, signal, "Proposed follow-up, not applied.", None);
             assert!(body.contains(signal));
-            assert!(body.contains(kind));
-            assert!(body.contains("retain this proposal locally"));
+            let title = refact_buddy_core::autonomous_workflows::autonomous_workflow_meta(id)
+                .unwrap()
+                .title;
+            assert!(body.starts_with(&format!("## {title} assessment")));
+            assert!(body.contains("Proposed follow-up"));
             assert!(!body.contains("Open chat"));
         }
     }

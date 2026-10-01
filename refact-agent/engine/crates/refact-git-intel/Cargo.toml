@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 refact-core = { path = "../refact-core" }
-serde = { workspace = true }
-git2 = "0.20.2"
+serde.workspace = true
+git2.workspace = true
 
 [dev-dependencies]
-tempfile = { workspace = true }
+tempfile.workspace = true

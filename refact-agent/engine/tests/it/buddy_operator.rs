@@ -1,19 +1,18 @@
 //! Isolated fixture transport and real Buddy resource persistence coverage.
 //!
-//! `REFACT_SKIP_GUI_BUILD=1 cargo test --test buddy_operator -- --nocapture`
+//! `REFACT_SKIP_GUI_BUILD=1 cargo test --test it -- buddy_operator:: --nocapture`
 //!
 //! Whole-worker acceptance: `sh tools/dev/buddy-operator-test.sh TEST_EXE REFACT_LSP`.
 //! Live IDE parity remains a separate gate.
 
-mod buddy_operator_common;
 
-use buddy_operator_common::BuddyOperatorHarness;
-use buddy_operator_common::fixtures::{FixtureEndpoints, FixtureTransport};
+use crate::buddy_operator_common::BuddyOperatorHarness;
+use crate::buddy_operator_common::fixtures::{FixtureEndpoints, FixtureTransport};
 use serde_json::json;
 
 #[tokio::test]
 async fn whole_worker_entry() {
-    let result = buddy_operator_common::worker::entry().await;
+    let result = crate::buddy_operator_common::worker::entry().await;
     if std::env::var_os("B02_MODE").is_some() {
         result.expect("whole-worker acceptance must succeed, never skip");
     } else {
@@ -24,7 +23,7 @@ async fn whole_worker_entry() {
 
 #[test]
 fn whole_worker_refuses_missing_shared_or_routed_namespace() {
-    use buddy_operator_common::worker::require_namespace as validate_namespace;
+    use crate::buddy_operator_common::worker::require_namespace as validate_namespace;
     assert!(validate_namespace(None, "net:[2]", &["lo".into()]).is_err());
     assert!(validate_namespace(Some("net:[1]"), "net:[1]", &["lo".into()]).is_err());
     assert!(validate_namespace(Some("net:[1]"), "net:[2]", &["lo".into(), "eth0".into()]).is_err());
@@ -53,7 +52,7 @@ async fn process_fixture_refuses_partial_or_unusable_confinement_before_launch()
     }
     let harness = BuddyOperatorHarness::new();
     for capability in [Enforcement::Partial, Enforcement::Unusable] {
-        let result = buddy_operator_common::fixtures::run_confined_process_with_provider(
+        let result = crate::buddy_operator_common::fixtures::run_confined_process_with_provider(
             &Unsupported(capability),
             harness.project_root(),
             harness.user_config_root(),

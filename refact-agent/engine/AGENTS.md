@@ -17,9 +17,13 @@ bash tools/compile_bench.sh               # compile-time before/after benchmark
 
 Release profile: `opt-level = "z"`, `lto = true`, `strip = true`. It does not configure `codegen-units`; the separate `ci-release` profile inherits release settings, then overrides `strip = false`, `lto = "thin"`, and `codegen-units = 16`.
 
+The `ci-test` profile inherits `dev` with debug info and incremental compilation disabled for CI tests.
+
 Dev profile keeps workspace crates debuggable but optimizes CodeGraph's parser and SQLite dependencies with `[profile.dev.package.*] opt-level = 3`: tree-sitter core, every tree-sitter grammar crate, `tree-sitter-language`, `rusqlite`, `tokio-rusqlite`, `libsqlite3-sys`, and `sqlite-vec`. This makes `target/debug/refact-lsp` indexing close to release speed for parse-dominated cold indexes; the first dev build is slower because these dependencies compile optimized, and the shared sccache setup mitigates repeated work across worktrees.
 
 `cargo build`, `cargo run`, and release builds normally rebuild and embed GUI assets. `REFACT_SKIP_GUI_BUILD=1` skips that refresh only for API-only developer builds.
+
+Run `python3 tools/fn_size_report.py` to list the largest non-test Rust functions. This report is advisory only, not a check or CI gate. Splitting the largest async functions cut cold root-crate compile time by only 1.6%; incremental checks were usually 13–22 s, with the clearest win editing inside a 677-line `#[async_trait]` method (21.7 s → 14.2 s).
 
 ### Worktree delivery
 
@@ -69,6 +73,8 @@ src/
   at_commands/         — `@`-prefixed IDE commands (file, search, ast_definition, knowledge)
   bin/refact.rs        — alternate entry point
 ```
+
+See [the staged crate-split plan](docs/crate-split-plan.md) for the target engine DAG, port boundaries, and migration sequence.
 
 ### Daemon upgrade safety
 
@@ -1125,7 +1131,7 @@ All foreground, background, service, and PTY exec spawns apply `EXEC_ENV_DEFAULT
 
 ## Testing
 
-- **Integration tests in `tests/`**: live HTTP+SSE Python suites plus Rust e2e suites (`daemon_e2e.rs`, `daemon_proxy.rs`, `daemon_supervisor.rs`) that share the `tests/e2e_helpers/` module. Python helpers include `fake_worker.py` and `lsp_connect.py`; 7 `test_chat_session_*.py` files cover the chat session flow.
+- **Integration tests in `tests/`**: live HTTP+SSE Python suites plus the Rust `tests/it` harness (daemon proxy/supervisor suites remain separate binaries because their process-global environment mutation is isolated with `serial_test`). Python helpers include `fake_worker.py` and `lsp_connect.py`; 7 `test_chat_session_*.py` files cover the chat session flow.
 - **Rust unit tests**: `src/chat/tests.rs`, CodeGraph/parser tests, 50+ modules. `cargo test --lib`.
 - **Test data**: `tests/emergency_frog_situation/` — themed frog simulations for parsing edge cases.
 

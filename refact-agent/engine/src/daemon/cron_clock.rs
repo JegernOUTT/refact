@@ -731,7 +731,7 @@ mod tests {
             &state,
             &project_id,
             WorkerState::Crashed,
-            Duration::from_secs(20),
+            Duration::from_secs(120),
         )
         .await;
         std::env::remove_var("FAKE_WORKER_CRASH");

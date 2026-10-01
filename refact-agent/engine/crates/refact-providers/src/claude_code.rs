@@ -203,6 +203,407 @@ pub enum ClaudeCodeUsageRequestError {
     Other(String),
 }
 
+pub const CLAUDE_CODE_RESET_PROGRAM_SAVED: &str = "cedar_ember";
+pub const CLAUDE_CODE_RESET_PROGRAM_SESSION: &str = "juniper_tide";
+const CLAUDE_CODE_RESET_STATUS_URL: &str =
+    "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1";
+const CLAUDE_CODE_PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
+const CLAUDE_CODE_RESET_CLAIM_TIMEOUT: Duration = Duration::from_secs(25);
+const CLAUDE_CODE_RESET_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaudeCodeResetGrant {
+    pub id: String,
+    pub label: String,
+    pub resets_total: u64,
+    pub resets_left: u64,
+    pub starts_at: Option<String>,
+    pub ends_at: Option<String>,
+    pub clears: Vec<String>,
+    pub paused: bool,
+    pub usable_now: bool,
+    pub use_requires_limit: bool,
+    pub percent_used: Map<String, Value>,
+    pub blocking: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaudeCodeSavedResets {
+    pub eligible: bool,
+    pub ineligible_reason: Option<String>,
+    pub at_limit: bool,
+    pub exhausted: Vec<String>,
+    pub grants: Vec<ClaudeCodeResetGrant>,
+    pub next_grant_id: Option<String>,
+    pub weekly_resets_at: Option<String>,
+    pub cooldown_until: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaudeCodeSessionReset {
+    pub eligible: bool,
+    pub ineligible_reason: Option<String>,
+    pub in_experiment: bool,
+    pub arm: Option<String>,
+    pub available: bool,
+    pub next_available_at: Option<String>,
+    pub weekly_resets_at: Option<String>,
+    pub resets_per_week: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaudeCodeResetStatus {
+    pub cedar_ember: Option<ClaudeCodeSavedResets>,
+    pub juniper_tide: Option<ClaudeCodeSessionReset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeCodeResetRequest {
+    pub program: String,
+    pub grant_id: Option<String>,
+    pub request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaudeCodeResetClaim {
+    pub program: String,
+    pub result: String,
+    pub reason: Option<String>,
+    pub resets_left: Option<u64>,
+    pub cleared: Vec<String>,
+    pub weekly_resets_at: Option<String>,
+    pub cooldown_until: Option<String>,
+    pub next_available_at: Option<String>,
+}
+
+impl ClaudeCodeResetRequest {
+    pub fn parse(
+        program: &str,
+        grant_id: Option<&str>,
+        request_id: Option<&str>,
+    ) -> Result<Self, String> {
+        let program = program.trim();
+        let grant_id = grant_id.map(str::trim).filter(|value| !value.is_empty());
+        let request_id = request_id.map(str::trim).filter(|value| !value.is_empty());
+        match program {
+            CLAUDE_CODE_RESET_PROGRAM_SAVED => {
+                let grant_id = grant_id
+                    .ok_or_else(|| "A saved reset needs the grant_id to use".to_string())?;
+                if !is_claude_reset_token(grant_id, 40, false) {
+                    return Err("grant_id is not a valid Claude Code reset grant id".to_string());
+                }
+                let request_id = request_id
+                    .map(str::to_string)
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                if !is_claude_reset_token(&request_id, 64, true) {
+                    return Err("request_id is not a valid Claude Code reset request id".to_string());
+                }
+                Ok(Self {
+                    program: program.to_string(),
+                    grant_id: Some(grant_id.to_string()),
+                    request_id: Some(request_id),
+                })
+            }
+            CLAUDE_CODE_RESET_PROGRAM_SESSION => Ok(Self {
+                program: program.to_string(),
+                grant_id: None,
+                request_id: None,
+            }),
+            _ => Err(format!(
+                "Unknown Claude Code reset program '{program}'; expected '{CLAUDE_CODE_RESET_PROGRAM_SAVED}' or '{CLAUDE_CODE_RESET_PROGRAM_SESSION}'"
+            )),
+        }
+    }
+
+    fn body(&self) -> Value {
+        let mut body = json!({ "program": self.program });
+        if let Some(grant_id) = &self.grant_id {
+            body["grant_id"] = json!(grant_id);
+        }
+        if let Some(request_id) = &self.request_id {
+            body["request_id"] = json!(request_id);
+        }
+        body
+    }
+}
+
+fn is_claude_reset_token(value: &str, max_len: usize, allow_uppercase: bool) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && value.chars().all(|character| {
+            character.is_ascii_digit()
+                || character.is_ascii_lowercase()
+                || (allow_uppercase && character.is_ascii_uppercase())
+                || character == '_'
+                || character == '-'
+        })
+}
+
+impl ClaudeCodeProvider {
+    fn oauth_request(
+        http_client: &reqwest::Client,
+        method: reqwest::Method,
+        url: &str,
+        access_token: &str,
+        timeout: Duration,
+    ) -> reqwest::RequestBuilder {
+        http_client
+            .request(method, url)
+            .timeout(timeout)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header("anthropic-beta", "oauth-2025-04-20")
+            .header("content-type", "application/json")
+            .header(
+                "user-agent",
+                refact_llm::adapters::claude_code_compat::USER_AGENT,
+            )
+    }
+
+    async fn oauth_json(
+        request: reqwest::RequestBuilder,
+        what: &str,
+    ) -> Result<Value, ClaudeCodeUsageRequestError> {
+        let resp = request.send().await.map_err(|error| {
+            ClaudeCodeUsageRequestError::Other(format!("{what} request failed: {error}"))
+        })?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let truncated: String = body.chars().take(512).collect();
+            return Err(ClaudeCodeUsageRequestError::Status(status, truncated));
+        }
+        resp.json().await.map_err(|error| {
+            ClaudeCodeUsageRequestError::Other(format!("Failed to parse {what} response: {error}"))
+        })
+    }
+
+    pub async fn fetch_reset_status_once(
+        http_client: &reqwest::Client,
+        access_token: &str,
+    ) -> Result<ClaudeCodeResetStatus, ClaudeCodeUsageRequestError> {
+        let request = Self::oauth_request(
+            http_client,
+            reqwest::Method::GET,
+            CLAUDE_CODE_RESET_STATUS_URL,
+            access_token,
+            CLAUDE_CODE_RESET_STATUS_TIMEOUT,
+        );
+        let root = Self::oauth_json(request, "Claude Code reset status").await?;
+        Ok(parse_claude_reset_status(&root))
+    }
+
+    pub async fn fetch_organization_uuid_once(
+        http_client: &reqwest::Client,
+        access_token: &str,
+    ) -> Result<String, ClaudeCodeUsageRequestError> {
+        let request = Self::oauth_request(
+            http_client,
+            reqwest::Method::GET,
+            CLAUDE_CODE_PROFILE_URL,
+            access_token,
+            CLAUDE_CODE_RESET_STATUS_TIMEOUT,
+        );
+        let root = Self::oauth_json(request, "Claude Code profile").await?;
+        root.get("organization")
+            .and_then(|organization| organization.get("uuid"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|uuid| !uuid.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                ClaudeCodeUsageRequestError::Other(
+                    "Claude Code profile has no organization; usage resets need an organization account".to_string(),
+                )
+            })
+    }
+
+    pub async fn claim_reset_once(
+        http_client: &reqwest::Client,
+        access_token: &str,
+        request: &ClaudeCodeResetRequest,
+    ) -> Result<ClaudeCodeResetClaim, ClaudeCodeUsageRequestError> {
+        let organization_uuid =
+            Self::fetch_organization_uuid_once(http_client, access_token).await?;
+        let url = format!(
+            "https://api.anthropic.com/api/organizations/{}/reset_rate_limits",
+            organization_uuid
+        );
+        let http_request = Self::oauth_request(
+            http_client,
+            reqwest::Method::POST,
+            &url,
+            access_token,
+            CLAUDE_CODE_RESET_CLAIM_TIMEOUT,
+        )
+        .json(&request.body());
+        let root = Self::oauth_json(http_request, "Claude Code reset claim").await?;
+        Ok(parse_claude_reset_claim(&request.program, &root))
+    }
+
+    pub fn reset_request_error_to_string(error: ClaudeCodeUsageRequestError) -> String {
+        match error {
+            ClaudeCodeUsageRequestError::Status(status, _)
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS =>
+            {
+                "Anthropic is rate limiting reset requests right now. Try again in a minute."
+                    .to_string()
+            }
+            ClaudeCodeUsageRequestError::Status(status, body) => {
+                format!("Claude Code reset request returned {}: {}", status, body)
+            }
+            ClaudeCodeUsageRequestError::Other(message) => message,
+        }
+    }
+}
+
+fn claude_string_list(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn claude_optional_string(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn claude_u64(value: Option<&Value>) -> Option<u64> {
+    value
+        .and_then(as_f64_loose)
+        .filter(|number| number.is_finite() && *number >= 0.0 && number.fract() == 0.0)
+        .map(|number| number as u64)
+}
+
+fn parse_claude_reset_grant(value: &Value) -> Option<ClaudeCodeResetGrant> {
+    let grant = value.as_object()?;
+    let id = claude_optional_string(grant.get("id"))?;
+    let resets_left = claude_u64(grant.get("resets_left"))?;
+    let percent_used = grant
+        .get("percent_used")
+        .and_then(Value::as_object)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|(key, value)| {
+                    claude_u64(Some(value))
+                        .filter(|percent| *percent <= 100)
+                        .map(|percent| (key.clone(), Value::from(percent)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ClaudeCodeResetGrant {
+        id,
+        label: grant
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        resets_total: claude_u64(grant.get("resets_total")).unwrap_or(0),
+        resets_left,
+        starts_at: claude_optional_string(grant.get("starts_at")),
+        ends_at: claude_optional_string(grant.get("ends_at")),
+        clears: claude_string_list(grant.get("clears")),
+        paused: grant
+            .get("paused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        usable_now: grant
+            .get("usable_now")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        use_requires_limit: grant
+            .get("use_requires_limit")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        percent_used,
+        blocking: claude_string_list(grant.get("blocking")),
+    })
+}
+
+fn parse_claude_saved_resets(value: &Value) -> Option<ClaudeCodeSavedResets> {
+    let block = value.as_object()?;
+    let eligible = block.get("eligible")?.as_bool()?;
+    let grants: Vec<ClaudeCodeResetGrant> = block
+        .get("grants")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(parse_claude_reset_grant).collect())
+        .unwrap_or_default();
+    let next_grant_id = claude_optional_string(block.get("next_grant_id"))
+        .filter(|next| grants.iter().any(|grant| &grant.id == next));
+    Some(ClaudeCodeSavedResets {
+        eligible,
+        ineligible_reason: claude_optional_string(block.get("ineligible_reason")),
+        at_limit: block
+            .get("at_limit")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        exhausted: claude_string_list(block.get("exhausted")),
+        grants,
+        next_grant_id,
+        weekly_resets_at: claude_optional_string(block.get("weekly_resets_at")),
+        cooldown_until: claude_optional_string(block.get("cooldown_until")),
+    })
+}
+
+fn parse_claude_session_reset(value: &Value) -> Option<ClaudeCodeSessionReset> {
+    let block = value.as_object()?;
+    let eligible = block.get("eligible")?.as_bool()?;
+    Some(ClaudeCodeSessionReset {
+        eligible,
+        ineligible_reason: claude_optional_string(block.get("ineligible_reason")),
+        in_experiment: block
+            .get("in_experiment")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        arm: claude_optional_string(block.get("arm")),
+        available: block
+            .get("available")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        next_available_at: claude_optional_string(block.get("next_available_at")),
+        weekly_resets_at: claude_optional_string(block.get("weekly_resets_at")),
+        resets_per_week: claude_u64(block.get("resets_per_week")).unwrap_or(1),
+    })
+}
+
+pub fn parse_claude_reset_status(root: &Value) -> ClaudeCodeResetStatus {
+    let data = root.get("data").unwrap_or(root);
+    ClaudeCodeResetStatus {
+        cedar_ember: data
+            .get(CLAUDE_CODE_RESET_PROGRAM_SAVED)
+            .and_then(parse_claude_saved_resets),
+        juniper_tide: data
+            .get(CLAUDE_CODE_RESET_PROGRAM_SESSION)
+            .and_then(parse_claude_session_reset),
+    }
+}
+
+pub fn parse_claude_reset_claim(program: &str, root: &Value) -> ClaudeCodeResetClaim {
+    let data = root.get("data").unwrap_or(root);
+    ClaudeCodeResetClaim {
+        program: program.to_string(),
+        result: claude_optional_string(data.get("result"))
+            .unwrap_or_else(|| "unavailable".to_string()),
+        reason: claude_optional_string(data.get("reason")),
+        resets_left: claude_u64(data.get("resets_left")),
+        cleared: claude_string_list(data.get("cleared")),
+        weekly_resets_at: claude_optional_string(data.get("weekly_resets_at")),
+        cooldown_until: claude_optional_string(data.get("cooldown_until")),
+        next_available_at: claude_optional_string(data.get("next_available_at")),
+    }
+}
+
 impl ClaudeCodeProvider {
     pub async fn fetch_usage(
         &self,
@@ -1707,6 +2108,265 @@ mod tests {
         assert_eq!(usage.tangelo.unwrap()["value"], json!(1));
         assert_eq!(usage.raw_extra["future_window"]["utilization"], json!(99.0));
         assert!(usage.raw_extra["limits"].is_array());
+    }
+
+    #[test]
+    fn claude_code_reset_status_parser_reads_both_programs() {
+        let status = parse_claude_reset_status(&json!({
+            "five_hour": { "utilization": 12.5 },
+            "cedar_ember": {
+                "eligible": true,
+                "ineligible_reason": null,
+                "at_limit": false,
+                "exhausted": ["five_hour"],
+                "grants": [
+                    {
+                        "id": "launch_2026-09",
+                        "label": "Launch bonus",
+                        "resets_total": 3,
+                        "resets_left": 2,
+                        "starts_at": "2026-09-01T00:00:00Z",
+                        "ends_at": "2026-10-01T00:00:00Z",
+                        "clears": ["five_hour", "seven_day"],
+                        "paused": false,
+                        "usable_now": true,
+                        "use_requires_limit": true,
+                        "percent_used": { "five_hour": 100, "seven_day": 36.5, "junk": 250 },
+                        "blocking": ["five_hour"]
+                    },
+                    { "id": "missing_resets_left" },
+                    "malformed",
+                    { "id": "later", "resets_left": "1" }
+                ],
+                "next_grant_id": "launch_2026-09",
+                "weekly_resets_at": "2026-09-29T23:00:00Z",
+                "cooldown_until": null,
+                "event_props": { "tier": "claude_max_20x" }
+            },
+            "juniper_tide": {
+                "eligible": true,
+                "in_experiment": true,
+                "arm": "reset",
+                "available": false,
+                "next_available_at": "2026-09-25T02:00:00Z",
+                "resets_per_week": 2
+            }
+        }));
+
+        let saved = status.cedar_ember.unwrap();
+        assert!(saved.eligible);
+        assert!(saved.ineligible_reason.is_none());
+        assert!(!saved.at_limit);
+        assert_eq!(saved.exhausted, vec!["five_hour"]);
+        assert_eq!(saved.grants.len(), 2);
+        let grant = &saved.grants[0];
+        assert_eq!(grant.id, "launch_2026-09");
+        assert_eq!(grant.label, "Launch bonus");
+        assert_eq!((grant.resets_total, grant.resets_left), (3, 2));
+        assert_eq!(grant.clears, vec!["five_hour", "seven_day"]);
+        assert!(grant.usable_now && grant.use_requires_limit && !grant.paused);
+        assert_eq!(grant.percent_used.get("five_hour"), Some(&json!(100)));
+        assert!(grant.percent_used.get("seven_day").is_none());
+        assert!(grant.percent_used.get("junk").is_none());
+        assert_eq!(saved.grants[1].id, "later");
+        assert_eq!(saved.grants[1].resets_left, 1);
+        assert!(!saved.grants[1].usable_now);
+        assert!(saved.grants[1].use_requires_limit);
+        assert_eq!(saved.next_grant_id.as_deref(), Some("launch_2026-09"));
+        assert_eq!(
+            saved.weekly_resets_at.as_deref(),
+            Some("2026-09-29T23:00:00Z")
+        );
+        assert!(saved.cooldown_until.is_none());
+
+        let session = status.juniper_tide.unwrap();
+        assert!(session.eligible && session.in_experiment && !session.available);
+        assert_eq!(session.arm.as_deref(), Some("reset"));
+        assert_eq!(
+            session.next_available_at.as_deref(),
+            Some("2026-09-25T02:00:00Z")
+        );
+        assert_eq!(session.resets_per_week, 2);
+    }
+
+    #[test]
+    fn claude_code_reset_status_parser_reads_live_opus55_launch_grant() {
+        let status = parse_claude_reset_status(&json!({
+            "five_hour": { "utilization": 16.0 },
+            "cedar_ember": {
+                "eligible": true,
+                "ineligible_reason": null,
+                "at_limit": false,
+                "exhausted": [],
+                "grants": [{
+                    "id": "opus55-launch-promax-20260921",
+                    "label": "Claude Opus 5.5 launch: one usage-limit reset for Pro and Max",
+                    "resets_total": 1,
+                    "resets_left": 1,
+                    "starts_at": "2026-09-22T16:00:00+00:00",
+                    "ends_at": "2026-10-22T16:00:00+00:00",
+                    "clears": ["five_hour", "seven_day", "seven_day_overage_included"],
+                    "paused": false,
+                    "usable_now": true,
+                    "use_requires_limit": false,
+                    "percent_used": {
+                        "five_hour": 16,
+                        "seven_day": 40,
+                        "seven_day_overage_included": 34
+                    },
+                    "blocking": [],
+                    "arm": null
+                }],
+                "next_grant_id": "opus55-launch-promax-20260921",
+                "weekly_resets_at": "2026-09-28T23:00:00+00:00",
+                "cooldown_until": null,
+                "event_props": { "surface": "claude_code_cli" }
+            },
+            "juniper_tide": null
+        }));
+
+        let saved = status.cedar_ember.unwrap();
+        assert!(saved.eligible && !saved.at_limit);
+        assert_eq!(saved.grants.len(), 1);
+        let grant = &saved.grants[0];
+        assert_eq!(grant.id, "opus55-launch-promax-20260921");
+        assert_eq!((grant.resets_total, grant.resets_left), (1, 1));
+        assert!(grant.usable_now && !grant.use_requires_limit && !grant.paused);
+        assert_eq!(
+            grant.clears,
+            vec!["five_hour", "seven_day", "seven_day_overage_included"]
+        );
+        assert_eq!(
+            grant.percent_used.get("seven_day_overage_included"),
+            Some(&json!(34))
+        );
+        assert_eq!(grant.ends_at.as_deref(), Some("2026-10-22T16:00:00+00:00"));
+        assert_eq!(saved.next_grant_id.as_deref(), Some(grant.id.as_str()));
+        assert!(status.juniper_tide.is_none());
+        assert!(serde_json::to_value(&saved).unwrap()["grants"][0]
+            .get("arm")
+            .is_none());
+    }
+
+    #[test]
+    fn claude_code_reset_status_parser_drops_malformed_blocks_and_dangling_next_grant() {
+        let status = parse_claude_reset_status(&json!({
+            "data": {
+                "cedar_ember": {
+                    "eligible": false,
+                    "ineligible_reason": "no_grant",
+                    "grants": [],
+                    "next_grant_id": "ghost"
+                },
+                "juniper_tide": { "available": true }
+            }
+        }));
+
+        let saved = status.cedar_ember.unwrap();
+        assert!(!saved.eligible);
+        assert_eq!(saved.ineligible_reason.as_deref(), Some("no_grant"));
+        assert!(saved.grants.is_empty());
+        assert!(saved.next_grant_id.is_none());
+        assert!(status.juniper_tide.is_none());
+
+        let empty = parse_claude_reset_status(&json!({ "five_hour": { "utilization": 1 } }));
+        assert!(empty.cedar_ember.is_none() && empty.juniper_tide.is_none());
+    }
+
+    #[test]
+    fn claude_code_reset_request_validates_programs_and_ids() {
+        let saved =
+            ClaudeCodeResetRequest::parse(" cedar_ember ", Some("launch_2026-09"), None).unwrap();
+        assert_eq!(saved.program, CLAUDE_CODE_RESET_PROGRAM_SAVED);
+        assert_eq!(saved.grant_id.as_deref(), Some("launch_2026-09"));
+        let request_id = saved.request_id.clone().unwrap();
+        assert!(uuid::Uuid::parse_str(&request_id).is_ok());
+        assert_eq!(
+            saved.body(),
+            json!({
+                "program": "cedar_ember",
+                "grant_id": "launch_2026-09",
+                "request_id": request_id
+            })
+        );
+
+        let explicit =
+            ClaudeCodeResetRequest::parse("cedar_ember", Some("launch_2026-09"), Some("Req_ID-42"))
+                .unwrap();
+        assert_eq!(explicit.request_id.as_deref(), Some("Req_ID-42"));
+
+        let session = ClaudeCodeResetRequest::parse("juniper_tide", Some("ignored"), None).unwrap();
+        assert_eq!(session.program, CLAUDE_CODE_RESET_PROGRAM_SESSION);
+        assert!(session.grant_id.is_none() && session.request_id.is_none());
+        assert_eq!(session.body(), json!({ "program": "juniper_tide" }));
+
+        assert!(ClaudeCodeResetRequest::parse("cedar_ember", None, None).is_err());
+        assert!(ClaudeCodeResetRequest::parse("cedar_ember", Some("Bad Grant"), None).is_err());
+        assert!(ClaudeCodeResetRequest::parse("cedar_ember", Some(&"a".repeat(41)), None).is_err());
+        assert!(
+            ClaudeCodeResetRequest::parse("cedar_ember", Some("ok"), Some("no spaces")).is_err()
+        );
+        assert!(ClaudeCodeResetRequest::parse("mystery", None, None).is_err());
+    }
+
+    #[test]
+    fn claude_code_reset_claim_parser_covers_both_result_shapes() {
+        let saved = parse_claude_reset_claim(
+            "cedar_ember",
+            &json!({
+                "result": "reset",
+                "reason": null,
+                "resets_left": 1,
+                "cleared": ["five_hour"],
+                "weekly_resets_at": "2026-09-29T23:00:00Z"
+            }),
+        );
+        assert_eq!(saved.program, "cedar_ember");
+        assert_eq!(saved.result, "reset");
+        assert!(saved.reason.is_none());
+        assert_eq!(saved.resets_left, Some(1));
+        assert_eq!(saved.cleared, vec!["five_hour"]);
+        assert!(saved.next_available_at.is_none());
+
+        let session = parse_claude_reset_claim(
+            "juniper_tide",
+            &json!({ "result": "already_used", "next_available_at": "2026-09-25T02:00:00Z" }),
+        );
+        assert_eq!(session.result, "already_used");
+        assert_eq!(
+            session.next_available_at.as_deref(),
+            Some("2026-09-25T02:00:00Z")
+        );
+        assert!(session.cleared.is_empty());
+
+        let cooldown = parse_claude_reset_claim(
+            "cedar_ember",
+            &json!({ "result": "cooldown", "reason": "cooldown", "cooldown_until": "2026-09-24T09:00:00Z" }),
+        );
+        assert_eq!(cooldown.reason.as_deref(), Some("cooldown"));
+        assert_eq!(
+            cooldown.cooldown_until.as_deref(),
+            Some("2026-09-24T09:00:00Z")
+        );
+
+        assert_eq!(
+            parse_claude_reset_claim("juniper_tide", &json!({})).result,
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn claude_code_reset_error_text_explains_rate_limits() {
+        let text =
+            ClaudeCodeProvider::reset_request_error_to_string(ClaudeCodeUsageRequestError::Status(
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                "{\"error\":{\"type\":\"rate_limit_error\"}}".to_string(),
+            ));
+        assert!(text.contains("rate limiting reset requests"));
+        let other = ClaudeCodeProvider::reset_request_error_to_string(
+            ClaudeCodeUsageRequestError::Status(reqwest::StatusCode::BAD_GATEWAY, "boom".into()),
+        );
+        assert!(other.contains("502"));
     }
 
     #[test]

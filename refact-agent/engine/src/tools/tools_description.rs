@@ -37,40 +37,9 @@ struct ToolConfigYamlCache {
 static TOOL_CONFIG_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static TOOL_CONFIG_USE_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Counts physical yaml reads *on the calling thread only*.
-///
-/// The cache itself is process-global, but the read counter must not be: every
-/// other test in the lib suite runs concurrently on its own thread and also
-/// loads tool configs, so a shared atomic makes the read-count assertions in
-/// this module's tests observe foreign reads and fail non-deterministically.
-/// `config()` is synchronous, so the read always lands on the asserting thread.
-/// Mirrors `ThreadLocalDiskReadCounter` in `crate::chat::trajectories`.
 #[cfg(test)]
-struct ThreadLocalYamlReadCounter;
-
-#[cfg(test)]
-impl ThreadLocalYamlReadCounter {
-    fn fetch_add(&self, value: u64, _ordering: std::sync::atomic::Ordering) -> u64 {
-        TOOL_CONFIG_YAML_READS_ON_THIS_THREAD.with(|reads| {
-            let previous = reads.get();
-            reads.set(previous.saturating_add(value));
-            previous
-        })
-    }
-
-    fn load(&self, _ordering: std::sync::atomic::Ordering) -> u64 {
-        TOOL_CONFIG_YAML_READS_ON_THIS_THREAD.with(std::cell::Cell::get)
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    static TOOL_CONFIG_YAML_READS_ON_THIS_THREAD: std::cell::Cell<u64> =
-        const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-static TOOL_CONFIG_YAML_READS: ThreadLocalYamlReadCounter = ThreadLocalYamlReadCounter;
+static TOOL_CONFIG_YAML_READS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, u64>>> =
+    std::sync::OnceLock::new();
 
 impl ToolConfigYamlCache {
     fn get(
@@ -159,8 +128,18 @@ fn tool_config_fingerprint(config_path: &str) -> ToolConfigFingerprint {
 
 fn read_tool_config_yaml(config_path: &str) -> Result<String, String> {
     #[cfg(test)]
-    TOOL_CONFIG_YAML_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    count_tool_config_yaml_read(config_path);
     std::fs::read_to_string(config_path).map_err(|e| format!("Error reading config file: {}", e))
+}
+
+#[cfg(test)]
+fn count_tool_config_yaml_read(config_path: &str) {
+    *TOOL_CONFIG_YAML_READS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(config_path.to_string())
+        .or_default() += 1;
 }
 
 fn load_tool_config_yaml(config_path: &str) -> Result<Arc<serde_yaml::Value>, String> {
@@ -423,7 +402,6 @@ impl WaitInterrupt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
 
     struct FakeTool {
         name: String,
@@ -464,8 +442,14 @@ mod tests {
         LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn reads() -> u64 {
-        TOOL_CONFIG_YAML_READS.load(Ordering::SeqCst)
+    fn reads(config_path: &str) -> u64 {
+        TOOL_CONFIG_YAML_READS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(config_path)
+            .copied()
+            .unwrap_or_default()
     }
 
     fn tool(name: &str, config_path: &str) -> FakeTool {
@@ -497,10 +481,10 @@ mod tests {
             .map(|name| tool(name, &config_path))
             .collect();
 
-        let before = reads();
+        let before = reads(&config_path);
         let configs: Vec<ToolConfig> = tools.iter().map(|t| t.config().unwrap()).collect();
 
-        assert_eq!(reads() - before, 1);
+        assert_eq!(reads(&config_path) - before, 1);
         assert!(!configs[0].enabled);
         assert!(configs[1].enabled);
         assert!(configs[4].enabled);
@@ -514,20 +498,20 @@ mod tests {
         write_config(&config_path, "tools:\n  alpha:\n    enabled: true\n");
         let alpha = tool("alpha", &config_path);
 
-        let before = reads();
+        let before = reads(&config_path);
         assert!(alpha.config().unwrap().enabled);
-        assert_eq!(reads() - before, 1);
+        assert_eq!(reads(&config_path) - before, 1);
         assert!(alpha.config().unwrap().enabled);
-        assert_eq!(reads() - before, 1);
+        assert_eq!(reads(&config_path) - before, 1);
 
         invalidate_tool_config_cache();
         assert!(alpha.config().unwrap().enabled);
-        assert_eq!(reads() - before, 2);
+        assert_eq!(reads(&config_path) - before, 2);
 
         write_config(&config_path, "tools:\n  alpha:\n    enabled: false\n");
         invalidate_tool_config_cache();
         assert!(!alpha.config().unwrap().enabled);
-        assert_eq!(reads() - before, 3);
+        assert_eq!(reads(&config_path) - before, 3);
     }
 
     #[test]
@@ -538,13 +522,13 @@ mod tests {
         write_config(&config_path, "tools:\n  alpha:\n    enabled: true\n");
         let alpha = tool("alpha", &config_path);
 
-        let before = reads();
+        let before = reads(&config_path);
         assert!(alpha.config().unwrap().enabled);
-        assert_eq!(reads() - before, 1);
+        assert_eq!(reads(&config_path) - before, 1);
 
         write_config(&config_path, "tools:\n  alpha:\n    enabled: false\n");
         assert!(!alpha.config().unwrap().enabled);
-        assert_eq!(reads() - before, 2);
+        assert_eq!(reads(&config_path) - before, 2);
     }
 
     #[test]

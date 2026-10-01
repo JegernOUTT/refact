@@ -9,28 +9,22 @@ refact-llm = { path = "../refact-llm" }
 
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 tracing.workspace = true
-tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "sync", "process", "time"] }
-indexmap.workspace = true
 regex.workspace = true
+
+async-trait.workspace = true
+base64.workspace = true
+rand.workspace = true
+sha2.workspace = true
+serde_yaml.workspace = true
+reqwest.workspace = true
+url.workspace = true
+lazy_static.workspace = true
+chrono.workspace = true
+fs2 = "0.4.3"
+process-wrap.workspace = true
 uuid.workspace = true
 
-async-trait = "0.1.73"
-base64 = "0.22.1"
-rand = "0.8.5"
-sha2 = "0.10.8"
-serde_yaml = "0.9.31"
-reqwest = { version = "0.13", default-features = false, features = ["json", "form", "stream", "rustls", "charset", "http2"] }
-tokio-util = { version = "0.7.12", features = ["compat"] }
-url = "2.4.1"
-oauth2 = { version = "5.0", default-features = false }
-dirs = "5.0"
-lazy_static = "1.4.0"
-chrono = { version = "0.4.31", features = ["serde"] }
-which = "7.0.2"
-home = "0.5"
-fs2 = "0.4.3"
-process-wrap = { version = "8.0.2", features = ["tokio1"] }
-
 [dev-dependencies]
-tempfile = "3.8"
+tempfile.workspace = true

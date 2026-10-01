@@ -1,5 +1,7 @@
 import { http, HttpResponse } from "msw";
+import { setupListeners } from "@reduxjs/toolkit/query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setUpStore } from "../../app/store";
 import {
   act,
   fireEvent,
@@ -43,7 +45,14 @@ function installPresenceHandlers() {
 
 function setHidden(value: boolean) {
   Object.defineProperty(document, "hidden", { configurable: true, value });
-  act(() => document.dispatchEvent(new Event("visibilitychange")));
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    get: () => (value ? "hidden" : "visible"),
+  });
+  act(() => {
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("visibilitychange"));
+  });
 }
 
 function stubReducedMotion(reduced: boolean) {
@@ -133,6 +142,92 @@ describe("BuddyPresenceProvider wiring", () => {
     expect(probe).toHaveAttribute("data-enabled", "true");
     expect(probe).toHaveAttribute("data-reduced-motion", "undefined");
     await waitFor(() => expect(probe).toHaveTextContent("idle"));
+  });
+
+  it("pauses provider polling while hidden and resumes immediately when visible", async () => {
+    let nativeReads = 0;
+    let decisionReads = 0;
+    server.use(
+      http.get("*/v1/buddy/native-work", () => {
+        nativeReads += 1;
+        return HttpResponse.json({
+          schema_version: 1,
+          project_root: PROJECT_ROOT,
+          coverage: "loaded_native_sessions",
+          next_cursor: null,
+          sessions: [],
+        });
+      }),
+      http.get("*/v1/buddy/decisions/current", () => {
+        decisionReads += 1;
+        return HttpResponse.json({
+          schema_version: 1,
+          project_root: PROJECT_ROOT,
+          coverage: "loaded_native_sessions",
+          truncated: false,
+          questions: [],
+        });
+      }),
+    );
+    vi.useFakeTimers();
+    const store = setUpStore({
+      config: { host: "vscode" as const, lspPort: 8001, themeProps: {} },
+    });
+    const stopListeners = setupListeners(store.dispatch);
+    const view = render(
+      <BuddyPresenceProvider>
+        <PresenceProbe />
+      </BuddyPresenceProvider>,
+      { store },
+    );
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(12500);
+      });
+      const visibleNativeReads = nativeReads;
+      const visibleDecisionReads = decisionReads;
+      expect(visibleNativeReads).toBeGreaterThanOrEqual(3);
+      expect(visibleDecisionReads).toBeGreaterThanOrEqual(3);
+
+      setHidden(true);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      const hiddenNativeReads = nativeReads;
+      const hiddenDecisionReads = decisionReads;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15000);
+      });
+      expect(nativeReads).toBe(hiddenNativeReads);
+      expect(decisionReads).toBe(hiddenDecisionReads);
+      expect(hiddenNativeReads).toBeLessThanOrEqual(visibleNativeReads + 1);
+      expect(hiddenDecisionReads).toBeLessThanOrEqual(visibleDecisionReads + 1);
+
+      setHidden(false);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      expect(nativeReads).toBe(visibleNativeReads + 1);
+      expect(decisionReads).toBe(visibleDecisionReads + 1);
+      expect(decisionReads).toBe(visibleDecisionReads + 1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      expect(nativeReads).toBe(visibleNativeReads + 1);
+      expect(decisionReads).toBe(visibleDecisionReads + 1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(nativeReads).toBe(visibleNativeReads + 2);
+      expect(decisionReads).toBe(visibleDecisionReads + 2);
+    } finally {
+      stopListeners();
+      view.unmount();
+      vi.useRealTimers();
+    }
   });
 
   it.each(["avatar", "scene"] as const)(

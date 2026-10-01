@@ -100,6 +100,57 @@
   min-width: 0;
 }
 
+/* The scene block owns the whole Pixel region: diorama, presence line and the
+ * one control that swaps between them. It follows the Desk and the decision
+ * panels so nothing decorative separates a work row from the control that
+ * acts on it. */
+.sceneBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+/* Collapsed: one ~56px strip — sprite small on the left, one line of state on
+ * the right. This merges what used to be a 46px presence row plus a separate
+ * scene card, so the default page costs one row, not two regions.
+ *
+ * flex-wrap, not a fixed grid: at 240px the three columns squeezed the
+ * presence line to 27px against a 32px scroll width, so it wraps to its own
+ * line instead of overflowing. */
+.sceneBlockStrip {
+  display: flex;
+  align-items: center;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
+.sceneBlockStrip .presenceSlot {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+/* The presence section stacks by default; inside the strip its header is the
+ * whole row, so speech collapses to a single truncated line. */
+.sceneBlockStrip [data-testid="buddy-presence"] > * {
+  min-width: 0;
+}
+
+.sceneBlockStrip [data-testid="buddy-presence"] p {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sceneSizeActions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
 /* Hero — the scene sits at the top of every tab, compact by default so the
  * tab strip stays inside the first viewport; Play expands it. */
 .heroCard {
@@ -132,6 +183,21 @@
 .heroCardDemoted.heroCardDemoted [data-testid="buddy-world"] {
   height: clamp(112px, 13vh, 150px);
   min-height: 104px;
+}
+
+/* Strip presentation: the diorama shrinks to a sprite-sized thumbnail on the
+ * left of the row instead of claiming a full-width band. It stays mounted and
+ * visible — Play, care actions and the character all keep working. Declared
+ * last and triple-specificity so it wins over the demoted and base heights. */
+.heroCardStrip {
+  flex: 0 0 auto;
+  width: 72px;
+  padding: 0;
+}
+
+.heroCardStrip.heroCardStrip.heroCardStrip [data-testid="buddy-world"] {
+  height: 56px;
+  min-height: 56px;
 }
 
 /* Work authority failure banner. It leads the page so a total outage can
@@ -293,8 +359,20 @@
   min-width: 0;
 }
 
+.tabNoticeItems {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .tabNoticeRow {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
   min-width: 0;
 }
 
@@ -455,6 +533,33 @@
 @media (max-width: 520px) {
   .homeContent {
     gap: var(--rf-space-2);
+  }
+
+  .sceneBlockStrip [data-testid="buddy-presence"] > header > :first-child {
+    flex-basis: 100%;
+  }
+
+  .heroCardStrip [data-testid="buddy-world"] button {
+    visibility: hidden;
+  }
+
+  .heroCardStrip [data-testid="buddy-world"] [class*="objectLabel"],
+  .heroCardStrip [data-testid="buddy-world"] [class*="objectValue"] {
+    visibility: hidden;
+  }
+
+  /* The scene's hotspot buttons and labels are not offered at this width: the
+   * scene renders as a ~72px thumbnail, where a hotspot is not a usable target.
+   * They return when the scene is expanded, which drops .heroCardStrip. Do not
+   * add a :focus-within reveal here - visibility:hidden removes these buttons
+   * from the tab order, and .sceneSizeActions sits outside .heroCard, so
+   * nothing inside .heroCardStrip can ever take focus and fire it. */
+
+  .tabs .tabsList {
+    grid-auto-columns: unset;
+    grid-auto-flow: row;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow-x: hidden;
   }
 
   .heroCard {

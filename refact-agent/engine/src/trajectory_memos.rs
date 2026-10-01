@@ -1,10 +1,13 @@
 use std::path::{Path, PathBuf};
 use std::future::Future;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
 use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::fs;
@@ -37,11 +40,40 @@ const MAX_TRAJECTORIES_PER_SWEEP: usize = 25;
 const MAX_EXTRACTION_ATTEMPTS: u64 = 3;
 const RATE_LIMIT_BREAKER_THRESHOLD: usize = 3;
 const BREAKER_COOLDOWNS_SECS: &[u64] = &[300, 900, 2700, 10_800, 21_600];
+const FINISHED_INDEX_SCHEMA_VERSION: u32 = 1;
+const FINISHED_INDEX_FILE: &str = ".refact/memo-extraction-index.json";
 
 #[derive(Debug)]
 struct TrajectoryCandidate {
     path: PathBuf,
+    workspace_root: PathBuf,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct TrajectoryFingerprint {
+    size_bytes: u64,
+    modified_secs: u64,
+    modified_nanos: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct FinishedIndexFile {
+    schema_version: u32,
+    entries: HashMap<String, TrajectoryFingerprint>,
+}
+
+struct FinishedTrajectoryIndex {
+    workspace_root: PathBuf,
+    entries: HashMap<String, TrajectoryFingerprint>,
+    seen_paths: HashSet<String>,
+    dirty: bool,
+}
+
+struct TrajectoryScan {
+    candidates: Vec<TrajectoryCandidate>,
+    indexes: Vec<FinishedTrajectoryIndex>,
+    parsed_files: usize,
 }
 
 struct MemoBreaker {
@@ -85,21 +117,58 @@ impl MemoBreaker {
         category: &crate::buddy::workflows::WorkflowFailureCategory,
         now: Instant,
     ) -> Option<TokioDuration> {
-        if *category != crate::buddy::workflows::WorkflowFailureCategory::ProviderRateLimit {
+        use crate::buddy::workflows::WorkflowFailureCategory;
+
+        if *category == WorkflowFailureCategory::ProviderRateLimit {
+            self.consecutive_rate_limited += 1;
+            if self.consecutive_rate_limited < RATE_LIMIT_BREAKER_THRESHOLD {
+                return None;
+            }
+        } else {
             self.consecutive_rate_limited = 0;
-            return None;
+            if !is_environment_failure_category(category) {
+                return None;
+            }
         }
 
-        self.consecutive_rate_limited += 1;
-        if self.consecutive_rate_limited < RATE_LIMIT_BREAKER_THRESHOLD {
-            return None;
-        }
+        Some(self.open_with_next_cooldown(now))
+    }
 
+    fn open_with_next_cooldown(&mut self, now: Instant) -> TokioDuration {
         let cooldown = TokioDuration::from_secs(BREAKER_COOLDOWNS_SECS[self.escalation]);
         self.open_until = Some(now + cooldown);
         self.escalation = (self.escalation + 1).min(BREAKER_COOLDOWNS_SECS.len() - 1);
-        Some(cooldown)
+        cooldown
     }
+}
+
+fn is_environment_failure_category(
+    category: &crate::buddy::workflows::WorkflowFailureCategory,
+) -> bool {
+    use crate::buddy::workflows::WorkflowFailureCategory::*;
+
+    matches!(
+        category,
+        ModelUnavailable
+            | ToolUnavailable
+            | ToolFailed
+            | InvalidRequest
+            | ProviderTransient
+            | ProviderRateLimit
+            | AuthenticationFailed
+            | BillingQuota
+            | Cancelled
+            | Unknown
+    )
+}
+
+fn is_environment_failure_class(class: &str) -> bool {
+    let Ok(category) = serde_json::from_value::<crate::buddy::workflows::WorkflowFailureCategory>(
+        Value::String(class.to_string()),
+    ) else {
+        return false;
+    };
+    is_environment_failure_category(&category) && category.as_str() == class
 }
 
 struct MemoExtractionRequest {
@@ -191,9 +260,10 @@ async fn process_abandoned_trajectories_with_enabled(
 
     let now = Utc::now();
     let threshold = now - Duration::hours(ABANDONED_THRESHOLD_HOURS);
-    let candidates = collect_trajectory_candidates(project_dirs, &threshold).await?;
+    let mut scan = collect_trajectory_scan(project_dirs, &threshold).await?;
+    persist_finished_indexes(&scan.indexes).await;
 
-    for candidate in candidates.into_iter().take(MAX_TRAJECTORIES_PER_SWEEP) {
+    for candidate in scan.candidates.iter().take(MAX_TRAJECTORIES_PER_SWEEP) {
         let Some(outcome) = process_trajectory_until_shutdown(
             gcx.clone(),
             candidate.path.clone(),
@@ -208,6 +278,7 @@ async fn process_abandoned_trajectories_with_enabled(
         match outcome {
             MemoProcessingOutcome::Extracted => {
                 breaker.record_success();
+                remember_finished_trajectory(&mut scan.indexes, candidate).await;
                 info!(
                     "trajectory_memos: extracted memos from {}",
                     candidate.path.display()
@@ -218,10 +289,11 @@ async fn process_abandoned_trajectories_with_enabled(
                 record_extraction_failure(&candidate.path, &failure).await?;
                 if let Some(cooldown) = breaker.record_failure(&failure.category, Instant::now()) {
                     warn!(
+                        category = failure.category.as_str(),
                         cooldown_secs = cooldown.as_secs(),
-                        "trajectory_memos: rate-limit breaker opened after {} consecutive provider rate-limit failures",
-                        RATE_LIMIT_BREAKER_THRESHOLD
+                        "trajectory_memos: environment failure opened the breaker; stopping this sweep"
                     );
+                    persist_finished_indexes(&scan.indexes).await;
                     return Ok(());
                 }
                 warn!(
@@ -232,6 +304,8 @@ async fn process_abandoned_trajectories_with_enabled(
             }
         }
     }
+
+    persist_finished_indexes(&scan.indexes).await;
 
     Ok(())
 }
@@ -255,13 +329,27 @@ async fn collect_trajectory_candidates(
     project_dirs: Vec<PathBuf>,
     threshold: &DateTime<Utc>,
 ) -> Result<Vec<TrajectoryCandidate>, String> {
-    let mut candidates = Vec::new();
+    let scan = collect_trajectory_scan(project_dirs, threshold).await?;
+    persist_finished_indexes(&scan.indexes).await;
+    Ok(scan.candidates)
+}
+
+async fn collect_trajectory_scan(
+    project_dirs: Vec<PathBuf>,
+    threshold: &DateTime<Utc>,
+) -> Result<TrajectoryScan, String> {
+    let mut scan = TrajectoryScan {
+        candidates: Vec::new(),
+        indexes: Vec::new(),
+        parsed_files: 0,
+    };
 
     for workspace_root in project_dirs {
         let trajectories_dir = workspace_root.join(TRAJECTORIES_FOLDER);
         if !trajectories_dir.exists() {
             continue;
         }
+        let mut index = load_finished_index(&workspace_root).await;
 
         for entry in WalkDir::new(&trajectories_dir)
             .max_depth(2)
@@ -277,52 +365,227 @@ async fn collect_trajectory_candidates(
                 continue;
             }
 
-            let metadata = fs::metadata(&path)
-                .await
-                .map_err(|error| error.to_string())?;
+            let Ok(metadata) = fs::metadata(&path).await else {
+                continue;
+            };
             if metadata.len() > MAX_TRAJECTORY_BYTES {
-                mark_oversize_trajectory(&path, metadata.len()).await?;
+                let _ = mark_oversize_trajectory(&path, metadata.len()).await;
                 continue;
             }
 
-            let content = fs::read_to_string(&path)
-                .await
-                .map_err(|error| error.to_string())?;
+            let Some(fingerprint) = trajectory_fingerprint(&metadata) else {
+                continue;
+            };
+            let Some(relative_path) = relative_trajectory_path(&workspace_root, path) else {
+                continue;
+            };
+            index.seen_paths.insert(relative_path.clone());
+            if index.entries.get(&relative_path) == Some(&fingerprint) {
+                continue;
+            }
+            if index.entries.remove(&relative_path).is_some() {
+                index.dirty = true;
+            }
+
+            let Ok(content) = fs::read_to_string(&path).await else {
+                continue;
+            };
+            scan.parsed_files += 1;
             let mut trajectory: Value = match serde_json::from_str(&content) {
                 Ok(value) => value,
                 Err(_) => continue,
             };
+            let abandoned_class = trajectory
+                .get("memo_extraction_abandoned")
+                .and_then(|value| value.get("last_error_class"))
+                .and_then(Value::as_str);
+            if abandoned_class.is_some_and(is_environment_failure_class) {
+                if let Some(object) = trajectory.as_object_mut() {
+                    object.remove("memo_extraction_abandoned");
+                    object.remove("memo_extraction_attempt");
+                }
+                if write_trajectory_json(&path, &trajectory).await.is_err() {
+                    continue;
+                }
+            }
+
+            if is_finished_trajectory(&trajectory) {
+                if let Ok(updated_metadata) = fs::metadata(&path).await {
+                    if let Some(fingerprint) = trajectory_fingerprint(&updated_metadata) {
+                        index.entries.insert(relative_path, fingerprint);
+                        index.dirty = true;
+                    }
+                }
+                continue;
+            }
             let Some(updated_at) = eligible_trajectory_updated_at(&trajectory, threshold) else {
                 continue;
             };
 
             if is_buddy_system_trajectory(&trajectory) {
-                mark_trajectory_skipped(&path, &mut trajectory, "skipped: buddy system trajectory")
-                    .await?;
+                if mark_trajectory_skipped(
+                    &path,
+                    &mut trajectory,
+                    "skipped: buddy system trajectory",
+                )
+                .await
+                .is_ok()
+                {
+                    remember_finished_path(&mut index, &relative_path, &path).await;
+                }
                 continue;
             }
             let Some(messages) = trajectory.get("messages").and_then(Value::as_array) else {
                 continue;
             };
             if build_chat_messages(messages).is_empty() {
-                mark_trajectory_skipped(&path, &mut trajectory, "skipped: invalid chat history")
-                    .await?;
+                if mark_trajectory_skipped(&path, &mut trajectory, "skipped: invalid chat history")
+                    .await
+                    .is_ok()
+                {
+                    remember_finished_path(&mut index, &relative_path, &path).await;
+                }
                 continue;
             }
 
-            candidates.push(TrajectoryCandidate {
+            scan.candidates.push(TrajectoryCandidate {
                 path: path.to_path_buf(),
+                workspace_root: workspace_root.clone(),
                 updated_at,
             });
         }
+
+        let previous_count = index.entries.len();
+        let seen_paths = &index.seen_paths;
+        index.entries.retain(|path, _| seen_paths.contains(path));
+        if previous_count != index.entries.len() {
+            index.dirty = true;
+        }
+        scan.indexes.push(index);
     }
 
-    candidates.sort_by(|left, right| {
+    scan.candidates.sort_by(|left, right| {
         left.updated_at
             .cmp(&right.updated_at)
             .then_with(|| left.path.cmp(&right.path))
     });
-    Ok(candidates)
+    Ok(scan)
+}
+
+async fn load_finished_index(workspace_root: &Path) -> FinishedTrajectoryIndex {
+    let path = workspace_root.join(FINISHED_INDEX_FILE);
+    let loaded = fs::read(&path).await.ok().and_then(|bytes| {
+        serde_json::from_slice::<FinishedIndexFile>(&bytes)
+            .ok()
+            .filter(|index| index.schema_version == FINISHED_INDEX_SCHEMA_VERSION)
+    });
+    match loaded {
+        Some(index) => FinishedTrajectoryIndex {
+            workspace_root: workspace_root.to_path_buf(),
+            entries: index.entries,
+            seen_paths: HashSet::new(),
+            dirty: false,
+        },
+        None => FinishedTrajectoryIndex {
+            workspace_root: workspace_root.to_path_buf(),
+            entries: HashMap::new(),
+            seen_paths: HashSet::new(),
+            dirty: true,
+        },
+    }
+}
+
+async fn persist_finished_indexes(indexes: &[FinishedTrajectoryIndex]) {
+    for index in indexes {
+        if !index.dirty {
+            continue;
+        }
+        let file = FinishedIndexFile {
+            schema_version: FINISHED_INDEX_SCHEMA_VERSION,
+            entries: index.entries.clone(),
+        };
+        if let Ok(value) = serde_json::to_value(file) {
+            let path = index.workspace_root.join(FINISHED_INDEX_FILE);
+            let _ = write_json_atomically(&path, &value).await;
+        }
+    }
+}
+
+async fn remember_finished_trajectory(
+    indexes: &mut [FinishedTrajectoryIndex],
+    candidate: &TrajectoryCandidate,
+) {
+    let Some(index) = indexes
+        .iter_mut()
+        .find(|index| index.workspace_root == candidate.workspace_root)
+    else {
+        return;
+    };
+    let Some(relative_path) = relative_trajectory_path(&candidate.workspace_root, &candidate.path)
+    else {
+        return;
+    };
+    remember_finished_path(index, &relative_path, &candidate.path).await;
+}
+
+async fn remember_finished_path(
+    index: &mut FinishedTrajectoryIndex,
+    relative_path: &str,
+    path: &Path,
+) {
+    let Ok(metadata) = fs::metadata(path).await else {
+        return;
+    };
+    let Some(fingerprint) = trajectory_fingerprint(&metadata) else {
+        return;
+    };
+    index.seen_paths.insert(relative_path.to_string());
+    index.entries.insert(relative_path.to_string(), fingerprint);
+    index.dirty = true;
+}
+
+fn relative_trajectory_path(workspace_root: &Path, path: &Path) -> Option<String> {
+    path.strip_prefix(workspace_root)
+        .ok()
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+}
+
+fn trajectory_fingerprint(metadata: &std::fs::Metadata) -> Option<TrajectoryFingerprint> {
+    let modified = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    Some(TrajectoryFingerprint {
+        size_bytes: metadata.len(),
+        modified_secs: modified.as_secs(),
+        modified_nanos: modified.subsec_nanos(),
+    })
+}
+
+fn is_finished_trajectory(trajectory: &Value) -> bool {
+    let abandoned_class = trajectory
+        .get("memo_extraction_abandoned")
+        .and_then(|abandoned| abandoned.get("last_error_class"))
+        .and_then(Value::as_str);
+    if abandoned_class.is_some_and(is_environment_failure_class) {
+        return false;
+    }
+
+    trajectory
+        .get("memo_extracted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || abandoned_class.is_some_and(is_content_failure_class)
+}
+
+fn is_content_failure_class(class: &str) -> bool {
+    use crate::buddy::workflows::WorkflowFailureCategory;
+
+    serde_json::from_value::<WorkflowFailureCategory>(Value::String(class.to_string()))
+        .ok()
+        .is_some_and(|category| {
+            matches!(
+                category,
+                WorkflowFailureCategory::ContextTooLarge | WorkflowFailureCategory::ContentPolicy
+            ) && category.as_str() == class
+        })
 }
 
 fn is_trajectory_path(path: &Path) -> bool {
@@ -381,6 +644,10 @@ async fn record_extraction_failure(
     path: &Path,
     failure: &MemoProcessingFailure,
 ) -> Result<(), String> {
+    if is_environment_failure_category(&failure.category) {
+        return Ok(());
+    }
+
     let content = fs::read_to_string(path)
         .await
         .map_err(|error| error.to_string())?;
@@ -1160,6 +1427,118 @@ mod tests {
         (workspace, gcx)
     }
 
+    async fn scan_workspace(workspace: &Path) -> TrajectoryScan {
+        let threshold = Utc::now() - Duration::hours(ABANDONED_THRESHOLD_HOURS);
+        collect_trajectory_scan(vec![workspace.to_path_buf()], &threshold)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn finished_trajectories_are_not_reparsed() {
+        let (workspace, _gcx) = memo_test_workspace(12).await;
+        let trajectories = workspace.path().join(TRAJECTORIES_FOLDER);
+        for index in 0..12 {
+            let path = trajectories.join(format!("trajectory-{index}.json"));
+            let mut trajectory: Value =
+                serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+            trajectory["memo_extracted"] = Value::Bool(true);
+            tokio::fs::write(&path, serde_json::to_vec(&trajectory).unwrap())
+                .await
+                .unwrap();
+        }
+
+        let first = scan_workspace(workspace.path()).await;
+        persist_finished_indexes(&first.indexes).await;
+        let second = scan_workspace(workspace.path()).await;
+
+        assert_eq!(first.parsed_files, 12);
+        assert_eq!(second.parsed_files, 0);
+        assert!(second.candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_rewritten_trajectory_is_reexamined() {
+        let (workspace, _gcx) = memo_test_workspace(1).await;
+        let path = workspace
+            .path()
+            .join(TRAJECTORIES_FOLDER)
+            .join("trajectory-0.json");
+        let mut trajectory: Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        trajectory["memo_extracted"] = Value::Bool(true);
+        tokio::fs::write(&path, serde_json::to_vec(&trajectory).unwrap())
+            .await
+            .unwrap();
+        let first = scan_workspace(workspace.path()).await;
+        persist_finished_indexes(&first.indexes).await;
+
+        trajectory["title"] = Value::String("Rewritten with a different byte length".to_string());
+        tokio::fs::write(&path, serde_json::to_vec(&trajectory).unwrap())
+            .await
+            .unwrap();
+        let second = scan_workspace(workspace.path()).await;
+
+        assert_eq!(first.parsed_files, 1);
+        assert_eq!(second.parsed_files, 1);
+    }
+
+    #[tokio::test]
+    async fn environment_abandonment_is_never_remembered_as_finished() {
+        let (workspace, _gcx) = memo_test_workspace(1).await;
+        let path = workspace
+            .path()
+            .join(TRAJECTORIES_FOLDER)
+            .join("trajectory-0.json");
+        let mut trajectory: Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        trajectory["memo_extraction_attempt"] = json!({"count": 3});
+        trajectory["memo_extraction_abandoned"] =
+            json!({"count": 3, "last_error_class": "model_unavailable"});
+        tokio::fs::write(&path, serde_json::to_vec(&trajectory).unwrap())
+            .await
+            .unwrap();
+
+        let scan = scan_workspace(workspace.path()).await;
+        let relative_path = relative_trajectory_path(workspace.path(), &path).unwrap();
+        let index = &scan.indexes[0];
+        let restored: Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+
+        assert_eq!(scan.parsed_files, 1);
+        assert!(!index.entries.contains_key(&relative_path));
+        assert!(restored.get("memo_extraction_abandoned").is_none());
+        assert!(scan
+            .candidates
+            .iter()
+            .any(|candidate| candidate.path == path));
+    }
+
+    #[tokio::test]
+    async fn corrupt_index_falls_back_to_full_scan() {
+        let (workspace, _gcx) = memo_test_workspace(3).await;
+        let trajectories = workspace.path().join(TRAJECTORIES_FOLDER);
+        for index in 0..3 {
+            let path = trajectories.join(format!("trajectory-{index}.json"));
+            let mut trajectory: Value =
+                serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+            trajectory["memo_extracted"] = Value::Bool(true);
+            tokio::fs::write(&path, serde_json::to_vec(&trajectory).unwrap())
+                .await
+                .unwrap();
+        }
+        let first = scan_workspace(workspace.path()).await;
+        persist_finished_indexes(&first.indexes).await;
+        tokio::fs::write(workspace.path().join(FINISHED_INDEX_FILE), "not-json")
+            .await
+            .unwrap();
+
+        let recovered = scan_workspace(workspace.path()).await;
+
+        assert_eq!(recovered.parsed_files, 3);
+        assert_eq!(recovered.indexes[0].entries.len(), 3);
+    }
+
     fn recording_extractor(processed: Arc<std::sync::Mutex<Vec<String>>>) -> Arc<MemoExtractor> {
         Arc::new(move |request| {
             let processed = processed.clone();
@@ -1233,9 +1612,9 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let extractor = scripted_extractor(
             vec![
-                Err("model unavailable".to_string()),
-                Err("model unavailable".to_string()),
-                Err("model unavailable".to_string()),
+                Err("OpenAI API error (400): content_filter: blocked by policy".to_string()),
+                Err("OpenAI API error (400): content_filter: blocked by policy".to_string()),
+                Err("OpenAI API error (400): content_filter: blocked by policy".to_string()),
             ],
             calls.clone(),
         );
@@ -1267,8 +1646,170 @@ mod tests {
         );
         assert_eq!(
             trajectory["memo_extraction_abandoned"]["last_error_class"].as_str(),
-            Some("model_unavailable")
+            Some("content_policy")
         );
+    }
+
+    #[tokio::test]
+    async fn model_unavailable_never_counts_toward_abandonment() {
+        let (workspace, _gcx) = memo_test_workspace(1).await;
+        let path = workspace
+            .path()
+            .join(TRAJECTORIES_FOLDER)
+            .join("trajectory-0.json");
+        let failure = MemoProcessingFailure {
+            category: crate::buddy::workflows::WorkflowFailureCategory::ModelUnavailable,
+            error: "model unavailable".to_string(),
+        };
+        for _ in 0..3 {
+            record_extraction_failure(&path, &failure).await.unwrap();
+        }
+        let trajectory: Value =
+            serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
+        assert!(trajectory.get("memo_extraction_attempt").is_none());
+        assert!(trajectory.get("memo_extraction_abandoned").is_none());
+    }
+
+    #[tokio::test]
+    async fn rate_limit_never_counts_toward_abandonment() {
+        let (workspace, _gcx) = memo_test_workspace(1).await;
+        let path = workspace
+            .path()
+            .join(TRAJECTORIES_FOLDER)
+            .join("trajectory-0.json");
+        let failure = MemoProcessingFailure {
+            category: crate::buddy::workflows::WorkflowFailureCategory::ProviderRateLimit,
+            error: "rate limit reached".to_string(),
+        };
+        for _ in 0..3 {
+            record_extraction_failure(&path, &failure).await.unwrap();
+        }
+        let trajectory: Value =
+            serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
+        assert!(trajectory.get("memo_extraction_attempt").is_none());
+        assert!(trajectory.get("memo_extraction_abandoned").is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn environment_failure_aborts_the_sweep() {
+        let (_workspace, gcx) = memo_test_workspace(25).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let extractor = scripted_extractor(
+            vec![Err("OpenAI 404: model refact/gpt-6-mini not found".into())],
+            calls.clone(),
+        );
+        let mut breaker = MemoBreaker::default();
+        process_abandoned_trajectories(gcx, &mut breaker, extractor.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(breaker.is_open(Instant::now()));
+    }
+
+    #[tokio::test]
+    async fn environment_abandonments_are_restored() {
+        let (workspace, gcx) = memo_test_workspace(2).await;
+        let trajectories = workspace.path().join(TRAJECTORIES_FOLDER);
+        let model_path = trajectories.join("trajectory-0.json");
+        let content_path = trajectories.join("trajectory-1.json");
+        let mut model = trajectory_json("trajectory-0", enough_messages());
+        model["memo_extraction_attempt"] = json!({"count": 3});
+        model["memo_extraction_abandoned"] =
+            json!({"count": 3, "last_error_class": "model_unavailable"});
+        model["unrelated"] = json!({"kept": true});
+        let mut content = trajectory_json("trajectory-1", enough_messages());
+        content["memo_extraction_attempt"] =
+            json!({"count": 3, "last_error_class": "content_policy"});
+        content["memo_extraction_abandoned"] =
+            json!({"count": 3, "last_error_class": "content_policy"});
+        tokio::fs::write(&model_path, serde_json::to_string(&model).unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&content_path, serde_json::to_string(&content).unwrap())
+            .await
+            .unwrap();
+        let processed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let extractor = recording_extractor(processed.clone());
+        let mut breaker = MemoBreaker::default();
+        let threshold = Utc::now() - Duration::hours(ABANDONED_THRESHOLD_HOURS);
+        let candidates =
+            collect_trajectory_candidates(vec![workspace.path().to_path_buf()], &threshold)
+                .await
+                .unwrap();
+        let restored: Value =
+            serde_json::from_slice(&tokio::fs::read(&model_path).await.unwrap()).unwrap();
+        assert!(restored.get("memo_extraction_attempt").is_none());
+        assert!(restored.get("memo_extraction_abandoned").is_none());
+        assert_eq!(restored["unrelated"], json!({"kept": true}));
+        let retained: Value =
+            serde_json::from_slice(&tokio::fs::read(&content_path).await.unwrap()).unwrap();
+        assert_eq!(retained["memo_extraction_attempt"]["count"], 3);
+        assert_eq!(
+            retained["memo_extraction_abandoned"]["last_error_class"],
+            "content_policy"
+        );
+        assert_eq!(candidates.len(), 1);
+        process_abandoned_trajectories(gcx, &mut breaker, extractor.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(*processed.lock().unwrap(), vec!["trajectory-0"]);
+    }
+
+    #[tokio::test]
+    async fn restoration_is_idempotent() {
+        let (workspace, _gcx) = memo_test_workspace(1).await;
+        let path = workspace
+            .path()
+            .join(TRAJECTORIES_FOLDER)
+            .join("trajectory-0.json");
+        let mut trajectory = trajectory_json("trajectory-0", enough_messages());
+        trajectory["memo_extraction_attempt"] = json!({"count": 3});
+        trajectory["memo_extraction_abandoned"] =
+            json!({"count": 3, "last_error_class": "provider_transient"});
+        tokio::fs::write(&path, serde_json::to_string(&trajectory).unwrap())
+            .await
+            .unwrap();
+        let dirs = vec![workspace.path().to_path_buf()];
+        let threshold = Utc::now() - Duration::hours(ABANDONED_THRESHOLD_HOURS);
+        let first = collect_trajectory_candidates(dirs.clone(), &threshold)
+            .await
+            .unwrap();
+        let after_first = tokio::fs::read(&path).await.unwrap();
+        let second = collect_trajectory_candidates(dirs, &threshold)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(tokio::fs::read(path).await.unwrap(), after_first);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn invalid_request_is_environment_and_opens_the_breaker() {
+        let (workspace, gcx) = memo_test_workspace(25).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let error = "OpenAI invalid_request_error: malformed request";
+        assert_eq!(
+            crate::buddy::workflows::WorkflowFailureCategory::classify(error),
+            crate::buddy::workflows::WorkflowFailureCategory::InvalidRequest
+        );
+        let extractor = scripted_extractor(vec![Err(error.into())], calls.clone());
+        let mut breaker = MemoBreaker::default();
+
+        process_abandoned_trajectories(gcx, &mut breaker, extractor.as_ref())
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(breaker.is_open(Instant::now()));
+        for index in 0..25 {
+            let path = workspace
+                .path()
+                .join(TRAJECTORIES_FOLDER)
+                .join(format!("trajectory-{index}.json"));
+            let trajectory: Value =
+                serde_json::from_slice(&tokio::fs::read(path).await.unwrap()).unwrap();
+            assert!(trajectory.get("memo_extraction_attempt").is_none());
+        }
     }
 
     #[tokio::test]
@@ -1446,11 +1987,11 @@ mod tests {
     }
 
     #[test]
-    fn non_rate_limit_failure_does_not_open_the_breaker() {
+    fn content_failure_does_not_open_the_breaker() {
         let mut breaker = MemoBreaker::default();
         let now = Instant::now();
         let rate_limit = crate::buddy::workflows::WorkflowFailureCategory::ProviderRateLimit;
-        let parse_error = crate::buddy::workflows::WorkflowFailureCategory::InvalidRequest;
+        let parse_error = crate::buddy::workflows::WorkflowFailureCategory::ContextTooLarge;
 
         assert!(breaker.record_failure(&rate_limit, now).is_none());
         assert!(breaker.record_failure(&rate_limit, now).is_none());
@@ -1458,6 +1999,43 @@ mod tests {
 
         assert_eq!(breaker.consecutive_rate_limited, 0);
         assert!(!breaker.is_open(now));
+    }
+
+    #[test]
+    fn invalid_request_category_opens_breaker() {
+        let now = Instant::now();
+        let invalid_request = crate::buddy::workflows::WorkflowFailureCategory::InvalidRequest;
+        let mut breaker = MemoBreaker::default();
+        assert_eq!(
+            breaker.record_failure(&invalid_request, now),
+            Some(TokioDuration::from_secs(300))
+        );
+        assert!(breaker.is_open(now));
+    }
+
+    #[test]
+    fn failure_categories_are_classified_explicitly() {
+        use crate::buddy::workflows::WorkflowFailureCategory::*;
+
+        for category in [
+            ModelUnavailable,
+            ToolUnavailable,
+            ToolFailed,
+            InvalidRequest,
+            ProviderTransient,
+            ProviderRateLimit,
+            AuthenticationFailed,
+            BillingQuota,
+            Cancelled,
+            Unknown,
+        ] {
+            assert!(is_environment_failure_category(&category));
+            assert!(is_environment_failure_class(category.as_str()));
+        }
+        for category in [ContextTooLarge, ContentPolicy] {
+            assert!(!is_environment_failure_category(&category));
+            assert!(!is_environment_failure_class(category.as_str()));
+        }
     }
 
     #[tokio::test(start_paused = true)]

@@ -3265,6 +3265,130 @@ async fn fetch_claude_code_usage_with_refresh(
     }
 }
 
+async fn with_claude_code_access_token<T, F, Fut>(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+    operation: F,
+) -> Result<T, String>
+where
+    F: Fn(reqwest::Client, String) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<T, crate::providers::claude_code::ClaudeCodeUsageRequestError>,
+    >,
+{
+    use crate::providers::claude_code::ClaudeCodeUsageRequestError;
+
+    let (provider, http_client) = resolve_provider_for_base(&gcx, provider_name, "claude_code")
+        .await
+        .map_err(|error| error.message)?;
+    let mut request_provider =
+        downcast_provider::<ClaudeCodeProvider>(provider.as_ref(), "Claude Code")
+            .map_err(|error| error.message)?
+            .clone();
+
+    let mut refresh_attempted = false;
+    let access_token = match request_provider.resolve_auth() {
+        Ok(access_token) => access_token,
+        Err(_) if !request_provider.oauth_tokens.refresh_token.is_empty() => {
+            refresh_attempted = true;
+            let rejected_access_token = request_provider.oauth_tokens.access_token.clone();
+            request_provider = crate::providers::oauth_refresh::force_refresh_claude_code_for_retry(
+                &gcx,
+                &http_client,
+                provider_name,
+                &rejected_access_token,
+                Some(request_provider.oauth_tokens.expires_at),
+                None,
+            )
+            .await?
+            .ok_or_else(|| {
+                "Claude Code access token is expired and refresh returned no access token. Log in again in Claude Code provider settings."
+                    .to_string()
+            })?;
+            request_provider.resolve_auth()?
+        }
+        Err(error) => return Err(error),
+    };
+
+    match operation(http_client.clone(), access_token.clone()).await {
+        Ok(value) => Ok(value),
+        Err(ClaudeCodeUsageRequestError::Status(status, _body))
+            if ClaudeCodeProvider::should_force_refresh_for_status(
+                status,
+                &request_provider.oauth_tokens.refresh_token,
+                refresh_attempted,
+            ) =>
+        {
+            let retry_provider = crate::providers::oauth_refresh::force_refresh_claude_code_for_retry(
+                &gcx,
+                &http_client,
+                provider_name,
+                &access_token,
+                Some(request_provider.oauth_tokens.expires_at),
+                Some(status),
+            )
+            .await?
+            .ok_or_else(|| {
+                "Anthropic rejected the Claude Code access token and refresh returned no access token. Log in again in Claude Code provider settings."
+                    .to_string()
+            })?;
+            let retry_access_token = retry_provider.resolve_auth()?;
+            operation(http_client, retry_access_token)
+                .await
+                .map_err(ClaudeCodeProvider::reset_request_error_to_string)
+        }
+        Err(error) => Err(ClaudeCodeProvider::reset_request_error_to_string(error)),
+    }
+}
+
+async fn claude_code_reset_status_response(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+) -> Result<Response<Body>, ScratchError> {
+    let result = with_claude_code_access_token(gcx, provider_name, |client, token| async move {
+        ClaudeCodeProvider::fetch_reset_status_once(&client, &token).await
+    })
+    .await;
+
+    match result {
+        Ok(status) => json_response(StatusCode::OK, &json!({"data": status})),
+        Err(e) => json_response(StatusCode::OK, &json!({"error": e})),
+    }
+}
+
+async fn claude_code_reset_claim_response(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+    request: crate::providers::claude_code::ClaudeCodeResetRequest,
+) -> Result<Response<Body>, ScratchError> {
+    let result = with_claude_code_access_token(gcx, provider_name, |client, token| {
+        let request = request.clone();
+        async move { ClaudeCodeProvider::claim_reset_once(&client, &token, &request).await }
+    })
+    .await;
+
+    match result {
+        Ok(claim) => json_response(StatusCode::OK, &json!({"data": claim})),
+        Err(e) => json_response(StatusCode::OK, &json!({"error": e})),
+    }
+}
+
+pub async fn handle_v1_provider_usage_resets(
+    State(app): State<AppState>,
+    Path(params): Path<ProviderPathParams>,
+) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
+    validate_instance_id_for_http(&params.name)?;
+    let identity = resolve_provider_identity(&gcx, &params.name).await?;
+    if identity.base_provider != "claude_code" {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            format!("Provider '{}' does not support usage resets", params.name),
+        ));
+    }
+    claude_code_reset_status_response(gcx, &params.name).await
+}
+
 async fn openai_codex_usage_response(
     gcx: Arc<GlobalContext>,
     provider_name: &str,
@@ -3972,6 +4096,12 @@ pub async fn handle_v1_provider_usage(
 struct ResetRedeemRequest {
     #[serde(default)]
     redeem_request_id: Option<String>,
+    #[serde(default)]
+    program: Option<String>,
+    #[serde(default)]
+    grant_id: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
 }
 
 pub async fn handle_v1_provider_usage_redeem(
@@ -3992,21 +4122,32 @@ pub async fn handle_v1_provider_usage_redeem(
         })?
     };
     let identity = resolve_provider_identity(&gcx, &params.name).await?;
-    if identity.base_provider != "openai_codex" {
-        return Err(ScratchError::new(
+    match identity.base_provider.as_str() {
+        "openai_codex" => {
+            let redeem_request_id = request
+                .redeem_request_id
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            openai_codex_redeem_response(gcx, &params.name, &redeem_request_id).await
+        }
+        "claude_code" => {
+            let reset_request = crate::providers::claude_code::ClaudeCodeResetRequest::parse(
+                request.program.as_deref().unwrap_or_default(),
+                request.grant_id.as_deref(),
+                request.request_id.as_deref(),
+            )
+            .map_err(|error| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, error))?;
+            claude_code_reset_claim_response(gcx, &params.name, reset_request).await
+        }
+        _ => Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
             format!(
                 "Provider '{}' does not support rate-limit reset redemption",
                 params.name
             ),
-        ));
+        )),
     }
-    let redeem_request_id = request
-        .redeem_request_id
-        .map(|id| id.trim().to_string())
-        .filter(|id| !id.is_empty())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    openai_codex_redeem_response(gcx, &params.name, &redeem_request_id).await
 }
 
 async fn current_openai_codex_provider(

@@ -5,7 +5,7 @@ These self-contained localhost pages exercise browser interaction, auto-waiting,
 Run the ignored suite from `refact-agent/engine` with a Chrome-family binary on `PATH`:
 
 ```bash
-REFACT_BROWSER_E2E=1 cargo test --test browser_e2e -- --ignored --test-threads=1
+REFACT_BROWSER_E2E=1 cargo test --test it -- browser_e2e:: --ignored --test-threads=1
 ```
 
 Set `CHROME=/absolute/path/to/chrome` when the binary is not named `chrome`, `chromium`, `google-chrome`, or `chromium-browser`. The first parity tests describe behavior not yet implemented and can fail until later browser-runtime work lands.

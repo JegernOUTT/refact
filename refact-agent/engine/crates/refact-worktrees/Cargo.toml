@@ -6,13 +6,13 @@ edition = "2021"
 [dependencies]
 refact-core = { path = "../refact-core" }
 serde.workspace = true
+tokio.workspace = true
+chrono.workspace = true
 serde_json.workspace = true
-tokio = { version = "1.43.0", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync"] }
-chrono = { version = "0.4.31", features = ["serde"] }
-uuid.workspace = true
-sha2 = "0.10.8"
-git2 = "0.20.2"
-dunce = "1.0.5"
+sha2.workspace = true
+git2.workspace = true
+dunce.workspace = true
 tempfile.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]

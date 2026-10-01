@@ -804,6 +804,22 @@ impl OperatorStore {
     pub fn diagnostic_summary(
         &self,
     ) -> Result<super::operator_observability::StoreSummary, OperatorStoreError> {
+        self.diagnostic_summary_inner(false)
+            .map(|(summary, _)| summary)
+    }
+
+    pub fn diagnostic_summary_with_growth_warnings(
+        &self,
+    ) -> Result<(super::operator_observability::StoreSummary, Vec<String>), OperatorStoreError>
+    {
+        self.diagnostic_summary_inner(true)
+    }
+
+    fn diagnostic_summary_inner(
+        &self,
+        evaluate_growth: bool,
+    ) -> Result<(super::operator_observability::StoreSummary, Vec<String>), OperatorStoreError>
+    {
         use super::operator_observability::*;
         let mut tables = Vec::new();
         let mut protected = 0;
@@ -818,17 +834,21 @@ impl OperatorStore {
             "work_snoozes",
             "changes",
         ] {
-            let bytes = if table == "changes" {
-                "8"
+            let (rows, bytes): (u64, u64) = if table == "changes" {
+                let mut statement = self
+                    .connection
+                    .prepare("SELECT seq FROM changes LIMIT ?1")?;
+                let sample = statement
+                    .query_map([MAX_DIAGNOSTIC_ROWS_PER_TABLE], |row| row.get::<_, u64>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                (sample.len() as u64, (sample.len() as u64).saturating_mul(8))
             } else {
-                "length(CAST(payload AS BLOB))"
-            };
-            let sql = format!("SELECT count(*),COALESCE(sum(bytes),0) FROM (SELECT {bytes} AS bytes FROM {table} LIMIT ?1)");
-            let (rows, bytes): (u64, u64) =
+                let sql = format!("SELECT count(*),COALESCE(sum(bytes),0) FROM (SELECT length(CAST(payload AS BLOB)) AS bytes FROM {table} LIMIT ?1)");
                 self.connection
                     .query_row(&sql, [MAX_DIAGNOSTIC_ROWS_PER_TABLE], |r| {
                         Ok((r.get(0)?, r.get(1)?))
-                    })?;
+                    })?
+            };
             let truncated: bool = self.connection.query_row(
                 &format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1 OFFSET ?1)"),
                 [MAX_DIAGNOSTIC_ROWS_PER_TABLE],
@@ -845,21 +865,25 @@ impl OperatorStore {
                 enforced_row_capacity: (table == "active_runs").then_some(MAX_ACTIVE_RUNS),
             });
         }
-        let (active, unknown) = self.connection.query_row(
-            "SELECT COALESCE(sum(json_extract(payload,'$.status') IN ('claimed','running','reconciling')),0),COALESCE(sum(json_extract(payload,'$.status')='outcome_unknown'),0) FROM (SELECT payload FROM executions ORDER BY execution_id LIMIT ?1)",
-            [MAX_DIAGNOSTIC_ROWS_PER_TABLE], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        let (active, unknown) = self.connection.query_row("SELECT COALESCE(sum(json_extract(payload,'$.status') IN ('claimed','running','reconciling')),0),COALESCE(sum(json_extract(payload,'$.status')='outcome_unknown'),0) FROM (SELECT payload FROM executions ORDER BY execution_id LIMIT ?1)", [MAX_DIAGNOSTIC_ROWS_PER_TABLE], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        let growth_thresholds = GrowthThresholds::from_env();
+        let growth = self.store_growth_metrics()?;
+        let warnings = if evaluate_growth {
+            evaluate_process_growth_warnings(&growth, growth_thresholds)
+        } else {
+            Vec::new()
+        };
         let pragma = |name: &str| -> Result<u64, OperatorStoreError> {
             Ok(self
                 .connection
                 .query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))?)
         };
-        Ok(StoreSummary {
+        let summary = StoreSummary {
             interrupted_workflow_outcomes_lower_bound: self.connection.query_row("SELECT count(*) FROM (SELECT payload FROM run_outcomes LIMIT ?1) WHERE json_extract(payload,'$.failure_class')='engine_interrupted'", [MAX_DIAGNOSTIC_ROWS_PER_TABLE], |r| r.get(0))?,
             new_work_admission_policy: self.capacity_policy()?,
             document_growth: DocumentGrowthSummary {
                 snapshot: self.policy_snapshot()?,
                 terminal_reservations: self.connection.query_row("SELECT count(*),COALESCE(sum(remaining),0),COALESCE(sum(coverage IN ('grandfathered_inactive','grandfathered_legacy')),0),COALESCE(sum(coverage='policy_control'),0) FROM terminal_reservations", [], |r| Ok(TerminalReservationSummary { retained_entries:r.get(0)?,outstanding_slots:r.get(1)?,grandfathered_entries:r.get(2)?,policy_control_entries:r.get(3)?,retained_ledger_is_charged:true,covered_producers:&["resource_apply", "fixed_evaluation", "native_installation", "artifact_stage", "artifact_cleanup", "host_release", "supervision", "supervision_completion", "recovery_grant"],unclassified_writes_exempt:false,hard_database_quota:false }))?,
-
                 editorial_mutable_slots: usize::from(self.document_growth_policy()?.is_some_and(|p| p.replace_editorial_aggregate)),
                 editorial_selection_admission: self.document_growth_policy()?.is_some(),
                 sequence_allocator_growth_bounded: false,
@@ -874,10 +898,7 @@ impl OperatorStore {
             },
             generic_document_growth_is_native_owner_governed: true,
             schema_version: 1,
-            active_runs: tables
-                .iter()
-                .find(|t| t.table == "active_runs")
-                .map_or(0, |t| t.sampled_rows),
+            active_runs: tables.iter().find(|t| t.table == "active_runs").map_or(0, |t| t.sampled_rows),
             tables,
             record_byte_limit: MAX_RECORD_BYTES,
             page_limit: MAX_PAGE_SIZE,
@@ -885,13 +906,103 @@ impl OperatorStore {
             scan_rows_per_table: MAX_DIAGNOSTIC_ROWS_PER_TABLE,
             database_allocated_bytes: pragma("page_count")?.saturating_mul(pragma("page_size")?),
             database_reusable_bytes: pragma("freelist_count")?.saturating_mul(pragma("page_size")?),
-            effective_database_byte_capacity: pragma("max_page_count")?
-                .saturating_mul(pragma("page_size")?),
+            effective_database_byte_capacity: pragma("max_page_count")?.saturating_mul(pragma("page_size")?),
             database_capacity_excludes_wal_and_backups: true,
             active_executions_lower_bound: active,
             unknown_executions_lower_bound: unknown,
             protected_payload_rows_lower_bound: protected,
             evidence_deletion_supported: false,
+            growth_thresholds,
+            growth,
+        };
+        Ok((summary, warnings))
+    }
+
+    fn store_growth_metrics(
+        &self,
+    ) -> Result<super::operator_observability::StoreGrowthMetrics, OperatorStoreError> {
+        use super::operator_observability::*;
+        let mut files = Vec::new();
+        let mut total_disk_bytes = 0u64;
+        for (label, path) in [
+            ("db", self.path.clone()),
+            ("wal", sidecar_path(&self.path, "-wal")),
+            ("shm", sidecar_path(&self.path, "-shm")),
+        ] {
+            let (size_bytes, modified_at_ms) = match fs::metadata(path) {
+                Ok(metadata) if metadata.is_file() => {
+                    let modified_at_ms = metadata
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_millis());
+                    (metadata.len(), modified_at_ms)
+                }
+                Ok(_) => (0, None),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (0, None),
+                Err(error) => return Err(error.into()),
+            };
+            total_disk_bytes = total_disk_bytes.saturating_add(size_bytes);
+            files.push(StoreFileMetric {
+                file: label,
+                size_bytes,
+                modified_at_ms,
+            });
+        }
+        let mut table_row_counts = Vec::new();
+        for table in [
+            "run_outcomes",
+            "artifacts",
+            "work_items",
+            "executions",
+            "active_runs",
+            "operator_documents",
+            "read_states",
+            "work_snoozes",
+            "changes",
+        ] {
+            let exact_rows = if table == "changes" {
+                None
+            } else {
+                Some(self.connection.query_row(
+                    &format!("SELECT count(*) FROM {table}"),
+                    [],
+                    |row| row.get(0),
+                )?)
+            };
+            table_row_counts.push(TableRowCount { table, exact_rows });
+        }
+        let (min_seq, max_seq): (Option<u64>, Option<u64>) = self.connection.query_row(
+            "SELECT (SELECT min(seq) FROM changes), (SELECT max(seq) FROM changes)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let retained_seq_span = match (min_seq, max_seq) {
+            (Some(min), Some(max)) => max.saturating_sub(min).saturating_add(1),
+            _ => 0,
+        };
+        let mut stmt = self.connection.prepare("SELECT artifact_id,count(*) AS revisions FROM artifacts GROUP BY artifact_id ORDER BY revisions DESC,artifact_id LIMIT 5")?;
+        let top_artifacts_by_revision_count = stmt
+            .query_map([], |row| {
+                Ok(ArtifactRevisionCount {
+                    artifact_id: row.get(0)?,
+                    revisions: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let first_recorded_outcome_started_at = self.connection.query_row("SELECT json_extract(payload,'$.started_at') FROM run_outcomes ORDER BY rowid ASC LIMIT 1", [], |row| row.get(0)).optional()?;
+        let last_recorded_outcome_started_at = self.connection.query_row("SELECT json_extract(payload,'$.started_at') FROM run_outcomes ORDER BY rowid DESC LIMIT 1", [], |row| row.get(0)).optional()?;
+        Ok(StoreGrowthMetrics {
+            total_disk_bytes,
+            files,
+            table_row_counts,
+            min_seq,
+            max_seq,
+            retained_seq_span,
+            retained_seq_span_exact_under_prefix_compaction: true,
+            first_recorded_outcome_started_at,
+            last_recorded_outcome_started_at,
+            top_artifacts_by_revision_count,
         })
     }
 
@@ -1028,6 +1139,7 @@ impl OperatorStore {
             migrate(&connection, identity)?;
             connection.execute_batch("CREATE INDEX IF NOT EXISTS executions_by_spec ON executions(spec_hash, change_seq)")?;
             connection.execute_batch("CREATE INDEX IF NOT EXISTS outcomes_by_work ON run_outcomes(json_extract(payload,'$.work_id'), change_seq)")?;
+            connection.execute_batch("CREATE INDEX IF NOT EXISTS work_items_by_material_change ON work_items(julianday(json_extract(payload,'$.last_material_change_at')) DESC,id DESC)")?;
             restrict_store_files(&path)?;
             let mut store = Self {
                 connection,
@@ -1659,7 +1771,7 @@ impl OperatorStore {
                 &active.start.input_fingerprint,
             )
             .map_err(|_| OperatorStoreError::InvalidInput("invalid active run subject"))?;
-            let title = format!("{} — interrupted run", active.start.workflow);
+            let title = super::workflow_display::workflow_interrupted_title(&active.start.workflow);
             let mut outcome = super::outcome_runtime::build_workflow_outcome(
                 active.start,
                 active.checkpoint,
@@ -2010,7 +2122,6 @@ impl OperatorStore {
             self.admit_new_work()?;
         }
         let outcome_payload = encode(outcome)?;
-        let item_payload = encode(item)?;
         let artifact_payload = artifact.map(encode).transpose()?;
         let tx = self.connection.transaction()?;
 
@@ -2029,7 +2140,14 @@ impl OperatorStore {
             let work = stored_mutable_in_tx::<WorkItem>(&tx, "work_items", &item.id)?.ok_or(
                 OperatorStoreError::Conflict("existing outcome has no linked work item"),
             )?;
-            if work.value != *item {
+            let mut expected_item = item.clone();
+            if item.subject.resource_kind == "workflow"
+                && work.value.subject == item.subject
+                && work.value.state == refact_buddy_core::operator_types::WorkItemState::Cancelled
+            {
+                expected_item.state = refact_buddy_core::operator_types::WorkItemState::Cancelled;
+            }
+            if work.value != expected_item {
                 return Err(OperatorStoreError::Conflict(
                     "existing outcome was completed against a different work item revision",
                 ));
@@ -2063,7 +2181,12 @@ impl OperatorStore {
             }
         }
 
-        let work = upsert_work_item_in_tx(&tx, item, &item_payload, expected_work_revision)?;
+        let mut published_item = item.clone();
+        retire_workflow_siblings_in_tx(&tx, outcome, &mut published_item)?;
+        let item_payload = encode(&published_item)?;
+
+        let work =
+            upsert_work_item_in_tx(&tx, &published_item, &item_payload, expected_work_revision)?;
         let outcome = insert_outcome_in_tx(&tx, outcome, &outcome_payload)?;
         let artifact = match (artifact, artifact_payload.as_deref()) {
             (Some(artifact), Some(payload)) => Some(insert_artifact_in_tx(&tx, artifact, payload)?),
@@ -2419,6 +2542,158 @@ impl OperatorStore {
         Ok(state)
     }
 
+    pub(crate) fn retire_superseded_backlog(&mut self) -> Result<usize, OperatorStoreError> {
+        use refact_buddy_core::operator_types::{RunStatus, WorkItemState};
+        use std::collections::BTreeMap;
+        #[cfg(test)]
+        if !super::supersede::open_pass_enabled() {
+            return Ok(0);
+        }
+
+        let rows = {
+            let mut statement = self.connection.prepare(
+                "SELECT payload,revision,change_seq FROM work_items WHERE json_extract(payload,'$.project.project_id')=?1 AND json_extract(payload,'$.project.canonical_root')=?2 AND json_extract(payload,'$.subject.resource_kind')='workflow' AND json_extract(payload,'$.state') IN ('needs_attention','watching','blocked') ORDER BY id",
+            )?;
+            let rows = statement.query_map(
+                params![self.identity.project_id, self.identity.canonical_root],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, u64>(2)?,
+                    ))
+                },
+            )?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let mut groups: BTreeMap<
+            (String, String),
+            Vec<(Stored<WorkItem>, super::supersede::Candidate)>,
+        > = BTreeMap::new();
+        for (payload, revision, change_seq) in rows {
+            let work: WorkItem = decode(&payload)?;
+            if work.project != self.identity
+                || work.subject.resource_kind != "workflow"
+                || !matches!(
+                    work.state,
+                    WorkItemState::NeedsAttention
+                        | WorkItemState::Watching
+                        | WorkItemState::Blocked
+                )
+            {
+                continue;
+            }
+            let workflow = work.subject.resource_id.clone();
+            let latest: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT payload FROM run_outcomes WHERE json_extract(payload,'$.work_id')=?1 AND json_extract(payload,'$.workflow')=?2 ORDER BY change_seq DESC LIMIT 1",
+                    params![work.id, workflow],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let run = match latest {
+                Some(payload) => match decode::<RunOutcome>(&payload) {
+                    Ok(run) => Some(run),
+                    Err(_) => None,
+                },
+                None => None,
+            };
+            let (status, coverage, outcome_time) = match run {
+                Some(run) => (
+                    run.status,
+                    run.coverage,
+                    chrono::DateTime::parse_from_rfc3339(&run.started_at).ok(),
+                ),
+                None => (
+                    match work.state {
+                        WorkItemState::Blocked => RunStatus::Blocked,
+                        WorkItemState::NeedsAttention | WorkItemState::Watching => {
+                            RunStatus::Inconclusive
+                        }
+                        _ => continue,
+                    },
+                    work.scope.clone().unwrap_or_default(),
+                    None,
+                ),
+            };
+            let observed_at = outcome_time.or_else(|| {
+                chrono::DateTime::parse_from_rfc3339(&work.last_material_change_at).ok()
+            });
+            let Some(observed_at) = observed_at else {
+                continue;
+            };
+            groups
+                .entry((workflow, super::supersede::coverage_class(&coverage)))
+                .or_default()
+                .push((
+                    Stored {
+                        value: work.clone(),
+                        revision,
+                        change_seq,
+                    },
+                    super::supersede::Candidate {
+                        id: work.id,
+                        status,
+                        observed_at,
+                        eligible: true,
+                    },
+                ));
+        }
+
+        let mut retired = 0;
+        #[cfg(test)]
+        let mut processed_groups = 0;
+        for (_, group) in groups {
+            let candidates: Vec<_> = group
+                .iter()
+                .map(|(_, candidate)| candidate.clone())
+                .collect();
+            let retire_ids = super::supersede::retire_ids(&candidates);
+            let tx = self.connection.transaction()?;
+            let mut group_retired = 0;
+            for (stored, _) in &group {
+                if !retire_ids.contains(&stored.value.id) {
+                    continue;
+                }
+                let Some(current) =
+                    stored_mutable_in_tx::<WorkItem>(&tx, "work_items", &stored.value.id)?
+                else {
+                    continue;
+                };
+                if !matches!(
+                    current.value.state,
+                    WorkItemState::NeedsAttention
+                        | WorkItemState::Watching
+                        | WorkItemState::Blocked
+                ) {
+                    continue;
+                }
+                let mut retired_item = current.value;
+                retired_item.state = WorkItemState::Cancelled;
+                upsert_work_item_in_tx(
+                    &tx,
+                    &retired_item,
+                    &encode(&retired_item)?,
+                    Some(current.revision),
+                )?;
+                group_retired += 1;
+            }
+            tx.commit()?;
+            retired += group_retired;
+            #[cfg(test)]
+            {
+                processed_groups += 1;
+                if super::supersede::should_interrupt_after_group(processed_groups) {
+                    return Err(OperatorStoreError::Conflict(
+                        "interrupted superseded backlog pass",
+                    ));
+                }
+            }
+        }
+        Ok(retired)
+    }
+
     pub fn list_work_items(
         &self,
         after_seq: Option<u64>,
@@ -2538,41 +2813,91 @@ impl OperatorStore {
         if search.len() > 512 {
             return Err(OperatorStoreError::InvalidInput("work search is too long"));
         }
+        let cursor_key = after
+            .map(|rowid| {
+                let rowid = i64::try_from(rowid)
+                    .map_err(|_| OperatorStoreError::InvalidInput("invalid work cursor"))?;
+                self.connection
+                    .query_row(
+                        "SELECT julianday(json_extract(payload,'$.last_material_change_at')),id FROM work_items WHERE rowid=?1",
+                        [rowid],
+                        |row| Ok((row.get::<_, f64>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional()?
+                    .ok_or(OperatorStoreError::InvalidInput("unknown work cursor"))
+            })
+            .transpose()?;
         let mut statement = self.connection.prepare(
-            "WITH selected AS (
-                SELECT w.*,
-                    (json_extract(w.payload,'$.current_artifact_id') IS NOT NULL AND
-                      (r.payload IS NULL OR
-                       json_extract(r.payload,'$.artifact_id') != json_extract(w.payload,'$.current_artifact_id') OR
-                       json_extract(r.payload,'$.last_read_revision') < json_extract(w.payload,'$.current_artifact_revision'))) AS unread,
-                    COALESCE((json_extract(s.payload,'$.artifact_id')=json_extract(w.payload,'$.current_artifact_id') AND
-                     json_extract(s.payload,'$.artifact_revision')=json_extract(w.payload,'$.current_artifact_revision') AND
-                     julianday(json_extract(s.payload,'$.until'))>julianday(?6)),0) AS snoozed
-                FROM work_items w LEFT JOIN read_states r ON r.work_id=w.id
-                LEFT JOIN work_snoozes s ON s.work_id=w.id
-             ) SELECT payload,revision,change_seq FROM selected WHERE change_seq>?1 AND (
-                ?2 IS NULL OR
-                (?2='needs_you' AND json_extract(payload,'$.state') IN ('needs_attention','blocked')) OR
-                (?2='working_on' AND json_extract(payload,'$.state')='working') OR
-                (?2='delivered' AND json_extract(payload,'$.state') IN ('delivered','cancelled')) OR
-                (?2='watching' AND json_extract(payload,'$.state')='watching')
-            ) AND (?3='' OR instr(lower(json_extract(payload,'$.title') || ' ' ||
-                json_extract(payload,'$.subject.resource_id') || ' ' || json_extract(payload,'$.kind')),?3)>0)
-            AND (?5='all' OR (?5='unread' AND unread) OR (?5='snoozed' AND snoozed) OR (?5='unsnoozed' AND NOT snoozed))
-            ORDER BY change_seq,id LIMIT ?4",
+            "SELECT w.payload,w.revision,w.change_seq,w.rowid FROM work_items w
+             LEFT JOIN read_states r ON r.work_id=w.id
+             LEFT JOIN work_snoozes s ON s.work_id=w.id
+             WHERE (?1 IS NULL OR julianday(json_extract(w.payload,'$.last_material_change_at'))<?2 OR\n                (julianday(json_extract(w.payload,'$.last_material_change_at'))=?2 AND w.id<?3)) AND (\n                ?4 IS NULL OR
+                (?4='needs_you' AND json_extract(w.payload,'$.state') IN ('needs_attention','blocked')) OR
+                (?4='working_on' AND json_extract(w.payload,'$.state')='working') OR
+                (?4='delivered' AND json_extract(w.payload,'$.state') IN ('delivered','cancelled')) OR
+                (?4='watching' AND json_extract(w.payload,'$.state')='watching')
+            ) AND (?5='' OR instr(lower(json_extract(w.payload,'$.title') || ' ' ||
+                json_extract(w.payload,'$.subject.resource_id') || ' ' || json_extract(w.payload,'$.kind')),?5)>0)
+            AND (?7='all' OR (?7='unread' AND
+                json_extract(w.payload,'$.current_artifact_id') IS NOT NULL AND
+                (r.payload IS NULL OR
+                 json_extract(r.payload,'$.artifact_id') != json_extract(w.payload,'$.current_artifact_id') OR
+                 json_extract(r.payload,'$.last_read_revision') < json_extract(w.payload,'$.current_artifact_revision'))) OR
+                (?7='snoozed' AND COALESCE(
+                    json_extract(s.payload,'$.artifact_id')=json_extract(w.payload,'$.current_artifact_id') AND
+                    json_extract(s.payload,'$.artifact_revision')=json_extract(w.payload,'$.current_artifact_revision') AND
+                    julianday(json_extract(s.payload,'$.until'))>julianday(?6),0)) OR
+                (?7='unsnoozed' AND NOT COALESCE(
+                    json_extract(s.payload,'$.artifact_id')=json_extract(w.payload,'$.current_artifact_id') AND
+                    json_extract(s.payload,'$.artifact_revision')=json_extract(w.payload,'$.current_artifact_revision') AND
+                    julianday(json_extract(s.payload,'$.until'))>julianday(?6),0)))
+            ORDER BY julianday(json_extract(w.payload,'$.last_material_change_at')) DESC,w.id DESC LIMIT ?8",
         )?;
         let rows = statement.query_map(
             params![
-                after.unwrap_or(0),
+                after
+                    .map(i64::try_from)
+                    .transpose()
+                    .map_err(|_| OperatorStoreError::InvalidInput("invalid work cursor"))?,
+                cursor_key.as_ref().map(|(date, _)| *date),
+                cursor_key.as_ref().map(|(_, id)| id.as_str()),
                 view,
                 search,
-                (limit + 1) as i64,
+                chrono::Utc::now().to_rfc3339(),
                 attention.unwrap_or("all"),
-                chrono::Utc::now().to_rfc3339()
+                (limit + 1) as i64
             ],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
         )?;
-        page(rows, limit)
+        let mut entries = Vec::new();
+        for row in rows {
+            let (payload, revision, change_seq, rowid) = row?;
+            entries.push((
+                Stored {
+                    value: decode(&payload)?,
+                    revision,
+                    change_seq,
+                },
+                rowid as u64,
+            ));
+        }
+        let next_after = if entries.len() > limit {
+            entries.pop();
+            entries.last().map(|(_, rowid)| *rowid)
+        } else {
+            None
+        };
+        Ok(Page {
+            entries: entries.into_iter().map(|(entry, _)| entry).collect(),
+            next_after,
+        })
     }
 
     pub fn dismiss_work_item_with_execution(
@@ -3659,6 +3984,147 @@ fn upsert_work_item_in_tx(
     })
 }
 
+fn retire_workflow_siblings_in_tx(
+    tx: &Transaction<'_>,
+    outcome: &RunOutcome,
+    item: &mut WorkItem,
+) -> Result<(), OperatorStoreError> {
+    use refact_buddy_core::operator_types::WorkItemState;
+
+    if item.subject.resource_kind != "workflow"
+        || outcome.workflow.as_deref() != Some(item.subject.resource_id.as_str())
+    {
+        return Ok(());
+    }
+    let outcome_time = chrono::DateTime::parse_from_rfc3339(&outcome.started_at)
+        .map_err(|_| OperatorStoreError::InvalidInput("invalid workflow start timestamp"))?;
+    let mut records = vec![(
+        Stored {
+            value: item.clone(),
+            revision: 0,
+            change_seq: 0,
+        },
+        super::supersede::Candidate {
+            id: item.id.clone(),
+            status: outcome.status.clone(),
+            observed_at: outcome_time,
+            eligible: true,
+        },
+    )];
+    let sibling_rows: Vec<(Stored<WorkItem>, Option<RunOutcome>)> = {
+        let mut statement = tx.prepare(
+            "SELECT payload,revision,change_seq FROM work_items WHERE id<>?1 AND json_extract(payload,'$.project.project_id')=?2 AND json_extract(payload,'$.project.canonical_root')=?3 AND json_extract(payload,'$.subject.resource_kind')='workflow' AND json_extract(payload,'$.subject.resource_id')=?4 AND json_extract(payload,'$.state') IN ('needs_attention','watching','blocked')",
+        )?;
+        let rows = statement.query_map(
+            rusqlite::params![
+                item.id,
+                item.project.project_id,
+                item.project.canonical_root,
+                item.subject.resource_id
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u64>(2)?,
+                ))
+            },
+        )?;
+        let mut candidates = Vec::new();
+        for row in rows {
+            let (payload, revision, change_seq) = row?;
+            let sibling: WorkItem = decode(&payload)?;
+            if sibling.project != item.project
+                || sibling.subject.resource_kind != "workflow"
+                || sibling.subject.resource_id != item.subject.resource_id
+            {
+                continue;
+            }
+            let latest: Option<String> = tx
+                .query_row(
+                    "SELECT payload FROM run_outcomes WHERE json_extract(payload,'$.work_id')=?1 AND json_extract(payload,'$.workflow')=?2 ORDER BY change_seq DESC LIMIT 1",
+                    rusqlite::params![sibling.id, item.subject.resource_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            candidates.push((
+                Stored {
+                    value: sibling,
+                    revision,
+                    change_seq,
+                },
+                latest.map(|payload| decode(&payload)).transpose()?,
+            ));
+        }
+        candidates
+    };
+
+    for (sibling, latest) in sibling_rows {
+        let (status, coverage, observed_at) = if let Some(run) = latest {
+            (
+                run.status,
+                run.coverage,
+                chrono::DateTime::parse_from_rfc3339(&run.started_at).ok(),
+            )
+        } else {
+            let status = match &sibling.value.state {
+                WorkItemState::NeedsAttention | WorkItemState::Watching => {
+                    refact_buddy_core::operator_types::RunStatus::Inconclusive
+                }
+                WorkItemState::Blocked => refact_buddy_core::operator_types::RunStatus::Blocked,
+                _ => continue,
+            };
+            (
+                status,
+                sibling.value.scope.clone().unwrap_or_default(),
+                None,
+            )
+        };
+        if super::supersede::coverage_class(&coverage)
+            != super::supersede::coverage_class(&outcome.coverage)
+        {
+            continue;
+        }
+        let observed_at = match observed_at {
+            Some(value) => value,
+            None => {
+                match chrono::DateTime::parse_from_rfc3339(&sibling.value.last_material_change_at) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                }
+            }
+        };
+        records.push((
+            sibling.clone(),
+            super::supersede::Candidate {
+                id: sibling.value.id.clone(),
+                status,
+                observed_at,
+                eligible: true,
+            },
+        ));
+    }
+
+    let candidates: Vec<_> = records
+        .iter()
+        .map(|(_, candidate)| candidate.clone())
+        .collect();
+    let retire_ids = super::supersede::retire_ids(&candidates);
+    for (candidate, _) in records {
+        if !retire_ids.contains(&candidate.value.id) {
+            continue;
+        }
+        if candidate.value.id == item.id {
+            item.state = WorkItemState::Cancelled;
+        } else {
+            let mut retired = candidate.value;
+            retired.state = WorkItemState::Cancelled;
+            upsert_work_item_in_tx(tx, &retired, &encode(&retired)?, Some(candidate.revision))?;
+        }
+    }
+    Ok(())
+}
+
 fn insert_outcome_in_tx(
     tx: &Transaction<'_>,
     outcome: &RunOutcome,
@@ -3930,8 +4396,13 @@ fn page<T: DeserializeOwned>(
 }
 
 #[cfg(test)]
+#[path = "work_order_tests.rs"]
+mod work_order_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::operator_observability::evaluate_growth_warnings_with_latch as evaluate_growth_warnings;
     use tempfile::TempDir;
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
@@ -4444,6 +4915,208 @@ mod tests {
         let text = serde_json::to_string(&summary).unwrap();
         assert!(!text.contains("never-disclose"));
         assert!(!text.contains("private-namespace"));
+    }
+
+    #[test]
+    fn metrics_report_sizes_and_counts() {
+        let root = TempDir::new().unwrap();
+        let project = project(root.path());
+        let mut store = OperatorStore::open(root.path(), &project).unwrap();
+        store
+            .upsert_work_item(&work("metric-work", &project), None)
+            .unwrap();
+        store
+            .append_artifact_revision(&artifact("metric-artifact", 1, "run-1", &project))
+            .unwrap();
+        store
+            .append_artifact_revision(&artifact("metric-artifact", 2, "run-2", &project))
+            .unwrap();
+        let metrics = store.diagnostic_summary().unwrap().growth;
+        let db_size = fs::metadata(store.path()).unwrap().len();
+        assert_eq!(
+            metrics.total_disk_bytes,
+            metrics
+                .files
+                .iter()
+                .map(|file| file.size_bytes)
+                .sum::<u64>()
+        );
+        assert!(metrics
+            .files
+            .iter()
+            .any(|file| file.file == "db" && file.size_bytes == db_size));
+        assert_eq!(
+            metrics
+                .table_row_counts
+                .iter()
+                .find(|table| table.table == "work_items")
+                .unwrap()
+                .exact_rows,
+            Some(1)
+        );
+        assert_eq!(
+            metrics.top_artifacts_by_revision_count[0].artifact_id,
+            "metric-artifact"
+        );
+        assert_eq!(metrics.top_artifacts_by_revision_count[0].revisions, 2);
+        assert_eq!(metrics.first_recorded_outcome_started_at, None);
+        assert_eq!(metrics.last_recorded_outcome_started_at, None);
+    }
+
+    #[test]
+    fn metrics_are_cheap_and_seq_span_survives_prefix_compaction() {
+        let root = TempDir::new().unwrap();
+        let project = project(root.path());
+        let mut store = OperatorStore::open(root.path(), &project).unwrap();
+        store.connection.execute_batch("WITH RECURSIVE n(seq) AS (SELECT 1 UNION ALL SELECT seq + 1 FROM n WHERE seq < 10000) INSERT INTO changes(seq) SELECT seq FROM n;").unwrap();
+        let plan: Vec<String> = store
+            .connection
+            .prepare("EXPLAIN QUERY PLAN SELECT (SELECT min(seq) FROM changes), (SELECT max(seq) FROM changes)")
+            .unwrap()
+            .query_map([], |row| row.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let plan = plan.join(" ").to_ascii_lowercase();
+        assert!(plan.contains("search changes"), "{plan}");
+        assert!(!plan.contains("scan changes"), "{plan}");
+        let started = std::time::Instant::now();
+        let summary = store.diagnostic_summary().unwrap();
+        let elapsed = started.elapsed();
+        eprintln!(
+            "R-8 metrics measurement: rows=10000, elapsed_ms={}, changes_query_plan={plan}",
+            elapsed.as_millis()
+        );
+        assert_eq!(summary.growth.max_seq, Some(10000));
+        assert_eq!(
+            summary
+                .growth
+                .table_row_counts
+                .iter()
+                .find(|table| table.table == "changes")
+                .unwrap()
+                .exact_rows,
+            None
+        );
+        let prepared = store.prepare_sequence_compaction().unwrap();
+        store.apply_sequence_compaction(prepared).unwrap();
+        let metrics = store.store_growth_metrics().unwrap();
+        let retained: u64 = store
+            .connection
+            .query_row("SELECT count(*) FROM changes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(metrics.retained_seq_span, retained);
+    }
+
+    #[test]
+    fn soft_threshold_warns_once_and_names_top_contributor() {
+        use super::super::operator_observability::*;
+        let metrics = StoreGrowthMetrics {
+            total_disk_bytes: 11,
+            files: vec![StoreFileMetric {
+                file: "db",
+                size_bytes: 11,
+                modified_at_ms: None,
+            }],
+            table_row_counts: vec![],
+            min_seq: None,
+            max_seq: None,
+            retained_seq_span: 0,
+            retained_seq_span_exact_under_prefix_compaction: true,
+            first_recorded_outcome_started_at: None,
+            last_recorded_outcome_started_at: None,
+            top_artifacts_by_revision_count: vec![ArtifactRevisionCount {
+                artifact_id: "largest-artifact".into(),
+                revisions: 3,
+            }],
+        };
+        let thresholds = GrowthThresholds {
+            store_soft_limit_bytes: 10,
+            artifact_revision_soft_limit: 3,
+        };
+        let mut latch = GrowthWarningLatch::default();
+        let warnings = evaluate_growth_warnings(&metrics, thresholds, &mut latch);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].contains("db"));
+        assert!(warnings[1].contains("largest-artifact"));
+        assert!(evaluate_growth_warnings(&metrics, thresholds, &mut latch).is_empty());
+    }
+
+    #[test]
+    fn threshold_rearms_after_clearing() {
+        use super::super::operator_observability::*;
+        let thresholds = GrowthThresholds {
+            store_soft_limit_bytes: 10,
+            artifact_revision_soft_limit: 500,
+        };
+        let mut latch = GrowthWarningLatch::default();
+        let mut metrics = StoreGrowthMetrics {
+            total_disk_bytes: 11,
+            files: vec![],
+            table_row_counts: vec![],
+            min_seq: None,
+            max_seq: None,
+            retained_seq_span: 0,
+            retained_seq_span_exact_under_prefix_compaction: true,
+            first_recorded_outcome_started_at: None,
+            last_recorded_outcome_started_at: None,
+            top_artifacts_by_revision_count: vec![],
+        };
+        assert_eq!(
+            evaluate_growth_warnings(&metrics, thresholds, &mut latch).len(),
+            1
+        );
+        metrics.total_disk_bytes = 9;
+        assert!(evaluate_growth_warnings(&metrics, thresholds, &mut latch).is_empty());
+        metrics.total_disk_bytes = 10;
+        assert_eq!(
+            evaluate_growth_warnings(&metrics, thresholds, &mut latch).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn no_policy_is_installed_by_migration_and_nothing_is_deleted() {
+        let root = TempDir::new().unwrap();
+        let project = project(root.path());
+        let mut store = OperatorStore::open(root.path(), &project).unwrap();
+        for id in ["retain-a", "retain-b"] {
+            store.upsert_work_item(&work(id, &project), None).unwrap();
+        }
+        let rows_before: u64 = store
+            .connection
+            .query_row("SELECT count(*) FROM work_items", [], |row| row.get(0))
+            .unwrap();
+        let artifacts_before: u64 = store
+            .connection
+            .query_row("SELECT count(*) FROM artifacts", [], |row| row.get(0))
+            .unwrap();
+        let summary = store.diagnostic_summary().unwrap();
+        assert!(summary.growth_thresholds.store_soft_limit_bytes > 0);
+        assert!(summary.growth_thresholds.artifact_revision_soft_limit > 0);
+        let policies: u64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM meta WHERE key LIKE '%capacity%' OR key LIKE '%growth%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(policies, 0);
+        assert_eq!(
+            store
+                .connection
+                .query_row::<u64, _, _>("SELECT count(*) FROM work_items", [], |row| row.get(0))
+                .unwrap(),
+            rows_before
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row::<u64, _, _>("SELECT count(*) FROM artifacts", [], |row| row.get(0))
+                .unwrap(),
+            artifacts_before
+        );
     }
 
     #[test]
@@ -5351,11 +6024,11 @@ mod tests {
         let first = store
             .search_work_items(None, 1, Some("needs_you"), Some("PROVIDER"))
             .unwrap();
-        assert_eq!(first.entries[0].value.id, "a");
+        assert_eq!(first.entries[0].value.id, "c");
         let second = store
             .search_work_items(first.next_after, 1, Some("needs_you"), Some("provider"))
             .unwrap();
-        assert_eq!(second.entries[0].value.id, "c");
+        assert_eq!(second.entries[0].value.id, "a");
         assert!(second.next_after.is_none());
         assert!(store
             .search_work_items(None, 10, None, Some("%' OR 1=1 --"))

@@ -21,6 +21,26 @@ const ADAPTER_ID: &str = "operator.saved_evidence";
 const DISMISS_ADAPTER_ID: &str = "operator.work_lifecycle";
 const MAX_LINKS: usize = 200;
 
+fn resource_kind_label(resource_kind: &str) -> String {
+    match resource_kind {
+        "project_code" => "code".into(),
+        "default_models" => "default model".into(),
+        "project_customization_file" => "project setup".into(),
+        "native_markdown" => "markdown".into(),
+        "memory" => "memory".into(),
+        "settings" => "settings".into(),
+        "saved_report" => "saved report".into(),
+        "work_item" => "work item".into(),
+        "worktree" => "isolated code".into(),
+        "registered_worktree" => "worktree".into(),
+        "project" => "project".into(),
+        "test" => "test".into(),
+        "local" => "local resource".into(),
+        "scratch" => "scratch resource".into(),
+        other => other.replace('_', " "),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeskActionRequest {
@@ -217,7 +237,10 @@ pub fn actions_for_work(
             actions.push(DeskAction {
                 work_id: work_id.into(), spec: prepared.spec.clone(), spec_hash: hash.clone(),
                 work_revision: work.revision, artifact_id: id.clone(), artifact_revision: revision,
-                label: format!("Preview {} change", prepared.spec.resource.resource_kind),
+                label: format!(
+                    "Preview {} change",
+                    resource_kind_label(&prepared.spec.resource.resource_kind)
+                ),
                 description: "Review the registered resource scope and exact changes before granting permission. Report text does not authorize execution.".into(),
                 latest_execution: store.latest_execution_for_spec(&hash)?,
             });
@@ -232,7 +255,7 @@ pub fn actions_for_work(
         artifact_revision: revision,
         label: "Verify saved evidence".into(),
         description: if bounded {
-            "Checks retained source outcomes and evidence metadata. Does not open source files or URLs, verify findings, or apply fixes. Only the check receipt is saved."
+            "Checks that this report's saved evidence is still intact."
         } else {
             "This report exceeds the bounded evidence-check limit; no check will run."
         }
@@ -241,7 +264,7 @@ pub fn actions_for_work(
     });
     if matches!(
         work.value.state,
-        WorkItemState::NeedsAttention | WorkItemState::Blocked
+        WorkItemState::NeedsAttention | WorkItemState::Blocked | WorkItemState::Watching
     ) {
         let dismissal_spec = ActionSpec {
             schema_version: OPERATOR_SCHEMA_VERSION_V1,
@@ -276,8 +299,9 @@ pub fn actions_for_work(
             artifact_id: id.clone(),
             artifact_revision: revision,
             label: "Dismiss — not a problem".into(),
-            description: "Moves this item out of Needs you. Saved evidence remains available."
-                .into(),
+            description:
+                "Moves this item out of Needs you or Watching. Saved evidence remains available."
+                    .into(),
             latest_execution: store.latest_execution_for_spec(&dismissal_hash)?,
         });
     }
@@ -387,6 +411,24 @@ pub fn validate_resource_origin(
 #[cfg(test)]
 mod resource_origin_tests {
     use super::*;
+
+    #[test]
+    fn resource_action_labels_use_human_resource_names() {
+        assert_eq!(resource_kind_label("project_code"), "code");
+        assert_eq!(resource_kind_label("default_models"), "default model");
+        assert_eq!(
+            resource_kind_label("unknown_resource_kind"),
+            "unknown resource kind"
+        );
+    }
+
+    #[test]
+    fn verify_saved_evidence_description_is_concise_and_scoped() {
+        let text = "Checks that this report's saved evidence is still intact.";
+        assert_eq!(text.split_whitespace().count(), 9);
+        assert!(!text.contains("not independently verified"));
+        assert!(!text.contains("no fix was applied"));
+    }
 
     fn worker() -> WorkerIdentity {
         WorkerIdentity {
@@ -719,8 +761,186 @@ mod resource_origin_tests {
         let actions = actions_for_work(&store, &work.id).unwrap();
         assert_eq!(actions.len(), 3);
         assert_eq!(actions[0].spec.action_id, spec.action_id);
+        assert_eq!(actions[0].label, "Preview markdown change");
         assert_eq!(actions[1].label, "Verify saved evidence");
         assert_eq!(actions[2].spec.action_id, DISMISS_NOT_A_PROBLEM);
+    }
+
+    #[test]
+    fn watching_row_offers_dismiss_as_its_last_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = refact_buddy_core::operator_types::ProjectIdentity {
+            project_id: "watching-actions".into(),
+            canonical_root: dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let mut store = OperatorStore::open(dir.path(), &project).unwrap();
+        let (work, _) = seed_work(&mut store, &project, "watching-work", "provider_health");
+        let current = store.get_work_item(&work.id).unwrap().unwrap();
+        let mut watching = current.value;
+        watching.state = WorkItemState::Watching;
+        store
+            .upsert_work_item(&watching, Some(current.revision))
+            .unwrap();
+
+        let actions = actions_for_work(&store, &work.id).unwrap();
+        assert_eq!(
+            actions.last().unwrap().spec.action_id,
+            DISMISS_NOT_A_PROBLEM
+        );
+        assert_eq!(actions.last().unwrap().label, "Dismiss — not a problem");
+    }
+
+    #[test]
+    fn dismissing_watching_item_preserves_evidence_and_records_a_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = refact_buddy_core::operator_types::ProjectIdentity {
+            project_id: "watching-dismissal".into(),
+            canonical_root: dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let mut store = OperatorStore::open(dir.path(), &project).unwrap();
+        let (work, artifact) =
+            seed_work(&mut store, &project, "watching-dismiss", "provider_health");
+        let current = store.get_work_item(&work.id).unwrap().unwrap();
+        let mut watching = current.value;
+        watching.state = WorkItemState::Watching;
+        store
+            .upsert_work_item(&watching, Some(current.revision))
+            .unwrap();
+        let actions = actions_for_work(&store, &work.id).unwrap();
+        let action = actions.last().unwrap();
+        assert_eq!(action.spec.action_id, DISMISS_NOT_A_PROBLEM);
+
+        let execution = execute_action(
+            &mut store,
+            worker(),
+            &work.id,
+            DISMISS_NOT_A_PROBLEM,
+            dismissal_request(&project, action, "watching-dismiss-once"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.get_work_item(&work.id).unwrap().unwrap().value.state,
+            WorkItemState::Cancelled
+        );
+        assert_eq!(
+            store
+                .get_artifact_revision(&artifact.artifact_id, Some(artifact.revision))
+                .unwrap()
+                .unwrap()
+                .value,
+            artifact
+        );
+        assert_eq!(
+            store
+                .list_work_outcomes(&work.id, None, 10)
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        assert_eq!(execution.value.requester, dismissal_requester());
+        assert_eq!(
+            execution.value.status,
+            refact_buddy_core::operator_types::ActionExecutionState::Completed
+        );
+        assert_eq!(
+            store
+                .get_execution(&execution.value.execution_id)
+                .unwrap()
+                .unwrap(),
+            execution
+        );
+    }
+
+    #[test]
+    fn working_delivered_and_cancelled_rows_do_not_offer_dismiss() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = refact_buddy_core::operator_types::ProjectIdentity {
+            project_id: "dismiss-terminal-states".into(),
+            canonical_root: dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let mut store = OperatorStore::open(dir.path(), &project).unwrap();
+        for (id, state) in [
+            ("working", WorkItemState::Working),
+            ("delivered", WorkItemState::Delivered),
+            ("cancelled", WorkItemState::Cancelled),
+        ] {
+            let (work, _) = seed_work(&mut store, &project, id, "provider_health");
+            let current = store.get_work_item(&work.id).unwrap().unwrap();
+            let mut updated = current.value;
+            updated.state = state;
+            store
+                .upsert_work_item(&updated, Some(current.revision))
+                .unwrap();
+
+            let actions = actions_for_work(&store, &work.id).unwrap();
+            assert!(actions
+                .iter()
+                .all(|action| action.spec.action_id != DISMISS_NOT_A_PROBLEM));
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_watching_actions_match_per_row_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = refact_buddy_core::operator_types::ProjectIdentity {
+            project_id: "watching-batch".into(),
+            canonical_root: dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let mut store = OperatorStore::open(dir.path(), &project).unwrap();
+        let (work, _) = seed_work(
+            &mut store,
+            &project,
+            "watching-batch-work",
+            "provider_health",
+        );
+        let current = store.get_work_item(&work.id).unwrap().unwrap();
+        let mut watching = current.value;
+        watching.state = WorkItemState::Watching;
+        store
+            .upsert_work_item(&watching, Some(current.revision))
+            .unwrap();
+        let runtime =
+            super::super::outcome_runtime::OutcomeRuntime::from_store(store, project, worker());
+
+        let per_row = runtime.desk_actions(work.id.clone()).await.unwrap();
+        let batch = runtime
+            .desk_actions_batch(vec![work.id.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].error, None);
+        assert!(batch[0]
+            .actions
+            .iter()
+            .any(|action| action.spec.action_id == DISMISS_NOT_A_PROBLEM));
+        assert_eq!(
+            serde_json::to_value(&batch[0].actions).unwrap(),
+            serde_json::to_value(&per_row).unwrap()
+        );
+        runtime.shutdown().await;
     }
 }
 
@@ -764,7 +984,7 @@ fn check_links(
         format!("Retained source outcomes: {retained}/{}.", artifact.source_run_ids.len()),
         format!("Evidence metadata matches: {matched}/{} (including recorded digests, not live file hashes).", artifact.evidence.len()),
         format!("Provenance references match: {}.", if provenance_matches { "yes" } else { "no" }),
-        "Findings are not independently verified. Source files and URLs were not opened; no fix was applied.".into(),
+        "Findings are not independently verified.".into(),
     ]))
 }
 

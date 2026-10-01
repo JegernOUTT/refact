@@ -245,7 +245,7 @@
   padding: 0;
   background-color: transparent;
   font-size: unset;
-  line-height: var(--rf-line-tight);
+  line-height: var(--rf-line);
   vertical-align: unset;
 }
 

@@ -6,22 +6,19 @@ edition = "2021"
 [dependencies]
 refact-core = { path = "../refact-core" }
 
-async-trait = "0.1.73"
-chrono = { version = "0.4.31", features = ["serde"] }
+async-trait.workspace = true
+chrono.workspace = true
+log.workspace = true
 indexmap.workspace = true
-itertools.workspace = true
-log = "0.4.20"
-md5.workspace = true
-regex.workspace = true
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "charset", "http2"] }
-ropey.workspace = true
-rusqlite = { version = "0.31.0", features = ["bundled"] }
+reqwest.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
+sqlite-vec.workspace = true
 serde_json.workspace = true
-sqlite-vec = { version = "0.1.6" }
+tokio-rusqlite.workspace = true
 tokio.workspace = true
-tokio-rusqlite = "0.5.0"
-tokenizers.workspace = true
+regex.workspace = true
 tracing.workspace = true
+tokenizers.workspace = true
+zerocopy.workspace = true
 uuid.workspace = true
-zerocopy = "0.8.14"

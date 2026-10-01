@@ -1263,8 +1263,52 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn inherited_pipe_command() -> String {
-        shell_script("sleep 60 & printf 'parent-done'; exit 0")
+    struct InheritedPipeChildGuard {
+        pid_file: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl Drop for InheritedPipeChildGuard {
+        fn drop(&mut self) {
+            if let Ok(contents) = std::fs::read_to_string(&self.pid_file) {
+                if let Ok(pid) = contents.parse::<u32>() {
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn inherited_pipe_command(pid_file: &std::path::Path) -> String {
+        let pid_file = pid_file.to_string_lossy().replace('\'', "'\\''");
+        shell_script(&format!(
+            "sleep 60 & child=$!; printf '%s' \"$child\" > '{pid_file}'; printf 'parent-done'; exit 0"
+        ))
+    }
+
+    #[cfg(unix)]
+    async fn kill_and_wait_inherited_child(pid_file: &std::path::Path) {
+        let pid = std::fs::read_to_string(pid_file)
+            .expect("inherited child pid recorded")
+            .parse::<u32>()
+            .expect("valid inherited child pid");
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+        for _ in 0..200 {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            if stat.is_empty()
+                || stat
+                    .rsplit_once(") ")
+                    .is_some_and(|(_, fields)| fields.starts_with('Z'))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("inherited-pipe child {pid} did not exit after SIGKILL");
     }
 
     async fn assert_process_missing(process_id: u32) {
@@ -2095,16 +2139,24 @@ mod tests {
     #[tokio::test]
     async fn foreground_fails_promptly_when_descendant_keeps_pipe_open() {
         let registry = ExecRegistry::new();
+        let temp = tempfile::tempdir().unwrap();
+        let child = InheritedPipeChildGuard {
+            pid_file: temp.path().join("child.pid"),
+        };
+        let pid_file = &child.pid_file;
         let started = Instant::now();
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            registry.spawn(ExecSpawnRequest::foreground(inherited_pipe_command())),
+            registry.spawn(ExecSpawnRequest::foreground(inherited_pipe_command(
+                &pid_file,
+            ))),
         )
         .await
         .expect("foreground spawn must not hang when descendant holds pipe open")
         .unwrap();
 
         assert!(started.elapsed() < Duration::from_secs(3));
+        kill_and_wait_inherited_child(pid_file).await;
         match &result.snapshot.status {
             ExecStatus::Failed { message } => {
                 assert!(message.contains("output drain timed out"));
@@ -2125,8 +2177,15 @@ mod tests {
     #[tokio::test]
     async fn background_fails_when_descendant_keeps_pipe_open() {
         let registry = ExecRegistry::new();
+        let temp = tempfile::tempdir().unwrap();
+        let child = InheritedPipeChildGuard {
+            pid_file: temp.path().join("child.pid"),
+        };
+        let pid_file = &child.pid_file;
         let result = registry
-            .spawn(ExecSpawnRequest::background(inherited_pipe_command()))
+            .spawn(ExecSpawnRequest::background(inherited_pipe_command(
+                &pid_file,
+            )))
             .await
             .unwrap();
         assert_eq!(result.snapshot.status, ExecStatus::Running);
@@ -2139,6 +2198,7 @@ mod tests {
         .expect("background process must become terminal when descendant holds pipe open")
         .unwrap();
 
+        kill_and_wait_inherited_child(pid_file).await;
         match &snapshot.status {
             ExecStatus::Failed { message } => {
                 assert!(message.contains("output drain timed out"));

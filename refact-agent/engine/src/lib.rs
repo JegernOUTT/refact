@@ -223,7 +223,13 @@ pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
     tokio::fs::create_dir_all(&config_dir)
         .await
         .expect("failed to create cache dir");
-    let workspace_leases = acquire_startup_workspace_leases(&cache_dir, &cmdline);
+    let lease_cache_dir = cache_dir.clone();
+    let lease_cmdline = cmdline.clone();
+    let workspace_leases = tokio::task::spawn_blocking(move || {
+        acquire_startup_workspace_leases(&lease_cache_dir, &lease_cmdline)
+    })
+    .await
+    .expect("startup workspace lease acquisition task panicked");
     let (gcx, ask_shutdown_receiver) = global_context::create_global_context(
         cache_dir.clone(),
         config_dir.clone(),

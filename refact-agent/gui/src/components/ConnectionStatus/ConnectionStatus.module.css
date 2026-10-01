@@ -84,7 +84,7 @@
 
 .statusButton:disabled {
   cursor: default;
-  opacity: var(--rf-disabled-opacity);
+  opacity: var(--rf-motion-opacity-muted);
 }
 
 .statusButton:disabled:hover {

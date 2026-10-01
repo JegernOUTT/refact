@@ -1,7 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { Provider, useSelector } from "react-redux";
-import { Button as UiButton } from "../../src/components/ui";
+import { Badge, Button as UiButton } from "../../src/components/ui";
 import { Button, Flex, Text } from "@radix-ui/themes";
 
 import { setUpStore, type RootState } from "../../src/app/store";
@@ -58,6 +58,7 @@ import type {
   BuddyRuntimeEvent,
   BuddySettings,
   BuddySnapshot,
+  DiagnosticContext,
 } from "../../src/features/Buddy/types";
 import type {
   CapsResponse,
@@ -104,6 +105,9 @@ const operatorParam = new URLSearchParams(window.location.search).get(
 const sceneSpeechParam = new URLSearchParams(window.location.search).has(
   "scene_speech",
 );
+const recentErrorsFixtureParam = new URLSearchParams(
+  window.location.search,
+).has("recent_errors_fixture");
 const showcaseProject = {
   project_id: "showcase",
   canonical_root: "/workspace/refact",
@@ -271,6 +275,68 @@ const buddyRuntimeEvent: BuddyRuntimeEvent = {
   chat_id: "showcase-chat",
 };
 
+const buddyRecentErrorsFixture: BuddyRuntimeEvent[] = [
+  {
+    ...buddyRuntimeEvent,
+    id: "recent-error-title-summary",
+    title: "Model unavailable",
+    failure_summary: "Model unavailable",
+    created_at: new Date(Date.now() - 1000).toISOString(),
+  },
+  ...Array.from({ length: 3 }, (_, index) => ({
+    ...buddyRuntimeEvent,
+    id: `recent-error-repeated-${index}`,
+    title: "Provider unavailable",
+    failure_summary: "Provider unavailable — retry later",
+    created_at: new Date(Date.now() - 2000).toISOString(),
+  })),
+  ...Array.from({ length: 25 }, (_, index) => ({
+    ...buddyRuntimeEvent,
+    id: `recent-error-distinct-${index}`,
+    title: `Distinct warning ${index}`,
+    failure_summary: `Additional detail ${index}`,
+    created_at: new Date(Date.now() - 3000 - index * 1000).toISOString(),
+  })),
+];
+
+const buddyRecentErrorDiagnostics: DiagnosticContext[] =
+  recentErrorsFixtureParam
+    ? [
+        {
+          error_type: "model_unavailable",
+          error_message: "Model unavailable",
+          source_file: null,
+          tool_name: null,
+          chat_id: "showcase-chat",
+          diagnostic_id: "recent-error-diagnostic-model",
+          collected_at: new Date(Date.now() - 1000).toISOString(),
+          severity: "high",
+        },
+        ...Array.from({ length: 3 }, (_, index) => ({
+          error_type: "provider_unavailable",
+          error_message: "Provider unavailable — retry later",
+          source_file: null,
+          tool_name: null,
+          chat_id: "showcase-chat",
+          diagnostic_id: `recent-error-diagnostic-repeat-${index}`,
+          collected_at: new Date(Date.now() - 2000).toISOString(),
+          severity: "high" as const,
+        })),
+        ...Array.from({ length: 25 }, (_, index) => ({
+          error_type: `distinct_warning_${index}`,
+          error_message: `Additional detail ${index}`,
+          source_file: null,
+          tool_name: null,
+          chat_id: "showcase-chat",
+          diagnostic_id: `recent-error-diagnostic-distinct-${index}`,
+          collected_at: new Date(
+            Date.now() - 3000 - index * 1000,
+          ).toISOString(),
+          severity: "high" as const,
+        })),
+      ]
+    : [];
+
 const buddyConversations: BuddyConversationEntry[] = [
   {
     id: "showcase-buddy-chat",
@@ -296,6 +362,120 @@ const buddyConversations: BuddyConversationEntry[] = [
     workflow_id: "buddy_layout_watcher",
   },
 ];
+
+const activityFixtureParam = new URLSearchParams(window.location.search).has(
+  "activity_fixture",
+);
+const realConversationsFixtureParam = new URLSearchParams(
+  window.location.search,
+).has("conversations_fixture");
+const realConversationsFixture: BuddyConversationEntry[] = [
+  {
+    id: "memo_extraction",
+    kind: "system",
+    title: "Memo extraction",
+    created_at: "2026-09-24T14:14:29.963146380+00:00",
+    updated_at: "2026-09-24T14:14:29.963146380+00:00",
+    status: "failed",
+    message_count: 100,
+    icon: "🧠",
+    badge: "Memo",
+  },
+  {
+    id: "kg_enrich",
+    kind: "system",
+    title: "Knowledge graph enrichment",
+    created_at: "2026-09-24T06:54:38.312631790+00:00",
+    updated_at: "2026-09-24T06:54:38.312631790+00:00",
+    status: "failed",
+    message_count: 100,
+    icon: "📚",
+    badge: "Knowledge",
+  },
+  {
+    id: "kg_deprecate",
+    kind: "system",
+    title: "Knowledge cleanup",
+    created_at: "2026-09-24T05:54:38.312631790+00:00",
+    updated_at: "2026-09-24T05:54:38.312631790+00:00",
+    status: "failed",
+    message_count: 100,
+    icon: "📚",
+    badge: "Knowledge",
+  },
+  {
+    id: "commit_message",
+    kind: "workflow",
+    title: "Commit message generation",
+    created_at: "2026-09-22T18:50:59.124159204+00:00",
+    updated_at: "2026-09-22T18:50:59.124159204+00:00",
+    status: "failed",
+    message_count: 100,
+    icon: "🔄",
+    badge: "Commit Msg",
+  },
+  {
+    id: "55b749c2-540e-45f2-99ce-d852698a4f2a",
+    kind: "system",
+    title: "Privacy observation degraded",
+    created_at: "2026-09-21T12:51:39.536239200+00:00",
+    updated_at: "2026-09-21T12:51:39.536239200+00:00",
+    status: "active",
+    message_count: 1,
+    icon: "🔄",
+    badge: null,
+  },
+  {
+    id: "title_generation",
+    kind: "workflow",
+    title: "Title generation",
+    created_at: "2026-06-03T05:55:03.452956309+00:00",
+    updated_at: "2026-06-03T05:55:03.452956309+00:00",
+    status: "completed",
+    message_count: 100,
+    icon: "🔄",
+    badge: null,
+  },
+];
+const buddyActivityConversations: BuddyConversationEntry[] =
+  realConversationsFixtureParam
+    ? realConversationsFixture
+    : activityFixtureParam
+      ? Array.from({ length: 60 }, (_, index) => {
+          const workflowIndex = Math.floor(index / 12);
+          const ids = [
+            "refact_error_detective",
+            "buddy_pr_issue_matchmaker",
+            "kg_deprecate",
+            "privacy_observation_degraded",
+            "commit_message",
+          ];
+          const badges = [
+            "Error Detective",
+            "PR Matchmaker",
+            "Knowledge",
+            "Privacy observation degraded",
+            "Commit message",
+          ];
+          const id = ids[workflowIndex];
+          const badge = badges[workflowIndex];
+          const title =
+            index % 12 < 2
+              ? `${id.replace(/_/g, " ")} (${badge})`
+              : `${badge} report ${index}`;
+          return {
+            id: index % 12 < 2 ? id : `${id}-${index}`,
+            kind: "workflow",
+            title,
+            created_at: now,
+            updated_at: now,
+            status: "completed",
+            message_count: index === 0 ? 1 : 2,
+            icon: "⚙️",
+            badge,
+          };
+        })
+      : buddyConversations;
 
 const buddySnapshot: BuddySnapshot = {
   state: {
@@ -379,7 +559,9 @@ const buddySnapshot: BuddySnapshot = {
     buddy_dir: "/workspace/refact/.refact/buddy",
     settings_path: "/workspace/refact/.refact/buddy/settings.json",
   },
-  recent_diagnostics: [],
+  recent_diagnostics: recentErrorsFixtureParam
+    ? buddyRecentErrorDiagnostics
+    : [],
   active_speech: sceneSpeechParam
     ? {
         id: "showcase-scene-speech",
@@ -393,7 +575,9 @@ const buddySnapshot: BuddySnapshot = {
         speech_intent: "speech_insight",
       }
     : null,
-  runtime_queue: [buddyRuntimeEvent],
+  runtime_queue: recentErrorsFixtureParam
+    ? buddyRecentErrorsFixture
+    : [buddyRuntimeEvent],
   now_playing: null,
   pulse: buddyPulse,
   opportunities: [buddyOpportunity],
@@ -1490,7 +1674,7 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         }),
       );
     }
-    return Promise.resolve(jsonResponse(buddyConversations));
+    return Promise.resolve(jsonResponse(buddyActivityConversations));
   }
   if (path === "/v1/buddy/pulse")
     return Promise.resolve(jsonResponse(buddyPulse));
@@ -1745,6 +1929,11 @@ const preloadedState: Partial<RootState> = {
 };
 
 const store = setUpStore(preloadedState);
+if (recentErrorsFixtureParam) {
+  Object.defineProperty(window, "__routeShowcaseBuddyStore", {
+    get: () => store,
+  });
+}
 if (rebuildRoute) {
   Object.defineProperty(window, "__rebuildFixtureState", {
     get: () => store.getState().chat,
@@ -2351,6 +2540,42 @@ const ShowcaseSurface = () => {
 
   if (route === "privacy-block") {
     return <PrivacyBlockSurface />;
+  }
+
+  if (route === "badges") {
+    const tones = [
+      "default",
+      "accent",
+      "success",
+      "warning",
+      "danger",
+      "muted",
+    ] as const;
+    const variants = ["soft", "outline", "glass"] as const;
+    const sizes = ["xs", "sm", "md"] as const;
+
+    return (
+      <div>
+        {tones.flatMap((tone) =>
+          variants.flatMap((variant) =>
+            sizes.map((size) => (
+              <Badge
+                key={`${tone}-${variant}-${size}`}
+                data-testid="badge-contrast"
+                data-tone={tone}
+                data-variant={variant}
+                data-size={size}
+                tone={tone}
+                variant={variant}
+                size={size}
+              >
+                {`${tone} ${variant} ${size}`}
+              </Badge>
+            )),
+          ),
+        )}
+      </div>
+    );
   }
 
   if (chatDndRoute) {

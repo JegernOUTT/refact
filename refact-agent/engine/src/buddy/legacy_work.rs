@@ -17,6 +17,9 @@ use super::types::{
 use super::work_items::{problem_summary_from_title, stable_hash, SubjectKey, WorkItemDraft};
 
 pub const MAX_MIGRATION_BATCH: usize = 128;
+const LEGACY_SAVED_CONCLUSION: &str =
+    "Saved from an earlier Buddy. Nothing here has been checked or run.";
+const LEGACY_SUGGESTIONS_MARKER: &str = "\n\nThe earlier Buddy suggested:";
 /// Namespaces for retained legacy history. These are read-only projections of
 /// files the migration never edits or deletes.
 pub const LEGACY_RECEIPT_NAMESPACE: &str = "legacy_receipt";
@@ -225,7 +228,9 @@ fn plain_text(value: &str) -> String {
 /// language; the machine payload stays in the legacy file it came from.
 fn describe_action(action: &BuddyAction) -> Option<String> {
     let described = match action {
-        BuddyAction::OpenPage { .. } => "Open a Buddy page".to_string(),
+        BuddyAction::OpenPage { page } => {
+            return super::opportunity_copy::page_action(page).map(str::to_owned);
+        }
         BuddyAction::LaunchInvestigationChat { .. } => "Start an investigation chat".to_string(),
         BuddyAction::DraftSkill { label, .. } => format!("Draft a skill: {}", plain_line(label)),
         BuddyAction::DraftCommand { label, .. } => {
@@ -252,7 +257,7 @@ fn describe_action(action: &BuddyAction) -> Option<String> {
         }
         BuddyAction::AcceptQuest { .. } => "Accept a quest".to_string(),
         BuddyAction::OpenBuddyConversation { .. } => "Open a Buddy conversation".to_string(),
-        BuddyAction::Dismiss => "dismiss it".to_string(),
+        BuddyAction::Dismiss => return None,
     };
     (!described.trim().is_empty()).then_some(described)
 }
@@ -273,7 +278,33 @@ fn opportunity_body(opportunity: &BuddyOpportunity) -> String {
         .map(|suggestion| format!("- {suggestion}"))
         .collect::<Vec<_>>()
         .join("\n");
-    format!("{summary}\n\nThe earlier Buddy suggested:\n{rendered}")
+    format!("{summary}\n\nSuggested next steps:\n{rendered}")
+}
+
+fn opportunity_conclusion(summary: &str) -> String {
+    summary
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(plain_line)
+        .unwrap_or_default()
+}
+
+fn draft_conclusion(draft: &BuddyDraft) -> String {
+    let target = match draft.kind {
+        super::types::DraftKind::Skill => "a skill",
+        super::types::DraftKind::Command => "a command",
+        super::types::DraftKind::Delegate => "a subagent",
+        super::types::DraftKind::Mode => "a mode",
+        super::types::DraftKind::AgentsMd => "AGENTS.md",
+        super::types::DraftKind::DefaultsModel => "model defaults",
+        super::types::DraftKind::Hook => "a hook",
+        super::types::DraftKind::PulseReport => "a pulse report",
+    };
+    format!(
+        "This draft proposes changes to {target}: {}.",
+        plain_line(&draft.title)
+    )
 }
 
 /// A legacy status is the user's own last answer, so it still decides the state.
@@ -382,9 +413,11 @@ pub fn migrate_batch(
             "legacy_draft",
             &draft.id,
             &sanitize_title(&draft.title),
+            &draft_conclusion(draft),
             &body,
             &draft.created_at.to_rfc3339(),
             WorkItemState::NeedsAttention,
+            super::opportunity_labels::ImportTriage::Draft(draft.kind),
         )?;
         progress.record(imported);
     }
@@ -436,7 +469,21 @@ pub fn migrate_batch(
                 ("legacy_opportunity", owner)
             }
         };
-        let imported = import_record(store, worker, kind, &id, &title, &body, &created_at, state)?;
+        let imported = import_record(
+            store,
+            worker,
+            kind,
+            &id,
+            &title,
+            &opportunity_conclusion(&opportunity.summary),
+            &body,
+            &created_at,
+            state,
+            super::opportunity_labels::ImportTriage::Opportunity {
+                priority: opportunity.priority,
+                kind: opportunity.kind,
+            },
+        )?;
         progress.record(imported);
     }
     Ok(progress)
@@ -776,9 +823,11 @@ fn import_record(
     kind: &str,
     id: &str,
     title: &str,
+    conclusion: &str,
     body: &str,
     created_at: &str,
     state: WorkItemState,
+    triage: super::opportunity_labels::ImportTriage,
 ) -> Result<bool, OperatorStoreError> {
     let project = store.identity().clone();
     let subject = SubjectKey::new(&project, kind, id, "legacy-import-v1", "1")
@@ -786,10 +835,25 @@ fn import_record(
     let current = store.get_work_item(&subject.work_item_id())?;
     let current_artifact = store.get_artifact_revision(&subject.artifact_id(), None)?;
     let title = super::actor::redact_sensitive(title);
+    let conclusion = super::actor::redact_sensitive(conclusion);
     let body = super::actor::redact_sensitive(body);
+    let uncertainty = super::opportunity_copy::uncertainty_for_body(body.trim());
     if current_artifact.as_ref().is_some_and(|artifact| {
-        artifact.value.title == title.trim() && artifact.value.body == body.trim()
+        artifact.value.title == title.trim()
+            && artifact.value.conclusion == conclusion.trim()
+            && artifact.value.body == body.trim()
+            && artifact.value.uncertainty.as_deref() == Some(uncertainty)
     }) {
+        if let Some(current) = &current {
+            let severity = super::opportunity_labels::severity_for_import(triage);
+            let scope = super::opportunity_labels::scope_for_import(triage).map(str::to_owned);
+            if current.value.severity != severity || current.value.scope != scope {
+                let mut updated = current.value.clone();
+                updated.severity = severity;
+                updated.scope = scope;
+                store.upsert_work_item(&updated, Some(current.revision))?;
+            }
+        }
         return Ok(false);
     }
     let revision = current_artifact
@@ -821,9 +885,9 @@ fn import_record(
         state,
         native_sources: vec![],
         last_material_change_at: created_at.into(),
-        severity: Some(refact_buddy_core::operator_types::WorkItemSeverity::Unknown),
+        severity: super::opportunity_labels::severity_for_import(triage),
         problem_summary: problem_summary_from_title(&title),
-        scope: None,
+        scope: super::opportunity_labels::scope_for_import(triage).map(str::to_owned),
     }
     .build()
     .map_err(|_| OperatorStoreError::Conflict("invalid legacy work item"))?;
@@ -831,11 +895,11 @@ fn import_record(
         subject,
         source_run_ids: vec![outcome.run_id.clone()],
         title,
-        conclusion: "Saved from an earlier Buddy. Nothing here has been checked or run.".into(),
+        conclusion,
         delta: String::new(),
         body,
         // The untrusted fact itself lives on provenance below, which the UI can badge.
-        uncertainty: Some("Kept for reference only — Buddy cannot act on it.".into()),
+        uncertainty: Some(uncertainty.into()),
         proposed_action_ids: vec![],
         evidence: vec![],
     }
@@ -865,6 +929,165 @@ fn import_record(
         Some(&artifact),
     )?;
     Ok(true)
+}
+
+pub fn rerender_legacy_copy(
+    store: &mut OperatorStore,
+    worker: &WorkerIdentity,
+) -> Result<usize, OperatorStoreError> {
+    let mut after = None;
+    let mut candidates = Vec::new();
+    loop {
+        let page = store.list_work_items(after, 200)?;
+        candidates.extend(page.entries.into_iter().filter(|work| {
+            matches!(
+                work.value.subject.resource_kind.as_str(),
+                "legacy_opportunity" | "legacy_draft"
+            )
+        }));
+        after = page.next_after;
+        if after.is_none() {
+            break;
+        }
+    }
+
+    let mut rerendered = 0;
+    let mut unrecognised = 0;
+    for stored in candidates {
+        let work = stored.value;
+        let (Some(artifact_id), Some(artifact_revision)) = (
+            work.current_artifact_id.as_deref(),
+            work.current_artifact_revision,
+        ) else {
+            continue;
+        };
+        let Some(current_artifact) =
+            store.get_artifact_revision(artifact_id, Some(artifact_revision))?
+        else {
+            continue;
+        };
+        if current_artifact.value.conclusion != LEGACY_SAVED_CONCLUSION {
+            continue;
+        }
+
+        let subject = match SubjectKey::new(
+            store.identity(),
+            &work.subject.resource_kind,
+            &work.subject.resource_id,
+            "legacy-import-v1",
+            "1",
+        ) {
+            Ok(subject)
+                if subject.work_item_id() == work.id
+                    && Some(subject.artifact_id()) == work.current_artifact_id =>
+            {
+                subject
+            }
+            _ => {
+                unrecognised += 1;
+                continue;
+            }
+        };
+        let (body, conclusion) = match work.subject.resource_kind.as_str() {
+            "legacy_opportunity" => {
+                let (summary, suggestions) = match current_artifact
+                    .value
+                    .body
+                    .split_once(LEGACY_SUGGESTIONS_MARKER)
+                {
+                    Some((summary, suggestions)) => (summary.trim(), suggestions),
+                    None => (current_artifact.value.body.as_str(), ""),
+                };
+                let steps = suggestions
+                    .lines()
+                    .filter(|line| {
+                        line.starts_with("- ")
+                            && *line != "- dismiss it"
+                            && *line != "- Open a Buddy page"
+                    })
+                    .collect::<Vec<_>>();
+                let body = if steps.is_empty() {
+                    summary.to_string()
+                } else {
+                    format!("{summary}\n\nSuggested next steps:\n{}", steps.join("\n"))
+                };
+                (body, opportunity_conclusion(summary))
+            }
+            "legacy_draft" => {
+                let body = current_artifact.value.body.clone();
+                let conclusion = opportunity_conclusion(&body);
+                (body, conclusion)
+            }
+            _ => continue,
+        };
+        let uncertainty = super::opportunity_copy::uncertainty_for_body(&body).to_string();
+        let next_revision =
+            current_artifact
+                .value
+                .revision
+                .checked_add(1)
+                .ok_or(OperatorStoreError::Conflict(
+                    "legacy artifact revision exhausted",
+                ))?;
+        let run_id = format!("legacy-import:{}:{next_revision}", subject.stable_hash());
+        let timestamp = work.last_material_change_at.clone();
+        let outcome = RunOutcome {
+            schema_version: OPERATOR_SCHEMA_VERSION_V1,
+            run_id: run_id.clone(),
+            work_id: work.id.clone(),
+            parent_run_id: None,
+            project: store.identity().clone(),
+            worker: worker.clone(),
+            origin: "legacy_import".into(),
+            workflow: None,
+            input_fingerprint: stable_hash(&[&current_artifact.value.title, &body]),
+            coverage: "Legacy proposal import only; effects and conclusions are unverified".into(),
+            started_at: timestamp.clone(),
+            ended_at: Some(timestamp),
+            status: RunStatus::Inconclusive,
+            evidence: vec![],
+            effects: vec![],
+            failure_class: None,
+        };
+        let artifact = ArtifactDraft {
+            subject,
+            source_run_ids: vec![run_id],
+            title: current_artifact.value.title.clone(),
+            conclusion,
+            delta: String::new(),
+            body,
+            uncertainty: Some(uncertainty),
+            proposed_action_ids: vec![],
+            evidence: vec![],
+        }
+        .materialize(
+            std::slice::from_ref(&outcome),
+            Some(&current_artifact.value),
+        )
+        .map_err(|_| OperatorStoreError::Conflict("legacy copy revision is invalid"))?;
+        let ArtifactMaterialization::Revision(mut artifact) = artifact else {
+            return Err(OperatorStoreError::Conflict(
+                "legacy copy revision unexpectedly folded",
+            ));
+        };
+        artifact.provenance.contains_untrusted_source = true;
+        let mut updated_work = work;
+        updated_work.current_artifact_revision = Some(artifact.revision);
+        store.append_outcome_work_item_artifact(
+            &outcome,
+            &updated_work,
+            Some(stored.revision),
+            Some(&artifact),
+        )?;
+        rerendered += 1;
+    }
+    if unrecognised > 0 {
+        tracing::warn!(
+            unrecognised,
+            "buddy: skipped stored legacy proposal copy with an unrecognised subject identity"
+        );
+    }
+    Ok(rerendered)
 }
 
 /// Compatibility projection; never copies legacy status/actions back over Work authority.
@@ -1013,7 +1236,7 @@ mod migration_regressions {
     }
 
     #[test]
-    fn retained_actions_remain_reference_only_and_do_not_duplicate() {
+    fn desk_actions_are_not_repeated_in_imported_body() {
         let root = tempfile::tempdir().unwrap();
         let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
         let input = opportunity(1);
@@ -1023,7 +1246,7 @@ mod migration_regressions {
             .get_artifact_revision(work.value.current_artifact_id.as_ref().unwrap(), None)
             .unwrap()
             .unwrap();
-        assert!(artifact.value.body.contains("dismiss"));
+        assert_eq!(artifact.value.body, input.summary);
         assert!(artifact.value.proposed_action_ids.is_empty());
         assert!(project_opportunity(&work, false)
             .proposed_actions
@@ -1090,6 +1313,305 @@ mod migration_regressions {
         assert!(!artifact.body.contains("\"kind\""));
         assert!(artifact.body.contains("- Patch AGENTS.md"));
         assert!(artifact.body.contains("- Tidy 97 memory entries"));
+    }
+
+    #[test]
+    fn current_opportunity_copy_reports_the_finding_and_only_useful_next_steps() {
+        current_opportunity_copy_reports_the_finding_and_only_useful_next_steps_with_conclusion(
+            "Default model not configured",
+        );
+    }
+
+    #[test]
+    fn default_models_action_is_not_dropped_from_the_imported_body() {
+        let input = opportunity_with(
+            "config_drift",
+            "Default model not configured",
+            "provider:default-model",
+            "new",
+            serde_json::json!([
+                {"kind": "open_page", "page": {"type": "default_models"}},
+                {"kind": "dismiss"}
+            ]),
+        );
+        let body = opportunity_body(&input);
+        assert_eq!(
+            body,
+            "Default model not configured\n\nSuggested next steps:\n- Open Default models in Settings"
+        );
+        assert_eq!(
+            super::super::opportunity_copy::uncertainty_for_body(&body),
+            "Buddy has not changed anything and cannot carry out these steps from here."
+        );
+    }
+
+    #[test]
+    fn dismissal_only_has_no_steps_and_uses_truthful_uncertainty() {
+        let input = opportunity_with(
+            "config_drift",
+            "A settings signal needs review",
+            "settings:review",
+            "new",
+            serde_json::json!([{"kind": "dismiss"}]),
+        );
+        let body = opportunity_body(&input);
+        assert_eq!(body, input.summary);
+        assert_eq!(
+            super::super::opportunity_copy::uncertainty_for_body(&body),
+            "Buddy noticed this from project signals and has not changed anything."
+        );
+    }
+
+    fn current_opportunity_copy_reports_the_finding_and_only_useful_next_steps_with_conclusion(
+        expected_conclusion: &str,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let input = opportunity_with(
+            "config_drift",
+            "Default model not configured\n\nMore context about the missing model.",
+            "provider:default-model",
+            "new",
+            serde_json::json!([
+                {"kind": "open_page", "page": {"type": "buddy"}},
+                {"kind": "dismiss"},
+                {"kind": "draft_skill", "draft_id": "skill-1", "label": "Safer shell"}
+            ]),
+        );
+        migrate_batch(&mut store, &worker(), &[input.clone()], &[]).unwrap();
+        let artifact = only_artifact(&store);
+        assert_eq!(artifact.conclusion, expected_conclusion);
+        assert_eq!(
+            artifact.body,
+            "Default model not configured\n\nMore context about the missing model.\n\nSuggested next steps:\n- Draft a skill: Safer shell"
+        );
+        for content in [
+            artifact.title.as_str(),
+            artifact.conclusion.as_str(),
+            artifact.body.as_str(),
+            artifact.uncertainty.as_deref().unwrap(),
+        ] {
+            assert!(!content.contains("earlier"), "unexpected copy: {content}");
+        }
+        assert_eq!(
+            artifact.uncertainty.as_deref(),
+            Some("Buddy has not changed anything and cannot carry out these steps from here.")
+        );
+        assert_eq!(
+            artifact.uncertainty.as_deref(),
+            Some(super::super::opportunity_copy::uncertainty_for_body(
+                &artifact.body
+            ))
+        );
+    }
+
+    #[test]
+    fn desk_redundant_actions_leave_only_the_opportunity_summary() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let input = opportunity_with(
+            "config_drift",
+            "Diff growing fast",
+            "git:diff-growing",
+            "new",
+            serde_json::json!([
+                {"kind": "open_page", "page": {"type": "buddy"}},
+                {"kind": "dismiss"}
+            ]),
+        );
+        migrate_batch(&mut store, &worker(), &[input], &[]).unwrap();
+        let artifact = only_artifact(&store);
+        assert_eq!(artifact.body, "Diff growing fast");
+        assert!(!artifact.body.contains("Open a Buddy page"));
+        assert!(!artifact.body.contains("dismiss it"));
+        assert_eq!(
+            artifact.uncertainty.as_deref(),
+            Some("Buddy noticed this from project signals and has not changed anything.")
+        );
+    }
+
+    #[test]
+    fn updated_migration_copy_appends_one_revision_then_becomes_a_noop() {
+        let root = tempfile::tempdir().unwrap();
+        let project = identity(root.path());
+        let mut store = OperatorStore::open(root.path(), &project).unwrap();
+        let input = opportunity_with(
+            "config_drift",
+            "Default model not configured",
+            "provider:default-model",
+            "new",
+            serde_json::json!([{"kind": "dismiss"}]),
+        );
+        let title = sanitize_title(&input.summary);
+        let producer_id = format!("producer:{}", stable_hash(&[&input.cooldown_key]));
+        import_record(
+            &mut store,
+            &worker(),
+            "legacy_opportunity",
+            &producer_id,
+            &title,
+            "Legacy saved report",
+            "Default model not configured\n\nSuggested next steps:\n- dismiss it",
+            &input.created_at.to_rfc3339(),
+            WorkItemState::NeedsAttention,
+            super::super::opportunity_labels::ImportTriage::Opportunity {
+                priority: input.priority,
+                kind: input.kind,
+            },
+        )
+        .unwrap();
+        let first = store.list_work_items(None, 10).unwrap().entries.remove(0);
+        let artifact_id = first.value.current_artifact_id.clone().unwrap();
+        let old_revision = store
+            .get_artifact_revision(&artifact_id, None)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            migrate_batch(&mut store, &worker(), &[input.clone()], &[])
+                .unwrap()
+                .imported,
+            1
+        );
+        let revised = store
+            .get_artifact_revision(&artifact_id, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(revised.value.revision, old_revision.value.revision + 1);
+        assert!(revised.change_seq > old_revision.change_seq);
+        let work = store.get_work_item(&first.value.id).unwrap().unwrap();
+        let artifact_seq = revised.change_seq;
+        let work_seq = work.change_seq;
+
+        let progress = migrate_batch(&mut store, &worker(), &[input], &[]).unwrap();
+        assert_eq!(progress.imported, 0);
+        assert_eq!(progress.already_imported, 1);
+        assert_eq!(
+            store
+                .get_artifact_revision(&artifact_id, None)
+                .unwrap()
+                .unwrap()
+                .change_seq,
+            artifact_seq
+        );
+        assert_eq!(
+            store
+                .get_work_item(&first.value.id)
+                .unwrap()
+                .unwrap()
+                .change_seq,
+            work_seq
+        );
+    }
+
+    #[test]
+    fn existing_opportunity_gets_one_copy_revision_then_becomes_a_noop() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let input = opportunity_with(
+            "config_drift",
+            "Default model not configured",
+            "provider:default-model",
+            "new",
+            serde_json::json!([
+                {"kind": "open_page", "page": {"type": "default_models"}},
+                {"kind": "dismiss"}
+            ]),
+        );
+        let producer_id = format!("producer:{}", stable_hash(&[&input.cooldown_key]));
+        let old_body = "Default model not configured";
+        import_record(
+            &mut store,
+            &worker(),
+            "legacy_opportunity",
+            &producer_id,
+            &sanitize_title(&input.summary),
+            &opportunity_conclusion(&input.summary),
+            old_body,
+            &input.created_at.to_rfc3339(),
+            WorkItemState::NeedsAttention,
+            super::super::opportunity_labels::ImportTriage::Opportunity {
+                priority: input.priority,
+                kind: input.kind,
+            },
+        )
+        .unwrap();
+        let original = store.list_work_items(None, 10).unwrap().entries.remove(0);
+        let artifact_id = original.value.current_artifact_id.clone().unwrap();
+        let original_revision = store
+            .get_artifact_revision(&artifact_id, None)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            migrate_batch(&mut store, &worker(), &[input.clone()], &[])
+                .unwrap()
+                .imported,
+            1
+        );
+        let revised = store
+            .get_artifact_revision(&artifact_id, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(revised.value.revision, original_revision.value.revision + 1);
+        assert_eq!(
+            revised.value.body,
+            "Default model not configured\n\nSuggested next steps:\n- Open Default models in Settings"
+        );
+        assert_eq!(
+            revised.value.uncertainty.as_deref(),
+            Some("Buddy has not changed anything and cannot carry out these steps from here.")
+        );
+        let work_seq = store
+            .get_work_item(&original.value.id)
+            .unwrap()
+            .unwrap()
+            .change_seq;
+        let artifact_seq = revised.change_seq;
+
+        let repeated = migrate_batch(&mut store, &worker(), &[input], &[]).unwrap();
+        assert_eq!(repeated.imported, 0);
+        assert_eq!(repeated.already_imported, 1);
+        assert_eq!(
+            store
+                .get_artifact_revision(&artifact_id, None)
+                .unwrap()
+                .unwrap()
+                .change_seq,
+            artifact_seq
+        );
+        assert_eq!(
+            store
+                .get_work_item(&original.value.id)
+                .unwrap()
+                .unwrap()
+                .change_seq,
+            work_seq
+        );
+    }
+
+    #[test]
+    fn draft_import_has_a_factual_conclusion() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let draft = BuddyDraft {
+            id: "draft-skill".into(),
+            kind: super::super::types::DraftKind::Skill,
+            title: "Safer shell workflow".into(),
+            yaml_or_json: "name: safer-shell".into(),
+            explanation: "Adds a reviewed shell workflow".into(),
+            created_at: chrono::Utc::now(),
+            expires_at: chrono::Utc::now() + chrono::Duration::days(1),
+        };
+        migrate_batch(&mut store, &worker(), &[], &[draft]).unwrap();
+        let artifact = only_artifact(&store);
+        assert_eq!(
+            artifact.conclusion,
+            "This draft proposes changes to a skill: Safer shell workflow."
+        );
+        assert!(!artifact.conclusion.contains("earlier"));
+        assert!(!artifact.conclusion.contains("reference only"));
+        assert!(!artifact.conclusion.contains("has not been checked"));
     }
 
     #[test]
@@ -1408,5 +1930,479 @@ mod migration_regressions {
             .unwrap();
         assert_eq!(doc.revision, 1);
         assert!(!doc.value.to_string().contains("retained-private-content"));
+    }
+
+    #[test]
+    fn live_opportunity_import_maps_priority_and_kind_on_the_admission_path() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let mut input = opportunity_with(
+            "git_hygiene",
+            "Review the growing diff",
+            "git:diff-growing",
+            "new",
+            serde_json::json!([]),
+        );
+        input.priority = BuddyPriority::Critical;
+
+        assert_eq!(
+            migrate_batch(&mut store, &worker(), &[input], &[])
+                .unwrap()
+                .imported,
+            1
+        );
+        let work = store.list_work_items(None, 10).unwrap().entries.remove(0);
+        assert_eq!(
+            work.value.severity,
+            Some(refact_buddy_core::operator_types::WorkItemSeverity::Critical)
+        );
+        assert_eq!(work.value.scope.as_deref(), Some("Git"));
+    }
+
+    #[test]
+    fn triage_import_repair_is_idempotent_without_an_artifact_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let mut input = opportunity_with(
+            "provider_tuning",
+            "Reconnect the provider",
+            "provider:reconnect",
+            "new",
+            serde_json::json!([]),
+        );
+        input.priority = BuddyPriority::High;
+        migrate_batch(&mut store, &worker(), &[input.clone()], &[]).unwrap();
+        let mut work = store.list_work_items(None, 10).unwrap().entries.remove(0);
+        let artifact_id = work.value.current_artifact_id.clone().unwrap();
+        work.value.severity = Some(refact_buddy_core::operator_types::WorkItemSeverity::Unknown);
+        work.value.scope = None;
+        work = store
+            .upsert_work_item(&work.value, Some(work.revision))
+            .unwrap();
+        let artifact_seq = store
+            .get_artifact_revision(&artifact_id, None)
+            .unwrap()
+            .unwrap()
+            .change_seq;
+
+        migrate_batch(&mut store, &worker(), &[input.clone()], &[]).unwrap();
+        let repaired = store.get_work_item(&work.value.id).unwrap().unwrap();
+        assert_eq!(
+            repaired.value.severity,
+            Some(refact_buddy_core::operator_types::WorkItemSeverity::High)
+        );
+        assert_eq!(repaired.value.scope.as_deref(), Some("Providers"));
+        let repaired_work_seq = repaired.change_seq;
+        let artifact = store
+            .get_artifact_revision(&artifact_id, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(artifact.value.revision, 1);
+        assert_eq!(artifact.change_seq, artifact_seq);
+
+        let repeated = migrate_batch(&mut store, &worker(), &[input], &[]).unwrap();
+        assert_eq!(repeated.imported, 0);
+        assert_eq!(repeated.already_imported, 1);
+        assert_eq!(
+            store
+                .get_work_item(&work.value.id)
+                .unwrap()
+                .unwrap()
+                .change_seq,
+            repaired_work_seq
+        );
+        let artifact = store
+            .get_artifact_revision(&artifact_id, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(artifact.value.revision, 1);
+        assert_eq!(artifact.change_seq, artifact_seq);
+    }
+
+    #[test]
+    fn drafts_keep_only_the_scope_implied_by_their_kind() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = OperatorStore::open(root.path(), &identity(root.path())).unwrap();
+        let draft = BuddyDraft {
+            id: "draft-pulse".into(),
+            kind: super::super::types::DraftKind::PulseReport,
+            title: "Workspace pulse".into(),
+            yaml_or_json: "{}".into(),
+            explanation: "A general workspace report".into(),
+            created_at: chrono::Utc::now(),
+            expires_at: chrono::Utc::now() + chrono::Duration::days(1),
+        };
+        migrate_batch(&mut store, &worker(), &[], &[draft]).unwrap();
+        let work = store.list_work_items(None, 10).unwrap().entries.remove(0);
+        assert_eq!(work.value.scope, None);
+        assert_eq!(
+            work.value.severity,
+            Some(refact_buddy_core::operator_types::WorkItemSeverity::Unknown)
+        );
+    }
+}
+
+#[cfg(test)]
+mod legacy_copy_regressions {
+    use super::*;
+
+    fn identity(root: &std::path::Path) -> ProjectIdentity {
+        ProjectIdentity {
+            project_id: "legacy-copy-fixture".into(),
+            canonical_root: root.to_string_lossy().into_owned(),
+        }
+    }
+
+    fn worker() -> WorkerIdentity {
+        WorkerIdentity {
+            worker_id: "worker".into(),
+            engine_instance_id: "engine".into(),
+            epoch: 1,
+        }
+    }
+
+    fn seed(
+        store: &mut OperatorStore,
+        kind: &str,
+        id: &str,
+        title: &str,
+        conclusion: &str,
+        body: &str,
+        state: WorkItemState,
+    ) -> String {
+        let subject = SubjectKey::new(store.identity(), kind, id, "legacy-import-v1", "1").unwrap();
+        let run_id = format!("legacy-import:{}:1", subject.stable_hash());
+        let timestamp = "2026-09-10T00:00:00Z";
+        let outcome = RunOutcome {
+            schema_version: OPERATOR_SCHEMA_VERSION_V1,
+            run_id: run_id.clone(),
+            work_id: subject.work_item_id(),
+            parent_run_id: None,
+            project: store.identity().clone(),
+            worker: worker(),
+            origin: "legacy_import".into(),
+            workflow: None,
+            input_fingerprint: stable_hash(&[title, body]),
+            coverage: "Legacy proposal import only; effects and conclusions are unverified".into(),
+            started_at: timestamp.into(),
+            ended_at: Some(timestamp.into()),
+            status: RunStatus::Inconclusive,
+            evidence: vec![],
+            effects: vec![],
+            failure_class: None,
+        };
+        let artifact = ArtifactDraft {
+            subject: subject.clone(),
+            source_run_ids: vec![run_id],
+            title: title.into(),
+            conclusion: conclusion.into(),
+            delta: String::new(),
+            body: body.into(),
+            uncertainty: Some("Kept for reference only — Buddy cannot act on it.".into()),
+            proposed_action_ids: vec![],
+            evidence: vec![],
+        }
+        .materialize(std::slice::from_ref(&outcome), None)
+        .unwrap();
+        let ArtifactMaterialization::Revision(mut artifact) = artifact else {
+            panic!("fixture artifact unexpectedly folded");
+        };
+        artifact.provenance.contains_untrusted_source = true;
+        let mut work = WorkItemDraft {
+            project: store.identity().clone(),
+            subject,
+            kind: kind.into(),
+            title: title.into(),
+            state,
+            native_sources: vec![],
+            last_material_change_at: timestamp.into(),
+            severity: Some(refact_buddy_core::operator_types::WorkItemSeverity::High),
+            problem_summary: problem_summary_from_title(title),
+            scope: Some("Configuration".into()),
+        }
+        .build()
+        .unwrap();
+        work.current_artifact_id = Some(artifact.artifact_id.clone());
+        work.current_artifact_revision = Some(artifact.revision);
+        store
+            .append_outcome_work_item_artifact(&outcome, &work, None, Some(&artifact))
+            .unwrap();
+        work.id
+    }
+
+    #[test]
+    fn stored_legacy_copy_refreshes_once_and_preserves_fields_and_desk_order() {
+        let root = tempfile::tempdir().unwrap();
+        let project = identity(root.path());
+        let mut store = OperatorStore::open(root.path(), &project).unwrap();
+        let ids = [
+            seed(
+                &mut store,
+                "legacy_opportunity",
+                "trajectory-counts",
+                "Too many chat trajectories",
+                LEGACY_SAVED_CONCLUSION,
+                "Too many chat trajectories\n\nThe earlier Buddy suggested:\n- Write a pulse report\n- dismiss it",
+                WorkItemState::NeedsAttention,
+            ),
+            seed(
+                &mut store,
+                "legacy_opportunity",
+                "warmup",
+                "Warm up this workspace",
+                LEGACY_SAVED_CONCLUSION,
+                "Warm up this workspace\n\nsunny starter: I am on the trail now.",
+                WorkItemState::Watching,
+            ),
+            seed(
+                &mut store,
+                "legacy_opportunity",
+                "only-ui-actions",
+                "A short finding",
+                LEGACY_SAVED_CONCLUSION,
+                "A short finding\n\nThe earlier Buddy suggested:\n- Open a Buddy page\n- dismiss it",
+                WorkItemState::Blocked,
+            ),
+            seed(
+                &mut store,
+                "legacy_draft",
+                "handbook-memory",
+                "Handbook: memory",
+                LEGACY_SAVED_CONCLUSION,
+                "Distilled 9061 recurring 'memory' insights into one handbook page.\n\n# Handbook: memory\n\nContent remains unchanged.",
+                WorkItemState::Cancelled,
+            ),
+        ];
+        let current_id = seed(
+            &mut store,
+            "legacy_opportunity",
+            "already-current",
+            "Already current",
+            "Already current",
+            "Already current",
+            WorkItemState::NeedsAttention,
+        );
+        let mut before = Vec::new();
+        let mut old_artifacts = Vec::new();
+        for id in ids.iter().chain(std::iter::once(&current_id)) {
+            let mut work = store.get_work_item(id).unwrap().unwrap();
+            work.value.severity =
+                Some(refact_buddy_core::operator_types::WorkItemSeverity::Critical);
+            work.value.scope = Some("Preserved scope".into());
+            work.value.problem_summary = Some("Preserved problem summary".into());
+            work.value.native_sources =
+                vec![refact_buddy_core::operator_types::NativeSourceIdentity {
+                    source_kind: refact_buddy_core::operator_types::NativeSourceKind::Check,
+                    source_id: format!("source:{id}"),
+                    source_version: "v7".into(),
+                }];
+            let work = store
+                .upsert_work_item(&work.value, Some(work.revision))
+                .unwrap();
+            old_artifacts.push(
+                store
+                    .get_artifact_revision(
+                        work.value.current_artifact_id.as_ref().unwrap(),
+                        work.value.current_artifact_revision,
+                    )
+                    .unwrap()
+                    .unwrap(),
+            );
+            before.push(work);
+        }
+        let desk_before = store
+            .search_work_items(None, 20, Some("needs_you"), None)
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|work| work.value.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rerender_legacy_copy(&mut store, &worker()).unwrap(), 4);
+
+        for (previous, old_artifact) in before.iter().zip(old_artifacts.iter()) {
+            let current = store.get_work_item(&previous.value.id).unwrap().unwrap();
+            assert_eq!(current.value.state, previous.value.state);
+            assert_eq!(current.value.severity, previous.value.severity);
+            assert_eq!(current.value.scope, previous.value.scope);
+            assert_eq!(
+                current.value.problem_summary,
+                previous.value.problem_summary
+            );
+            assert_eq!(current.value.native_sources, previous.value.native_sources);
+            assert_eq!(current.value.title, previous.value.title);
+            assert_eq!(
+                current.value.last_material_change_at,
+                previous.value.last_material_change_at
+            );
+            assert_eq!(
+                current.value.current_artifact_id,
+                previous.value.current_artifact_id
+            );
+            let expected_revision =
+                old_artifact.value.revision + u32::from(previous.value.id != current_id);
+            assert_eq!(
+                current.value.current_artifact_revision,
+                Some(expected_revision)
+            );
+            assert!(store
+                .get_artifact_revision(
+                    current.value.current_artifact_id.as_ref().unwrap(),
+                    Some(old_artifact.value.revision),
+                )
+                .unwrap()
+                .is_some());
+        }
+
+        let revised = |index: usize, store: &OperatorStore| {
+            let work = store.get_work_item(&ids[index]).unwrap().unwrap();
+            store
+                .get_artifact_revision(
+                    work.value.current_artifact_id.as_ref().unwrap(),
+                    work.value.current_artifact_revision,
+                )
+                .unwrap()
+                .unwrap()
+                .value
+        };
+        let opportunity = revised(0, &store);
+        assert_eq!(
+            opportunity.body,
+            "Too many chat trajectories\n\nSuggested next steps:\n- Write a pulse report"
+        );
+        assert_eq!(opportunity.conclusion, "Too many chat trajectories");
+        assert_eq!(
+            opportunity.uncertainty.as_deref(),
+            Some("Buddy has not changed anything and cannot carry out these steps from here.")
+        );
+        let no_marker = revised(1, &store);
+        assert_eq!(
+            no_marker.body,
+            "Warm up this workspace\n\nsunny starter: I am on the trail now."
+        );
+        assert_eq!(no_marker.conclusion, "Warm up this workspace");
+        assert_eq!(
+            no_marker.uncertainty.as_deref(),
+            Some("Buddy noticed this from project signals and has not changed anything.")
+        );
+        let no_steps = revised(2, &store);
+        assert_eq!(no_steps.body, "A short finding");
+        assert_eq!(
+            no_steps.uncertainty.as_deref(),
+            Some("Buddy noticed this from project signals and has not changed anything.")
+        );
+        let draft = revised(3, &store);
+        assert_eq!(
+            draft.body,
+            "Distilled 9061 recurring 'memory' insights into one handbook page.\n\n# Handbook: memory\n\nContent remains unchanged."
+        );
+        assert_eq!(
+            draft.conclusion,
+            "Distilled 9061 recurring 'memory' insights into one handbook page."
+        );
+        assert_eq!(
+            draft.uncertainty.as_deref(),
+            Some("Buddy noticed this from project signals and has not changed anything.")
+        );
+        assert!(opportunity.provenance.contains_untrusted_source);
+        assert_eq!(
+            store
+                .list_work_outcomes(&ids[0], None, 10)
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .get_work_item(&current_id)
+                .unwrap()
+                .unwrap()
+                .value
+                .current_artifact_revision,
+            Some(1)
+        );
+        assert_eq!(
+            store
+                .search_work_items(None, 20, Some("needs_you"), None)
+                .unwrap()
+                .entries
+                .into_iter()
+                .map(|work| work.value.id)
+                .collect::<Vec<_>>(),
+            desk_before
+        );
+        assert_eq!(rerender_legacy_copy(&mut store, &worker()).unwrap(), 0);
+        assert_eq!(
+            store
+                .list_artifact_revisions(
+                    before[0].value.current_artifact_id.as_ref().unwrap(),
+                    None,
+                    10,
+                )
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn outcome_runtime_open_refreshes_legacy_copy_once() {
+        let root = tempfile::tempdir().unwrap();
+        let project = identity(root.path());
+        let worker = worker();
+        let mut store = OperatorStore::open(root.path(), &project).unwrap();
+        let id = seed(
+            &mut store,
+            "legacy_opportunity",
+            "open-time-copy",
+            "Stored finding",
+            LEGACY_SAVED_CONCLUSION,
+            "Stored finding\n\nThe earlier Buddy suggested:\n- dismiss it",
+            WorkItemState::NeedsAttention,
+        );
+        drop(store);
+
+        let runtime = super::super::outcome_runtime::OutcomeRuntime::open(
+            root.path(),
+            project.clone(),
+            worker.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            runtime
+                .get_work_item(id.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .value
+                .current_artifact_revision,
+            Some(2)
+        );
+        runtime.shutdown().await;
+        let reopened =
+            super::super::outcome_runtime::OutcomeRuntime::open(root.path(), project, worker)
+                .unwrap();
+        assert_eq!(
+            reopened
+                .get_work_item(id.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .value
+                .current_artifact_revision,
+            Some(2)
+        );
+        assert_eq!(
+            reopened
+                .list_work_outcomes(id, None, 10)
+                .await
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+        reopened.shutdown().await;
     }
 }

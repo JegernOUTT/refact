@@ -4,22 +4,22 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-base64 = "0.22.1"
-chrono = { version = "0.4.31", features = ["serde"] }
+base64.workspace = true
+chrono.workspace = true
 refact-chat-api = { path = "../refact-chat-api" }
 refact-core = { path = "../refact-core" }
 refact-integrations = { path = "../refact-integrations" }
-headless_chrome = "1.0.16"
-image = "0.25.2"
-regex = "1.9.5"
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "form", "stream", "rustls", "charset", "http2"] }
+headless_chrome.workspace = true
+regex.workspace = true
+reqwest.workspace = true
 serde.workspace = true
+serde_yaml.workspace = true
 serde_json.workspace = true
-serde_yaml = "0.9.31"
-tracing.workspace = true
 tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
-url = "2"
+url.workspace = true
+tracing.workspace = true
+image.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

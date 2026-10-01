@@ -66,7 +66,8 @@ use crate::providers::http::{
     handle_v1_provider_oauth_start, handle_v1_provider_remove_custom_model,
     handle_v1_provider_remove_custom_model_post, handle_v1_provider_schema,
     handle_v1_provider_quota, handle_v1_provider_quotas, handle_v1_provider_update,
-    handle_v1_provider_usage, handle_v1_provider_usage_redeem, handle_v1_providers_list,
+    handle_v1_provider_usage, handle_v1_provider_usage_redeem, handle_v1_provider_usage_resets,
+    handle_v1_providers_list,
 };
 
 use crate::http::routers::v1::vecdb::{
@@ -533,6 +534,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route(
             "/providers/:name/usage/redeem",
             post(handle_v1_provider_usage_redeem),
+        )
+        .route(
+            "/providers/:name/usage/resets",
+            get(handle_v1_provider_usage_resets),
         )
         .route(
             "/providers/:name/oauth/start",
@@ -1177,6 +1182,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             get(buddy_operator::handle_v1_buddy_operator_work_list),
         )
         .route(
+            "/buddy/work/actions",
+            get(buddy_operator::handle_v1_buddy_operator_actions_batch),
+        )
+        .route(
             "/buddy/decisions/current",
             get(buddy_decisions::handle_current_decisions),
         )
@@ -1446,4 +1455,33 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .layer(axum::Extension(rl))
         .layer(axum::middleware::from_fn(request_logging_middleware))
         .with_state(app_state)
+}
+
+#[cfg(test)]
+mod router_tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    use super::make_v1_router;
+    use crate::app_state::AppState;
+
+    #[tokio::test]
+    async fn batch_actions_is_matched_before_the_work_id_route() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let router = make_v1_router(app.clone()).with_state(app);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/buddy/work/actions?ids=missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("buddy operator runtime is unavailable"));
+    }
 }

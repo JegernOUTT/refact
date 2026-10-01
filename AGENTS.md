@@ -44,7 +44,7 @@ cargo test --lib && cargo test --doc
 cargo build --release
 ```
 
-⚠️ **First build compiles ~85 crates + 7 tree-sitter parsers + SQLite. Expect 10-20 minutes cold.** Incremental builds are much faster. CI runs `cargo test --release` on 7 platform targets.
+⚠️ **First build compiles ~85 crates + 7 tree-sitter parsers + SQLite. Expect 10-20 minutes cold.** Incremental builds are much faster. CI runs `ci-test` correctness checks on Linux x86_64, Windows x86_64, and macOS arm64; distribution jobs build `ci-release` across supported targets.
 
 Python integration tests (`tests/*.py`) require a running `refact-lsp` instance — don't run them as a quick check.
 
@@ -92,7 +92,8 @@ If you changed **both**: run both sets.
 
 | Workflow | Trigger paths | Checks |
 |---|---|---|
-| `agent_engine_build` | `refact-agent/engine/**` | `cargo test --release` on 7 targets (Win/Linux/macOS × x86_64/aarch64) |
+| `agent_engine_check` | `refact-agent/engine/**` | Linux x86_64 `ci-test` library, integration, daemon E2E, and documentation tests; Windows x86_64/macOS arm64 platform tests on PRs, tags, and dispatch |
+| `agent_engine_build` | `refact-agent/engine/**` | `ci-release` distribution builds for Windows/Linux/macOS targets; tests run in `agent_engine_check` |
 | `agent_gui_build` | `refact-agent/gui/**` | `npm test` → `format:check` → `types` → `lint` → `build` (Node LTS + latest) |
 | `server_build` | `refact-server/**` | Docker multi-arch build |
 | `docs_build` | `docs/**` | Docker build + push |
@@ -174,7 +175,7 @@ parallel-safe (unlike a shared `CARGO_TARGET_DIR`, which locks).
 - `CARGO_INCREMENTAL=0` is **required** for sccache to cache. Trade-off: slightly
   slower single-worktree incremental rebuilds, much faster cold cross-worktree builds.
 - npm cache (`~/.npm`) is already shared; use `npm ci --prefer-offline` in worktrees.
-- Optional: `mold` linker (uncomment in `refact-agent/engine/.cargo/config.toml`).
+- Optional mold linking: install mold (`apt install mold` on Ubuntu), then uncomment the `-B/usr/libexec/mold` rustflag in `refact-agent/engine/.cargo/config.toml` (adjust the path for your distro); Rust ≥1.90's default rust-lld already links in 2.7–3.4 s, while mold saves about 2 s per link.
 
 ### Issues = WHAT, task planner = HOW
 

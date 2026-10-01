@@ -51,6 +51,7 @@
   align-items: center;
   align-self: flex-start;
   flex-wrap: wrap;
+  max-width: 100%;
   gap: var(--rf-space-1);
   padding: 0;
   border: var(--rf-hairline) solid var(--rf-border);
@@ -133,11 +134,11 @@
 
 .item {
   display: grid;
-  grid-template-columns: minmax(0, max-content) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   column-gap: var(--rf-space-2);
   row-gap: var(--rf-space-1);
-  width: fit-content;
+  width: 100%;
   max-width: 100%;
   min-width: 0;
   text-align: start;
@@ -194,13 +195,12 @@
 }
 
 .problemSummary,
-.scope,
-.actionVerb {
+.scope {
   color: var(--rf-color-muted);
 }
 
 .actionVerb {
-  color: var(--rf-color-accent);
+  color: var(--rf-color-muted);
 }
 
 .itemMeta {
@@ -232,7 +232,7 @@
 .summary:focus-visible,
 .search input:focus-visible,
 .search select:focus-visible {
-  outline: var(--rf-hairline) solid var(--rf-color-accent);
+  outline: var(--rf-focus-ring-w) solid var(--rf-color-accent);
   outline-offset: var(--rf-space-1);
 }
 
@@ -376,5 +376,37 @@
   .desk[data-detail-open="true"] .list,
   .placeholder {
     display: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .desk {
+    gap: var(--rf-space-2);
+    padding: var(--rf-space-2);
+  }
+
+  .views {
+    flex-wrap: wrap;
+    gap: 0;
+    max-width: 100%;
+    border: 0;
+  }
+
+  .views.views button {
+    padding-inline: var(--rf-space-2xs);
+  }
+
+  .views.views button span {
+    overflow: visible;
+  }
+
+  .list {
+    gap: var(--rf-space-1);
+    padding-left: 0;
+  }
+
+  .filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--rf-space-1);
   }
 }

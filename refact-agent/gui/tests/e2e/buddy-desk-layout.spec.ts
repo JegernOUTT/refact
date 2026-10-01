@@ -228,10 +228,10 @@ async function deskMetrics(page: Page) {
 }
 
 test.describe("Buddy Desk layout", () => {
-  test("row measure and chevron remain legible at every desktop width", async ({
-    page,
-  }) => {
-    for (const width of [768, 1280, 1600]) {
+  for (const width of [768, 1280, 1600]) {
+    test(`row measure and chevron remain legible at ${width}px`, async ({
+      page,
+    }) => {
       await openBuddy(page, width);
       const metrics = await deskMetrics(page);
       expect(
@@ -252,13 +252,13 @@ test.describe("Buddy Desk layout", () => {
           `${width}px triaged row width ${metrics.rowWidth}`,
         ).toBeLessThanOrEqual(metrics.measure);
       }
-    }
-  });
+    });
+  }
 
-  test("Desk uses one content rail without narrow overflow in either theme", async ({
-    page,
-  }) => {
-    for (const theme of ["dark", "light"] as const) {
+  for (const theme of ["dark", "light"] as const) {
+    test(`Desk uses one content rail at 1280px in ${theme} theme`, async ({
+      page,
+    }) => {
       await openBuddy(page, 1280, theme);
       const desktop = await deskMetrics(page);
       const placeholder = page.locator(`${DESK} [class*='placeholder']`);
@@ -271,7 +271,11 @@ test.describe("Buddy Desk layout", () => {
         rails.length,
         `${theme} Desk left rails: ${rails.join(", ")}`,
       ).toBeLessThanOrEqual(2);
+    });
 
+    test(`Desk avoids narrow overflow at 360px in ${theme} theme`, async ({
+      page,
+    }) => {
       await openBuddy(page, 360, theme);
       const narrow = await deskMetrics(page);
       expect(
@@ -279,8 +283,8 @@ test.describe("Buddy Desk layout", () => {
         `${theme} 360px row fill ${narrow.fill}`,
       ).toBeGreaterThanOrEqual(0.6);
       expect(narrow.scrollWidth).toBeLessThanOrEqual(narrow.clientWidth + 1);
-    }
-  });
+    });
+  }
 
   test("switching views preserves the Desk's page geometry", async ({
     page,

@@ -172,7 +172,18 @@ pub(crate) struct WorkspaceLeaseOutcome {
     pub rejected: Vec<RejectedWorkspaceRoot>,
 }
 
-pub(crate) fn acquire_workspace_leases(
+pub(crate) async fn acquire_workspace_leases(
+    gcx: &Arc<GlobalContext>,
+    roots: &[PathBuf],
+) -> WorkspaceLeaseOutcome {
+    let gcx = gcx.clone();
+    let roots = roots.to_vec();
+    tokio::task::spawn_blocking(move || acquire_workspace_leases_blocking(&gcx, &roots))
+        .await
+        .expect("workspace lease acquisition task panicked")
+}
+
+fn acquire_workspace_leases_blocking(
     gcx: &Arc<GlobalContext>,
     roots: &[PathBuf],
 ) -> WorkspaceLeaseOutcome {
@@ -457,7 +468,7 @@ impl LanguageServer for LspBackend {
             }
         }
         let lease_outcome =
-            acquire_workspace_leases(&self.gcx, &canonical_workspace_roots(&folders));
+            acquire_workspace_leases(&self.gcx, &canonical_workspace_roots(&folders)).await;
         let folders = canonical_workspace_roots(&lease_outcome.accepted);
         // Deliberately non-fatal: refusing the whole session because one of several folders is
         // busy is worse than serving the rest, and the multi-root case is exactly when this fires.
@@ -653,7 +664,7 @@ impl LanguageServer for LspBackend {
             };
             removed.push(path);
         }
-        let lease_outcome = acquire_workspace_leases(&self.gcx, &added);
+        let lease_outcome = acquire_workspace_leases(&self.gcx, &added).await;
         // Same silent-drop pattern as initialize(): a folder added later must not disappear
         // without a word either.
         self.report_rejected_workspace_roots(&lease_outcome.rejected)
@@ -1060,7 +1071,7 @@ mod tests {
 
     /// The whole point of the fix: a busy root must come back as `rejected`, not vanish.
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn lsp_busy_workspace_root_is_reported_not_silently_dropped() {
         let _locks = LspLocksDirGuard::set();
         let gcx = make_lease_test_gcx(false).await;
@@ -1074,7 +1085,7 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = acquire_workspace_leases(&gcx, &[free_root.clone(), busy_root.clone()]);
+        let outcome = acquire_workspace_leases(&gcx, &[free_root.clone(), busy_root.clone()]).await;
 
         assert_eq!(outcome.accepted, vec![free_root]);
         assert_eq!(outcome.rejected.len(), 1, "busy root must be reported");
@@ -1094,7 +1105,7 @@ mod tests {
     /// The message a user actually sees: names the folder and the holder, and does not leak the
     /// sha256 lease path under the cache directory.
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn lsp_busy_workspace_root_message_names_folder_and_holder_without_cache_paths() {
         let _locks = LspLocksDirGuard::set();
         let gcx = make_lease_test_gcx(false).await;
@@ -1108,7 +1119,7 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = acquire_workspace_leases(&gcx, std::slice::from_ref(&busy_root));
+        let outcome = acquire_workspace_leases(&gcx, std::slice::from_ref(&busy_root)).await;
 
         let message = outcome.rejected[0].client_message();
         assert!(message.contains(&busy_root.display().to_string()));
@@ -1125,7 +1136,7 @@ mod tests {
     /// `--allow-shared-workspace` keeps its old behaviour exactly: the root is served and nothing
     /// is reported to the client.
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn lsp_allow_shared_workspace_still_accepts_a_busy_root() {
         let _locks = LspLocksDirGuard::set();
         let gcx = make_lease_test_gcx(true).await;
@@ -1137,7 +1148,7 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = acquire_workspace_leases(&gcx, std::slice::from_ref(&busy_root));
+        let outcome = acquire_workspace_leases(&gcx, std::slice::from_ref(&busy_root)).await;
 
         assert_eq!(outcome.accepted, vec![busy_root]);
         assert!(outcome.rejected.is_empty());
@@ -1148,14 +1159,14 @@ mod tests {
     /// root this engine already holds is still accepted rather than reported as busy against
     /// itself.
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn lsp_free_workspace_root_is_accepted_and_held() {
         let _locks = LspLocksDirGuard::set();
         let gcx = make_lease_test_gcx(false).await;
         let free = tempfile::tempdir().unwrap();
         let free_root = crate::files_correction::canonical_path(free.path().to_string_lossy());
 
-        let outcome = acquire_workspace_leases(&gcx, std::slice::from_ref(&free_root));
+        let outcome = acquire_workspace_leases(&gcx, std::slice::from_ref(&free_root)).await;
         assert_eq!(outcome.accepted, vec![free_root.clone()]);
         assert!(outcome.rejected.is_empty());
         assert!(
@@ -1164,7 +1175,7 @@ mod tests {
             "the lease must actually be held"
         );
 
-        let again = acquire_workspace_leases(&gcx, std::slice::from_ref(&free_root));
+        let again = acquire_workspace_leases(&gcx, std::slice::from_ref(&free_root)).await;
         assert_eq!(again.accepted, vec![free_root.clone()]);
         assert!(again.rejected.is_empty());
 

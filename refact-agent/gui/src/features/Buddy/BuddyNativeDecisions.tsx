@@ -74,7 +74,8 @@ function QuestionForm({
   const [error, setError] = useState(false);
   const [rechecking, setRechecking] = useState(false);
   const lock = useRef(false);
-  const visible = useIsDocumentVisible();
+  const refetchStatusRef = useRef<() => void>(() => undefined);
+  const visible = useIsDocumentVisible(() => refetchStatusRef.current());
   const status = useGetBuddyNativeQuestionQuery(
     {
       project_root: initial.project_root,
@@ -91,6 +92,9 @@ function QuestionForm({
     },
   );
   const question = status.currentData?.question;
+  refetchStatusRef.current = () => {
+    if (!status.error) void status.refetch();
+  };
   const pending =
     question?.status === "pending" &&
     question.asked_at_ms === initial.question.asked_at_ms;
@@ -331,8 +335,9 @@ function QuestionForm({
 }
 
 function Decisions({ identity }: { identity: string }) {
-  const visible = useIsDocumentVisible();
   const [halted, setHalted] = useState(false);
+  const refetchRef = useRef<() => void>(() => undefined);
+  const visible = useIsDocumentVisible(() => refetchRef.current());
   const query = useGetBuddyNativeDecisionsQuery(
     { endpoint_identity: identity },
     {
@@ -343,6 +348,9 @@ function Decisions({ identity }: { identity: string }) {
       refetchOnReconnect: true,
     },
   );
+  refetchRef.current = () => {
+    if (!halted && !query.error) void query.refetch();
+  };
   const work = useGetBuddyNativeWorkQuery(
     { endpoint_identity: identity },
     {
@@ -381,13 +389,6 @@ function Decisions({ identity }: { identity: string }) {
       ),
     );
   }, [snapshot]);
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void refetch();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [refetch]);
   const questions = rendered.filter(
     (question) => !snapshot || question.project_root === snapshot.project_root,
   );

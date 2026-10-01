@@ -5,7 +5,7 @@
   max-width: 200px;
   padding: 0 var(--rf-space-2);
   color: var(--rf-color-muted);
-  line-height: var(--rf-line-height-2);
+  line-height: var(--rf-line-2);
   vertical-align: middle;
   background: var(--rf-surface-1);
   border-radius: var(--rf-radius-chip);
@@ -22,13 +22,13 @@
 }
 
 .chip:focus-visible {
-  outline: var(--rf-focus-width) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-focus-offset);
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-space-1);
 }
 
 .disabled {
   cursor: default;
-  opacity: var(--rf-disabled-opacity);
+  opacity: var(--rf-motion-opacity-muted);
 }
 
 .icon {

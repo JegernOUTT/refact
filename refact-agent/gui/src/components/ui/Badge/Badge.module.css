@@ -119,3 +119,25 @@
 .muted {
   color: var(--rf-color-muted);
 }
+
+@supports (color: color-mix(in oklab, currentColor 85%, black)) {
+  :global([data-appearance="light"]) .variant-soft.accent,
+  :global(.light) .variant-soft.accent {
+    color: color-mix(in oklab, var(--rf-color-accent) 85%, black);
+  }
+
+  :global([data-appearance="light"]) .variant-soft.success,
+  :global(.light) .variant-soft.success {
+    color: color-mix(in oklab, var(--rf-color-success) 85%, black);
+  }
+
+  :global([data-appearance="light"]) .variant-soft.warning,
+  :global(.light) .variant-soft.warning {
+    color: color-mix(in oklab, var(--rf-color-warning) 85%, black);
+  }
+
+  :global([data-appearance="light"]) .variant-soft.danger,
+  :global(.light) .variant-soft.danger {
+    color: color-mix(in oklab, var(--rf-color-danger) 85%, black);
+  }
+}

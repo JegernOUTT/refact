@@ -50,7 +50,7 @@ impl BuddyJob for HealthWatcherJob {
                 None
             } else {
                 Some(BuddySuggestion {
-                    id: format!("health-no-models-{}", chrono::Utc::now().timestamp()),
+                    id: "health-no-models".to_string(),
                     suggestion_type: "health".to_string(),
                     title: "No AI models configured".to_string(),
                     description: "I couldn't find any completion or chat models. Head to Provider Settings to add one.".to_string(),
@@ -214,6 +214,21 @@ mod tests {
         assert!(result.suggestion.is_some());
         assert!(result.runtime_event.is_some());
         assert_eq!(result.last_result.as_deref(), Some("unhealthy"));
+    }
+
+    #[tokio::test]
+    async fn missing_models_condition_keeps_one_stable_suggestion_id() {
+        let job = HealthWatcherJob;
+        let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        gcx.model.caps.write().await.caps = Some(Arc::new(CodeAssistantCaps::default()));
+
+        let first = job
+            .execute(gcx.clone(), test_context(Some("healthy")))
+            .await;
+        let second = job.execute(gcx, test_context(Some("healthy"))).await;
+
+        assert_eq!(first.suggestion.unwrap().id, "health-no-models");
+        assert_eq!(second.suggestion.unwrap().id, "health-no-models");
     }
 
     #[tokio::test]

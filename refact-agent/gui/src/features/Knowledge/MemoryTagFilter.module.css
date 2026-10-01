@@ -131,7 +131,7 @@
 
 .chip:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-focus-offset);
+  outline-offset: var(--rf-space-1);
 }
 
 .chipLabel {
@@ -160,5 +160,5 @@
 
 .clear:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-focus-offset);
+  outline-offset: var(--rf-space-1);
 }

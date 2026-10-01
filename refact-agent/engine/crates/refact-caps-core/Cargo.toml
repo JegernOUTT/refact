@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 refact-core = { path = "../refact-core" }
-indexmap.workspace = true
 serde.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
 serde_json.workspace = true
-serde_yaml = "0.9.31"
-tokio = { workspace = true, features = ["sync"] }
+indexmap.workspace = true

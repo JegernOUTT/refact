@@ -1,3 +1,21 @@
+import { humanizeIdentifier } from "../../utils/displayNames";
+
+export function headline(title: string): string {
+  const trimmed = title.trim();
+  return (
+    trimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) ?? trimmed
+  );
+}
+
+export function sameText(a: string, b: string): boolean {
+  const normalize = (value: string) =>
+    value.trim().replace(/\s+/g, " ").toLowerCase();
+  return normalize(a) === normalize(b);
+}
+
 export function computeXpFill(xp: number, xpNext: number): number {
   if (!Number.isFinite(xp)) return 0;
   if (!Number.isFinite(xpNext)) return xp > 0 ? 100 : 0;
@@ -41,6 +59,49 @@ export function formatRelativeTime(ts: string | null | undefined): string {
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
   return `${Math.floor(hrs / 24)}d ago`;
+}
+
+export function formatReportTime(
+  ts: string | null | undefined,
+  now = Date.now(),
+): { relative: string; absolute: string | null } {
+  if (!ts) return { relative: "Unknown time", absolute: null };
+  const timestamp = Date.parse(ts);
+  if (!Number.isFinite(timestamp))
+    return { relative: "Unknown time", absolute: null };
+  const absolute = new Date(timestamp).toLocaleString();
+  const minutes = Math.floor(Math.abs(now - timestamp) / 60_000);
+  const direction = timestamp > now ? "from now" : "ago";
+  if (minutes < 1) return { relative: "just now", absolute };
+  if (minutes < 60)
+    return {
+      relative: `${minutes} min${minutes === 1 ? "" : "s"} ${direction}`,
+      absolute,
+    };
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24)
+    return {
+      relative: `${hours} hr${hours === 1 ? "" : "s"} ${direction}`,
+      absolute,
+    };
+  const days = Math.floor(hours / 24);
+  return {
+    relative: `${days} day${days === 1 ? "" : "s"} ${direction}`,
+    absolute,
+  };
+}
+
+export function humanizeResourceReference(
+  resourceKind: string,
+  resourceId: string,
+): string {
+  const opaque =
+    /^producer:/i.test(resourceId) ||
+    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(
+      resourceId,
+    ) ||
+    /[0-9a-f]{24,}/i.test(resourceId);
+  return humanizeIdentifier(opaque ? resourceKind : resourceId);
 }
 
 export function formatTimestamp(value: string | null | undefined): string {

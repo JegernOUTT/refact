@@ -6,10 +6,13 @@ use tracing::{info, warn};
 use reqwest::Client;
 use async_trait::async_trait;
 use tokio::sync::Mutex as AMutex;
-use select::predicate::{Attr, Name};
+use html5ever::tendril::TendrilSink;
+use html5ever::{parse_document, serialize};
 use html2text::render::text_renderer::{TaggedLine, TextDecorator};
+use markup5ever_rcdom::{Handle, RcDom, SerializableHandle};
 use serde_json::Value;
 use refact_chat_api::sanitize_http_url;
+use refact_at_web::html_dom::{attribute, descendant_nodes, element_name};
 
 use crate::at_commands::at_commands::{AtCommand, AtCommandsContext, AtParam};
 use crate::at_commands::execute_at::AtCommandMember;
@@ -335,7 +338,8 @@ impl TextDecorator for CustomTextConversion {
 }
 
 fn find_content(html: String) -> String {
-    let document = select::document::Document::from(html.as_str());
+    let document = parse_document(RcDom::default(), Default::default()).one(html.as_str());
+    let nodes = descendant_nodes(&document.document);
     let content_ids = vec![
         "content",
         "I_content",
@@ -344,17 +348,37 @@ fn find_content(html: String) -> String {
         "CONTENT",
     ];
     for id in content_ids {
-        if let Some(node) = document.find(Attr("id", id)).next() {
-            return node.html();
+        if let Some(node) = nodes
+            .iter()
+            .find(|node| attribute(node, "id").as_deref() == Some(id))
+        {
+            return serialize_node(node);
         }
     }
-    if let Some(node) = document.find(Name("article")).next() {
-        return node.html();
+    if let Some(node) = nodes
+        .iter()
+        .find(|node| element_name(node) == Some("article"))
+    {
+        return serialize_node(node);
     }
-    if let Some(node) = document.find(Name("main")).next() {
-        return node.html();
+    if let Some(node) = nodes.iter().find(|node| element_name(node) == Some("main")) {
+        return serialize_node(node);
     }
     html
+}
+
+fn serialize_node(node: &Handle) -> String {
+    let mut html = Vec::new();
+    serialize(
+        &mut html,
+        &SerializableHandle::from(node.clone()),
+        html5ever::serialize::SerializeOpts {
+            traversal_scope: html5ever::serialize::TraversalScope::IncludeNode,
+            ..Default::default()
+        },
+    )
+    .expect("serializing an HTML node to a byte vector cannot fail");
+    String::from_utf8(html).expect("HTML serialization emits UTF-8")
 }
 
 async fn fetch_html(url: &str, timeout: Duration) -> Result<WebFetchResult, String> {
@@ -421,6 +445,64 @@ async fn fetch_simple(url: &str) -> Result<WebFetchResult, String> {
 mod tests {
     use tracing::warn;
     use super::*;
+
+    #[test]
+    fn find_content_prefers_id_candidates_in_declared_order() {
+        let html = r#"
+            <div id="I_content">I content</div>
+            <div id="content">Main content</div>
+            <article>Article content</article>
+        "#;
+
+        let content = find_content(html.to_string());
+        assert!(content.contains("Main content"));
+        assert!(!content.contains("I content"));
+        assert!(!content.contains("Article content"));
+    }
+
+    #[test]
+    fn find_content_uses_first_matching_id_node() {
+        let html = r#"
+            <div id="content">First content</div>
+            <div id="content">Second content</div>
+        "#;
+
+        let content = find_content(html.to_string());
+        assert!(content.contains("First content"));
+        assert!(!content.contains("Second content"));
+    }
+
+    #[test]
+    fn find_content_falls_back_to_first_article() {
+        let html = r#"
+            <article>First article</article>
+            <article>Second article</article>
+            <main>Main content</main>
+        "#;
+
+        let content = find_content(html.to_string());
+        assert!(content.contains("First article"));
+        assert!(!content.contains("Second article"));
+        assert!(!content.contains("Main content"));
+    }
+
+    #[test]
+    fn find_content_falls_back_to_first_main() {
+        let html = r#"
+            <main>First main</main>
+            <main>Second main</main>
+        "#;
+
+        let content = find_content(html.to_string());
+        assert!(content.contains("First main"));
+        assert!(!content.contains("Second main"));
+    }
+
+    #[test]
+    fn find_content_returns_original_html_without_selection() {
+        let html = "<div>No preferred content</div>";
+        assert_eq!(find_content(html.to_string()), html);
+    }
 
     #[tokio::test]
     async fn test_execute_at_web_jina() {

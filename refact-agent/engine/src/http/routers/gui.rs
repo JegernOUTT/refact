@@ -387,10 +387,13 @@ mod tests {
         }
     }
 
-    fn largest_embedded_js_asset() -> String {
+    fn largest_embedded_text_asset() -> String {
         ChatGuiAsset::iter()
             .filter(|path| {
-                path.ends_with(".js") || path.ends_with(".cjs") || path.ends_with(".css")
+                path == INDEX_PATH
+                    || path.ends_with(".js")
+                    || path.ends_with(".cjs")
+                    || path.ends_with(".css")
             })
             .filter_map(|path| {
                 let size = ChatGuiAsset::get(path.as_ref())?.data.len();
@@ -398,12 +401,12 @@ mod tests {
             })
             .max()
             .map(|(_, path)| path)
-            .expect("embedded GUI assets are required to verify asset negotiation")
+            .expect("an embedded text asset is required to verify asset negotiation")
     }
 
     #[test]
     fn embedded_asset_response_negotiates_gzip_and_revalidation() {
-        let path = largest_embedded_js_asset();
+        let path = largest_embedded_text_asset();
         let asset = ChatGuiAsset::get(&path).expect("asset exists");
         let raw_len = asset.data.len();
         let etag = asset_etag(&asset);

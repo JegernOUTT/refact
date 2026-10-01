@@ -21,6 +21,8 @@ import {
   addOpportunity,
   addBuddySuggestion,
   defaultBuddySettings,
+  clearNowPlaying,
+  dequeueRuntimeEvent,
   selectHomeSnoozedUntil,
   selectSeenNotificationIds,
 } from "../features/Buddy/buddySlice";
@@ -56,6 +58,11 @@ import { useExecuteBuddyAction } from "../features/Buddy/hooks/useExecuteBuddyAc
 import { executeBuddyNavigation } from "../features/Buddy/executeBuddyAction";
 import { PALETTES, STAGES } from "../features/Buddy/constants";
 import { SETUP_MODES } from "../features/Setup/setupModes";
+import { buddyApi } from "../services/refact/buddy";
+import {
+  buddyOperatorApi,
+  buddyOperatorIdentity,
+} from "../services/refact/buddyOperator";
 import type {
   BuddyOpportunity,
   BuddySuggestion,
@@ -67,8 +74,10 @@ import type {
   BuddyConversationEntry,
   BuddyActivityEntry,
   BuddySpeechItem,
+  DiagnosticContext,
 } from "../features/Buddy/types";
 import type React from "react";
+import { act } from "react-dom/test-utils";
 
 const operatorStatus = (
   mode: "disabled" | "enabled" | "unavailable",
@@ -142,16 +151,19 @@ describe("BuddyHome single work authority", () => {
           style: "primary" as const,
         },
       ];
-      for (const Surface of [
-        () => <BuddyPanel />,
-        () => <BuddyChatCompanion chatId="producer-fixture" />,
-        () => <BuddySpeechCloud />,
-      ]) {
+      for (const [surfaceIndex, Surface] of (
+        [
+          () => <BuddyPanel />,
+          () => <BuddyChatCompanion chatId="producer-fixture" />,
+          () => <BuddySpeechCloud />,
+        ] as const
+      ).entries()) {
         const store = setUpStore({ ...CONFIG_STATE });
         store.dispatch(
           setBuddySnapshot(
             makeSnapshot(undefined, {
               active_speech: makeSpeech({
+                id: `speech-${mode}-${surfaceIndex}`,
                 text: "Saved cleanup advice",
                 created_at: new Date().toISOString(),
                 persistent: true,
@@ -160,6 +172,18 @@ describe("BuddyHome single work authority", () => {
             }),
           ),
         );
+        await store
+          .dispatch(
+            buddyOperatorApi.endpoints.getBuddyOperatorStatus.initiate(
+              buddyOperatorIdentity(store.getState()),
+            ),
+          )
+          .unwrap();
+        if (mode === "disabled") {
+          await store
+            .dispatch(buddyApi.endpoints.getOpportunities.initiate(undefined))
+            .unwrap();
+        }
         const view = render(<Surface />, { store });
         expect(
           await screen.findByText("Review cleanup candidates"),
@@ -283,6 +307,27 @@ describe("BuddyHome single work authority", () => {
     const store = setUpStore({ ...CONFIG_STATE });
     store.dispatch(setBuddySnapshot(makeSnapshot()));
     store.dispatch(push({ name: "buddy", draftId: "expired" }));
+    await Promise.all([
+      store
+        .dispatch(
+          buddyOperatorApi.endpoints.getBuddyLegacyDraftWork.initiate({
+            id: "expired",
+            project_id: "fixture",
+            endpoint_identity: buddyOperatorIdentity(store.getState()),
+          }),
+        )
+        .unwrap(),
+      store
+        .dispatch(
+          buddyOperatorApi.endpoints.getBuddyOperatorArtifact.initiate({
+            id: "saved-report",
+            revision: 1,
+            project_id: "fixture",
+            endpoint_identity: buddyOperatorIdentity(store.getState()),
+          }),
+        )
+        .unwrap(),
+    ]);
     render(<BuddyHome />, { store });
     expect(
       await screen.findByText("Retained proposal report"),
@@ -744,8 +789,12 @@ describe("AutonomousChats_groups_by_workflow_id", () => {
       { preloadedState: CONFIG_STATE },
     );
 
-    expect(screen.getByText("refact self critic")).toBeInTheDocument();
-    expect(screen.getByText("buddy memory garden")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Refact self critic" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Buddy memory garden" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Refact A")).toBeInTheDocument();
     expect(screen.getByText("Refact B")).toBeInTheDocument();
     expect(screen.getByText("Buddy A")).toBeInTheDocument();
@@ -1969,6 +2018,229 @@ describe("BuddyHome_operator_surface", () => {
     expect(screen.getByTestId("buddy-home-hero").className).not.toContain(
       "heroCardDemoted",
     );
+  });
+
+  it("keeps operator warnings visible while runtime events are dequeued and cleared", async () => {
+    const createdAt = new Date().toISOString();
+    const runtimeEvents = ["alpha", "beta", "gamma"].map((suffix) => ({
+      id: `persistent-warning-${suffix}`,
+      signal_type: "chat_error",
+      title: `Persistent warning ${suffix}`,
+      description: `Diagnostic details ${suffix}`,
+      source: "provider",
+      status: "failed",
+      failure_summary: `Diagnostic details ${suffix}`,
+      priority: "high",
+      created_at: createdAt,
+      chat_id: "persistent-warning-chat",
+    })) satisfies BuddyRuntimeEvent[];
+    const diagnostics = ["alpha", "beta", "gamma"].map((suffix) => ({
+      error_type: "provider_error",
+      error_message: `Diagnostic details ${suffix}`,
+      source_file: null,
+      tool_name: null,
+      chat_id: "persistent-warning-chat",
+      diagnostic_id: `persistent-diagnostic-${suffix}`,
+      collected_at: createdAt,
+      severity: "high",
+    })) satisfies DiagnosticContext[];
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get("*/v1/buddy/work", () => HttpResponse.json(envelope([]))),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(makePulse(), {
+          recent_diagnostics: diagnostics,
+          runtime_queue: runtimeEvents,
+          now_playing: runtimeEvents[0],
+        }),
+      ),
+    );
+
+    const actEnvironment = globalThis as typeof globalThis & {
+      IS_REACT_ACT_ENVIRONMENT?: boolean;
+    };
+    const previousActEnvironment = actEnvironment.IS_REACT_ACT_ENVIRONMENT;
+    actEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
+    try {
+      const { user } = render(<BuddyHome />, { store });
+      await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+      const list = await screen.findByRole("list", {
+        name: "Recent warnings",
+      });
+      expect(within(list).getAllByRole("listitem")).toHaveLength(3);
+
+      act(() => {
+        for (const _event of runtimeEvents) {
+          store.dispatch(dequeueRuntimeEvent());
+          store.dispatch(clearNowPlaying());
+        }
+      });
+      expect(store.getState().buddy.runtimeQueue).toHaveLength(0);
+      expect(store.getState().buddy.nowPlaying).toBeNull();
+      const currentList = screen.getByRole("list", {
+        name: "Recent warnings",
+      });
+      expect(within(currentList).getAllByRole("listitem")).toHaveLength(3);
+    } finally {
+      actEnvironment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+    }
+  });
+
+  it("keeps diagnostics out of legacy Recent errors and dismisses runtime ids", async () => {
+    const createdAt = new Date().toISOString();
+    const runtimeEvents = ["first", "second"].map((suffix) => ({
+      id: `legacy-runtime-${suffix}`,
+      signal_type: "chat_error",
+      title: `Legacy warning ${suffix}`,
+      description: `Runtime details ${suffix}`,
+      source: "provider",
+      status: "failed",
+      priority: "high",
+      created_at: createdAt,
+    })) satisfies BuddyRuntimeEvent[];
+    const dismissedIds: string[] = [];
+    server.use(
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("disabled")),
+      ),
+      http.get("*/v1/buddy/opportunities", () =>
+        HttpResponse.json({ opportunities: [] }),
+      ),
+      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
+      http.get("*/v1/stats/llm/summary", () =>
+        HttpResponse.json({
+          totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
+        }),
+      ),
+      http.get("*/v1/setup/status", () =>
+        HttpResponse.json({ configured: true, reasons: [], detail: {} }),
+      ),
+      http.post("*/v1/buddy/runtime/:id/dismiss", ({ params }) => {
+        dismissedIds.push(String(params.id));
+        return HttpResponse.json({ detail: "dismissed" });
+      }),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(makePulse(), {
+          runtime_queue: runtimeEvents,
+          recent_diagnostics: [
+            {
+              error_type: "provider_error",
+              error_message: "Diagnostic-only warning",
+              source_file: null,
+              tool_name: null,
+              chat_id: "diagnostic-only-chat",
+              diagnostic_id: "legacy-diagnostic-only",
+              collected_at: createdAt,
+              severity: "high",
+            },
+          ],
+        }),
+      ),
+    );
+
+    const { user } = render(<BuddyHome />, { store });
+    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+    const panel = await screen.findByTestId("buddy-recent-errors-panel");
+    expect(panel.querySelectorAll("[data-priority]")).toHaveLength(2);
+    expect(within(panel).getByText("Legacy warning first")).toBeInTheDocument();
+    expect(
+      within(panel).getByText("Legacy warning second"),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).queryByText("Diagnostic-only warning"),
+    ).not.toBeInTheDocument();
+
+    for (const event of runtimeEvents) {
+      const row = within(panel)
+        .getByText(event.title)
+        .closest<HTMLElement>("[data-priority]");
+      if (!row) throw new Error("Expected a legacy runtime warning row");
+      await user.click(within(row).getByRole("button", { name: "Shoo" }));
+      await waitFor(() => {
+        const currentEvent = store
+          .getState()
+          .buddy.runtimeQueue.find((candidate) => candidate.id === event.id);
+        const activeEvent = store.getState().buddy.nowPlaying;
+        expect(currentEvent?.dismissed ?? activeEvent?.dismissed).toBe(true);
+      });
+    }
+    expect(dismissedIds).toEqual(runtimeEvents.map((event) => event.id));
+  });
+
+  it("limits operator diagnostics to six hours and merges matches with runtime warnings", async () => {
+    const createdAt = new Date().toISOString();
+    const runtimeEvent = {
+      id: "diagnostic-runtime-match",
+      signal_type: "chat_error",
+      title: "Provider unavailable",
+      description: "Model endpoint returned an error",
+      source: "provider",
+      status: "failed",
+      failure_summary: "Model endpoint returned an error",
+      priority: "high",
+      created_at: createdAt,
+      chat_id: "diagnostic-chat",
+    } satisfies BuddyRuntimeEvent;
+    const diagnostic = (
+      id: string,
+      overrides: Partial<DiagnosticContext> = {},
+    ): DiagnosticContext => ({
+      error_type: "provider_error",
+      error_message: "Model endpoint returned an error",
+      source_file: null,
+      tool_name: null,
+      chat_id: "diagnostic-chat",
+      diagnostic_id: id,
+      collected_at: createdAt,
+      severity: "high",
+      occurrences: 2,
+      ...overrides,
+    });
+    server.use(
+      ...surfaceHandlers,
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json(operatorStatus("enabled")),
+      ),
+      http.get("*/v1/buddy/work", () => HttpResponse.json(envelope([]))),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(makePulse(), {
+          runtime_queue: [runtimeEvent],
+          recent_diagnostics: [
+            diagnostic("matched-diagnostic"),
+            diagnostic("old-diagnostic", {
+              error_type: "old_provider_error",
+              error_message: "Old diagnostic is outside the window",
+              collected_at: new Date(
+                Date.now() - 7 * 60 * 60 * 1000,
+              ).toISOString(),
+            }),
+          ],
+        }),
+      ),
+    );
+
+    const { user } = render(<BuddyHome />, { store });
+    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+    const list = await screen.findByRole("list", { name: "Recent warnings" });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(1);
+    expect(
+      within(list).getByText("Provider unavailable ×2", { exact: true }),
+    ).toBeInTheDocument();
+    expect(
+      within(list).queryByText("Old diagnostic is outside the window"),
+    ).not.toBeInTheDocument();
   });
 
   it.each([
@@ -4785,6 +5057,119 @@ describe("BuddySettingsPanel_renders_all_settings", () => {
       screen.getByRole("switch", { name: /provider health/i }),
     ).toBeInTheDocument();
   });
+
+  it("humanizes muted intent labels and keeps their identifiers internal", async () => {
+    const intentLabels = [
+      ["humor", "Humor"],
+      ["suggestion", "Suggestions"],
+      ["insight", "Insights"],
+      ["win", "Wins"],
+      ["error_alert", "Error alerts"],
+      ["greeting", "Greetings"],
+      ["tour", "Tours"],
+      ["milestone", "Milestones"],
+      ["memory_pulse_commentary", "Memory pulse commentary"],
+      ["quest_accept", "Quest acceptance"],
+      ["quest_complete", "Quest completion"],
+      ["chat_reaction", "Chat reactions"],
+    ] as const;
+    const opaqueRule = "rule-0123456789abcdef0123456789abcdef";
+    const opaqueWorkflow = "12345678-1234-1234-1234-123456789abc";
+    const capturedBodies: unknown[] = [];
+    server.use(
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBodies.push(await request.json());
+        return HttpResponse.json({
+          ...makeSnapshot().settings,
+          muted_intents: intentLabels
+            .map(([intent]) => intent)
+            .filter((intent) => intent !== "error_alert"),
+        });
+      }),
+    );
+
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(
+      setBuddySnapshot(
+        makeSnapshot(undefined, {
+          settings: {
+            ...makeSnapshot().settings,
+            muted_intents: intentLabels.map(([intent]) => intent),
+          },
+          state: {
+            ...makeSnapshot().state,
+            muted_rules: [opaqueRule, "buddy_memory_garden"],
+            workflow_summaries: [
+              {
+                workflow_id: opaqueWorkflow,
+                last_run: null,
+                run_count: 1,
+                last_outcome: null,
+              },
+            ],
+          },
+        }),
+      ),
+    );
+
+    const { user } = render(<BuddySettingsPanel />, { store });
+    const panel = screen.getByTestId("buddy-settings-panel");
+    const mutedIntents = within(screen.getByTestId("buddy-muted-intents"));
+
+    for (const [intent, label] of intentLabels) {
+      expect(
+        within(panel).getByRole("switch", {
+          name: `Mute ${label.toLowerCase()}`,
+        }),
+      ).toBeChecked();
+      expect(mutedIntents.getByText(label)).toBeInTheDocument();
+      expect(label).not.toMatch(/[a-z]+_[a-z]+/);
+      if (intent.includes("_"))
+        expect(
+          within(panel).queryByRole("switch", { name: `Mute ${intent}` }),
+        ).toBeNull();
+    }
+    const switchNames = within(panel)
+      .getAllByRole("switch")
+      .map((toggle) => toggle.getAttribute("aria-label") ?? "");
+    for (const name of switchNames) {
+      expect(name).not.toMatch(/[a-z]+_[a-z]+/);
+      expect(name).not.toMatch(/[0-9a-f]{24,}/i);
+      expect(name).not.toMatch(/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/i);
+    }
+    expect(within(panel).getByText("Saved rule 1")).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("button", { name: "Unmute Saved rule 1" }),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("buddy-muted-rules")).getByText(
+        "Buddy Memory Garden",
+      ),
+    ).toBeInTheDocument();
+    expect(within(panel).getAllByText("Workflow").length).toBeGreaterThan(0);
+    expect(within(panel).queryByText(opaqueRule)).toBeNull();
+    expect(within(panel).queryByText(opaqueWorkflow)).toBeNull();
+    expect(
+      within(panel).queryByRole("button", { name: new RegExp(opaqueRule) }),
+    ).toBeNull();
+    expect(
+      within(panel).queryByRole("switch", {
+        name: /[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/i,
+      }),
+    ).toBeNull();
+
+    await user.click(
+      within(panel).getByRole("switch", { name: "Mute error alerts" }),
+    );
+    await waitFor(() => expect(capturedBodies).toHaveLength(1));
+    expect(capturedBodies).toEqual([
+      {
+        muted_intents: intentLabels
+          .map(([intent]) => intent)
+          .filter((intent) => intent !== "error_alert"),
+      },
+    ]);
+  });
 });
 
 describe("BuddySettingsPanel_segmented_controls_accessible_state", () => {
@@ -5147,6 +5532,7 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
             kind: "system",
             title: "System maintenance note",
             badge: "System",
+            status: "active",
             message_count: 0,
           }),
         ]),
@@ -5421,7 +5807,11 @@ describe("BuddyHome_bottom_row_bounded_scroll", () => {
     const panelBlock = readCssBlock(recentChatsCss, ".panel");
     const entriesBlock = readCssBlock(recentChatsCss, ".scrollList");
 
-    expect(panelBlock).toContain("height: 100%");
+    // `max-height: 100%` contains the substring `height: 100%`, so the old
+    // single assertion silently matched either shape and could no longer tell a
+    // content-sized panel from one forced to fill its slot. Pin both halves.
+    expect(panelBlock).toContain("height: fit-content");
+    expect(panelBlock).toContain("max-height: 100%");
     expect(panelBlock).toContain("overflow: hidden");
     expect(entriesBlock).toContain("flex: 1");
     expect(entriesBlock).toContain("min-height: 0");

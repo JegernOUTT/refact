@@ -781,6 +781,23 @@ pub async fn handle_v1_buddy_operator_actions(
     Ok(envelope(project, actions, None))
 }
 
+pub async fn handle_v1_buddy_operator_actions_batch(
+    State(app): State<AppState>,
+    Query(query): Query<crate::buddy::desk_actions_batch::WorkActionsBatchQuery>,
+) -> Result<
+    axum::Json<OperatorEnvelope<Vec<crate::buddy::desk_actions_batch::WorkDeskActions>>>,
+    ScratchError,
+> {
+    let (runtime, project) = operator_runtime(&app, query.project_id.as_deref()).await?;
+    let ids = crate::buddy::desk_actions_batch::parse_work_ids(query.ids.as_deref())
+        .map_err(|message| ScratchError::new(StatusCode::BAD_REQUEST, message.to_string()))?;
+    let actions = runtime
+        .desk_actions_batch(ids)
+        .await
+        .map_err(operator_error)?;
+    Ok(envelope(project, actions, None))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttachResourceRequest {

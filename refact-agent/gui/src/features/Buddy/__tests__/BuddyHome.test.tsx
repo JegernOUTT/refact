@@ -304,6 +304,9 @@ describe("BuddyHome", () => {
     const { user } = render(<BuddyHome />, { store });
 
     expect(await screen.findByTestId("buddy-home-content")).toBeInTheDocument();
+    expect(
+      screen.getByRole("tablist", { name: "Buddy sections" }),
+    ).toBeInTheDocument();
     // The scene is hoisted out of the Play tab, so it owns the character and
     // the presence header no longer repeats a second avatar.
     expect(screen.getByTestId("buddy-home-hero")).toBeInTheDocument();
@@ -474,5 +477,88 @@ describe("BuddyHome", () => {
     expect(await screen.findByTestId("buddy-pulse-card")).toHaveTextContent(
       "50 docs · 5 orphan · 1 conflict · 6 pending · 7 applied · 1 failed · 10 candidates",
     );
+  });
+
+  it("renders enabled recent errors as a deduplicated, expandable list", async () => {
+    installBuddyHomeHandlers();
+    server.use(
+      http.get("*/v1/buddy/operator/status", () =>
+        HttpResponse.json({
+          schema_version: 1,
+          mode: "enabled",
+          features: {
+            storage: true,
+            actions: true,
+            supervision: false,
+            improvement: false,
+            editorial: false,
+          },
+          project: { project_id: "project", canonical_root: "/workspace" },
+          worker: {
+            worker_id: "worker",
+            engine_instance_id: "engine",
+            epoch: 1,
+          },
+        }),
+      ),
+    );
+    const currentTime = Date.now();
+    const duplicateSignature = {
+      title: "Repeated failure",
+      description: "Provider issue detected.",
+      failure_summary: "Repeated failure",
+      source: "test-provider",
+      signal_type: "provider_failed",
+    } as const;
+    const events = [
+      makeRuntimeEvent({
+        id: "same-title",
+        title: "Repeated warning",
+        failure_summary: "Repeated warning",
+        created_at: new Date(currentTime).toISOString(),
+      }),
+      ...Array.from({ length: 3 }, (_, index) =>
+        makeRuntimeEvent({
+          ...duplicateSignature,
+          id: `duplicate-${index}`,
+          created_at: new Date(currentTime - 1000).toISOString(),
+        }),
+      ),
+      ...Array.from({ length: 25 }, (_, index) =>
+        makeRuntimeEvent({
+          id: `distinct-${index}`,
+          title: `Distinct warning ${index}`,
+          description: `Provider detail ${index}.`,
+          failure_summary: `Additional detail ${index}`,
+          source: `test-provider-${index}`,
+          created_at: new Date(currentTime - 2000 - index * 1000).toISOString(),
+        }),
+      ),
+    ];
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot({ runtime_queue: events })));
+
+    const { user } = render(<BuddyHome />, { store });
+    await screen.findByTestId("buddy-home-content");
+    await user.click(screen.getByRole("tab", { name: "Recent errors" }));
+
+    const list = await screen.findByRole("list", { name: "Recent warnings" });
+    expect(within(list).getByText("Repeated warning")).toBeInTheDocument();
+    expect(
+      within(list).getAllByText("Repeated warning", { exact: true }),
+    ).toHaveLength(1);
+    expect(within(list).getByText("Repeated failure ×3")).toBeInTheDocument();
+    expect(within(list).getAllByText("just now").length).toBeGreaterThan(0);
+    expect(
+      within(list).queryByText("Repeated warning: Repeated warning"),
+    ).toBeNull();
+    expect(within(list).getAllByRole("listitem")).toHaveLength(20);
+    expect(
+      screen.getByRole("button", { name: "Show more" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Show more" }));
+    expect(within(list).getAllByRole("listitem")).toHaveLength(27);
+    expect(within(list).getByText("Additional detail 24")).toBeInTheDocument();
   });
 });

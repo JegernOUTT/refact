@@ -2057,7 +2057,16 @@ impl BuddyService {
                 self.state.suggestion_state.remove(pos);
             }
         }
-        self.state.suggestion_state.push(suggestion.clone());
+        if let Some(existing) = self
+            .state
+            .suggestion_state
+            .iter_mut()
+            .find(|existing| existing.id == suggestion.id)
+        {
+            *existing = suggestion.clone();
+        } else {
+            self.state.suggestion_state.push(suggestion.clone());
+        }
         self.last_suggestion_at = Some(Instant::now());
         self.dirty = true;
         let _ = self
@@ -3283,10 +3292,83 @@ pub async fn buddy_apply(gcx: AppState, m: BuddyMutation) {
     }
 }
 
-pub async fn buddy_background_task(gcx: AppState) {
+async fn check_operator_store_growth(buddy: &Arc<tokio::sync::Mutex<Option<BuddyService>>>) {
+    let runtime = buddy
+        .lock()
+        .await
+        .as_ref()
+        .filter(|service| service.operator_features.storage)
+        .and_then(|service| service.outcome_runtime.clone());
+    let Some(runtime) = runtime else { return };
+    let warnings = match runtime
+        .with_store(|store| {
+            store
+                .diagnostic_summary_with_growth_warnings()
+                .map(|(_, warnings)| warnings)
+        })
+        .await
+    {
+        Ok(warnings) => warnings,
+        Err(error) => {
+            warn!(%error, "buddy: operator store growth check failed");
+            return;
+        }
+    };
+    if warnings.is_empty() {
+        return;
+    }
+    let mut guard = buddy.lock().await;
+    let Some(service) = guard.as_mut() else {
+        return;
+    };
+    if !service
+        .outcome_runtime
+        .as_ref()
+        .is_some_and(|current| current.same_owner(&runtime))
+    {
+        return;
+    }
+    publish_operator_store_growth_warnings(service, warnings);
+}
+
+pub(crate) fn operator_store_growth_check_due(tick: u64) -> bool {
+    tick != 0 && tick % 3600 == 0
+}
+
+pub(crate) fn publish_operator_store_growth_warnings(
+    service: &mut BuddyService,
+    warnings: Vec<String>,
+) {
+    for warning in warnings {
+        let collected_at = Utc::now().to_rfc3339();
+        warn!("{warning}");
+        service.add_diagnostic(super::diagnostics::DiagnosticContext {
+            error_type: "operator_store_growth".into(),
+            error_message: format!("{warning} (observed {collected_at})"),
+            source_file: Some("buddy/operator_store.rs".into()),
+            tool_name: None,
+            chat_id: None,
+            model_id: None,
+            collected_at,
+            severity: super::diagnostics::DiagnosticSeverity::Medium,
+            occurrences: None,
+        });
+    }
+}
+
+struct BuddyBackgroundContext {
+    project_root: PathBuf,
+    buddy_arc: Arc<tokio::sync::Mutex<Option<BuddyService>>>,
+    scheduler: super::scheduler::BuddyScheduler,
+    shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
+    writer_handle: JoinHandle<()>,
+    commit_poller_handle: JoinHandle<()>,
+}
+
+async fn initialize_buddy_background(gcx: AppState) -> Option<BuddyBackgroundContext> {
     let project_root = loop {
         if gcx.runtime.shutdown_flag.load(Ordering::SeqCst) {
-            return;
+            return None;
         }
         let dirs = crate::files_correction::get_project_dirs(gcx.gcx.clone()).await;
         if let Some(root) = dirs.into_iter().next() {
@@ -3297,7 +3379,7 @@ pub async fn buddy_background_task(gcx: AppState) {
 
     if let Err(e) = super::storage::bootstrap_buddy_storage(&project_root).await {
         warn!("buddy: failed to bootstrap storage: {}", e);
-        return;
+        return None;
     }
     super::storage::gc_stale_memory_ops_tmp_files(&project_root).await;
     match super::storage::archive_memory_ops_if_oversized(
@@ -3338,9 +3420,6 @@ pub async fn buddy_background_task(gcx: AppState) {
     let runtime_queue = super::storage::load_runtime_queue(&project_root).await;
 
     let events_tx = gcx.buddy.buddy_events_tx.clone();
-
-    // Spawn the single-writer task that owns runtime_queue.jsonl. All queue
-    // mutations forward to this channel, which preserves on-disk write order.
     let (queue_tx, queue_rx) = mpsc::unbounded_channel::<RuntimeQueueWriteOp>();
     let writer_root = project_root.clone();
     let writer_handle = tokio::spawn(async move {
@@ -3387,29 +3466,36 @@ pub async fn buddy_background_task(gcx: AppState) {
     let scheduler = super::scheduler::BuddyScheduler::new();
     let shutdown_flag = gcx.runtime.shutdown_flag.clone();
     let commit_poller_handle = tokio::spawn(commit_activity_poller(
-        gcx.clone(),
+        gcx,
         project_root.clone(),
         shutdown_flag.clone(),
     ));
-    let mut expiry_tick: u64 = 0;
+    Some(BuddyBackgroundContext {
+        project_root,
+        buddy_arc,
+        scheduler,
+        shutdown_flag,
+        writer_handle,
+        commit_poller_handle,
+    })
+}
 
-    // Exactly one maintenance future is owned and polled here (never spawned).
-    // Slow repository work backpressures maintenance, not native actor decisions
-    // or shutdown. Dropping the future cannot acknowledge an unfinished admission.
-    {
-        let maintenance = async {
-            let agents_md = project_root.join("AGENTS.md");
-            let setup_done = tokio::fs::try_exists(&agents_md).await.unwrap_or(false);
-            if !setup_done {
-                let mut guard = buddy_arc.lock().await;
-                if let Some(svc) = guard.as_mut() {
-                    let already = svc
-                        .state
-                        .suggestion_state
-                        .iter()
-                        .any(|s| s.suggestion_type == "setup");
-                    if !already {
-                        let suggestion = BuddySuggestion {
+async fn handle_startup_suggestion(
+    project_root: &Path,
+    buddy_arc: &Arc<tokio::sync::Mutex<Option<BuddyService>>>,
+) {
+    let agents_md = project_root.join("AGENTS.md");
+    let setup_done = tokio::fs::try_exists(&agents_md).await.unwrap_or(false);
+    if !setup_done {
+        let mut guard = buddy_arc.lock().await;
+        if let Some(svc) = guard.as_mut() {
+            let already = svc
+                .state
+                .suggestion_state
+                .iter()
+                .any(|s| s.suggestion_type == "setup");
+            if !already {
+                let suggestion = BuddySuggestion {
                     id: "setup".to_string(),
                     suggestion_type: "setup".to_string(),
                     title: "Set up this project".to_string(),
@@ -3421,437 +3507,487 @@ pub async fn buddy_background_task(gcx: AppState) {
                     controls: vec![],
                     quest: None,
                 };
-                        let admission = svc.prepare_suggestion(suggestion);
-                        drop(guard);
-                        match admission {
-                            Ok(admission) => {
-                                if let Err(error) = admission.commit(&buddy_arc).await {
-                                    tracing::warn!(%error, "operator suggestion admission failed");
-                                }
-                            }
-                            Err(error) => {
-                                tracing::warn!(%error, "operator suggestion admission failed")
-                            }
+                let admission = svc.prepare_suggestion(suggestion);
+                drop(guard);
+                match admission {
+                    Ok(admission) => {
+                        if let Err(error) = admission.commit(buddy_arc).await {
+                            tracing::warn!(%error, "operator suggestion admission failed");
                         }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "operator suggestion admission failed")
                     }
                 }
             }
+        }
+    }
+}
 
-            loop {
-                if shutdown_flag.load(Ordering::SeqCst) {
-                    break;
-                }
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                expiry_tick += 1;
-                tick_operator_reopen(&buddy_arc).await;
-                if let Err(error) = publish_operator_inputs(&buddy_arc).await {
-                    if expiry_tick % 60 == 0 {
-                        warn!("buddy: operator proposals remain pending: {}", error);
-                    }
-                }
-                if expiry_tick % 60 == 0 {
-                    let runtime = {
-                        let buddy = buddy_arc.lock().await;
-                        buddy
-                            .as_ref()
-                            .filter(|svc| {
-                                svc.operator_features.storage && svc.operator_features.supervision
-                            })
-                            .and_then(|svc| svc.outcome_runtime.clone())
-                    };
-                    if let Some(runtime) = runtime {
-                        if let Err(error) =
-                            super::supervision::reconcile_active(&gcx, &runtime).await
-                        {
-                            warn!("buddy: supervision reconciliation unavailable: {}", error);
+async fn handle_operator_maintenance(
+    gcx: AppState,
+    context: &BuddyBackgroundContext,
+    expiry_tick: u64,
+) {
+    tick_operator_reopen(&context.buddy_arc).await;
+    if operator_store_growth_check_due(expiry_tick) && !context.shutdown_flag.load(Ordering::SeqCst)
+    {
+        check_operator_store_growth(&context.buddy_arc).await;
+    }
+    if let Err(error) = publish_operator_inputs(&context.buddy_arc).await {
+        if expiry_tick % 60 == 0 {
+            warn!("buddy: operator proposals remain pending: {}", error);
+        }
+    }
+    if expiry_tick % 60 == 0 {
+        let runtime = {
+            let buddy = context.buddy_arc.lock().await;
+            buddy
+                .as_ref()
+                .filter(|svc| svc.operator_features.storage && svc.operator_features.supervision)
+                .and_then(|svc| svc.outcome_runtime.clone())
+        };
+        if let Some(runtime) = runtime {
+            if let Err(error) = super::supervision::reconcile_active(&gcx, &runtime).await {
+                warn!("buddy: supervision reconciliation unavailable: {}", error);
+            }
+        }
+    }
+}
+
+async fn handle_expire_suggestions(context: &BuddyBackgroundContext, expiry_tick: u64) {
+    if expiry_tick % 60 == 0 {
+        let mut buddy = context.buddy_arc.lock().await;
+        if let Some(svc) = buddy.as_mut() {
+            svc.expire_suggestions();
+        }
+    }
+}
+
+async fn handle_refresh_pulse(gcx: AppState, context: &BuddyBackgroundContext, expiry_tick: u64) {
+    // Pulse refresh + opportunity expiry every 60s
+    if expiry_tick % 60 == 0 {
+        let now = Utc::now();
+        let fact_snap = {
+            let buddy = context.buddy_arc.lock().await;
+            buddy
+                .as_ref()
+                .map(|svc| svc.fact_store.iter().cloned().collect::<Vec<_>>())
+        };
+        if let Some(facts) = fact_snap {
+            let mut tmp_store = FactStore::new();
+            for f in facts {
+                tmp_store.ingest(f);
+            }
+            let knowledge_dirs = crate::files_correction::get_project_dirs(gcx.gcx.clone())
+                .await
+                .into_iter()
+                .map(|dir| dir.join(crate::file_filter::KNOWLEDGE_FOLDER_NAME))
+                .filter(|dir| dir.exists())
+                .collect::<Vec<_>>();
+            let lifecycle_ops =
+                detect_memory_lifecycle_ops_from_knowledge_dirs(&knowledge_dirs, now).await;
+            if !lifecycle_ops.is_empty() {
+                let mut memory_ops = super::storage::load_memory_ops(&context.project_root).await;
+                for op in lifecycle_ops {
+                    match super::storage::enqueue_memory_op(&context.project_root, op).await {
+                        Ok(updated) => memory_ops = updated,
+                        Err(err) => {
+                            warn!("buddy: failed to enqueue memory lifecycle op: {}", err)
                         }
                     }
                 }
-                if expiry_tick % 60 == 0 {
-                    let mut buddy = buddy_arc.lock().await;
-                    if let Some(svc) = buddy.as_mut() {
-                        svc.expire_suggestions();
-                    }
-                }
-                // Pulse refresh + opportunity expiry every 60s
-                if expiry_tick % 60 == 0 {
-                    let now = Utc::now();
-                    let fact_snap = {
-                        let buddy = buddy_arc.lock().await;
-                        buddy
-                            .as_ref()
-                            .map(|svc| svc.fact_store.iter().cloned().collect::<Vec<_>>())
-                    };
-                    if let Some(facts) = fact_snap {
-                        let mut tmp_store = FactStore::new();
-                        for f in facts {
-                            tmp_store.ingest(f);
-                        }
-                        let knowledge_dirs =
-                            crate::files_correction::get_project_dirs(gcx.gcx.clone())
-                                .await
-                                .into_iter()
-                                .map(|dir| dir.join(crate::file_filter::KNOWLEDGE_FOLDER_NAME))
-                                .filter(|dir| dir.exists())
-                                .collect::<Vec<_>>();
-                        let lifecycle_ops =
-                            detect_memory_lifecycle_ops_from_knowledge_dirs(&knowledge_dirs, now)
-                                .await;
-                        if !lifecycle_ops.is_empty() {
-                            let mut memory_ops =
-                                super::storage::load_memory_ops(&project_root).await;
-                            for op in lifecycle_ops {
-                                match super::storage::enqueue_memory_op(&project_root, op).await {
-                                    Ok(updated) => memory_ops = updated,
-                                    Err(err) => {
-                                        warn!(
-                                            "buddy: failed to enqueue memory lifecycle op: {}",
-                                            err
-                                        )
-                                    }
-                                }
-                            }
-                            if let Err(error) =
-                                BuddyService::set_memory_ops_durable(&buddy_arc, memory_ops).await
-                            {
-                                tracing::warn!(%error, "operator memory admission failed");
-                            }
-                        }
-                        let new_pulse =
-                            super::pulse::build_pulse(gcx.clone(), &project_root, &tmp_store).await;
-                        let mut buddy = buddy_arc.lock().await;
-                        if let Some(svc) = buddy.as_mut() {
-                            svc.set_pulse(new_pulse);
-                            svc.expire_opportunities();
-                            svc.opportunity_queue.refresh_cooldowns(now);
-                            svc.expire_drafts(now);
-                            svc.expire_runtime_events_at(now);
-                        }
-                    }
-                }
+                if let Err(error) =
+                    BuddyService::set_memory_ops_durable(&context.buddy_arc, memory_ops).await
                 {
-                    let window = {
-                        let actions = {
-                            let ring = gcx.buddy.user_activity.lock().await;
-                            ring.snapshot()
-                        };
-                        super::speech_policy::auto_quiet_window_from_actions(&actions)
-                    };
-                    let mut buddy = buddy_arc.lock().await;
-                    if let Some(svc) = buddy.as_mut() {
-                        svc.auto_quiet_window = window;
-                    }
+                    tracing::warn!(%error, "operator memory admission failed");
                 }
-                // Observer ticking — each observer respects its own cadence
-                {
-                    let now = Utc::now();
-                    let due_observers = {
-                        let buddy = buddy_arc.lock().await;
-                        match buddy.as_ref() {
-                            Some(svc) => {
-                                let s = svc.settings.clone();
-                                let lt = svc.last_observer_tick.clone();
-                                let due: Vec<Arc<dyn BuddyObserver>> = svc
-                                    .observers
-                                    .iter()
-                                    .filter(|obs| {
-                                        if !obs.requires_setting(&s) {
-                                            return false;
-                                        }
-                                        match lt.get(obs.id()) {
-                                            Some(t) => {
-                                                (now - *t).num_seconds() as u64
-                                                    >= obs.cadence_seconds()
-                                            }
-                                            None => true,
-                                        }
-                                    })
-                                    .cloned()
-                                    .collect();
-                                due
-                            }
-                            None => vec![],
-                        }
-                    };
-                    if !due_observers.is_empty() {
-                        // Run observers without holding buddy lock (prevents deadlock with
-                        // DiagnosticClusterObserver which also locks buddy).
-                        let all_facts = observe_buddy_facts_parallel(
-                            due_observers.clone(),
-                            gcx.clone(),
-                            project_root.clone(),
-                            now,
-                        )
-                        .await;
-                        // Phase 1: ingest facts, detect candidates, add non-humor opps — all under buddy lock.
-                        let source_owner = buddy_arc
-                            .lock()
-                            .await
-                            .as_ref()
-                            .map(BuddyService::admission_identity);
-                        let mut native_ready = Vec::new();
-                        let (humor_tasks, pulse_for_humor, humor_arc) = {
-                            let mut buddy = buddy_arc.lock().await;
-                            if let Some(svc) = buddy.as_mut() {
-                                for obs in &due_observers {
-                                    svc.last_observer_tick.insert(obs.id(), now);
-                                }
-                                for (refresh_ttl_secs, facts) in all_facts {
-                                    svc.fact_store.ingest_many_with_refresh_ttl(
-                                        facts,
-                                        chrono::Duration::seconds(refresh_ttl_secs as i64),
-                                    );
-                                }
-                                let candidates = OpportunityDetector::new().detect(
-                                    &svc.fact_store,
-                                    &svc.pulse,
-                                    &svc.opportunity_queue,
-                                );
-                                let mut humor_needed: Vec<(BuddyOpportunity, BuddyFactKind, u64)> =
-                                    vec![];
-                                for (opp, cooldown_secs) in candidates {
-                                    if svc.operator_features.storage {
-                                        native_ready.push((opp, cooldown_secs));
-                                        continue;
-                                    }
-                                    match evaluate_with_mutes(
-                                        &opp,
-                                        &svc.settings,
-                                        &svc.opportunity_queue,
-                                        &svc.state.muted_rules,
-                                    ) {
-                                        PolicyDecision::Drop { reason } => {
-                                            tracing::debug!(
-                                                "buddy: opp dropped by policy: {}",
-                                                reason
-                                            );
-                                        }
-                                        PolicyDecision::Surface { humor_allowed } => {
-                                            if humor_allowed && !svc.operator_features.editorial {
-                                                let kind = primary_fact_kind_for_opportunity(
-                                                    &opp,
-                                                    &svc.fact_store,
-                                                );
-                                                humor_needed.push((opp, kind, cooldown_secs));
-                                            } else {
-                                                svc.surface_opportunity_with_cooldown(
-                                                    opp,
-                                                    cooldown_secs,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                let pulse = svc.pulse.clone();
-                                let humor_arc = svc.humor_service.clone();
-                                (humor_needed, pulse, humor_arc)
-                            } else {
-                                (
-                                    vec![],
-                                    BuddyPulse::default(),
-                                    Arc::new(tokio::sync::Mutex::new(HumorService::new())),
-                                )
-                            }
-                        }; // buddy lock released — LLM humor calls happen outside the lock
+            }
+            let new_pulse =
+                super::pulse::build_pulse(gcx.clone(), &context.project_root, &tmp_store).await;
+            let mut buddy = context.buddy_arc.lock().await;
+            if let Some(svc) = buddy.as_mut() {
+                svc.set_pulse(new_pulse);
+                svc.expire_opportunities();
+                svc.opportunity_queue.refresh_cooldowns(now);
+                svc.expire_drafts(now);
+                svc.expire_runtime_events_at(now);
+            }
+        }
+    }
+}
 
-                        // Phase 2: attach humor outside the buddy lock.
-                        let mut ready: Vec<(BuddyOpportunity, u64)> = native_ready;
-                        for (mut opp, kind, cooldown_secs) in humor_tasks {
-                            let legacy_humor_allowed = {
-                                let buddy = buddy_arc.lock().await;
-                                buddy
-                                    .as_ref()
-                                    .is_some_and(|svc| !svc.operator_features.editorial)
-                            };
-                            if !legacy_humor_allowed {
-                                opp.humor = None;
-                                ready.push((opp, cooldown_secs));
-                                continue;
-                            }
-                            let plan = {
-                                let mut humor = humor_arc.lock().await;
-                                humor.plan_humor(kind, &pulse_for_humor)
-                            };
-                            match plan {
-                                HumorPlan::Ready(line) => {
-                                    opp.humor = Some(line);
-                                }
-                                HumorPlan::Generate(reservation) => {
-                                    let legacy_humor_allowed = {
-                                        let buddy = buddy_arc.lock().await;
-                                        buddy
-                                            .as_ref()
-                                            .is_some_and(|svc| !svc.operator_features.editorial)
-                                    };
-                                    if !legacy_humor_allowed {
-                                        opp.humor = None;
-                                        ready.push((opp, cooldown_secs));
-                                        continue;
-                                    }
-                                    let lines = reservation.generate(gcx.clone()).await;
-                                    let line = {
-                                        let mut humor = humor_arc.lock().await;
-                                        humor.complete_humor(reservation, lines)
-                                    };
-                                    if let Some(line) = line {
-                                        opp.humor = Some(line);
-                                    }
-                                }
-                                HumorPlan::Skip => {}
-                            }
-                            ready.push((opp, cooldown_secs));
-                        }
+async fn handle_refresh_quiet_window(gcx: AppState, context: &BuddyBackgroundContext) {
+    {
+        let window = {
+            let actions = {
+                let ring = gcx.buddy.user_activity.lock().await;
+                ring.snapshot()
+            };
+            super::speech_policy::auto_quiet_window_from_actions(&actions)
+        };
+        let mut buddy = context.buddy_arc.lock().await;
+        if let Some(svc) = buddy.as_mut() {
+            svc.auto_quiet_window = window;
+        }
+    }
+}
 
-                        // Persistence never owns the actor mutex.
-                        for (opp, cooldown_secs) in ready {
-                            let admission = {
-                                let mut guard = buddy_arc.lock().await;
-                                guard
-                                    .as_mut()
-                                    .filter(|svc| {
-                                        source_owner
-                                            .as_ref()
-                                            .is_some_and(|owner| svc.has_admission_identity(owner))
-                                    })
-                                    .ok_or("Buddy observer owner changed".to_string())
-                                    .and_then(|svc| svc.prepare_opportunity(opp, cooldown_secs))
-                            };
-                            if let Err(error) = async { admission?.commit(&buddy_arc).await }.await
-                            {
-                                tracing::warn!(%error, "operator admission failed");
+async fn handle_run_observers(gcx: AppState, context: &BuddyBackgroundContext) {
+    // Observer ticking — each observer respects its own cadence
+    {
+        let now = Utc::now();
+        let due_observers = {
+            let buddy = context.buddy_arc.lock().await;
+            match buddy.as_ref() {
+                Some(svc) => {
+                    let s = svc.settings.clone();
+                    let lt = svc.last_observer_tick.clone();
+                    let due: Vec<Arc<dyn BuddyObserver>> = svc
+                        .observers
+                        .iter()
+                        .filter(|obs| {
+                            if !obs.requires_setting(&s) {
+                                return false;
                             }
-                        }
-                    }
-                }
-                if expiry_tick % 30 == 0 {
-                    scheduler
-                        .tick(gcx.clone(), buddy_arc.clone(), &project_root)
-                        .await;
-                }
-                if let Err(error) = publish_operator_inputs(&buddy_arc).await {
-                    tracing::debug!("buddy: operator publication deferred: {}", error);
-                }
-                let state_to_save = {
-                    let mut buddy = buddy_arc.lock().await;
-                    buddy.as_mut().and_then(|svc| {
-                        if svc.dirty {
-                            svc.dirty = false;
-                            Some(svc.state.clone())
-                        } else {
-                            None
-                        }
-                    })
-                };
-                if let Some(s) = state_to_save {
-                    if let Err(e) = super::state::save_state(&project_root, &s).await {
-                        warn!("buddy: failed to save state: {}", e);
-                        if let Some(svc) = buddy_arc.lock().await.as_mut() {
-                            svc.dirty = true;
-                        }
-                    }
-                }
-                let drafts_to_save = {
-                    let mut buddy = buddy_arc.lock().await;
-                    buddy.as_mut().and_then(|svc| {
-                        if svc.drafts_dirty && !svc.operator_features.storage {
-                            svc.drafts_dirty = false;
-                            Some(svc.draft_store.snapshot())
-                        } else {
-                            None
-                        }
-                    })
-                };
-                if let Some(drafts) = drafts_to_save {
-                    if let Err(e) = super::storage::save_drafts(&project_root, &drafts).await {
-                        warn!("buddy: failed to save drafts: {}", e);
-                        if let Some(svc) = buddy_arc.lock().await.as_mut() {
-                            svc.drafts_dirty = true;
-                        }
-                    }
-                }
-
-                // Periodic compaction: ask the writer task to rewrite the JSONL from
-                // the in-memory queue every 5 minutes. The append-on-mutation log can
-                // grow unbounded under churn (progress updates, repeated coalesces);
-                // this collapses it back to one line per surviving event. Routing
-                // through the same channel keeps writes strictly ordered.
-                if expiry_tick % 300 == 0 {
-                    let buddy = buddy_arc.lock().await;
-                    if let Some(svc) = buddy.as_ref() {
-                        if let Some(tx) = &svc.queue_writer {
-                            let _ =
-                                tx.send(RuntimeQueueWriteOp::Compact(svc.runtime_queue.clone()));
-                        }
-                    }
-                }
-                if expiry_tick % MEMORY_OPS_COMPACT_INTERVAL_SECS == 0 {
-                    match super::storage::compact_memory_ops(&project_root).await {
-                        Ok(memory_ops) => {
-                            if let Err(error) =
-                                BuddyService::set_memory_ops_durable(&buddy_arc, memory_ops).await
-                            {
-                                tracing::warn!(%error, "operator memory admission failed");
+                            match lt.get(obs.id()) {
+                                Some(t) => (now - *t).num_seconds() as u64 >= obs.cadence_seconds(),
+                                None => true,
                             }
-                        }
-                        Err(err) => warn!("buddy: failed to compact memory ops queue: {}", err),
-                    }
+                        })
+                        .cloned()
+                        .collect();
+                    due
                 }
-                if expiry_tick % MEMORY_OPS_DRAIN_INTERVAL_SECS == 0 {
-                    let drain_settings = {
-                        let buddy = buddy_arc.lock().await;
-                        buddy
-                            .as_ref()
-                            .map(|svc| (svc.settings.autonomy_level, svc.settings.enabled))
-                    };
-                    if let Some((autonomy, enabled)) = drain_settings {
-                        if enabled {
-                            match super::storage::drain_memory_ops(
-                                &project_root,
-                                gcx.clone(),
-                                autonomy,
-                                MEMORY_OPS_DRAIN_MAX_APPLIES,
-                            )
-                            .await
-                            {
-                                Ok((memory_ops, changed)) => {
-                                    if let Err(error) =
-                                        BuddyService::set_memory_ops_durable(&buddy_arc, memory_ops)
-                                            .await
-                                    {
-                                        tracing::warn!(%error, "operator memory admission failed");
-                                    }
-                                    if changed > 0 {
-                                        info!("buddy: drained {} memory ops", changed);
-                                    }
-                                }
-                                Err(err) => {
-                                    warn!("buddy: failed to drain memory ops queue: {}", err)
-                                }
-                            }
-                        }
-                    }
-                }
+                None => vec![],
             }
         };
-        drive_maintenance(&buddy_arc, shutdown_flag.clone(), maintenance).await;
-    } // cancels maintenance and releases its admission permit before teardown.
+        if !due_observers.is_empty() {
+            // Run observers without holding buddy lock (prevents deadlock with
+            // DiagnosticClusterObserver which also locks buddy).
+            let all_facts = observe_buddy_facts_parallel(
+                due_observers.clone(),
+                gcx.clone(),
+                context.project_root.clone(),
+                now,
+            )
+            .await;
+            // Phase 1: ingest facts, detect candidates, add non-humor opps — all under buddy lock.
+            let source_owner = context
+                .buddy_arc
+                .lock()
+                .await
+                .as_ref()
+                .map(BuddyService::admission_identity);
+            let mut native_ready = Vec::new();
+            let (humor_tasks, pulse_for_humor, humor_arc) = {
+                let mut buddy = context.buddy_arc.lock().await;
+                if let Some(svc) = buddy.as_mut() {
+                    for obs in &due_observers {
+                        svc.last_observer_tick.insert(obs.id(), now);
+                    }
+                    for (refresh_ttl_secs, facts) in all_facts {
+                        svc.fact_store.ingest_many_with_refresh_ttl(
+                            facts,
+                            chrono::Duration::seconds(refresh_ttl_secs as i64),
+                        );
+                    }
+                    let candidates = OpportunityDetector::new().detect(
+                        &svc.fact_store,
+                        &svc.pulse,
+                        &svc.opportunity_queue,
+                    );
+                    let mut humor_needed: Vec<(BuddyOpportunity, BuddyFactKind, u64)> = vec![];
+                    for (opp, cooldown_secs) in candidates {
+                        if svc.operator_features.storage {
+                            native_ready.push((opp, cooldown_secs));
+                            continue;
+                        }
+                        match evaluate_with_mutes(
+                            &opp,
+                            &svc.settings,
+                            &svc.opportunity_queue,
+                            &svc.state.muted_rules,
+                        ) {
+                            PolicyDecision::Drop { reason } => {
+                                tracing::debug!("buddy: opp dropped by policy: {}", reason);
+                            }
+                            PolicyDecision::Surface { humor_allowed } => {
+                                if humor_allowed && !svc.operator_features.editorial {
+                                    let kind =
+                                        primary_fact_kind_for_opportunity(&opp, &svc.fact_store);
+                                    humor_needed.push((opp, kind, cooldown_secs));
+                                } else {
+                                    svc.surface_opportunity_with_cooldown(opp, cooldown_secs);
+                                }
+                            }
+                        }
+                    }
+                    let pulse = svc.pulse.clone();
+                    let humor_arc = svc.humor_service.clone();
+                    (humor_needed, pulse, humor_arc)
+                } else {
+                    (
+                        vec![],
+                        BuddyPulse::default(),
+                        Arc::new(tokio::sync::Mutex::new(HumorService::new())),
+                    )
+                }
+            }; // buddy lock released — LLM humor calls happen outside the lock
 
+            // Phase 2: attach humor outside the buddy lock.
+            let mut ready: Vec<(BuddyOpportunity, u64)> = native_ready;
+            for (mut opp, kind, cooldown_secs) in humor_tasks {
+                let legacy_humor_allowed = {
+                    let buddy = context.buddy_arc.lock().await;
+                    buddy
+                        .as_ref()
+                        .is_some_and(|svc| !svc.operator_features.editorial)
+                };
+                if !legacy_humor_allowed {
+                    opp.humor = None;
+                    ready.push((opp, cooldown_secs));
+                    continue;
+                }
+                let plan = {
+                    let mut humor = humor_arc.lock().await;
+                    humor.plan_humor(kind, &pulse_for_humor)
+                };
+                match plan {
+                    HumorPlan::Ready(line) => {
+                        opp.humor = Some(line);
+                    }
+                    HumorPlan::Generate(reservation) => {
+                        let legacy_humor_allowed = {
+                            let buddy = context.buddy_arc.lock().await;
+                            buddy
+                                .as_ref()
+                                .is_some_and(|svc| !svc.operator_features.editorial)
+                        };
+                        if !legacy_humor_allowed {
+                            opp.humor = None;
+                            ready.push((opp, cooldown_secs));
+                            continue;
+                        }
+                        let lines = reservation.generate(gcx.clone()).await;
+                        let line = {
+                            let mut humor = humor_arc.lock().await;
+                            humor.complete_humor(reservation, lines)
+                        };
+                        if let Some(line) = line {
+                            opp.humor = Some(line);
+                        }
+                    }
+                    HumorPlan::Skip => {}
+                }
+                ready.push((opp, cooldown_secs));
+            }
+
+            // Persistence never owns the actor mutex.
+            for (opp, cooldown_secs) in ready {
+                let admission = {
+                    let mut guard = context.buddy_arc.lock().await;
+                    guard
+                        .as_mut()
+                        .filter(|svc| {
+                            source_owner
+                                .as_ref()
+                                .is_some_and(|owner| svc.has_admission_identity(owner))
+                        })
+                        .ok_or("Buddy observer owner changed".to_string())
+                        .and_then(|svc| svc.prepare_opportunity(opp, cooldown_secs))
+                };
+                if let Err(error) = async { admission?.commit(&context.buddy_arc).await }.await {
+                    tracing::warn!(%error, "operator admission failed");
+                }
+            }
+        }
+    }
+}
+
+async fn handle_tick_scheduler(gcx: AppState, context: &BuddyBackgroundContext, expiry_tick: u64) {
+    if expiry_tick % 30 == 0 {
+        context
+            .scheduler
+            .tick(
+                gcx.clone(),
+                context.buddy_arc.clone(),
+                &context.project_root,
+            )
+            .await;
+    }
+}
+
+async fn handle_publish_and_persist(context: &BuddyBackgroundContext) {
+    if let Err(error) = publish_operator_inputs(&context.buddy_arc).await {
+        tracing::debug!("buddy: operator publication deferred: {}", error);
+    }
+    let state_to_save = {
+        let mut buddy = context.buddy_arc.lock().await;
+        buddy.as_mut().and_then(|svc| {
+            if svc.dirty {
+                svc.dirty = false;
+                Some(svc.state.clone())
+            } else {
+                None
+            }
+        })
+    };
+    if let Some(s) = state_to_save {
+        if let Err(e) = super::state::save_state(&context.project_root, &s).await {
+            warn!("buddy: failed to save state: {}", e);
+            if let Some(svc) = context.buddy_arc.lock().await.as_mut() {
+                svc.dirty = true;
+            }
+        }
+    }
+    let drafts_to_save = {
+        let mut buddy = context.buddy_arc.lock().await;
+        buddy.as_mut().and_then(|svc| {
+            if svc.drafts_dirty && !svc.operator_features.storage {
+                svc.drafts_dirty = false;
+                Some(svc.draft_store.snapshot())
+            } else {
+                None
+            }
+        })
+    };
+    if let Some(drafts) = drafts_to_save {
+        if let Err(e) = super::storage::save_drafts(&context.project_root, &drafts).await {
+            warn!("buddy: failed to save drafts: {}", e);
+            if let Some(svc) = context.buddy_arc.lock().await.as_mut() {
+                svc.drafts_dirty = true;
+            }
+        }
+    }
+}
+
+async fn handle_compact_runtime_queue(context: &BuddyBackgroundContext, expiry_tick: u64) {
+    // Periodic compaction: ask the writer task to rewrite the JSONL from
+    // the in-memory queue every 5 minutes. The append-on-mutation log can
+    // grow unbounded under churn (progress updates, repeated coalesces);
+    // this collapses it back to one line per surviving event. Routing
+    // through the same channel keeps writes strictly ordered.
+    if expiry_tick % 300 == 0 {
+        let buddy = context.buddy_arc.lock().await;
+        if let Some(svc) = buddy.as_ref() {
+            if let Some(tx) = &svc.queue_writer {
+                let _ = tx.send(RuntimeQueueWriteOp::Compact(svc.runtime_queue.clone()));
+            }
+        }
+    }
+}
+
+async fn handle_compact_memory_ops(context: &BuddyBackgroundContext, expiry_tick: u64) {
+    if expiry_tick % MEMORY_OPS_COMPACT_INTERVAL_SECS == 0 {
+        match super::storage::compact_memory_ops(&context.project_root).await {
+            Ok(memory_ops) => {
+                if let Err(error) =
+                    BuddyService::set_memory_ops_durable(&context.buddy_arc, memory_ops).await
+                {
+                    tracing::warn!(%error, "operator memory admission failed");
+                }
+            }
+            Err(err) => warn!("buddy: failed to compact memory ops queue: {}", err),
+        }
+    }
+}
+
+async fn handle_drain_memory_ops(
+    gcx: AppState,
+    context: &BuddyBackgroundContext,
+    expiry_tick: u64,
+) {
+    if expiry_tick % MEMORY_OPS_DRAIN_INTERVAL_SECS == 0 {
+        let drain_settings = {
+            let buddy = context.buddy_arc.lock().await;
+            buddy
+                .as_ref()
+                .map(|svc| (svc.settings.autonomy_level, svc.settings.enabled))
+        };
+        if let Some((autonomy, enabled)) = drain_settings {
+            if enabled {
+                match super::storage::drain_memory_ops(
+                    &context.project_root,
+                    gcx.clone(),
+                    autonomy,
+                    MEMORY_OPS_DRAIN_MAX_APPLIES,
+                )
+                .await
+                {
+                    Ok((memory_ops, changed)) => {
+                        if let Err(error) =
+                            BuddyService::set_memory_ops_durable(&context.buddy_arc, memory_ops)
+                                .await
+                        {
+                            tracing::warn!(%error, "operator memory admission failed");
+                        }
+                        if changed > 0 {
+                            info!("buddy: drained {} memory ops", changed);
+                        }
+                    }
+                    Err(err) => {
+                        warn!("buddy: failed to drain memory ops queue: {}", err)
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn run_buddy_maintenance(gcx: AppState, context: &BuddyBackgroundContext) {
+    handle_startup_suggestion(&context.project_root, &context.buddy_arc).await;
+    let mut expiry_tick = 0;
+    loop {
+        if context.shutdown_flag.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        expiry_tick += 1;
+        handle_operator_maintenance(gcx.clone(), context, expiry_tick).await;
+        handle_expire_suggestions(context, expiry_tick).await;
+        handle_refresh_pulse(gcx.clone(), context, expiry_tick).await;
+        handle_refresh_quiet_window(gcx.clone(), context).await;
+        handle_run_observers(gcx.clone(), context).await;
+        handle_tick_scheduler(gcx.clone(), context, expiry_tick).await;
+        handle_publish_and_persist(context).await;
+        handle_compact_runtime_queue(context, expiry_tick).await;
+        handle_compact_memory_ops(context, expiry_tick).await;
+        handle_drain_memory_ops(gcx.clone(), context, expiry_tick).await;
+    }
+}
+
+pub async fn buddy_background_task(gcx: AppState) {
+    let Some(context) = initialize_buddy_background(gcx.clone()).await else {
+        return;
+    };
+    let maintenance = run_buddy_maintenance(gcx, &context);
+    drive_maintenance(
+        &context.buddy_arc,
+        context.shutdown_flag.clone(),
+        maintenance,
+    )
+    .await;
+    shutdown_buddy_background(context).await;
+}
+
+async fn shutdown_buddy_background(context: BuddyBackgroundContext) {
     let state_opt = {
-        let buddy = buddy_arc.lock().await;
+        let buddy = context.buddy_arc.lock().await;
         buddy.as_ref().map(|s| s.state.clone())
     };
     if let Some(s) = state_opt {
-        let _ = super::state::save_state(&project_root, &s).await;
+        let _ = super::state::save_state(&context.project_root, &s).await;
     }
     let drafts_opt = {
-        let buddy = buddy_arc.lock().await;
+        let buddy = context.buddy_arc.lock().await;
         buddy
             .as_ref()
             .filter(|s| s.drafts_dirty && !s.operator_features.storage)
             .map(|s| s.draft_store.snapshot())
     };
     if let Some(drafts) = drafts_opt {
-        let _ = super::storage::save_drafts(&project_root, &drafts).await;
+        let _ = super::storage::save_drafts(&context.project_root, &drafts).await;
     }
 
     // Final compaction on shutdown so the JSONL on disk is canonical, then
@@ -3861,7 +3997,7 @@ pub async fn buddy_background_task(gcx: AppState) {
     // observes None and cannot spawn a new tracked task or enqueue new runtime records. Send the
     // final compaction from the taken service so nothing can mutate Buddy state after it.
     // Dropping the taken service also drops the writer sender so the writer task can finish.
-    let mut service = buddy_arc.lock().await.take();
+    let mut service = context.buddy_arc.lock().await.take();
     if let Some(svc) = service.as_ref() {
         if let Some(tx) = &svc.queue_writer {
             let _ = tx.send(RuntimeQueueWriteOp::Compact(svc.runtime_queue.clone()));
@@ -3894,8 +4030,12 @@ pub async fn buddy_background_task(gcx: AppState) {
         svc.shutdown_operator_reopen().await;
     }
     drop(service);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), writer_handle).await;
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), commit_poller_handle).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), context.writer_handle).await;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        context.commit_poller_handle,
+    )
+    .await;
 
     info!("buddy: background task stopped");
 }

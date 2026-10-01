@@ -458,11 +458,17 @@ pub async fn handle_summary(
     if owner.project().project_id != request.project_id {
         return Err(rejected("project changed"));
     }
-    owner
-        .with_store(|store| store.diagnostic_summary())
+    let (summary, warnings) = owner
+        .with_store(|store| store.diagnostic_summary_with_growth_warnings())
         .await
-        .map(axum::Json)
-        .map_err(rejected)
+        .map_err(rejected)?;
+    if !warnings.is_empty() {
+        let mut service = app.buddy.buddy.lock().await;
+        if let Some(service) = service.as_mut() {
+            crate::buddy::actor::publish_operator_store_growth_warnings(service, warnings);
+        }
+    }
+    Ok(axum::Json(summary))
 }
 
 pub async fn handle_retention_preview(

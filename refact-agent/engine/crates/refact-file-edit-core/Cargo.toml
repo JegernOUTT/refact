@@ -5,5 +5,5 @@ edition = "2021"
 
 [dependencies]
 refact-tool-api = { path = "../refact-tool-api" }
-regex.workspace = true
 serde_json.workspace = true
+regex.workspace = true

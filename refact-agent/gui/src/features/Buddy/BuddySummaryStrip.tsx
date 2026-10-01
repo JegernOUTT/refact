@@ -108,10 +108,6 @@ export const BuddySummaryStrip: React.FC<BuddySummaryStripProps> = ({
             label="Care"
             value={formatCompactNumber(pet.evolution.care_score)}
           />
-          <StatItem
-            label="Neglect"
-            value={formatCompactNumber(pet.evolution.neglect_score)}
-          />
         </>
       )}
       {statsData && (

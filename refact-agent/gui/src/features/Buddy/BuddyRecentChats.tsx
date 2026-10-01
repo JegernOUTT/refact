@@ -26,6 +26,11 @@ import { conversationIcon } from "./buddyIcons";
 import { formatRelativeTime } from "./buddyUtils";
 import type { BuddyConversationEntry } from "./types";
 import styles from "./BuddyRecentChats.module.css";
+import {
+  collapseConsecutive,
+  countLabel,
+  HISTORY_PAGE_SIZE,
+} from "./buddyHistory";
 
 type FilterKind = "all" | "chat" | "setup" | "system";
 
@@ -37,6 +42,15 @@ const FILTER_OPTIONS: { value: FilterKind; label: string }[] = [
 ];
 
 const STALE_EMPTY_PLACEHOLDER_MS = 24 * 60 * 60 * 1000;
+
+function isWorkflowHistory(entry: BuddyConversationEntry): boolean {
+  return (
+    entry.kind === "workflow" ||
+    (entry.kind === "system" &&
+      entry.badge !== null &&
+      entry.status !== "active")
+  );
+}
 
 function isStaleEmptyPlaceholder(entry: BuddyConversationEntry): boolean {
   if (entry.kind !== "chat") return false;
@@ -50,13 +64,23 @@ function isStaleEmptyPlaceholder(entry: BuddyConversationEntry): boolean {
 interface EntryRowProps {
   entry: BuddyConversationEntry;
   onClick: (entry: BuddyConversationEntry) => void;
+  duplicateCount: number;
 }
 
-const EntryRow: React.FC<EntryRowProps> = ({ entry, onClick }) => {
+const EntryRow: React.FC<EntryRowProps> = ({
+  entry,
+  onClick,
+  duplicateCount,
+}) => {
+  const workflowHistory = isWorkflowHistory(entry);
   const clickable =
-    entry.kind === "chat" ||
-    entry.kind === "setup" ||
-    entry.kind === "workflow";
+    entry.kind === "chat" || entry.kind === "setup" || workflowHistory;
+  const title =
+    workflowHistory &&
+    entry.badge &&
+    entry.title === `${entry.id.replace(/_/g, " ")} (${entry.badge})`
+      ? entry.badge
+      : entry.title || "Untitled";
   const content = (
     <>
       <span className={styles.entryIcon}>
@@ -68,20 +92,38 @@ const EntryRow: React.FC<EntryRowProps> = ({ entry, onClick }) => {
             size="1"
             weight="medium"
             className={styles.entryTitle}
-            title={entry.title || "Untitled"}
+            title={title}
           >
-            {entry.title || "Untitled"}
+            {title}
           </Text>
-          {entry.badge && (
+          {duplicateCount > 1 && (
             <Badge size="xs" tone="muted" className={styles.entryBadge}>
-              {entry.badge}
+              {countLabel(duplicateCount, "chat", "chats")}
             </Badge>
           )}
+          {entry.badge &&
+            !title.toLowerCase().includes(entry.badge.toLowerCase()) && (
+              <Badge size="xs" tone="muted" className={styles.entryBadge}>
+                {entry.badge}
+              </Badge>
+            )}
         </span>
         <Text size="1" color="gray" className={styles.entryMeta}>
+          {workflowHistory && entry.status === "failed" && (
+            <>
+              <Text size="1" color="red">
+                Failed
+              </Text>
+              {entry.message_count > 0 ? " · " : ""}
+            </>
+          )}
           {entry.message_count > 0
-            ? `${entry.message_count} entries`
-            : entry.status}
+            ? workflowHistory
+              ? countLabel(entry.message_count, "entry", "entries")
+              : countLabel(entry.message_count, "message", "messages")
+            : workflowHistory && entry.status === "failed"
+              ? null
+              : entry.status}
           {entry.updated_at ? ` · ${formatRelativeTime(entry.updated_at)}` : ""}
         </Text>
       </span>
@@ -98,6 +140,7 @@ const EntryRow: React.FC<EntryRowProps> = ({ entry, onClick }) => {
     <button
       type="button"
       className={classNames(styles.entryRow, "rf-enter-rise", "rf-pressable")}
+      aria-label={`Open ${title}`}
       onClick={() => onClick(entry)}
       data-clickable
     >
@@ -125,7 +168,7 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
 }) => {
   const dispatch = useAppDispatch();
   const [filter, setFilter] = useState<FilterKind>("all");
-
+  const [visibleCount, setVisibleCount] = useState(HISTORY_PAGE_SIZE);
   const { data: conversationsList, isLoading } = useGetBuddyConversationsQuery(
     undefined,
     { refetchOnMountOrArgChange: true },
@@ -136,27 +179,41 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
 
   const conversations = React.useMemo(() => {
     if (!allConversations) return [];
-    const visibleConversations = allConversations.filter(
+    const visible = allConversations.filter(
       (entry) => !isStaleEmptyPlaceholder(entry),
     );
-    const filtered =
-      filter === "all"
-        ? visibleConversations
-        : filter === "system"
-          ? visibleConversations.filter(
-              (e) => e.kind === "system" || e.kind === "workflow",
-            )
-          : visibleConversations.filter((e) => e.kind === filter);
-    return maxItems ? filtered.slice(0, maxItems) : filtered;
-  }, [allConversations, filter, maxItems]);
-
+    return filter === "all"
+      ? visible
+      : filter === "system"
+        ? visible.filter(
+            (entry) => entry.kind === "system" || entry.kind === "workflow",
+          )
+        : visible.filter((entry) => entry.kind === filter);
+  }, [allConversations, filter]);
+  const collapsedConversations = React.useMemo(
+    () =>
+      collapseConsecutive(conversations, (entry) => {
+        if (!isWorkflowHistory(entry)) return `${entry.kind}\u0000${entry.id}`;
+        return `${entry.badge ?? entry.id}\u0000${entry.title}`;
+      }),
+    [conversations],
+  );
+  const visibleConversations = collapsedConversations.slice(
+    0,
+    maxItems ?? visibleCount,
+  );
   const handleOpen = useCallback(
     (entry: BuddyConversationEntry) => {
-      void dispatch(openExistingBuddyChat(entry));
+      void dispatch(
+        openExistingBuddyChat(
+          isWorkflowHistory(entry) && entry.kind === "system"
+            ? { ...entry, kind: "workflow" }
+            : entry,
+        ),
+      );
     },
     [dispatch],
   );
-
   const handleNew = useCallback(async () => {
     const result = await createConversation(undefined);
     if ("data" in result && result.data) {
@@ -205,7 +262,6 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
           </>
         }
       />
-
       {showFilters && !compact && (
         <SegmentedControl
           aria-label="conversation filter"
@@ -217,11 +273,9 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
           options={FILTER_OPTIONS}
         />
       )}
-
       {isLoading && (
         <LoadingState label="Loading recent chats" variant="compact" />
       )}
-
       {!isLoading && conversations.length === 0 && (
         <div className={styles.empty}>
           <Icon icon={MessagesSquare} size="lg" tone="faint" />
@@ -240,18 +294,32 @@ export const BuddyRecentChats: React.FC<BuddyRecentChatsProps> = ({
           )}
         </div>
       )}
-
-      {conversations.length > 0 && (
-        <div className={classNames(styles.scrollList, "rf-stagger")}>
-          {conversations.map((entry) => (
-            <EntryRow
-              key={`${entry.kind}-${entry.id}`}
-              entry={entry}
-              onClick={handleOpen}
-            />
+      {visibleConversations.length > 0 && (
+        <ul className={classNames(styles.scrollList, "rf-stagger")}>
+          {visibleConversations.map(({ entry, count }) => (
+            <li key={`${entry.kind}-${entry.id}`}>
+              <EntryRow
+                entry={entry}
+                onClick={handleOpen}
+                duplicateCount={count}
+              />
+            </li>
           ))}
-        </div>
+        </ul>
       )}
+      {maxItems === undefined &&
+        visibleConversations.length < collapsedConversations.length && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() =>
+              setVisibleCount((count) => count + HISTORY_PAGE_SIZE)
+            }
+          >
+            Show more
+          </Button>
+        )}
     </Surface>
   );
 };

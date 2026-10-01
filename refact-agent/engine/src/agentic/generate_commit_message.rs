@@ -13,6 +13,37 @@ use tracing::warn;
 use crate::files_in_workspace::detect_vcs_for_a_file_path;
 
 const SUBAGENT_ID: &str = "commit_message";
+const COMMIT_MESSAGE_TITLE_PREFIX: &str = "Commit message: ";
+const COMMIT_MESSAGE_TITLE_MAX_CHARS: usize = 80;
+
+fn commit_message_proposal_title(message: &str) -> String {
+    let subject = message.lines().next().unwrap_or("").trim();
+    let redacted = crate::buddy::actor::redact_sensitive(subject);
+    let normalized = redacted
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let subject = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if subject.is_empty() {
+        return "Commit-message proposal".to_string();
+    }
+
+    let mut title = format!("{COMMIT_MESSAGE_TITLE_PREFIX}{subject}");
+    if title.chars().count() > COMMIT_MESSAGE_TITLE_MAX_CHARS {
+        title = title
+            .chars()
+            .take(COMMIT_MESSAGE_TITLE_MAX_CHARS - 1)
+            .collect();
+        title = format!("{}…", title.trim_end());
+    }
+    title
+}
 
 fn commit_message_input_fingerprint(diff: &str, prompt: &Option<String>) -> String {
     use sha2::{Digest, Sha256};
@@ -49,7 +80,10 @@ fn commit_message_report(
         ),
     };
     crate::buddy::workflows::WorkflowReport {
-        title: "Commit-message proposal".to_string(),
+        title: result
+            .as_ref()
+            .map(|message| commit_message_proposal_title(message))
+            .unwrap_or_else(|_| "Commit-message proposal".to_string()),
         body,
         terminal,
         evidence: Vec::new(),
@@ -93,8 +127,7 @@ pub async fn generate_commit_message_by_diff_with_abort(
         "📦",
         5,
         |msg: &String| {
-            let short: String = msg.lines().next().unwrap_or("").chars().take(50).collect();
-            format!("Commit message: {}", short)
+            commit_message_proposal_title(msg)
         },
         crate::buddy::workflows::WorkflowReportScope {
             observed_scope: "Commit-message proposal generation only from the supplied diff and custom prompt; no commit created, no changes applied, and no verification performed.".into(),
@@ -273,17 +306,37 @@ mod operator_report_tests {
         let report = commit_message_report(&Ok(message.clone()));
         assert_eq!(report.terminal, WorkflowTerminal::Completed);
         assert_eq!(report.body, message);
-        assert_eq!(report.title, "Commit-message proposal");
+        assert_eq!(report.title, "Commit message: Subject");
         assert!(report.evidence.is_empty());
         assert_eq!(
-            commit_message_report(&Ok(" \n".into())).terminal,
-            WorkflowTerminal::Inconclusive
+            commit_message_report(&Ok("Bearer sk-abc123defgh456ijklmn\nBody".into())).title,
+            "Commit message: Bearer [REDACTED]"
         );
+        let empty = commit_message_report(&Ok(" \n".into()));
+        assert_eq!(empty.terminal, WorkflowTerminal::Inconclusive);
+        assert_eq!(empty.title, "Commit-message proposal");
         let cancelled = commit_message_report(&Err("cancelled token=private-token".into()));
         assert!(matches!(
             cancelled.terminal,
             WorkflowTerminal::Cancelled { .. }
         ));
         assert!(!cancelled.body.contains("private-token"));
+    }
+
+    #[test]
+    fn proposal_title_sanitizes_and_caps_the_subject() {
+        assert_eq!(
+            commit_message_proposal_title("  feat:\timprove labels  \nBody"),
+            "Commit message: feat: improve labels"
+        );
+
+        let title = commit_message_proposal_title(&"s".repeat(100));
+        assert_eq!(title.chars().count(), COMMIT_MESSAGE_TITLE_MAX_CHARS);
+        assert!(title.starts_with(COMMIT_MESSAGE_TITLE_PREFIX));
+        assert!(title.ends_with('…'));
+        assert_eq!(
+            commit_message_proposal_title(" \nBody"),
+            "Commit-message proposal"
+        );
     }
 }

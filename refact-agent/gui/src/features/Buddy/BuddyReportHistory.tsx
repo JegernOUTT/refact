@@ -7,6 +7,7 @@ import {
 } from "../../services/refact/buddyOperator";
 import type { ArtifactRevision, WorkItem } from "./operatorTypes";
 import { humanizeIdentifier } from "../../utils/displayNames";
+import { formatReportTime, humanizeResourceReference } from "./buddyUtils";
 import { BuddyArtifactBody } from "./BuddyArtifactBody";
 import styles from "./BuddyReportHistory.module.css";
 
@@ -28,6 +29,8 @@ function RunEvidence({
   const matches =
     run?.work_id === item.id &&
     run.project.canonical_root === item.project.canonical_root;
+  const startedAt = formatReportTime(run?.started_at);
+  const endedAt = formatReportTime(run?.ended_at);
   return (
     <section aria-label="Recorded run" className={styles.run}>
       {query.isFetching && (
@@ -42,9 +45,20 @@ function RunEvidence({
       ) : (
         run && (
           <>
-            <Text as="p" size="1" color="gray">
-              {humanizeIdentifier(run.status)} · {run.started_at} —{" "}
-              {run.ended_at ?? "No terminal time"}
+            <Text
+              as="p"
+              size="1"
+              color="gray"
+              title={startedAt.absolute ?? undefined}
+            >
+              {humanizeIdentifier(run.status)} · {startedAt.relative} —{" "}
+              {run.ended_at ? (
+                <time title={endedAt.absolute ?? undefined}>
+                  {endedAt.relative}
+                </time>
+              ) : (
+                "No terminal time"
+              )}
             </Text>
             <h3 className={styles.heading}>Observed scope</h3>
             <Text as="p" size="2">
@@ -64,8 +78,11 @@ function RunEvidence({
                 {run.effects.map((effect, index) => (
                   <li key={index}>
                     <Text size="1" color="gray">
-                      {effect.resource.resource_id}:{" "}
-                      {humanizeIdentifier(effect.state)}
+                      {humanizeResourceReference(
+                        effect.resource.resource_kind,
+                        effect.resource.resource_id,
+                      )}
+                      : {humanizeIdentifier(effect.state)}
                     </Text>
                   </li>
                 ))}
@@ -219,9 +236,21 @@ export function BuddyReportHistory({
                   variant="ghost"
                   className={styles.runRow}
                   onClick={() => setSelectedRun(value.run_id)}
+                  title={`Run ID: ${value.run_id} · ${new Date(
+                    value.ended_at ?? value.started_at,
+                  ).toLocaleString()}`}
                 >
                   {humanizeIdentifier(value.status)} ·{" "}
-                  {value.ended_at ?? value.started_at} · {value.run_id}
+                  <time
+                    title={new Date(
+                      value.ended_at ?? value.started_at,
+                    ).toLocaleString()}
+                  >
+                    {
+                      formatReportTime(value.ended_at ?? value.started_at)
+                        .relative
+                    }
+                  </time>
                 </Button>
               ),
             )}
@@ -251,15 +280,16 @@ export function BuddyReportHistory({
         <details className={styles.disclosure}>
           <summary className={styles.summary}>Source runs</summary>
           <div className={styles.body}>
-            {artifact.source_run_ids.map((id) => (
+            {artifact.source_run_ids.map((id, index) => (
               <Button
                 key={id}
                 size="sm"
                 variant="ghost"
                 className={styles.runRow}
                 onClick={() => setSelectedRun(id)}
+                title={`Run ID: ${id}`}
               >
-                {id}
+                Source run {index + 1}
               </Button>
             ))}
           </div>

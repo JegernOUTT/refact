@@ -6,24 +6,35 @@ fn main() {
     println!("cargo:rerun-if-env-changed=REFACT_SKIP_GUI_BUILD");
     println!("cargo:rerun-if-env-changed=REFACT_USE_PREBUILT_GUI");
     println!("cargo:rerun-if-env-changed=REFACT_GUI_DIR");
-    println!("cargo:rerun-if-changed=../gui/package.json");
-    println!("cargo:rerun-if-changed=../gui/package-lock.json");
-    println!("cargo:rerun-if-changed=../gui/src");
     println!("cargo:rerun-if-changed=assets/chat/index.html");
     println!("cargo:rerun-if-changed=src/daemon/web_picker.html");
 
     if env::var("REFACT_SKIP_GUI_BUILD").ok().as_deref() != Some("1") {
-        build_gui_assets();
+        let gui_dir = gui_dir();
+        println!(
+            "cargo:rerun-if-changed={}",
+            gui_dir.join("package.json").display()
+        );
+        println!(
+            "cargo:rerun-if-changed={}",
+            gui_dir.join("package-lock.json").display()
+        );
+        println!("cargo:rerun-if-changed={}", gui_dir.join("src").display());
+        build_gui_assets(&gui_dir);
     }
 
     shadow_rs::ShadowBuilder::builder().build().unwrap();
 }
 
-fn build_gui_assets() {
+fn gui_dir() -> PathBuf {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let gui_dir = env::var_os("REFACT_GUI_DIR")
+    env::var_os("REFACT_GUI_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| manifest_dir.parent().unwrap().join("gui"));
+        .unwrap_or_else(|| manifest_dir.parent().unwrap().join("gui"))
+}
+
+fn build_gui_assets(gui_dir: &Path) {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let dist_dir = gui_dir.join("dist").join("chat");
     let asset_dist_dir = manifest_dir.join("assets").join("chat").join("dist");
     let target_chat_dir = asset_dist_dir.join("chat");

@@ -160,6 +160,9 @@ pub fn refact_bin() -> PathBuf {
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_refact") {
         return PathBuf::from(path);
     }
+    if let Some(path) = option_env!("CARGO_BIN_EXE_refact") {
+        return PathBuf::from(path);
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("debug")
@@ -285,6 +288,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn daemon_dir_env_redirects_runtime_paths() {
         let temp = tempdir().unwrap();
         let previous = std::env::var_os(refact_lsp::daemon::paths::DAEMON_DIR_ENV);

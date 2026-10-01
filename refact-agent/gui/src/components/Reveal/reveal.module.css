@@ -61,11 +61,7 @@
   width: 100%;
   overflow: hidden;
   max-height: 9em;
-  mask-image: linear-gradient(
-    to bottom,
-    var(--rf-surface-base) 50%,
-    transparent 100%
-  );
+  mask-image: linear-gradient(to bottom, var(--rf-bg) 50%, transparent 100%);
 }
 
 .reveal_hidden_exposed {
@@ -75,12 +71,8 @@
   height: 100%;
   max-height: 6em;
   color: var(--rf-color-accent);
-  background: var(--rf-surface-base);
-  mask-image: linear-gradient(
-    to top,
-    var(--rf-surface-base) 0%,
-    transparent 100%
-  );
+  background: var(--rf-bg);
+  mask-image: linear-gradient(to top, var(--rf-bg) 0%, transparent 100%);
   transition: background-color var(--rf-dur-fast) var(--rf-ease-standard);
 }
 

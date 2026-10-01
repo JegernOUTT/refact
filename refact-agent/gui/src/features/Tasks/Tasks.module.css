@@ -88,10 +88,10 @@
 }
 
 .kanbanCardTitle {
-  color: var(--rf-fg);
-  font-size: var(--rf-font-size-2);
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
   font-weight: var(--rf-weight-medium);
-  line-height: var(--rf-line-height-tight);
+  line-height: var(--rf-line-2);
   overflow: hidden;
   display: -webkit-box;
   -webkit-line-clamp: 3;
@@ -147,10 +147,10 @@
   margin: 0;
   min-width: 0;
   overflow: hidden;
-  color: var(--rf-fg);
-  font-size: var(--rf-font-size-2);
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
   font-weight: var(--rf-weight-semibold);
-  line-height: var(--rf-line-height-tight);
+  line-height: var(--rf-line-2);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -222,10 +222,10 @@
 
 .taskListTitle {
   margin: 0;
-  color: var(--rf-fg);
-  font-size: var(--rf-font-size-5);
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-5);
   font-weight: var(--rf-weight-semibold);
-  line-height: var(--rf-line-height-tight);
+  line-height: var(--rf-line-5);
 }
 
 .taskCreateCard {
@@ -293,10 +293,10 @@
 .taskItemTitle {
   min-width: 0;
   overflow: hidden;
-  color: var(--rf-fg);
-  font-size: var(--rf-font-size-2);
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
   font-weight: var(--rf-weight-semibold);
-  line-height: var(--rf-line-height-tight);
+  line-height: var(--rf-line-2);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -306,8 +306,8 @@
 .taskItemDate,
 .taskListEmpty {
   color: var(--rf-color-muted);
-  font-size: var(--rf-font-size-1);
-  line-height: var(--rf-line-height-normal);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line);
 }
 
 .taskItemMeta,
@@ -748,8 +748,8 @@
 
 .cardDetailTitle {
   min-width: 0;
-  font-size: var(--rf-font-size-4);
-  line-height: var(--rf-line-height-tight);
+  font-size: var(--rf-text-4);
+  line-height: var(--rf-line-4);
   overflow-wrap: anywhere;
 }
 
@@ -777,10 +777,10 @@
 
 .cardDetailMetaLabel {
   color: var(--rf-color-muted);
-  font-size: var(--rf-font-size-1);
+  font-size: var(--rf-text-1);
   font-weight: var(--rf-weight-semibold);
   letter-spacing: 0.04em;
-  line-height: var(--rf-line-height-tight);
+  line-height: var(--rf-line-1);
   text-transform: uppercase;
 }
 

@@ -5,16 +5,16 @@ edition = "2021"
 
 [dependencies]
 refact-core = { path = "../refact-core" }
-flate2 = "1.0"
-hex = "0.4.3"
-percent-encoding = "2.3"
-reqwest = { version = "0.13", default-features = false, features = ["json", "form", "stream", "rustls", "charset", "http2"] }
+flate2.workspace = true
+hex.workspace = true
+percent-encoding.workspace = true
+reqwest.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-sha2 = "0.10.8"
+sha2.workspace = true
 tar = "0.4"
-zip = { version = "2.2", default-features = false, features = ["deflate"] }
+zip.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
+tokio.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }

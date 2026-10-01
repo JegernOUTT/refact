@@ -1,0 +1,227 @@
+{
+  "type": "object",
+  "description": "Ref-first element address; see help topic 'locators'",
+  "required": [
+    "by"
+  ],
+  "properties": {
+    "by": {
+      "type": "string",
+      "enum": [
+        "ref",
+        "css",
+        "id",
+        "name",
+        "text",
+        "label",
+        "role",
+        "xpath",
+        "placeholder",
+        "alt_text",
+        "title",
+        "autocomplete",
+        "test_id"
+      ]
+    },
+    "value": {
+      "type": "string",
+      "description": "Snapshot ref such as e12, or a selector value"
+    },
+    "frames": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      },
+      "description": "Outermost-first iframe-owner locator chain"
+    },
+    "nth": {
+      "type": "integer",
+      "description": "Zero-based match index; -1 selects the last match"
+    },
+    "within": {
+      "type": "string",
+      "description": "Deprecated CSS scope; use locator for chaining"
+    },
+    "locator": {
+      "type": "object",
+      "description": "Nested locator evaluated under each outer match"
+    },
+    "filter": {
+      "type": "object",
+      "properties": {
+        "has": {
+          "type": "object",
+          "description": "Locator required under the candidate"
+        },
+        "has_not": {
+          "type": "object",
+          "description": "Locator forbidden under the candidate"
+        },
+        "has_text": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object",
+              "required": [
+                "source"
+              ],
+              "properties": {
+                "source": {
+                  "type": "string"
+                },
+                "flags": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
+        "has_not_text": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object",
+              "required": [
+                "source"
+              ],
+              "properties": {
+                "source": {
+                  "type": "string"
+                },
+                "flags": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
+        "visible": {
+          "type": "boolean"
+        }
+      }
+    },
+    "and": {
+      "type": "object",
+      "description": "Locator whose matches intersect this one"
+    },
+    "or": {
+      "type": "object",
+      "description": "Locator whose matches union with this one in DOM order"
+    },
+    "first": {
+      "type": "boolean",
+      "description": "Select the first match"
+    },
+    "last": {
+      "type": "boolean",
+      "description": "Select the last match"
+    },
+    "exact": {
+      "type": "boolean",
+      "description": "Case-sensitive whole-string match; regex ignores it"
+    },
+    "attribute": {
+      "type": "string",
+      "description": "Test-id attribute; defaults to data-testid"
+    },
+    "role": {
+      "type": "string",
+      "description": "ARIA role"
+    },
+    "name": {
+      "type": "string",
+      "description": "Accessible name"
+    },
+    "description": {
+      "type": "string",
+      "description": "Accessible description"
+    },
+    "checked": {
+      "oneOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string",
+          "enum": [
+            "mixed"
+          ]
+        }
+      ]
+    },
+    "pressed": {
+      "oneOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string",
+          "enum": [
+            "mixed"
+          ]
+        }
+      ]
+    },
+    "selected": {
+      "type": "boolean"
+    },
+    "expanded": {
+      "type": "boolean"
+    },
+    "disabled": {
+      "type": "boolean"
+    },
+    "level": {
+      "type": "integer"
+    },
+    "include_hidden": {
+      "type": "boolean"
+    },
+    "regex": {
+      "type": "object",
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "flags": {
+          "type": "string"
+        }
+      }
+    },
+    "name_regex": {
+      "type": "object",
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "flags": {
+          "type": "string"
+        }
+      }
+    },
+    "description_regex": {
+      "type": "object",
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "flags": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

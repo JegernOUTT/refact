@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -17,10 +18,12 @@ import { Button, Icon, Surface, Text } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
   useGetBuddyDeskActionsQuery,
+  useGetBuddyDeskActionsBatchQuery,
   useGetBuddyOperatorArtifactQuery,
   useGetBuddyOperatorWorkQuery,
   useGetBuddyOperatorWorkItemQuery,
   buddyOperatorIdentity,
+  type DeskActionBatchEntry,
   type OperatorRecord,
 } from "../../services/refact/buddyOperator";
 import type { WorkItem, WorkItemState } from "./operatorTypes";
@@ -31,6 +34,7 @@ import { BuddyReportReadState } from "./BuddyReportReadState";
 import { BuddyArtifactBody } from "./BuddyArtifactBody";
 import { BuddyReportHistory } from "./BuddyReportHistory";
 import { BuddyWorkSnooze } from "./BuddyWorkSnooze";
+import { headline, sameText } from "./buddyUtils";
 import styles from "./BuddyDesk.module.css";
 
 const views = ["Needs you", "Working on", "Delivered", "Watching"] as const;
@@ -63,12 +67,22 @@ const emptyView: Record<WorkView, string> = {
 const NO_RESULT_YET = "No result yet";
 const NO_ACTION = "No action to take";
 const ACTION_STATUS_UNAVAILABLE = "Action status unavailable";
+const ROW_GROUP_SIZE = 50;
 
 const opaqueIdentifier = /[0-9a-f]{24,}/i;
+const uuidLikeIdentifier = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 
 function readableSubject(item: WorkItem): string | null {
   const subject = item.subject.resource_id.trim();
-  if (subject === "" || opaqueIdentifier.test(subject)) return null;
+  const machineToken = /^[a-z0-9_-]+$/.test(subject) && /[_-]/.test(subject);
+  if (
+    subject === "" ||
+    item.subject.resource_kind === "workflow" ||
+    opaqueIdentifier.test(subject) ||
+    uuidLikeIdentifier.test(subject) ||
+    machineToken
+  )
+    return null;
   return subject;
 }
 
@@ -124,11 +138,28 @@ function changedAtAbsolute(value: string): string | null {
   return new Date(parsed).toLocaleString();
 }
 
+function titleRemainder(title: string, body?: string): string | null {
+  const lines = title.split(/\r?\n/);
+  const headlineIndex = lines.findIndex((line) => line.trim() !== "");
+  if (headlineIndex < 0) return null;
+  const remainder = lines
+    .slice(headlineIndex + 1)
+    .join(" ")
+    .trim();
+  if (!remainder) return null;
+  const normalize = (value: string) =>
+    value.toLowerCase().replace(/\s+/g, " ").trim();
+  return body && normalize(body).includes(normalize(remainder))
+    ? null
+    : remainder;
+}
+
 function WorkRow({
   item,
   endpointIdentity,
   showState,
   showActionVerb,
+  rowActions,
   selected,
   onOpen,
   onActionVerb,
@@ -137,6 +168,15 @@ function WorkRow({
   endpointIdentity: string;
   showState: boolean;
   showActionVerb: boolean;
+  rowActions:
+    | { mode: "per_row" }
+    | {
+        mode: "batch";
+        entry: DeskActionBatchEntry | undefined;
+        loaded: boolean;
+        pending: boolean;
+        failed: boolean;
+      };
   selected: boolean;
   onOpen: (item: WorkItem, trigger: HTMLButtonElement) => void;
   onActionVerb: (id: string, verb: string) => void;
@@ -148,22 +188,36 @@ function WorkRow({
       project_id: item.project.project_id,
       endpoint_identity: endpointIdentity,
     },
-    { skip: !artifactId },
+    { skip: !artifactId || rowActions.mode !== "per_row" },
   );
-  const action = currentData?.data.find(
+  const actions =
+    rowActions.mode === "per_row"
+      ? currentData?.data
+      : rowActions.entry?.actions;
+  const action = actions?.find(
     (candidate) =>
       candidate.artifact_id === artifactId &&
       candidate.artifact_revision === item.current_artifact_revision &&
       candidate.spec.project.canonical_root === item.project.canonical_root,
   );
-  const pending = isFetching && !currentData;
+  const failed =
+    rowActions.mode === "per_row"
+      ? Boolean(error)
+      : rowActions.failed ||
+        (rowActions.loaded &&
+          (rowActions.entry === undefined || rowActions.entry.error !== null));
+  const pending =
+    rowActions.mode === "per_row"
+      ? isFetching && !currentData
+      : rowActions.pending;
   let verb: string | null = NO_ACTION;
   if (!artifactId) verb = NO_RESULT_YET;
-  else if (error) verb = ACTION_STATUS_UNAVAILABLE;
+  else if (failed) verb = ACTION_STATUS_UNAVAILABLE;
   else if (pending) verb = null;
   else if (action) verb = action.label;
   const changed = changedAt(item.last_material_change_at);
   const absolute = changedAtAbsolute(item.last_material_change_at);
+  const absoluteTimeId = useId();
   const severity = severityLabel(item);
   const scope = meaningfulText(item.scope);
   const summary = problemSummary(item);
@@ -175,6 +229,7 @@ function WorkRow({
       <button
         className={styles.item}
         aria-current={selected ? "true" : undefined}
+        aria-describedby={absolute ? absoluteTimeId : undefined}
         onClick={(event) => onOpen(item, event.currentTarget)}
       >
         <span className={styles.itemContent}>
@@ -193,7 +248,7 @@ function WorkRow({
               className={styles.name}
               data-testid="buddy-desk-row-title"
             >
-              {item.title}
+              {headline(item.title)}
             </Text>
           </span>
           {summary && (
@@ -231,10 +286,16 @@ function WorkRow({
             {changed && (
               <Text size="1" color="gray" title={absolute ?? undefined}>
                 {changed}
-                {absolute && (
-                  <span className={styles.srOnly}>{` · ${absolute}`}</span>
-                )}
               </Text>
+            )}
+            {absolute && (
+              <span
+                id={absoluteTimeId}
+                className={styles.srOnly}
+                aria-hidden="true"
+              >
+                {absolute}
+              </span>
             )}
           </span>
         </span>
@@ -249,14 +310,89 @@ function WorkRow({
   );
 }
 
+function WorkRowGroup({
+  records,
+  endpointIdentity,
+  showState,
+  showActionVerb,
+  selectedId,
+  onOpen,
+  onActionVerb,
+}: {
+  records: OperatorRecord<WorkItem>[];
+  endpointIdentity: string;
+  showState: boolean;
+  showActionVerb: boolean;
+  selectedId: string | null;
+  onOpen: (item: WorkItem, trigger: HTMLButtonElement) => void;
+  onActionVerb: (id: string, verb: string) => void;
+}) {
+  const projectId = records[0].value.project.project_id;
+  const ids = records
+    .filter(
+      ({ value }) =>
+        Boolean(value.current_artifact_id) &&
+        value.project.project_id === projectId,
+    )
+    .map(({ value }) => value.id);
+  const batch = useGetBuddyDeskActionsBatchQuery(
+    { ids, project_id: projectId, endpoint_identity: endpointIdentity },
+    { skip: ids.length === 0 },
+  );
+  const status =
+    batch.error && typeof batch.error === "object" && "status" in batch.error
+      ? batch.error.status
+      : undefined;
+  const perRow = status === 404 || status === 405;
+  return (
+    <>
+      {records.map(({ value }) => (
+        <WorkRow
+          key={value.id}
+          item={value}
+          endpointIdentity={endpointIdentity}
+          showState={showState}
+          showActionVerb={showActionVerb}
+          rowActions={
+            perRow
+              ? { mode: "per_row" }
+              : {
+                  mode: "batch",
+                  entry: batch.currentData?.data.find(
+                    (entry) => entry.work_id === value.id,
+                  ),
+                  loaded: batch.currentData !== undefined,
+                  pending: batch.isFetching && !batch.currentData,
+                  failed:
+                    batch.error !== undefined ||
+                    value.project.project_id !== projectId,
+                }
+          }
+          selected={selectedId === value.id}
+          onOpen={onOpen}
+          onActionVerb={onActionVerb}
+        />
+      ))}
+    </>
+  );
+}
+
 function WorkDetail({
   item,
   endpointIdentity,
   onBack,
+  onSnoozeChange,
+  onDismiss,
+  onDismissPending,
+  onDismissFailure,
 }: {
   item: WorkItem;
   endpointIdentity: string;
   onBack: () => void;
+  onSnoozeChange: () => void;
+  onDismiss: (item: WorkItem) => void;
+  onDismissPending: (item: WorkItem) => void;
+  onDismissFailure: (item: WorkItem) => void;
 }) {
   const { currentData, isFetching, error, refetch } =
     useGetBuddyOperatorArtifactQuery(
@@ -272,8 +408,42 @@ function WorkDetail({
   const artifactMatches =
     artifact?.project.project_id === item.project.project_id &&
     artifact.project.canonical_root === item.project.canonical_root;
+  const artifactHeadline = artifact ? headline(artifact.title) : "";
+  const showConclusion =
+    Boolean(artifact?.conclusion.trim()) &&
+    !sameText(artifact?.conclusion ?? "", artifactHeadline);
+  let artifactBody: string | null = artifact?.body.trim() || null;
+  if (
+    artifactBody &&
+    (sameText(artifactBody, artifactHeadline) ||
+      sameText(artifactBody, artifact?.conclusion ?? ""))
+  ) {
+    artifactBody = null;
+  } else if (artifactBody) {
+    const paragraphBreak = /\r?\n[ \t]*\r?\n/.exec(artifactBody);
+    const firstParagraph = paragraphBreak
+      ? artifactBody.slice(0, paragraphBreak.index)
+      : artifactBody;
+    if (sameText(firstParagraph, artifactHeadline)) {
+      artifactBody = paragraphBreak
+        ? artifactBody
+            .slice(paragraphBreak.index + paragraphBreak[0].length)
+            .trim() || null
+        : null;
+    }
+    if (
+      artifactBody &&
+      (sameText(artifactBody, artifactHeadline) ||
+        sameText(artifactBody, artifact?.conclusion ?? ""))
+    ) {
+      artifactBody = null;
+    }
+  }
   const backButton = useRef<HTMLButtonElement>(null);
   const subject = readableSubject(item);
+  const remainder = artifact
+    ? titleRemainder(artifact.title, artifact.body)
+    : titleRemainder(item.title);
   useEffect(() => {
     backButton.current?.focus();
   }, []);
@@ -296,10 +466,15 @@ function WorkDetail({
             : humanizeIdentifier(item.state)}
         </Text>
       </div>
+      {!item.current_artifact_id && remainder && (
+        <Text as="p" size="2" color="gray">
+          {remainder}
+        </Text>
+      )}
       {!item.current_artifact_id && (
         <Surface variant="surface-1" className={styles.note} role="status">
           <Text size="2" color="gray">
-            {item.title} has not produced a result yet.
+            {headline(item.title)} has not produced a result yet.
           </Text>
         </Surface>
       )}
@@ -334,12 +509,14 @@ function WorkDetail({
             radius="card"
             className={styles.headline}
           >
-            <Text as="p" size="3" weight="bold" className={styles.title}>
-              {artifact.title}
+            <Text as="h3" size="3" weight="bold" className={styles.title}>
+              {artifactHeadline}
             </Text>
-            <Text as="p" size="3" className={styles.conclusion}>
-              {artifact.conclusion}
-            </Text>
+            {showConclusion && (
+              <Text as="p" size="3" className={styles.conclusion}>
+                {artifact.conclusion}
+              </Text>
+            )}
             {artifact.delta && (
               <Text as="p" size="2" color="gray" className={styles.delta}>
                 {artifact.delta}
@@ -351,6 +528,9 @@ function WorkDetail({
               item={item}
               artifact={artifact}
               endpointIdentity={endpointIdentity}
+              onDismiss={onDismiss}
+              onDismissPending={onDismissPending}
+              onDismissFailure={onDismissFailure}
             />
             <div className={styles.embedded}>
               <BuddyReportReadState
@@ -364,13 +544,19 @@ function WorkDetail({
                 item={item}
                 artifact={artifact}
                 identity={endpointIdentity}
+                onChange={onSnoozeChange}
               />
             </div>
           </div>
           <details className={styles.disclosure} open>
             <summary className={styles.summary}>The full write-up</summary>
             <div className={styles.disclosureBody}>
-              <BuddyArtifactBody body={artifact.body} />
+              {remainder && (
+                <Text as="p" size="2" color="gray">
+                  {remainder}
+                </Text>
+              )}
+              {artifactBody && <BuddyArtifactBody body={artifactBody} />}
               {artifact.uncertainty && (
                 <section aria-label="Limitations" className={styles.limits}>
                   <Text as="p" size="1" color="orange" weight="medium">
@@ -402,9 +588,17 @@ function WorkDetail({
                       <Text size="1" color="gray">
                         {evidence.locator}
                       </Text>
-                      <Text size="1" color="gray">
-                        Observed {evidence.observed_at}
-                      </Text>
+                      {changedAt(evidence.observed_at) && (
+                        <Text
+                          size="1"
+                          color="gray"
+                          title={
+                            changedAtAbsolute(evidence.observed_at) ?? undefined
+                          }
+                        >
+                          Observed {changedAt(evidence.observed_at)}
+                        </Text>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -437,6 +631,10 @@ function DeskContent({
   const [actionVerbs, setActionVerbs] = useState<Record<string, string>>({});
   const [view, setView] = useState<WorkView>(DEFAULT_VIEW);
   const [selectedId, setSelectedId] = useState<string | null>(workId ?? null);
+  const [selectedOverride, setSelectedOverride] = useState<WorkItem | null>(
+    null,
+  );
+  const dismissSnapshotRef = useRef<WorkItem | null>(null);
   const [expanded, setExpanded] = useState(false);
   const linkedWork = useGetBuddyOperatorWorkItemQuery(
     {
@@ -449,21 +647,44 @@ function DeskContent({
   const [search, setSearch] = useState("");
   const [attention, setAttention] = useState<
     "all" | "unread" | "snoozed" | "unsnoozed"
-  >("all");
+  >("unsnoozed");
+  const listRef = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement | null>(null);
+  const viewTrigger = useRef<HTMLButtonElement | null>(null);
+  const restoreViewFocus = useRef(false);
   const expandButton = useRef<HTMLButtonElement>(null);
-  const { currentData, isFetching, error, refetch } =
-    useGetBuddyOperatorWorkQuery(
-      {
-        cursor,
-        limit: 50,
-        endpoint_identity: endpointIdentity,
-        view: viewQuery[view],
-        search: search.trim(),
-        attention,
-      },
-      { refetchOnMountOrArgChange: true },
-    );
+  const refreshButton = useRef<HTMLButtonElement>(null);
+  const refreshStartedAt = useRef<number | null>(null);
+  const [refreshPending, setRefreshPending] = useState(false);
+  const [refreshNotice, setRefreshNotice] = useState(false);
+  const [dismissalNotice, setDismissalNotice] = useState<string | null>(null);
+  const refreshFocusPending = useRef(false);
+  const snoozeFocusPending = useRef(false);
+  const dismissalPendingId = useRef<string | null>(null);
+  const dismissalFocusPending = useRef<{ id: string; index: number } | null>(
+    null,
+  );
+  const dismissedSelectionId = useRef<string | null>(null);
+  const snoozedSelectionId = useRef<string | null>(null);
+  const {
+    currentData,
+    isFetching,
+    isError,
+    error,
+    startedTimeStamp,
+    fulfilledTimeStamp,
+    refetch,
+  } = useGetBuddyOperatorWorkQuery(
+    {
+      cursor,
+      limit: 50,
+      endpoint_identity: endpointIdentity,
+      view: viewQuery[view],
+      search: search.trim(),
+      attention,
+    },
+    { refetchOnMountOrArgChange: true },
+  );
   const compatiblePrevious = currentData
     ? previous.filter(
         (record) =>
@@ -483,7 +704,11 @@ function DeskContent({
   const selected =
     selectedId === workId
       ? linkedWork.currentData?.data.value
-      : records.find((record) => record.value.id === selectedId)?.value;
+      : records.find((record) => record.value.id === selectedId)?.value ??
+        (selectedOverride?.id === selectedId ? selectedOverride : undefined) ??
+        (dismissSnapshotRef.current?.id === selectedId
+          ? dismissSnapshotRef.current
+          : undefined);
   const query = search.trim().toLocaleLowerCase();
   const filtered = records.filter(
     ({ value }) => viewForState[value.state] === view,
@@ -495,9 +720,11 @@ function DeskContent({
   const showActionVerb =
     actionVerbsReady &&
     new Set(filtered.map(({ value }) => actionVerbs[value.id])).size > 1;
-  const filtersApplied = query !== "" || attention !== "all";
+  const filtersApplied = query !== "" || attention !== "unsnoozed";
   const collapsed =
     !expanded &&
+    selectedId === null &&
+    !refreshNotice &&
     !workId &&
     !error &&
     !filtersApplied &&
@@ -522,17 +749,126 @@ function DeskContent({
   }, [currentData, previous]);
 
   useLayoutEffect(() => {
-    if (selectedId === null) trigger.current?.focus({ preventScroll: true });
+    if (selectedId === null && trigger.current && !restoreViewFocus.current) {
+      trigger.current?.focus({ preventScroll: true });
+    }
   }, [selectedId]);
+
+  useLayoutEffect(() => {
+    if (selectedId !== null || !restoreViewFocus.current || isFetching) return;
+    const firstRow =
+      listRef.current?.querySelector<HTMLButtonElement>("ul li button");
+    if (firstRow) firstRow.focus({ preventScroll: true });
+    else viewTrigger.current?.focus({ preventScroll: true });
+    restoreViewFocus.current = false;
+  }, [isFetching, selectedId, view]);
+
+  useEffect(() => {
+    const startedAt = refreshStartedAt.current;
+    if (!refreshPending || startedAt === null) return;
+    if (
+      isError &&
+      startedTimeStamp !== undefined &&
+      startedTimeStamp >= startedAt
+    ) {
+      refreshStartedAt.current = null;
+      setRefreshPending(false);
+      return;
+    }
+    if (
+      isFetching ||
+      !currentData ||
+      fulfilledTimeStamp === undefined ||
+      fulfilledTimeStamp < startedAt
+    )
+      return;
+    refreshStartedAt.current = null;
+    setRefreshPending(false);
+    if (
+      selectedId &&
+      selectedId !== workId &&
+      !currentData.data.some(({ value }) => value.id === selectedId)
+    ) {
+      if (dismissalPendingId.current === selectedId) {
+        refreshStartedAt.current = null;
+        setRefreshPending(false);
+        refreshFocusPending.current = false;
+        return;
+      }
+      if (dismissedSelectionId.current === selectedId) {
+        refreshFocusPending.current = false;
+        return;
+      }
+      if (snoozedSelectionId.current === selectedId) return;
+      refreshFocusPending.current = true;
+      trigger.current = null;
+      setExpanded(true);
+      setRefreshNotice(true);
+      setSelectedId(null);
+    }
+  }, [
+    currentData,
+    fulfilledTimeStamp,
+    isError,
+    isFetching,
+    refreshPending,
+    selectedId,
+    startedTimeStamp,
+    workId,
+  ]);
+
+  useLayoutEffect(() => {
+    if (!refreshFocusPending.current || selectedId !== null) return;
+    const firstRow =
+      listRef.current?.querySelector<HTMLButtonElement>("ul li button");
+    (firstRow ?? refreshButton.current ?? expandButton.current)?.focus({
+      preventScroll: true,
+    });
+    refreshFocusPending.current = false;
+  }, [records, selectedId]);
+
+  useLayoutEffect(() => {
+    if (!snoozeFocusPending.current || selectedId !== null || isFetching)
+      return;
+    const firstRow =
+      listRef.current?.querySelector<HTMLButtonElement>("ul li button");
+    (firstRow ?? refreshButton.current ?? expandButton.current)?.focus({
+      preventScroll: true,
+    });
+    snoozeFocusPending.current = false;
+  }, [isFetching, records, selectedId]);
+
+  useLayoutEffect(() => {
+    const pending = dismissalFocusPending.current;
+    if (
+      !pending ||
+      selectedId !== null ||
+      records.some(({ value }) => value.id === pending.id)
+    )
+      return;
+    const rows =
+      listRef.current?.querySelectorAll<HTMLButtonElement>("ul li button");
+    const target = rows?.[pending.index] ?? rows?.[pending.index - 1];
+    (target ?? refreshButton.current ?? expandButton.current)?.focus({
+      preventScroll: true,
+    });
+    dismissalFocusPending.current = null;
+    dismissedSelectionId.current = null;
+  }, [records, selectedId]);
 
   const refresh = () => {
     setPrevious([]);
-    setSelectedId(null);
+    refreshStartedAt.current = Date.now();
+    setRefreshPending(true);
+    setRefreshNotice(false);
+    setDismissalNotice(null);
     if (cursor === undefined) void refetch();
     else setCursor(undefined);
   };
   const back = () => {
     setSelectedId(null);
+    setSelectedOverride(null);
+    snoozedSelectionId.current = null;
     if (config.host === "web" && config.engineServed) {
       const url = new URL(window.location.href);
       url.searchParams.delete("buddy_work");
@@ -550,8 +886,57 @@ function DeskContent({
   };
   const open = (item: WorkItem, source: HTMLButtonElement) => {
     trigger.current = source;
+    setDismissalNotice(null);
+    setSelectedOverride(null);
+    dismissedSelectionId.current = null;
+    snoozedSelectionId.current = null;
     setSelectedId(item.id);
     updateLink(item);
+  };
+  const onDismissPending = (item: WorkItem) => {
+    const index = filtered.findIndex(({ value }) => value.id === item.id);
+    dismissalPendingId.current = item.id;
+    dismissalFocusPending.current = { id: item.id, index };
+    dismissSnapshotRef.current = item;
+    setSelectedOverride(item);
+    refreshStartedAt.current = null;
+    setRefreshPending(false);
+  };
+  const onDismissFailure = (item: WorkItem) => {
+    if (dismissalPendingId.current !== item.id) return;
+    dismissalPendingId.current = null;
+    dismissSnapshotRef.current = null;
+    dismissalFocusPending.current = null;
+    setSelectedOverride(item);
+  };
+  const onDismiss = (item: WorkItem) => {
+    dismissalPendingId.current = null;
+    dismissSnapshotRef.current = null;
+    dismissalFocusPending.current ??= {
+      id: item.id,
+      index: filtered.findIndex(({ value }) => value.id === item.id),
+    };
+    dismissedSelectionId.current = item.id;
+    trigger.current = null;
+    setSelectedOverride(null);
+    setRefreshNotice(false);
+    setDismissalNotice(
+      `Dismissed "${headline(item.title)}". You can find it under Delivered.`,
+    );
+    setSelectedId(null);
+    if (config.host === "web" && config.engineServed) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("buddy_work");
+      url.searchParams.delete("buddy_project");
+      window.history.replaceState(window.history.state, "", url);
+    }
+  };
+  const onSnoozeChange = () => {
+    if (!selected) return;
+    setSelectedOverride(selected);
+    snoozedSelectionId.current = selected.id;
+    snoozeFocusPending.current = true;
+    void refetch();
   };
   const recordActionVerb = useCallback((id: string, verb: string) => {
     setActionVerbs((current) =>
@@ -566,8 +951,13 @@ function DeskContent({
         aria-label="Buddy Desk"
         data-detail-open={false}
       >
-        <Text size="2" color="gray" className={styles.collapsedText}>
-          Nothing needs you right now.
+        <Text
+          size="2"
+          color="gray"
+          className={styles.collapsedText}
+          role={dismissalNotice !== null ? "status" : undefined}
+        >
+          {dismissalNotice ?? "Nothing needs you right now."}
         </Text>
         <Button
           ref={expandButton}
@@ -596,15 +986,25 @@ function DeskContent({
         <h2 className={styles.heading}>Buddy Desk</h2>
         <span className={styles.headerSpacer} aria-hidden />
         <Button
+          ref={refreshButton}
           size="sm"
           variant="ghost"
           leftIcon={RefreshCw}
-          disabled={isFetching}
           onClick={refresh}
         >
           Refresh work
         </Button>
       </header>
+      {refreshNotice && !dismissalNotice && (
+        <Text as="p" size="1" color="gray" role="status">
+          That item is no longer in this view.
+        </Text>
+      )}
+      {dismissalNotice && (
+        <Text as="p" size="1" color="gray" role="status">
+          {dismissalNotice}
+        </Text>
+      )}
       {selectedId === workId && linkedWork.isFetching && (
         <Surface variant="surface-1" className={styles.note} role="status">
           <Text size="2" color="gray">
@@ -629,7 +1029,7 @@ function DeskContent({
         </Surface>
       )}
       <div className={styles.layout}>
-        <div className={styles.list}>
+        <div className={styles.list} ref={listRef}>
           <nav className={styles.views} aria-label="Work views">
             {views.map((label) => (
               <Button
@@ -637,7 +1037,9 @@ function DeskContent({
                 size="sm"
                 variant={view === label ? "primary" : "ghost"}
                 aria-pressed={view === label}
-                onClick={() => {
+                onClick={(event) => {
+                  viewTrigger.current = event.currentTarget;
+                  restoreViewFocus.current = selectedId !== null;
                   setView(label);
                   setSelectedId(null);
                   setCursor(undefined);
@@ -648,24 +1050,26 @@ function DeskContent({
               </Button>
             ))}
           </nav>
-          {(records.length > 0 || filtersApplied) && !error && (
+          {(records.length > 0 || filtersApplied || expanded) && !error && (
             <div className={styles.filters}>
-              <label className={styles.search}>
-                <Text size="1" color="gray">
-                  Search saved work
-                </Text>
-                <input
-                  type="search"
-                  value={search}
-                  maxLength={256}
-                  onChange={(event) => {
-                    setSearch(event.target.value);
-                    setCursor(undefined);
-                    setPrevious([]);
-                    setSelectedId(null);
-                  }}
-                />
-              </label>
+              {(records.length > 0 || query !== "") && (
+                <label className={styles.search}>
+                  <Text size="1" color="gray">
+                    Search saved work
+                  </Text>
+                  <input
+                    type="search"
+                    value={search}
+                    maxLength={256}
+                    onChange={(event) => {
+                      setSearch(event.target.value);
+                      setCursor(undefined);
+                      setPrevious([]);
+                      setSelectedId(null);
+                    }}
+                  />
+                </label>
+              )}
               <label className={styles.search}>
                 <Text size="1" color="gray">
                   Report attention
@@ -687,10 +1091,10 @@ function DeskContent({
                     setSelectedId(null);
                   }}
                 >
-                  <option value="all">All saved work</option>
+                  <option value="unsnoozed">Active reports</option>
                   <option value="unread">Unread reports</option>
                   <option value="snoozed">Snoozed reports</option>
-                  <option value="unsnoozed">Not snoozed</option>
+                  <option value="all">All saved work, including snoozed</option>
                 </select>
               </label>
             </div>
@@ -730,14 +1134,21 @@ function DeskContent({
                 </Text>
               )}
               <ul className={styles.items}>
-                {filtered.map(({ value }) => (
-                  <WorkRow
-                    key={value.id}
-                    item={value}
+                {Array.from(
+                  { length: Math.ceil(filtered.length / ROW_GROUP_SIZE) },
+                  (_, index) =>
+                    filtered.slice(
+                      index * ROW_GROUP_SIZE,
+                      (index + 1) * ROW_GROUP_SIZE,
+                    ),
+                ).map((group) => (
+                  <WorkRowGroup
+                    key={group[0].value.id}
+                    records={group}
                     endpointIdentity={endpointIdentity}
                     showState={distinctStates.size > 1}
                     showActionVerb={showActionVerb}
-                    selected={selectedId === value.id}
+                    selectedId={selectedId}
                     onOpen={open}
                     onActionVerb={recordActionVerb}
                   />
@@ -764,6 +1175,10 @@ function DeskContent({
             item={selected}
             endpointIdentity={endpointIdentity}
             onBack={back}
+            onSnoozeChange={onSnoozeChange}
+            onDismiss={onDismiss}
+            onDismissPending={onDismissPending}
+            onDismissFailure={onDismissFailure}
           />
         ) : (
           filtered.length > 0 && (

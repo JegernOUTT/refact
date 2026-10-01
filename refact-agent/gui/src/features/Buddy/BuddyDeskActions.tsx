@@ -25,12 +25,18 @@ function ActionControl({
   endpointIdentity,
   refresh,
   disabled,
+  onDismiss,
+  onDismissPending,
+  onDismissFailure,
 }: {
   action: DeskAction;
   item: WorkItem;
   endpointIdentity: string;
   refresh: () => void;
   disabled: boolean;
+  onDismiss?: (item: WorkItem) => void;
+  onDismissPending?: (item: WorkItem) => void;
+  onDismissFailure?: (item: WorkItem) => void;
 }) {
   const [execute] = useExecuteBuddyDeskActionMutation();
   const [pending, setPending] = useState(false);
@@ -41,6 +47,10 @@ function ActionControl({
   const inFlight = useRef(false);
   const mounted = useRef(false);
   const key = useRef<string>();
+  const onDismissRef = useRef(onDismiss);
+  onDismissRef.current = onDismiss;
+  const itemRef = useRef(item);
+  itemRef.current = item;
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -71,6 +81,8 @@ function ActionControl({
     setPending(true);
     setError(null);
     key.current ??= uuidv4();
+    if (lifecycle && action.spec.action_id === "dismiss_not_a_problem")
+      onDismissPending?.(item);
     try {
       const response = await execute({
         id: item.id,
@@ -84,11 +96,30 @@ function ActionControl({
         spec_hash: action.spec_hash,
         idempotency_key: key.current,
       }).unwrap();
+      const dismissed =
+        lifecycle &&
+        action.spec.action_id === "dismiss_not_a_problem" &&
+        response.data.value.status === "completed";
+      if (dismissed && onDismissRef.current) {
+        onDismissRef.current?.(itemRef.current);
+        key.current = undefined;
+        return;
+      }
+      if (lifecycle && action.spec.action_id === "dismiss_not_a_problem") {
+        onDismissFailure?.(itemRef.current);
+        if (!mounted.current) return;
+        setResult(response.data);
+        key.current = undefined;
+        refresh();
+        return;
+      }
       if (!mounted.current) return;
       setResult(response.data);
       key.current = undefined;
       refresh();
     } catch {
+      if (lifecycle && action.spec.action_id === "dismiss_not_a_problem")
+        onDismissFailure?.(itemRef.current);
       if (mounted.current) {
         setError(
           "No acknowledged result was received. Reload the saved status before retrying; a retry keeps the same request identity.",
@@ -160,10 +191,16 @@ export function BuddyDeskActions({
   item,
   artifact,
   endpointIdentity,
+  onDismiss,
+  onDismissPending,
+  onDismissFailure,
 }: {
   item: WorkItem;
   artifact: ArtifactRevision;
   endpointIdentity: string;
+  onDismiss?: (item: WorkItem) => void;
+  onDismissPending?: (item: WorkItem) => void;
+  onDismissFailure?: (item: WorkItem) => void;
 }) {
   const { currentData, error, isFetching, refetch } =
     useGetBuddyDeskActionsQuery(
@@ -239,6 +276,9 @@ export function BuddyDeskActions({
               endpointIdentity={endpointIdentity}
               disabled={isFetching}
               refresh={() => void refetch()}
+              onDismiss={onDismiss}
+              onDismissPending={onDismissPending}
+              onDismissFailure={onDismissFailure}
             />
           ),
         )}

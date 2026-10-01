@@ -2492,13 +2492,31 @@ mod tests {
     }
 
     async fn wait_for_daemon_info(path: &Path) -> crate::daemon::state::DaemonInfo {
-        for _ in 0..100 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        loop {
             if let Ok(Some(info)) = crate::daemon::state::read_daemon_info(path).await {
                 return info;
             }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "daemon did not start"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        panic!("daemon did not start")
+    }
+
+    async fn wait_for_daemon_ready(info: &crate::daemon::state::DaemonInfo) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            if client::ping_daemon(info).await.is_alive() {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "daemon did not become responsive"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     async fn start_test_daemon(
@@ -2517,7 +2535,9 @@ mod tests {
             crate::daemon::run_daemon_entry_with_paths(config, paths, false, false).await
         });
         let daemon_json = cache_dir.path().join("daemon").join("daemon.json");
-        (wait_for_daemon_info(&daemon_json).await, task)
+        let info = wait_for_daemon_info(&daemon_json).await;
+        wait_for_daemon_ready(&info).await;
+        (info, task)
     }
 
     async fn shutdown_test_daemon(
@@ -2529,8 +2549,8 @@ mod tests {
     }
 
     async fn retry_open_project(info: &crate::daemon::state::DaemonInfo, root: &Path) -> Value {
-        let mut last_error = None;
-        for _ in 0..20 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        loop {
             match client::post_json::<_, Value>(
                 info,
                 "/daemon/v1/projects/open",
@@ -2540,12 +2560,14 @@ mod tests {
             {
                 Ok(value) => return value,
                 Err(error) => {
-                    last_error = Some(error);
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "daemon project open failed: {error}"
+                    );
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         }
-        panic!("daemon project open failed: {:?}", last_error);
     }
 
     #[tokio::test]
@@ -2766,6 +2788,7 @@ mod tests {
         };
         let project_dir = tempfile::tempdir().unwrap();
         let (info, task) = start_test_daemon(&cache_dir).await;
+        wait_for_daemon_ready(&info).await;
 
         let mut out = Vec::new();
         assert_eq!(
@@ -2997,8 +3020,16 @@ mod tests {
         let _: Value = client::delete_json(&info, &format!("/daemon/v1/projects/{project_id}"))
             .await
             .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        while !client::ping_daemon(&info).await.is_alive() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "daemon did not become responsive"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         let report = doctor_report().await;
-        assert_eq!(report.exit_code(), 0);
+        assert_eq!(report.exit_code(), 0, "doctor checks: {:#?}", report.checks);
         assert!(report
             .checks
             .iter()

@@ -46,21 +46,21 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-serde = { version = "1", features = ["rc", "derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
-tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "signal", "process"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
 tracing = "0.1"
-heed = "0.22.0"
 indexmap = { version = "1.9.1", features = ["serde-1"] }
 itertools = "0.14.0"
 lazy_static = "1.4.0"
+clap = { version = "=4.5.60", features = ["derive"] }
 libc = "0.2"
 md5 = "0.7"
 regex = "1.9.5"
 ropey = "1.6"
-serde_cbor = "0.11.2"
-tempfile = "3.8.1"
-tokenizers = "0.21.0"
+tempfile = "3"
+image = { version = "0.25.6", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+tokenizers = { version = "0.21.0", default-features = false, features = ["onig"] }
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25"
 tree-sitter-cpp = "0.23"
@@ -70,7 +70,44 @@ tree-sitter-kotlin-ng = "1.1.0"
 tree-sitter-python = "0.25"
 tree-sitter-rust = "0.24"
 tree-sitter-typescript = "0.23"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["serde", "v4", "v7"] }
+async-trait = "0.1.73"
+axum = { version = "0.6.20", features = ["default", "http2"] }
+base64 = "0.22.1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+dunce = "1.0.5"
+fd-lock = "4.0.4"
+flate2 = "1.0"
+futures = "0.3"
+git2 = "0.20.2"
+glob = "0.3.1"
+headless_chrome = "1.0.16"
+hex = "0.4.3"
+home = "0.5"
+html5ever = "0.27"
+hyper = { version = "0.14", features = ["server", "stream"] }
+log = "0.4.20"
+markup5ever_rcdom = "0.3"
+percent-encoding = "2.3"
+petgraph = "0.6"
+process-wrap = { version = "8.0.2", features = ["tokio1"] }
+rand = "0.8.5"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "charset", "form", "http2", "json", "rustls", "stream"] }
+rusqlite = { version = "0.31.0", features = ["bundled"] }
+rust-embed = { version = "8.5.0", features = ["include-exclude"] }
+serde_yaml = "0.9.31"
+sha2 = "0.10.8"
+shell-words = "1.1.0"
+sqlite-vec = "0.1.6"
+strip-ansi-escapes = "0.2.1"
+tokio-rusqlite = "0.5.0"
+unicode-width = "0.2"
+url = { version = "2", features = ["serde"] }
+walkdir = "2.3"
+which = "7.0.2"
+zerocopy = "0.8.14"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 [profile.release]
 #debug = true
@@ -83,6 +120,11 @@ inherits = "release"
 strip = false
 lto = "thin"
 codegen-units = 16
+
+[profile.ci-test]
+inherits = "dev"
+debug = false
+incremental = false
 
 [profile.dev]
 debug = "line-tables-only"
@@ -201,6 +243,19 @@ path = "src/bin/refact.rs"
 test = false
 bench = false
 
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+
+[[test]]
+name = "daemon_proxy"
+path = "tests/it/daemon_proxy.rs"
+test = true
+
+[[test]]
+name = "daemon_supervisor"
+path = "tests/it/daemon_supervisor.rs"
+
 [features]
 default = ["voice"]
 voice = ["refact-voice/voice"]
@@ -209,7 +264,7 @@ perf-tests = []
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [build-dependencies]
-shadow-rs = "1.1.0"
+shadow-rs = { version = "1.1.0", default-features = false, features = ["build"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55.0"
@@ -218,18 +273,18 @@ winreg = "0.55.0"
 pnet_datalink = "0.35.0"
 
 [dependencies]
+clap.workspace = true
 
 # Pinned transitive dep (via rustls -> aws-lc-rs): aws-lc-sys 0.42.0's build script
 # aborts with a false-positive "COMPILER BUG DETECTED" (gcc bug 95189) on the CI
 # toolchain, breaking the x86_64-unknown-linux-gnu engine build. 0.38.0 builds cleanly
-# and is compatible with aws-lc-rs 1.16.x. Cargo.lock is gitignored, so pin here.
+# and is compatible with aws-lc-rs 1.16.x. Cargo.lock is tracked; keep this pin here.
 aws-lc-sys = "=0.38.0"
 
 refact-core = { path = "crates/refact-core" }
 refact-chat-api = { path = "crates/refact-chat-api" }
 refact-vecdb = { path = "crates/refact-vecdb" }
 refact-codegraph = { path = "crates/refact-codegraph" }
-refact-codegraph-parsers = { path = "crates/refact-codegraph-parsers" }
 refact-codehealth = { path = "crates/refact-codehealth" }
 refact-git-intel = { path = "crates/refact-git-intel" }
 refact-codewiki = { path = "crates/refact-codewiki" }
@@ -268,126 +323,114 @@ refact-self-update = { path = "crates/refact-self-update" }
 refact-tui = { path = "crates/refact-tui" }
 
 astral-tokio-tar = "0.5.2"
-axum = { version = "0.6.20", features = ["default", "http2"] }
+axum.workspace = true
 async-stream = "0.3.5"
-async-trait = "0.1.73"
+async-trait.workspace = true
 backtrace = "0.3.71"
-base64 = "0.22.1"
-chrono = { version = "0.4.31", features = ["serde"] }
+base64.workspace = true
+chrono.workspace = true
 chrono-tz = "0.10"
 cron = "0.12"
 iana-time-zone = "0.1"
 diff = "0.1.13"
-dunce = "1.0.5"
-fd-lock = "4.0.4"
-dyn_partial_eq = "=0.1.2"
+dunce.workspace = true
+fd-lock.workspace = true
 filetime = "0.2.25"
-futures = "0.3"
-git2 = "0.20.2"
-glob = "0.3.1"
+futures.workspace = true
+git2.workspace = true
+glob.workspace = true
 hashbrown = "0.15.2"
-headless_chrome = "1.0.16"
-heed = "0.22.0"
-home = "0.5"
+headless_chrome.workspace = true
+home.workspace = true
+image.workspace = true
 hostname = "0.4"
 html2text = "0.12.5"
+html5ever.workspace = true
+markup5ever_rcdom.workspace = true
 humantime = "2.1"
-hyper = { version = "0.14", features = ["server", "stream"] }
-image = "0.25.2"
-indexmap = { version = "1.9.1", features = ["serde-1"] }
-itertools = "0.14.0"
-lazy_static = "1.4.0"
-libc.workspace = true
-libsqlite3-sys = "0.28.0"
-log = "0.4.20"
-md5 = "0.7"
+hyper.workspace = true
+indexmap.workspace = true
+itertools.workspace = true
+lazy_static.workspace = true
+log.workspace = true
+md5.workspace = true
 mdns-sd = "0.20.0"
 mimalloc = { version = "0.1", default-features = false }
 notify = { version = "8.0.0", features = ["serde"] }
 parking_lot = { version = "0.12.1", features = ["serde"] }
-portable-pty = "0.9"
-process-wrap = { version = "8.0.2", features = ["tokio1"] }
-rand = "0.8.5"
+rand.workspace = true
 rayon = "1.8.0"
 roxmltree = "0.20.0"
-regex = "1.9.5"
-reqwest = { version = "0.13", default-features = false, features = ["json", "form", "stream", "rustls", "charset", "http2"] }
+regex.workspace = true
+reqwest.workspace = true
 eventsource-stream = "0.2"
-flate2 = "1.0"
-resvg = "0.44.0"
-ropey = "1.6"
-rusqlite = { version = "0.31.0", features = ["bundled"] }
-rust-embed = { version = "8.5.0", features = ["include-exclude"] }
-percent-encoding = "2.3"
-serde = { version = "1", features = ["rc", "derive"] }
-serde_cbor = "0.11.2"
-serde_json = { version = "1", features = ["preserve_order"] }
-serde_yaml = "0.9.31"
+flate2.workspace = true
+resvg = { version = "0.44.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
+ropey.workspace = true
+rusqlite.workspace = true
+rust-embed.workspace = true
+percent-encoding.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
 # all features = ["compression", "docs", "event_log", "failpoints", "io_uring", "lock_free_delays", "measure_allocs", "miri_optimizations", "mutex", "no_inline", "no_logs", "pretty_backtrace", "testing"]
 shadow-rs = { version = "1.1.0", features = [], default-features = false }
-sha2 = "0.10.8"
-hex = "0.4.3"
-shell-words = "1.1.0"
+sha2.workspace = true
+hex.workspace = true
+shell-words.workspace = true
 shell-escape = "0.1.5"
-select = "0.6.0"
 similar = "2.3.0"
-sqlite-vec = { version = "0.1.6" }
-strip-ansi-escapes = "0.2.1"
+sqlite-vec.workspace = true
 strsim = "0.11.1"
-structopt = "0.3"
 sysinfo = { version = "0.35.2", default-features = false, features = ["system"] }
-tempfile = "3.8.1"
-tokenizers = "0.21.0"
-tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "signal", "process"] }
-tokio-rusqlite = "0.5.0"
+tempfile.workspace = true
+libc.workspace = true
+tokio.workspace = true
+tokio-rusqlite.workspace = true
 tokio-util = { version = "0.7.12", features = ["compat"] }
-tokio-tungstenite = { version = "0.21.0", features = ["rustls-tls-webpki-roots"] }
-tar = "0.4"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+webpki-roots = "0.26"
 tower-http = { version = "0.4.0", features = ["cors"] }
 tower-lsp = "0.20"
-tracing = "0.1"
+tracing.workspace = true
 tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tree-sitter = "0.25"
-tree-sitter-bash = { workspace = true }
-tree-sitter-cpp = "0.23"
-tree-sitter-java = "0.23"
-tree-sitter-javascript = "0.25"
-tree-sitter-kotlin-ng = "1.1.0"
-tree-sitter-python = "0.25"
-tree-sitter-rust = "0.24"
-tree-sitter-typescript = "0.23"
-typetag = "0.2"
-unicode-width = "0.2"
+tree-sitter.workspace = true
+tree-sitter-bash.workspace = true
+unicode-width.workspace = true
 # SSE event decoding for the legacy MCP HTTP+SSE client transport (same crate rmcp uses internally).
 sse-stream = "0.2"
-url = "2.4.1"
-uuid = { version = "1", features = ["v4", "v7", "serde"] }
-walkdir = "2.3"
-which = "7.0.2"
-zip = { version = "2.2", default-features = false, features = ["deflate"] }
-petgraph = "0.6"
-zerocopy = "0.8.14"
+url.workspace = true
+uuid.workspace = true
+walkdir.workspace = true
+which.workspace = true
+zip.workspace = true
+petgraph.workspace = true
+zerocopy.workspace = true
 
 # There you can use a local copy
 # rmcp = { path = "../../../rust-sdk/crates/rmcp/", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
-# Pinned to a known-good rmcp rev because upstream main drifts and Cargo.lock is gitignored.
+# Pinned to a known-good rmcp rev because upstream main drifts; the engine Cargo.lock is tracked.
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "63583b164f54ec6ed2f17c98450487c747d34aeb", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
 oauth2 = { version = "5.0", default-features = false }
-thiserror = "2.0.12"
-dirs = "5.0"
+dirs.workspace = true
+tokenizers.workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["aws-lc-sys", "tokio-util", "proptest", "astral-tokio-tar"]
 
 [dev-dependencies]
 refact-privacy = { path = "crates/refact-privacy", features = ["test-util"] }
 # Same pinned rev as the main dependency; integration tests drive the MCP
 # client stack directly (tests/mcp_stdio_e2e.rs).
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "63583b164f54ec6ed2f17c98450487c747d34aeb", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth"] }
-serde_json = "1"
-tempfile = "3.8"
+serde_json.workspace = true
+tempfile.workspace = true
 proptest = "1.4"
 insta = "1.34"
-uuid = { version = "1.6", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
+uuid.workspace = true
+chrono.workspace = true
 serial_test = "3"
 tower = { version = "0.4", features = ["util"] }
-tokio = { workspace = true, features = ["test-util"] }
+tokio.workspace = true

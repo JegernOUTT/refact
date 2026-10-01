@@ -4,15 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-serde = { workspace = true }
-tree-sitter = { workspace = true }
-tree-sitter-rust = { workspace = true }
-tree-sitter-python = { workspace = true }
-tree-sitter-javascript = { workspace = true }
-tree-sitter-typescript = { workspace = true }
-tree-sitter-java = { workspace = true }
-tree-sitter-kotlin-ng = { workspace = true }
-tree-sitter-cpp = { workspace = true }
+serde.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-java.workspace = true
+tree-sitter-kotlin-ng.workspace = true
+tree-sitter-cpp.workspace = true
 tree-sitter-go = "0.25"
 tree-sitter-c-sharp = "0.23"
 tree-sitter-ruby = "0.23"
@@ -20,10 +20,10 @@ tree-sitter-php = "0.24"
 tree-sitter-scala = "0.26"
 tree-sitter-swift = "0.7"
 tree-sitter-c = "0.24"
-tree-sitter-bash = { workspace = true }
+tree-sitter-bash.workspace = true
 tree-sitter-elixir = "0.3"
 tree-sitter-ocaml = "0.25"
 tree-sitter-haskell = "0.23"
 
 [dev-dependencies]
-serde_json = { workspace = true }
+serde_json.workspace = true

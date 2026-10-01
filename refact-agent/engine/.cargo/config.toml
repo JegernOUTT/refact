@@ -5,7 +5,7 @@ rustflags = ["-Ctarget-feature=+crt-static"]
 [target.aarch64-pc-windows-msvc]
 rustflags = ["-Ctarget-feature=+crt-static"]
 
-# Uncomment for faster local linking (requires: sudo apt install mold clang)
+# Uncomment for faster local linking (Ubuntu: apt install mold; paths may differ by distro).
+# Default rust-lld (Rust >=1.90) links in 2.7-3.4s; mold saves about 2s per link.
 # [target.x86_64-unknown-linux-gnu]
-# linker = "clang"
-# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+# rustflags = ["-C", "link-arg=-B/usr/libexec/mold"]

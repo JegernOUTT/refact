@@ -6,8 +6,10 @@ use sha2::{Digest, Sha256};
 
 use crate::canonical::ClaudeCodeIdentity;
 
-pub const CC_VERSION: &str = "2.1.258";
-pub const USER_AGENT: &str = "claude-cli/2.1.258 (external, cli)";
+pub const CC_VERSION: &str = "2.1.281";
+pub const USER_AGENT: &str = "claude-cli/2.1.281 (external, cli)";
+pub const STAINLESS_PACKAGE_VERSION: &str = "0.112.1";
+pub const STAINLESS_RUNTIME_VERSION: &str = "v26.3.0";
 pub const SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 pub const MCP_TOOL_PREFIX: &str = "t_";
 
@@ -101,9 +103,9 @@ pub fn apply_stainless_headers(
         ("x-stainless-lang", "js"),
         ("x-stainless-os", os_name),
         ("x-stainless-arch", arch),
-        ("x-stainless-package-version", "0.81.0"),
+        ("x-stainless-package-version", STAINLESS_PACKAGE_VERSION),
         ("x-stainless-runtime", "node"),
-        ("x-stainless-runtime-version", "v22.14.0"),
+        ("x-stainless-runtime-version", STAINLESS_RUNTIME_VERSION),
         ("x-stainless-retry-count", "0"),
         ("x-stainless-timeout", "600"),
         ("anthropic-dangerous-direct-browser-access", "true"),
@@ -121,6 +123,11 @@ pub fn apply_stainless_headers(
         "x-claude-code-session-id",
         HeaderValue::from_str(identity.session_id.as_str())
             .map_err(|e| format!("invalid x-claude-code-session-id: {e}"))?,
+    );
+    headers.insert(
+        "x-client-request-id",
+        HeaderValue::from_str(&uuid::Uuid::new_v4().to_string())
+            .map_err(|e| format!("invalid x-client-request-id: {e}"))?,
     );
     Ok(())
 }
@@ -770,8 +777,8 @@ mod tests {
             .collect();
         assert_eq!(parts.len(), 3, "CC_VERSION must be major.minor.patch");
         assert!(
-            (parts[0], parts[1], parts[2]) >= (2, 1, 251),
-            "CC_VERSION {CC_VERSION} is below 2.1.251; Anthropic rejects newer models with older clients"
+            (parts[0], parts[1], parts[2]) >= (2, 1, 280),
+            "CC_VERSION {CC_VERSION} is below 2.1.280; Anthropic rejects newer models with older clients"
         );
     }
 
@@ -860,6 +867,32 @@ mod tests {
         assert_eq!(
             headers.get("x-claude-code-session-id").unwrap(),
             identity.session_id.as_str()
+        );
+        assert_eq!(
+            headers.get("x-stainless-package-version").unwrap(),
+            STAINLESS_PACKAGE_VERSION
+        );
+        assert_eq!(
+            headers.get("x-stainless-runtime-version").unwrap(),
+            STAINLESS_RUNTIME_VERSION
+        );
+        let request_id = headers
+            .get("x-client-request-id")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(uuid::Uuid::parse_str(request_id).is_ok());
+    }
+
+    #[test]
+    fn test_apply_stainless_headers_mints_a_fresh_request_id_per_call() {
+        let mut first = HeaderMap::new();
+        let mut second = HeaderMap::new();
+        apply_stainless_headers(&mut first, None).unwrap();
+        apply_stainless_headers(&mut second, None).unwrap();
+        assert_ne!(
+            first.get("x-client-request-id").unwrap(),
+            second.get("x-client-request-id").unwrap()
         );
     }
 

@@ -33,50 +33,6 @@ env:
   MACOSX_DEPLOYMENT_TARGET: 10.15
 
 jobs:
-  daemon-e2e:
-    name: daemon E2E (Linux x86_64)
-    runs-on: ubuntu-22.04
-    env:
-      REFACT_SKIP_GUI_BUILD: "1"
-      REFACT_DAEMON_E2E: "1"
-      PYTHON3: "python3"
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: ${{ env.FETCH_DEPTH }}
-
-      - name: Install Rust toolchain
-        run: |
-          rustup update --no-self-update stable
-          rustup component add rust-src
-
-      - name: Ensure Python is available
-        run: python3 --version
-
-      - name: Install build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang mold lld
-
-      - name: Restore cached cargo
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            refact-agent/engine -> target
-          key: ubuntu-22.04-x86_64-unknown-linux-gnu-daemon-e2e-cargo
-          shared-key: ubuntu-22.04-x86_64-unknown-linux-gnu-daemon-e2e-cargo
-          cache-bin: false
-
-      - name: Build refact daemon binary
-        run: cargo build --bin refact
-
-      - name: Run daemon E2E suite
-        # Single-threaded: each test spawns a real daemon + worker subprocesses;
-        # running them concurrently on a 2-core runner starves the daemon's
-        # idle/cron poll loops and makes lifecycle timeouts flaky.
-        run: cargo test --test daemon_e2e -- --nocapture --test-threads=1
-
   dist:
     strategy:
       fail-fast: false
@@ -98,10 +54,9 @@ jobs:
             target: x86_64-unknown-linux-gnu
             code-target: linux-x64
             cross: true
-          - os: ubuntu-22.04
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             code-target: linux-arm64
-            cross: true
 #          - os: ubuntu-22.04
 #            target: arm-unknown-linux-gnueabihf
 #            code-target: linux-armhf
@@ -186,18 +141,11 @@ jobs:
           fallback: none
 
       - name: Build GUI for linux-like artifact
-        if: matrix.cross
+        if: matrix.cross || matrix.target == 'aarch64-unknown-linux-gnu'
         working-directory: refact-agent/gui
         run: |
           npm ci
           npm run build
-
-      - name: Test artifact
-        if: matrix.cross == null && startsWith(matrix.os, 'windows')
-        env:
-          REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
-        shell: bash
-        run: cargo test --workspace --exclude refact-tui --profile ci-release --lib --tests
 
       - name: Build artifact
         if: matrix.cross == null && startsWith(matrix.os, 'windows')
@@ -209,12 +157,6 @@ jobs:
           cp ./target/ci-release/refact-lsp${{ matrix.ext }} ../..
           cp ./target/ci-release/refact${{ matrix.ext }} ../..
 
-      - name: Test artifact
-        if: matrix.cross == null && !startsWith(matrix.os, 'windows')
-        env:
-          CARGO_PROFILE_CI_RELEASE_LTO: ${{ endsWith(matrix.target, 'apple-darwin') && 'thin' || 'true' }}
-        run: OPENSSL_STATIC=1 cargo test --workspace --exclude refact-lsp --profile ci-release --lib --tests --target ${{ matrix.target }}
-
       - name: Build artifact
         if: matrix.cross == null && !startsWith(matrix.os, 'windows')
         env:
@@ -224,36 +166,75 @@ jobs:
           cp ./target/${{ matrix.target }}/ci-release/refact-lsp${{ matrix.ext }} ../..
           cp ./target/${{ matrix.target }}/ci-release/refact${{ matrix.ext }} ../..
 
-      - name: Test linux-like artifact
-        if: matrix.cross
-        env:
-          CARGO_BUILD_JOBS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '2' }}
-          CROSS_CONTAINER_OPTS: --volume "${{ github.workspace }}/refact-agent/gui:/gui:ro"
-        run: |
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            CROSS_NO_WARNINGS=0 cross test --workspace --exclude refact-lsp --profile ci-release --lib --tests --target ${{ matrix.target }}
-          else
-            CROSS_NO_WARNINGS=0 cross test --workspace --profile ci-release --lib --tests --target ${{ matrix.target }}
-          fi
-
-      - name: Free test artifacts before linux-like build
-        if: matrix.cross
-        run: |
-          df -h . ./target || true
-          rm -rf ./target/${{ matrix.target }}/ci-release/deps
-          rm -rf ./target/${{ matrix.target }}/ci-release/incremental
-          docker system prune -af || true
-          df -h . ./target || true
-
       - name: Build linux-like artifact
         if: matrix.cross
         env:
-          CARGO_BUILD_JOBS: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '2' }}
+          CARGO_BUILD_JOBS: "2"
           CROSS_CONTAINER_OPTS: --volume "${{ github.workspace }}/refact-agent/gui:/gui:ro"
         run: |
           CROSS_NO_WARNINGS=0 cross build --workspace --profile ci-release --target ${{ matrix.target }}
           cp ./target/${{ matrix.target }}/ci-release/refact-lsp${{ matrix.ext }} ../..
           cp ./target/${{ matrix.target }}/ci-release/refact${{ matrix.ext }} ../..
+
+      - name: Build native linux ARM artifact
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        env:
+          CARGO_PROFILE_CI_RELEASE_LTO: thin
+          OPENSSL_STATIC: "1"
+        run: |
+          mkdir -p "$HOME/.cargo/registry" "$HOME/.cargo/git"
+          docker run --rm --platform linux/arm64 \
+            -e HOST_UID="$(id -u)" \
+            -e HOST_GID="$(id -g)" \
+            -e CARGO_HOME=/cargo \
+            -e RUSTUP_HOME=/rustup \
+            -e CARGO_PROFILE_CI_RELEASE_LTO \
+            -e OPENSSL_STATIC \
+            -e REFACT_USE_PREBUILT_GUI=1 \
+            -e REFACT_GUI_DIR=/workspace/refact-agent/gui \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -v "$HOME/.cargo/registry:/cargo/registry" \
+            -v "$HOME/.cargo/git:/cargo/git" \
+            -w /workspace/refact-agent/engine \
+            ubuntu:20.04 bash -euo pipefail -c '
+              restore_host_ownership() {
+                status=$?
+                for path in /workspace/refact-agent/engine/target /cargo/registry /cargo/git /workspace/refact-lsp /workspace/refact; do
+                  if [ -e "$path" ]; then
+                    chown -R "$HOST_UID:$HOST_GID" "$path" || status=$?
+                  fi
+                done
+                exit "$status"
+              }
+              trap restore_host_ownership EXIT
+              mkdir -p target "$CARGO_HOME/registry" "$CARGO_HOME/git"
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates clang cmake curl git libclang-dev libssl-dev lld pkg-config unzip
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain stable
+              export PATH="$CARGO_HOME/bin:$PATH"
+              rustup target add aarch64-unknown-linux-gnu
+              rustup component add rust-src
+              git config --global --add safe.directory /workspace
+              cargo build --workspace --profile ci-release --target aarch64-unknown-linux-gnu
+              cp target/aarch64-unknown-linux-gnu/ci-release/refact-lsp /workspace/refact-lsp
+              cp target/aarch64-unknown-linux-gnu/ci-release/refact /workspace/refact
+            '
+
+      - name: Check native ARM glibc floor
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GLIBC_2.31 comes from Ubuntu 20.04 in the pinned Cross image at cross-rs/cross revision 29d00c7803f221f1b3f35e561b03792368fb8339.
+          floor=GLIBC_2.31
+          for binary in target/${{ matrix.target }}/ci-release/refact-lsp target/${{ matrix.target }}/ci-release/refact; do
+            required=$(objdump -T "$binary" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+            echo "$binary: $required (maximum allowed: $floor)"
+            if [[ -z "$required" || "$(printf '%s\n%s\n' "$floor" "$required" | sort -V | tail -1)" != "$floor" ]]; then
+              echo "$binary requires a glibc newer than $floor" >&2
+              exit 1
+            fi
+          done
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

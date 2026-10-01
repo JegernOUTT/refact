@@ -1,8 +1,7 @@
 use std::ffi::OsString;
 use std::io::Write;
 
-use structopt::clap::ErrorKind;
-use structopt::StructOpt;
+use clap::error::ErrorKind;
 
 use crate::global_context::CommandLine;
 
@@ -278,14 +277,14 @@ fn contains_json<'a>(args: impl Iterator<Item = &'a OsString>) -> bool {
         .any(|arg| arg == "--json")
 }
 
-fn clap_error(error: structopt::clap::Error) -> CliDispatchError {
-    let exit_code = match error.kind {
-        ErrorKind::HelpDisplayed | ErrorKind::VersionDisplayed => 0,
+fn clap_error(error: clap::Error) -> CliDispatchError {
+    let exit_code = match error.kind() {
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => 0,
         _ => 1,
     };
     let use_stderr = error.use_stderr();
     CliDispatchError {
-        message: error.message,
+        message: error.to_string(),
         exit_code,
         use_stderr,
         kind: None,
@@ -341,6 +340,15 @@ mod tests {
             }
             _ => panic!("expected worker command"),
         }
+    }
+
+    #[test]
+    fn parse_worker_version_exits_successfully() {
+        let error = parse_from(["refact", "worker", "--version"]).unwrap_err();
+
+        assert_eq!(error.exit_code, 0);
+        assert!(!error.use_stderr);
+        assert!(error.message.contains(env!("CARGO_PKG_VERSION")));
     }
 
     #[test]
@@ -410,6 +418,42 @@ mod tests {
             RefactCliCommand::Daemon {
                 foreground: true,
                 port: Some(0)
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_vscode_daemon_spawn_argv() {
+        assert!(matches!(
+            parse_from(["refact", "daemon"]).unwrap(),
+            RefactCliCommand::Daemon {
+                foreground: false,
+                port: None
+            }
+        ));
+        assert!(matches!(
+            parse_from(["refact", "daemon", "--port", "9000"]).unwrap(),
+            RefactCliCommand::Daemon {
+                foreground: false,
+                port: Some(9000)
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_jetbrains_daemon_spawn_argv() {
+        assert!(matches!(
+            parse_from(["refact", "daemon"]).unwrap(),
+            RefactCliCommand::Daemon {
+                foreground: false,
+                port: None
+            }
+        ));
+        assert!(matches!(
+            parse_from(["refact", "daemon", "--port", "9000"]).unwrap(),
+            RefactCliCommand::Daemon {
+                foreground: false,
+                port: Some(9000)
             }
         ));
     }

@@ -4578,135 +4578,10 @@ async fn wait_for_test_detached_trajectory_writer_failure(chat_id: &str) {
     }
 }
 
-async fn save_trajectory_snapshot_inner(
-    gcx: Arc<GlobalContext>,
-    mut snapshot: TrajectorySnapshot,
-    write_cache: Option<Arc<AMutex<DetachedTrajectoryWriteCache>>>,
-) -> Result<(), String> {
-    validate_trajectory_id(&snapshot.chat_id).map_err(|e| e.message)?;
-    let chat_id = snapshot.chat_id.clone();
-    let app = AppState::from_gcx(gcx.clone()).await;
-    let existing_no_meta_path = if snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none() {
-        find_normal_trajectory_path(gcx.clone(), &snapshot.chat_id).await
-    } else {
-        None
-    };
-    if snapshot.messages.is_empty()
-        && snapshot.pending_deliveries.is_empty()
-        && snapshot.task_meta.is_none()
-        && snapshot.buddy_meta.is_none()
-        && snapshot.frozen_request_prefix.is_none()
-        && snapshot.goal.is_none()
-        && snapshot.auto_compression_cap.is_none()
-        && !snapshot.auto_compression_cap_pending
-        && snapshot.title.is_empty()
-        && existing_no_meta_path.is_none()
-    {
-        return Ok(());
-    }
-
-    let message_count = snapshot.messages.len();
-    let collect_metrics = snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none();
-    let should_generate_title =
-        is_placeholder_title(&snapshot.title) && !snapshot.is_title_generated && message_count > 0;
-    let should_generate_task_name = snapshot
-        .task_meta
-        .as_ref()
-        .is_some_and(|task_meta| task_meta.role == "planner");
-    let retain_background_messages = should_generate_title || should_generate_task_name;
-    let messages = std::mem::take(&mut snapshot.messages);
-    let mut serialize_span = perf_diagnostics::span(
-        PerfComponent::TrajectorySerialize,
-        Some(&snapshot.chat_id),
-        None,
-    );
-    let message_serialization = tokio::task::spawn_blocking(move || {
-        let messages_json: Result<Vec<serde_json::Value>, String> = messages
-            .iter()
-            .enumerate()
-            .map(|(index, message)| {
-                #[cfg(test)]
-                if test_message_serialization_should_fail(message) {
-                    return Err(format!(
-                        "Failed to serialize trajectory message at index {index} (id {}, role {}): test failure",
-                        message.message_id, message.role
-                    ));
-                }
-                serde_json::to_value(message).map_err(|error| {
-                    format!(
-                        "Failed to serialize trajectory message at index {index} (id {}, role {}): {error}",
-                        message.message_id, message.role
-                    )
-                })
-            })
-            .collect();
-        messages_json.map(|messages_json| (messages, messages_json))
-    })
-    .await;
-    let (messages, messages_json) = match message_serialization {
-        Ok(Ok(result)) => {
-            serialize_span.pause();
-            result
-        }
-        Ok(Err(error)) => {
-            serialize_span.finish(
-                PerfOutcome::Failure,
-                None,
-                Some(message_count as u64),
-                Some(snapshot.version),
-                None,
-            );
-            return Err(error);
-        }
-        Err(error) => {
-            serialize_span.finish(
-                PerfOutcome::Failure,
-                None,
-                Some(message_count as u64),
-                Some(snapshot.version),
-                None,
-            );
-            return Err(format!(
-                "Trajectory message serialization task failed: {}",
-                error
-            ));
-        }
-    };
-    let metric_scan_span = perf_diagnostics::is_enabled()
-        .then(|| perf_diagnostics::span(PerfComponent::TrajectoryMetricScan, Some(&chat_id), None));
-    let metric_scan = tokio::task::spawn_blocking(move || {
-        let background_messages_json = retain_background_messages.then(|| messages_json.clone());
-        let metrics = collect_metrics.then(|| scan_trajectory_metrics(&messages));
-        (messages_json, background_messages_json, metrics)
-    })
-    .await;
-    if let Some(span) = metric_scan_span {
-        span.finish(
-            if metric_scan.is_ok() {
-                PerfOutcome::Success
-            } else {
-                PerfOutcome::Failure
-            },
-            None,
-            Some(message_count as u64),
-            Some(snapshot.version),
-            None,
-        );
-    }
-    let (messages_json, background_messages_json, metrics) = match metric_scan {
-        Ok(result) => result,
-        Err(error) => {
-            serialize_span.finish(
-                PerfOutcome::Failure,
-                None,
-                Some(message_count as u64),
-                Some(snapshot.version),
-                None,
-            );
-            return Err(format!("Trajectory metric scan task failed: {}", error));
-        }
-    };
-
+fn trajectory_value_from_snapshot(
+    snapshot: &TrajectorySnapshot,
+    messages_json: Vec<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
     let mut trajectory = json!({
         "id": snapshot.chat_id,
         "title": snapshot.title,
@@ -4818,14 +4693,132 @@ async fn save_trajectory_snapshot_inner(
         trajectory["task_meta"] = serde_json::to_value(task_meta).unwrap_or_default();
     }
 
-    let source = if let Some(task_meta) = snapshot.task_meta.as_ref() {
-        TrajectorySourceIdentity::from_task_meta(task_meta)
-    } else if snapshot.buddy_meta.is_some() {
-        TrajectorySourceIdentity::Buddy
-    } else {
-        TrajectorySourceIdentity::Normal
+    Ok(trajectory)
+}
+
+async fn serialize_trajectory_snapshot_messages(
+    messages: Vec<ChatMessage>,
+    retain_background_messages: bool,
+    collect_metrics: bool,
+    chat_id: &str,
+    message_count: usize,
+    version: u64,
+) -> Result<
+    (
+        Vec<serde_json::Value>,
+        Option<Vec<serde_json::Value>>,
+        Option<TrajectoryMetrics>,
+        perf_diagnostics::PerfSpan,
+    ),
+    String,
+> {
+    let mut serialize_span =
+        perf_diagnostics::span(PerfComponent::TrajectorySerialize, Some(chat_id), None);
+    let message_serialization = tokio::task::spawn_blocking(move || {
+        let messages_json: Result<Vec<serde_json::Value>, String> = messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| {
+                #[cfg(test)]
+                if test_message_serialization_should_fail(message) {
+                    return Err(format!(
+                        "Failed to serialize trajectory message at index {index} (id {}, role {}): test failure",
+                        message.message_id, message.role
+                    ));
+                }
+                serde_json::to_value(message).map_err(|error| {
+                    format!(
+                        "Failed to serialize trajectory message at index {index} (id {}, role {}): {error}",
+                        message.message_id, message.role
+                    )
+                })
+            })
+            .collect();
+        messages_json.map(|messages_json| (messages, messages_json))
+    })
+    .await;
+    let (messages, messages_json) = match message_serialization {
+        Ok(Ok(result)) => {
+            serialize_span.pause();
+            result
+        }
+        Ok(Err(error)) => {
+            serialize_span.finish(
+                PerfOutcome::Failure,
+                None,
+                Some(message_count as u64),
+                Some(version),
+                None,
+            );
+            return Err(error);
+        }
+        Err(error) => {
+            serialize_span.finish(
+                PerfOutcome::Failure,
+                None,
+                Some(message_count as u64),
+                Some(version),
+                None,
+            );
+            return Err(format!(
+                "Trajectory message serialization task failed: {}",
+                error
+            ));
+        }
     };
-    let cached_entry = if let Some(write_cache) = write_cache.as_ref() {
+    let metric_scan_span = perf_diagnostics::is_enabled()
+        .then(|| perf_diagnostics::span(PerfComponent::TrajectoryMetricScan, Some(chat_id), None));
+    let metric_scan = tokio::task::spawn_blocking(move || {
+        let background_messages_json = retain_background_messages.then(|| messages_json.clone());
+        let metrics = collect_metrics.then(|| scan_trajectory_metrics(&messages));
+        (messages_json, background_messages_json, metrics)
+    })
+    .await;
+    if let Some(span) = metric_scan_span {
+        span.finish(
+            if metric_scan.is_ok() {
+                PerfOutcome::Success
+            } else {
+                PerfOutcome::Failure
+            },
+            None,
+            Some(message_count as u64),
+            Some(version),
+            None,
+        );
+    }
+    let (messages_json, background_messages_json, metrics) = match metric_scan {
+        Ok(result) => result,
+        Err(error) => {
+            serialize_span.finish(
+                PerfOutcome::Failure,
+                None,
+                Some(message_count as u64),
+                Some(version),
+                None,
+            );
+            return Err(format!("Trajectory metric scan task failed: {}", error));
+        }
+    };
+    Ok((
+        messages_json,
+        background_messages_json,
+        metrics,
+        serialize_span,
+    ))
+}
+
+async fn persist_trajectory_snapshot_file(
+    gcx: Arc<GlobalContext>,
+    snapshot: &TrajectorySnapshot,
+    write_cache: Option<&Arc<AMutex<DetachedTrajectoryWriteCache>>>,
+    existing_no_meta_path: Option<PathBuf>,
+    source: TrajectorySourceIdentity,
+    mut trajectory: serde_json::Value,
+    message_count: usize,
+    mut serialize_span: perf_diagnostics::PerfSpan,
+) -> Result<(PathBuf, String, serde_json::Value), String> {
+    let cached_entry = if let Some(write_cache) = write_cache {
         let write_cache = write_cache.lock().await;
         if write_cache.source.as_ref() == Some(&source) {
             match (
@@ -4970,13 +4963,13 @@ async fn save_trajectory_snapshot_inner(
 
     let backing_stamp =
         cache_written_trajectory_metadata(&file_path, &snapshot.chat_id, &trajectory).await;
-    if let Some(write_cache) = write_cache.as_ref() {
+    if let Some(write_cache) = write_cache {
         let metadata = trajectory.as_object().cloned();
         let mut write_cache = write_cache.lock().await;
         if let (Some(metadata), Some(stamp)) = (metadata, backing_stamp) {
             write_cache.backing_path = Some(file_path.clone());
             write_cache.existing_metadata = Some(metadata);
-            write_cache.source = Some(source.clone());
+            write_cache.source = Some(source);
             write_cache.backing_stamp = Some(stamp);
         } else {
             *write_cache = DetachedTrajectoryWriteCache::default();
@@ -4987,9 +4980,24 @@ async fn save_trajectory_snapshot_inner(
         "Saved trajectory for chat {} ({} messages) to {:?}",
         snapshot.chat_id, message_count, file_path
     );
+    Ok((file_path, updated_at, trajectory))
+}
 
+async fn publish_trajectory_snapshot_updates(
+    gcx: Arc<GlobalContext>,
+    app: &AppState,
+    snapshot: &TrajectorySnapshot,
+    source: &TrajectorySourceIdentity,
+    file_path: &Path,
+    trajectory: serde_json::Value,
+    message_count: usize,
+    metrics: Option<TrajectoryMetrics>,
+    background_messages_json: Option<Vec<serde_json::Value>>,
+    updated_at: String,
+    should_generate_title: bool,
+) -> Result<(), String> {
     if !is_internal_trace_link_type(snapshot.link_type.as_deref()) {
-        if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), &file_path).await {
+        if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), file_path).await {
             let source_hint = if let Some(task_meta) = snapshot.task_meta.as_ref() {
                 Some(TrajectorySourceIdentity::from_task_meta(task_meta))
             } else if snapshot.buddy_meta.is_some() {
@@ -5000,7 +5008,7 @@ async fn save_trajectory_snapshot_inner(
             trajectory_index::upsert_trajectory_index_entry_from_owned_value_with_rollout(
                 &app.chat.trajectory_index_coordinator,
                 &dir,
-                &file_path,
+                file_path,
                 trajectory,
                 source_hint,
             )
@@ -5018,8 +5026,8 @@ async fn save_trajectory_snapshot_inner(
         prune_buddy_conversations_throttled(gcx.clone()).await;
     }
 
-    if should_vectorize_trajectory(&source, snapshot.link_type.as_deref()) {
-        enqueue_trajectory_vectorization(gcx.clone(), file_path.clone()).await;
+    if should_vectorize_trajectory(source, snapshot.link_type.as_deref()) {
+        enqueue_trajectory_vectorization(gcx.clone(), file_path.to_path_buf()).await;
     }
 
     if snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none() {
@@ -5092,7 +5100,7 @@ async fn save_trajectory_snapshot_inner(
                 gcx.clone(),
                 snapshot.chat_id.clone(),
                 background_messages_json.unwrap_or_default(),
-                file_path.clone(),
+                file_path.to_path_buf(),
                 TrajectorySourceIdentity::Normal,
             );
         }
@@ -5102,7 +5110,7 @@ async fn save_trajectory_snapshot_inner(
                 gcx.clone(),
                 snapshot.chat_id.clone(),
                 background_messages_json.unwrap_or_default(),
-                file_path.clone(),
+                file_path.to_path_buf(),
                 TrajectorySourceIdentity::Buddy,
             );
         }
@@ -5114,7 +5122,7 @@ async fn save_trajectory_snapshot_inner(
                 gcx.clone(),
                 snapshot.chat_id.clone(),
                 background_messages_json.clone(),
-                file_path.clone(),
+                file_path.to_path_buf(),
                 TrajectorySourceIdentity::from_task_meta(task_meta),
             );
         }
@@ -5123,7 +5131,7 @@ async fn save_trajectory_snapshot_inner(
             let user_message_count = count_user_messages(&background_messages_json);
             if user_message_count >= 1 {
                 spawn_task_name_generation_task(
-                    gcx.clone(),
+                    gcx,
                     task_meta.task_id.clone(),
                     std::mem::take(&mut background_messages_json),
                 );
@@ -5132,6 +5140,88 @@ async fn save_trajectory_snapshot_inner(
     }
 
     Ok(())
+}
+
+async fn save_trajectory_snapshot_inner(
+    gcx: Arc<GlobalContext>,
+    mut snapshot: TrajectorySnapshot,
+    write_cache: Option<Arc<AMutex<DetachedTrajectoryWriteCache>>>,
+) -> Result<(), String> {
+    validate_trajectory_id(&snapshot.chat_id).map_err(|e| e.message)?;
+    let chat_id = snapshot.chat_id.clone();
+    let app = AppState::from_gcx(gcx.clone()).await;
+    let existing_no_meta_path = if snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none() {
+        find_normal_trajectory_path(gcx.clone(), &snapshot.chat_id).await
+    } else {
+        None
+    };
+    if snapshot.messages.is_empty()
+        && snapshot.pending_deliveries.is_empty()
+        && snapshot.task_meta.is_none()
+        && snapshot.buddy_meta.is_none()
+        && snapshot.frozen_request_prefix.is_none()
+        && snapshot.goal.is_none()
+        && snapshot.auto_compression_cap.is_none()
+        && !snapshot.auto_compression_cap_pending
+        && snapshot.title.is_empty()
+        && existing_no_meta_path.is_none()
+    {
+        return Ok(());
+    }
+
+    let message_count = snapshot.messages.len();
+    let collect_metrics = snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none();
+    let should_generate_title =
+        is_placeholder_title(&snapshot.title) && !snapshot.is_title_generated && message_count > 0;
+    let should_generate_task_name = snapshot
+        .task_meta
+        .as_ref()
+        .is_some_and(|task_meta| task_meta.role == "planner");
+    let retain_background_messages = should_generate_title || should_generate_task_name;
+    let messages = std::mem::take(&mut snapshot.messages);
+    let (messages_json, background_messages_json, metrics, serialize_span) =
+        serialize_trajectory_snapshot_messages(
+            messages,
+            retain_background_messages,
+            collect_metrics,
+            &chat_id,
+            message_count,
+            snapshot.version,
+        )
+        .await?;
+    let trajectory = trajectory_value_from_snapshot(&snapshot, messages_json)?;
+    let source = if let Some(task_meta) = snapshot.task_meta.as_ref() {
+        TrajectorySourceIdentity::from_task_meta(task_meta)
+    } else if snapshot.buddy_meta.is_some() {
+        TrajectorySourceIdentity::Buddy
+    } else {
+        TrajectorySourceIdentity::Normal
+    };
+    let (file_path, updated_at, trajectory) = persist_trajectory_snapshot_file(
+        gcx.clone(),
+        &snapshot,
+        write_cache.as_ref(),
+        existing_no_meta_path,
+        source.clone(),
+        trajectory,
+        message_count,
+        serialize_span,
+    )
+    .await?;
+    publish_trajectory_snapshot_updates(
+        gcx,
+        &app,
+        &snapshot,
+        &source,
+        &file_path,
+        trajectory,
+        message_count,
+        metrics,
+        background_messages_json,
+        updated_at,
+        should_generate_title,
+    )
+    .await
 }
 
 pub async fn try_save_trajectory(
@@ -5905,6 +5995,173 @@ enum ExternalDeleteRevalidationOutcome {
     NoopStalePending,
 }
 
+async fn apply_loaded_external_delete_with_revalidation(
+    gcx: Arc<GlobalContext>,
+    session_arc: Arc<AMutex<ChatSession>>,
+    chat_id: &str,
+    expected_pending: Option<ExternalReloadPending>,
+    deleted_source: Option<TrajectorySourceIdentity>,
+    mut loaded: LoadedTrajectory,
+) -> ExternalDeleteRevalidationOutcome {
+    let task_roots = get_all_task_roots(gcx.clone()).await;
+    let loaded_source = loaded_trajectory_source(&loaded, &task_roots);
+    let transition_identity_repaired = loaded.transition_identity_repaired;
+    apply_mode_defaults_to_thread(
+        gcx.clone(),
+        &mut loaded.thread,
+        loaded.auto_approve_editing_tools_present,
+        loaded.auto_approve_dangerous_commands_present,
+    )
+    .await;
+    let repair_patch = loaded.repair_patch();
+    let outcome_loaded = loaded.clone();
+    let same_source_loaded = match deleted_source.as_ref() {
+        Some(source) if loaded_source != *source => {
+            let mut loaded =
+                load_generic_trajectory_for_chat_matching_source(gcx.clone(), chat_id, source)
+                    .await;
+            if let Some(loaded) = loaded.as_mut() {
+                apply_mode_defaults_to_thread(
+                    gcx.clone(),
+                    &mut loaded.thread,
+                    loaded.auto_approve_editing_tools_present,
+                    loaded.auto_approve_dangerous_commands_present,
+                )
+                .await;
+            }
+            loaded
+        }
+        _ => None,
+    };
+    let same_source_repair_patch = same_source_loaded
+        .as_ref()
+        .map(LoadedTrajectory::repair_patch);
+    let same_source_transition_identity_repaired = same_source_loaded
+        .as_ref()
+        .is_some_and(|loaded| loaded.transition_identity_repaired);
+    let (repaired_version, applied_to_session) = {
+        let mut session = session_arc.lock().await;
+        if let Some(expected) = expected_pending {
+            if session.external_reload_pending != Some(expected) {
+                return ExternalDeleteRevalidationOutcome::NoopStalePending;
+            }
+        }
+        let deleted_matches_session =
+            external_delete_matches_session(deleted_source.as_ref(), &session);
+        let fallback_matches_session = loaded_source.matches_session(&session);
+        if !(deleted_matches_session || fallback_matches_session) {
+            drop(session);
+            if transition_identity_repaired {
+                if let Err(e) =
+                    persist_loaded_trajectory_repair_raw(gcx.clone(), &repair_patch).await
+                {
+                    warn!(
+                        "Failed to persist repaired trajectory for {}: {}",
+                        chat_id, e
+                    );
+                }
+            }
+            return ExternalDeleteRevalidationOutcome::Updated {
+                loaded: outcome_loaded,
+                applied_to_session: false,
+            };
+        }
+        if deleted_matches_session && !fallback_matches_session {
+            if let Some(same_source_loaded) = same_source_loaded {
+                if !can_apply_external_reload(&session) {
+                    let pending_source = TrajectorySourceIdentity::from_session(&session);
+                    session.external_reload_pending =
+                        Some(ExternalReloadPending::delete(pending_source));
+                    return ExternalDeleteRevalidationOutcome::Updated {
+                        loaded: outcome_loaded,
+                        applied_to_session: false,
+                    };
+                }
+                info!(
+                    "Reloading same-source trajectory for {} after delete revalidation",
+                    chat_id
+                );
+                let repaired_version = apply_loaded_external_update_to_session(
+                    &mut session,
+                    same_source_loaded,
+                    same_source_transition_identity_repaired,
+                );
+                (repaired_version, true)
+            } else {
+                if !can_apply_external_reload(&session) {
+                    let pending_source = TrajectorySourceIdentity::from_session(&session);
+                    session.external_reload_pending =
+                        Some(ExternalReloadPending::delete(pending_source));
+                    return ExternalDeleteRevalidationOutcome::Updated {
+                        loaded: outcome_loaded,
+                        applied_to_session: false,
+                    };
+                }
+                info!(
+                    "Clearing trajectory for {} after same-source delete with fallback mismatch",
+                    chat_id
+                );
+                apply_external_delete_to_session(&mut session, chat_id);
+                (None, true)
+            }
+        } else if !can_apply_external_reload(&session) {
+            let pending_source = TrajectorySourceIdentity::from_session(&session);
+            session.external_reload_pending = Some(ExternalReloadPending::delete(pending_source));
+            return ExternalDeleteRevalidationOutcome::Updated {
+                loaded: outcome_loaded,
+                applied_to_session: false,
+            };
+        } else {
+            info!(
+                "Reloading trajectory for {} after delete revalidation",
+                chat_id
+            );
+            let repaired_version = apply_loaded_external_update_to_session(
+                &mut session,
+                loaded,
+                transition_identity_repaired,
+            );
+            (repaired_version, true)
+        }
+    };
+    if let Some(repaired_version) = repaired_version {
+        let applied_repair_patch = same_source_repair_patch.as_ref().unwrap_or(&repair_patch);
+        if let Err(e) =
+            persist_loaded_trajectory_repair_raw(gcx.clone(), applied_repair_patch).await
+        {
+            warn!(
+                "Failed to persist repaired trajectory for {}: {}",
+                chat_id, e
+            );
+        } else {
+            let mut session = session_arc.lock().await;
+            session.complete_trajectory_commit(repaired_version);
+        }
+    }
+    if same_source_transition_identity_repaired {
+        if let Some(repair_patch) = same_source_repair_patch.as_ref() {
+            if let Err(e) = persist_loaded_trajectory_repair_raw(gcx.clone(), repair_patch).await {
+                warn!(
+                    "Failed to persist repaired trajectory for {}: {}",
+                    chat_id, e
+                );
+            }
+        }
+    }
+    if transition_identity_repaired {
+        if let Err(e) = persist_loaded_trajectory_repair_raw(gcx.clone(), &repair_patch).await {
+            warn!(
+                "Failed to persist repaired trajectory for {}: {}",
+                chat_id, e
+            );
+        }
+    }
+    return ExternalDeleteRevalidationOutcome::Updated {
+        loaded: outcome_loaded,
+        applied_to_session,
+    };
+}
+
 async fn apply_external_delete_with_revalidation(
     gcx: Arc<GlobalContext>,
     session_arc: Arc<AMutex<ChatSession>>,
@@ -5913,168 +6170,16 @@ async fn apply_external_delete_with_revalidation(
     deleted_source: Option<TrajectorySourceIdentity>,
 ) -> ExternalDeleteRevalidationOutcome {
     let loaded = load_generic_trajectory_for_chat(gcx.clone(), chat_id).await;
-
-    if let Some(mut loaded) = loaded {
-        let task_roots = get_all_task_roots(gcx.clone()).await;
-        let loaded_source = loaded_trajectory_source(&loaded, &task_roots);
-        let transition_identity_repaired = loaded.transition_identity_repaired;
-        apply_mode_defaults_to_thread(
-            gcx.clone(),
-            &mut loaded.thread,
-            loaded.auto_approve_editing_tools_present,
-            loaded.auto_approve_dangerous_commands_present,
+    if let Some(loaded) = loaded {
+        return apply_loaded_external_delete_with_revalidation(
+            gcx,
+            session_arc,
+            chat_id,
+            expected_pending,
+            deleted_source,
+            loaded,
         )
         .await;
-        let repair_patch = loaded.repair_patch();
-        let outcome_loaded = loaded.clone();
-        let same_source_loaded = match deleted_source.as_ref() {
-            Some(source) if loaded_source != *source => {
-                let mut loaded =
-                    load_generic_trajectory_for_chat_matching_source(gcx.clone(), chat_id, source)
-                        .await;
-                if let Some(loaded) = loaded.as_mut() {
-                    apply_mode_defaults_to_thread(
-                        gcx.clone(),
-                        &mut loaded.thread,
-                        loaded.auto_approve_editing_tools_present,
-                        loaded.auto_approve_dangerous_commands_present,
-                    )
-                    .await;
-                }
-                loaded
-            }
-            _ => None,
-        };
-        let same_source_repair_patch = same_source_loaded
-            .as_ref()
-            .map(LoadedTrajectory::repair_patch);
-        let same_source_transition_identity_repaired = same_source_loaded
-            .as_ref()
-            .is_some_and(|loaded| loaded.transition_identity_repaired);
-        let (repaired_version, applied_to_session) = {
-            let mut session = session_arc.lock().await;
-            if let Some(expected) = expected_pending {
-                if session.external_reload_pending != Some(expected) {
-                    return ExternalDeleteRevalidationOutcome::NoopStalePending;
-                }
-            }
-            let deleted_matches_session =
-                external_delete_matches_session(deleted_source.as_ref(), &session);
-            let fallback_matches_session = loaded_source.matches_session(&session);
-            if !(deleted_matches_session || fallback_matches_session) {
-                drop(session);
-                if transition_identity_repaired {
-                    if let Err(e) =
-                        persist_loaded_trajectory_repair_raw(gcx.clone(), &repair_patch).await
-                    {
-                        warn!(
-                            "Failed to persist repaired trajectory for {}: {}",
-                            chat_id, e
-                        );
-                    }
-                }
-                return ExternalDeleteRevalidationOutcome::Updated {
-                    loaded: outcome_loaded,
-                    applied_to_session: false,
-                };
-            }
-            if deleted_matches_session && !fallback_matches_session {
-                if let Some(same_source_loaded) = same_source_loaded {
-                    if !can_apply_external_reload(&session) {
-                        let pending_source = TrajectorySourceIdentity::from_session(&session);
-                        session.external_reload_pending =
-                            Some(ExternalReloadPending::delete(pending_source));
-                        return ExternalDeleteRevalidationOutcome::Updated {
-                            loaded: outcome_loaded,
-                            applied_to_session: false,
-                        };
-                    }
-                    info!(
-                        "Reloading same-source trajectory for {} after delete revalidation",
-                        chat_id
-                    );
-                    let repaired_version = apply_loaded_external_update_to_session(
-                        &mut session,
-                        same_source_loaded,
-                        same_source_transition_identity_repaired,
-                    );
-                    (repaired_version, true)
-                } else {
-                    if !can_apply_external_reload(&session) {
-                        let pending_source = TrajectorySourceIdentity::from_session(&session);
-                        session.external_reload_pending =
-                            Some(ExternalReloadPending::delete(pending_source));
-                        return ExternalDeleteRevalidationOutcome::Updated {
-                            loaded: outcome_loaded,
-                            applied_to_session: false,
-                        };
-                    }
-                    info!(
-                        "Clearing trajectory for {} after same-source delete with fallback mismatch",
-                        chat_id
-                    );
-                    apply_external_delete_to_session(&mut session, chat_id);
-                    (None, true)
-                }
-            } else if !can_apply_external_reload(&session) {
-                let pending_source = TrajectorySourceIdentity::from_session(&session);
-                session.external_reload_pending =
-                    Some(ExternalReloadPending::delete(pending_source));
-                return ExternalDeleteRevalidationOutcome::Updated {
-                    loaded: outcome_loaded,
-                    applied_to_session: false,
-                };
-            } else {
-                info!(
-                    "Reloading trajectory for {} after delete revalidation",
-                    chat_id
-                );
-                let repaired_version = apply_loaded_external_update_to_session(
-                    &mut session,
-                    loaded,
-                    transition_identity_repaired,
-                );
-                (repaired_version, true)
-            }
-        };
-        if let Some(repaired_version) = repaired_version {
-            let applied_repair_patch = same_source_repair_patch.as_ref().unwrap_or(&repair_patch);
-            if let Err(e) =
-                persist_loaded_trajectory_repair_raw(gcx.clone(), applied_repair_patch).await
-            {
-                warn!(
-                    "Failed to persist repaired trajectory for {}: {}",
-                    chat_id, e
-                );
-            } else {
-                let mut session = session_arc.lock().await;
-                session.complete_trajectory_commit(repaired_version);
-            }
-        }
-        if same_source_transition_identity_repaired {
-            if let Some(repair_patch) = same_source_repair_patch.as_ref() {
-                if let Err(e) =
-                    persist_loaded_trajectory_repair_raw(gcx.clone(), repair_patch).await
-                {
-                    warn!(
-                        "Failed to persist repaired trajectory for {}: {}",
-                        chat_id, e
-                    );
-                }
-            }
-        }
-        if transition_identity_repaired {
-            if let Err(e) = persist_loaded_trajectory_repair_raw(gcx.clone(), &repair_patch).await {
-                warn!(
-                    "Failed to persist repaired trajectory for {}: {}",
-                    chat_id, e
-                );
-            }
-        }
-        return ExternalDeleteRevalidationOutcome::Updated {
-            loaded: outcome_loaded,
-            applied_to_session,
-        };
     }
 
     let mut session = session_arc.lock().await;
@@ -7175,195 +7280,205 @@ fn spawn_title_generation_task(
     file_path: PathBuf,
     source: TrajectorySourceIdentity,
 ) {
-    tokio::spawn(async move {
-        let app = AppState::from_gcx(gcx.clone()).await;
-        let generated_title = match tokio::time::timeout(
-            TITLE_GENERATION_LLM_TIMEOUT,
-            generate_title_llm(gcx.clone(), &messages, Some(id.as_str())),
-        )
-        .await
-        {
-            Ok(title) => title,
-            Err(_) => {
-                warn!("Title generation timed out for {}", id);
-                None
-            }
-        };
-        let title = match generated_title {
-            Some(t) => t,
-            None => match extract_first_user_message(&messages) {
-                Some(first_msg) => {
-                    let truncated: String = first_msg.chars().take(60).collect();
-                    if truncated.len() < first_msg.len() {
-                        format!("{}...", truncated.trim_end())
-                    } else {
-                        truncated
-                    }
+    tokio::spawn(run_title_generation_task(
+        gcx, id, messages, file_path, source,
+    ));
+}
+
+async fn run_title_generation_task(
+    gcx: Arc<GlobalContext>,
+    id: String,
+    messages: Vec<serde_json::Value>,
+    file_path: PathBuf,
+    source: TrajectorySourceIdentity,
+) {
+    let app = AppState::from_gcx(gcx.clone()).await;
+    let generated_title = match tokio::time::timeout(
+        TITLE_GENERATION_LLM_TIMEOUT,
+        generate_title_llm(gcx.clone(), &messages, Some(id.as_str())),
+    )
+    .await
+    {
+        Ok(title) => title,
+        Err(_) => {
+            warn!("Title generation timed out for {}", id);
+            None
+        }
+    };
+    let title = match generated_title {
+        Some(t) => t,
+        None => match extract_first_user_message(&messages) {
+            Some(first_msg) => {
+                let truncated: String = first_msg.chars().take(60).collect();
+                if truncated.len() < first_msg.len() {
+                    format!("{}...", truncated.trim_end())
+                } else {
+                    truncated
                 }
-                None => return,
-            },
-        };
-        let sessions = app.chat.sessions.clone();
-        if !title_generation_backing_file_matches(&file_path, &id, &source).await {
-            return;
-        }
-        let maybe_session_arc = {
-            let sessions_read = sessions.read().await;
-            sessions_read.get(&id).cloned()
-        };
-        if let Some(session_arc) = maybe_session_arc {
-            let mut session = session_arc.lock().await;
-            if TrajectorySourceIdentity::from_session(&session) != source {
-                drop(session);
-            } else {
-                if session.thread.is_title_generated {
-                    info!("Title already generated for {}, skipping", id);
-                    return;
-                }
-                let suppressed_trajectory_events_tx =
-                    if matches!(source, TrajectorySourceIdentity::Buddy) {
-                        session.trajectory_events_tx.take()
-                    } else {
-                        None
-                    };
-                session.set_title(title.clone(), true);
-                if let Some(tx) = suppressed_trajectory_events_tx {
-                    session.trajectory_events_tx = Some(tx);
-                }
-                drop(session);
-                maybe_save_trajectory_with_intent(
-                    app.clone(),
-                    session_arc,
-                    TrajectoryCommitIntent::Checkpoint,
-                )
-                .await;
-                info!("Updated session {} with generated title: {}", id, title);
+            }
+            None => return,
+        },
+    };
+    let sessions = app.chat.sessions.clone();
+    if !title_generation_backing_file_matches(&file_path, &id, &source).await {
+        return;
+    }
+    let maybe_session_arc = {
+        let sessions_read = sessions.read().await;
+        sessions_read.get(&id).cloned()
+    };
+    if let Some(session_arc) = maybe_session_arc {
+        let mut session = session_arc.lock().await;
+        if TrajectorySourceIdentity::from_session(&session) != source {
+            drop(session);
+        } else {
+            if session.thread.is_title_generated {
+                info!("Title already generated for {}, skipping", id);
                 return;
             }
-        }
-        let content = match fs::read_to_string(&file_path).await {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("Failed to read trajectory for title update: {}", e);
-                return;
+            let suppressed_trajectory_events_tx =
+                if matches!(source, TrajectorySourceIdentity::Buddy) {
+                    session.trajectory_events_tx.take()
+                } else {
+                    None
+                };
+            session.set_title(title.clone(), true);
+            if let Some(tx) = suppressed_trajectory_events_tx {
+                session.trajectory_events_tx = Some(tx);
             }
-        };
-        let mut data: TrajectoryData = match serde_json::from_str(&content) {
-            Ok(d) => d,
-            Err(e) => {
-                warn!("Failed to parse trajectory for title update: {}", e);
-                return;
-            }
-        };
-        if data.id != id {
-            warn!(
-                "Skipping title update for {}: JSON id mismatch, found {}",
-                file_path.display(),
-                data.id
-            );
+            drop(session);
+            maybe_save_trajectory_with_intent(
+                app.clone(),
+                session_arc,
+                TrajectoryCommitIntent::Checkpoint,
+            )
+            .await;
+            info!("Updated session {} with generated title: {}", id, title);
             return;
         }
-        let actual_source = match TrajectorySourceIdentity::from_extra(&data.extra) {
-            Ok(actual_source) => actual_source,
-            Err(e) => {
-                warn!(
-                    "Skipping title update for {}: trajectory source is invalid before write: {}",
-                    file_path.display(),
-                    e
-                );
-                return;
-            }
-        };
-        if actual_source != source {
-            warn!(
-                "Skipping title update for {}: trajectory source changed before write",
-                file_path.display()
-            );
+    }
+    let content = match fs::read_to_string(&file_path).await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Failed to read trajectory for title update: {}", e);
             return;
         }
-        let already_generated = data
-            .extra
-            .get("isTitleGenerated")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if already_generated {
-            info!("Title already generated for {}, skipping", id);
+    };
+    let mut data: TrajectoryData = match serde_json::from_str(&content) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("Failed to parse trajectory for title update: {}", e);
             return;
         }
-        let updated_at = chrono::Utc::now().to_rfc3339();
-        data.title = title.clone();
-        data.updated_at = updated_at.clone();
-        data.extra
-            .insert("isTitleGenerated".to_string(), serde_json::json!(true));
-        if let Err(e) = atomic_write_json(&file_path, &data, source.clone()).await {
-            warn!("Failed to write trajectory with generated title: {}", e);
-            return;
-        }
-        if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), &file_path).await {
-            let value = match serde_json::to_value(&data) {
-                Ok(value) => value,
-                Err(e) => {
-                    warn!(
-                        "Failed to serialize trajectory title update for index: {}",
-                        e
-                    );
-                    return;
-                }
-            };
-            if let Err(e) =
-                trajectory_index::upsert_trajectory_index_entry_from_owned_value_with_rollout(
-                    &app.chat.trajectory_index_coordinator,
-                    &dir,
-                    &file_path,
-                    value,
-                    Some(source.clone()),
-                )
-                .await
-            {
-                warn!(
-                    "Failed to update trajectory index for generated title: {}",
-                    e
-                );
-            }
-        }
-        info!("Updated trajectory {} with generated title: {}", id, title);
-        if !source.emits_generic_event() {
-            return;
-        }
-        let content = match fs::read_to_string(&file_path).await {
-            Ok(content) => content,
-            Err(e) => {
-                warn!("Failed to read updated trajectory for title SSE: {}", e);
-                return;
-            }
-        };
-        let updated_data: TrajectoryData = match serde_json::from_str(&content) {
-            Ok(data) => data,
-            Err(e) => {
-                warn!("Failed to parse updated trajectory for title SSE: {}", e);
-                return;
-            }
-        };
-        let task_roots = get_all_task_roots(gcx.clone()).await;
-        let mut meta = trajectory_data_to_meta_validated(app.clone(), &updated_data).await;
-        apply_task_trajectory_context(&file_path, &task_roots, &mut meta);
-        if meta.root_chat_id.is_none() {
-            meta.root_chat_id = Some(id.clone());
-        }
-        let (session_state, session_error, session_worktree) =
-            get_session_runtime_for_trajectory_source(&sessions, &id, &meta.source).await;
-        let event = updated_trajectory_event_from_meta_with_worktree(
-            meta,
-            Some(true),
-            session_state,
-            session_error,
-            session_worktree,
+    };
+    if data.id != id {
+        warn!(
+            "Skipping title update for {}: JSON id mismatch, found {}",
+            file_path.display(),
+            data.id
         );
-        let tx = &app.chat.trajectory_events_tx;
-        {
-            let _ = tx.send(event);
+        return;
+    }
+    let actual_source = match TrajectorySourceIdentity::from_extra(&data.extra) {
+        Ok(actual_source) => actual_source,
+        Err(e) => {
+            warn!(
+                "Skipping title update for {}: trajectory source is invalid before write: {}",
+                file_path.display(),
+                e
+            );
+            return;
         }
-    });
+    };
+    if actual_source != source {
+        warn!(
+            "Skipping title update for {}: trajectory source changed before write",
+            file_path.display()
+        );
+        return;
+    }
+    let already_generated = data
+        .extra
+        .get("isTitleGenerated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if already_generated {
+        info!("Title already generated for {}, skipping", id);
+        return;
+    }
+    let updated_at = chrono::Utc::now().to_rfc3339();
+    data.title = title.clone();
+    data.updated_at = updated_at.clone();
+    data.extra
+        .insert("isTitleGenerated".to_string(), serde_json::json!(true));
+    if let Err(e) = atomic_write_json(&file_path, &data, source.clone()).await {
+        warn!("Failed to write trajectory with generated title: {}", e);
+        return;
+    }
+    if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), &file_path).await {
+        let value = match serde_json::to_value(&data) {
+            Ok(value) => value,
+            Err(e) => {
+                warn!(
+                    "Failed to serialize trajectory title update for index: {}",
+                    e
+                );
+                return;
+            }
+        };
+        if let Err(e) =
+            trajectory_index::upsert_trajectory_index_entry_from_owned_value_with_rollout(
+                &app.chat.trajectory_index_coordinator,
+                &dir,
+                &file_path,
+                value,
+                Some(source.clone()),
+            )
+            .await
+        {
+            warn!(
+                "Failed to update trajectory index for generated title: {}",
+                e
+            );
+        }
+    }
+    info!("Updated trajectory {} with generated title: {}", id, title);
+    if !source.emits_generic_event() {
+        return;
+    }
+    let content = match fs::read_to_string(&file_path).await {
+        Ok(content) => content,
+        Err(e) => {
+            warn!("Failed to read updated trajectory for title SSE: {}", e);
+            return;
+        }
+    };
+    let updated_data: TrajectoryData = match serde_json::from_str(&content) {
+        Ok(data) => data,
+        Err(e) => {
+            warn!("Failed to parse updated trajectory for title SSE: {}", e);
+            return;
+        }
+    };
+    let task_roots = get_all_task_roots(gcx.clone()).await;
+    let mut meta = trajectory_data_to_meta_validated(app.clone(), &updated_data).await;
+    apply_task_trajectory_context(&file_path, &task_roots, &mut meta);
+    if meta.root_chat_id.is_none() {
+        meta.root_chat_id = Some(id.clone());
+    }
+    let (session_state, session_error, session_worktree) =
+        get_session_runtime_for_trajectory_source(&sessions, &id, &meta.source).await;
+    let event = updated_trajectory_event_from_meta_with_worktree(
+        meta,
+        Some(true),
+        session_state,
+        session_error,
+        session_worktree,
+    );
+    let tx = &app.chat.trajectory_events_tx;
+    {
+        let _ = tx.send(event);
+    }
 }
 
 fn spawn_task_name_generation_task(
@@ -9994,6 +10109,76 @@ mod tests {
                 format!("message {index}"),
             )],
         )
+    }
+
+    #[test]
+    fn snapshot_payload_serialization_matches_expected_json() {
+        let mut snapshot = test_snapshot(
+            "snapshot-payload",
+            "Payload",
+            vec![ChatMessage::new("user".to_string(), "hello".to_string())],
+        );
+        snapshot.reasoning_effort = Some("high".to_string());
+        snapshot.thinking_budget = Some(2048);
+        snapshot.temperature = Some(0.25);
+        snapshot.frequency_penalty = Some(0.5);
+        snapshot.max_tokens = Some(4096);
+        snapshot.previous_response_id = Some("response-1".to_string());
+        snapshot.parallel_tool_calls = Some(true);
+        snapshot.active_skill = Some("skill-1".to_string());
+        snapshot.auto_enrichment_enabled = Some(false);
+        snapshot.auto_compact_enabled = Some(true);
+        snapshot.parent_id = Some("parent-1".to_string());
+        snapshot.link_type = Some("branch".to_string());
+        snapshot.root_chat_id = Some("root-1".to_string());
+
+        let actual = trajectory_value_from_snapshot(
+            &snapshot,
+            snapshot
+                .messages
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<_, _>>()
+                .unwrap(),
+        )
+        .unwrap();
+        let expected = json!({
+            "id": "snapshot-payload",
+            "title": "Payload",
+            "model": "model",
+            "mode": "agent",
+            "tool_use": "agent",
+            "messages": [serde_json::to_value(&snapshot.messages[0]).unwrap()],
+            "created_at": "2024-01-01T00:00:00Z",
+            "boost_reasoning": false,
+            "checkpoints_enabled": true,
+            "context_tokens_cap": null,
+            "auto_compression_cap": null,
+            "auto_compression_cap_pending": false,
+            "include_project_info": true,
+            "isTitleGenerated": true,
+            "auto_approve_editing_tools": false,
+            "auto_approve_dangerous_commands": false,
+            "autonomous_no_confirm": false,
+            "reasoning_effort": "high",
+            "thinking_budget": 2048,
+            "temperature": 0.25,
+            "frequency_penalty": 0.5,
+            "max_tokens": 4096,
+            "previous_response_id": "response-1",
+            "parallel_tool_calls": true,
+            "active_skill": "skill-1",
+            "auto_enrichment_enabled": false,
+            "auto_compact_enabled": true,
+            "parent_id": "parent-1",
+            "link_type": "branch",
+            "root_chat_id": "root-1"
+        });
+
+        assert_eq!(
+            serde_json::to_string(&actual).unwrap(),
+            serde_json::to_string(&expected).unwrap()
+        );
     }
 
     #[test]
