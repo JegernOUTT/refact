@@ -133,7 +133,17 @@ impl EngineChatSessionFacade {
         command: refact_chat_api::ChatCommand,
         priority: bool,
     ) -> Result<(), String> {
-        self.enqueue_guarded_command(chat_id, command, priority, None)
+        self.enqueue_guarded_command(chat_id, command, priority, None, None)
+            .await
+    }
+
+    pub(crate) async fn push_command_with_request_id(
+        &self,
+        chat_id: &str,
+        command: refact_chat_api::ChatCommand,
+        client_request_id: String,
+    ) -> Result<(), String> {
+        self.enqueue_guarded_command(chat_id, command, false, None, Some(client_request_id))
             .await
     }
 
@@ -143,6 +153,7 @@ impl EngineChatSessionFacade {
         command: refact_chat_api::ChatCommand,
         priority: bool,
         supervision_guard: Option<refact_chat_api::SupervisionCommandGuard>,
+        client_request_id: Option<String>,
     ) -> Result<(), String> {
         let app = AppState::from_gcx(self.gcx.clone()).await;
         match command {
@@ -180,10 +191,12 @@ impl EngineChatSessionFacade {
         if let Some(guard) = &supervision_guard {
             crate::buddy::supervision_authority::validate_chat_command(guard, chat_id, &command)?;
         }
+        let custom_request_id = client_request_id.is_some();
         let request = refact_chat_api::CommandRequest {
             native_approval_guard: None,
             supervision_guard,
-            client_request_id: uuid::Uuid::new_v4().to_string(),
+            client_request_id: client_request_id
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             priority,
             command,
         };
@@ -193,6 +206,9 @@ impl EngineChatSessionFacade {
         }
         if enqueue_outcome == EnqueueCommandOutcome::Full {
             return Err("chat command queue is full".to_string());
+        }
+        if custom_request_id && enqueue_outcome == EnqueueCommandOutcome::Duplicate {
+            return Ok(());
         }
         let processor_running = session.queue_processor_running.clone();
         let queue_notify = session.queue_notify.clone();
@@ -204,6 +220,17 @@ impl EngineChatSessionFacade {
         }
         Ok(())
     }
+}
+
+pub(crate) async fn push_chat_command_with_request_id(
+    gcx: SharedGlobalContext,
+    chat_id: &str,
+    command: refact_chat_api::ChatCommand,
+    client_request_id: String,
+) -> Result<(), String> {
+    EngineChatSessionFacade::new(gcx)
+        .push_command_with_request_id(chat_id, command, client_request_id)
+        .await
 }
 
 #[async_trait]
@@ -315,7 +342,7 @@ impl ChatSessionFacade for EngineChatSessionFacade {
         guard: refact_chat_api::SupervisionCommandGuard,
     ) -> Result<(), String> {
         crate::buddy::supervision_authority::validate_chat_command(&guard, chat_id, &command)?;
-        self.enqueue_guarded_command(chat_id, command, false, Some(guard))
+        self.enqueue_guarded_command(chat_id, command, false, Some(guard), None)
             .await
     }
 

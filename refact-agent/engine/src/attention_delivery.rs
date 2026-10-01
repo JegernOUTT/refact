@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use refact_chat_api::{ChatCommand, PendingQuestionStatus, QuestionAnswer};
 
 use crate::app_state::AppState;
 use crate::attention::{AttentionLimits, PromptDelivery};
@@ -61,6 +62,121 @@ pub async fn deliver_due(app: &AppState, now: DateTime<Utc>) -> usize {
     sent
 }
 
+pub async fn apply_timeout_defaults(app: &AppState, now: DateTime<Utc>) -> usize {
+    let candidates = app.attention().take_expired_defaults(now);
+    let mut applied = 0;
+    for candidate in candidates {
+        debug_assert!(candidate.priority == crate::attention::AttentionPriority::Low);
+        debug_assert!(!candidate.irreversible);
+        if candidate.priority != crate::attention::AttentionPriority::Low || candidate.irreversible
+        {
+            continue;
+        }
+        if app
+            .questions()
+            .get(&candidate.question_id)
+            .is_some_and(|question| question.state == refact_chat_api::QuestionState::Answered)
+        {
+            continue;
+        }
+        if candidate.deliveries.is_empty() {
+            continue;
+        }
+        let deliveries = candidate.deliveries;
+        let mut deliveries_by_set: HashMap<(String, String), Vec<PromptDelivery>> = HashMap::new();
+        for delivery in deliveries {
+            deliveries_by_set
+                .entry((delivery.chat_id.clone(), delivery.tool_call_id.clone()))
+                .or_default()
+                .push(delivery);
+        }
+        for ((chat_id, tool_call_id), deliveries) in deliveries_by_set {
+            let session_arc = {
+                let sessions = app.chat.sessions.read().await;
+                sessions.get(&chat_id).cloned()
+            };
+            let Some(session_arc) = session_arc else {
+                continue;
+            };
+            let answers = {
+                let session = session_arc.lock().await;
+                let Some(set) = session.pending_questions.iter().find(|set| {
+                    set.tool_call_id == tool_call_id
+                        && deliveries
+                            .iter()
+                            .any(|delivery| delivery.asked_at_ms == set.asked_at_ms)
+                }) else {
+                    continue;
+                };
+                if set.status != PendingQuestionStatus::Pending
+                    || deliveries
+                        .iter()
+                        .any(|delivery| delivery.asked_at_ms != set.asked_at_ms)
+                    || deliveries.iter().any(|delivery| {
+                        !set.questions
+                            .iter()
+                            .any(|question| question.id == delivery.question.id)
+                    })
+                    || deliveries.len() != set.questions.len()
+                {
+                    continue;
+                }
+                let mut answers = Vec::with_capacity(set.questions.len());
+                for question in &set.questions {
+                    let Some(delivery) = deliveries
+                        .iter()
+                        .find(|delivery| delivery.question.id == question.id)
+                    else {
+                        continue;
+                    };
+                    let value = match question.question_type.as_str() {
+                        "yes_no" => match candidate
+                            .default_answer
+                            .trim()
+                            .to_ascii_lowercase()
+                            .as_str()
+                        {
+                            "yes" | "true" => serde_json::Value::Bool(true),
+                            "no" | "false" => serde_json::Value::Bool(false),
+                            _ => continue,
+                        },
+                        "multi_select" => serde_json::json!([candidate.default_answer]),
+                        _ => serde_json::Value::String(candidate.default_answer.clone()),
+                    };
+                    answers.push(QuestionAnswer {
+                        id: delivery.question.id.clone(),
+                        answer: value,
+                    });
+                }
+                if answers.len() != set.questions.len() {
+                    continue;
+                }
+                answers
+            };
+            let command = ChatCommand::AnswerQuestions {
+                tool_call_id,
+                answers,
+                asked_at_ms: deliveries.first().map(|delivery| delivery.asked_at_ms),
+            };
+            let request_id = format!("attention-timeout:{}", candidate.question_id);
+            match crate::app_state::push_chat_command_with_request_id(
+                app.gcx.clone(),
+                &chat_id,
+                command,
+                request_id,
+            )
+            .await
+            {
+                Ok(()) => applied += 1,
+                Err(error) => {
+                    tracing::warn!(%error, question_id = %candidate.question_id, "failed to enqueue attention timeout default")
+                }
+            }
+        }
+    }
+    applied
+}
+
 async fn wait_for_shutdown(shutdown: Arc<AtomicBool>) {
     while !shutdown.load(Ordering::SeqCst) {
         tokio::time::sleep(SHUTDOWN_POLL).await;
@@ -83,7 +199,10 @@ pub async fn attention_delivery_background_task(app: AppState, shutdown: Arc<Ato
         if shutdown.load(Ordering::SeqCst) {
             return;
         }
-        deliver_due(&app, Utc::now()).await;
+        let now = Utc::now();
+        deliver_due(&app, now).await;
+        apply_timeout_defaults(&app, now).await;
+        apply_timeout_defaults(&app, Utc::now()).await;
     }
 }
 

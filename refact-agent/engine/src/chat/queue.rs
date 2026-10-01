@@ -2283,6 +2283,11 @@ async fn process_command_queue_inner(
             } => {
                 let content = answer_questions_content(&tool_call_id, &answers);
                 let resolution_id = request.client_request_id.clone();
+                let timeout_default_notice = request
+                    .client_request_id
+                    .strip_prefix("attention-timeout:")
+                    .and_then(|question_id| app.questions().get(question_id))
+                    .and_then(|question| question.default_answer);
                 let mut staged_message_id: Option<String> = None;
                 let resolved = {
                     let mut session = session_arc.lock().await;
@@ -2301,6 +2306,17 @@ async fn process_command_queue_inner(
                     ) {
                         Ok(resolved) => {
                             if resolved {
+                                if let (Some(question_id), Some(default_answer)) = (
+                                    request.client_request_id.strip_prefix("attention-timeout:"),
+                                    timeout_default_notice,
+                                ) {
+                                    session.add_message(crate::chat::internal_roles::event(
+                                        crate::chat::internal_roles::EventSubkind::SystemNotice,
+                                        "chat.attention_timeout",
+                                        serde_json::json!({ "question_id": question_id }),
+                                        format!("No answer before the deadline; applied the documented default: {default_answer}"),
+                                    ));
+                                }
                                 let message = user_message_with_client_message_id(
                                     ChatContent::SimpleText(content),
                                     Vec::new(),

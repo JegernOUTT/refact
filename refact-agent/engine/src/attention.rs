@@ -331,6 +331,16 @@ pub struct AttentionPrompt {
     pub deliveries: Vec<PromptDelivery>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpiredDefault {
+    pub question_id: String,
+    pub default_answer: String,
+    pub deliveries: Vec<PromptDelivery>,
+    pub expires_at: DateTime<Utc>,
+    pub priority: AttentionPriority,
+    pub irreversible: bool,
+}
+
 struct Tracked {
     key: DedupKey,
     scope: AttentionScope,
@@ -356,6 +366,7 @@ struct Retired {
     waiters: Vec<String>,
     presented: bool,
     retired_at_ms: i64,
+    expired_default: Option<ExpiredDefault>,
 }
 
 #[derive(Default)]
@@ -364,6 +375,7 @@ struct BudgetState {
     tracked: HashMap<String, Tracked>,
     batch_opened_at: Option<DateTime<Utc>>,
     retired: VecDeque<Retired>,
+    expired_defaults: VecDeque<ExpiredDefault>,
 }
 
 /// What became of a question the human was asked. `Defaulted` is the state this
@@ -648,6 +660,25 @@ impl AttentionBudget {
         let Some(question) = self.questions.get(question_id) else {
             return;
         };
+        let expired_default = if question.state == QuestionState::Defaulted {
+            question
+                .defaulted()
+                .zip(question.expires_at)
+                .map(|(default_answer, expires_at)| ExpiredDefault {
+                    question_id: question.id.clone(),
+                    default_answer: default_answer.to_string(),
+                    deliveries: tracked
+                        .deliveries
+                        .iter()
+                        .map(|(_, delivery)| delivery.clone())
+                        .collect(),
+                    expires_at,
+                    priority: tracked.priority,
+                    irreversible: question.is_irreversible(),
+                })
+        } else {
+            None
+        };
         state.retired.push_back(Retired {
             question,
             scope: tracked.scope,
@@ -656,9 +687,26 @@ impl AttentionBudget {
             waiters: tracked.waiters.into_iter().collect(),
             presented: tracked.presented,
             retired_at_ms: now.timestamp_millis(),
+            expired_default: expired_default.clone(),
         });
+        if let Some(expired_default) = expired_default {
+            state.expired_defaults.push_back(expired_default);
+        }
         while state.retired.len() > SETTLED_HISTORY {
-            state.retired.pop_front();
+            if let Some(retired) = state.retired.pop_front() {
+                if let Some(expired_default) = retired.expired_default {
+                    if let Some(index) = state
+                        .expired_defaults
+                        .iter()
+                        .position(|candidate| candidate.question_id == expired_default.question_id)
+                    {
+                        state.expired_defaults.remove(index);
+                        tracing::warn!(
+                            "evicted an expired attention default before chat application"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -792,6 +840,22 @@ impl AttentionBudget {
         now: DateTime<Utc>,
     ) -> Result<QuestionSettlement, AttentionError> {
         Ok(self.questions.wait(question_id, now).await?)
+    }
+
+    pub fn take_expired_defaults(&self, now: DateTime<Utc>) -> Vec<ExpiredDefault> {
+        let mut state = self.guard();
+        self.sweep(&mut state, now);
+        let mut due = Vec::new();
+        let mut pending = VecDeque::new();
+        while let Some(candidate) = state.expired_defaults.pop_front() {
+            if candidate.expires_at <= now {
+                due.push(candidate);
+            } else {
+                pending.push_back(candidate);
+            }
+        }
+        state.expired_defaults = pending;
+        due
     }
 
     /// Forget questions the service has already settled so a later identical
