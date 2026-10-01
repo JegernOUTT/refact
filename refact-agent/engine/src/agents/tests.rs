@@ -1695,7 +1695,6 @@ async fn spawn_and_wait_returns_terminal_record_within_timeout() {
 #[serial(test_runner)]
 #[tokio::test]
 async fn spawn_and_wait_times_out_when_runner_hangs() {
-    tokio::time::pause();
     let runner_started = Arc::new(tokio::sync::Notify::new());
     let _runner = {
         let runner_started = runner_started.clone();
@@ -1718,6 +1717,7 @@ async fn spawn_and_wait_times_out_when_runner_hangs() {
         result = &mut wait => panic!("spawn finished before the runner started: {result:?}"),
         _ = runner_started.notified() => {}
     }
+    tokio::time::pause();
     assert!(futures::poll!(&mut wait).is_pending());
     tokio::time::advance(Duration::from_secs(5)).await;
     let err = wait.await.expect_err("spawn should time out");

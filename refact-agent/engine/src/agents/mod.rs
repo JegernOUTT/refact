@@ -21,4 +21,7 @@ pub use refact_agents_core::{registry, storage, types};
 mod spawn_lifecycle_tests;
 
 #[cfg(test)]
+mod launch_intent_spawn_tests;
+
+#[cfg(test)]
 mod tests;

@@ -698,6 +698,10 @@ async fn accept_prepared_launch(
         })
         .await?;
     let agent_id = record.agent_id.clone();
+    let launch_intent = crate::coordination::launch_intents::LaunchIntentSlot::persist_for_agent(
+        &app, &agent_id, 1,
+    )
+    .await;
     rollback.agent_id = Some(agent_id.clone());
     if let Some(contract) = req
         .deliverable
@@ -705,6 +709,7 @@ async fn accept_prepared_launch(
         .filter(|contract| !contract.is_empty())
     {
         if let Err(error) = app.agents.install_deliverable(&agent_id, contract).await {
+            launch_intent.settle().await;
             app.agents.mark_failed(&agent_id, error.clone()).await?;
             return Err(error);
         }
@@ -715,11 +720,13 @@ async fn accept_prepared_launch(
             .install_profile_name(&agent_id, profile.name.clone())
             .await
         {
+            launch_intent.settle().await;
             app.agents.mark_failed(&agent_id, error.clone()).await?;
             return Err(error);
         }
     }
     if launch_stopping(&app) {
+        launch_intent.settle().await;
         app.agents
             .mark_cancelled(&agent_id, Some("launch cancelled during acceptance".into()))
             .await?;
@@ -751,6 +758,7 @@ async fn accept_prepared_launch(
     let ticket = match app.work_scheduler.reserve(request) {
         Ok(ticket) => ticket,
         Err(error) => {
+            launch_intent.settle().await;
             app.agent_executions.forget_launch_provenance(&agent_id);
             let _ = app.agents.mark_failed(&agent_id, error.to_string()).await;
             return Err(error.to_string());
@@ -761,6 +769,7 @@ async fn accept_prepared_launch(
         .save_accepted_launch(&agent_id, &launch_payload)
         .await
     {
+        launch_intent.settle().await;
         app.agent_executions.forget_launch_provenance(&agent_id);
         let _ = app.agents.mark_failed(&agent_id, error.clone()).await;
         return Err(error);
@@ -775,6 +784,7 @@ async fn accept_prepared_launch(
     let record = match setup {
         Ok(record) => record,
         Err(error) => {
+            launch_intent.settle().await;
             app.agent_executions.forget_launch_provenance(&agent_id);
             let _ = app.agents.mark_failed(&agent_id, error.clone()).await;
             return Err(error);
@@ -809,6 +819,7 @@ async fn accept_prepared_launch(
     let tracked_chat_id = child_chat_id.clone();
     let rejected_app = app.clone();
     let rejected_agent = agent_id.clone();
+    let task_intent = launch_intent.clone();
     let registration = executions.spawn_owned(
         tracked_chat_id,
         abort_flag.clone(),
@@ -827,6 +838,8 @@ async fn accept_prepared_launch(
                 {
                     let _ = completion_tx.send(record);
                 }
+                task_intent.settle().await;
+                app.agent_executions.forget_launch_intent(&child_chat_id);
                 return;
             }
             let acquire = ticket.acquire();
@@ -858,6 +871,8 @@ async fn accept_prepared_launch(
                         fallback_failed_record(agent_id.clone(), req.clone(), error.to_string())
                     });
                     let _ = completion_tx.send(failed);
+                    task_intent.settle().await;
+                    app.agent_executions.forget_launch_intent(&child_chat_id);
                     return;
                 }
             };
@@ -870,6 +885,8 @@ async fn accept_prepared_launch(
                 if let Ok(record) = cancelled {
                     let _ = completion_tx.send(record);
                 }
+                task_intent.settle().await;
+                app.agent_executions.forget_launch_intent(&child_chat_id);
                 return;
             }
             let execution = match app.agent_executions.install(&child_chat_id, permit) {
@@ -878,10 +895,16 @@ async fn accept_prepared_launch(
                     if let Ok(record) = app.agents.mark_cancelled(&agent_id, Some(error)).await {
                         let _ = completion_tx.send(record);
                     }
+                    task_intent.settle().await;
+                    app.agent_executions.forget_launch_intent(&child_chat_id);
                     return;
                 }
             };
             let _registration = app.agent_executions.registration(&child_chat_id);
+            app.agent_executions
+                .remember_launch_intent(&child_chat_id, task_intent.clone());
+            let child_chat_id_for_cleanup = child_chat_id.clone();
+            task_intent.dispatched().await;
             let result = prepare_and_run(
                 app.clone(),
                 req,
@@ -894,6 +917,9 @@ async fn accept_prepared_launch(
             .await;
             drop(execution);
             drop(_registration);
+            task_intent.settle().await;
+            app.agent_executions
+                .forget_launch_intent(&child_chat_id_for_cleanup);
             let _ = completion_tx.send(result);
         },
     );
@@ -905,6 +931,7 @@ async fn accept_prepared_launch(
             .agents
             .mark_cancelled(&rejected_agent, Some(error.clone()))
             .await;
+        launch_intent.settle().await;
         return Err(error);
     }
     rollback.armed = false;
@@ -2609,6 +2636,9 @@ async fn run_spawned_agent(
                 && !abort_flag.load(Ordering::Relaxed)
                 && !launch_stopping(&app) =>
         {
+            if let Some(intent) = app.agent_executions.launch_intent(&child_chat_id) {
+                intent.acknowledged().await;
+            }
             crate::agents::push::mark_sub_goal_dispatched(&app, &record).await;
             emit_background_agent_update(app.clone(), &record).await;
         }
