@@ -1868,9 +1868,23 @@ pub fn start_generation(
 
             if let Err(mut error) = generation_result {
                 let retry_decision = error.retry_decision();
-                let should_retry_network = error.should_retry(network_retry_attempt, &abort_flag);
+                let is_context_limit =
+                    retry_decision.is_context_limit() && !abort_flag.load(Ordering::SeqCst);
+                let pressure_retry = if !retry_decision.is_user_cancelled()
+                    && !is_context_limit
+                    && !abort_flag.load(Ordering::SeqCst)
+                {
+                    crate::llm::pressure::pressure_retry(
+                        &error,
+                        u32::try_from(network_retry_attempt).unwrap_or(u32::MAX),
+                    )
+                } else {
+                    None
+                };
+                let should_retry_network = error.should_retry(network_retry_attempt, &abort_flag)
+                    && pressure_retry.is_none();
                 let retry_reason = retry_decision.reason();
-                if should_retry_network {
+                if should_retry_network && !is_context_limit {
                     let delay = super::retry_policy::retry_delay_for_attempt(network_retry_attempt);
                     network_retry_attempt += 1;
                     {
@@ -1917,8 +1931,6 @@ pub fn start_generation(
                     }
                     continue;
                 }
-                let is_context_limit =
-                    error.retry_decision().is_context_limit() && !abort_flag.load(Ordering::SeqCst);
                 if is_context_limit {
                     let original_error = error.message.clone();
                     let round = {
@@ -1953,6 +1965,26 @@ pub fn start_generation(
                         let mut session = session_arc.lock().await;
                         crate::chat::goal_monitor::mark_goal_blocked_on_context_limit(&mut session);
                     }
+                }
+
+                if let Some(crate::llm::pressure::PressureRetry::Retry { delay_ms, .. }) =
+                    pressure_retry.as_ref()
+                {
+                    network_retry_attempt += 1;
+                    session_arc.lock().await.clear_stream_for_retry();
+                    if super::retry_policy::sleep_or_abort(
+                        std::time::Duration::from_millis(*delay_ms),
+                        abort_flag.clone(),
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                if let Some(crate::llm::pressure::PressureRetry::GiveUp { cause }) = pressure_retry
+                {
+                    error.message = format!("{} (not retried: {})", error.message, cause);
                 }
 
                 if error.partial_output_emitted && !abort_flag.load(Ordering::SeqCst) {

@@ -11,6 +11,35 @@ use refact_work_core::CoordinationSettings;
 
 use crate::coordination::metrics::{self, Decision, Explanation};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PressureRetry {
+    Retry {
+        delay_ms: u64,
+        honoured_retry_after: bool,
+    },
+    GiveUp {
+        cause: String,
+    },
+}
+
+pub fn pressure_retry(
+    error: &crate::chat::stream_core::LlmStreamError,
+    completed_attempts: u32,
+) -> Option<PressureRetry> {
+    let (bucket, report) = error.pressure_failure.as_ref()?;
+    match retry_decision(bucket, report, completed_attempts)? {
+        RetryDecision::Retry {
+            delay_ms,
+            honoured_retry_after,
+            ..
+        } => Some(PressureRetry::Retry {
+            delay_ms,
+            honoured_retry_after,
+        }),
+        RetryDecision::GiveUp { cause, .. } => Some(PressureRetry::GiveUp { cause }),
+    }
+}
+
 fn counter(field: &str, value: usize) -> Result<u32, String> {
     u32::try_from(value)
         .map_err(|_| format!("coordination.{field} does not fit a 32-bit counter: {value}"))

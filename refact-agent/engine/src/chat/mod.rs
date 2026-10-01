@@ -16,6 +16,8 @@ pub mod delivery;
 pub mod diagnostics;
 mod generation;
 #[cfg(test)]
+mod generation_pressure_retry_tests;
+#[cfg(test)]
 pub(crate) use generation::prepare_project_work_context;
 pub(crate) mod evidence;
 pub(crate) mod evidence_cache;
