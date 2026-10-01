@@ -14,9 +14,13 @@
 //! read restriction under the bubblewrap provider, which read-only binds `/`, so
 //! code mode does not claim read confinement it does not have.
 
+pub mod dispatch;
 pub mod hosts;
 pub mod policy;
 pub mod session;
+
+#[cfg(test)]
+mod dispatch_tests;
 
 pub use hosts::{
     declared_names, operation, HostArgument, HostCall, HostOperation, HostValueType,
