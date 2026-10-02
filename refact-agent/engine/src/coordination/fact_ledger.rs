@@ -222,6 +222,9 @@ impl FactLedger {
     ) -> Result<ClaimLanding, ClaimError> {
         incoming.validate().map_err(ClaimError::Refused)?;
         let at_ms = now_ms();
+        if let Err(error) = self.expire(retention_ms(), at_ms).await {
+            tracing::warn!(%error, "fact ledger claim retention prune failed");
+        }
         let on_topic = self.on_subject(&incoming.subject).await?;
         let assessment = incoming.assess(&on_topic, policy);
         let staled = self
@@ -557,14 +560,14 @@ pub fn render_landing(landing: &ClaimLanding) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::coordination) mod tests {
     use super::*;
     use refact_work_core::store::records::{EvidenceKind, EvidenceRef};
     use refact_work_core::{ClaimSubjectKind, CoordinationSettings, WorkKey};
 
     const REVISION: &str = "sha-abc";
 
-    fn test_policy() -> ClaimPolicy {
+    pub(in crate::coordination) fn test_policy() -> ClaimPolicy {
         ClaimPolicy {
             corroboration_step_per_mille: 100,
             contradiction_min_confidence_per_mille: 250,
@@ -589,7 +592,12 @@ mod tests {
         }
     }
 
-    fn claim(claim_id: &str, assertion: &str, author: &str, confidence: u32) -> ClaimRecord {
+    pub(in crate::coordination) fn claim(
+        claim_id: &str,
+        assertion: &str,
+        author: &str,
+        confidence: u32,
+    ) -> ClaimRecord {
         ClaimRecord {
             project: ProjectKey::new("alpha"),
             claim_id: claim_id.to_string(),
@@ -604,6 +612,26 @@ mod tests {
             asserted_at_ms: 1_700_000_000_000,
             updated_at_ms: 1_700_000_000_000,
         }
+    }
+
+    pub(in crate::coordination) async fn seed_claim(
+        ledger: &FactLedger,
+        mut claim: ClaimRecord,
+        status: ClaimStatus,
+        updated_at_ms: i64,
+    ) {
+        ledger
+            .store
+            .record_claim(&ledger.access, &claim)
+            .await
+            .unwrap();
+        claim.status = status;
+        claim.updated_at_ms = updated_at_ms;
+        ledger
+            .store
+            .put_claim_standing(&ledger.access, &claim)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

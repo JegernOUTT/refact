@@ -24,6 +24,8 @@ pub mod disagreement;
 mod disagreement_gate_tests;
 pub mod error;
 pub mod fact_ledger;
+#[cfg(test)]
+mod fact_ledger_retention_tests;
 pub mod file_provenance;
 pub mod history;
 pub mod launch_intents;
