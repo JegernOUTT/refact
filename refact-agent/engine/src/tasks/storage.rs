@@ -1550,6 +1550,24 @@ mod tests {
         gcx
     }
 
+    struct BoardLockSettingsGuard(crate::runtime_settings::TrajectoryRuntimeSettings);
+
+    impl BoardLockSettingsGuard {
+        fn generous_timeout() -> Self {
+            let previous = crate::runtime_settings::current();
+            let mut settings = previous.clone();
+            settings.coordination.lock_timeout_secs = 120;
+            crate::runtime_settings::install_startup(settings);
+            Self(previous)
+        }
+    }
+
+    impl Drop for BoardLockSettingsGuard {
+        fn drop(&mut self) {
+            crate::runtime_settings::install_startup(self.0.clone());
+        }
+    }
+
     #[tokio::test]
     async fn create_board_refuses_to_clobber_existing_board() {
         let temp = tempfile::tempdir().unwrap();
@@ -1591,7 +1609,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(runtime_settings)]
     async fn concurrent_updates_do_not_lose_cards() {
+        let _lock_settings = BoardLockSettingsGuard::generous_timeout();
         let temp = tempfile::tempdir().unwrap();
         let gcx = task_with_board(temp.path(), "task-concurrent-cards").await;
 
@@ -1703,7 +1723,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(runtime_settings)]
     async fn concurrent_planner_chat_id_reservations_are_unique() {
+        let _lock_settings = BoardLockSettingsGuard::generous_timeout();
         let temp = tempfile::tempdir().unwrap();
         let gcx = task_with_board(temp.path(), "task-planner-race").await;
 

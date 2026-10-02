@@ -106,24 +106,27 @@ async fn reopen_succeeds_once_the_lock_is_released() {
         .is_none());
 
     tokio::time::advance(Duration::from_secs(1)).await;
-    for _ in 0..10_000 {
-        tick_operator_reopen(&buddy).await;
-        if buddy
-            .lock()
-            .await
+    tick_operator_reopen(&buddy).await;
+    {
+        let guard = buddy.lock().await;
+        let reopen_task = guard
             .as_ref()
             .unwrap()
-            .outcome_runtime
-            .is_some()
-        {
-            break;
+            .operator_reopen_task
+            .as_ref()
+            .expect("due reopen starts one tracked task");
+        while !reopen_task.is_finished() {
+            tokio::task::yield_now().await;
         }
-        tokio::time::advance(Duration::from_millis(100)).await;
     }
+    tick_operator_reopen(&buddy).await;
     let reopened = buddy.lock().await;
     let service = reopened.as_ref().unwrap();
     assert!(service.outcome_runtime.is_some());
     assert!(service.operator_open_failure.is_none());
+    let runtime = service.outcome_runtime.as_ref().unwrap().clone();
+    drop(reopened);
+    runtime.shutdown().await;
 }
 
 #[tokio::test(start_paused = true)]

@@ -117,7 +117,11 @@ pub fn workspace_lease_key(root: &Path) -> String {
 }
 
 pub fn workspace_lease_path(root: &Path) -> PathBuf {
-    engine_locks_dir().join(format!("{}.lock", workspace_lease_key(root)))
+    workspace_lease_path_in(&engine_locks_dir(), root)
+}
+
+fn workspace_lease_path_in(locks_dir: &Path, root: &Path) -> PathBuf {
+    locks_dir.join(format!("{}.lock", workspace_lease_key(root)))
 }
 
 /// Holder details live beside the lock, never inside it.
@@ -127,7 +131,11 @@ pub fn workspace_lease_path(root: &Path) -> PathBuf {
 /// file therefore made the holder unreadable on Windows exactly when a conflict needed reporting,
 /// so a busy workspace could only ever be blamed on an "unknown holder".
 pub fn workspace_lease_info_path(root: &Path) -> PathBuf {
-    engine_locks_dir().join(format!("{}.json", workspace_lease_key(root)))
+    workspace_lease_info_path_in(&engine_locks_dir(), root)
+}
+
+fn workspace_lease_info_path_in(locks_dir: &Path, root: &Path) -> PathBuf {
+    locks_dir.join(format!("{}.json", workspace_lease_key(root)))
 }
 
 /// Collapses every alias of a workspace root onto the one path that owns its index.
@@ -286,8 +294,16 @@ pub fn try_acquire_workspace_lease(
     root: &Path,
     info: &WorkspaceLeaseInfo,
 ) -> Result<WorkspaceLease, WorkspaceLeaseError> {
-    let path = workspace_lease_path(root);
-    let info_path = workspace_lease_info_path(root);
+    try_acquire_workspace_lease_in(&engine_locks_dir(), root, info)
+}
+
+fn try_acquire_workspace_lease_in(
+    locks_dir: &Path,
+    root: &Path,
+    info: &WorkspaceLeaseInfo,
+) -> Result<WorkspaceLease, WorkspaceLeaseError> {
+    let path = workspace_lease_path_in(locks_dir, root);
+    let info_path = workspace_lease_info_path_in(locks_dir, root);
     let mut lock = open_lock(&path).map_err(|error| WorkspaceLeaseError::Io {
         path: path.clone(),
         error,
@@ -382,9 +398,17 @@ pub fn acquire_workspace_leases(
     roots: &[PathBuf],
     info: &WorkspaceLeaseInfo,
 ) -> Result<WorkspaceLeaseSet, WorkspaceLeaseError> {
+    acquire_workspace_leases_in(&engine_locks_dir(), roots, info)
+}
+
+fn acquire_workspace_leases_in(
+    locks_dir: &Path,
+    roots: &[PathBuf],
+    info: &WorkspaceLeaseInfo,
+) -> Result<WorkspaceLeaseSet, WorkspaceLeaseError> {
     let mut set = WorkspaceLeaseSet::default();
     for root in roots {
-        match try_acquire_workspace_lease(root, info) {
+        match try_acquire_workspace_lease_in(locks_dir, root, info) {
             Ok(lease) => set.insert(lease),
             Err(error) => return Err(error),
         }
@@ -756,16 +780,17 @@ mod tests {
     #[test]
     #[serial_test::serial(daemon)]
     fn workspace_lease_set_rolls_back_on_conflict() {
-        let _guard = LocksDirGuard::set();
+        let locks_dir = tempfile::tempdir().unwrap();
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
-        let blocker = try_acquire_workspace_lease(second.path(), &test_info()).unwrap();
+        let blocker =
+            try_acquire_workspace_lease_in(locks_dir.path(), second.path(), &test_info()).unwrap();
         let roots = vec![first.path().to_path_buf(), second.path().to_path_buf()];
-        let error = acquire_workspace_leases(&roots, &test_info()).unwrap_err();
+        let error =
+            acquire_workspace_leases_in(locks_dir.path(), &roots, &test_info()).unwrap_err();
         assert!(matches!(error, WorkspaceLeaseError::Busy(_)));
-        let recovered = try_acquire_workspace_lease(first.path(), &test_info());
         assert!(
-            recovered.is_ok(),
+            try_acquire_workspace_lease_in(locks_dir.path(), first.path(), &test_info()).is_ok(),
             "first root must be released when a later root is busy"
         );
         drop(blocker);
