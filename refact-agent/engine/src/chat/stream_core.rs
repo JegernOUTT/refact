@@ -2376,84 +2376,28 @@ fn build_http_for_attempt(
         .map_err(|error| format!("Failed to build LLM request: {error}"))
 }
 
-pub async fn run_llm_stream<C: StreamCollector>(
-    app: AppState,
-    params: StreamRunParams,
-    collector: &mut C,
-) -> Result<LlmStreamOutcome, LlmStreamError> {
-    run_llm_stream_with_prepare_started(app, params, collector, None).await
+struct PreparedLlmStreamRequest {
+    client: reqwest::Client,
+    wire_format: WireFormat,
+    adapter: &'static dyn crate::llm::adapter::LlmWireAdapter,
+    adapter_settings: AdapterSettings,
+    http_parts: HttpParts,
+    command_credential: Option<String>,
+    snapshot_for_commit: Option<(
+        Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+        crate::chat::cache_guard::CacheGuardSnapshot,
+    )>,
+    header_retry_config: Option<(Duration, usize)>,
 }
 
-pub(crate) async fn run_llm_stream_with_prepare_started<C: StreamCollector>(
-    app: AppState,
-    params: StreamRunParams,
-    collector: &mut C,
-    prepare_started_at: Option<Instant>,
-) -> Result<LlmStreamOutcome, LlmStreamError> {
-    let bucket = provider_pressure_bucket(&params.model_rec);
-    let mut permit = None;
-    let result = run_llm_stream_with_prepare_started_inner(
-        app,
-        params,
-        collector,
-        prepare_started_at,
-        &bucket,
-        &mut permit,
-    )
-    .await;
-    match (permit, result) {
-        (Some(permit), Ok(outcome @ LlmStreamOutcome::Choices(_))) => {
-            permit.complete(ProviderPressureOutcome::Success);
-            Ok(outcome)
-        }
-        (Some(permit), Ok(outcome @ LlmStreamOutcome::PausedForCacheGuard)) => {
-            drop(permit);
-            Ok(outcome)
-        }
-        (Some(permit), Err(mut error)) => {
-            if let Some((_, report)) = error.pressure_failure.clone() {
-                permit.complete(ProviderPressureOutcome::Failure(report));
-            } else if is_abort_error(&error.message) {
-                drop(permit);
-            } else if error.message.starts_with("LLM request failed:")
-                || error
-                    .message
-                    .starts_with("LLM HTTP SSE response header timeout")
-                || error.message.starts_with("Stream error:")
-                || error.message.contains("stream ended unexpectedly")
-                || error.message.contains("LLM stream timeout")
-                || error.message.contains("LLM stream stalled")
-                || error.message.contains("WebSocket")
-            {
-                let report = FailureReport::transport(&error.message);
-                permit.complete(ProviderPressureOutcome::Failure(report.clone()));
-                error.pressure_failure = Some((bucket, report));
-            } else {
-                drop(permit);
-            }
-            Err(error)
-        }
-        (None, result) => result,
-    }
-}
-
-async fn run_llm_stream_with_prepare_started_inner<C: StreamCollector>(
-    app: AppState,
-    params: StreamRunParams,
-    collector: &mut C,
+async fn prepare_llm_stream_request(
+    app: &AppState,
+    params: &StreamRunParams,
     prepare_started_at: Option<Instant>,
     provider_bucket: &str,
     pressure_permit: &mut Option<Permit>,
-) -> Result<LlmStreamOutcome, LlmStreamError> {
-    let mut partial_output_emitted = false;
-
-    if params.llm_request.params.n.unwrap_or(1) != 1 {
-        return Err(LlmStreamError::new(
-            "Streaming with n > 1 is not supported",
-            partial_output_emitted,
-        ));
-    }
-
+) -> Result<Option<PreparedLlmStreamRequest>, LlmStreamError> {
+    let partial_output_emitted = false;
     let client = app.runtime.http_client.clone();
 
     let wire_format = params.model_rec.wire_format;
@@ -2491,14 +2435,13 @@ async fn run_llm_stream_with_prepare_started_inner<C: StreamCollector>(
     )
     .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
 
-    let mut command_credential = tokio::select! {
+    let command_credential = tokio::select! {
         result = crate::providers::runtime_credential::resolve(&params.model_rec) => result,
         _ = wait_for_abort_signal(params.abort_flag.clone(), params.abort_notify.clone()) => {
             return Err(LlmStreamError::new(ABORT_ERROR_MESSAGE, partial_output_emitted));
         }
     }
     .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
-    let mut rejected_command_credential: Option<String> = None;
     if let Some(value) = command_credential.as_deref() {
         set_bearer_authorization_header(&mut http_parts.headers, value)
             .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
@@ -2518,23 +2461,23 @@ async fn run_llm_stream_with_prepare_started_inner<C: StreamCollector>(
         };
         if let Some(session_arc) = session_arc_opt {
             let outcome = tokio::select! {
-                res = crate::chat::cache_guard::check_or_pause_cache_guard(
-                    app.clone(),
-                    session_arc.clone(),
-                    &params.llm_request.model_id,
-                    &http_parts.body,
-                ) => res.map_err(|e| LlmStreamError::new(e, partial_output_emitted))?,
-                _ = wait_for_abort_signal(params.abort_flag.clone(), params.abort_notify.clone()) => {
-                    return Err(LlmStreamError::new(ABORT_ERROR_MESSAGE, partial_output_emitted));
-                }
-            };
+                    res = crate::chat::cache_guard::check_or_pause_cache_guard(
+            app.clone(),
+            session_arc.clone(),
+                        &params.llm_request.model_id,
+                        &http_parts.body,
+                    ) => res.map_err(|e| LlmStreamError::new(e, partial_output_emitted))?,
+                    _ = wait_for_abort_signal(params.abort_flag.clone(), params.abort_notify.clone()) => {
+                        return Err(LlmStreamError::new(ABORT_ERROR_MESSAGE, partial_output_emitted));
+                    }
+                };
             match outcome {
                 crate::chat::cache_guard::CacheGuardOutcome::Pass(s) => {
                     snapshot_for_commit = s.map(|snapshot| (session_arc, snapshot));
                 }
                 crate::chat::cache_guard::CacheGuardOutcome::Paused { reason } => {
                     tracing::info!("Generation paused by cache guard: {}", reason);
-                    return Ok(LlmStreamOutcome::PausedForCacheGuard);
+                    return Ok(None);
                 }
                 crate::chat::cache_guard::CacheGuardOutcome::Error(e) => {
                     return Err(LlmStreamError::new(e, partial_output_emitted));
@@ -2583,6 +2526,30 @@ async fn run_llm_stream_with_prepare_started_inner<C: StreamCollector>(
     }
 
     let header_retry_config = llm_http_header_retry_config(&params.model_rec);
+    Ok(Some(PreparedLlmStreamRequest {
+        client,
+        wire_format,
+        adapter,
+        adapter_settings,
+        http_parts,
+        command_credential,
+        snapshot_for_commit,
+        header_retry_config,
+    }))
+}
+
+async fn try_openai_codex_websocket<C: StreamCollector>(
+    app: &AppState,
+    params: &StreamRunParams,
+    prepared: &PreparedLlmStreamRequest,
+    collector: &mut C,
+) -> Result<Option<LlmStreamOutcome>, LlmStreamError> {
+    let client = &prepared.client;
+    let wire_format = prepared.wire_format;
+    let http_parts = &prepared.http_parts;
+    let snapshot_for_commit = &prepared.snapshot_for_commit;
+    let header_retry_config = prepared.header_retry_config;
+    let partial_output_emitted = false;
     let mut codex_http_fallback_reason: Option<String> = None;
     if params.allow_websocket {
         if let Some(websocket_endpoint) = openai_codex_websocket_endpoint(&params.model_rec) {
@@ -2623,7 +2590,7 @@ async fn run_llm_stream_with_prepare_started_inner<C: StreamCollector>(
                         .await;
                         commit_cache_guard_snapshot_if_needed(snapshot_for_commit.clone()).await;
                         replay_collector.replay(collector);
-                        return Ok(LlmStreamOutcome::Choices(results));
+                        return Ok(Some(LlmStreamOutcome::Choices(results)));
                     }
                     Err((error, returned_session)) => {
                         if let Some(status) = openai_codex_websocket_auth_rejection_status(&error) {
@@ -2709,6 +2676,23 @@ async fn run_llm_stream_with_prepare_started_inner<C: StreamCollector>(
         );
     }
 
+    Ok(None)
+}
+
+async fn send_http_stream_request(
+    app: &AppState,
+    params: &StreamRunParams,
+    prepared: &PreparedLlmStreamRequest,
+    provider_bucket: &str,
+) -> Result<(reqwest::Response, Option<Instant>), LlmStreamError> {
+    let client = &prepared.client;
+    let wire_format = prepared.wire_format;
+    let http_parts = &prepared.http_parts;
+    let header_retry_config = prepared.header_retry_config;
+    let snapshot_for_commit = prepared.snapshot_for_commit.clone();
+    let mut command_credential = prepared.command_credential.clone();
+    let mut rejected_command_credential: Option<String> = None;
+    let partial_output_emitted = false;
     let request_sent_at = perf_diagnostics::is_enabled().then(Instant::now);
     let mut response = if let Some((response_header_timeout, max_attempts)) = header_retry_config {
         send_llm_http_request_with_header_timeout(
@@ -2950,10 +2934,24 @@ async fn run_llm_stream_with_prepare_started_inner<C: StreamCollector>(
 
     commit_cache_guard_snapshot_if_needed(snapshot_for_commit).await;
 
+    Ok((response, provider_ttft_started_at))
+}
+
+async fn consume_llm_stream_response<C: StreamCollector>(
+    response: reqwest::Response,
+    adapter: &'static dyn crate::llm::adapter::LlmWireAdapter,
+    adapter_settings: &AdapterSettings,
+    params: &StreamRunParams,
+    collector: &mut C,
+    provider_ttft_started_at: Option<Instant>,
+    partial_output_emitted: &mut bool,
+    provider_bucket: &str,
+) -> Result<LlmStreamOutcome, LlmStreamError> {
+    let wire_format = params.model_rec.wire_format;
     let progress_events = Arc::new(AtomicU64::new(0));
     let mut tracking_collector = PartialOutputCollector {
         collector,
-        partial_output_emitted: &mut partial_output_emitted,
+        partial_output_emitted,
         progress_events: progress_events.clone(),
     };
 
@@ -2981,11 +2979,9 @@ async fn run_llm_stream_with_prepare_started_inner<C: StreamCollector>(
     }
 
     let mut stream = response.bytes_stream().eventsource();
-
     let mut accumulators: Vec<ChoiceAccumulator> = vec![ChoiceAccumulator::default()];
     let mut stream_done = false;
     let mut provider_ttft_recorded = false;
-
     let stream_started_at = Instant::now();
     let mut last_progress_event_count = 0;
     let mut last_progress_at = Instant::now();
@@ -3084,8 +3080,113 @@ async fn run_llm_stream_with_prepare_started_inner<C: StreamCollector>(
     }
 
     let results = finalize_accumulators(accumulators, &mut tracking_collector);
-
     Ok(LlmStreamOutcome::Choices(results))
+}
+
+pub async fn run_llm_stream<C: StreamCollector>(
+    app: AppState,
+    params: StreamRunParams,
+    collector: &mut C,
+) -> Result<LlmStreamOutcome, LlmStreamError> {
+    run_llm_stream_with_prepare_started(app, params, collector, None).await
+}
+
+pub(crate) async fn run_llm_stream_with_prepare_started<C: StreamCollector>(
+    app: AppState,
+    params: StreamRunParams,
+    collector: &mut C,
+    prepare_started_at: Option<Instant>,
+) -> Result<LlmStreamOutcome, LlmStreamError> {
+    let bucket = provider_pressure_bucket(&params.model_rec);
+    let mut permit = None;
+    let result = run_llm_stream_with_prepare_started_inner(
+        app,
+        params,
+        collector,
+        prepare_started_at,
+        &bucket,
+        &mut permit,
+    )
+    .await;
+    match (permit, result) {
+        (Some(permit), Ok(outcome @ LlmStreamOutcome::Choices(_))) => {
+            permit.complete(ProviderPressureOutcome::Success);
+            Ok(outcome)
+        }
+        (Some(permit), Ok(outcome @ LlmStreamOutcome::PausedForCacheGuard)) => {
+            drop(permit);
+            Ok(outcome)
+        }
+        (Some(permit), Err(mut error)) => {
+            if let Some((_, report)) = error.pressure_failure.clone() {
+                permit.complete(ProviderPressureOutcome::Failure(report));
+            } else if is_abort_error(&error.message) {
+                drop(permit);
+            } else if error.message.starts_with("LLM request failed:")
+                || error
+                    .message
+                    .starts_with("LLM HTTP SSE response header timeout")
+                || error.message.starts_with("Stream error:")
+                || error.message.contains("stream ended unexpectedly")
+                || error.message.contains("LLM stream timeout")
+                || error.message.contains("LLM stream stalled")
+                || error.message.contains("WebSocket")
+            {
+                let report = FailureReport::transport(&error.message);
+                permit.complete(ProviderPressureOutcome::Failure(report.clone()));
+                error.pressure_failure = Some((bucket, report));
+            } else {
+                drop(permit);
+            }
+            Err(error)
+        }
+        (None, result) => result,
+    }
+}
+
+async fn run_llm_stream_with_prepare_started_inner<C: StreamCollector>(
+    app: AppState,
+    params: StreamRunParams,
+    collector: &mut C,
+    prepare_started_at: Option<Instant>,
+    provider_bucket: &str,
+    pressure_permit: &mut Option<Permit>,
+) -> Result<LlmStreamOutcome, LlmStreamError> {
+    let mut partial_output_emitted = false;
+    if params.llm_request.params.n.unwrap_or(1) != 1 {
+        return Err(LlmStreamError::new(
+            "Streaming with n > 1 is not supported",
+            partial_output_emitted,
+        ));
+    }
+
+    let Some(prepared) = prepare_llm_stream_request(
+        &app,
+        &params,
+        prepare_started_at,
+        provider_bucket,
+        pressure_permit,
+    )
+    .await?
+    else {
+        return Ok(LlmStreamOutcome::PausedForCacheGuard);
+    };
+    if let Some(outcome) = try_openai_codex_websocket(&app, &params, &prepared, collector).await? {
+        return Ok(outcome);
+    }
+    let (response, provider_ttft_started_at) =
+        send_http_stream_request(&app, &params, &prepared, provider_bucket).await?;
+    consume_llm_stream_response(
+        response,
+        prepared.adapter,
+        &prepared.adapter_settings,
+        &params,
+        collector,
+        provider_ttft_started_at,
+        &mut partial_output_emitted,
+        provider_bucket,
+    )
+    .await
 }
 
 /// Merges incoming thinking blocks into the accumulator, deduplicating by:
