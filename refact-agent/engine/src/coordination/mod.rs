@@ -18,6 +18,8 @@ pub mod causal_view;
 pub mod deadlock;
 #[cfg(test)]
 mod deadlock_identity_tests;
+#[cfg(test)]
+mod deadlock_snapshot_tests;
 pub mod decomposition;
 pub mod disagreement;
 #[cfg(test)]

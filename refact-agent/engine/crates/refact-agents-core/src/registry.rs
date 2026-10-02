@@ -1203,13 +1203,25 @@ impl BackgroundAgentRegistry {
             .map(|record| record.agent_id.clone())
     }
 
-    pub fn find_agent_id_by_child_chat_id_now(&self, chat_id: &str) -> Option<String> {
-        self.records
-            .try_read()
-            .ok()?
-            .values()
-            .find(|record| record.child_chat_id.as_deref() == Some(chat_id))
-            .map(|record| record.agent_id.clone())
+    pub fn try_child_chat_index(&self) -> Option<HashMap<String, String>> {
+        self.records.try_read().ok().map(|records| {
+            records
+                .values()
+                .filter_map(|record| {
+                    record
+                        .child_chat_id
+                        .as_ref()
+                        .map(|chat_id| (chat_id.clone(), record.agent_id.clone()))
+                })
+                .collect()
+        })
+    }
+
+    #[cfg(debug_assertions)]
+    pub async fn records_write_guard_for_test(
+        &self,
+    ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<String, BackgroundAgent>> {
+        self.records.write().await
     }
 
     pub async fn list_descendants(&self, agent_id: &str) -> Vec<BackgroundAgent> {

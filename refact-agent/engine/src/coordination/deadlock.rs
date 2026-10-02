@@ -64,8 +64,7 @@ pub fn declare_agent_wait(
         .map(|ticket| (ticket.run.work.id.as_str(), &ticket.run))
         .collect();
     let waiter_id = background_agent_id
-        .map(|agent_id| agent_id.to_string())
-        .or_else(|| app.agents.find_agent_id_by_child_chat_id_now(waiter))
+        .map(str::to_string)
         .unwrap_or_else(|| waiter.to_string());
     let from = by_id
         .get(waiter_id.as_str())
@@ -91,6 +90,12 @@ pub fn declare_agent_wait(
 
 /// One consistent capture of everything that can block a run.
 pub fn capture(app: &AppState) -> WaitGraph {
+    let Some(child_chat_index) = app.agents.try_child_chat_index() else {
+        return WaitGraph {
+            incomplete: Some("agent registry busy".to_string()),
+            ..WaitGraph::default()
+        };
+    };
     let bounds = WaitGraphBounds::from_settings();
     let snapshot = app.work_scheduler.snapshot();
     let declared = app.wait_graph.edges();
@@ -141,11 +146,10 @@ pub fn capture(app: &AppState) -> WaitGraph {
         let target = if question.kind == QuestionKind::UserInput {
             Some(WaitTarget::User)
         } else {
-            let answerer = app
-                .agents
-                .find_agent_id_by_child_chat_id_now(&question.answerer)
-                .unwrap_or_else(|| question.answerer.clone());
-            target_for(&answerer, &by_id)
+            let answerer = child_chat_index
+                .get(&question.answerer)
+                .unwrap_or(&question.answerer);
+            target_for(answerer, &by_id)
         };
         let Some(target) = target else {
             continue;
