@@ -11,6 +11,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ChatUsage};
 use crate::chat::diagnostics::make_ui_only_error_message;
 use crate::chat::internal_roles::{event, EventSubkind, GOAL_ROLE};
 use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
+use refact_chat_api::role_projection::{checkpoint_provenance, CHECKPOINT_SOURCE};
 
 use super::types::*;
 
@@ -218,6 +219,16 @@ fn goal_events_from_messages(messages: &[ChatMessage]) -> Vec<GoalEvent> {
     messages
         .iter()
         .filter_map(|message| {
+            if checkpoint_provenance(message).is_some()
+                || message
+                    .extra
+                    .get("event")
+                    .and_then(|event| event.get("source"))
+                    .and_then(|source| source.as_str())
+                    == Some(CHECKPOINT_SOURCE)
+            {
+                return None;
+            }
             let subkind = goal_event_subkind(message)?;
             if !matches!(subkind, "goal_delta" | "goal_pursuit") {
                 return None;
