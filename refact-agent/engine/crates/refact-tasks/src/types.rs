@@ -696,6 +696,7 @@ pub enum VerifierReportClassification {
     Passed,
     VerificationFailed,
     HumanReview,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

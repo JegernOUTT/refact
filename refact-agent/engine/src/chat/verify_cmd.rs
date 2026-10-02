@@ -106,6 +106,11 @@ pub(crate) fn parse_verification_argv(command: &str) -> Result<ParsedVerificatio
         }
         (None, tokens.as_slice())
     };
+    if malformed_cargo_test_threads(rest) {
+        return Err(
+            "malformed cargo test separators: command not executed; use one `--` before the filter and place `--test-threads=1` after the filter without another `--`".to_string(),
+        );
+    }
     if rest.is_empty() {
         return Err("missing command after cd prefix".to_string());
     }
@@ -146,6 +151,31 @@ fn is_assignment_token(token: &str) -> bool {
     is_env_name(key)
 }
 
+fn malformed_cargo_test_threads(tokens: &[String]) -> bool {
+    let command = tokens
+        .iter()
+        .skip_while(|token| is_assignment_token(token))
+        .collect::<Vec<_>>();
+    if !command
+        .first()
+        .is_some_and(|token| token.as_str() == "cargo")
+        || !command.get(1).is_some_and(|token| token.as_str() == "test")
+    {
+        return false;
+    }
+    let Some(threads) = command
+        .iter()
+        .position(|token| token.as_str() == "--test-threads=1")
+    else {
+        return false;
+    };
+    command[..threads]
+        .iter()
+        .filter(|token| token.as_str() == "--")
+        .count()
+        > 1
+}
+
 fn is_env_name(name: &str) -> bool {
     !name.is_empty() && env_name_len(name.as_bytes()) == name.len()
 }
@@ -173,6 +203,36 @@ pub(crate) fn instruction_commands(instructions: &str) -> Vec<String> {
     commands
 }
 
+pub(crate) fn instruction_skip_notes(instructions: &str) -> Vec<String> {
+    let mut notes = Vec::new();
+    let mut in_fence = false;
+    let mut in_negative_control = false;
+    for line in instructions.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            let heading = trimmed.trim_start_matches('#').trim().to_ascii_lowercase();
+            in_negative_control = heading.contains("negative control");
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let explicitly_marked = explicit_verify_command(trimmed).is_some();
+        let candidate = strip_list_and_backticks(trimmed);
+        if (in_negative_control || is_negative_control_instruction(trimmed))
+            && (explicitly_marked || trimmed.contains('`') || looks_like_command(&candidate))
+            && notes.is_empty()
+        {
+            notes.push("not executed: negative-control step".to_string());
+        }
+    }
+    notes
+}
+
 /// Commands an agent reported running. Untrusted proposals until accepted under policy.
 pub(crate) fn reported_verification_commands(card: &BoardCard) -> Vec<String> {
     let mut commands = Vec::new();
@@ -186,8 +246,8 @@ pub(crate) fn reported_verification_commands(card: &BoardCard) -> Vec<String> {
 
 fn commands_from_instructions(instructions: &str) -> Vec<String> {
     let mut commands = Vec::new();
-    let mut in_verification_section = false;
     let mut in_fence = false;
+    let mut in_negative_control = false;
     for line in instructions.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("```") {
@@ -196,29 +256,52 @@ fn commands_from_instructions(instructions: &str) -> Vec<String> {
         }
         if trimmed.starts_with('#') {
             let heading = trimmed.trim_start_matches('#').trim().to_ascii_lowercase();
-            in_verification_section = heading.contains("acceptance") || heading.contains("verif");
+            in_negative_control = heading.contains("negative control");
+            continue;
+        }
+        if in_fence || in_negative_control || is_negative_control_instruction(trimmed) {
             continue;
         }
         if let Some(command) = explicit_verify_command(trimmed) {
-            push_unique(&mut commands, command);
-            continue;
-        }
-        if in_fence || !in_verification_section {
-            continue;
-        }
-        let candidate = strip_list_and_backticks(trimmed);
-        if looks_like_command(&candidate) {
-            push_unique(&mut commands, candidate);
+            push_expanded_unique(&mut commands, &command);
         }
     }
     commands
 }
 
+fn is_negative_control_instruction(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    [
+        "negative control",
+        "temporarily",
+        "remove ",
+        "delete ",
+        "restore",
+        "git show head:",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase))
+}
+
 fn explicit_verify_command(line: &str) -> Option<String> {
     let line = line.trim_start_matches(['-', '*', ' ']).trim();
+    let line = line
+        .strip_prefix("[ ]")
+        .or_else(|| line.strip_prefix("[x]"))
+        .map(str::trim_start)
+        .unwrap_or(line);
     let lower = line.to_ascii_lowercase();
-    let index = lower.find("verify:")?;
-    let command = strip_list_and_backticks(&line[index + "verify:".len()..]);
+    let rest = lower.strip_prefix("verify:")?;
+    let command_start = line.len() - rest.len();
+    let command_text = line[command_start..].trim();
+    if !command_text.starts_with('`')
+        || !command_text.ends_with('`')
+        || command_text.len() < 2
+        || command_text[1..command_text.len() - 1].contains('`')
+    {
+        return None;
+    }
+    let command = command_text[1..command_text.len() - 1].trim().to_string();
     (!command.is_empty()).then_some(command)
 }
 
@@ -600,10 +683,29 @@ mod tests {
     }
 
     #[test]
+    fn only_verify_lines_are_scraped_and_negative_controls_are_skipped() {
+        let instructions = "## Notes\n`cargo test --lib`\n\n## Verification\n- Verify: `cargo test --lib`\n## Negative control\n- temporarily remove the guard, run `cargo test --lib`, paste the failure, restore it\n";
+        assert_eq!(instruction_commands(instructions), vec!["cargo test --lib"]);
+        assert_eq!(
+            instruction_skip_notes(instructions),
+            vec!["not executed: negative-control step"]
+        );
+    }
+
+    #[test]
+    fn double_dash_test_threads_is_rejected_with_clear_note() {
+        let error =
+            parse_verification_argv("cargo test --lib -- chat::verifier -- --test-threads=1")
+                .unwrap_err();
+        assert!(error.contains("malformed cargo test separators"));
+        assert!(error.contains("command not executed"));
+    }
+
+    #[test]
     fn real_commands_in_acceptance_section_are_still_extracted() {
         let card: BoardCard = serde_json::from_value(serde_json::json!({
             "id":"T","title":"t","column":"done",
-            "instructions":"## Verification\n- make check\n- go test ./...\n- dotnet test\n- npm run lint\n",
+            "instructions":"## Verification\n- Verify: `make check`\n- Verify: `go test ./...`\n- Verify: `dotnet test`\n- Verify: `npm run lint`\n",
             "assignee":null,"agent_chat_id":null,"created_at":"now","started_at":null,"completed_at":null
         })).unwrap();
         assert_eq!(

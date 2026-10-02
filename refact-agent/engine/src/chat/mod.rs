@@ -81,6 +81,8 @@ pub mod trajectory_ops;
 pub mod types;
 pub mod verifier;
 mod verifier_diff;
+#[cfg(test)]
+mod verifier_false_fail_tests;
 pub(crate) mod verify_cmd;
 
 pub use session::{

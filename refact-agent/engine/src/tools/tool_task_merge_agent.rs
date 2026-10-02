@@ -542,6 +542,10 @@ fn verifier_merge_block_message(
     )
 }
 
+fn concern_is_model_unavailable(concern: &str) -> bool {
+    concern.starts_with("Verifier model unavailable; infrastructure unavailable:")
+}
+
 fn verifier_force_warning(card_id: &str, concerns: &[String]) -> String {
     format!(
         "Card {} verifier failed and requires human review. Merge is continuing only because force=true. Concerns:\n{}",
@@ -569,7 +573,7 @@ fn concern_is_infrastructure_only(concern: &str, infrastructure_commands: &[&str
             .any(|command| concern.strip_prefix("Verification command failed: ") == Some(*command))
 }
 
-fn ensure_verifier_allows_merge(
+pub(crate) fn ensure_verifier_allows_merge(
     card: &crate::tasks::types::BoardCard,
     force: bool,
 ) -> Result<Option<String>, String> {
@@ -583,6 +587,17 @@ fn ensure_verifier_allows_merge(
             .concerns
             .iter()
             .all(|concern| concern_is_infrastructure_only(concern, &[]));
+    if force
+        && !report.passed
+        && report.classification == VerifierReportClassification::Unavailable
+        && !report.concerns.is_empty()
+        && report
+            .concerns
+            .iter()
+            .all(|concern| concern_is_model_unavailable(concern))
+    {
+        return Ok(Some(verifier_force_warning(&card.id, &report.concerns)));
+    }
     let legacy_launch_failure = !report.passed
         && report.classification == VerifierReportClassification::Unknown
         && report.recommendation == "human-review"
@@ -2373,6 +2388,31 @@ mod worktree_merge_tool_tests {
         assert!(err.contains("verifier failed"));
         assert!(err.contains("cargo test failed"));
         assert!(err.contains("force=true"));
+    }
+
+    #[test]
+    fn merge_agent_force_allows_unavailable_verifier_model() {
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = Some(VerifierReport {
+            passed: false,
+            concerns: vec![
+                "Verifier model unavailable; infrastructure unavailable: configured model not found"
+                    .to_string(),
+            ],
+            recommendation: "human-review".to_string(),
+            classification: crate::tasks::types::VerifierReportClassification::Unavailable,
+            ..Default::default()
+        });
+
+        assert!(ensure_verifier_allows_merge(&card, false).is_err());
+        assert!(ensure_verifier_allows_merge(&card, true).unwrap().is_some());
+
+        card.verifier_report
+            .as_mut()
+            .unwrap()
+            .concerns
+            .push("Implementation does not satisfy the requested behavior".to_string());
+        assert!(ensure_verifier_allows_merge(&card, true).is_err());
     }
 
     #[test]

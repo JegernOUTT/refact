@@ -17,6 +17,7 @@ use crate::chat::verifier_diff::{
     git_changed_files_summary, git_head_commit, resolve_verifier_diff_base,
 };
 use crate::chat::verify_cmd::VerifyCommandPolicy;
+use crate::chat::verify_cmd::instruction_skip_notes;
 use crate::exec::command_policy::{build_exec_request, CommandKind, CommandPolicyInput, ExecSource};
 use crate::exec::{ExecOutputStream, ExecStatus};
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
@@ -131,15 +132,24 @@ async fn check_cwd_in_worktree(worktree: &Path, effective_cwd: &Path) -> Result<
 }
 
 fn append_verifier_status(card: &mut BoardCard, report: &VerifierReport) {
-    let message = if report.passed {
-        "Verifier: PASS".to_string()
-    } else {
-        let first = report
-            .concerns
-            .first()
-            .map(|s| s.as_str())
-            .unwrap_or("verification failed");
-        format!("Verifier: FAIL — {}", first)
+    let message = match report.classification {
+        VerifierReportClassification::Unavailable => format!(
+            "Verifier: UNAVAILABLE — {}",
+            report
+                .concerns
+                .first()
+                .map(String::as_str)
+                .unwrap_or("verification infrastructure unavailable")
+        ),
+        _ if report.passed => "Verifier: PASS".to_string(),
+        _ => {
+            let first = report
+                .concerns
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("verification failed");
+            format!("Verifier: FAIL — {}", first)
+        }
     };
     card.status_updates.push(StatusUpdate {
         timestamp: Utc::now().to_rfc3339(),
@@ -215,7 +225,7 @@ pub async fn schedule_card_verifier(gcx: Arc<GlobalContext>, request: VerifyCard
                 tracing::info!("{}", error);
                 return;
             }
-            let report = launch_failure_report(error);
+            let report = unavailable_verifier_report(error);
             if let Err(store_error) = store_verifier_report(
                 task_gcx,
                 &request.task_id,
@@ -301,6 +311,19 @@ pub async fn verify_card(
         crate::tasks::assignment::load_assignment(gcx.clone(), &request.task_id, &card.id).await?;
     let specs =
         crate::tasks::assignment::specs_for_validation(assignment.as_ref(), &card, &defaults);
+    let skipped_instruction_notes = if assignment
+        .as_ref()
+        .is_some_and(|assignment| assignment.has_typed_verification())
+    {
+        Vec::new()
+    } else {
+        instruction_skip_notes(
+            assignment
+                .as_ref()
+                .map(|assignment| assignment.task.as_str())
+                .unwrap_or(&card.instructions),
+        )
+    };
     let commit = git_head_commit(&worktree).await;
     let service = EvidenceService::new(
         VerifyCommandPolicy::load(gcx.clone()).await,
@@ -346,6 +369,7 @@ pub async fn verify_card(
         .is_some_and(|report| report.success);
     let decision = completion_decision(&gates, reported_success);
     let mut concerns = decision.reasons;
+    concerns.extend(skipped_instruction_notes);
     if decision.reported_success && !decision.allowed {
         concerns.insert(
             0,
@@ -355,7 +379,7 @@ pub async fn verify_card(
 
     // Gates decide before any model is consulted: a blocked gate means the judge
     // never runs, so no amount of model confidence can turn it into a pass.
-    let (review_unavailable, review_has_concerns) = if gates.judge_allowed() {
+    let (review_unavailable, review_has_concerns, review_error) = if gates.judge_allowed() {
         let worktree_base = if let Some(worktree_id) = card.agent_worktree_name.as_deref() {
             let project_root = crate::files_correction::get_project_dirs(gcx.clone())
                 .await
@@ -395,24 +419,33 @@ pub async fn verify_card(
         let prompt = verifier_prompt(&card, &command_results, &diff);
         let review = run_verifier_review(gcx.clone(), prompt, card.agent_chat_id.as_deref()).await;
         let review_unavailable = review.is_err();
+        let review_error = review.as_ref().err().cloned();
         let model_concerns = review.unwrap_or_else(|error| {
-            vec![format!(
-                "Verifier review subchat unavailable; human review recommended: {}",
-                error
-            )]
+            vec![if verifier_model_unavailable(Some(&error)) {
+                format!("Verifier model unavailable; infrastructure unavailable: {error}")
+            } else {
+                format!("Verifier review subchat unavailable; human review recommended: {error}")
+            }]
         });
         let review_has_concerns = !review_unavailable && !model_concerns.is_empty();
         concerns.extend(model_concerns);
-        (review_unavailable, review_has_concerns)
+        (review_unavailable, review_has_concerns, review_error)
     } else {
-        (false, false)
+        (false, false, None)
     };
 
-    let classification = classify_verifier_report(&gates, review_unavailable, review_has_concerns);
+    let classification =
+        if review_unavailable && verifier_model_unavailable(review_error.as_deref()) {
+            VerifierReportClassification::Unavailable
+        } else {
+            classify_verifier_report(&gates, review_unavailable, review_has_concerns)
+        };
     let passed = classification == VerifierReportClassification::Passed;
     let recommendation = match classification {
         VerifierReportClassification::Passed => "merge",
-        VerifierReportClassification::HumanReview => "human-review",
+        VerifierReportClassification::HumanReview | VerifierReportClassification::Unavailable => {
+            "human-review"
+        }
         VerifierReportClassification::VerificationFailed
         | VerifierReportClassification::Unknown => "fix-needed",
     }
@@ -472,16 +505,34 @@ fn classify_verifier_report(
     VerifierReportClassification::Passed
 }
 
-fn launch_failure_report(error: String) -> VerifierReport {
+fn verifier_model_unavailable(error: Option<&str>) -> bool {
+    error.is_some_and(|error| {
+        let lower = error.to_ascii_lowercase();
+        lower.contains("model")
+            && (lower.contains("not found")
+                || lower.contains("not available")
+                || lower.contains("no light/default model")
+                || lower.contains("no verifier model")
+                || lower.contains("no model configured"))
+    })
+}
+
+pub(crate) fn unavailable_verifier_report(error: String) -> VerifierReport {
+    let model_unavailable = verifier_model_unavailable(Some(&error));
     VerifierReport {
         passed: false,
         command_results: Vec::new(),
-        concerns: vec![format!(
-            "Verifier failed to launch; human review recommended: {}",
-            error
-        )],
+        concerns: vec![if model_unavailable {
+            format!("Verifier model unavailable; infrastructure unavailable: {error}")
+        } else {
+            format!("Verifier failed to launch; human review recommended: {error}")
+        }],
         recommendation: "human-review".to_string(),
-        classification: VerifierReportClassification::HumanReview,
+        classification: if model_unavailable {
+            VerifierReportClassification::Unavailable
+        } else {
+            VerifierReportClassification::HumanReview
+        },
     }
 }
 
@@ -702,11 +753,19 @@ async fn resolve_verifier_model(gcx: Arc<GlobalContext>) -> Result<String, Strin
     let caps = try_load_caps_quickly_if_not_present(gcx, 0)
         .await
         .map_err(|e| e.message.clone())?;
-    if !caps.defaults.chat_light_model.is_empty() {
-        return Ok(caps.defaults.chat_light_model.clone());
-    }
-    if !caps.defaults.chat_default_model.is_empty() {
-        return Ok(caps.defaults.chat_default_model.clone());
+    for model in [
+        caps.defaults.chat_light_model.as_str(),
+        caps.defaults.chat_default_model.as_str(),
+    ] {
+        if model.is_empty() {
+            continue;
+        }
+        if crate::caps::resolve_model(&caps.chat_models, model).is_ok() {
+            return Ok(model.to_string());
+        }
+        return Err(format!(
+            "verifier model '{model}' is not available in the model catalog"
+        ));
     }
     Err("no light/default model configured for verifier".to_string())
 }
@@ -907,13 +966,17 @@ mod tests {
     }
 
     #[test]
-    fn launch_failure_report_returns_passed_false() {
-        let report = launch_failure_report("no model configured".to_string());
+    fn unavailable_verifier_report_returns_passed_false() {
+        let report = unavailable_verifier_report("no model configured".to_string());
 
         assert!(!report.passed);
         assert_eq!(report.recommendation, "human-review");
         assert!(report.command_results.is_empty());
-        assert!(report.concerns[0].contains("Verifier failed to launch"));
+        assert_eq!(
+            report.classification,
+            VerifierReportClassification::Unavailable
+        );
+        assert!(report.concerns[0].contains("Verifier model unavailable"));
         assert!(report.concerns[0].contains("no model configured"));
     }
 

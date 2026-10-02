@@ -129,7 +129,7 @@ mod tool_task_done;
 mod tool_task_init;
 mod tool_task_mark_card;
 pub mod tool_task_memory;
-mod tool_task_merge_agent;
+pub(crate) mod tool_task_merge_agent;
 mod tool_task_overview;
 mod tool_task_restart_agent;
 pub(crate) mod tool_task_spawn_agent;
