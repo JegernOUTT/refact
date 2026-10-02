@@ -182,18 +182,33 @@ mod tests {
     async fn metrics_pages_with_opaque_cursors_and_rejects_foreign_continuations() {
         let (app, _dir) = app(Some("metrics-token")).await;
         seed();
-        let (status, first) = request(app.clone(), "/metrics?limit=2", Some("metrics-token")).await;
-        assert_eq!(status, StatusCode::OK, "{first}");
+        let mut successful_pages = None;
+        for _ in 0..20 {
+            let (status, first) =
+                request(app.clone(), "/metrics?limit=2", Some("metrics-token")).await;
+            assert_eq!(status, StatusCode::OK, "{first}");
+            let cursor = first["next_cursor"].as_str().unwrap().to_string();
+            let (status, second) = request(
+                app.clone(),
+                &format!("/metrics?limit=2&cursor={cursor}"),
+                Some("metrics-token"),
+            )
+            .await;
+            if status == StatusCode::CONFLICT {
+                assert_eq!(second["code"], "cursor_expired", "{second}");
+                continue;
+            }
+            assert_eq!(status, StatusCode::OK, "{second}");
+            successful_pages = Some((first, second, cursor));
+            break;
+        }
+        // The recorder is process-global, so concurrent writes can legitimately expire a cursor.
+        let (first, second, cursor) = successful_pages.expect(
+            "metrics recorder never stayed quiet long enough to complete pagination in 20 attempts",
+        );
         assert_eq!(first["returned"], 2);
         assert_eq!(first["truncated"], true);
-        let cursor = first["next_cursor"].as_str().unwrap();
-        let (status, second) = request(
-            app.clone(),
-            &format!("/metrics?limit=2&cursor={cursor}"),
-            Some("metrics-token"),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{second}");
+        assert!(cursor.starts_with("w1."));
         assert_eq!(second["snapshot_id"], first["snapshot_id"]);
         assert_ne!(second["entries"][0], first["entries"][0]);
         let (status, body) = request(
