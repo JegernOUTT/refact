@@ -1,6 +1,6 @@
 use at_tools::handle_v1_post_tools;
 use axum::Router;
-use axum::routing::{get, post, put, patch, delete};
+use axum::routing::{get, post, patch, delete};
 
 use crate::app_state::AppState;
 use crate::http::utils::request_logging_middleware;
@@ -287,6 +287,106 @@ use crate::http::routers::v1::v1_browser::{
 
 pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
     let builder = Router::new()
+        .merge(core_routes())
+        .merge(coordination_routes())
+        .merge(tools_routes())
+        .merge(lsp_routes())
+        .merge(ast_routes())
+        .merge(performance_routes())
+        .merge(project_configs_routes())
+        .merge(settings_routes())
+        .merge(privacy_routes())
+        .merge(worktrees_routes())
+        .merge(background_agents_routes())
+        .merge(at_commands_routes())
+        .merge(integrations_routes())
+        .merge(git_routes())
+        .merge(files_routes())
+        .merge(providers_routes())
+        .merge(code_completion_routes())
+        .merge(code_lens_routes())
+        .merge(sync_files_routes())
+        .merge(system_prompt_routes())
+        .merge(code_intel_routes())
+        .merge(knowledge_routes())
+        .merge(trajectories_routes())
+        .merge(chats_routes())
+        .merge(voice_routes())
+        .merge(tasks_routes())
+        .merge(project_information_routes())
+        .merge(exec_routes())
+        .merge(scheduler_routes())
+        .merge(browser_routes())
+        .merge(stats_routes())
+        .merge(extensions_routes())
+        .merge(marketplace_sources_routes())
+        .merge(marketplace_skills_routes())
+        .merge(marketplace_commands_routes())
+        .merge(marketplace_subagents_routes())
+        .merge(plugins_routes())
+        .merge(mcp_routes())
+        .merge(buddy_core_routes())
+        .merge(buddy_opportunities_routes())
+        .merge(buddy_drafts_routes())
+        .merge(buddy_supervision_routes())
+        .merge(buddy_improvement_routes())
+        .merge(buddy_operator_routes())
+        .merge(buddy_decisions_routes())
+        .merge(buddy_editorial_routes())
+        .merge(buddy_native_work_routes())
+        .merge(buddy_frontend_error_routes())
+        .merge(shell_policy_routes())
+        .merge(bug_report_routes());
+
+    let rl = buddy_frontend_error::FrontendErrorRateLimiter::new();
+    builder
+        .layer(axum::Extension(rl))
+        .layer(axum::middleware::from_fn(request_logging_middleware))
+        .with_state(app_state)
+}
+fn core_routes() -> Router<AppState> {
+    Router::new()
+        .route("/ping", get(handle_v1_ping))
+        .route(
+            "/graceful-shutdown",
+            get(handle_v1_graceful_shutdown).post(handle_v1_graceful_shutdown),
+        )
+        .route("/caps", get(handle_v1_caps))
+        .route("/build_info", get(crate::http::routers::info::handle_info))
+        .route("/model-capabilities", get(handle_v1_model_capabilities))
+        .route("/model-supported", get(handle_v1_model_supported))
+        .route("/rag-status", get(handle_v1_rag_status))
+        .route("/config-path", get(handle_v1_config_path))
+        .route("/customization", get(handle_v1_customization))
+        .route("/chat-modes", get(handle_v1_chat_modes))
+        .route(
+            "/customization/registry",
+            get(handle_v1_customization_registry),
+        )
+        .route(
+            "/customization/:kind/:id",
+            get(handle_v1_customization_get)
+                .put(handle_v1_customization_save)
+                .delete(handle_v1_customization_delete),
+        )
+        .route("/customization/:kind", post(handle_v1_customization_create))
+        .route("/links", post(handle_v1_links))
+        .route(
+            "/get-app-searchable-id",
+            get(handle_v1_get_app_searchable_id),
+        )
+        .route(
+            "/commit-message-from-diff",
+            post(handle_v1_commit_message_from_diff),
+        )
+        .route("/sidebar/subscribe", get(sidebar::handle_sidebar_subscribe))
+        .route("/hooks", get(hooks::handle_v1_hooks_surface))
+        .route("/hooks/fire", post(handle_v1_hooks_fire))
+        .route("/setup/status", get(handle_v1_setup_status))
+}
+
+fn coordination_routes() -> Router<AppState> {
+    Router::new()
         .route("/work", get(work::list))
         .route("/work/subscribe", get(work::subscribe))
         .route("/work/wait-graph", get(work::wait_graph))
@@ -295,42 +395,24 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/work/causal/subscribe", get(causal::subscribe))
         .route("/metrics", get(metrics::page))
         .route("/attention", get(attention::queue))
-        .route("/hooks", get(hooks::handle_v1_hooks_surface))
         .route("/work/:id", get(work::inspect))
-        .route("/ping", get(handle_v1_ping))
+}
+
+fn tools_routes() -> Router<AppState> {
+    Router::new()
         .route(
-            "/graceful-shutdown",
-            get(handle_v1_graceful_shutdown).post(handle_v1_graceful_shutdown),
+            "/tools",
+            get(handle_v1_get_tools).post(handle_v1_post_tools),
         )
-        .route("/code-completion", post(handle_v1_code_completion_web))
-        .route("/code-lens", post(handle_v1_code_lens))
-        .route("/caps", get(handle_v1_caps))
-        .route("/build_info", get(crate::http::routers::info::handle_info))
-        .route(
-            "/bug-report/context",
-            get(bug_report::handle_v1_bug_report_context),
-        )
-        .route(
-            "/bug-report/logs",
-            get(bug_report::handle_v1_bug_report_logs),
-        )
-        .route(
-            "/bug-report/errors",
-            get(bug_report::handle_v1_bug_report_errors),
-        )
-        .route(
-            "/bug-report/bundle",
-            post(bug_report::handle_v1_bug_report_bundle),
-        )
-        .route("/model-capabilities", get(handle_v1_model_capabilities))
-        .route("/model-supported", get(handle_v1_model_supported))
-        .route("/tools", get(handle_v1_get_tools))
-        .route("/tools", post(handle_v1_post_tools))
         .route(
             "/tools-check-if-confirmation-needed",
             post(handle_v1_tools_check_if_confirmation_needed),
         )
         .route("/tools-execute", post(handle_v1_tools_execute))
+}
+
+fn lsp_routes() -> Router<AppState> {
+    Router::new()
         .route("/lsp-initialize", post(handle_v1_lsp_initialize))
         .route("/lsp-did-changed", post(handle_v1_lsp_did_change))
         .route("/lsp-add-folder", post(handle_v1_lsp_add_folder))
@@ -340,12 +422,17 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/lsp-set-active-document",
             post(handle_v1_set_active_document),
         )
+}
+
+fn ast_routes() -> Router<AppState> {
+    Router::new()
         .route("/ast-file-symbols", post(handle_v1_ast_file_symbols))
         .route("/ast-file-dump", post(handle_v1_ast_file_dump))
         .route("/ast-status", get(handle_v1_ast_status))
-        .route("/rag-status", get(handle_v1_rag_status))
-        .route("/config-path", get(handle_v1_config_path))
-        .route("/customization", get(handle_v1_customization))
+}
+
+fn performance_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/performance/telemetry",
             get(performance::handle_v1_performance_telemetry_get)
@@ -355,17 +442,23 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/performance/telemetry/reset",
             post(performance::handle_v1_performance_telemetry_reset),
         )
+}
+
+fn project_configs_routes() -> Router<AppState> {
+    Router::new()
         .route("/project-configs", get(handle_v1_project_configs_get))
         .route(
-            "/trajectory-settings",
-            get(settings_config::handle_v1_trajectory_settings_get)
-                .post(settings_config::handle_v1_trajectory_settings_post),
+            "/project-configs/rescan",
+            post(handle_v1_project_configs_rescan),
         )
         .route(
-            "/coordination-settings",
-            get(settings_config::handle_v1_coordination_settings_get)
-                .post(settings_config::handle_v1_coordination_settings_post),
+            "/project-configs/bootstrap",
+            post(handle_v1_project_configs_bootstrap),
         )
+}
+
+fn settings_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/indexing-settings",
             get(settings_config::handle_v1_indexing_settings_get)
@@ -377,10 +470,19 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
                 .post(settings_config::handle_v1_skills_settings_post),
         )
         .route(
+            "/coordination-settings",
+            get(settings_config::handle_v1_coordination_settings_get)
+                .post(settings_config::handle_v1_coordination_settings_post),
+        )
+        .route(
             "/browser-settings",
             get(browser_settings::handle_v1_browser_settings_get)
                 .post(browser_settings::handle_v1_browser_settings_post),
         )
+}
+
+fn privacy_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/privacy/policy",
             get(privacy::handle_v1_privacy_policy_get).post(privacy::handle_v1_privacy_policy_post),
@@ -392,27 +494,31 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/privacy/derived/clear",
             post(privacy::handle_v1_privacy_derived_clear),
         )
+}
+
+fn worktrees_routes() -> Router<AppState> {
+    Router::new()
         .route(
-            "/project-configs/rescan",
-            post(handle_v1_project_configs_rescan),
+            "/worktrees",
+            get(handle_v1_worktrees_list).post(handle_v1_worktrees_create),
         )
-        .route(
-            "/project-configs/bootstrap",
-            post(handle_v1_project_configs_bootstrap),
-        )
-        .route("/worktrees", get(handle_v1_worktrees_list))
-        .route("/worktrees", post(handle_v1_worktrees_create))
         .route("/worktrees/summary", get(handle_v1_worktrees_summary))
         .route(
             "/worktrees/cleanup-dry-run",
             post(handle_v1_worktrees_cleanup_dry_run),
         )
         .route("/worktrees/cleanup", post(handle_v1_worktrees_cleanup))
-        .route("/worktrees/:id", get(handle_v1_worktrees_get))
-        .route("/worktrees/:id", delete(handle_v1_worktrees_delete))
+        .route(
+            "/worktrees/:id",
+            get(handle_v1_worktrees_get).delete(handle_v1_worktrees_delete),
+        )
         .route("/worktrees/:id/diff", get(handle_v1_worktrees_diff))
         .route("/worktrees/:id/merge", post(handle_v1_worktrees_merge))
         .route("/worktrees/:id/open", post(handle_v1_worktrees_open))
+}
+
+fn background_agents_routes() -> Router<AppState> {
+    Router::new()
         .route("/background-agents", get(handle_v1_background_agents_get))
         .route(
             "/background-agents/:agent_id/cancel",
@@ -422,41 +528,19 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/background-agents/:agent_id/message",
             post(handle_v1_background_agents_message),
         )
-        .route("/chat-modes", get(handle_v1_chat_modes))
-        .route(
-            "/customization/registry",
-            get(handle_v1_customization_registry),
-        )
-        .route("/customization/:kind/:id", get(handle_v1_customization_get))
-        .route(
-            "/customization/:kind/:id",
-            put(handle_v1_customization_save),
-        )
-        .route("/customization/:kind", post(handle_v1_customization_create))
-        .route(
-            "/customization/:kind/:id",
-            delete(handle_v1_customization_delete),
-        )
-        .route(
-            "/sync-files-extract-tar",
-            post(handle_v1_sync_files_extract_tar),
-        )
-        .route("/git-commit", post(handle_v1_git_commit))
-        .route("/git/status", get(handle_v1_git_status))
-        .route("/git/diff", get(handle_v1_git_diff))
-        .route("/git/log", get(handle_v1_git_log))
-        .route("/git/branches", get(handle_v1_git_branches))
-        .route("/git/stage", post(handle_v1_git_stage))
-        .route("/git/unstage", post(handle_v1_git_unstage))
-        .route(
-            "/prepend-system-prompt-and-maybe-more-initial-messages",
-            post(handle_v1_prepend_system_prompt_and_maybe_more_initial_messages),
-        )
+}
+
+fn at_commands_routes() -> Router<AppState> {
+    Router::new()
         .route("/at-command-completion", post(handle_v1_command_completion))
         .route("/at-command-preview", post(handle_v1_command_preview))
         .route("/at-command-execute", post(handle_v1_at_command_execute))
         .route("/slash-commands", get(handle_v1_slash_commands))
         .route("/fullpath", post(handle_v1_fullpath))
+}
+
+fn integrations_routes() -> Router<AppState> {
+    Router::new()
         .route("/integrations", get(handle_v1_integrations))
         .route(
             "/integrations-filtered/:integr_name",
@@ -473,9 +557,23 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/integrations-mcp-logs",
             post(handle_v1_integrations_mcp_logs),
         )
+}
+
+fn git_routes() -> Router<AppState> {
+    Router::new()
+        .route("/git-commit", post(handle_v1_git_commit))
+        .route("/git/status", get(handle_v1_git_status))
+        .route("/git/diff", get(handle_v1_git_diff))
+        .route("/git/log", get(handle_v1_git_log))
+        .route("/git/branches", get(handle_v1_git_branches))
+        .route("/git/stage", post(handle_v1_git_stage))
+        .route("/git/unstage", post(handle_v1_git_unstage))
         .route("/checkpoints-preview", post(handle_v1_checkpoints_preview))
         .route("/checkpoints-restore", post(handle_v1_checkpoints_restore))
-        .route("/links", post(handle_v1_links))
+}
+
+fn files_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/file_edit_tool_dry_run",
             post(handle_v1_file_edit_tool_dry_run),
@@ -484,12 +582,19 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/files/read", get(handle_v1_files_read))
         .route("/files/write", post(handle_v1_files_write))
         .route("/code-edit", post(handle_v1_code_edit))
+}
+
+fn providers_routes() -> Router<AppState> {
+    Router::new()
         .route("/models", get(handle_v1_models))
         .route("/providers", get(handle_v1_providers_list))
         .route("/providers/quotas", get(handle_v1_provider_quotas))
-        .route("/providers/:name", get(handle_v1_provider_get))
-        .route("/providers/:name", post(handle_v1_provider_update))
-        .route("/providers/:name", delete(handle_v1_provider_delete))
+        .route(
+            "/providers/:name",
+            get(handle_v1_provider_get)
+                .post(handle_v1_provider_update)
+                .delete(handle_v1_provider_delete),
+        )
         .route("/providers/:name/schema", get(handle_v1_provider_schema))
         .route("/providers/:name/models", get(handle_v1_provider_models))
         .route(
@@ -510,11 +615,8 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         )
         .route(
             "/providers/:name/custom-models",
-            post(handle_v1_provider_add_custom_model),
-        )
-        .route(
-            "/providers/:name/custom-models",
-            delete(handle_v1_provider_remove_custom_model),
+            post(handle_v1_provider_add_custom_model)
+                .delete(handle_v1_provider_remove_custom_model),
         )
         .route(
             "/providers/:name/custom-models/remove",
@@ -555,26 +657,47 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/providers/:name/oauth/callback",
             get(handle_v1_provider_oauth_callback),
         )
-        .route("/defaults", get(handle_v1_defaults_get))
-        .route("/defaults", post(handle_v1_defaults_update))
-        .route("/project-defaults", get(handle_v1_project_defaults_get))
-        .route("/project-defaults", post(handle_v1_project_defaults_update))
+        .route(
+            "/defaults",
+            get(handle_v1_defaults_get).post(handle_v1_defaults_update),
+        )
+        .route(
+            "/project-defaults",
+            get(handle_v1_project_defaults_get).post(handle_v1_project_defaults_update),
+        )
         .route("/openrouter/health", get(handle_v1_openrouter_health))
         .route("/google-gemini/health", get(handle_v1_google_gemini_health))
-        .route(
-            "/get-app-searchable-id",
-            get(handle_v1_get_app_searchable_id),
-        )
-        // experimental
+}
+
+fn code_completion_routes() -> Router<AppState> {
+    Router::new()
+        .route("/code-completion", post(handle_v1_code_completion_web))
         .route(
             "/code-completion-prompt",
             post(handle_v1_code_completion_prompt),
         )
-        .route(
-            "/commit-message-from-diff",
-            post(handle_v1_commit_message_from_diff),
-        );
-    let builder = builder
+}
+
+fn code_lens_routes() -> Router<AppState> {
+    Router::new().route("/code-lens", post(handle_v1_code_lens))
+}
+
+fn sync_files_routes() -> Router<AppState> {
+    Router::new().route(
+        "/sync-files-extract-tar",
+        post(handle_v1_sync_files_extract_tar),
+    )
+}
+
+fn system_prompt_routes() -> Router<AppState> {
+    Router::new().route(
+        "/prepend-system-prompt-and-maybe-more-initial-messages",
+        post(handle_v1_prepend_system_prompt_and_maybe_more_initial_messages),
+    )
+}
+
+fn code_intel_routes() -> Router<AppState> {
+    Router::new()
         .route("/vdb-search", post(handle_v1_vecdb_search))
         .route("/vdb-status", get(handle_v1_vecdb_status))
         .route("/codegraph-search", post(handle_v1_codegraph_search))
@@ -598,6 +721,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/code-intel/security-scan",
             post(handle_v1_code_intel_security_scan),
         )
+}
+
+fn knowledge_routes() -> Router<AppState> {
+    Router::new()
         .route("/knowledge-graph", get(handle_v1_knowledge_graph))
         .route(
             "/knowledge/update-memory",
@@ -611,6 +738,15 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/knowledge/relink-memories",
             post(handle_v1_knowledge_relink_memories),
         )
+}
+
+fn trajectories_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/trajectory-settings",
+            get(settings_config::handle_v1_trajectory_settings_get)
+                .post(settings_config::handle_v1_trajectory_settings_post),
+        )
         .route("/trajectory-compress", post(handle_v1_trajectory_compress))
         .route("/trajectories", get(handle_v1_trajectories_list))
         .route("/trajectories/all", get(handle_v1_trajectories_all))
@@ -618,10 +754,17 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/trajectories/subscribe",
             get(handle_v1_trajectories_subscribe),
         )
-        .route("/trajectories/:id", get(handle_v1_trajectories_get))
+        .route(
+            "/trajectories/:id",
+            get(handle_v1_trajectories_get)
+                .put(handle_v1_trajectories_save)
+                .delete(handle_v1_trajectories_delete),
+        )
         .route("/trajectories/:id/path", get(handle_v1_trajectory_path))
-        .route("/trajectories/:id", put(handle_v1_trajectories_save))
-        .route("/trajectories/:id", delete(handle_v1_trajectories_delete))
+}
+
+fn chats_routes() -> Router<AppState> {
+    Router::new()
         .route("/chats/subscribe", get(handle_v1_chat_subscribe))
         .route("/chats/:chat_id/commands", post(handle_v1_chat_command))
         .route(
@@ -635,102 +778,6 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route(
             "/chats/:chat_id/queue/:client_request_id",
             delete(handle_v1_chat_cancel_queued).patch(handle_v1_chat_reprioritize_queued),
-        )
-        .route("/voice/transcribe", post(handle_v1_voice_transcribe))
-        .route("/voice/download", post(handle_v1_voice_download))
-        .route("/voice/status", get(handle_v1_voice_status))
-        .route(
-            "/voice/stream/:session_id/subscribe",
-            get(handle_v1_voice_stream_subscribe),
-        )
-        .route(
-            "/voice/stream/:session_id/chunk",
-            post(handle_v1_voice_stream_chunk),
-        )
-        .route("/sidebar/subscribe", get(sidebar::handle_sidebar_subscribe))
-        .route("/tasks", get(handle_list_tasks))
-        .route("/tasks", post(handle_create_task))
-        .route("/tasks/subscribe", get(handle_tasks_subscribe))
-        .route("/tasks/:task_id", get(handle_get_task))
-        .route("/tasks/:task_id", delete(handle_delete_task))
-        .route("/tasks/:task_id/status", post(handle_update_task_status))
-        .route("/tasks/:task_id/meta", patch(handle_update_task_meta))
-        .route("/task/:task_id/memories", get(handle_list_task_memories))
-        .route(
-            "/task/:task_id/memories/facets",
-            get(handle_task_memory_facets),
-        )
-        .route(
-            "/task/:task_id/memories/triage-done",
-            post(handle_task_memories_triage_done),
-        )
-        .route(
-            "/task/:task_id/memories/:filename/pin",
-            post(handle_pin_task_memory),
-        )
-        .route(
-            "/task/:task_id/memories/:filename/archive",
-            post(handle_archive_task_memory),
-        )
-        .route("/task/:task_id/documents", get(handle_list_task_documents))
-        .route(
-            "/task/:task_id/documents",
-            post(handle_create_task_document),
-        )
-        .route(
-            "/task/:task_id/documents/:slug",
-            get(handle_get_task_document),
-        )
-        .route(
-            "/task/:task_id/documents/:slug",
-            put(handle_update_task_document),
-        )
-        .route(
-            "/task/:task_id/documents/:slug",
-            delete(handle_delete_task_document),
-        )
-        .route(
-            "/task/:task_id/documents/:slug/append",
-            post(handle_append_task_document),
-        )
-        .route(
-            "/task/:task_id/documents/:slug/pin",
-            post(handle_pin_task_document),
-        )
-        .route(
-            "/task/:task_id/documents/:slug/history",
-            get(handle_history_task_document),
-        )
-        .route("/tasks/:task_id/board", get(handle_get_board))
-        .route("/tasks/:task_id/board", post(handle_patch_board))
-        .route(
-            "/tasks/:task_id/cards/:card_id/comments",
-            post(handle_create_card_comment),
-        )
-        .route("/tasks/:task_id/board/ready", get(handle_get_ready_cards))
-        .route(
-            "/tasks/:task_id/planner-instructions",
-            get(handle_get_planner_instructions),
-        )
-        .route(
-            "/tasks/:task_id/planner-instructions",
-            put(handle_set_planner_instructions),
-        )
-        .route(
-            "/tasks/:task_id/trajectories/:role",
-            get(handle_list_task_trajectories),
-        )
-        .route(
-            "/tasks/:task_id/planner-chats",
-            post(handle_create_planner_chat),
-        )
-        .route(
-            "/tasks/:task_id/planner-chats/:chat_id",
-            delete(handle_delete_planner_chat),
-        )
-        .route(
-            "/tasks/:task_id/planner-chats/from-transition",
-            post(handle_planner_from_transition),
         )
         .route(
             "/chats/:chat_id/trajectory/transform/preview",
@@ -752,18 +799,117 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/chats/:chat_id/trajectory/mode-transition/apply",
             post(handle_mode_transition_apply),
         )
+}
+
+fn voice_routes() -> Router<AppState> {
+    Router::new()
+        .route("/voice/transcribe", post(handle_v1_voice_transcribe))
+        .route("/voice/download", post(handle_v1_voice_download))
+        .route("/voice/status", get(handle_v1_voice_status))
         .route(
-            "/project-information",
-            get(handle_v1_project_information_get),
+            "/voice/stream/:session_id/subscribe",
+            get(handle_v1_voice_stream_subscribe),
         )
         .route(
+            "/voice/stream/:session_id/chunk",
+            post(handle_v1_voice_stream_chunk),
+        )
+}
+
+fn tasks_routes() -> Router<AppState> {
+    Router::new()
+        .route("/tasks", get(handle_list_tasks).post(handle_create_task))
+        .route("/tasks/subscribe", get(handle_tasks_subscribe))
+        .route(
+            "/tasks/:task_id",
+            get(handle_get_task).delete(handle_delete_task),
+        )
+        .route("/tasks/:task_id/status", post(handle_update_task_status))
+        .route("/tasks/:task_id/meta", patch(handle_update_task_meta))
+        .route("/task/:task_id/memories", get(handle_list_task_memories))
+        .route(
+            "/task/:task_id/memories/facets",
+            get(handle_task_memory_facets),
+        )
+        .route(
+            "/task/:task_id/memories/triage-done",
+            post(handle_task_memories_triage_done),
+        )
+        .route(
+            "/task/:task_id/memories/:filename/pin",
+            post(handle_pin_task_memory),
+        )
+        .route(
+            "/task/:task_id/memories/:filename/archive",
+            post(handle_archive_task_memory),
+        )
+        .route(
+            "/task/:task_id/documents",
+            get(handle_list_task_documents).post(handle_create_task_document),
+        )
+        .route(
+            "/task/:task_id/documents/:slug",
+            get(handle_get_task_document)
+                .put(handle_update_task_document)
+                .delete(handle_delete_task_document),
+        )
+        .route(
+            "/task/:task_id/documents/:slug/append",
+            post(handle_append_task_document),
+        )
+        .route(
+            "/task/:task_id/documents/:slug/pin",
+            post(handle_pin_task_document),
+        )
+        .route(
+            "/task/:task_id/documents/:slug/history",
+            get(handle_history_task_document),
+        )
+        .route(
+            "/tasks/:task_id/board",
+            get(handle_get_board).post(handle_patch_board),
+        )
+        .route(
+            "/tasks/:task_id/cards/:card_id/comments",
+            post(handle_create_card_comment),
+        )
+        .route("/tasks/:task_id/board/ready", get(handle_get_ready_cards))
+        .route(
+            "/tasks/:task_id/planner-instructions",
+            get(handle_get_planner_instructions).put(handle_set_planner_instructions),
+        )
+        .route(
+            "/tasks/:task_id/trajectories/:role",
+            get(handle_list_task_trajectories),
+        )
+        .route(
+            "/tasks/:task_id/planner-chats",
+            post(handle_create_planner_chat),
+        )
+        .route(
+            "/tasks/:task_id/planner-chats/:chat_id",
+            delete(handle_delete_planner_chat),
+        )
+        .route(
+            "/tasks/:task_id/planner-chats/from-transition",
+            post(handle_planner_from_transition),
+        )
+}
+
+fn project_information_routes() -> Router<AppState> {
+    Router::new()
+        .route(
             "/project-information",
-            post(handle_v1_project_information_save),
+            get(handle_v1_project_information_get).post(handle_v1_project_information_save),
         )
         .route(
             "/project-information/preview",
             post(handle_v1_project_information_preview),
         )
+}
+
+fn exec_routes() -> Router<AppState> {
+    Router::new()
         .route("/exec/spawn", post(exec::handle_v1_exec_spawn))
         .route("/exec/list", get(exec::handle_v1_exec_list))
         .route("/exec/:process_id/read", get(exec::handle_v1_exec_read))
@@ -777,6 +923,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/exec/:process_id/subscribe",
             get(exec::handle_v1_exec_subscribe),
         )
+}
+
+fn scheduler_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/scheduler/cron",
             get(handle_v1_scheduler_cron_get).post(handle_v1_scheduler_cron_post),
@@ -789,8 +939,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/scheduler/cron/:id/run",
             post(handle_v1_scheduler_cron_run),
         )
-        .route("/hooks/fire", post(handle_v1_hooks_fire))
-        .route("/setup/status", get(handle_v1_setup_status))
+}
+
+fn browser_routes() -> Router<AppState> {
+    Router::new()
         .route("/browser/start", post(handle_browser_start))
         .route("/browser/stop", post(handle_browser_stop))
         .route("/browser/screenshot", post(handle_browser_screenshot))
@@ -833,26 +985,38 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             post(handle_browser_annotate_clear),
         )
         .route("/browser/action", post(handle_browser_action))
+}
+
+fn stats_routes() -> Router<AppState> {
+    Router::new()
         .route("/stats/llm/summary", get(handle_v1_stats_llm_summary))
         .route("/stats/llm/events", get(handle_v1_stats_llm_events))
+}
+
+fn extensions_routes() -> Router<AppState> {
+    Router::new()
         .route("/ext/registry", get(handle_v1_ext_registry))
         .route("/ext/skills", post(handle_v1_ext_skill_post))
-        .route("/ext/skills/:name", get(handle_v1_ext_skill_get))
-        .route("/ext/skills/:name", put(handle_v1_ext_skill_put))
-        .route("/ext/skills/:name", delete(handle_v1_ext_skill_delete))
-        .route("/ext/commands", post(handle_v1_ext_command_post))
-        .route("/ext/commands/:name", get(handle_v1_ext_command_get))
-        .route("/ext/commands/:name", put(handle_v1_ext_command_put))
-        .route("/ext/commands/:name", delete(handle_v1_ext_command_delete))
-        .route("/ext/hooks", get(handle_v1_ext_hooks_get))
-        .route("/ext/hooks", put(handle_v1_ext_hooks_put))
         .route(
-            "/ext/competitor-import",
-            get(handle_v1_ext_competitor_import_get),
+            "/ext/skills/:name",
+            get(handle_v1_ext_skill_get)
+                .put(handle_v1_ext_skill_put)
+                .delete(handle_v1_ext_skill_delete),
+        )
+        .route("/ext/commands", post(handle_v1_ext_command_post))
+        .route(
+            "/ext/commands/:name",
+            get(handle_v1_ext_command_get)
+                .put(handle_v1_ext_command_put)
+                .delete(handle_v1_ext_command_delete),
+        )
+        .route(
+            "/ext/hooks",
+            get(handle_v1_ext_hooks_get).put(handle_v1_ext_hooks_put),
         )
         .route(
             "/ext/competitor-import",
-            post(handle_v1_ext_competitor_import_post),
+            get(handle_v1_ext_competitor_import_get).post(handle_v1_ext_competitor_import_post),
         )
         .route(
             "/ext/hooks/:index",
@@ -860,11 +1024,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         )
         .route(
             "/ext/marketplace/sources",
-            get(handle_v1_ext_marketplace_sources_get),
-        )
-        .route(
-            "/ext/marketplace/sources",
-            post(handle_v1_ext_marketplace_sources_post),
+            get(handle_v1_ext_marketplace_sources_get).post(handle_v1_ext_marketplace_sources_post),
         )
         .route(
             "/ext/marketplace/sources/:id",
@@ -878,13 +1038,13 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/ext/marketplace/sources/:id/refresh",
             post(handle_v1_ext_marketplace_sources_refresh),
         )
+}
+
+fn marketplace_sources_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/skills_marketplace/sources",
-            get(handle_v1_ext_marketplace_sources_get),
-        )
-        .route(
-            "/skills_marketplace/sources",
-            post(handle_v1_ext_marketplace_sources_post),
+            get(handle_v1_ext_marketplace_sources_get).post(handle_v1_ext_marketplace_sources_post),
         )
         .route(
             "/skills_marketplace/sources/:id",
@@ -896,11 +1056,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         )
         .route(
             "/commands_marketplace/sources",
-            get(handle_v1_ext_marketplace_sources_get),
-        )
-        .route(
-            "/commands_marketplace/sources",
-            post(handle_v1_ext_marketplace_sources_post),
+            get(handle_v1_ext_marketplace_sources_get).post(handle_v1_ext_marketplace_sources_post),
         )
         .route(
             "/commands_marketplace/sources/:id",
@@ -912,11 +1068,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         )
         .route(
             "/subagents_marketplace/sources",
-            get(handle_v1_ext_marketplace_sources_get),
-        )
-        .route(
-            "/subagents_marketplace/sources",
-            post(handle_v1_ext_marketplace_sources_post),
+            get(handle_v1_ext_marketplace_sources_get).post(handle_v1_ext_marketplace_sources_post),
         )
         .route(
             "/subagents_marketplace/sources/:id",
@@ -926,23 +1078,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/subagents_marketplace/sources/:id/configure",
             post(handle_v1_ext_marketplace_sources_configure),
         )
-        .route("/skills/marketplace", get(handle_v1_skills_marketplace_get))
-        .route(
-            "/skills/marketplace/install",
-            post(handle_v1_skills_marketplace_install),
-        )
         .route("/skills_marketplace", get(handle_v1_skills_marketplace_get))
         .route(
             "/skills_marketplace/install",
             post(handle_v1_skills_marketplace_install),
-        )
-        .route(
-            "/commands/marketplace",
-            get(handle_v1_commands_marketplace_get),
-        )
-        .route(
-            "/commands/marketplace/install",
-            post(handle_v1_commands_marketplace_install),
         )
         .route(
             "/commands_marketplace",
@@ -953,14 +1092,6 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             post(handle_v1_commands_marketplace_install),
         )
         .route(
-            "/subagents/marketplace",
-            get(handle_v1_subagents_marketplace_get),
-        )
-        .route(
-            "/subagents/marketplace/install",
-            post(handle_v1_subagents_marketplace_install),
-        )
-        .route(
             "/subagents_marketplace",
             get(handle_v1_subagents_marketplace_get),
         )
@@ -968,8 +1099,47 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/subagents_marketplace/install",
             post(handle_v1_subagents_marketplace_install),
         )
-        .route("/plugins/marketplaces", get(handle_list_marketplaces))
-        .route("/plugins/marketplaces", post(handle_add_marketplace))
+}
+
+fn marketplace_skills_routes() -> Router<AppState> {
+    Router::new()
+        .route("/skills/marketplace", get(handle_v1_skills_marketplace_get))
+        .route(
+            "/skills/marketplace/install",
+            post(handle_v1_skills_marketplace_install),
+        )
+}
+
+fn marketplace_commands_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/commands/marketplace",
+            get(handle_v1_commands_marketplace_get),
+        )
+        .route(
+            "/commands/marketplace/install",
+            post(handle_v1_commands_marketplace_install),
+        )
+}
+
+fn marketplace_subagents_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/subagents/marketplace",
+            get(handle_v1_subagents_marketplace_get),
+        )
+        .route(
+            "/subagents/marketplace/install",
+            post(handle_v1_subagents_marketplace_install),
+        )
+}
+
+fn plugins_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/plugins/marketplaces",
+            get(handle_list_marketplaces).post(handle_add_marketplace),
+        )
         .route(
             "/plugins/marketplaces/:name",
             delete(handle_delete_marketplace),
@@ -981,6 +1151,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/plugins/install", post(handle_install_plugin))
         .route("/plugins/installed", get(handle_list_installed))
         .route("/plugins/installed/:name", delete(handle_uninstall_plugin))
+}
+
+fn mcp_routes() -> Router<AppState> {
+    Router::new()
         .route("/mcp-server-info", get(handle_v1_mcp_server_info))
         .route(
             "/mcp-server-reconnect",
@@ -1007,11 +1181,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/mcp/wizard-probe", post(handle_v1_mcp_wizard_probe))
         .route(
             "/mcp/marketplace/sources",
-            get(handle_v1_mcp_marketplace_sources_get),
-        )
-        .route(
-            "/mcp/marketplace/sources",
-            post(handle_v1_mcp_marketplace_sources_post),
+            get(handle_v1_mcp_marketplace_sources_get).post(handle_v1_mcp_marketplace_sources_post),
         )
         .route(
             "/mcp/marketplace/sources/:id",
@@ -1035,6 +1205,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/mcp/interactions/respond",
             post(handle_v1_mcp_interactions_respond),
         )
+}
+
+fn buddy_core_routes() -> Router<AppState> {
+    Router::new()
         .route("/buddy", get(buddy::handle_v1_buddy_snapshot))
         .route(
             "/buddy/user_action",
@@ -1048,10 +1222,9 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/buddy/pulse_preview",
             get(buddy::handle_v1_buddy_pulse_preview),
         )
-        .route("/buddy/settings", get(buddy::handle_v1_buddy_settings_get))
         .route(
             "/buddy/settings",
-            post(buddy::handle_v1_buddy_settings_update),
+            get(buddy::handle_v1_buddy_settings_get).post(buddy::handle_v1_buddy_settings_update),
         )
         .route("/buddy/care", post(buddy::handle_v1_buddy_care))
         .route(
@@ -1069,11 +1242,8 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/buddy/activities", get(buddy::handle_v1_buddy_activities))
         .route(
             "/buddy/conversations",
-            get(buddy::handle_v1_buddy_conversations_list),
-        )
-        .route(
-            "/buddy/conversations",
-            post(buddy::handle_v1_buddy_conversations_create),
+            get(buddy::handle_v1_buddy_conversations_list)
+                .post(buddy::handle_v1_buddy_conversations_create),
         )
         .route(
             "/buddy/conversations/setup",
@@ -1103,6 +1273,16 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/buddy/issues/create",
             post(buddy::handle_v1_buddy_issues_create),
         )
+        .route("/buddy/briefing", get(buddy::handle_v1_buddy_briefing))
+        .route(
+            "/buddy/speech-decisions",
+            get(buddy::handle_v1_buddy_speech_decisions),
+        )
+        .route("/buddy/pulse", get(buddy_pulse::handle_v1_buddy_pulse))
+}
+
+fn buddy_opportunities_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/buddy/opportunities",
             get(buddy_opportunities::handle_v1_buddy_opportunities_list),
@@ -1127,12 +1307,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/buddy/rules/unmute",
             post(buddy_opportunities::handle_v1_buddy_rule_unmute),
         )
-        .route("/buddy/briefing", get(buddy::handle_v1_buddy_briefing))
-        .route(
-            "/buddy/speech-decisions",
-            get(buddy::handle_v1_buddy_speech_decisions),
-        )
-        .route("/buddy/pulse", get(buddy_pulse::handle_v1_buddy_pulse))
+}
+
+fn buddy_drafts_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/buddy/drafts/skill",
             post(buddy_drafts::handle_v1_buddy_draft_create_skill),
@@ -1166,49 +1344,14 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             post(buddy_drafts::handle_v1_buddy_draft_create_pulse_report),
         )
         .route(
-            "/buddy/operator/status",
-            get(buddy_operator::handle_operator_status),
+            "/buddy/drafts/:id",
+            get(buddy_drafts::handle_v1_buddy_draft_get)
+                .delete(buddy_drafts::handle_v1_buddy_draft_delete),
         )
-        .route(
-            "/buddy/operator/reopen",
-            post(buddy_operator::handle_operator_reopen),
-        )
-        .route(
-            "/buddy/operator/legacy-drafts/:id/work",
-            get(buddy_operator::handle_legacy_draft_work),
-        )
-        .route(
-            "/buddy/work",
-            get(buddy_operator::handle_v1_buddy_operator_work_list),
-        )
-        .route(
-            "/buddy/work/actions",
-            get(buddy_operator::handle_v1_buddy_operator_actions_batch),
-        )
-        .route(
-            "/buddy/decisions/current",
-            get(buddy_decisions::handle_current_decisions),
-        )
-        .route(
-            "/buddy/approvals/current",
-            get(buddy_native_approvals::handle_current_approvals),
-        )
-        .route(
-            "/buddy/approvals/:chat_id/response",
-            post(buddy_native_approvals::handle_approval_response),
-        )
-        .route(
-            "/buddy/editorial/claim",
-            post(buddy_editorial::handle_claim),
-        )
-        .route(
-            "/buddy/editorial/feedback",
-            post(buddy_editorial::handle_feedback),
-        )
-        .route(
-            "/buddy/editorial/metrics",
-            get(buddy_editorial::handle_metrics),
-        )
+}
+
+fn buddy_supervision_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/buddy/supervision/context",
             get(buddy_supervision::context),
@@ -1265,6 +1408,10 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/buddy/supervision/mandates/:id/assess-candidate",
             post(buddy_supervision::assess_candidate),
         )
+}
+
+fn buddy_improvement_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/buddy/improvement/candidates",
             get(buddy_improvement::handle_list).post(buddy_improvement::handle_create),
@@ -1314,6 +1461,38 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             get(buddy_improvement::handle_evaluations),
         )
         .route(
+            "/buddy/improvement/evaluations/:id",
+            get(buddy_improvement::handle_evaluation_get),
+        )
+        .route(
+            "/buddy/improvement/evaluations/:id/cancel",
+            post(buddy_improvement::handle_evaluation_cancel),
+        )
+}
+
+fn buddy_operator_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/buddy/operator/status",
+            get(buddy_operator::handle_operator_status),
+        )
+        .route(
+            "/buddy/operator/reopen",
+            post(buddy_operator::handle_operator_reopen),
+        )
+        .route(
+            "/buddy/operator/legacy-drafts/:id/work",
+            get(buddy_operator::handle_legacy_draft_work),
+        )
+        .route(
+            "/buddy/work",
+            get(buddy_operator::handle_v1_buddy_operator_work_list),
+        )
+        .route(
+            "/buddy/work/actions",
+            get(buddy_operator::handle_v1_buddy_operator_actions_batch),
+        )
+        .route(
             "/buddy/operator/diagnostics",
             get(buddy_observability::handle_summary),
         )
@@ -1328,14 +1507,6 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route(
             "/buddy/operator/policy/confirm",
             post(buddy_observability::handle_policy_confirm),
-        )
-        .route(
-            "/buddy/improvement/evaluations/:id",
-            get(buddy_improvement::handle_evaluation_get),
-        )
-        .route(
-            "/buddy/improvement/evaluations/:id/cancel",
-            post(buddy_improvement::handle_evaluation_cancel),
         )
         .route(
             "/buddy/actions/preview",
@@ -1368,15 +1539,6 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route(
             "/buddy/grants/:id/revoke",
             post(buddy_operator::handle_resource_grant_revoke),
-        )
-        .route(
-            "/buddy/native-work",
-            get(buddy_native_work::handle_native_work),
-        )
-        .route(
-            "/buddy/decisions/questions/:chat_id/:tool_call_id",
-            get(buddy_decisions::handle_question_state)
-                .post(buddy_decisions::handle_question_answer),
         )
         .route(
             "/buddy/work/:id",
@@ -1424,18 +1586,60 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/buddy/executions/:id",
             get(buddy_operator::handle_v1_buddy_operator_execution_get),
         )
+}
+
+fn buddy_decisions_routes() -> Router<AppState> {
+    Router::new()
         .route(
-            "/buddy/drafts/:id",
-            get(buddy_drafts::handle_v1_buddy_draft_get),
+            "/buddy/decisions/current",
+            get(buddy_decisions::handle_current_decisions),
         )
         .route(
-            "/buddy/drafts/:id",
-            delete(buddy_drafts::handle_v1_buddy_draft_delete),
+            "/buddy/approvals/current",
+            get(buddy_native_approvals::handle_current_approvals),
         )
         .route(
-            "/buddy/frontend-error",
-            post(buddy_frontend_error::handle_v1_buddy_frontend_error),
+            "/buddy/approvals/:chat_id/response",
+            post(buddy_native_approvals::handle_approval_response),
         )
+        .route(
+            "/buddy/decisions/questions/:chat_id/:tool_call_id",
+            get(buddy_decisions::handle_question_state)
+                .post(buddy_decisions::handle_question_answer),
+        )
+}
+
+fn buddy_editorial_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/buddy/editorial/claim",
+            post(buddy_editorial::handle_claim),
+        )
+        .route(
+            "/buddy/editorial/feedback",
+            post(buddy_editorial::handle_feedback),
+        )
+        .route(
+            "/buddy/editorial/metrics",
+            get(buddy_editorial::handle_metrics),
+        )
+}
+
+fn buddy_native_work_routes() -> Router<AppState> {
+    Router::new().route(
+        "/buddy/native-work",
+        get(buddy_native_work::handle_native_work),
+    )
+}
+
+fn buddy_frontend_error_routes() -> Router<AppState> {
+    Router::new().route(
+        "/buddy/frontend-error",
+        post(buddy_frontend_error::handle_v1_buddy_frontend_error),
+    )
+}
+fn shell_policy_routes() -> Router<AppState> {
+    Router::new()
         .route(
             "/shell-policy",
             get(shell_policy::handle_v1_shell_policy_get)
@@ -1448,13 +1652,27 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route(
             "/shell-policy/audit",
             get(shell_policy::handle_v1_shell_policy_audit),
-        );
+        )
+}
 
-    let rl = buddy_frontend_error::FrontendErrorRateLimiter::new();
-    builder
-        .layer(axum::Extension(rl))
-        .layer(axum::middleware::from_fn(request_logging_middleware))
-        .with_state(app_state)
+fn bug_report_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/bug-report/context",
+            get(bug_report::handle_v1_bug_report_context),
+        )
+        .route(
+            "/bug-report/logs",
+            get(bug_report::handle_v1_bug_report_logs),
+        )
+        .route(
+            "/bug-report/errors",
+            get(bug_report::handle_v1_bug_report_errors),
+        )
+        .route(
+            "/bug-report/bundle",
+            post(bug_report::handle_v1_bug_report_bundle),
+        )
 }
 
 #[cfg(test)]
@@ -1483,5 +1701,143 @@ mod router_tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("buddy operator runtime is unavailable"));
+    }
+
+    #[tokio::test]
+    async fn v1_router_builds_without_overlap_and_keeps_every_route() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let router = make_v1_router(app.clone()).with_state(app);
+        let routes = [
+            ("GET", "/buddy/work/actions?ids=missing"),
+            ("GET", "/work"),
+            ("GET", "/work/causal?root=missing"),
+            ("GET", "/providers/openai_codex/usage/resets"),
+        ];
+
+        for (method, uri) in routes {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_ne!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn v1_router_routes_each_domain_and_keeps_shared_layers() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let router = make_v1_router(app.clone()).with_state(app);
+        let routes = [
+            ("GET", "/ping"),
+            ("GET", "/build_info"),
+            ("GET", "/bug-report/context"),
+            ("GET", "/tools"),
+            ("POST", "/lsp-initialize"),
+            ("GET", "/ast-status"),
+            ("GET", "/performance/telemetry"),
+            ("GET", "/project-configs"),
+            ("GET", "/browser-settings"),
+            ("GET", "/privacy/status"),
+            ("GET", "/worktrees"),
+            ("GET", "/background-agents"),
+            ("GET", "/slash-commands"),
+            ("GET", "/integrations"),
+            ("GET", "/git/status"),
+            ("GET", "/files/tree"),
+            ("GET", "/models"),
+            ("POST", "/code-completion"),
+            ("POST", "/code-lens"),
+            ("POST", "/sync-files-extract-tar"),
+            (
+                "POST",
+                "/prepend-system-prompt-and-maybe-more-initial-messages",
+            ),
+            ("GET", "/codegraph-status"),
+            ("GET", "/knowledge-graph"),
+            ("GET", "/trajectories/all"),
+            ("GET", "/chats/subscribe"),
+            ("GET", "/voice/status"),
+            ("GET", "/tasks"),
+            ("GET", "/project-information"),
+            ("GET", "/exec/list"),
+            ("GET", "/scheduler/cron"),
+            ("POST", "/browser/status"),
+            ("GET", "/stats/llm/summary"),
+            ("GET", "/ext/registry"),
+            ("GET", "/skills_marketplace"),
+            ("GET", "/skills/marketplace"),
+            ("GET", "/commands/marketplace"),
+            ("GET", "/subagents/marketplace"),
+            ("GET", "/plugins/installed"),
+            ("GET", "/mcp/marketplace"),
+            ("GET", "/buddy"),
+            ("GET", "/buddy/opportunities"),
+            ("GET", "/buddy/native-work"),
+            ("GET", "/buddy/work/actions?ids=missing"),
+            ("GET", "/shell-policy"),
+        ];
+
+        for (method, uri) in routes {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_ne!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+            assert_ne!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {uri}"
+            );
+        }
+
+        let wrong_method = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ping")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        let frontend_error_request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/buddy/frontend-error")
+                .header("content-type", "application/json")
+                .header("x-forwarded-for", "192.0.2.10")
+                .body(Body::from(
+                    r#"{"message":"test error","stack":"","url":"test","kind":"test"}"#,
+                ))
+                .unwrap()
+        };
+        for _ in 0..60 {
+            let response = router
+                .clone()
+                .oneshot(frontend_error_request())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let limited = router.oneshot(frontend_error_request()).await.unwrap();
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 }
