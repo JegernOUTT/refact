@@ -66,6 +66,8 @@ pub mod session_runtime;
 pub mod stream_core;
 pub mod summarization;
 pub mod system_context;
+#[cfg(test)]
+mod task_agent_attention_tests;
 pub mod task_agent_monitor;
 #[cfg(test)]
 mod tests;

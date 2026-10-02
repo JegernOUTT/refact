@@ -502,6 +502,7 @@ fn mark_finished_card(
     report: &ParsedFinishReport,
     commit_hash: Option<&str>,
 ) {
+    card.attention = None;
     if success {
         card.final_report = Some(report.markdown.clone());
         card.final_report_structured = report.structured.clone();

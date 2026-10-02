@@ -201,6 +201,7 @@ impl Tool for ToolTaskAgentUpdate {
                 timestamp: Utc::now().to_rfc3339(),
                 message: message.clone(),
             });
+            card.attention = None;
             Ok(())
         })
         .await?;

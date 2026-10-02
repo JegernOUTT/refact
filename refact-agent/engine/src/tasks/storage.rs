@@ -495,6 +495,11 @@ where
         board.authorize_reviewer(reviewer, settings.board_allow_self_review)?;
     }
     let result = updater(&mut board)?;
+    for card in &mut board.cards {
+        if card.column != "doing" {
+            card.attention = None;
+        }
+    }
     validate_board(&board, &settings)?;
     let new_failed = board
         .cards
