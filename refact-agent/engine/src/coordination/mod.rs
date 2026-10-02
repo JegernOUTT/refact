@@ -1,6 +1,8 @@
 //! Local work discovery, cross-project-root catalog, privacy-gated views and
 //! the significant-change context capsule (M1-03 / M1-08 / M1-09).
 
+#[cfg(test)]
+mod agent_wait_authorization_tests;
 pub(crate) mod board_bootstrap;
 pub mod board_index;
 pub(crate) mod board_rows;

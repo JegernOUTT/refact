@@ -1393,13 +1393,17 @@ impl Tool for ToolAgentWait {
             )
         };
         if targets.len() == 1 {
+            let agent_id = &targets[0];
+            app.agents
+                .get(&parent_chat_id, agent_id)
+                .await
+                .map_err(|error| map_registry_error(agent_id, error))?;
             let waiting = crate::coordination::deadlock::declare_agent_wait(
                 &app,
                 &parent_chat_id,
                 background_agent_id.as_deref(),
                 &targets,
             );
-            let agent_id = &targets[0];
             let record = tokio::select! {
                 settled = app
                     .agents

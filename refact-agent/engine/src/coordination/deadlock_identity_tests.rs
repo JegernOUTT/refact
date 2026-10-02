@@ -47,18 +47,18 @@ fn spawn_request(parent_chat_id: &str, title: &str, subchat_depth: usize) -> Spa
     }
 }
 
-fn parked_run(id: &str) -> refact_work_core::RunKey {
+pub(super) fn parked_run(id: &str) -> refact_work_core::RunKey {
     WorkKey::background_agent(id).run(1)
 }
 
-fn work_scope() -> WorkScope {
+pub(super) fn work_scope() -> WorkScope {
     WorkScope::new(
         ProjectKey::new("identity-test-project"),
         CheckoutKey::new("wait-root"),
     )
 }
 
-async fn create_running_record(
+pub(super) async fn create_running_record(
     app: &crate::app_state::AppState,
     parent_chat_id: &str,
     child_chat_id: &str,
@@ -92,7 +92,10 @@ async fn create_running_record(
     record.agent_id
 }
 
-async fn parked_ticket(app: &crate::app_state::AppState, run: refact_work_core::RunKey) -> Ticket {
+pub(super) async fn parked_ticket(
+    app: &crate::app_state::AppState,
+    run: refact_work_core::RunKey,
+) -> Ticket {
     app.work_scheduler
         .reserve(AdmissionRequest::new(run, work_scope()))
         .unwrap()
@@ -103,7 +106,7 @@ async fn parked_ticket(app: &crate::app_state::AppState, run: refact_work_core::
         .unwrap()
 }
 
-async fn app_with_workspace() -> (crate::app_state::AppState, tempfile::TempDir) {
+pub(super) async fn app_with_workspace() -> (crate::app_state::AppState, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
     let cache = temp.path().join("cache");
     let config = temp.path().join("config");
