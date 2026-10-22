@@ -297,6 +297,7 @@ tools:
   - work_inspect
   - board_discover
   - metrics
+  - causal_trace
   - disagreement_file
   - disagreement_list
   - disagreement_adjudicate

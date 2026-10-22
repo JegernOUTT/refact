@@ -404,6 +404,7 @@ tools:
   - work_overview
   - work_inspect
   - metrics
+  - causal_trace
   - disagreement_file
   - disagreement_list
   - disagreement_adjudicate

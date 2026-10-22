@@ -833,6 +833,9 @@ async fn get_builtin_tools(
         Box::new(crate::tools::tool_metrics::ToolMetrics {
             config_path: config_path.clone(),
         }),
+        Box::new(crate::tools::tool_causal_trace::ToolCausalTrace {
+            config_path: config_path.clone(),
+        }),
         Box::new(crate::tools::tool_disagreement::ToolDisagreementFile {
             config_path: config_path.clone(),
         }),

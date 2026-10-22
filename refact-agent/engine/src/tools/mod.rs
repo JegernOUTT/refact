@@ -34,6 +34,7 @@ mod tool_ast_definition;
 pub mod tool_background_agents;
 mod tool_card_comment;
 mod tool_cat;
+pub mod tool_causal_trace;
 pub mod tool_chrome;
 mod tool_clean_background_processes;
 #[cfg(test)]
@@ -95,6 +96,8 @@ mod tool_web_search;
 pub mod tool_work_inspect;
 pub mod tool_work_overview;
 
+#[cfg(test)]
+mod tool_causal_trace_tests;
 #[cfg(test)]
 mod tool_team_role_grant_tests;
 #[cfg(test)]
