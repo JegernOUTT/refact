@@ -2032,6 +2032,7 @@ pub(super) async fn resume_agent_inner(
             raised_max_steps.is_some(),
         )
         .await?;
+    emit_background_agent_update(app.clone(), &record).await;
     let launch_intent = crate::coordination::launch_intents::LaunchIntentSlot::persist_for_agent(
         &app, agent_id, generation,
     )
@@ -2060,7 +2061,6 @@ pub(super) async fn resume_agent_inner(
     if let Some(instruction) = instruction {
         messages.push(ChatMessage::new("user".into(), instruction));
     }
-    emit_background_agent_update(app.clone(), &record).await;
     config.max_steps = max_steps;
     config.abort_flag = Some(abort.clone());
     config.step_progress = None;

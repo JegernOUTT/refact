@@ -16,6 +16,7 @@ pub mod question;
 #[cfg(test)]
 mod role_checkpoint_tests;
 pub mod role_projection;
+pub mod seal;
 pub mod sub_goal;
 pub mod tool_enrichment;
 
@@ -36,6 +37,7 @@ pub use chat_local_types::{
     PendingBrowserMessage, PendingSkillDeactivation, RuntimeChatTimeouts, TrajectorySourceIdentity,
 };
 pub use notification_event::{NotificationEvent, NotificationQuestion};
+pub use seal::SealReason;
 pub use question::{
     AskQuestion, QuestionContract, QuestionError, QuestionKind, QuestionLimits, QuestionRegistry,
     QuestionSettlement, QuestionState, QUESTION_MAX_EXPIRY_SECS,

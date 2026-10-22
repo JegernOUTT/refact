@@ -22,12 +22,12 @@ use crate::subchat::{
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeMeta;
 
-struct RepoFixture {
-    _temp: TempDir,
-    source: PathBuf,
-    cache: PathBuf,
-    app: AppState,
-    parent_worktree: WorktreeMeta,
+pub(crate) struct RepoFixture {
+    pub(crate) _temp: TempDir,
+    pub(crate) source: PathBuf,
+    pub(crate) cache: PathBuf,
+    pub(crate) app: AppState,
+    pub(crate) parent_worktree: WorktreeMeta,
 }
 
 fn run_git(cwd: &Path, args: &[&str]) -> String {
@@ -67,7 +67,7 @@ fn init_repo(root: &Path) {
     run_git(root, &["commit", "-m", "work branch"]);
 }
 
-async fn repo_fixture() -> RepoFixture {
+pub(crate) async fn repo_fixture() -> RepoFixture {
     let temp = tempfile::tempdir().expect("tempdir");
     let source = temp.path().join("repo");
     let cache = temp.path().join("cache");
@@ -124,7 +124,7 @@ async fn repo_fixture() -> RepoFixture {
     }
 }
 
-fn spawn_request(parent_chat_id: &str, kind: BgAgentKind) -> SpawnRequest {
+pub(crate) fn spawn_request(parent_chat_id: &str, kind: BgAgentKind) -> SpawnRequest {
     SpawnRequest {
         native_supervision_guard: None,
         kind,
@@ -290,7 +290,7 @@ async fn queued_spawn_is_discoverable_only_with_permitted_launch_provenance() {
     drop(permit);
 }
 
-async fn await_completion(handle: SpawnHandle) -> BackgroundAgent {
+pub(crate) async fn await_completion(handle: SpawnHandle) -> BackgroundAgent {
     tokio::time::timeout(Duration::from_secs(60), handle.completion_rx)
         .await
         .expect("agent completion timed out")

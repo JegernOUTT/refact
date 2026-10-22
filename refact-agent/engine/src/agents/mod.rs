@@ -12,6 +12,7 @@ pub mod profile;
 pub mod progress_monitor;
 pub mod push;
 pub mod sandbox_contract;
+pub mod seal;
 pub mod spawn;
 pub(crate) mod tool_authority;
 
@@ -19,6 +20,9 @@ pub use refact_agents_core::{registry, storage, types};
 
 #[cfg(test)]
 mod spawn_lifecycle_tests;
+
+#[cfg(test)]
+mod seal_tests;
 
 #[cfg(test)]
 mod launch_intent_spawn_tests;
