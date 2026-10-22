@@ -21177,7 +21177,7 @@ mod tests {
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             cache.clone(),
-            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+            crate::test_tmp::scratch_dir("cfg"),
         )
         .await;
         {
@@ -21233,7 +21233,7 @@ mod tests {
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             cache.clone(),
-            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+            crate::test_tmp::scratch_dir("cfg"),
         )
         .await;
         {
@@ -24306,7 +24306,7 @@ mod tests {
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             cache.clone(),
-            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+            crate::test_tmp::scratch_dir("cfg"),
         )
         .await;
         {
@@ -24363,7 +24363,7 @@ mod tests {
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             cache.clone(),
-            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+            crate::test_tmp::scratch_dir("cfg"),
         )
         .await;
         {
@@ -24511,7 +24511,7 @@ mod tests {
         init_repo(&source);
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             cache.clone(),
-            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+            crate::test_tmp::scratch_dir("cfg"),
         )
         .await;
         {

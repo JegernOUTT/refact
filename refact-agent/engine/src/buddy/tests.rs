@@ -8075,7 +8075,7 @@ async fn defaults_update_with_valid_draft_consumes_after_save() {
 
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
-        std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4())),
+        crate::test_tmp::scratch_dir("cache"),
         dir.path().to_path_buf(),
     )
     .await;
@@ -8127,7 +8127,7 @@ async fn defaults_update_wrong_draft_kind_returns_conflict_and_keeps_draft() {
 
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
-        std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4())),
+        crate::test_tmp::scratch_dir("cache"),
         dir.path().to_path_buf(),
     )
     .await;
@@ -8173,7 +8173,7 @@ async fn defaults_update_parse_invalid_draft_returns_422_and_keeps_draft() {
 
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
-        std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4())),
+        crate::test_tmp::scratch_dir("cache"),
         dir.path().to_path_buf(),
     )
     .await;
@@ -8220,7 +8220,7 @@ async fn defaults_update_without_draft_id_still_saves() {
 
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
-        std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4())),
+        crate::test_tmp::scratch_dir("cache"),
         dir.path().to_path_buf(),
     )
     .await;
@@ -8249,7 +8249,7 @@ async fn make_project_defaults_app(
 ) -> (tempfile::TempDir, crate::app_state::AppState) {
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
-        std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4())),
+        crate::test_tmp::scratch_dir("cache"),
         dir.path().to_path_buf(),
     )
     .await;
@@ -9614,7 +9614,7 @@ async fn launch_investigation_action_writes_static_prompt_and_envelope() {
     let dir = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
         dir.path().join("cache"),
-        std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+        crate::test_tmp::scratch_dir("cfg"),
     )
     .await;
     {

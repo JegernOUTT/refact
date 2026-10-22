@@ -136,6 +136,9 @@ pub mod voice;
 #[cfg(test)]
 pub mod test_paths;
 
+#[cfg(any(test, feature = "bench"))]
+pub mod test_tmp;
+
 const EXEC_SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn workspace_lease_info_for(

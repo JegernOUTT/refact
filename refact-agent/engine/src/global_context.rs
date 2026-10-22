@@ -333,21 +333,13 @@ static TEST_TEMP_DIRS: std::sync::OnceLock<std::sync::Mutex<Vec<PathBuf>>> =
 
 #[cfg(test)]
 fn test_temp_dir_is_safe(path: &std::path::Path) -> bool {
-    let temp_dir = std::env::temp_dir();
-    if !path.starts_with(&temp_dir) {
-        return false;
-    }
     let Ok(path) = path.canonicalize() else {
         return false;
     };
-    let Ok(temp_dir) = temp_dir.canonicalize() else {
+    let Ok(process_root) = crate::test_tmp::process_root().canonicalize() else {
         return false;
     };
-    path.starts_with(&temp_dir)
-        && path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("refact-"))
+    path != process_root && path.starts_with(process_root)
 }
 
 #[cfg(test)]
@@ -1468,8 +1460,8 @@ pub mod tests {
     }
 
     pub async fn make_test_gcx() -> Arc<GlobalContext> {
-        let cache_dir = std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4()));
-        let config_dir = std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()));
+        let cache_dir = crate::test_tmp::scratch_dir("cache");
+        let config_dir = crate::test_tmp::scratch_dir("cfg");
         make_test_gcx_with_dirs(cache_dir, config_dir).await
     }
 

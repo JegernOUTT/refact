@@ -1470,7 +1470,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             dir.path().join("cache"),
-            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+            crate::test_tmp::scratch_dir("cfg"),
         )
         .await;
         {
@@ -1698,7 +1698,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             dir.path().join("cache"),
-            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+            crate::test_tmp::scratch_dir("cfg"),
         )
         .await;
         let app = AppState::from_gcx(gcx).await;
@@ -1720,7 +1720,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             dir.path().join("cache"),
-            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+            crate::test_tmp::scratch_dir("cfg"),
         )
         .await;
         let app = AppState::from_gcx(gcx).await;
@@ -1742,7 +1742,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             dir.path().join("cache"),
-            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+            crate::test_tmp::scratch_dir("cfg"),
         )
         .await;
         {
@@ -1826,7 +1826,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             dir.path().join("cache"),
-            std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4())),
+            crate::test_tmp::scratch_dir("cfg"),
         )
         .await;
         create_initial_plan_document_for_transition(
