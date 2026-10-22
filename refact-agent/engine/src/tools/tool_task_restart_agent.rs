@@ -188,6 +188,9 @@ async fn claim_restart(
     let agent_chat_id = agent_chat_id.to_string();
     let mode = mode.to_string();
     let (_, queued) = storage::update_board_atomic(gcx, task_id, move |board| {
+        board
+            .dependency_gate(&original.id)
+            .map_err(storage::violation_error)?;
         let card = board
             .get_card_mut(&original.id)
             .ok_or("restart card removed")?;
@@ -386,7 +389,6 @@ impl Tool for ToolTaskRestartAgent {
         {
             return Err("Pick or cancel the A/B variants before restarting this card".into());
         }
-
         match card.column.as_str() {
             "done" => {
                 return Err(format!(
@@ -417,7 +419,9 @@ impl Tool for ToolTaskRestartAgent {
                 ))
             }
         }
-
+        board
+            .dependency_gate(card_id)
+            .map_err(storage::violation_error)?;
         let card_title = card.title.clone();
         let card_instructions = card.instructions.clone();
         let dependency_context = board

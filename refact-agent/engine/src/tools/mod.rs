@@ -134,7 +134,7 @@ mod tool_task_mark_card;
 pub mod tool_task_memory;
 pub(crate) mod tool_task_merge_agent;
 mod tool_task_overview;
-mod tool_task_restart_agent;
+pub(crate) mod tool_task_restart_agent;
 pub(crate) mod tool_task_spawn_agent;
 mod tool_task_verify_card;
 mod tool_task_wait_for_agents;

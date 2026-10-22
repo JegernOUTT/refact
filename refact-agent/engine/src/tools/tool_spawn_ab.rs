@@ -536,7 +536,11 @@ pub(crate) async fn dispatch_ab_variants(
                 return Err("A/B caller cancelled before claim".to_string());
             }
             let card_id = card.id.clone();
+            let dependency_card_id = card_id.clone();
             storage::update_board_atomic(app.gcx.clone(), &task_meta.id, move |board| {
+                board
+                    .dependency_gate(&dependency_card_id)
+                    .map_err(storage::violation_error)?;
                 let card = board
                     .get_card_mut(&card_id)
                     .ok_or("A/B card removed before claim")?;
@@ -1062,6 +1066,9 @@ impl Tool for ToolSpawnAb {
         if card.ab_variants.is_some() {
             return Err(format!("Card {} already has A/B variants", card_id));
         }
+        board
+            .dependency_gate(card_id)
+            .map_err(storage::violation_error)?;
         let original_card = card.clone();
         let card_title = card.title.clone();
         let dependency_context = board
