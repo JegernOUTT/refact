@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -546,12 +547,66 @@ pub(crate) fn verifier_command_env(
             .or_insert_with(|| "0".to_string());
         env.entry("RUST_MIN_STACK".to_string())
             .or_insert_with(|| "16777216".to_string());
-        env.insert(
-            "REFACT_SKIP_GUI_BUILD".to_string(),
-            skip_gui_build.unwrap_or("0").to_string(),
-        );
+        if let Some(skip_gui_build) = skip_gui_build {
+            env.entry("REFACT_SKIP_GUI_BUILD".to_string())
+                .or_insert_with(|| skip_gui_build.to_string());
+        }
     }
     env
+}
+
+pub(crate) fn worktree_skip_gui_build(cwd: &Path, env: &HashMap<String, String>) -> Option<String> {
+    let target_dir = env
+        .get("CARGO_TARGET_DIR")
+        .cloned()
+        .or_else(|| std::env::var("CARGO_TARGET_DIR").ok())
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }
+        })
+        .unwrap_or_else(|| cwd.join("target"));
+    let build_dir = target_dir.join("debug").join("build");
+    let entries = fs::read_dir(build_dir).ok()?;
+    let mut newest: Option<(SystemTime, String)> = None;
+
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("refact-lsp-")
+        {
+            continue;
+        }
+        let output_path = entry.path().join("output");
+        let Ok(metadata) = fs::metadata(&output_path) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let Ok(contents) = fs::read_to_string(output_path) else {
+            continue;
+        };
+        if newest
+            .as_ref()
+            .map_or(true, |(newest_modified, _)| modified > *newest_modified)
+        {
+            newest = Some((modified, contents));
+        }
+    }
+
+    let (_, output) = newest?;
+    output.lines().find_map(|line| {
+        line.strip_prefix("cargo:rustc-env=REFACT_SKIP_GUI_BUILD=")
+            .map(str::to_string)
+    })
 }
 
 fn verifier_model_unavailable(error: Option<&str>) -> bool {
@@ -620,6 +675,13 @@ pub(crate) async fn run_verification_argv_impl(
             executed_at: None,
         };
     }
+    let verifier_env = env.into_iter().collect::<HashMap<_, _>>();
+    let command_name = argv.first().map(String::as_str).unwrap_or_default();
+    let skip_gui_build = if command_name == "cargo" {
+        worktree_skip_gui_build(&effective_cwd, &verifier_env)
+    } else {
+        None
+    };
     let request = match build_exec_request(
         gcx.clone(),
         CommandPolicyInput {
@@ -627,9 +689,9 @@ pub(crate) async fn run_verification_argv_impl(
             command: CommandKind::Argv(&argv),
             cwd: Some(effective_cwd),
             env: verifier_command_env(
-                argv.first().map(String::as_str).unwrap_or_default(),
-                env,
-                option_env!("REFACT_SKIP_GUI_BUILD"),
+                command_name,
+                verifier_env.into_iter().collect(),
+                skip_gui_build.as_deref(),
             ),
             chat_mode: None,
             escalation: None,
