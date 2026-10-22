@@ -85,6 +85,8 @@ pub mod verifier;
 mod verifier_diff;
 #[cfg(test)]
 mod verifier_false_fail_tests;
+#[cfg(test)]
+mod verifier_infra_tests;
 pub(crate) mod verify_cmd;
 
 pub use session::{

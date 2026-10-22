@@ -484,12 +484,20 @@ pub(crate) fn outcome_is_infrastructure(outcome: &VerificationOutcome) -> bool {
 
 /// Gates first, judge second. A blocked gate settles the classification on its
 /// own; only once every required gate passed does the model's opinion matter.
-fn classify_verifier_report(
+pub(crate) fn classify_verifier_report(
     gates: &GateOutcome,
     review_unavailable: bool,
     review_has_concerns: bool,
 ) -> VerifierReportClassification {
     if !gates.completion_allowed() {
+        if !gates.blocks.is_empty()
+            && gates
+                .blocks
+                .iter()
+                .all(|block| block.verdict == crate::chat::evidence::EvidenceVerdict::Unavailable)
+        {
+            return VerifierReportClassification::Unavailable;
+        }
         return if gates.has_contract_violation() {
             VerifierReportClassification::VerificationFailed
         } else {
@@ -503,6 +511,47 @@ fn classify_verifier_report(
         return VerifierReportClassification::HumanReview;
     }
     VerifierReportClassification::Passed
+}
+
+pub(crate) fn verification_failure_is_infrastructure(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    lower.contains("command timed out")
+        || lower.contains("blocking waiting for file lock")
+        || lower.contains("failed to spawn command")
+        || lower.contains("could not find `cargo.toml`")
+}
+
+pub(crate) fn verification_outcome_for_exit(
+    exit_code: Option<i32>,
+    output: &str,
+) -> VerificationOutcome {
+    if verification_failure_is_infrastructure(output) {
+        return VerificationOutcome::InfrastructureFailed;
+    }
+    match exit_code {
+        Some(0) => VerificationOutcome::Passed,
+        Some(_) => VerificationOutcome::CommandFailed,
+        None => VerificationOutcome::InfrastructureFailed,
+    }
+}
+
+pub(crate) fn verifier_command_env(
+    command: &str,
+    env: Vec<(String, String)>,
+    skip_gui_build: Option<&str>,
+) -> HashMap<String, String> {
+    let mut env = env.into_iter().collect::<HashMap<_, _>>();
+    if command == "cargo" {
+        env.entry("CARGO_INCREMENTAL".to_string())
+            .or_insert_with(|| "0".to_string());
+        env.entry("RUST_MIN_STACK".to_string())
+            .or_insert_with(|| "16777216".to_string());
+        env.insert(
+            "REFACT_SKIP_GUI_BUILD".to_string(),
+            skip_gui_build.unwrap_or("0").to_string(),
+        );
+    }
+    env
 }
 
 fn verifier_model_unavailable(error: Option<&str>) -> bool {
@@ -577,7 +626,11 @@ pub(crate) async fn run_verification_argv_impl(
             source: ExecSource::Verifier,
             command: CommandKind::Argv(&argv),
             cwd: Some(effective_cwd),
-            env: env.into_iter().collect::<HashMap<String, String>>(),
+            env: verifier_command_env(
+                argv.first().map(String::as_str).unwrap_or_default(),
+                env,
+                option_env!("REFACT_SKIP_GUI_BUILD"),
+            ),
             chat_mode: None,
             escalation: None,
         },
@@ -595,7 +648,7 @@ pub(crate) async fn run_verification_argv_impl(
                 exit_code: None,
                 passed: false,
                 output_tail: format!("failed to spawn command: {}", error.message),
-                outcome: VerificationOutcome::PolicyDenied,
+                outcome: VerificationOutcome::InfrastructureFailed,
                 from_cache: false,
                 executed_at: None,
             };
@@ -632,11 +685,7 @@ pub(crate) async fn run_verification_argv_impl(
         ExecStatus::Exited { exit_code } => (
             *exit_code,
             exit_code == &Some(0),
-            if exit_code == &Some(0) {
-                VerificationOutcome::Passed
-            } else {
-                VerificationOutcome::CommandFailed
-            },
+            verification_outcome_for_exit(*exit_code, &output),
         ),
         ExecStatus::SandboxLauncherFailed { exit_code } => {
             output.push_str(&format!(
@@ -795,7 +844,6 @@ fn tail_chars(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::chat::evidence::{gate_outcome_for_verdicts, specs_from_card, EvidenceVerdict};
-    use crate::chat::verify_cmd::reported_verification_commands;
     use crate::tasks::types::{FinalReport, ScopeGuardMode, TaskBoard, TaskMeta, TaskStatus};
 
     fn card(instructions: &str) -> BoardCard {
@@ -919,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn verifier_commands_include_structured_final_report_commands() {
+    fn verifier_commands_ignore_structured_final_report_commands() {
         let mut card = card("## Acceptance Criteria\n- [ ] done");
         card.final_report_structured = Some(FinalReport {
             verification: vec![VerificationResult {
@@ -934,10 +982,14 @@ mod tests {
             ..Default::default()
         });
 
-        assert_eq!(
-            reported_verification_commands(&card),
-            vec!["cargo test --lib -p refact-lsp -- verifier".to_string()]
-        );
+        assert!(crate::chat::evidence::specs_from_card(
+            &card,
+            &EvidenceDefaults {
+                timeout_secs: 60,
+                output_cap_bytes: 4_000,
+            },
+        )
+        .is_empty());
     }
 
     #[test]
@@ -987,7 +1039,7 @@ mod tests {
         let unavailable = gate_outcome_for_verdicts(&[(true, EvidenceVerdict::Unavailable)]);
         assert_eq!(
             classify_verifier_report(&unavailable, false, false),
-            VerifierReportClassification::HumanReview
+            VerifierReportClassification::Unavailable
         );
         let passed = gate_outcome_for_verdicts(&[(true, EvidenceVerdict::Passed)]);
         assert_eq!(
@@ -1239,11 +1291,20 @@ mod tests {
 
     #[test]
     fn blocked_and_unavailable_gates_classify_as_human_review_not_verification_failure() {
-        for verdict in [EvidenceVerdict::Blocked, EvidenceVerdict::Unavailable] {
+        for (verdict, classification) in [
+            (
+                EvidenceVerdict::Blocked,
+                VerifierReportClassification::HumanReview,
+            ),
+            (
+                EvidenceVerdict::Unavailable,
+                VerifierReportClassification::Unavailable,
+            ),
+        ] {
             let gates = gate_outcome_for_verdicts(&[(true, verdict)]);
             assert_eq!(
                 classify_verifier_report(&gates, false, false),
-                VerifierReportClassification::HumanReview,
+                classification,
                 "{verdict:?} means evidence was not obtained, not that the work failed"
             );
         }

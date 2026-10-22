@@ -16,9 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use refact_chat_api::DeliverableContract;
 
-use crate::chat::evidence::{
-    append_reported_specs, instruction_specs, specs_from_card, EvidenceDefaults, VerificationSpec,
-};
+use crate::chat::evidence::{instruction_specs, specs_from_card, EvidenceDefaults, VerificationSpec};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, ScopeGuardMode};
@@ -204,9 +202,8 @@ pub fn typed_parts(
     Ok((deliverable, verification))
 }
 
-/// Specs the verifier runs. With a dispatched assignment the contract leg comes from
-/// that record; commands the agent reported are proposals that only exist after
-/// dispatch, so they are still read from the card.
+/// Specs the verifier runs. A dispatched assignment carries its contract; without one,
+/// the card's explicit Verify lines supply it.
 pub fn specs_for_validation(
     assignment: Option<&Assignment>,
     card: &BoardCard,
@@ -215,9 +212,7 @@ pub fn specs_for_validation(
     let Some(assignment) = assignment else {
         return specs_from_card(card, defaults);
     };
-    let mut specs = assignment.verification_specs(defaults);
-    append_reported_specs(&mut specs, card, &assignment.scope.target_files, defaults);
-    specs
+    assignment.verification_specs(defaults)
 }
 
 fn assignment_path(task_dir: &Path, card_id: &str) -> Result<PathBuf, String> {
@@ -481,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn commands_the_agent_reported_are_still_proposals_on_top_of_the_assignment() {
+    fn commands_the_agent_reported_are_not_verification_specs() {
         let mut card = card("## Verification\n- Verify: `cargo test --lib`");
         let assignment = Assignment::from_card(&card);
         card.final_report_structured = Some(FinalReport {
@@ -495,15 +490,8 @@ mod tests {
 
         let specs = specs_for_validation(Some(&assignment), &card, &defaults());
 
-        assert_eq!(specs.len(), 2);
+        assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].proposed_by, SpecAuthority::CardInstructions);
-        assert_eq!(specs[1].command, "npm test");
-        assert_eq!(
-            specs[1].proposed_by,
-            SpecAuthority::AgentProposal {
-                agent: "agent-1".to_string()
-            }
-        );
     }
 
     #[test]

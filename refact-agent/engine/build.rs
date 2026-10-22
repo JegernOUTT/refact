@@ -9,7 +9,12 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/chat/index.html");
     println!("cargo:rerun-if-changed=src/daemon/web_picker.html");
 
-    if env::var("REFACT_SKIP_GUI_BUILD").ok().as_deref() != Some("1") {
+    let skip_gui_build = env::var("REFACT_SKIP_GUI_BUILD").ok().as_deref() == Some("1");
+    println!(
+        "cargo:rustc-env=REFACT_SKIP_GUI_BUILD={}",
+        if skip_gui_build { "1" } else { "0" }
+    );
+    if !skip_gui_build {
         let gui_dir = gui_dir();
         println!(
             "cargo:rerun-if-changed={}",

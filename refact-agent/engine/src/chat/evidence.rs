@@ -20,8 +20,7 @@ use crate::chat::evidence_cache::CacheDeclaration;
 use crate::chat::evidence_revision::ContentRevision;
 use crate::chat::types::{CriterionEvidence, CriterionVerdict, GoalCriterion, VerdictSource};
 use crate::chat::verify_cmd::{
-    instruction_commands, looks_like_command, parse_verification_argv,
-    reported_verification_commands, VerifyCommandPolicy,
+    instruction_commands, looks_like_command, parse_verification_argv, VerifyCommandPolicy,
 };
 use crate::global_context::GlobalContext;
 use crate::tasks::types::{BoardCard, VerificationOutcome, VerificationResult};
@@ -960,7 +959,6 @@ pub fn specs_from_card(card: &BoardCard, defaults: &EvidenceDefaults) -> Vec<Ver
     for spec in specs.iter_mut() {
         spec.cache.deterministic_inputs = card.target_files.clone();
     }
-    append_reported_specs(&mut specs, card, &card.target_files, defaults);
     specs
 }
 
@@ -981,37 +979,6 @@ pub(crate) fn instruction_specs(
         ));
     }
     specs
-}
-
-/// Commands an agent said it ran. They only exist after dispatch, so they are read
-/// from the card and stay untrusted proposals.
-pub(crate) fn append_reported_specs(
-    specs: &mut Vec<VerificationSpec>,
-    card: &BoardCard,
-    cache_inputs: &[String],
-    defaults: &EvidenceDefaults,
-) {
-    let agent = card
-        .agent_chat_id
-        .clone()
-        .or_else(|| card.assignee.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-    for command in reported_verification_commands(card) {
-        if specs.iter().any(|spec| spec.command == command) {
-            continue;
-        }
-        let spec_id = format!("{}#{}", card.id, specs.len());
-        let mut spec = VerificationSpec::propose(
-            spec_id,
-            command,
-            SpecAuthority::AgentProposal {
-                agent: agent.clone(),
-            },
-            defaults,
-        );
-        spec.cache.deterministic_inputs = cache_inputs.to_vec();
-        specs.push(spec);
-    }
 }
 
 fn tail_chars(text: &str, max_chars: usize) -> String {
@@ -1628,7 +1595,7 @@ mod tests {
     }
 
     #[test]
-    fn specs_from_a_card_separate_planner_authority_from_agent_proposals() {
+    fn specs_from_a_card_only_include_declared_verification() {
         let mut card = card("## Acceptance Criteria\n- Verify: `cargo test --lib`");
         card.final_report_structured = Some(FinalReport {
             verification: vec![VerificationResult {
@@ -1641,21 +1608,13 @@ mod tests {
 
         let specs = specs_from_card(&card, &defaults());
 
-        assert_eq!(specs.len(), 2);
+        assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].command, "cargo test --lib");
         assert_eq!(specs[0].proposed_by, SpecAuthority::CardInstructions);
-        assert_eq!(specs[1].command, "npm test");
-        assert_eq!(
-            specs[1].proposed_by,
-            SpecAuthority::AgentProposal {
-                agent: "agent-1".to_string()
-            }
-        );
         assert!(specs
             .iter()
             .all(|spec| spec.required && !spec.is_accepted()));
         assert_eq!(specs[0].spec_id, "T-1#0");
-        assert_eq!(specs[1].spec_id, "T-1#1");
     }
 
     #[test]
