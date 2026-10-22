@@ -471,6 +471,8 @@ mod tests {
             target_files: vec![],
             scope_guard_mode: Default::default(),
             attention: None,
+            deliverable: None,
+            verification: Vec::new(),
         }
     }
 

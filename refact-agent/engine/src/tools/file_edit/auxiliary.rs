@@ -1302,6 +1302,8 @@ mod tests {
                 target_files: vec!["src/allowed.rs".to_string()],
                 scope_guard_mode: mode,
                 attention: None,
+                deliverable: None,
+                verification: Vec::new(),
             }
         }
 

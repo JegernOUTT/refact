@@ -71,6 +71,8 @@ fn card(worktree_id: &str, branch: &str, root: &Path) -> BoardCard {
         target_files: Vec::new(),
         scope_guard_mode: Default::default(),
         attention: None,
+        deliverable: None,
+        verification: Vec::new(),
     }
 }
 

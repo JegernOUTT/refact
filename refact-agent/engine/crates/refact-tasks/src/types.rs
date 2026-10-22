@@ -1058,6 +1058,10 @@ pub struct BoardCard {
     pub scope_guard_mode: ScopeGuardMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention: Option<CardAttention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliverable: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification: Vec<serde_json::Value>,
 }
 
 fn default_priority() -> String {
@@ -1835,6 +1839,8 @@ mod tests {
             target_files: vec![],
             scope_guard_mode: ScopeGuardMode::Off,
             attention: None,
+            deliverable: None,
+            verification: Vec::new(),
         }
     }
 

@@ -820,6 +820,8 @@ impl Tool for ToolTaskBoardCreateCard {
                 scope_guard_mode: Default::default(),
                 team_members: vec![],
                 attention: None,
+                deliverable: None,
+                verification: Vec::new(),
             });
             Ok(())
         })
@@ -1706,6 +1708,8 @@ mod tests {
             scope_guard_mode: Default::default(),
             team_members: vec![],
             attention: None,
+            deliverable: None,
+            verification: Vec::new(),
         }
     }
 

@@ -913,6 +913,8 @@ mod tests {
             target_files: Vec::new(),
             scope_guard_mode: Default::default(),
             attention: None,
+            deliverable: None,
+            verification: Vec::new(),
         }
     }
 

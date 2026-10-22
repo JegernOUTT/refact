@@ -12,3 +12,6 @@ pub mod waves;
 
 #[cfg(test)]
 mod dependency_gate_paths_tests;
+
+#[cfg(test)]
+mod assignment_typed_tests;

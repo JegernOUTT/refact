@@ -40,6 +40,8 @@ fn card(id: &str, depends_on: &[&str]) -> BoardCard {
         scope_guard_mode: Default::default(),
         team_members: vec![],
         attention: None,
+        deliverable: None,
+        verification: Vec::new(),
     }
 }
 

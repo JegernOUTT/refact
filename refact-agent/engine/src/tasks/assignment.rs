@@ -110,7 +110,15 @@ impl Assignment {
             target_files: card.target_files.clone(),
             guard: card.scope_guard_mode,
         };
-        assignment
+        match typed_parts(card) {
+            Ok((deliverable, verification)) => assignment
+                .with_deliverable(deliverable)
+                .with_verification(verification),
+            Err(error) => {
+                tracing::warn!(card_id = %card.id, %error, "ignoring malformed typed assignment data");
+                assignment
+            }
+        }
     }
 
     pub fn with_dependency_context(mut self, dependency_context: impl Into<String>) -> Self {
@@ -171,6 +179,29 @@ impl Assignment {
         }
         specs
     }
+}
+
+pub fn typed_parts(
+    card: &BoardCard,
+) -> Result<(Option<DeliverableContract>, Vec<VerificationSpec>), String> {
+    let deliverable = card
+        .deliverable
+        .as_ref()
+        .map(|value| {
+            serde_json::from_value(value.clone())
+                .map_err(|error| format!("card {} deliverable: {error}", card.id))
+        })
+        .transpose()?;
+    let verification = card
+        .verification
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            serde_json::from_value(value.clone())
+                .map_err(|error| format!("card {} verification[{index}]: {error}", card.id))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((deliverable, verification))
 }
 
 /// Specs the verifier runs. With a dispatched assignment the contract leg comes from

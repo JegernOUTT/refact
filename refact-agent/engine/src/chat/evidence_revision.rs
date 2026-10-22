@@ -379,6 +379,8 @@ mod tests {
             target_files: vec!["src".to_string()],
             scope_guard_mode: ScopeGuardMode::Off,
             attention: None,
+            deliverable: None,
+            verification: Vec::new(),
         }
     }
 

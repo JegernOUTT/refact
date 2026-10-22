@@ -866,6 +866,8 @@ fn build_fix_card(
         scope_guard_mode: source_card.scope_guard_mode,
         team_members: Vec::new(),
         attention: None,
+        deliverable: None,
+        verification: Vec::new(),
     }
 }
 
@@ -1084,6 +1086,8 @@ mod tests {
             scope_guard_mode: ScopeGuardMode::Off,
             team_members: vec![],
             attention: None,
+            deliverable: None,
+            verification: Vec::new(),
         }
     }
 

@@ -197,6 +197,8 @@ pub async fn handle_create_task(
                 scope_guard_mode: Default::default(),
                 team_members: vec![],
                 attention: None,
+                deliverable: None,
+                verification: Vec::new(),
             });
             Ok(())
         })
@@ -476,6 +478,8 @@ pub async fn handle_patch_board(
                     scope_guard_mode: Default::default(),
                     team_members: vec![],
                     attention: None,
+                    deliverable: None,
+                    verification: Vec::new(),
                 });
             }
             BoardPatch::UpdateCard {
