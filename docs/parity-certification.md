@@ -28,11 +28,11 @@ amended document.
 
 | | |
 |---|---|
-| Worktree | `/home/svakhreev/.cache/refact/worktrees/a5ef23b532caf0f6/58bf83ad-2ff1-442c-889c-bed0aa06c7dd` |
-| Branch | `refact/task/d3bd0b85-.../card/O-5/a7f35f9f` |
-| **Certified commit** | **`97ad671747783a1504c56420c1c6b70f975bb573`** (`97ad67174`, "O-4 merged into integration branch") |
-| Tree state | clean — `git status --porcelain` produced no output (C12). Every command below ran against the tree at `97ad67174`; the only commit added afterwards is the one that introduces this file, which changes no source |
-| Date | 2026-09-16 |
+| Worktree | `/home/svakhreev/.cache/refact/worktrees/a5ef23b532caf0f6/5e318518-c74f-436d-b6e3-360f50d9c881` |
+| Branch | `refact/task/d3bd0b85-7231-4c48-8537-f9090c569d21/card/C-3/08477fef` |
+| **Certified commit** | **`3b2fcefe2baa3bb67f9698b53cb4ce51609bd814`** (`3b2fcefe2`, final code commit before this docs-only certification commit) |
+| Tree state | clean at certified base — C12 was empty. Evidence below ran against this base; the documentation commit follows it and changes no source. |
+| Date | 2026-10-22 |
 | Platform | Linux x86_64 |
 
 ## Executed evidence
@@ -42,36 +42,37 @@ The exit code column is the real exit status of the process.
 
 | # | Command | Observed result | Exit |
 |---|---|---|---|
-| C0 | `cargo test --lib --no-run -p refact-lsp` | built the lib test binary, cold, 1256s (20m56s) | 0 |
-| C1 | `cargo test --lib -p refact-lsp -- --list --format terse` | **6353** test names discovered | 0 |
-| C2 | `cargo test --lib -p refact-lsp` | `ok. **6328 passed**; 0 failed; 25 ignored; 0 filtered out; finished in 135.62s` | 0 |
-| C3 | `cargo test --doc -p refact-lsp` | `ok. **0 passed**; 0 failed; 0 ignored; 0 filtered out` — the crate has no doc tests; 968s, spent rebuilding for rustdoc | 0 |
-| C4 | `cargo test -p refact-work-core -p refact-tasks -p refact-worktrees -p refact-chat-api -p refact-providers -p refact-sandbox` | **851 passed; 0 failed** over 16 test binaries (see breakdown below), 32.7s | 0 |
-| C5 | `cargo fmt --all -- --check` | no diffs (only nightly-only-option warnings) | 0 |
-| C6 | `npx vitest run --reporter=dot` | `Test Files **388 passed** (388)`, `Tests **4515 passed** \| 6 skipped (4521)`, 259.38s | 0 |
-| C7 | `npm run types` | `tsc --noEmit`, no errors, 21.1s | 0 |
-| C8 | `npm run lint` | eslint `--max-warnings 0`, clean, 57.1s | 0 |
-| C9 | `npm run format:check` | prettier clean, 13.3s | 0 |
-| C10 | `cargo test --lib -p refact-lsp -- --exact agents::tool_authority::tests::canonical_aliases_and_transport_are_not_ambient_authority` | `running 0 tests` — `ok. **0 passed**; 0 failed; 6353 filtered out`: **the name cited by the M1 ledger matches no test** | 0 |
-| C11 | `cargo test --lib -p refact-lsp -- --exact agents::tool_authority::tests::canonical_aliases_and_mcp_transport_are_not_ambient_authority` | `ok. **1 passed**; 0 failed; 6352 filtered out` — the real name, with `mcp_` | 0 |
-| C12 | `git status --porcelain` | empty — nothing uncommitted at the certified commit | 0 |
-| C13 | citation audit — `grep -oE "[a-z_][a-z_0-9]*(::[a-z_0-9]+)+" docs/parity-certification.md`, then `grep -vxF -f` against C1's inventory, then `grep -vxFf` against the names found in the C4 log | every engine name cited below resolves in C1; all **22** crate-test names cited below appear in the C4 log (the "missing" list came back empty); the only deliberately non-resolving name in this file is the stale M1 citation in C10 | 0/1 (`grep -v` exits 1 on an empty result) |
-| C14 | `grep -E "WorkPanel.test.tsx\|AttentionPanel.test.tsx\|CausalTracePanel.test.tsx" <C6 log>` | `✓ WorkPanel.test.tsx (13 tests)`, `✓ CausalTracePanel.test.tsx (10 tests)`, `✓ AttentionPanel.test.tsx (9 tests)` | 0 |
+| C0 | `cargo test --lib --no-run -p refact-lsp` | built lib test binary in 875s (14m35s) | 0 |
+| C1 | `cargo test --lib -p refact-lsp -- --list --format terse`, count with `grep -c ': test$'` | **7181** test names discovered | 0 |
+| C2 | `cargo test --lib -p refact-lsp` | **7152 passed; 1 failed; 28 ignored** in 195.97s. Failure: `chat::generation_pressure_retry_tests::generation_without_pressure_registry_uses_legacy_retry_status_budget` (expected 6, observed 5). Exact-name reruns passed 3/3 (C2-flake). The full-run failure remains a failure, not a pass. | 101 |
+| C2-flake | `cargo test --lib -p refact-lsp chat::generation_pressure_retry_tests::generation_without_pressure_registry_uses_legacy_retry_status_budget -- --exact` ×3 | **3/3 passed**, each run: 1 passed, 0 failed; 7180 filtered out; 0.39–0.44s. Consistent with the known F-12 global pressure-registry race under load; no full-suite pass is claimed. | 0 |
+| C3 | `cargo test --doc -p refact-lsp` | **0 passed; 0 failed** — no doc tests; rustdoc rebuild took 12m04s | 0 |
+| C4 | `cargo test -p refact-work-core -p refact-tasks -p refact-worktrees -p refact-chat-api -p refact-providers -p refact-sandbox -p refact-agents-core -p refact-yaml-configs` | **982 passed; 0 failed** across 18 test binaries. `refact-agents-core` and `refact-yaml-configs` are the two crates added since O-5. | 0 |
+| C5 | `cargo fmt --all -- --check` | no formatting diffs | 0 |
+| GUI install | `npm ci --prefer-offline` | installed 2055 packages; npm reported 121 dependency audit vulnerabilities | 0 |
+| C6 | `npx vitest run --exclude 'src/__tests__/integration/**' --reporter=dot` | `Test Files **437 passed** (437)`, `Tests **5167 passed** \| 6 skipped (5173)`, 351.13s. Excluded integration suite targets `127.0.0.1:8001`, which serves the user's currently running old engine and cannot certify this commit. | 0 |
+| C7 | `npm run types` | `tsc --noEmit`, no errors | 0 |
+| C8 | `npm run lint` | eslint `--max-warnings 0`, clean | 0 |
+| C9 | `npm run format:check` | prettier clean | 0 |
+| C12 | `git status --porcelain` | empty at the certified base | 0 |
+| C13 | Citation audit — exact test names in both certification ledgers resolved against C1 (`: test`) and C4 (`test … ... ok`) | The M1 ledger alias citation matches the current C1 entry; no unresolved test-name citations remain. | 0 |
 
 C4 breakdown, per test binary, all `0 failed`:
 
 | Crate | Binary | Passed |
 |---|---|---:|
-| refact-chat-api | lib | 208 |
-| refact-providers | lib | 318 |
+| refact-agents-core | lib | 41 |
+| refact-chat-api | lib | 229 |
+| refact-providers | lib | 324 |
 | refact-sandbox | lib / `tests/enforcement.rs` | 7 / 6 |
-| refact-tasks | lib | 82 |
-| refact-work-core | lib | 37 |
-| refact-work-core | `approval_settings_tests` / `approval_tests` | 1 / 10 |
+| refact-tasks | lib | 84 |
+| refact-work-core | lib | 38 |
+| refact-work-core | `approval_settings_tests` / `approval_tests` | 1 / 13 |
 | refact-work-core | `disagreement_tests` / `fairness_regressions` | 9 / 6 |
 | refact-work-core | `priority_tests` / `residency_tests` | 7 / 4 |
 | refact-work-core | `scheduler_tests` / `settings_tests` / `store_tests` | 30 / 17 / 21 |
-| refact-worktrees | lib | 88 |
+| refact-worktrees | lib | 92 |
+| refact-yaml-configs | lib | 53 |
 
 **How to read the row table.** Every test named below was resolved against the C1
 inventory (so no row cites a test that does not exist) and executed: engine `src/` tests
@@ -104,7 +105,7 @@ file, the file is named and its tests ran in C6.
 | 18 | Plan approval, files/task state, bounded compaction-safe current plan + full audit | `src/tools/tool_set_plan.rs`, `src/tools/tool_update_plan.rs`, `src/tools/tool_get_plan.rs` (checkpoint projection), `src/chat/plan_role.rs` | `tools::tool_get_plan::tests::get_plan_checkpoints_two_hundred_deltas_without_losing_approved_constraints`; `tools::tool_get_plan::tests::get_plan_history_recovers_the_full_audit_trail_after_checkpointing`; `chat::cache_stability_tests::cache_stability_plan_checkpoint_appends_without_changing_the_prior_wire_prefix` | `tools::tool_set_plan::tests::requires_exactly_one_of_path_or_content`; `tools::tool_set_plan::tests::path_rejects_oversized_plan_file_before_reading`; `tools::tool_get_plan::tests::legacy_plan_trajectory_without_checkpoint_loads_and_projects` | **complete** |
 | 19 | Hook control events/types and safe extensions | `src/ext/hooks_runner.rs`, surface `GET /v1/hooks` → `src/http/routers/v1/hooks.rs::handle_v1_hooks_surface` | `ext::hooks_runner::tests::test_hooks_surface_names_the_hook_that_denied_and_respects_deny_precedence`; `ext::hooks_runner::tests::test_every_event_builds_a_payload_naming_itself`; `http::routers::v1::hooks::tests::hooks_fire_hook_id_runs_matching_webhook_jobs_only` | `ext::hooks_runner::tests::test_timeout_is_a_deny_and_never_falls_through_to_allow`; `ext::hooks_runner::tests::test_untrusted_project_hook_is_not_executed_until_trusted`; `ext::hooks_runner::tests::test_rewrite_cannot_widen_child_tool_authority`; `http::routers::v1::hooks::tests::hooks_fire_auth_requires_daemon_bearer_when_configured` | **complete** |
 | 20 | Governed code-mode orchestration, tool catalog search, bounded intermediate data | `src/code_mode/{mod,policy,session,hosts}.rs` | `code_mode::hosts::tests::code_mode_declares_a_closed_catalog_that_names_its_backing_tool`; `code_mode::session::tests::the_host_call_count_and_intermediate_size_are_both_capped` | `code_mode::session::tests::code_mode_refuses_to_run_when_no_sandbox_provider_can_enforce_it`; `code_mode::policy::tests::an_open_authority_is_refused_rather_than_read_as_everything`; `code_mode::session::tests::a_confined_worker_cannot_write_outside_the_sandbox_or_open_a_socket` | **complete** |
-| 21 | Human surfaces and diagnostic visibility | GUI `features/Workspace/{WorkPanel,AttentionPanel,CausalTrace}`, HTTP `v1/{work,attention,causal,hooks}.rs`, `src/coordination/metrics.rs` | `http::routers::v1::work::tests::gui_route_and_model_tool_agree_on_the_same_projection`; GUI `WorkPanel.test.tsx` (13), `AttentionPanel.test.tsx` (9), `CausalTracePanel.test.tsx` (10) — C6/C14 | `WorkPanel.test.tsx` withheld/unavailable cases (C6); `http::routers::v1::attention::tests::the_attention_queue_requires_authorization_before_it_reveals_anything` | **partial** — see gap 21a/21b |
+| 21 | Human surfaces and diagnostic visibility | GUI `features/Workspace/{WorkPanel,AttentionPanel,CausalTrace,MetricsPanel}`, HTTP `v1/{work,attention,causal,hooks,metrics}.rs`, model `metrics` tool | Agent-facing reachability: `tools::tools_list::tests::agent_and_work_tool_names_stay_registered_as_builtins`; model descriptor: `tools::tool_metrics::tests::model_tool_description_keeps_the_read_surface_bounded_and_parallel`; GUI `WorkPanel.test.tsx` (13), `AttentionPanel.test.tsx` (9), `CausalTracePanel.test.tsx` (10), `MetricsPanel.test.tsx` (5) — C1/C2/C6 | Metrics privacy/redaction and authorization: `http::routers::v1::metrics::tests::metrics_require_authorization_before_any_snapshot_is_read`; denied/unavailable `WorkPanel.test.tsx` cases (C6); `http::routers::v1::attention::tests::the_attention_queue_requires_authorization_before_it_reveals_anything` | **partial** — GUI/HTTP/model readers meet reachability and failure-path columns; TUI metrics/explanation reader remains uncarded (21b) |
 | 22 | **A** — Wait-graph deadlock detection with authorized break actions | `crates/refact-work-core/src/waitgraph.rs::detect`/`detect_stable`/`refuse`, `src/coordination/deadlock.rs::visible_view`, reachable as `work_inspect{selector:{kind:"wait_graph"}}` (`InspectSelector::WaitGraph`) | `coordination::deadlock::tests::a_parent_waiting_on_a_child_that_asks_it_back_is_reported_with_both_names`; `coordination::deadlock::tests::the_visible_view_names_only_runs_the_caller_may_see`; `waitgraph::tests::a_refusal_lands_on_the_wait_that_closed_the_loop` (C4) | `coordination::deadlock::tests::a_graph_past_its_bounds_is_truthfully_incomplete`; `coordination::deadlock::tests::a_wait_on_the_user_is_never_a_deadlock`; `coordination::deadlock::tests::a_long_chain_with_a_progressing_tail_is_never_reported` | **complete** |
 | 23 | **B** — Handoff sufficiency feedback into later decomposition | `src/agents/handoff.rs` (`finding_for`, `metric_for`, `redact_metric`), consumed by `src/tools/tool_subagent.rs` | `tools::tool_subagent::tests::a_child_handoff_declaration_is_recorded_and_an_absent_one_stays_unknown`; `tools::tool_subagent::tests::prior_handoff_gaps_surface_in_the_preview_without_widening_scope_or_authority` | `agents::handoff::tests::a_handoff_finding_stays_insufficient_until_the_sample_is_large_enough`; `agents::handoff::tests::an_exploratory_card_never_reads_as_an_inadequate_brief_and_no_template_is_touched`; `agents::handoff::tests::declared_paths_are_filtered_for_the_parent_destination_before_they_reach_a_model` | **complete** |
 | 24 | **C** — Human attention budget for approvals, questions and notifications | `src/attention.rs::AttentionBudget`, HTTP `src/http/routers/v1/attention.rs`, GUI `features/Workspace/AttentionPanel/AttentionPanel.tsx` | `http::routers::v1::attention::tests::the_queue_surface_reports_rank_and_what_was_merged_into_a_prompt`; `attention::tests::two_identical_questions_become_one_prompt_for_the_human`; GUI `AttentionPanel.test.tsx` (C6) | `attention::tests::an_approval_or_irreversible_question_never_defaults_however_long_it_waits`; `attention::tests::a_saturated_human_refuses_low_priority_questions_instead_of_queueing_them`; `http::routers::v1::attention::tests::the_attention_queue_requires_authorization_before_it_reveals_anything` | **complete** |
@@ -148,97 +149,128 @@ certification did not test them:
 | **open** | **0** |
 | **struck** | **4** (plus 3 struck clauses inside surviving rows) |
 | Surviving rows assessed | 29 |
-| Certified commit | `97ad671747783a1504c56420c1c6b70f975bb573` (`97ad67174`) |
+| Certified commit | `3b2fcefe2baa3bb67f9698b53cb4ce51609bd814` (`3b2fcefe2`) |
 
 ## Residual gaps, stated precisely
 
-### 21a — the metrics and the auditable explanation log have no reader
+### 21a — the metrics and explanation log have an agent-facing reader
 
-Plan §12 requires "structured metrics and traces for queue latency, permit counts,
-provider pressure, unknown attribution, stale-write rejections, delivery lag/duplicates/
-expiry, abandoned claims, recovery decisions, evidence cache validity, generation progress
-and context payload size", and an "auditable explanation for automatic pause, denial,
-retry, merge refusal and goal completion".
+Plan §12 requires structured metrics for queue latency, permit counts, provider pressure,
+unknown attribution, stale-write rejections, delivery lag/duplicates/expiry, abandoned
+claims, recovery decisions, evidence cache validity, generation progress and context
+payload size, plus auditable explanations for automatic pause, denial, retry, merge refusal
+and goal completion.
 
-`src/coordination/metrics.rs` implements all of that as a recorder: `MetricsRecorder`,
-`Explanation`, `record_queue_latency`, `record_stale_write_rejection`,
-`record_delivery_lag`, `record_recovery_decision`, secret redaction, bounded series. Call
-sites exist in `merge_gate.rs`, `leases.rs`, `outbox.rs`, `file_provenance.rs`,
-`evidence.rs`, `llm/pressure.rs`, `progress_monitor.rs` and `causal.rs`.
+`src/coordination/metrics.rs` records these bounded series and explanations. The final tree
+has an authorized HTTP route at `/v1/metrics`, a model-facing `metrics` tool registered in
+`tools_list.rs` and allow-listed in agent/task-agent/task-planner mode YAML, and a GUI Metrics
+panel. The tool-registration test
+`tools::tools_list::tests::agent_and_work_tool_names_stay_registered_as_builtins` and its
+read-only/parallel assertion cover model reachability. The descriptor test
+`tools::tool_metrics::tests::model_tool_description_keeps_the_read_surface_bounded_and_parallel`
+checks its schema; `tools::tools_list::tests::all_default_mode_tools_reference_registered_tools`
+checks default-mode tool references. All three names appear in C1 and passed in C2.
+Failure-path coverage includes
+`http::routers::v1::metrics::tests::metrics_require_authorization_before_any_snapshot_is_read`
+and `http::routers::v1::metrics::tests::metrics_pages_with_opaque_cursors_and_rejects_foreign_continuations`;
+both names appear in C1 and passed in C2. C6's `MetricsPanel.test.tsx` adds human-surface
+evidence, but is not used as the agent-facing reachability proof.
 
-**Nothing reads it.** `grep -rn "metrics::recorder()\|MetricsSnapshot" src` resolves only
-inside `metrics.rs` itself plus one assertion in a `merge_gate.rs` test. O-2's commit
-(`4d11a27bd`) touched no HTTP router, no tool and no GUI file. There is no route, tool or
-panel from which a user or an agent can read a counter or an explanation record.
+### 21b — the TUI has no metrics/explanation reader
 
-By the plan's own completion definition — "a passing unit test of an unused helper … is
-not parity" — the metrics half of this row is **implemented and tested but not reachable**,
-so the row is partial. The write path is genuinely wired; what is missing is exactly one
-thing: a read surface.
-
-### 21b — the TUI carries none of the shared vocabulary
-
-Plan §12's first sentence requires the same concepts in "tools, HTTP, GUI, TUI and IDE
-clients". `crates/refact-tui/src/app/surfaces/` contains `activity`, `board`, `browser`,
-`history`, `settings` and `worktree`; none of them exposes queued/running/parked/stale,
-waiting questions, capacity-limit reasons, evidence verdicts, attention consumers, the
-causal trace or recovery actions. The only matches for "attention" in the TUI are two
-English sentences in the worktree surface.
-
-O-1 recorded this as a deliberate omission rather than an oversight — the TUI renders one
-chat session and names its own `SessionState`, which the catalog already maps into the
-shared vocabulary; pinning it would assert a synonym rather than forbid one. That is a
-defensible design decision, but it is still an unmet clause of the row, and it is recorded
-as unmet rather than argued away.
+The row's diagnostic-visibility scope and plan §12 require the metrics/explanation reader on
+the shared user-facing surfaces, including the TUI. `refact-agent/engine/crates/refact-tui/src/app/surfaces/`
+contains `activity`, `board`, `browser`, `history`, `settings` and `worktree`; none reads
+or renders metrics or automatic-decision explanations. O-1 recorded the TUI's narrower
+single-chat surface as a deliberate omission, but it does not satisfy this row's diagnostic
+reader scope. The TUI metrics/explanation reader is **not carded** and remains a gap.
 
 IDE clients are **not** a separate gap: VS Code and JetBrains host the same React GUI in a
 webview, so the GUI surfaces certified in C6 are the IDE surfaces.
 
-Neither 21a nor 21b is a defect in shipped behaviour, so neither produced a defect card.
-21a is a missing surface and is the one piece of work this certification would ask for
-before calling row 21 complete.
+The reader/reachability gap in 21a is closed by the HTTP route, model tool and GUI Metrics
+panel. Row 21 remains **partial** solely because of the TUI gap in 21b. That uncarded gap is
+not a regression; the deferred cards below address pre-existing lifecycle bugs or close
+polish/reachability gaps.
 
 ## Cross-check against the M1 acceptance ledger
 
 Per the card, M1 was not re-derived; `docs/m1-acceptance-ledger.md` (refreshed by G-6 at
-`1412c51b1`) is taken as the M1 authority. Two observations from this run:
+`1412c51b1`) remains the M1 authority. The ledger's cited test names were audited against
+fresh C1/C4 inventories; no M1 scenario was re-certified. Its alias citation was already the
+current name, `agents::tool_authority::tests::canonical_aliases_and_mcp_transport_are_not_ambient_authority`.
 
-1. **Its headline still holds at this commit.** G-6 certified 16 full / 0 partial with a
-   6249-test binary; C1/C2 at `97ad67174` discover 6353 tests and pass 6328 with 0 failed,
-   so nothing it relied on regressed between `1412c51b1` and `97ad67174`.
+## Core landing scope (2026-10-22)
 
-2. **One stale citation survived the G-6 refresh.** Row 13 of that ledger cites
-   `agents::tool_authority::tests::canonical_aliases_and_transport_are_not_ambient_authority`,
-   and its own E18 note claims to have corrected the name while printing the same string
-   twice. The test that exists is
-   `agents::tool_authority::tests::canonical_aliases_and_**mcp_**transport_are_not_ambient_authority`.
-   C10 and C11 above are the executed proof: the cited name matches no test, the real name
-   passes. This is a citation defect in the M1 document, not a coverage gap — the clause it
-   supports is genuinely tested.
+The user chose a **core landing**: land the finished core scope on local `main`, run full
+engine and GUI gates, refresh this certification, and do not push. The final round landed
+U-19, U-20b, L-11b, L-11c, U-29a, L-1a, U-31, Y-1, U-37c, U-37d and C-2. Six of them were
+already finished when the landing began: U-19, U-20b, L-11b, U-29a, L-1a and U-31 (U-31 by
+planner rescue). The landing round added Y-1, U-37c, U-37d, L-11c (a fix to L-11b found in
+review) and the C-2 cleanup.
+
+### Deferred follow-ups
+
+These **28 deferred cards** remain planned for the rebuilt engine. Lifecycle items fix bugs
+that predate this branch; polish items close gaps in already working features. None is a
+regression introduced by this landing. One-line summaries below follow the pinned deferred
+backlog/task-board briefs. The final row is explicitly not carded.
+
+| Card | Deferred follow-up |
+|---|---|
+| L-1a2 | Refuse user/UI messages and worktree rebinding on sealed chats; drop wake deliveries with reason `sealed`. |
+| L-1b | Prevent all engine wake sources from starting a generation in a sealed chat. |
+| L-2 | Seal task-agent chats when cards leave `doing`; stop and seal live agents before force merge. |
+| L-5 | Start a fresh worktree after continuing a merged child and report every generation merge. |
+| L-6 | Add durable pause/release for subagents and task agents; do not mark paused runs stalled. |
+| L-7 | Give messages to finished agents an honest receipt and durable follow-up queue. |
+| L-8 | Never remove a worktree bound to a live chat; capture its diff before fresh restart. |
+| L-9 | Limit abandoned-worktree spawn blocking to dependencies/overlap and add planner discard. |
+| L-10 | Hide unusable agent-only tools; preserve full ids/history and add lifecycle logging. |
+| L-12 | Close questions when a card leaves `doing` or a record becomes terminal. |
+| L-13 | Start `spawn_ab` variants from current base and make each variant addressable. |
+| L-3g | Show attention-needed and paused badges on GUI board cards. |
+| F-11b | Deflake `daemon::lock::tests::workspace_lease_probe_matches_lock_state`. |
+| F-12 | Isolate the 40 ms runner-delivery TTL test and global pressure-registry retry test from parallel-load races. |
+| U-10 | Add parent spot-checks of a child's claimed-complete work. |
+| U-11 | Show decomposition advice and handoff findings on actual launches, not just previews. |
+| U-12c | Release human-attention budget when a chat stops waiting. |
+| U-13 | Prune card-id-keyed board maps when a card is deleted so reused ids inherit no stale state. |
+| U-14 | Prove or fix the potentially lossy shutdown broadcast in daemon state. |
+| U-16 | Record causality on live question-ask paths. |
+| U-17 | Promote a queued child to UserBlocking when a user chat waits on it. |
+| U-24 | Request, store and show board-agent handoff declarations. |
+| U-29b | Accept and validate typed deliverable/verify fields in board create/update. |
+| U-32 | Append the waiting-begin event when a goal enters a wait. |
+| U-38 | Project the live team roster onto board-card `team_members`. |
+| U-5c | Make goal-review escalation typed and escalate after the repair cap. |
+| U-7b | Run PostCompact hooks after releasing the trajectory-save mutex. |
+| U-7d | Run Pre/PostCompact hooks on HTTP transform-apply compaction. |
+| Not carded | Add a TUI metrics/explanation reader to close row 21b. |
 
 ## Verdict
 
-**The program is complete except for one surface.**
+**The core landing is qualified with one TUI metrics-reader gap and one load-sensitive test failure.**
 
-At `97ad671747783a1504c56420c1c6b70f975bb573`, 28 of the 29 surviving coverage-ledger
-families satisfy all four columns of the plan's completion definition with executed
-evidence; four families are struck by the user's scope amendment and are recorded as
-struck; none is open.
-
-The single partial row is "Human surfaces and diagnostic visibility", for two named
-reasons: the metrics/explanation log is recorded but unreadable (21a), and the TUI exposes
-none of the shared vocabulary (21b). Both are stated above with the grep that establishes
-them.
+The coverage totals are **28 complete, 1 partial, 0 open, 4 struck** across 29 surviving
+families. The single partial row is "Human surfaces and diagnostic visibility": its GUI,
+HTTP and agent-facing metrics/explanation readers have passing C1/C2 evidence; the TUI
+reader remains missing and is not carded (21b). C2 had a full-run failure in the known F-12
+global pressure-registry race; the exact test passed 3/3 isolated reruns. The full-suite
+failure is recorded honestly and is not called a pass. Separate planner evidence at the same
+commit, from the integration worktree: one full `cargo test --lib` run passed **7153; 0
+failed; 28 ignored**, and the same shared-crate and GUI unit gates passed with identical
+counts. The F-12 failure therefore appears in some full runs under load and not in others.
 
 Stated honestly rather than implied:
 
-1. All evidence is unit- and integration-level on **Linux x86_64**. The engine's own CI
-   matrix (`cargo test --release` on 7 targets) is what would close the Windows/macOS
-   qualification; this document does not.
-2. C6 is the whole GUI suite (388 files, 4515 tests), not a subset — but it is jsdom-level.
-   No browser run is included in this certification.
-3. Rows whose evidence lives outside `refact-lsp`'s lib target are marked `(C4)`; those
-   suites do **not** run under `cargo test --lib` and need their own invocation, which is
-   the reason C4 exists as a separate command.
-4. No row was marked complete because a card report claimed it. Every cited test name was
-   resolved in the C1 inventory before it was written down.
+1. All evidence is unit-level on **Linux x86_64**. The engine CI matrix is needed to close
+   Windows/macOS qualification; this document does not.
+2. C6 excludes `src/__tests__/integration/**` because those tests use the user's currently
+   running old engine at `127.0.0.1:8001`. The 437-file GUI unit gate is jsdom-level; no
+   browser run is included.
+3. C4 separately executes crate tests outside `refact-lsp`'s lib target; these suites do
+   not run under `cargo test --lib`.
+4. Every named engine test was checked against C1, every named crate test against C4, and
+   every cited passing engine test appears in C2. The one C2 failure and its reruns are
+   identified above; no test is cited as passing without evidence.
