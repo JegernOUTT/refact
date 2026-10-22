@@ -247,8 +247,8 @@ async fn trajectory_row_without_root_uses_its_own_chat_not_its_parent() {
     assert!(matches!(
         &result.1[0],
         ContextEnum::ChatMessage(message)
-            if message.extra["team_role_grant"]["member_root"] == "member-chat"
-                && message.extra["team_role_grant"]["recipient_root"] == "recipient-chat"
+            if message.extra["team_role_grant"]["member_chat_id"] == "member-chat"
+                && message.extra["team_role_grant"]["recipient_chat_id"] == "recipient-chat"
     ));
 }
 

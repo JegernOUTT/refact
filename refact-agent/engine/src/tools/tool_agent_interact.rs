@@ -111,6 +111,14 @@ async fn context(
     )
 }
 
+pub(super) fn require_top_level_root(ccx: &AtCommandsContext) -> Result<String, String> {
+    if ccx.background_agent_id.is_none() && ccx.root_chat_id == ccx.chat_id {
+        Ok(ccx.root_chat_id.clone())
+    } else {
+        Err("Only a top-level root can change peer authority.".to_string())
+    }
+}
+
 fn include_overview_record(record: &BackgroundAgent) -> bool {
     !record.status.is_terminal()
         || record
@@ -296,10 +304,8 @@ impl Tool for ToolAgentPeerGrant {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let recipient_root = required_string(args, "recipient_root")?;
         let revoke = optional_bool(args, "revoke")?;
-        let (app, chat_id, sender_root, caller_agent_id) = context(&ccx).await;
-        if caller_agent_id.is_some() {
-            return Err("Only a top-level root can change peer authority.".to_string());
-        }
+        let (app, chat_id, _sender_root, _caller_agent_id) = context(&ccx).await;
+        let sender_root = require_top_level_root(&*ccx.lock().await)?;
         if recipient_root == sender_root {
             return Err("recipient_root must identify a different root".to_string());
         }
@@ -308,11 +314,13 @@ impl Tool for ToolAgentPeerGrant {
             .await
             .map_err(|error| error.to_string())?;
         let project = crate::coordination::roots::project_identity(&caller.source_root);
-        let exists = crate::coordination::catalog::build_catalog(&app, caller.source_root.to_str())
-            .await?
-            .all_rows()
-            .iter()
-            .any(|row| row.root_chat_id.as_deref() == Some(recipient_root.as_str()));
+        let (catalog, _) = crate::coordination::service::visible_projection(&app, &caller)
+            .await
+            .map_err(|_| "peer authority is unavailable".to_string())?;
+        let exists = catalog.all_rows().iter().any(|row| {
+            row.root_chat_id.as_deref() == Some(recipient_root.as_str())
+                || row.chat_id.as_deref() == Some(recipient_root.as_str())
+        });
         if !exists {
             return Err("recipient root is not visible in this project".to_string());
         }

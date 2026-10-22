@@ -296,7 +296,7 @@ async fn assigner_without_authority_is_refused() {
         .await
         .unwrap_err();
 
-    assert!(error.contains("does not hold Mail"), "{error}");
+    assert_eq!(error, "member or recipient is not reachable for this grant");
 }
 
 #[tokio::test]
@@ -414,7 +414,7 @@ async fn recipient_agent_id_resolves_to_its_root() {
         now_ms()
     ));
     assert!(
-        matches!(&result.1[0], ContextEnum::ChatMessage(message) if message.extra["team_role_grant"]["recipient_root"] == "recipient-root-chat")
+        matches!(&result.1[0], ContextEnum::ChatMessage(message) if message.extra["team_role_grant"]["recipient_agent_id"] == recipient_agent.agent_id)
     );
 }
 

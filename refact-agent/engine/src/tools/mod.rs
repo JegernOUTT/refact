@@ -97,6 +97,8 @@ pub mod tool_work_inspect;
 pub mod tool_work_overview;
 
 #[cfg(test)]
+mod peer_authority_boundary_tests;
+#[cfg(test)]
 mod tool_causal_trace_tests;
 #[cfg(test)]
 mod tool_team_role_grant_root_tests;

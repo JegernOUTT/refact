@@ -130,8 +130,9 @@ impl Tool for ToolTeamSeat {
             .await
             .map_err(|error| error.to_string())?;
         let project = crate::coordination::roots::project_identity(&caller.source_root);
-        let catalog =
-            crate::coordination::catalog::build_catalog(&app, caller.source_root.to_str()).await?;
+        let (catalog, _) = crate::coordination::service::visible_projection(&app, &caller)
+            .await
+            .map_err(|error| error.to_string())?;
         let live_ids = live_chat_ids(&catalog.all_rows());
         let now = now_ms();
         let idempotency_key = idempotency_key.unwrap_or_else(|| chat_id.clone());
@@ -346,20 +347,16 @@ impl Tool for ToolTeamRoleGrant {
         let (member_agent_id, member_chat_id) = address(args, "member_agent_id", "member_chat_id")?;
         let (recipient_agent_id, recipient_chat_id) =
             address(args, "recipient_agent_id", "recipient_chat_id")?;
-        let (app, chat_id, root_chat_id, background_agent_id, model) = {
+        let (app, chat_id, model) = {
             let ccx = ccx.lock().await;
             (
                 ccx.app.clone(),
                 ccx.chat_id.clone(),
-                ccx.root_chat_id.clone(),
-                ccx.background_agent_id.clone(),
                 ccx.current_model.clone(),
             )
         };
-        if background_agent_id.is_some() {
-            return Err("Only a top-level root can change peer authority.".to_string());
-        }
-        let assigner_root = root_chat_id;
+        let assigner_root =
+            crate::tools::tool_agent_interact::require_top_level_root(&*ccx.lock().await)?;
         let caller = crate::coordination::scope::model_caller(&app, &chat_id, &model)
             .await
             .map_err(|error| error.to_string())?;
@@ -368,8 +365,9 @@ impl Tool for ToolTeamRoleGrant {
         app.teams
             .register(team_spec)
             .map_err(|refusal: TeamRefusal| refusal.to_string())?;
-        let catalog =
-            crate::coordination::catalog::build_catalog(&app, caller.source_root.to_str()).await?;
+        let (catalog, _) = crate::coordination::service::visible_projection(&app, &caller)
+            .await
+            .map_err(|_| "member or recipient is not reachable for this grant".to_string())?;
         let rows = catalog.all_rows();
         let live_ids = live_chat_ids(&rows);
         let now = now_ms();
@@ -378,15 +376,17 @@ impl Tool for ToolTeamRoleGrant {
             member_agent_id.as_deref(),
             member_chat_id.as_deref(),
             "member",
-        )?;
-        let member_chat =
-            member_chat.ok_or_else(|| "member agent has no visible chat".to_string())?;
+        )
+        .map_err(|_| "member or recipient is not reachable for this grant".to_string())?;
+        let member_chat = member_chat
+            .ok_or_else(|| "member or recipient is not reachable for this grant".to_string())?;
         let (recipient_root, _) = root_for_address(
             &rows,
             recipient_agent_id.as_deref(),
             recipient_chat_id.as_deref(),
             "recipient",
-        )?;
+        )
+        .map_err(|_| "member or recipient is not reachable for this grant".to_string())?;
         let role_spec = app
             .teams
             .with_roster(&project, &team, |spec, roster| {
@@ -412,20 +412,27 @@ impl Tool for ToolTeamRoleGrant {
             authority,
             now,
         )
-        .map_err(|refusal| refusal.to_string())?;
+        .map_err(|refusal| match refusal {
+            crate::coordination::teams::RoleRefusal::AssignerLacksAuthority { .. } => {
+                "member or recipient is not reachable for this grant".to_string()
+            }
+            _ => refusal.to_string(),
+        })?;
         crate::coordination::teams::apply_role_grant(&app.peer_grants, proposal, now)?;
         let response = json!({
             "team": team,
             "role": role,
-            "member_root": member_root,
-            "recipient_root": recipient_root,
+            "member_agent_id": member_agent_id,
+            "member_chat_id": member_chat_id,
+            "recipient_agent_id": recipient_agent_id,
+            "recipient_chat_id": recipient_chat_id,
             "authority": authority,
         });
         let mut message = ChatMessage {
             role: "tool".into(),
             tool_call_id: tool_call_id.clone(),
             content: ChatContent::SimpleText(format!(
-                "Granted {authority:?} authority to team member `{member_root}` toward `{recipient_root}` through `{team}` role `{role}`."
+                "Granted {authority:?} authority through `{team}` role `{role}`."
             )),
             preserve: Some(true),
             output_filter: Some(OutputFilter::no_limits()),
