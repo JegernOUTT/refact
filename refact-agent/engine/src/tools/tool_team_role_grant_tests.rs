@@ -302,7 +302,6 @@ async fn assigner_without_authority_is_refused() {
 #[tokio::test]
 async fn member_without_seat_is_refused() {
     let (app, workspace, ccx) = fixture().await;
-    let project = crate::coordination::roots::project_identity(workspace.path());
     let spec = load_team(app.gcx.clone(), "ship-it").await.unwrap();
     app.teams.register(spec).unwrap();
     caller(&app, "member-chat", workspace.path()).await;

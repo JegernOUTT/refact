@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +12,6 @@ use crate::subchat::{SubchatConfig, SubchatResult};
 
 struct Fixture {
     _temp: tempfile::TempDir,
-    root: PathBuf,
     app: AppState,
 }
 
@@ -60,11 +58,7 @@ async fn fixture(parent_id: &str, hooks_enabled: bool) -> Fixture {
         .write()
         .await
         .insert(parent_id.to_string(), Arc::new(Mutex::new(parent)));
-    Fixture {
-        _temp: temp,
-        root,
-        app,
-    }
+    Fixture { _temp: temp, app }
 }
 
 fn request(parent_id: &str) -> SpawnRequest {
@@ -269,7 +263,6 @@ async fn cancelled_child_emits_one_cancelled_stop() {
 #[serial(test_runner, permission_decision_hooks)]
 async fn resumed_child_emits_start_with_resumed_true_and_generation_two() {
     let fixture = fixture("subagent-hook-resumed", true).await;
-    let child_chat_id;
     let marker = fixture._temp.path().join("hooks.jsonl");
     install_hooks(&fixture, &marker).await;
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -295,7 +288,6 @@ async fn resumed_child_emits_start_with_resumed_true_and_generation_two() {
     let first = spawn_completed(&fixture, "subagent-hook-resumed").await;
     assert_eq!(first.status, BgAgentStatus::Completed);
     let first = fixture.app.agents.get_any(&first.agent_id).await.unwrap();
-    child_chat_id = first.child_chat_id.clone().unwrap();
     std::fs::write(&marker, "").unwrap();
 
     let (start, receive) = tokio::sync::oneshot::channel();

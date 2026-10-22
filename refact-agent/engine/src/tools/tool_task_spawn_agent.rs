@@ -1002,7 +1002,6 @@ struct PreparedSpawn {
     agent_chat_id: String,
     workspace_root: PathBuf,
     app: crate::app_state::AppState,
-    depth: usize,
     original_card: BoardCard,
 }
 
@@ -1192,7 +1191,6 @@ async fn prepare_spawn(
         agent_chat_id,
         workspace_root,
         app,
-        depth,
         original_card,
     })
 }

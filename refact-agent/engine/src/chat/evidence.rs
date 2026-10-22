@@ -210,7 +210,7 @@ impl VerificationSpec {
     /// Turn a proposal into an executable spec, or refuse it. An agent-authored
     /// proposal must additionally survive the prose check, so a sentence never
     /// becomes argv just because a model wrote it into a report.
-    pub fn accept(
+    pub(crate) fn accept(
         mut self,
         policy: &VerifyCommandPolicy,
         accepted_by: &str,

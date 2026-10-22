@@ -9,7 +9,7 @@ use crate::app_state::AppState;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ContextEnum};
 use crate::chat::types::{ChatSession, ThreadParams};
-use crate::coordination::causal::{self, CausalEvent};
+use crate::coordination::causal;
 use crate::tools::tool_causal_trace::ToolCausalTrace;
 use crate::tools::tools_description::{Tool, ToolSourceType};
 use crate::tools::tools_list::{get_available_tools, get_tools_for_mode};
@@ -198,7 +198,7 @@ async fn causal_trace_is_registered_and_allow_listed() {
 
 #[tokio::test]
 async fn causal_trace_renders_recorded_causes() {
-    let (app, ccx, dir) = fixture().await;
+    let (_, ccx, dir) = fixture().await;
     let (delivery, spawn, child_scope) = chain_ids();
     record_event(
         dir.path(),
@@ -232,7 +232,7 @@ async fn causal_trace_renders_recorded_causes() {
 
 #[tokio::test]
 async fn causal_trace_replay_reports_reproduced() {
-    let (app, ccx, dir) = fixture().await;
+    let (_, ccx, dir) = fixture().await;
     let (delivery, spawn, child_scope) = chain_ids();
     record_event(
         dir.path(),

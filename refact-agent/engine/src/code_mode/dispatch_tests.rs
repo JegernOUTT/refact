@@ -35,7 +35,7 @@ async fn fixture() -> (
     let workspace = tempfile::tempdir().unwrap();
     *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace.path().into()];
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-    let mut thread = ThreadParams {
+    let thread = ThreadParams {
         id: "code-mode-dispatch".into(),
         model: "model".into(),
         mode: "agent".into(),

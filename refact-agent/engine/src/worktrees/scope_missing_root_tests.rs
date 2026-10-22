@@ -2,7 +2,6 @@ use super::scope::ExecutionScope;
 use super::types::WorktreeMeta;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ContextEnum};
-use refact_runtime_api::ToolRegistry;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;

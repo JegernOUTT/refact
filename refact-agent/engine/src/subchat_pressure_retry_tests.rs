@@ -8,7 +8,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::app_state::AppState;
 use crate::call_validation::{ChatMessage, ReasoningEffort};
 use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
-use crate::chat::types::ThreadParams;
 use crate::llm::{WireFormat, params::CacheControl, pressure::install_provider_pressure};
 use refact_providers::pressure::uninstall_pressure_registry;
 use refact_work_core::CoordinationSettings;

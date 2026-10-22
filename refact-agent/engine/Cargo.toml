@@ -421,6 +421,7 @@ tokenizers.workspace = true
 ignored = ["aws-lc-sys", "tokio-util", "proptest", "astral-tokio-tar"]
 
 [dev-dependencies]
+refact-agents-core = { path = "crates/refact-agents-core", features = ["test-support"] }
 refact-privacy = { path = "crates/refact-privacy", features = ["test-util"] }
 # Same pinned rev as the main dependency; integration tests drive the MCP
 # client stack directly (tests/mcp_stdio_e2e.rs).

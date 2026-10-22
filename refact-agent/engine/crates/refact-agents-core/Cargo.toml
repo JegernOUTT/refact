@@ -12,6 +12,9 @@ tokio.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 
+[features]
+test-support = []
+
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 

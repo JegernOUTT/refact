@@ -7,9 +7,7 @@ use crate::files_correction::get_project_dirs;
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
 use crate::global_context::GlobalContext;
 use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
-use crate::tools::tool_task_memory::{
-    memory_tags_visible_to_reader, related_memory_access_context, MemoryAccessContext,
-};
+use crate::tools::tool_task_memory::{memory_tags_visible_to_reader, MemoryAccessContext};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use tokio::sync::mpsc;
@@ -611,6 +609,7 @@ async fn scan_task_dirs(index: &mut KnowledgeIndex, task_roots: Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::tool_task_memory::related_memory_access_context;
 
     fn memory_card(title: &str, path: &str, namespace: Option<&str>) -> KnowledgeCard {
         KnowledgeCard {

@@ -1217,7 +1217,7 @@ impl BackgroundAgentRegistry {
         })
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn records_write_guard_for_test(
         &self,
     ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<String, BackgroundAgent>> {

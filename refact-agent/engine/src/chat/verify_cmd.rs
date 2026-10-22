@@ -6,6 +6,7 @@ use std::sync::Arc;
 use refact_tool_api::{extract_command_segments, first_matching_rule};
 
 use crate::global_context::GlobalContext;
+#[cfg(test)]
 use crate::tasks::types::BoardCard;
 use crate::tools::shell_gate::{ApprovalMode, ShellGatePolicy};
 
@@ -234,6 +235,7 @@ pub(crate) fn instruction_skip_notes(instructions: &str) -> Vec<String> {
 }
 
 /// Commands an agent reported running. Untrusted proposals until accepted under policy.
+#[cfg(test)]
 pub(crate) fn reported_verification_commands(card: &BoardCard) -> Vec<String> {
     let mut commands = Vec::new();
     if let Some(report) = card.final_report_structured.as_ref() {

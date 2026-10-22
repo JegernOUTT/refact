@@ -93,7 +93,7 @@ fn sweep_dead_roots_except(current_root: Option<&Path>) {
     }
 }
 
-fn root_is_dead(name: &str, path: &Path) -> bool {
+fn root_is_dead(name: &str, _path: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
         let Some((pid, marker)) = parse_root_name(name) else {
@@ -108,7 +108,7 @@ fn root_is_dead(name: &str, path: &Path) -> bool {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        let Ok(metadata) = std::fs::symlink_metadata(_path) else {
             return false;
         };
         let Ok(modified) = metadata.modified() else {
@@ -194,7 +194,7 @@ mod tests {
     fn sweep_never_follows_a_symlink() {
         use std::os::unix::fs::symlink;
 
-        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let child = std::process::Command::new("true").spawn().unwrap();
         let pid = child.id();
         child.wait_with_output().unwrap();
         let victim =
