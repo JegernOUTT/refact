@@ -99,6 +99,8 @@ pub mod tool_work_overview;
 #[cfg(test)]
 mod tool_causal_trace_tests;
 #[cfg(test)]
+mod tool_team_role_grant_root_tests;
+#[cfg(test)]
 mod tool_team_role_grant_tests;
 #[cfg(test)]
 mod tool_team_tests;

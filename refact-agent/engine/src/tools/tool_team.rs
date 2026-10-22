@@ -246,7 +246,7 @@ fn address(
     Ok((agent_id, chat_id))
 }
 
-fn root_for_address(
+pub(super) fn root_for_address(
     rows: &[crate::coordination::types::WorkRow],
     agent_id: Option<&str>,
     chat_id: Option<&str>,
@@ -263,15 +263,33 @@ fn root_for_address(
         _ => None,
     }
     .ok_or_else(|| format!("{label} is not visible in this project"))?;
-    let root = row
-        .root_chat_id
-        .as_deref()
-        .or(row.parent_chat_id.as_deref())
-        .or(row.chat_id.as_deref())
-        .unwrap_or(&row.key.id)
-        .to_string();
+    let root = match row.key.runtime {
+        refact_work_core::RuntimeKind::BackgroundAgent => row
+            .root_chat_id
+            .as_deref()
+            .or(row.parent_chat_id.as_deref()),
+        refact_work_core::RuntimeKind::Trajectory => {
+            row.root_chat_id.as_deref().or(row.chat_id.as_deref())
+        }
+    }
+    .ok_or_else(|| format!("{label} is not visible in this project"))?
+    .to_string();
     let chat = chat_id.map(str::to_string).or_else(|| row.chat_id.clone());
     Ok((root, chat))
+}
+
+pub(super) fn require_live_seat(
+    roster: &crate::coordination::teams::TeamRoster,
+    role: &str,
+    member_chat: &str,
+    live_chat_ids: &std::collections::BTreeSet<String>,
+    now_ms: u64,
+) -> Result<(), String> {
+    if roster.has_live_seat(role, member_chat, live_chat_ids, now_ms) {
+        Ok(())
+    } else {
+        Err(format!("member does not hold {role} in {}", roster.team()))
+    }
 }
 
 #[async_trait]
@@ -353,6 +371,8 @@ impl Tool for ToolTeamRoleGrant {
         let catalog =
             crate::coordination::catalog::build_catalog(&app, caller.source_root.to_str()).await?;
         let rows = catalog.all_rows();
+        let live_ids = live_chat_ids(&rows);
+        let now = now_ms();
         let (member_root, member_chat) = root_for_address(
             &rows,
             member_agent_id.as_deref(),
@@ -373,12 +393,7 @@ impl Tool for ToolTeamRoleGrant {
                 let role_spec = spec
                     .role(&role)
                     .ok_or_else(|| format!("team `{team}` does not define role `{role}`"))?;
-                if !roster
-                    .seat(&role)
-                    .is_some_and(|seat| seat.member_chat_id == member_chat)
-                {
-                    return Err(format!("member does not hold {role} in {team}"));
-                }
+                require_live_seat(roster, &role, &member_chat, &live_ids, now)?;
                 Ok::<_, String>(role_spec.clone())
             })
             .map_err(|refusal| refusal.to_string())??;
@@ -390,7 +405,6 @@ impl Tool for ToolTeamRoleGrant {
             member_root: &member_root,
             recipient_root: &recipient_root,
         };
-        let now = now_ms();
         let proposal = crate::coordination::teams::propose_role_grant(
             &app.peer_grants,
             &role_spec,

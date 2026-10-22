@@ -754,6 +754,20 @@ impl TeamRoster {
             .collect()
     }
 
+    pub fn has_live_seat(
+        &self,
+        role: &str,
+        member_chat_id: &str,
+        live_chat_ids: &BTreeSet<String>,
+        now_ms: u64,
+    ) -> bool {
+        self.seat(role).is_some_and(|seat| {
+            seat.member_chat_id == member_chat_id
+                && live_chat_ids.contains(member_chat_id)
+                && seat.silent_for_ms(now_ms) <= self.heartbeat_ttl_ms
+        })
+    }
+
     fn known_role(&self, role: &str) -> Result<(), RosterRefusal> {
         if self.roles.contains(role) {
             Ok(())
