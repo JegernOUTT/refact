@@ -1,4 +1,4 @@
-schema_version: 22
+schema_version: 23
 id: setup_skills
 title: Setup Skills
 description: Guided setup for project-specific skills

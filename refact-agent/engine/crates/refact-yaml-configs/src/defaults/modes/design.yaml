@@ -1,4 +1,4 @@
-schema_version: 26
+schema_version: 27
 id: design
 title: Design
 description: Evidence-driven UI implementation using the live design system and browser measurements

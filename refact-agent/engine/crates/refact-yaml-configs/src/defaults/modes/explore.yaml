@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 20
 id: explore
 title: Explore
 description: Read-only exploration for context gathering without editing

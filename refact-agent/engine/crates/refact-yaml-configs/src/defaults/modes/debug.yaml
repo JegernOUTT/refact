@@ -1,4 +1,4 @@
-schema_version: 22
+schema_version: 23
 id: debug
 title: Debug
 description: Systematic bug diagnosis and root cause analysis
