@@ -540,7 +540,15 @@ impl Tool for ToolSubagent {
             .ok_or_else(|| "subagent config 'subagent' not found".to_string())?;
         if let (Some(scope), Some(resolved)) = (&launch_scope, &resolved_launch) {
             if !resolved.skipped.is_empty() {
-                return Err("launch context could not be fully resolved; inspect the preview and revise the request before launching".into());
+                let skipped = resolved
+                    .skipped
+                    .iter()
+                    .map(|entry| format!("{}: {}", entry.description, entry.reason))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(format!(
+                    "launch context could not be fully resolved: {skipped}"
+                ));
             }
             scope.clear(&gcx, &resolved.prepended_messages)?;
             let current =
@@ -1610,6 +1618,45 @@ mod tests {
                     .expect("subagent must be publicly reachable")
                     .messages
             })
+    }
+
+    #[tokio::test]
+    async fn launch_refusal_lists_skipped_entries() {
+        let (ccx, app, _parent, _workspace) = profile_parent().await;
+        let mut request = args();
+        request.insert(
+            "launch_spec".into(),
+            json!({
+                "token_budget": 1,
+                "custom_instructions": "Never modify files.",
+                "context": [
+                    {"type": "raw_text", "label": "notes", "text": "Read only and be terse."},
+                    {"type": "message_range", "start_message_id": "missing"}
+                ]
+            }),
+        );
+        let mut preview_request = request.clone();
+        preview_request.insert("action".into(), json!("preview"));
+        let preview = run_subagent(&app, &ccx, "preview", preview_request)
+            .await
+            .unwrap();
+        let skipped = preview[0].extra["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 3);
+        let error = run_subagent(&app, &ccx, "run", request).await.unwrap_err();
+        assert!(
+            error.starts_with("launch context could not be fully resolved:"),
+            "{error}"
+        );
+        for entry in skipped {
+            let detail = format!(
+                "{}: {}",
+                entry["description"].as_str().unwrap(),
+                entry["reason"].as_str().unwrap()
+            );
+            assert!(error.contains(&detail), "missing {detail:?} in {error}");
+        }
+        assert!(app.agents.list_all().await.is_empty());
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
     }
 
     #[tokio::test]

@@ -1071,6 +1071,57 @@ pub async fn resolve_scoped_launch_spec(
     resolved
 }
 
+fn model_visible_tokens(messages: &[ChatMessage], count: &impl Fn(&str) -> usize) -> usize {
+    use crate::llm::adapters::render_extra::{is_context_role, render_context_message};
+
+    messages.iter().fold(0usize, |total, message| {
+        let role = if is_context_role(&message.role) {
+            if message.tool_call_id.is_empty() {
+                "user"
+            } else {
+                "tool"
+            }
+        } else if message.role == "diff" {
+            "tool"
+        } else {
+            &message.role
+        };
+        let content =
+            render_context_message(message).unwrap_or_else(|| message.content.content_text_only());
+        let mut tokens = count(role).saturating_add(count(&content));
+        if let crate::call_validation::ChatContent::Multimodal(elements) = &message.content {
+            let images = ChatMessage {
+                content: crate::call_validation::ChatContent::Multimodal(
+                    elements
+                        .iter()
+                        .filter(|element| !element.is_text())
+                        .cloned()
+                        .collect(),
+                ),
+                ..Default::default()
+            };
+            tokens = tokens.saturating_add(
+                refact_chat_history::trajectory_ops::approx_token_count(&[images])
+                    .saturating_sub(10),
+            );
+        }
+        if let Some(calls) = &message.tool_calls {
+            for call in calls {
+                tokens = tokens
+                    .saturating_add(count(&call.id))
+                    .saturating_add(count(&call.function.name))
+                    .saturating_add(count(&call.function.arguments));
+            }
+        }
+        if let Some(blocks) = &message.thinking_blocks {
+            for block in blocks {
+                tokens = tokens.saturating_add(count(&block.to_string()));
+            }
+        }
+        total.saturating_add(tokens)
+    })
+}
+
 fn admit_context(
     gcx: &Arc<GlobalContext>,
     scope: &LaunchScope,
@@ -1082,6 +1133,13 @@ fn admit_context(
     mut messages: Vec<ChatMessage>,
 ) {
     let result = (|| {
+        let remaining = scope
+            .limits
+            .launch_context_bytes
+            .saturating_sub(resolved.serialized_bytes);
+        if crate::coordination::bounds::serialized_size(&messages, remaining).is_none() {
+            return Err("configured launch context byte bound exceeded".to_string());
+        }
         if messages.iter_mut().any(|message| {
             crate::privacy::records::carry_records_into(message, parent_messages).is_err()
         }) {
@@ -1099,17 +1157,16 @@ fn admit_context(
                 scope.limits.launch_context_messages
             ));
         }
-        let remaining = scope
-            .limits
-            .launch_context_bytes
-            .saturating_sub(resolved.serialized_bytes);
         let bytes = crate::coordination::bounds::serialized_size(&messages, remaining)
-            .ok_or_else(|| "configured launch context byte bound exceeded".to_string())?;
-        let text = serde_json::to_string(&messages).map_err(|_| "context serialization failed")?;
-        let tokens = count(&text);
-        if resolved.estimated_tokens.saturating_add(tokens) > budget {
+            .ok_or_else(|| format!(
+                "privacy provenance exceeds configured launch context byte bound ({} bytes; {remaining} remain)",
+                scope.limits.launch_context_bytes,
+            ))?;
+        let tokens = model_visible_tokens(&messages, count);
+        let remaining_tokens = budget.saturating_sub(resolved.estimated_tokens);
+        if tokens > remaining_tokens {
             return Err(format!(
-                "token budget ({budget}) exceeded; entry needs ~{tokens} more tokens"
+                "token budget exceeded; entry needs ~{tokens} tokens; {remaining_tokens} of {budget} remain"
             ));
         }
         Ok((bytes, tokens))
@@ -1257,6 +1314,235 @@ mod tests {
     fn call_message(id: &str, call: &str) -> ChatMessage {
         serde_json::from_value(json!({"role":"assistant","message_id":id,"content":"calling",
             "tool_calls":[{"id":call,"type":"function","function":{"name":"cat","arguments":"{}"}}]})).unwrap()
+    }
+
+    fn parent_with_privacy(root: &Path, count: usize) -> Vec<ChatMessage> {
+        (0..count)
+            .map(|index| {
+                let mut message = msg(&format!("parent-{index}"), "user", "parent context");
+                crate::privacy::records::attach_record(
+                    &mut message,
+                    refact_privacy::FileRecord {
+                        path: root
+                            .join(format!("source-{index}.rs"))
+                            .to_string_lossy()
+                            .into_owned(),
+                        zone: "normal".into(),
+                        attribution: refact_privacy::Attribution::Declared,
+                    },
+                );
+                message
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn custom_instructions_from_a_long_parent_are_admitted() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let root = tempfile::tempdir().unwrap();
+        authorize_workspace(&gcx, root.path());
+        let parent = parent_with_privacy(root.path(), 2_000);
+        let spec = LaunchSpec {
+            custom_instructions: Some("Never modify files.".into()),
+            ..Default::default()
+        };
+        let result = resolve_launch_spec(gcx.clone(), &spec, &parent).await;
+        assert!(result.skipped.is_empty(), "{:?}", result.skipped);
+        assert_eq!(result.prepended_messages.len(), 1);
+        assert!(result.estimated_tokens < 100, "{}", result.estimated_tokens);
+        assert_eq!(
+            crate::privacy::records::records_to_carry(&result.prepended_messages).unwrap(),
+            crate::privacy::records::records_to_carry(&parent).unwrap(),
+        );
+        let without_parent = resolve_launch_spec(gcx.clone(), &spec, &[]).await;
+        assert_eq!(result.estimated_tokens, without_parent.estimated_tokens);
+        assert!(result.serialized_bytes > without_parent.serialized_bytes);
+        assert!(
+            result.serialized_bytes
+                <= refact_work_core::CoordinationSettings::default().launch_context_bytes
+        );
+        for spec in [
+            LaunchSpec {
+                profile_augmentation: Some("Be terse.".into()),
+                ..Default::default()
+            },
+            LaunchSpec {
+                context_entries: vec![LaunchContextEntry::RawText {
+                    label: Some("brief".into()),
+                    text: "Read only.".into(),
+                }],
+                ..Default::default()
+            },
+        ] {
+            let result = resolve_launch_spec(gcx.clone(), &spec, &parent).await;
+            assert!(result.skipped.is_empty(), "{:?}", result.skipped);
+            assert!(result.estimated_tokens < 100);
+            assert_eq!(
+                crate::privacy::records::records_to_carry(&result.prepended_messages)
+                    .unwrap()
+                    .len(),
+                2_000
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_custom_instructions_are_refused_with_accurate_numbers() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let spec = LaunchSpec {
+            custom_instructions: Some("word ".repeat(1_000)),
+            ..Default::default()
+        };
+        let full = resolve_launch_spec(gcx.clone(), &spec, &[]).await;
+        assert!(full.skipped.is_empty());
+        let budget = full.estimated_tokens - 1;
+        let bounded = resolve_launch_spec(
+            gcx,
+            &LaunchSpec {
+                token_budget: Some(budget),
+                ..spec
+            },
+            &[],
+        )
+        .await;
+        assert!(bounded.prepended_messages.is_empty());
+        assert_eq!(bounded.skipped.len(), 1);
+        assert_eq!(bounded.skipped[0].description, "parent instructions");
+        assert_eq!(
+            bounded.skipped[0].reason,
+            format!(
+                "token budget exceeded; entry needs ~{} tokens; {budget} of {budget} remain",
+                full.estimated_tokens,
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn uncleared_provenance_still_blocks_the_launch() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let root = tempfile::tempdir().unwrap();
+        authorize_workspace(&gcx, root.path());
+        gcx.privacy_policy_load.write().unwrap().policy = Arc::new(refact_privacy::PrivacyPolicy {
+            zones: vec![refact_privacy::Zone {
+                name: "parent_only".into(),
+                patterns: vec![],
+                send_to: vec!["test".into()],
+                on_shell_read: refact_privacy::ShellBehavior::Withhold,
+            }],
+            ..Default::default()
+        });
+        let mut parent = parent_with_privacy(root.path(), 1);
+        crate::privacy::records::attach_record(
+            &mut parent[0],
+            refact_privacy::FileRecord {
+                path: root
+                    .path()
+                    .join("private.rs")
+                    .to_string_lossy()
+                    .into_owned(),
+                zone: "parent_only".into(),
+                attribution: refact_privacy::Attribution::Declared,
+            },
+        );
+        let model = crate::caps::BaseModelRecord {
+            id: "test/parent".into(),
+            ..Default::default()
+        };
+        let scope = LaunchScope {
+            caller: WorkCaller {
+                source_root: root.path().into(),
+                checkout_root: root.path().into(),
+                principal: "parent".into(),
+                root_chat_id: None,
+                model: Some(model.clone()),
+            },
+            child_model: crate::caps::BaseModelRecord {
+                id: "other/child".into(),
+                ..Default::default()
+            },
+            limits: Default::default(),
+        };
+        assert!(clear_current_context(&gcx, &parent, &model).is_ok());
+        let result = resolve_scoped_launch_spec(
+            gcx,
+            &LaunchSpec {
+                custom_instructions: Some("Read only.".into()),
+                ..Default::default()
+            },
+            &parent,
+            &scope,
+        )
+        .await;
+        assert!(result.prepended_messages.is_empty());
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(
+            result.skipped[0].reason,
+            "launch context is no longer permitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn provenance_byte_overflow_is_refused_without_dropping_records() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let root = tempfile::tempdir().unwrap();
+        authorize_workspace(&gcx, root.path());
+        let parent = parent_with_privacy(root.path(), 2_000);
+        let spec = LaunchSpec {
+            custom_instructions: Some("Read only.".into()),
+            ..Default::default()
+        };
+        let limits = refact_work_core::CoordinationSettings {
+            launch_context_bytes: 4_096,
+            ..Default::default()
+        };
+        assert!(resolve_with_limits(gcx.clone(), &spec, &[], limits.clone())
+            .await
+            .skipped
+            .is_empty());
+        let result = resolve_with_limits(gcx, &spec, &parent, limits).await;
+        assert!(result.prepended_messages.is_empty());
+        assert_eq!(result.serialized_bytes, 0);
+        assert_eq!(result.skipped.len(), 1);
+        assert!(result.skipped[0]
+            .reason
+            .starts_with("privacy provenance exceeds configured launch context byte bound"));
+        assert_eq!(
+            crate::privacy::records::records_to_carry(&parent)
+                .unwrap()
+                .len(),
+            2_000
+        );
+    }
+
+    #[test]
+    fn model_visible_token_count_uses_rendered_content_not_message_metadata() {
+        use crate::call_validation::{ChatContent, ContextFile};
+        let mut message = ChatMessage {
+            role: "context_file".into(),
+            content: ChatContent::ContextFiles(vec![ContextFile {
+                file_name: "src/context.rs".into(),
+                file_content: "body".into(),
+                line1: 2,
+                line2: 4,
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        message
+            .extra
+            .insert("opaque".into(), json!("hidden".repeat(10_000)));
+        assert_eq!(
+            model_visible_tokens(&[message], &str::len),
+            "user".len() + "📄 src/context.rs:2-4\nbody".len()
+        );
+        let mut message = call_message("a", "read");
+        message
+            .extra
+            .insert("opaque".into(), json!("hidden".repeat(10_000)));
+        assert_eq!(
+            model_visible_tokens(&[message], &str::len),
+            "assistantcallingreadcat{}".len()
+        );
     }
 
     #[tokio::test]
