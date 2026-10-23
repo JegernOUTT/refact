@@ -16,9 +16,11 @@ use crate::chat::history_limit::{compute_context_budget, ContextBudgetReport, Co
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, TaskBoard};
-use crate::tools::tool_task_check_agents::{get_agent_statuses, AgentStatus};
+use crate::tools::tool_task_check_agents::{
+    classify_agent_status, format_card_pause, get_agent_statuses, AgentStateKind, AgentStatus,
+};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
-use refact_runtime_api::{ChatSessionFacade, SessionState};
+use refact_runtime_api::ChatSessionFacade;
 
 const MAX_REPORT_CHARS: usize = 4096;
 const MAX_DOCUMENTS: usize = 6;
@@ -189,67 +191,18 @@ fn render_board(board: &TaskBoard) -> String {
     output
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum OverviewAgentState {
-    Running,
-    Stuck,
-    Failed,
-    Done,
-    Paused,
-}
-
-fn classify_agent(status: &AgentStatus, _now: DateTime<Utc>) -> OverviewAgentState {
-    match status.column.as_str() {
-        "done" => OverviewAgentState::Done,
-        "failed" | "regressed" => OverviewAgentState::Failed,
-        "doing" => {
-            if matches!(status.session_state, Some(SessionState::Error)) {
-                return OverviewAgentState::Stuck;
-            }
-            if matches!(status.session_state, Some(SessionState::Completed))
-                && status.final_report.is_none()
-            {
-                return OverviewAgentState::Stuck;
-            }
-            if matches!(
-                status.session_state,
-                Some(
-                    SessionState::Paused
-                        | SessionState::WaitingUserInput
-                        | SessionState::WaitingIde
-                )
-            ) {
-                return OverviewAgentState::Paused;
-            }
-            if matches!(
-                status.session_state,
-                Some(SessionState::Generating | SessionState::ExecutingTools)
-            ) {
-                return OverviewAgentState::Running;
-            }
-            if generation_loop_is_off(status) {
-                return OverviewAgentState::Stuck;
-            }
-            OverviewAgentState::Running
-        }
-        _ => OverviewAgentState::Running,
-    }
-}
-
-fn generation_loop_is_off(status: &AgentStatus) -> bool {
-    matches!(status.session_state, Some(SessionState::Idle) | None)
-}
-
 fn render_agent_health(statuses: &[AgentStatus], now: DateTime<Utc>) -> String {
     let mut running = 0usize;
     let mut stuck = 0usize;
     let mut failed = 0usize;
+    let mut paused = 0usize;
     let mut done_last_hour = 0usize;
     let mut running_labels = Vec::new();
+    let mut paused_labels = Vec::new();
 
     for status in statuses {
-        match classify_agent(status, now) {
-            OverviewAgentState::Running | OverviewAgentState::Paused => {
+        match classify_agent_status(status, now) {
+            AgentStateKind::Running | AgentStateKind::Queued | AgentStateKind::Parked => {
                 running += 1;
                 if running_labels.len() < 4 {
                     let age = status
@@ -264,9 +217,19 @@ fn render_agent_health(statuses: &[AgentStatus], now: DateTime<Utc>) -> String {
                     ));
                 }
             }
-            OverviewAgentState::Stuck => stuck += 1,
-            OverviewAgentState::Failed => failed += 1,
-            OverviewAgentState::Done => {
+            AgentStateKind::Paused => {
+                paused += 1;
+                if paused_labels.len() < 4 {
+                    paused_labels.push(format!(
+                        "{}: {}",
+                        status.status_id(),
+                        format_card_pause(status)
+                    ));
+                }
+            }
+            AgentStateKind::Stuck => stuck += 1,
+            AgentStateKind::Failed => failed += 1,
+            AgentStateKind::Done => {
                 if status
                     .last_activity_at
                     .map(|timestamp| now.signed_duration_since(timestamp) <= Duration::hours(1))
@@ -283,9 +246,14 @@ fn render_agent_health(statuses: &[AgentStatus], now: DateTime<Utc>) -> String {
     } else {
         format!("   ({})", running_labels.join(", "))
     };
+    let paused_detail = if paused_labels.is_empty() {
+        String::new()
+    } else {
+        format!("   ({})", paused_labels.join(", "))
+    };
     format!(
-        "## Agent Health\n🔄 {} running{}\n🔴 {} stuck\n❌ {} failed\n✅ {} done in last hour\n",
-        running, running_detail, stuck, failed, done_last_hour
+        "## Agent Health\n🔄 {} running{}\n🔴 {} stuck\n❌ {} failed\n⏸️ Paused: {}{}\n✅ {} done in last hour\n",
+        running, running_detail, stuck, failed, paused, paused_detail, done_last_hour
     )
 }
 
@@ -817,6 +785,7 @@ mod tests {
     use crate::chat::types::TaskMeta as ThreadTaskMeta;
     use crate::tasks::types::{TaskMeta, TaskStatus};
     use crate::tools::tools_description::Tool;
+    use refact_runtime_api::SessionState;
 
     fn fixed_now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-05-22T00:00:00Z")
@@ -922,6 +891,9 @@ mod tests {
             session_state,
             last_status_update: None,
             last_activity_at: Some(ts),
+            started_at: Some(ts),
+            paused_at: None,
+            paused_by: None,
             final_report: None,
             last_tool_name: None,
             attention: None,
@@ -948,6 +920,41 @@ mod tests {
 
         assert!(output.contains("🔄 0 running"));
         assert!(output.contains("🔴 1 stuck"));
+    }
+
+    #[test]
+    fn task_overview_counts_fresh_idle_agents_as_running() {
+        let mut statuses = vec![
+            status("T-1", Some(SessionState::Idle), 0),
+            status("T-2", None, 0),
+        ];
+        for status in &mut statuses {
+            status.started_at = Some(fixed_now() - Duration::seconds(30));
+            status.last_activity_at = None;
+        }
+        let output = render_agent_health(&statuses, fixed_now());
+
+        assert!(output.contains("🔄 2 running"));
+        assert!(output.contains("🔴 0 stuck"));
+    }
+
+    #[test]
+    fn task_overview_counts_paused_cards_separately_but_keeps_real_failures() {
+        let mut statuses = vec![
+            status("T-PAUSED", Some(SessionState::Idle), 10),
+            status("T-ERROR", Some(SessionState::Error), 0),
+            status("T-COMPLETED", Some(SessionState::Completed), 0),
+        ];
+        for status in &mut statuses {
+            status.paused_at = Some((fixed_now() - Duration::minutes(5)).to_rfc3339());
+            status.paused_by = Some("planner-test".to_string());
+        }
+        let output = render_agent_health(&statuses, fixed_now());
+
+        assert!(output.contains("🔄 0 running"));
+        assert!(output.contains("🔴 2 stuck"));
+        assert!(output.contains("Paused: 1"));
+        assert!(output.contains("T-PAUSED: paused by planner-test since 2026-05-21T23:55:00+00:00"));
     }
 
     #[tokio::test]

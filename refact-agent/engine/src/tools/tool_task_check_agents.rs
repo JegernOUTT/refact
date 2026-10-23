@@ -15,6 +15,7 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType
 use refact_runtime_api::{ChatSessionFacade, SessionState};
 
 const DEFAULT_LIMIT: usize = 20;
+const IDLE_STUCK_GRACE_SECS: i64 = 120;
 
 pub struct ToolTaskCheckAgents;
 
@@ -35,6 +36,9 @@ pub(crate) struct AgentStatus {
     pub(crate) session_state: Option<SessionState>,
     pub(crate) last_status_update: Option<String>,
     pub(crate) last_activity_at: Option<DateTime<Utc>>,
+    pub(crate) started_at: Option<DateTime<Utc>>,
+    pub(crate) paused_at: Option<String>,
+    pub(crate) paused_by: Option<String>,
     pub(crate) final_report: Option<String>,
     pub(crate) last_tool_name: Option<String>,
     pub(crate) attention: Option<CardAttention>,
@@ -70,7 +74,7 @@ pub(crate) enum AgentReportFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum AgentStateKind {
+pub(crate) enum AgentStateKind {
     Running,
     Queued,
     Parked,
@@ -124,6 +128,7 @@ impl AgentStatusQuery {
                 AgentStateKind::Parked,
                 AgentStateKind::Stuck,
                 AgentStateKind::Failed,
+                AgentStateKind::Paused,
             ]))
         };
         Self {
@@ -158,7 +163,7 @@ pub(crate) fn agent_status_input_schema() -> Value {
             "status_filter": {
                 "type": "array",
                 "items": {"type": "string", "enum": ["running", "queued", "parked", "stuck", "failed", "done", "paused", "all"]},
-                "description": "Statuses to include. Default: running, stuck, failed"
+                "description": "Statuses to include. Default: running, queued, parked, stuck, failed, paused"
             },
             "card_ids": {
                 "type": "array",
@@ -491,6 +496,9 @@ fn agent_status_from_card(
         session_state,
         last_status_update,
         last_activity_at,
+        started_at,
+        paused_at: card.paused_at.clone(),
+        paused_by: card.paused_by.clone(),
         final_report: card.final_report.clone(),
         last_tool_name,
         attention: card.attention.clone(),
@@ -545,6 +553,9 @@ fn agent_status_from_ab_variant(
         session_state,
         last_status_update,
         last_activity_at,
+        started_at,
+        paused_at: card.paused_at.clone(),
+        paused_by: card.paused_by.clone(),
         final_report,
         last_tool_name,
         attention: card.attention.clone(),
@@ -583,22 +594,10 @@ fn latest_timestamp(
     times.into_iter().flatten().max()
 }
 
-fn classify_agent_status(status: &AgentStatus, _now: DateTime<Utc>) -> AgentStateKind {
-    if status.column == "doing" {
-        match crate::tasks::admission::execution_state(&status.agent_chat_id) {
-            Some(crate::agents::execution::ExecutionState::Acquiring) => {
-                return AgentStateKind::Queued
-            }
-            Some(
-                crate::agents::execution::ExecutionState::Parked
-                | crate::agents::execution::ExecutionState::Suspending,
-            ) => return AgentStateKind::Parked,
-            _ => {}
-        }
-    }
+pub(crate) fn classify_agent_status(status: &AgentStatus, now: DateTime<Utc>) -> AgentStateKind {
     match status.column.as_str() {
         "done" => AgentStateKind::Done,
-        "failed" => AgentStateKind::Failed,
+        "failed" | "regressed" => AgentStateKind::Failed,
         "doing" => {
             if matches!(status.session_state, Some(SessionState::Error)) {
                 return AgentStateKind::Stuck;
@@ -607,6 +606,19 @@ fn classify_agent_status(status: &AgentStatus, _now: DateTime<Utc>) -> AgentStat
                 && status.final_report.is_none()
             {
                 return AgentStateKind::Stuck;
+            }
+            if status.paused_at.is_some() {
+                return AgentStateKind::Paused;
+            }
+            match crate::tasks::admission::execution_state(&status.agent_chat_id) {
+                Some(crate::agents::execution::ExecutionState::Acquiring) => {
+                    return AgentStateKind::Queued
+                }
+                Some(
+                    crate::agents::execution::ExecutionState::Parked
+                    | crate::agents::execution::ExecutionState::Suspending,
+                ) => return AgentStateKind::Parked,
+                _ => {}
             }
             if matches!(
                 status.session_state,
@@ -625,6 +637,11 @@ fn classify_agent_status(status: &AgentStatus, _now: DateTime<Utc>) -> AgentStat
                 return AgentStateKind::Running;
             }
             if generation_loop_is_off(status) {
+                if latest_timestamp([status.started_at, status.last_activity_at])
+                    .is_some_and(|last| now - last < Duration::seconds(IDLE_STUCK_GRACE_SECS))
+                {
+                    return AgentStateKind::Running;
+                }
                 return AgentStateKind::Stuck;
             }
             AgentStateKind::Running
@@ -680,6 +697,7 @@ fn format_agent_status_detail_at(status: &AgentStatus, now: DateTime<Utc>) -> St
         AgentStateKind::Done => ("✅", "Completed"),
         AgentStateKind::Failed => ("❌", "Failed"),
         AgentStateKind::Stuck => ("🔴", "Stuck / needs attention"),
+        AgentStateKind::Paused if status.paused_at.is_some() => ("⏸️", "Paused by planner"),
         AgentStateKind::Paused => ("⏸️", "Paused / awaiting approval"),
         AgentStateKind::Queued => ("⏳", "Queued for execution capacity"),
         AgentStateKind::Parked => ("⏸️", "Parked / waiting without execution capacity"),
@@ -706,6 +724,9 @@ fn format_agent_status_detail_at(status: &AgentStatus, now: DateTime<Utc>) -> St
 
     if let Some(attention) = &status.attention {
         result.push_str(&format!("{}\n", format_attention(attention)));
+    }
+    if kind == AgentStateKind::Paused && status.paused_at.is_some() {
+        result.push_str(&format!("**Pause:** {}\n", format_card_pause(status)));
     }
 
     if let Some(variant_key) = status.variant_key.as_deref() {
@@ -967,6 +988,17 @@ fn format_attention(attention: &CardAttention) -> String {
     )
 }
 
+pub(crate) fn format_card_pause(status: &AgentStatus) -> String {
+    let mut text = String::from("paused");
+    if let Some(by) = &status.paused_by {
+        text.push_str(&format!(" by {}", by));
+    }
+    if let Some(since) = &status.paused_at {
+        text.push_str(&format!(" since {}", since));
+    }
+    text
+}
+
 fn format_summary(statuses: &[&AgentStatus], now: DateTime<Utc>) -> String {
     let mut running = 0;
     let mut stuck = 0;
@@ -1005,6 +1037,15 @@ fn format_summary(statuses: &[&AgentStatus], now: DateTime<Utc>) -> String {
         statuses.len(), running, stuck, failed, done, paused, queued, parked, priority_text
     );
     for status in statuses {
+        if classify_agent_status(status, now) == AgentStateKind::Paused
+            && status.paused_at.is_some()
+        {
+            result.push_str(&format!(
+                "{}: {}\n",
+                status.status_id(),
+                format_card_pause(status)
+            ));
+        }
         if let Some(attention) = &status.attention {
             result.push_str(&format!(
                 "{}: {}\n",
@@ -1113,6 +1154,13 @@ fn format_compact_line(status: &AgentStatus, now: DateTime<Utc>) -> String {
             status.status_id(),
             title,
             age
+        ),
+        AgentStateKind::Paused if status.paused_at.is_some() => format!(
+            "{:<2} ⏸️  {:<5} {:<22} | {}",
+            priority,
+            status.status_id(),
+            title,
+            format_card_pause(status)
         ),
         AgentStateKind::Paused => format!(
             "{:<2} ⏸️  {:<5} {:<22} | paused     | {} | approval",
@@ -1299,6 +1347,14 @@ mod tests {
             AgentAlerts::from_statuses(&[status.clone()], now()).stuck,
             0
         );
+        let mut paused = status.clone();
+        paused.paused_at = Some((now() - Duration::minutes(10)).to_rfc3339());
+        assert_eq!(
+            classify_agent_status(&paused, now()),
+            AgentStateKind::Paused
+        );
+        paused.session_state = Some(SessionState::Error);
+        assert_eq!(classify_agent_status(&paused, now()), AgentStateKind::Stuck);
         crate::tasks::admission::wait_for_permit(&status.agent_chat_id)
             .await
             .unwrap();
@@ -1334,6 +1390,9 @@ mod tests {
             session_state,
             last_status_update: Some(format!("{}: last: cat", ts.to_rfc3339())),
             last_activity_at: Some(ts),
+            started_at: Some(ts),
+            paused_at: None,
+            paused_by: None,
             final_report: if column == "done" {
                 Some("done".to_string())
             } else {
@@ -1412,6 +1471,9 @@ mod tests {
     fn orphan_doing_card(id: &str) -> BoardCard {
         let mut card = board_card(id, "doing", None);
         card.assignee = Some("agent-1".to_string());
+        let old = (now() - Duration::minutes(10)).to_rfc3339();
+        card.created_at = old.clone();
+        card.started_at = Some(old);
         card
     }
 
@@ -1620,6 +1682,160 @@ mod tests {
         assert!(output
             .starts_with("⚠️  Alerts: 1 stuck, 0 failed, 0 needing approval, 0 needing attention"));
         assert!(output.contains("STUCK"));
+    }
+
+    #[test]
+    fn paused_card_is_paused_not_stuck() {
+        let mut card = orphan_doing_card("T-PAUSED");
+        card.agent_chat_id = Some("agent-paused".to_string());
+        card.paused_at = Some((now() - Duration::minutes(5)).to_rfc3339());
+        card.paused_by = Some("planner-test".to_string());
+        let status = agent_status_from_card(&card, 1, Some(SessionState::Idle), None);
+
+        assert_eq!(status.paused_at, card.paused_at);
+        assert_eq!(status.paused_by, card.paused_by);
+        assert_eq!(
+            status.started_at,
+            card.started_at.as_deref().and_then(parse_timestamp)
+        );
+        assert_eq!(
+            classify_agent_status(&status, now()),
+            AgentStateKind::Paused
+        );
+        for format in [
+            AgentReportFormat::Compact,
+            AgentReportFormat::Summary,
+            AgentReportFormat::Detail,
+        ] {
+            let output = format_agent_statuses_at(
+                &[status.clone()],
+                &AgentStatusQuery::default_for_format(format),
+                now(),
+            )
+            .unwrap();
+            assert!(output.contains("T-PAUSED"), "{output}");
+            assert!(
+                output.contains("paused by planner-test since 2026-05-21T23:55:00+00:00"),
+                "{output}"
+            );
+            assert!(!output.contains("STUCK"), "{output}");
+            assert!(output.starts_with("⚠️  Alerts: 0 stuck"), "{output}");
+            if format == AgentReportFormat::Summary {
+                assert!(output.contains("Stuck: 0"), "{output}");
+                assert!(output.contains("Paused: 1"), "{output}");
+            }
+        }
+
+        let mut status = status;
+        status.paused_by = None;
+        let output = format_compact_line(&status, now());
+        assert!(output.contains("paused since 2026-05-21T23:55:00+00:00"));
+        assert!(!output.contains(" by "));
+    }
+
+    #[test]
+    fn fresh_idle_agent_within_grace_is_running() {
+        for state in [Some(SessionState::Idle), None] {
+            let mut status = status("T-FRESH", "P1", "doing", state, 0);
+            status.started_at = Some(now() - Duration::seconds(30));
+            status.last_activity_at = None;
+
+            assert_eq!(
+                classify_agent_status(&status, now()),
+                AgentStateKind::Running
+            );
+            assert!(!format_compact_line(&status, now()).contains("STUCK"));
+            assert_eq!(AgentAlerts::from_statuses(&[status], now()).stuck, 0);
+        }
+    }
+
+    #[test]
+    fn idle_agent_beyond_grace_is_stuck() {
+        for state in [Some(SessionState::Idle), None] {
+            let status = status("T-OLD", "P1", "doing", state, 10);
+
+            assert_eq!(classify_agent_status(&status, now()), AgentStateKind::Stuck);
+            assert!(format_compact_line(&status, now()).contains("STUCK"));
+        }
+    }
+
+    #[test]
+    fn idle_grace_uses_latest_start_or_activity_and_expires_at_boundary() {
+        let old = now() - Duration::minutes(10);
+        let recent = now() - Duration::seconds(30);
+        for (started_at, last_activity_at) in [
+            (Some(old), Some(recent)),
+            (Some(recent), Some(old)),
+            (None, Some(recent)),
+        ] {
+            let mut status = status("T-RECENT", "P1", "doing", Some(SessionState::Idle), 10);
+            status.started_at = started_at;
+            status.last_activity_at = last_activity_at;
+            assert_eq!(
+                classify_agent_status(&status, now()),
+                AgentStateKind::Running
+            );
+        }
+        let mut status = status("T-BOUNDARY", "P1", "doing", Some(SessionState::Idle), 2);
+        assert_eq!(classify_agent_status(&status, now()), AgentStateKind::Stuck);
+        status.started_at = None;
+        status.last_activity_at = None;
+        assert_eq!(classify_agent_status(&status, now()), AgentStateKind::Stuck);
+    }
+
+    #[test]
+    fn error_session_is_stuck_even_when_paused() {
+        let mut status = status("T-ERROR", "P1", "doing", Some(SessionState::Error), 0);
+        status.paused_at = Some(now().to_rfc3339());
+
+        assert_eq!(classify_agent_status(&status, now()), AgentStateKind::Stuck);
+        assert!(format_compact_line(&status, now()).contains("STUCK"));
+    }
+
+    #[test]
+    fn completed_without_report_is_stuck_even_when_paused() {
+        let mut status = status(
+            "T-COMPLETED",
+            "P1",
+            "doing",
+            Some(SessionState::Completed),
+            0,
+        );
+        status.paused_at = Some(now().to_rfc3339());
+
+        assert_eq!(classify_agent_status(&status, now()), AgentStateKind::Stuck);
+        assert!(format_compact_line(&status, now()).contains("STUCK"));
+    }
+
+    #[test]
+    fn ab_variants_inherit_card_pause_and_start_metadata() {
+        let mut card = ab_doing_card("T-AB-PAUSED");
+        card.started_at = Some((now() - Duration::minutes(10)).to_rfc3339());
+        card.paused_at = Some((now() - Duration::minutes(5)).to_rfc3339());
+        card.paused_by = Some("planner-test".to_string());
+        let variants = card.ab_variants.as_ref().unwrap();
+        for (key, variant) in [("a", &variants.a), ("b", &variants.b)] {
+            let status = agent_status_from_ab_variant(
+                &card,
+                1,
+                key,
+                variant,
+                Some(SessionState::Idle),
+                None,
+            );
+
+            assert_eq!(status.paused_at, card.paused_at);
+            assert_eq!(status.paused_by, card.paused_by);
+            assert_eq!(
+                status.started_at,
+                card.started_at.as_deref().and_then(parse_timestamp)
+            );
+            assert_eq!(
+                classify_agent_status(&status, now()),
+                AgentStateKind::Paused
+            );
+            assert!(format_compact_line(&status, now()).contains("paused by planner-test since"));
+        }
     }
 
     #[test]
