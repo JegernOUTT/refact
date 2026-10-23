@@ -264,7 +264,7 @@ impl BackgroundAgentRegistry {
         let now = Utc::now();
         let agent_id = agent_id.into();
         let record = BackgroundAgent {
-            schema_version: 1,
+            schema_version: storage::SCHEMA_VERSION,
             run_generation: 1,
             stop_hook_generation: None,
             agent_id: agent_id.clone(),
@@ -2356,6 +2356,7 @@ mod tests {
             .await
             .unwrap();
         let before = registry.get_any("stable-agent").await.unwrap();
+        assert_eq!(before.schema_version, storage::SCHEMA_VERSION);
 
         assert_eq!(
             registry

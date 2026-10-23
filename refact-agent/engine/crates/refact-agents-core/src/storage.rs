@@ -7,6 +7,9 @@ use tokio::fs;
 
 use crate::types::{BackgroundAgent, BgAgentStatus};
 
+mod migrations;
+
+pub const SCHEMA_VERSION: u32 = 2;
 const RECORDS_FILE: &str = "records.json";
 const RESULTS_DIR: &str = "results";
 pub const TERMINAL_RETENTION_DAYS: i64 = 7;
@@ -110,6 +113,16 @@ pub async fn save_all(
     storage_root: &Path,
     mut records: Vec<BackgroundAgent>,
 ) -> Result<(), String> {
+    for record in &mut records {
+        match record.schema_version {
+            1 | SCHEMA_VERSION => record.schema_version = SCHEMA_VERSION,
+            version => {
+                return Err(format!(
+                    "Unsupported background agent schema version: {version}"
+                ))
+            }
+        }
+    }
     let before: Vec<String> = records.iter().map(|r| r.agent_id.clone()).collect();
     prune_records(&mut records, Utc::now());
     fs::create_dir_all(storage_root)
@@ -178,8 +191,34 @@ pub async fn load_all(storage_root: &Path) -> Result<HashMap<String, BackgroundA
     if content.trim().is_empty() {
         return Ok(HashMap::new());
     }
-    let records: Vec<BackgroundAgent> = serde_json::from_str(&content)
+    let mut snapshot: Vec<serde_json::Value> = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse background agents file: {e}"))?;
+    let migrated = migrations::migrate(&mut snapshot)?;
+    let records: Vec<BackgroundAgent> = snapshot
+        .iter()
+        .map(|value| {
+            let record: BackgroundAgent = serde_json::from_value(value.clone())
+                .map_err(|e| format!("Failed to parse background agents file: {e}"))?;
+            for question in &record.questions {
+                question.validate().map_err(|e| {
+                    format!("Invalid background agent question {}: {e}", question.id)
+                })?;
+            }
+            Ok(record)
+        })
+        .collect::<Result<_, String>>()?;
+    if migrated {
+        let content = serde_json::to_vec_pretty(&snapshot)
+            .map_err(|e| format!("Failed to serialize migrated background agents: {e}"))?;
+        let tmp_path = tmp_path_for(&records_path);
+        if let Err(e) = fs::write(&tmp_path, content).await {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err(format!(
+                "Failed to write migrated background agents file: {e}"
+            ));
+        }
+        atomic_write_file(&tmp_path, &records_path).await?;
+    }
     Ok(records
         .into_iter()
         .map(|record| (record.agent_id.clone(), record))
@@ -637,7 +676,7 @@ mod tests {
         finished_at: Option<DateTime<Utc>>,
     ) -> BackgroundAgent {
         BackgroundAgent {
-            schema_version: 1,
+            schema_version: SCHEMA_VERSION,
             run_generation: 1,
             stop_hook_generation: None,
             agent_id: agent_id.to_string(),
@@ -690,6 +729,390 @@ mod tests {
             last_update_at: finished_at.unwrap_or(created_at),
             change_seq: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn load_migrates_v1_questions_and_persists_without_pruning() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        let mut legacy = serde_json::to_value(make_record(
+            "bgagent-legacy",
+            BgAgentStatus::Completed,
+            now - Duration::days(30),
+            Some(now - Duration::days(20)),
+        ))
+        .unwrap();
+        legacy["schema_version"] = serde_json::json!(1);
+        legacy["questions"] = serde_json::json!([
+            {
+                "id": "answered",
+                "text": "Which test?",
+                "asked_at": now - Duration::days(21),
+                "answer": "Run the unit tests",
+                "answered_at": now - Duration::days(20)
+            },
+            {
+                "id": "pending",
+                "text": "Continue?",
+                "asked_at": now,
+                "answer": null,
+                "answered_at": null
+            }
+        ]);
+        legacy["extra_metadata"] = serde_json::json!({"keep": true});
+        let mut modern = make_record("bgagent-modern", BgAgentStatus::Completed, now, Some(now));
+        modern.schema_version = 1;
+        modern.questions.push(
+            refact_chat_api::QuestionContract::pending(
+                "modern-question",
+                refact_chat_api::QuestionKind::AgentParent,
+                "bgagent-modern",
+                "parent",
+                "bgagent-modern:modern-question",
+                "Modern question",
+                None,
+                now,
+                None,
+            )
+            .unwrap(),
+        );
+        legacy["questions"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::to_value(&modern.questions[0]).unwrap());
+        let current = make_record("bgagent-current", BgAgentStatus::Completed, now, Some(now));
+        let mut no_questions = serde_json::to_value(&modern).unwrap();
+        no_questions["agent_id"] = serde_json::json!("bgagent-no-questions");
+        no_questions.as_object_mut().unwrap().remove("questions");
+        let original = serde_json::json!([legacy, modern, current, no_questions]);
+        let path = temp.path().join(RECORDS_FILE);
+        fs::write(&path, serde_json::to_vec(&original).unwrap())
+            .await
+            .unwrap();
+
+        let loaded = load_all(temp.path()).await.unwrap();
+
+        assert_eq!(loaded.len(), 4);
+        let record = &loaded["bgagent-legacy"];
+        assert_eq!(record.schema_version, 2);
+        assert_eq!(record.status, BgAgentStatus::Completed);
+        let answered = &record.questions[0];
+        assert_eq!(answered.kind, refact_chat_api::QuestionKind::AgentParent);
+        assert_eq!(answered.asker, record.agent_id);
+        assert_eq!(answered.answerer, record.parent_chat_id);
+        assert_eq!(answered.correlation_id, "bgagent-legacy:answered");
+        assert_eq!(answered.state, refact_chat_api::QuestionState::Answered);
+        assert_eq!(answered.answered(), Some("Run the unit tests"));
+        assert_eq!(answered.asked_at, now - Duration::days(21));
+        assert_eq!(answered.answered_at, Some(now - Duration::days(20)));
+        let pending = &record.questions[1];
+        assert_eq!(pending.state, refact_chat_api::QuestionState::Pending);
+        assert_eq!(pending.correlation_id, "bgagent-legacy:pending");
+        assert!(pending.answer.is_none());
+        assert!(pending.answered_at.is_none());
+        assert!(pending.expires_at.is_none());
+        assert!(pending.default_answer.is_none());
+        assert_eq!(loaded["bgagent-modern"].questions, modern.questions);
+        assert_eq!(loaded["bgagent-legacy"].questions[2], modern.questions[0]);
+        assert_eq!(loaded["bgagent-current"], current);
+        assert!(loaded["bgagent-no-questions"].questions.is_empty());
+
+        let persisted = fs::read(&path).await.unwrap();
+        let upgraded: serde_json::Value = serde_json::from_slice(&persisted).unwrap();
+        for (before, after) in original
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(upgraded.as_array().unwrap())
+        {
+            assert_eq!(after["schema_version"], 2);
+            for (key, value) in before.as_object().unwrap() {
+                if key != "schema_version" && key != "questions" {
+                    assert_eq!(&after[key], value, "changed field {key}");
+                }
+            }
+        }
+        assert_eq!(upgraded[1]["questions"], original[1]["questions"]);
+        for (before, after) in original[0]["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(upgraded[0]["questions"].as_array().unwrap())
+        {
+            for (key, value) in before.as_object().unwrap() {
+                assert_eq!(&after[key], value, "changed question field {key}");
+            }
+        }
+        assert_eq!(load_all(temp.path()).await.unwrap(), loaded);
+        assert_eq!(fs::read(&path).await.unwrap(), persisted);
+    }
+
+    #[tokio::test]
+    async fn current_snapshot_is_not_rewritten_and_new_writes_use_current_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        let record = make_record("current", BgAgentStatus::Completed, now, Some(now));
+        let path = temp.path().join(RECORDS_FILE);
+        let original = serde_json::to_vec(&vec![record.clone()]).unwrap();
+        fs::write(&path, &original).await.unwrap();
+        let modified = fs::metadata(&path).await.unwrap().modified().unwrap();
+
+        assert_eq!(load_all(temp.path()).await.unwrap()["current"], record);
+        assert_eq!(fs::read(&path).await.unwrap(), original);
+        assert_eq!(
+            fs::metadata(&path).await.unwrap().modified().unwrap(),
+            modified
+        );
+
+        let mut old_version = record.clone();
+        old_version.schema_version = 1;
+        save_all(temp.path(), vec![old_version]).await.unwrap();
+        let written: Vec<BackgroundAgent> =
+            serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(written, vec![record]);
+    }
+
+    #[tokio::test]
+    async fn invalid_snapshot_never_partially_commits_a_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        let mut valid = serde_json::to_value(make_record(
+            "valid",
+            BgAgentStatus::Completed,
+            now,
+            Some(now),
+        ))
+        .unwrap();
+        valid["schema_version"] = serde_json::json!(1);
+        let mut legacy = valid.clone();
+        legacy["agent_id"] = serde_json::json!("invalid");
+        legacy["questions"] = serde_json::json!([{
+            "id": "question",
+            "text": "Question?",
+            "asked_at": now,
+            "answer": null,
+            "answered_at": null
+        }]);
+        let mut partial = legacy.clone();
+        partial["questions"][0]["asker"] = serde_json::json!("invalid");
+        let mut unknown_kind = legacy.clone();
+        unknown_kind["questions"][0]["kind"] = serde_json::json!("unknown");
+        let mut unanswered_timestamp = legacy.clone();
+        unanswered_timestamp["questions"][0]["answered_at"] = serde_json::json!(now);
+        let mut answer_without_timestamp = legacy.clone();
+        answer_without_timestamp["questions"][0]["answer"] = serde_json::json!("yes");
+        let mut v2_legacy_question = legacy.clone();
+        v2_legacy_question["schema_version"] = serde_json::json!(SCHEMA_VERSION);
+        let mut invalid_agent = valid.clone();
+        invalid_agent.as_object_mut().unwrap().remove("model");
+        let mut future = valid.clone();
+        future["schema_version"] = serde_json::json!(SCHEMA_VERSION + 1);
+        let mut missing_version = valid.clone();
+        missing_version
+            .as_object_mut()
+            .unwrap()
+            .remove("schema_version");
+        let mut invalid_modern_question = legacy.clone();
+        invalid_modern_question["questions"][0] = serde_json::json!({
+            "id": "question", "text": "Question?", "asked_at": now,
+            "kind": "agent_parent", "asker": "invalid", "answerer": "parent",
+            "correlation_id": "invalid:question", "state": "answered"
+        });
+        let mut unknown_legacy_field = legacy;
+        unknown_legacy_field["questions"][0]["irreversible"] = serde_json::json!(true);
+        let path = temp.path().join(RECORDS_FILE);
+        for invalid in [
+            partial,
+            unknown_kind,
+            unanswered_timestamp,
+            answer_without_timestamp,
+            v2_legacy_question,
+            invalid_agent,
+            future,
+            missing_version,
+            invalid_modern_question,
+            unknown_legacy_field,
+        ] {
+            let original = serde_json::to_vec(&serde_json::json!([valid, invalid])).unwrap();
+            fs::write(&path, &original).await.unwrap();
+            assert!(load_all(temp.path()).await.is_err(), "accepted {invalid}");
+            assert_eq!(fs::read(&path).await.unwrap(), original);
+            assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+        }
+        fs::write(&path, b"[{invalid").await.unwrap();
+        assert!(load_all(temp.path()).await.is_err());
+        assert_eq!(fs::read(&path).await.unwrap(), b"[{invalid");
+    }
+
+    #[tokio::test]
+    async fn registry_restores_migrated_questions_and_interrupts_without_replay() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        let mut legacy = serde_json::to_value(make_record(
+            "bgagent-restored",
+            BgAgentStatus::Running,
+            now,
+            None,
+        ))
+        .unwrap();
+        legacy["schema_version"] = serde_json::json!(1);
+        legacy["questions"] = serde_json::json!([{
+            "id": "restored-question",
+            "text": "Continue?",
+            "asked_at": now,
+            "answer": null,
+            "answered_at": null
+        }]);
+        fs::write(
+            temp.path().join(RECORDS_FILE),
+            serde_json::to_vec(&vec![legacy]).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let registry = crate::BackgroundAgentRegistry::new(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let record = registry.get_any("bgagent-restored").await.unwrap();
+        assert_eq!(record.schema_version, SCHEMA_VERSION);
+        assert_eq!(record.status, BgAgentStatus::Interrupted);
+        assert!(!registry.has_runtime("bgagent-restored").await);
+        assert_eq!(
+            load_all(temp.path()).await.unwrap()["bgagent-restored"],
+            record
+        );
+        let question = registry.questions().get("restored-question").unwrap();
+        assert_eq!(question, record.questions[0]);
+        assert_eq!(question.state, refact_chat_api::QuestionState::Pending);
+        assert!(registry
+            .answer_question("bgagent-restored", "restored-question", "Yes".into())
+            .await
+            .is_ok());
+        let answered = registry.get_any("bgagent-restored").await.unwrap();
+        assert_eq!(answered.questions[0].answered(), Some("Yes"));
+    }
+
+    #[tokio::test]
+    async fn every_current_question_state_round_trips_through_storage() {
+        use refact_chat_api::{
+            AskQuestion, QuestionKind, QuestionLimits, QuestionRegistry, QuestionState,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        let mut record = make_record("current-states", BgAgentStatus::Completed, now, Some(now));
+        for kind in [
+            QuestionKind::UserInput,
+            QuestionKind::AgentParent,
+            QuestionKind::BoardPlanner,
+            QuestionKind::PlanApproval,
+            QuestionKind::PermissionEscalation,
+        ] {
+            for irreversible in [false, true] {
+                for default in [None, Some("skip")] {
+                    for state in [
+                        QuestionState::Pending,
+                        QuestionState::Answered,
+                        QuestionState::Defaulted,
+                        QuestionState::Rejected,
+                        QuestionState::Cancelled,
+                        QuestionState::Expired,
+                    ] {
+                        let service = QuestionRegistry::new(QuestionLimits::default()).unwrap();
+                        let id = format!("{kind:?}-{irreversible}-{default:?}-{state:?}");
+                        let request =
+                            AskQuestion::new(kind, &record.agent_id, "parent", &id, "Continue?")
+                                .with_id(&id)
+                                .with_options(Some(vec!["yes".into(), "skip".into()]))
+                                .with_expiry_secs(Some(60))
+                                .irreversible(irreversible)
+                                .with_default_answer(default.map(str::to_string));
+                        if default.is_some()
+                            && (irreversible
+                                || matches!(
+                                    kind,
+                                    QuestionKind::PlanApproval | QuestionKind::PermissionEscalation
+                                ))
+                        {
+                            assert!(service.ask(request, now).is_err());
+                            continue;
+                        }
+                        if (state == QuestionState::Defaulted && default.is_none())
+                            || (state == QuestionState::Expired && default.is_some())
+                        {
+                            continue;
+                        }
+                        let question = service.ask(request, now).unwrap();
+                        let settled = match state {
+                            QuestionState::Pending => question,
+                            QuestionState::Answered => service
+                                .answer(&id, "parent", "yes".into(), now + Duration::seconds(1))
+                                .unwrap(),
+                            QuestionState::Rejected => service.reject(&id, "parent", now).unwrap(),
+                            QuestionState::Cancelled => {
+                                service.cancel(&id, &record.agent_id, now).unwrap()
+                            }
+                            QuestionState::Defaulted | QuestionState::Expired => {
+                                service.expire(now + Duration::seconds(61));
+                                service.get(&id).unwrap()
+                            }
+                        };
+                        assert_eq!(settled.state, state);
+                        settled.validate().unwrap();
+                        record.questions.push(settled);
+                    }
+                }
+            }
+        }
+        assert_eq!(record.questions.len(), 65);
+        for version in [1, SCHEMA_VERSION] {
+            let mut to_save = record.clone();
+            to_save.schema_version = version;
+            save_all(temp.path(), vec![to_save]).await.unwrap();
+            let path = temp.path().join(RECORDS_FILE);
+            let bytes = fs::read(&path).await.unwrap();
+            let modified = fs::metadata(&path).await.unwrap().modified().unwrap();
+            assert_eq!(
+                load_all(temp.path()).await.unwrap()[&record.agent_id],
+                record
+            );
+            let restarted = crate::BackgroundAgentRegistry::new(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            assert_eq!(restarted.get_any(&record.agent_id).await.unwrap(), record);
+            for question in &record.questions {
+                assert_eq!(
+                    restarted.questions().get(&question.id).as_ref(),
+                    Some(question)
+                );
+            }
+            assert_eq!(fs::read(&path).await.unwrap(), bytes);
+            assert_eq!(
+                fs::metadata(&path).await.unwrap().modified().unwrap(),
+                modified
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_save_version_preserves_existing_records_and_creates_no_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        let record = make_record("saved", BgAgentStatus::Completed, now, Some(now));
+        save_all(temp.path(), vec![record.clone()]).await.unwrap();
+        let path = temp.path().join(RECORDS_FILE);
+        let bytes = fs::read(&path).await.unwrap();
+        for version in [0, SCHEMA_VERSION + 1, u32::MAX] {
+            let mut unsupported = record.clone();
+            unsupported.schema_version = version;
+            assert_eq!(
+                save_all(temp.path(), vec![unsupported]).await.unwrap_err(),
+                format!("Unsupported background agent schema version: {version}")
+            );
+            assert_eq!(fs::read(&path).await.unwrap(), bytes);
+            assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+        }
+        assert_eq!(load_all(temp.path()).await.unwrap()["saved"], record);
     }
 
     #[test]
