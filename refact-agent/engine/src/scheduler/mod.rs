@@ -81,7 +81,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(scheduler_env)]
     fn env_disable_skips_runner_spawn() {
         let _guard = EnvGuard::set(SCHEDULER_DISABLE_ENV, "1");
         let config = SchedulerConfig::default().with_startup_overrides(false);
@@ -95,6 +95,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[serial_test::serial(scheduler_env)]
     fn config_disable_skips_runner_spawn() {
         let config = SchedulerConfig {
             enabled: false,
@@ -109,6 +110,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[serial_test::serial(scheduler_env)]
     fn cli_disable_skips_runner_spawn() {
         let config = SchedulerConfig::default().with_startup_overrides(true);
 

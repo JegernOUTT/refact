@@ -3280,6 +3280,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(scheduler_env)]
     async fn daemon_cron_status_reports_pending_clock_shape() {
         use hyper::{Body, Request, StatusCode};
         use tower::ServiceExt;

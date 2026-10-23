@@ -3,7 +3,9 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender, TryRecvError};
-use std::sync::{Arc, OnceLock, RwLock as SyncRwLock};
+use std::sync::{Arc, OnceLock};
+#[cfg(test)]
+use std::sync::RwLock as SyncRwLock;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex as AMutex, OwnedMutexGuard};
@@ -41,27 +43,65 @@ impl BoardLockSettings {
     }
 }
 
-static SETTINGS_OVERRIDE: OnceLock<SyncRwLock<Option<BoardLockSettings>>> = OnceLock::new();
+#[cfg(test)]
+static SETTINGS_OVERRIDES: OnceLock<SyncRwLock<HashMap<PathBuf, BoardLockSettings>>> =
+    OnceLock::new();
 
-fn settings_override_cell() -> &'static SyncRwLock<Option<BoardLockSettings>> {
-    SETTINGS_OVERRIDE.get_or_init(|| SyncRwLock::new(None))
+#[cfg(test)]
+fn settings_override_cell() -> &'static SyncRwLock<HashMap<PathBuf, BoardLockSettings>> {
+    SETTINGS_OVERRIDES.get_or_init(|| SyncRwLock::new(HashMap::new()))
 }
 
-pub fn set_board_lock_settings_override(settings: Option<BoardLockSettings>) {
-    let mut slot = settings_override_cell()
+#[cfg(test)]
+#[must_use]
+struct BoardLockSettingsOverride {
+    dir: PathBuf,
+    previous: Option<BoardLockSettings>,
+}
+
+#[cfg(test)]
+impl Drop for BoardLockSettingsOverride {
+    fn drop(&mut self) {
+        let mut overrides = settings_override_cell()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match self.previous {
+            Some(settings) => {
+                overrides.insert(self.dir.clone(), settings);
+            }
+            None => {
+                overrides.remove(&self.dir);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn set_board_lock_settings_override(
+    dir: &Path,
+    settings: BoardLockSettings,
+) -> BoardLockSettingsOverride {
+    let dir = dunce::canonicalize(dir).unwrap();
+    let previous = settings_override_cell()
         .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *slot = settings.map(BoardLockSettings::sanitized);
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(dir.clone(), settings.sanitized());
+    BoardLockSettingsOverride { dir, previous }
+}
+
+#[cfg(test)]
+fn board_lock_settings_for(dir: &Path) -> BoardLockSettings {
+    let canonical = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    settings_override_cell()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&canonical)
+        .copied()
+        .unwrap_or_else(board_lock_settings)
 }
 
 pub fn board_lock_settings() -> BoardLockSettings {
-    let override_slot = settings_override_cell()
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match *override_slot {
-        Some(settings) => settings,
-        None => BoardLockSettings::from_coordination_settings(),
-    }
+    BoardLockSettings::from_coordination_settings()
 }
 static PROCESS_LOCKS: OnceLock<AMutex<HashMap<String, Arc<AMutex<()>>>>> = OnceLock::new();
 
@@ -213,7 +253,10 @@ async fn acquire_os_lock(
 }
 
 pub async fn acquire(dir: &Path, lock_file: &str) -> Result<BoardLockGuard, String> {
+    #[cfg(not(test))]
     let settings = board_lock_settings();
+    #[cfg(test)]
+    let settings = board_lock_settings_for(dir);
     let deadline = Instant::now() + Duration::from_millis(settings.wait_timeout_ms);
     let poll = Duration::from_millis(settings.poll_interval_ms);
 
@@ -278,17 +321,20 @@ mod tests {
         }
     }
 
-    fn short_settings() {
-        set_board_lock_settings_override(Some(BoardLockSettings {
-            wait_timeout_ms: 300,
-            poll_interval_ms: 5,
-        }));
+    fn short_settings(dir: &Path) -> BoardLockSettingsOverride {
+        set_board_lock_settings_override(
+            dir,
+            BoardLockSettings {
+                wait_timeout_ms: 300,
+                poll_interval_ms: 5,
+            },
+        )
     }
 
     #[tokio::test]
     async fn foreign_holder_blocks_acquisition_until_released() {
-        short_settings();
         let dir = tempfile::tempdir().unwrap();
+        let _settings = short_settings(dir.path());
         let canonical = canonical_dir(dir.path()).await.unwrap();
         let holder = hold_from_foreign_handle(lock_path(&canonical, BOARD_LOCK_FILE).unwrap());
 
@@ -306,11 +352,14 @@ mod tests {
 
     #[tokio::test]
     async fn same_process_waiters_are_serialized() {
-        set_board_lock_settings_override(Some(BoardLockSettings {
-            wait_timeout_ms: 5_000,
-            poll_interval_ms: 5,
-        }));
         let dir = tempfile::tempdir().unwrap();
+        let _settings = set_board_lock_settings_override(
+            dir.path(),
+            BoardLockSettings {
+                wait_timeout_ms: 5_000,
+                poll_interval_ms: 5,
+            },
+        );
         let path = dir.path().to_path_buf();
         let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -337,8 +386,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_waiter_does_not_leak_the_lock() {
-        short_settings();
         let dir = tempfile::tempdir().unwrap();
+        let _settings = short_settings(dir.path());
         let canonical = canonical_dir(dir.path()).await.unwrap();
         let holder = hold_from_foreign_handle(lock_path(&canonical, BOARD_LOCK_FILE).unwrap());
 
@@ -359,12 +408,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn symlink_alias_maps_to_the_same_lock() {
-        short_settings();
         let root = tempfile::tempdir().unwrap();
         let real = root.path().join("real");
         std::fs::create_dir_all(&real).unwrap();
         let alias = root.path().join("alias");
         std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let _settings = short_settings(&alias);
+        assert_eq!(board_lock_settings_for(&real).wait_timeout_ms, 300);
 
         let held = acquire_board(&real).await.unwrap();
         let denied = acquire_board(&alias).await;
@@ -379,8 +429,8 @@ mod tests {
 
     #[tokio::test]
     async fn distinct_lock_files_do_not_block_each_other() {
-        short_settings();
         let dir = tempfile::tempdir().unwrap();
+        let _settings = short_settings(dir.path());
         let board = acquire_board(dir.path()).await.unwrap();
         let planner = acquire_planner_ids(dir.path()).await;
         assert!(planner.is_ok());
@@ -390,19 +440,73 @@ mod tests {
 
     #[test]
     fn settings_are_clamped() {
-        set_board_lock_settings_override(Some(BoardLockSettings {
-            wait_timeout_ms: 0,
-            poll_interval_ms: 0,
-        }));
-        let settings = board_lock_settings();
+        let dir = tempfile::tempdir().unwrap();
+        let _settings = set_board_lock_settings_override(
+            dir.path(),
+            BoardLockSettings {
+                wait_timeout_ms: 0,
+                poll_interval_ms: 0,
+            },
+        );
+        let settings = board_lock_settings_for(dir.path());
         assert_eq!(settings.wait_timeout_ms, 1);
         assert_eq!(settings.poll_interval_ms, 1);
-        set_board_lock_settings_override(None);
     }
 
     #[test]
+    fn settings_override_restores_previous_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dunce::canonicalize(dir.path()).unwrap();
+        {
+            let _outer = short_settings(dir.path());
+            {
+                let _inner = set_board_lock_settings_override(
+                    dir.path(),
+                    BoardLockSettings {
+                        wait_timeout_ms: 1,
+                        poll_interval_ms: 1,
+                    },
+                );
+                assert_eq!(board_lock_settings_for(dir.path()).wait_timeout_ms, 1);
+            }
+            assert_eq!(board_lock_settings_for(dir.path()).wait_timeout_ms, 300);
+        }
+        assert!(!settings_override_cell()
+            .read()
+            .unwrap()
+            .contains_key(&canonical));
+    }
+
+    #[tokio::test]
+    async fn settings_override_does_not_shorten_another_directory_acquisition() {
+        let x = tempfile::tempdir().unwrap();
+        let y = tempfile::tempdir().unwrap();
+        let _settings = set_board_lock_settings_override(
+            x.path(),
+            BoardLockSettings {
+                wait_timeout_ms: 1,
+                poll_interval_ms: 1,
+            },
+        );
+        let canonical = canonical_dir(y.path()).await.unwrap();
+        let holder = hold_from_foreign_handle(lock_path(&canonical, BOARD_LOCK_FILE).unwrap());
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            holder.release.send(()).unwrap();
+            holder._thread.join().unwrap();
+        });
+
+        let acquired = acquire_board(y.path()).await;
+        release.await.unwrap();
+        assert!(
+            acquired.is_ok(),
+            "directory X override leaked into Y: {acquired:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(runtime_settings)]
     fn settings_follow_coordination_defaults() {
-        set_board_lock_settings_override(None);
         let coordination = refact_work_core::coordination_settings();
         let settings = board_lock_settings();
         assert_eq!(

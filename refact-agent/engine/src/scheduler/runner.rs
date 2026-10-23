@@ -2726,7 +2726,7 @@ mod tests {
     /// The kill switch is a startup gate. A running runner must not lose a due
     /// retry because another thread flipped the process environment.
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(scheduler_env)]
     async fn env_kill_switch_flip_does_not_suppress_a_due_retry() {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
@@ -3232,6 +3232,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(scheduler_env)]
     async fn spawn_from_active_project_starts_session_runner_without_project() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         gcx.shutdown_flag.store(true, Ordering::Relaxed);

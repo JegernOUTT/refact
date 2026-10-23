@@ -520,6 +520,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(scheduler_env)]
     async fn hooks_fire_agent_creates_isolated_turn() {
         let (_workspace, app) = test_app().await;
         let router = router(app.clone());
@@ -556,6 +557,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(scheduler_env)]
     async fn hooks_fire_agent_accepts_type_delivery_alias() {
         let (_workspace, app) = test_app().await;
         let router = router(app.clone());
@@ -576,6 +578,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(scheduler_env)]
     async fn hooks_fire_hook_id_runs_matching_webhook_jobs_only() {
         let (_workspace, app) = test_app().await;
         let store = session_cron_store();
@@ -645,6 +648,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(scheduler_env)]
     async fn hooks_fire_one_shot_failed_job_reports_not_fired() {
         let (_workspace, app) = test_app().await;
         let store = session_cron_store();
@@ -696,6 +700,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(scheduler_env)]
     async fn hooks_fire_agent_and_hook_id_do_both() {
         let (_workspace, app) = test_app().await;
         let store = session_cron_store();
