@@ -61,6 +61,13 @@ export interface CardOutcome {
   finalized: { finalized_by: string; finalized_at: string } | null;
 }
 
+export interface CardAttention {
+  reason: string;
+  kind: string;
+  since: string;
+  count: number;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -126,10 +133,41 @@ export function normalizeCardOutcomes(
   );
 }
 
+export function normalizeCardAttention(
+  value: unknown,
+): CardAttention | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.reason !== "string" ||
+    typeof value.kind !== "string" ||
+    typeof value.since !== "string" ||
+    typeof value.count !== "number" ||
+    !Number.isInteger(value.count) ||
+    value.count < 0
+  ) {
+    return undefined;
+  }
+
+  return {
+    reason: value.reason,
+    kind: value.kind,
+    since: value.since,
+    count: value.count,
+  };
+}
+
 export function normalizeTaskBoard(value: unknown): TaskBoard | null {
   if (!isRecord(value) || !Array.isArray(value.cards)) return null;
   return {
     ...(value as unknown as TaskBoard),
+    cards: value.cards.filter(isBoardCard).map((card) => ({
+      ...card,
+      attention: normalizeCardAttention(card.attention),
+      paused_at:
+        typeof card.paused_at === "string" ? card.paused_at : undefined,
+      paused_by:
+        typeof card.paused_by === "string" ? card.paused_by : undefined,
+    })),
     card_outcomes: normalizeCardOutcomes(value.card_outcomes),
   };
 }
@@ -163,6 +201,9 @@ export interface BoardCard {
   started_at: string | null;
   completed_at: string | null;
   last_heartbeat_at?: string | null;
+  attention?: CardAttention;
+  paused_at?: string;
+  paused_by?: string;
   agent_branch?: string;
   agent_worktree?: string;
   agent_worktree_name?: string;

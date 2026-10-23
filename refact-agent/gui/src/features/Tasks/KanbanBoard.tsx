@@ -9,6 +9,7 @@ import type {
 } from "../../services/refact/tasks";
 import { BranchIcon } from "../Worktrees/BranchIcon";
 import { CardOutcomeBadge } from "./CardOutcomeBadge";
+import { CardAttentionBadge } from "./CardAttentionBadge";
 import styles from "./Tasks.module.css";
 
 type BadgeTone = React.ComponentProps<typeof Badge>["tone"];
@@ -126,6 +127,7 @@ const KanbanCard: React.FC<KanbanCardProps> = ({
             </Badge>
           )}
           <CardOutcomeBadge cardId={card.id} cardOutcomes={cardOutcomes} />
+          <CardAttentionBadge card={card} />
         </div>
       </div>
     </Card>
