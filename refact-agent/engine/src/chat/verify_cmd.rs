@@ -222,13 +222,18 @@ pub(crate) fn instruction_skip_notes(instructions: &str) -> Vec<String> {
         if in_fence {
             continue;
         }
-        let explicitly_marked = explicit_verify_command(trimmed).is_some();
+        let explicit = explicit_verify_command(trimmed);
+        let explicitly_marked = explicit.is_some();
         let candidate = strip_list_and_backticks(trimmed);
         if (in_negative_control || is_negative_control_instruction(trimmed))
             && (explicitly_marked || trimmed.contains('`') || looks_like_command(&candidate))
-            && notes.is_empty()
         {
-            notes.push("not executed: negative-control step".to_string());
+            push_unique(
+                &mut notes,
+                "not executed: negative-control step".to_string(),
+            );
+        } else if !in_negative_control && explicit.is_some_and(|commands| commands.is_empty()) {
+            notes.push(format!("Verify line not executable: {}", trimmed));
         }
     }
     notes
@@ -264,8 +269,10 @@ fn commands_from_instructions(instructions: &str) -> Vec<String> {
         if in_fence || in_negative_control || is_negative_control_instruction(trimmed) {
             continue;
         }
-        if let Some(command) = explicit_verify_command(trimmed) {
-            push_expanded_unique(&mut commands, &command);
+        if let Some(line_commands) = explicit_verify_command(trimmed) {
+            for command in line_commands {
+                push_expanded_unique(&mut commands, &command);
+            }
         }
     }
     commands
@@ -285,7 +292,7 @@ fn is_negative_control_instruction(line: &str) -> bool {
     .any(|phrase| lower.contains(phrase))
 }
 
-fn explicit_verify_command(line: &str) -> Option<String> {
+fn explicit_verify_command(line: &str) -> Option<Vec<String>> {
     let line = line.trim_start_matches(['-', '*', ' ']).trim();
     let line = line
         .strip_prefix("[ ]")
@@ -296,15 +303,20 @@ fn explicit_verify_command(line: &str) -> Option<String> {
     let rest = lower.strip_prefix("verify:")?;
     let command_start = line.len() - rest.len();
     let command_text = line[command_start..].trim();
-    if !command_text.starts_with('`')
-        || !command_text.ends_with('`')
-        || command_text.len() < 2
-        || command_text[1..command_text.len() - 1].contains('`')
-    {
-        return None;
+    let mut commands = Vec::new();
+    let mut rest = command_text;
+    while let Some(start) = rest.find('`') {
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find('`') else {
+            break;
+        };
+        let command = rest[..end].trim();
+        if !command.is_empty() {
+            commands.push(command.to_string());
+        }
+        rest = &rest[end + 1..];
     }
-    let command = command_text[1..command_text.len() - 1].trim().to_string();
-    (!command.is_empty()).then_some(command)
+    Some(commands)
 }
 
 fn strip_list_and_backticks(value: &str) -> String {

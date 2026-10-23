@@ -243,6 +243,166 @@ mod tests {
         assert!(err.contains("task planner"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn planner_edit_after_dispatch_is_used_by_task_verify_card() {
+        use crate::tasks::assignment::{save_assignment, Assignment};
+        use crate::tasks::types::{
+            BoardCard, FinalReport, VerificationResult, VerifierReportClassification,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(temp.path()).await;
+        let mut card: BoardCard = serde_json::from_value(json!({
+            "id": "T-1", "title": "Planner corrections", "column": "done",
+            "created_at": "now", "started_at": null, "completed_at": null,
+            "assignee": null, "agent_chat_id": null,
+            "instructions": "- Verify: `echo frozen`",
+            "agent_worktree": temp.path().to_string_lossy()
+        }))
+        .unwrap();
+        let assignment = Assignment::from_card(&card);
+        save_assignment(gcx.clone(), "task-1", &assignment)
+            .await
+            .unwrap();
+        card.instructions =
+            "- Verify: `echo live-first` and `echo live-second`\n- Verify: needs a human"
+                .to_string();
+        card.final_report_structured = Some(FinalReport {
+            verification: vec![VerificationResult {
+                command: "echo agent-proposed".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        storage::save_board(
+            gcx.clone(),
+            "task-1",
+            &TaskBoard {
+                cards: vec![card],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let ccx = task_ccx(
+            gcx.clone(),
+            Some(thread_task_meta("planner")),
+            "planner-task-1-1",
+        )
+        .await;
+        ToolTaskVerifyCard::new()
+            .tool_execute(
+                ccx,
+                &"call".to_string(),
+                &HashMap::from([("card_id".to_string(), json!("T-1"))]),
+            )
+            .await
+            .unwrap();
+
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let report = board
+            .get_card("T-1")
+            .unwrap()
+            .verifier_report
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            report.classification,
+            VerifierReportClassification::Unavailable
+        );
+        assert_eq!(report.command_results.len(), 2);
+        for (result, expected) in report
+            .command_results
+            .iter()
+            .zip(["live-first", "live-second"])
+        {
+            assert_eq!(result.command, format!("echo {expected}"));
+            assert_eq!(result.exit_code, Some(0), "{result:?}");
+            assert_eq!(result.output_tail.trim(), expected);
+            assert!(report
+                .concerns
+                .iter()
+                .any(|note| note.contains(&result.command)
+                    && note.contains("live planner card Verify line")));
+        }
+        assert!(report
+            .concerns
+            .iter()
+            .any(|note| note.contains("not run: Verify line not executable:")));
+        assert!(report
+            .command_results
+            .iter()
+            .all(|result| !result.command.contains("frozen")
+                && !result.command.contains("agent-proposed")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn structural_deliverable_failure_remains_unforceable_after_commands_pass() {
+        use crate::tasks::assignment::{save_assignment, Assignment};
+        use crate::tasks::types::{BoardCard, VerifierReportClassification};
+
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(temp.path()).await;
+        let mut card: BoardCard = serde_json::from_value(json!({
+            "id": "T-1", "title": "Structural contract", "column": "done",
+            "created_at": "now", "started_at": null, "completed_at": null,
+            "assignee": null, "agent_chat_id": null,
+            "instructions": "- Verify: `echo passed`",
+            "final_report": "Missing required section",
+            "deliverable": {"required_sections": ["Evidence"]},
+            "agent_worktree": temp.path().to_string_lossy()
+        }))
+        .unwrap();
+        save_assignment(gcx.clone(), "task-1", &Assignment::from_card(&card))
+            .await
+            .unwrap();
+        card.deliverable = None;
+        storage::save_board(
+            gcx.clone(),
+            "task-1",
+            &TaskBoard {
+                cards: vec![card],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let ccx = task_ccx(
+            gcx.clone(),
+            Some(thread_task_meta("planner")),
+            "planner-task-1-1",
+        )
+        .await;
+        ToolTaskVerifyCard::new()
+            .tool_execute(
+                ccx,
+                &"call".to_string(),
+                &HashMap::from([("card_id".to_string(), json!("T-1"))]),
+            )
+            .await
+            .unwrap();
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        let report = card.verifier_report.as_ref().unwrap();
+        assert_eq!(
+            report.classification,
+            VerifierReportClassification::VerificationFailed
+        );
+        assert_eq!(report.command_results.len(), 1);
+        assert!(report.command_results[0].passed);
+        assert!(report
+            .concerns
+            .iter()
+            .any(|note| note.contains("Structural deliverable check failed")));
+        assert!(
+            crate::tools::tool_task_merge_agent::ensure_verifier_allows_merge(card, true)
+                .unwrap_err()
+                .contains("force=true cannot bypass verification failures")
+        );
+    }
+
     #[tokio::test]
     async fn task_verify_card_non_planner_role_rejected() {
         let gcx = crate::global_context::tests::make_test_gcx().await;

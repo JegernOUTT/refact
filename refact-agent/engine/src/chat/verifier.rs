@@ -143,6 +143,9 @@ fn append_verifier_status(card: &mut BoardCard, report: &VerifierReport) {
                 .unwrap_or("verification infrastructure unavailable")
         ),
         _ if report.passed => "Verifier: PASS".to_string(),
+        VerifierReportClassification::HumanReview => {
+            "Verifier: NEEDS REVIEW — advisory concerns or missing evidence".to_string()
+        }
         _ => {
             let first = report
                 .concerns
@@ -312,19 +315,7 @@ pub async fn verify_card(
         crate::tasks::assignment::load_assignment(gcx.clone(), &request.task_id, &card.id).await?;
     let specs =
         crate::tasks::assignment::specs_for_validation(assignment.as_ref(), &card, &defaults);
-    let skipped_instruction_notes = if assignment
-        .as_ref()
-        .is_some_and(|assignment| assignment.has_typed_verification())
-    {
-        Vec::new()
-    } else {
-        instruction_skip_notes(
-            assignment
-                .as_ref()
-                .map(|assignment| assignment.task.as_str())
-                .unwrap_or(&card.instructions),
-        )
-    };
+    let skipped_instruction_notes = instruction_skip_notes(&card.instructions);
     let commit = git_head_commit(&worktree).await;
     let service = EvidenceService::new(
         VerifyCommandPolicy::load(gcx.clone()).await,
@@ -361,6 +352,39 @@ pub async fn verify_card(
         .collect::<Vec<_>>();
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     let mut gates = evaluate_gates(&specs, &evidence);
+    for note in skipped_instruction_notes
+        .iter()
+        .filter(|note| note.starts_with("Verify line not executable:"))
+    {
+        gates.blocks.push(crate::chat::evidence::GateBlock {
+            spec_id: String::new(),
+            command: String::new(),
+            verdict: crate::chat::evidence::EvidenceVerdict::NotRun,
+            exit_code: None,
+            reason: format!("not run: {}", note),
+            from_cache: false,
+        });
+    }
+    let deliverable = match assignment.as_ref() {
+        Some(assignment) => assignment.deliverable.clone(),
+        None => crate::tasks::assignment::typed_parts(&card)?.0,
+    };
+    if let Some(contract) = deliverable {
+        let status = contract.evaluate(card.final_report.as_deref().unwrap_or_default());
+        if !status.met {
+            gates.blocks.push(crate::chat::evidence::GateBlock {
+                spec_id: format!("{}:deliverable", card.id),
+                command: String::new(),
+                verdict: crate::chat::evidence::EvidenceVerdict::Failed,
+                exit_code: None,
+                reason: format!(
+                    "Structural deliverable check failed: {}",
+                    serde_json::to_string(&status).unwrap_or_default()
+                ),
+                from_cache: false,
+            });
+        }
+    }
     gates
         .blocks
         .extend(crate::coordination::disagreement::completion_gate_blocks(&app).await);
@@ -371,6 +395,19 @@ pub async fn verify_card(
     let decision = completion_decision(&gates, reported_success);
     let mut concerns = decision.reasons;
     concerns.extend(skipped_instruction_notes);
+    concerns.extend(specs.iter().map(|spec| {
+        let source = if assignment.as_ref().is_some_and(|assignment| {
+            assignment
+                .verify
+                .iter()
+                .any(|frozen| frozen.spec_id == spec.spec_id)
+        }) {
+            "frozen assignment typed spec"
+        } else {
+            "live planner card Verify line"
+        };
+        format!("Command source: `{}` — {}", spec.command, source)
+    }));
     if decision.reported_success && !decision.allowed {
         concerns.insert(
             0,
@@ -429,7 +466,13 @@ pub async fn verify_card(
             }]
         });
         let review_has_concerns = !review_unavailable && !model_concerns.is_empty();
-        concerns.extend(model_concerns);
+        concerns.extend(model_concerns.into_iter().map(|concern| {
+            if review_unavailable {
+                concern
+            } else {
+                format!("ADVISORY: {}", concern)
+            }
+        }));
         (review_unavailable, review_has_concerns, review_error)
     } else {
         (false, false, None)
@@ -492,10 +535,14 @@ pub(crate) fn classify_verifier_report(
 ) -> VerifierReportClassification {
     if !gates.completion_allowed() {
         if !gates.blocks.is_empty()
-            && gates
-                .blocks
-                .iter()
-                .all(|block| block.verdict == crate::chat::evidence::EvidenceVerdict::Unavailable)
+            && gates.blocks.iter().all(|block| {
+                matches!(
+                    block.verdict,
+                    crate::chat::evidence::EvidenceVerdict::Unavailable
+                        | crate::chat::evidence::EvidenceVerdict::NotRun
+                        | crate::chat::evidence::EvidenceVerdict::Superseded
+                )
+            })
         {
             return VerifierReportClassification::Unavailable;
         }
@@ -506,7 +553,7 @@ pub(crate) fn classify_verifier_report(
         };
     }
     if review_has_concerns {
-        return VerifierReportClassification::VerificationFailed;
+        return VerifierReportClassification::HumanReview;
     }
     if review_unavailable {
         return VerifierReportClassification::HumanReview;
@@ -790,7 +837,7 @@ pub(crate) async fn run_verification_argv_impl(
 
 fn verifier_prompt(card: &BoardCard, commands: &[VerificationResult], diff: &str) -> String {
     format!(
-        "Review this completed task card. Return concise concerns only. If the changed files look safe and commands passed, answer exactly PASS.\n\nCard: {} - {}\n\nInstructions:\n{}\n\nFinal report:\n{}\n\nCommand results:\n{}\n\nChanged files:\n{}",
+        "Review this completed task card. Return concise ADVISORY concerns only. Deterministic gates already passed; your opinion cannot establish a verification failure. Only requirements written in the card apply; do not invent checks. For an acceptance check without verifier evidence, say 'not run: <reason>'. Negative-control steps are informational and are not executed by the verifier. If the changed files look safe and commands passed, answer exactly PASS.\n\nCard: {} - {}\n\nInstructions:\n{}\n\nFinal report:\n{}\n\nCommand results:\n{}\n\nChanged files:\n{}",
         card.id,
         card.title,
         card.instructions,
@@ -1110,7 +1157,7 @@ mod tests {
         );
         assert_eq!(
             classify_verifier_report(&passed, false, true),
-            VerifierReportClassification::VerificationFailed
+            VerifierReportClassification::HumanReview
         );
         assert_eq!(
             classify_verifier_report(&passed, false, false),
@@ -1122,7 +1169,7 @@ mod tests {
     fn typed_classification_requires_gates_and_real_success() {
         assert_eq!(
             classify_verifier_report(&evaluate_gates(&[], &[]), false, false),
-            VerifierReportClassification::VerificationFailed
+            VerifierReportClassification::Unavailable
         );
         let failed = gate_outcome_for_verdicts(&[(true, EvidenceVerdict::Failed)]);
         assert_eq!(
@@ -1346,7 +1393,7 @@ mod tests {
         assert!(specs.is_empty());
         assert_eq!(
             classify_verifier_report(&gates, false, false),
-            VerifierReportClassification::VerificationFailed
+            VerifierReportClassification::Unavailable
         );
         assert!(gates.reasons()[0].contains("No verification commands found"));
     }
@@ -1362,6 +1409,14 @@ mod tests {
                 EvidenceVerdict::Unavailable,
                 VerifierReportClassification::Unavailable,
             ),
+            (
+                EvidenceVerdict::NotRun,
+                VerifierReportClassification::Unavailable,
+            ),
+            (
+                EvidenceVerdict::Superseded,
+                VerifierReportClassification::Unavailable,
+            ),
         ] {
             let gates = gate_outcome_for_verdicts(&[(true, verdict)]);
             assert_eq!(
@@ -1374,11 +1429,7 @@ mod tests {
 
     #[test]
     fn a_genuine_gate_failure_still_classifies_as_verification_failure() {
-        for verdict in [
-            EvidenceVerdict::Failed,
-            EvidenceVerdict::NotRun,
-            EvidenceVerdict::Superseded,
-        ] {
+        for verdict in [EvidenceVerdict::Failed] {
             let gates = gate_outcome_for_verdicts(&[(true, verdict)]);
             assert_eq!(
                 classify_verifier_report(&gates, false, false),

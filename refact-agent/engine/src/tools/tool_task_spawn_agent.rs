@@ -1605,7 +1605,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_agent_validates_the_assignment_it_dispatched_not_the_edited_card() {
+    fn spawn_agent_preserves_dispatched_scope_but_uses_live_verify_lines() {
         let mut card = test_card("T-1", "doing", None);
         card.instructions = "## Verification\n- Verify: `cargo test --lib`".to_string();
         card.target_files = vec!["src/lib.rs".to_string()];
@@ -1631,7 +1631,7 @@ mod tests {
                 .iter()
                 .map(|spec| spec.command.clone())
                 .collect::<Vec<_>>(),
-            vec!["cargo test --lib".to_string()]
+            vec!["cargo test --lib -- rewritten".to_string()]
         );
         assert_eq!(
             assignment.scope.target_files,

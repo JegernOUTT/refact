@@ -1,12 +1,9 @@
 //! One typed assignment record: TASK, DELIVERABLE, SCOPE, VERIFY.
 //!
 //! The record is built once at dispatch, rendered into the prompt the agent receives,
-//! and stored beside the board. Validation reads that stored record instead of the
-//! live card, so the contract handed out is the contract checked afterwards.
+//! and stored beside the board.
 //! TASK stays prose verbatim; DELIVERABLE reuses `DeliverableContract`; SCOPE reuses
 //! `ScopeGuardMode` and reports whether `target_files` is declared intent or enforced;
-//! VERIFY carries typed `VerificationSpec`s and falls back to prose scraping of the
-//! dispatched TASK when none were bound.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use refact_chat_api::DeliverableContract;
 
-use crate::chat::evidence::{instruction_specs, specs_from_card, EvidenceDefaults, VerificationSpec};
+use crate::chat::evidence::{specs_from_card, EvidenceDefaults, VerificationSpec};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, ScopeGuardMode};
@@ -164,19 +161,6 @@ impl Assignment {
         ));
         prompt
     }
-
-    /// The executable contract this assignment carries. Typed specs win; an assignment
-    /// without them keeps the prose-scraping path, reading the TASK captured at dispatch.
-    pub fn verification_specs(&self, defaults: &EvidenceDefaults) -> Vec<VerificationSpec> {
-        if self.has_typed_verification() {
-            return self.verify.clone();
-        }
-        let mut specs = instruction_specs(&self.card_id, &self.task, defaults);
-        for spec in specs.iter_mut() {
-            spec.cache.deterministic_inputs = self.scope.target_files.clone();
-        }
-        specs
-    }
 }
 
 pub fn typed_parts(
@@ -202,17 +186,34 @@ pub fn typed_parts(
     Ok((deliverable, verification))
 }
 
-/// Specs the verifier runs. A dispatched assignment carries its contract; without one,
-/// the card's explicit Verify lines supply it.
 pub fn specs_for_validation(
     assignment: Option<&Assignment>,
     card: &BoardCard,
     defaults: &EvidenceDefaults,
 ) -> Vec<VerificationSpec> {
-    let Some(assignment) = assignment else {
-        return specs_from_card(card, defaults);
-    };
-    assignment.verification_specs(defaults)
+    let mut specs = assignment
+        .filter(|assignment| assignment.has_typed_verification())
+        .map(|assignment| assignment.verify.clone())
+        .unwrap_or_default();
+    for mut spec in specs_from_card(card, defaults) {
+        if specs
+            .iter()
+            .any(|existing| existing.command == spec.command)
+        {
+            continue;
+        }
+        if let Some(assignment) = assignment {
+            spec.cache.deterministic_inputs = assignment.scope.target_files.clone();
+        }
+        while specs
+            .iter()
+            .any(|existing| existing.spec_id == spec.spec_id)
+        {
+            spec.spec_id.push_str(":live");
+        }
+        specs.push(spec);
+    }
+    specs
 }
 
 fn assignment_path(task_dir: &Path, card_id: &str) -> Result<PathBuf, String> {
@@ -361,7 +362,7 @@ mod tests {
             )
         );
 
-        let specs = assignment.verification_specs(&defaults());
+        let specs = specs_for_validation(Some(&assignment), &card, &defaults());
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].command, "cargo test --lib");
         assert_eq!(specs[0].spec_id, "T-1#0");
@@ -416,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn a_typed_verification_spec_takes_precedence_over_prose_scraping() {
+    fn a_typed_verification_spec_is_preserved_alongside_live_verify_lines() {
         let card = card("## Verification\n- Verify: `cargo test --lib`");
         let typed = VerificationSpec::propose(
             "T-1:typed",
@@ -427,16 +428,14 @@ mod tests {
 
         let assignment = Assignment::from_card(&card).with_verification(vec![typed.clone()]);
 
-        let specs = assignment.verification_specs(&defaults());
-        assert_eq!(specs, vec![typed]);
-        assert!(
-            !specs.iter().any(|spec| spec.command == "cargo test --lib"),
-            "typed specs replace the scraped prose contract: {specs:?}"
-        );
+        let specs = specs_for_validation(Some(&assignment), &card, &defaults());
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0], typed);
+        assert_eq!(specs[1].command, "cargo test --lib");
     }
 
     #[test]
-    fn the_validated_assignment_is_the_dispatched_one_after_the_card_changes() {
+    fn live_verify_lines_change_without_rewriting_the_dispatched_assignment() {
         let mut card = card("## Verification\n- Verify: `cargo test --lib`");
         card.target_files = vec!["src/lib.rs".to_string()];
 
@@ -458,7 +457,7 @@ mod tests {
                 .iter()
                 .map(|spec| spec.command.clone())
                 .collect::<Vec<_>>(),
-            vec!["cargo test --lib".to_string()]
+            vec!["cargo test --lib -- rewritten".to_string()]
         );
         assert_eq!(
             validated[0].cache.deterministic_inputs,

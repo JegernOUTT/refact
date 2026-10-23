@@ -1260,7 +1260,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_merge_uses_the_dispatched_assignment_contract() {
+    async fn post_merge_uses_live_planner_verify_lines_after_dispatch() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let mut card = card("## Verification\n- Verify: `cargo test --assignment`");
@@ -1297,10 +1297,10 @@ mod tests {
                 argv: vec![
                     "cargo".to_string(),
                     "test".to_string(),
-                    "--assignment".to_string()
+                    "--edited-card".to_string()
                 ]
             }],
-            "the admitted assignment wins over edited card prose"
+            "planner Verify corrections are also used by post-merge validation"
         );
     }
 

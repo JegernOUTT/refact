@@ -590,7 +590,7 @@ mod tests {
         let stale = supersede_stale(temp.path(), None, &specs, records).await;
         let blocked = evaluate_gates(&specs, &stale);
         assert!(!blocked.completion_allowed());
-        assert!(blocked.has_contract_violation());
+        assert!(!blocked.has_contract_violation());
         assert!(
             !crate::chat::evidence::completion_decision(&blocked, true).allowed,
             "a report claiming success must not defeat a superseded verdict"

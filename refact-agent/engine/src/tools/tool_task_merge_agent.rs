@@ -542,10 +542,6 @@ fn verifier_merge_block_message(
     )
 }
 
-fn concern_is_model_unavailable(concern: &str) -> bool {
-    concern.starts_with("Verifier model unavailable; infrastructure unavailable:")
-}
-
 fn verifier_force_warning(card_id: &str, concerns: &[String]) -> String {
     format!(
         "Card {} verifier failed and requires human review. Merge is continuing only because force=true. Concerns:\n{}",
@@ -582,22 +578,49 @@ pub(crate) fn ensure_verifier_allows_merge(
     };
     use crate::tasks::types::{VerificationOutcome, VerifierReportClassification};
 
+    let deterministic_failure = report.classification
+        == VerifierReportClassification::VerificationFailed
+        || report
+            .command_results
+            .iter()
+            .any(|result| result.outcome == VerificationOutcome::CommandFailed);
+    if deterministic_failure {
+        let concerns = report
+            .concerns
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        return Err(verifier_merge_block_message(
+            &card.id,
+            &report.concerns,
+            if concerns.is_empty() {
+                &["deterministic verification gate failed"]
+            } else {
+                &concerns
+            },
+        ));
+    }
+    if force
+        && !report.passed
+        && matches!(
+            report.classification,
+            VerifierReportClassification::HumanReview | VerifierReportClassification::Unavailable
+        )
+        && !report.concerns.is_empty()
+        && report.command_results.iter().all(|result| {
+            (result.outcome == VerificationOutcome::Passed && result.passed)
+                || ((!result.passed)
+                    && (outcome_is_infrastructure(&result.outcome)
+                        || result.outcome == VerificationOutcome::NoCommands))
+        })
+    {
+        return Ok(Some(verifier_force_warning(&card.id, &report.concerns)));
+    }
     let explicit_infrastructure_concerns = !report.concerns.is_empty()
         && report
             .concerns
             .iter()
             .all(|concern| concern_is_infrastructure_only(concern, &[]));
-    if force
-        && !report.passed
-        && report.classification == VerifierReportClassification::Unavailable
-        && !report.concerns.is_empty()
-        && report
-            .concerns
-            .iter()
-            .all(|concern| concern_is_model_unavailable(concern))
-    {
-        return Ok(Some(verifier_force_warning(&card.id, &report.concerns)));
-    }
     let legacy_launch_failure = !report.passed
         && report.classification == VerifierReportClassification::Unknown
         && report.recommendation == "human-review"
@@ -616,27 +639,6 @@ pub(crate) fn ensure_verifier_allows_merge(
         .filter(|result| outcome_is_infrastructure(&result.outcome))
         .map(|result| result.command.as_str())
         .collect::<Vec<_>>();
-    let forceable_human_review = !report.passed
-        && report.classification == VerifierReportClassification::HumanReview
-        && (!infrastructure_commands.is_empty()
-            || (report.command_results.is_empty()
-                && report
-                    .concerns
-                    .iter()
-                    .any(|concern| concern_is_launch_failure(concern))))
-        && report.command_results.iter().all(|result| {
-            (result.outcome == VerificationOutcome::Passed
-                || outcome_is_infrastructure(&result.outcome))
-                && (result.passed == (result.outcome == VerificationOutcome::Passed))
-        })
-        && !report.concerns.is_empty()
-        && report
-            .concerns
-            .iter()
-            .all(|concern| concern_is_infrastructure_only(concern, &infrastructure_commands));
-    if force && forceable_human_review {
-        return Ok(Some(verifier_force_warning(&card.id, &report.concerns)));
-    }
     let consistent_pass = report.passed
         && report.classification == VerifierReportClassification::Passed
         && !report.command_results.is_empty()
@@ -646,6 +648,12 @@ pub(crate) fn ensure_verifier_allows_merge(
             .all(|result| result.passed && result.outcome == VerificationOutcome::Passed);
     if consistent_pass {
         return Ok(None);
+    }
+    if matches!(
+        report.classification,
+        VerifierReportClassification::HumanReview | VerifierReportClassification::Unavailable
+    ) {
+        return Err(format!("Card {} needs human review; retry with force=true to accept advisory concerns or unavailable evidence. Concerns:\n{}", card.id, render_concern_list(&report.concerns)));
     }
     let genuine_concerns = report
         .concerns
@@ -1315,7 +1323,7 @@ impl Tool for ToolTaskMergeAgent {
             experimental: false,
             allow_parallel: false,
             description: "Merge an agent's work back to the main branch and always cleanup the worktree after a successful merge or no-op merged state. The agent must have completed work on a card with an associated git branch and worktree.".to_string(),
-            input_schema: json_schema_from_params(&[("card_id", "string", "Card ID whose agent branch to merge"), ("strategy", "string", "Merge strategy: 'squash' (default) or 'merge'"), ("force", "boolean", "Bypass verifier human-review infrastructure failures only; genuine verification failures remain blocked"), ("auto_revert", "boolean", "Opt in to post-merge verification and automatic git revert on deterministic regression"), ("auto_revert_timeout_secs", "integer", "Timeout for post-merge verification and revert commands, default 300 seconds")], &["card_id"]),
+            input_schema: json_schema_from_params(&[("card_id", "string", "Card ID whose agent branch to merge"), ("strategy", "string", "Merge strategy: 'squash' (default) or 'merge'"), ("force", "boolean", "Accept advisory human review or unavailable evidence; deterministic verification failures remain blocked"), ("auto_revert", "boolean", "Opt in to post-merge verification and automatic git revert on deterministic regression"), ("auto_revert_timeout_secs", "integer", "Timeout for post-merge verification and revert commands, default 300 seconds")], &["card_id"]),
             output_schema: None,
             annotations: None,
         }
@@ -2414,7 +2422,7 @@ mod worktree_merge_tool_tests {
             .unwrap()
             .concerns
             .push("Implementation does not satisfy the requested behavior".to_string());
-        assert!(ensure_verifier_allows_merge(&card, true).is_err());
+        assert!(ensure_verifier_allows_merge(&card, true).is_ok());
     }
 
     #[test]
@@ -2547,7 +2555,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
-    fn merge_agent_force_blocks_semantic_typed_infrastructure_human_review() {
+    fn merge_agent_force_allows_advisory_typed_infrastructure_human_review() {
         use crate::tasks::types::{
             VerificationOutcome, VerificationResult, VerifierReportClassification,
         };
@@ -2566,11 +2574,11 @@ mod worktree_merge_tool_tests {
             }],
         });
 
-        assert!(ensure_verifier_allows_merge(&card, true).is_err());
+        assert!(ensure_verifier_allows_merge(&card, true).is_ok());
     }
 
     #[test]
-    fn merge_agent_force_blocks_passing_commands_with_semantic_concern() {
+    fn merge_agent_force_allows_passing_commands_with_advisory_concern() {
         use crate::tasks::types::{
             VerificationOutcome, VerificationResult, VerifierReportClassification,
         };
@@ -2589,7 +2597,7 @@ mod worktree_merge_tool_tests {
             }],
         });
 
-        assert!(ensure_verifier_allows_merge(&card, true).is_err());
+        assert!(ensure_verifier_allows_merge(&card, true).is_ok());
     }
 
     #[test]
@@ -2691,7 +2699,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
-    fn merge_agent_force_still_blocks_no_commands_result() {
+    fn merge_agent_force_allows_no_commands_for_human_review() {
         use crate::tasks::types::{
             VerificationOutcome, VerificationResult, VerifierReportClassification,
         };
@@ -2712,7 +2720,7 @@ mod worktree_merge_tool_tests {
             }],
         });
 
-        assert!(ensure_verifier_allows_merge(&card, true).is_err());
+        assert!(ensure_verifier_allows_merge(&card, true).is_ok());
     }
 
     #[test]
@@ -2747,7 +2755,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
-    fn merge_agent_force_blocks_rejected_command_with_semantic_concern() {
+    fn merge_agent_force_allows_rejected_command_with_advisory_concern() {
         use crate::tasks::types::VerificationOutcome;
 
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
@@ -2757,9 +2765,9 @@ mod worktree_merge_tool_tests {
             .push("Implementation does not satisfy the requested behavior".to_string());
         card.verifier_report = Some(report);
 
-        let err = ensure_verifier_allows_merge(&card, true).unwrap_err();
+        let err = ensure_verifier_allows_merge(&card, true).unwrap().unwrap();
 
-        assert!(err.contains("Genuine concerns:"));
+        assert!(err.contains("force=true"));
         assert!(err.contains("Implementation does not satisfy the requested behavior"));
     }
 

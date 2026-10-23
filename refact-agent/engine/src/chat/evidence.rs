@@ -72,10 +72,7 @@ impl EvidenceVerdict {
     /// A verdict that proves the contract was violated, as opposed to one that
     /// only proves the evidence could not be obtained.
     pub fn is_contract_violation(self) -> bool {
-        matches!(
-            self,
-            EvidenceVerdict::Failed | EvidenceVerdict::NotRun | EvidenceVerdict::Superseded
-        )
+        matches!(self, EvidenceVerdict::Failed)
     }
 }
 
@@ -328,7 +325,15 @@ impl EvidenceRecord {
             exit_code: self.exit_code,
             passed: self.verdict.is_passed(),
             output_tail: self.output_tail.clone(),
-            outcome: self.outcome,
+            outcome: match self.verdict {
+                EvidenceVerdict::Passed => VerificationOutcome::Passed,
+                EvidenceVerdict::Failed => VerificationOutcome::CommandFailed,
+                EvidenceVerdict::NotRun => VerificationOutcome::NoCommands,
+                EvidenceVerdict::Unavailable | EvidenceVerdict::Superseded => {
+                    VerificationOutcome::InfrastructureFailed
+                }
+                _ => self.outcome,
+            },
             from_cache: self.from_cache,
             executed_at: Some(self.started_at.clone()),
         }
@@ -709,7 +714,10 @@ pub fn evaluate_gates(specs: &[VerificationSpec], evidence: &[EvidenceRecord]) -
                 command: spec.command.clone(),
                 verdict: EvidenceVerdict::NotRun,
                 exit_code: None,
-                reason: format!("Verification command never ran: {}", spec.command),
+                reason: format!(
+                    "not run: Verification command never ran; no verifier evidence for {}",
+                    spec.command
+                ),
                 from_cache: false,
             });
             continue;
@@ -755,8 +763,7 @@ pub fn evaluate_gates(specs: &[VerificationSpec], evidence: &[EvidenceRecord]) -
             command: String::new(),
             verdict: EvidenceVerdict::NotRun,
             exit_code: None,
-            reason: "No verification commands found in card instructions or final report"
-                .to_string(),
+            reason: "not run: No verification commands found in planner instructions".to_string(),
             from_cache: false,
         });
     }
@@ -784,14 +791,14 @@ fn gate_reason(
     let detail = detail.map(str::trim).filter(|detail| !detail.is_empty());
     let head = match verdict {
         EvidenceVerdict::Failed => format!("Verification command failed: {}", command),
-        EvidenceVerdict::Blocked => format!("Verification command blocked: {}", command),
+        EvidenceVerdict::Blocked => format!("not run: Verification command blocked: {}", command),
         EvidenceVerdict::Unavailable => {
-            format!("Verification evidence unavailable: {}", command)
+            format!("not run: Verification evidence unavailable: {}", command)
         }
         EvidenceVerdict::Superseded => {
             format!("Verification evidence superseded: {}", command)
         }
-        EvidenceVerdict::NotRun => format!("Verification command never ran: {}", command),
+        EvidenceVerdict::NotRun => format!("not run: verification command {}", command),
         EvidenceVerdict::Passed => format!("Verification command passed: {}", command),
     };
     let exit = match exit_code {
@@ -1148,7 +1155,7 @@ mod tests {
         let gates = evaluate_gates(&[], &[]);
 
         assert!(!gates.completion_allowed());
-        assert!(gates.has_contract_violation());
+        assert!(!gates.has_contract_violation());
         assert!(gates.reasons()[0].contains("No verification commands found"));
     }
 
@@ -1431,7 +1438,7 @@ mod tests {
 
         assert_eq!(gates.blocks[0].verdict, EvidenceVerdict::Superseded);
         assert!(!gates.completion_allowed());
-        assert!(gates.has_contract_violation());
+        assert!(!gates.has_contract_violation());
     }
 
     #[tokio::test]

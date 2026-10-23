@@ -66,7 +66,7 @@ fn card_with_typed_fields_produces_typed_assignment() {
 }
 
 #[test]
-fn typed_specs_take_precedence_in_validation() {
+fn frozen_typed_specs_are_preserved_alongside_live_verify_lines() {
     let mut card = card("## Verification\n- Verify: `cargo test --lib -- from-prose`");
     let typed = VerificationSpec::propose(
         "T-typed:declared",
@@ -79,7 +79,9 @@ fn typed_specs_take_precedence_in_validation() {
 
     let specs = specs_for_validation(Some(&assignment), &card, &defaults());
 
-    assert_eq!(specs, vec![typed]);
+    assert_eq!(specs.len(), 2);
+    assert_eq!(specs[0], typed);
+    assert_eq!(specs[1].command, "cargo test --lib -- from-prose");
     assert_eq!(specs[0].command, "cargo test --lib -- typed-contract");
 }
 
