@@ -19,17 +19,17 @@ use crate::tools::tools_description::Tool;
 use refact_chat_api::ChatCommand;
 use refact_core::chat_types::{DeliveryOutcome, PendingDelivery, PushMode};
 
-struct Fixture {
+pub(crate) struct Fixture {
     _temp: tempfile::TempDir,
-    app: AppState,
+    pub(crate) app: AppState,
     task_id: String,
     agent_chat_id: String,
-    agent: Arc<Mutex<ChatSession>>,
+    pub(crate) agent: Arc<Mutex<ChatSession>>,
     planner: Arc<Mutex<ChatSession>>,
     ccx: Arc<Mutex<AtCommandsContext>>,
 }
 
-async fn fixture(state: SessionState) -> Fixture {
+pub(crate) async fn fixture(state: SessionState) -> Fixture {
     let (_temp, app, task_id, agent_chat_id, agent, planner) =
         setup_monitor_case("doing", state, Duration::from_secs(3600), vec![]).await;
     let (planner_id, meta) = {
@@ -69,14 +69,14 @@ fn args() -> HashMap<String, Value> {
     ])
 }
 
-async fn pause(f: &Fixture) {
+pub(crate) async fn pause(f: &Fixture) {
     ToolPauseAgent::new()
         .tool_execute(f.ccx.clone(), &"pause-call".to_string(), &args())
         .await
         .unwrap();
 }
 
-async fn resume(f: &Fixture) {
+pub(crate) async fn resume(f: &Fixture) {
     ToolResumeAgent::new()
         .tool_execute(f.ccx.clone(), &"resume-call".to_string(), &args())
         .await

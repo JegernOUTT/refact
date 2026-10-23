@@ -543,6 +543,10 @@ async fn handle_abort(context: &QueueCommandContext) -> QueueCommandOutcome {
     let mut session = session_arc.lock().await;
     session.suppress_delivery_wakes();
     session.abort_stream();
+    if session.planner_paused() || session.planner_pause_pending_tools {
+        session.planner_pause_pending_tools = false;
+        session.clear_pending_tool_calls_for_interruption();
+    }
     let attention_questions = pending_attention_questions(&app, &session);
     let questions_cancelled = session.cancel_pending_questions();
     let browser_cancelled =

@@ -11,7 +11,7 @@ pub mod types;
 pub mod waves;
 
 #[cfg(test)]
-mod board_pause_tests;
+pub(crate) mod board_pause_tests;
 #[cfg(test)]
 mod card_seal_tests;
 #[cfg(test)]

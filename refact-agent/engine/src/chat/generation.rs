@@ -1717,6 +1717,15 @@ enum GenerationLoopControl {
     Stop,
 }
 
+fn generation_chat_label(thread: &ThreadParams) -> String {
+    let title = thread.title.trim();
+    if title.is_empty() || title == "New Chat" {
+        "Untitled chat".to_string()
+    } else {
+        title.chars().take(60).collect()
+    }
+}
+
 async fn start_generation_iteration(
     app: &AppState,
     session_arc: &Arc<AMutex<ChatSession>>,
@@ -1773,14 +1782,7 @@ async fn start_generation_iteration(
         }
     }
 
-    let chat_label = {
-        let t = thread.title.trim().to_string();
-        if t.is_empty() || t == "New Chat" {
-            "Untitled chat".to_string()
-        } else {
-            t.chars().take(60).collect()
-        }
-    };
+    let chat_label = generation_chat_label(&thread);
 
     let fork_agent_name = {
         let session = session_arc.lock().await;
@@ -2167,6 +2169,34 @@ async fn handle_generation_error(
     GenerationLoopControl::Stop
 }
 
+async fn generation_context_budget(
+    gcx: &Arc<crate::global_context::GlobalContext>,
+    model_id: &str,
+    context_tokens_cap: Option<usize>,
+) -> (Option<usize>, refact_core::provider_types::ImageTokenMode) {
+    let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await;
+    let model_rec = match caps {
+        Ok(caps) => crate::caps::resolve_chat_model(caps, model_id).ok(),
+        Err(_) => None,
+    };
+    let image_token_mode = model_rec
+        .as_ref()
+        .map(|rec| rec.base.image_token_mode)
+        .unwrap_or_default();
+    let effective_n_ctx = model_rec.map(|rec| {
+        let model_n_ctx = if rec.base.n_ctx > 0 {
+            rec.base.n_ctx
+        } else {
+            tokens().default_n_ctx
+        };
+        match context_tokens_cap {
+            Some(cap) if cap > 0 => cap.min(model_n_ctx),
+            _ => model_n_ctx,
+        }
+    });
+    (effective_n_ctx, image_token_mode)
+}
+
 async fn process_successful_generation(
     app: &AppState,
     session_arc: &Arc<AMutex<ChatSession>>,
@@ -2174,10 +2204,9 @@ async fn process_successful_generation(
     context: &GenerationAttemptContext,
 ) -> GenerationLoopControl {
     let GenerationAttemptContext {
-        thread,
         chat_id,
-        chat_label,
         abort_flag,
+        ..
     } = context;
 
     if crate::agents::seal::is_sealed(app, chat_id).await {
@@ -2211,30 +2240,8 @@ async fn process_successful_generation(
         Some(model_id.as_str())
     };
 
-    let (effective_n_ctx, image_token_mode) = {
-        let caps =
-            crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0).await;
-        let model_rec = match caps {
-            Ok(caps) => crate::caps::resolve_chat_model(caps, &model_id).ok(),
-            Err(_) => None,
-        };
-        let image_token_mode = model_rec
-            .as_ref()
-            .map(|rec| rec.base.image_token_mode)
-            .unwrap_or_default();
-        let effective_n_ctx = model_rec.map(|rec| {
-            let model_n_ctx = if rec.base.n_ctx > 0 {
-                rec.base.n_ctx
-            } else {
-                tokens().default_n_ctx
-            };
-            match context_tokens_cap {
-                Some(cap) if cap > 0 => cap.min(model_n_ctx),
-                _ => model_n_ctx,
-            }
-        });
-        (effective_n_ctx, image_token_mode)
-    };
+    let (effective_n_ctx, image_token_mode) =
+        generation_context_budget(gcx, &model_id, context_tokens_cap).await;
 
     if let Some(effective_n_ctx) = effective_n_ctx {
         inject_token_budget_for_chat(
@@ -2253,7 +2260,34 @@ async fn process_successful_generation(
         TrajectoryCommitIntent::Checkpoint,
     );
 
-    match process_tool_calls_once(app.clone(), session_arc.clone(), &mode_id, model_id_opt).await {
+    let outcome =
+        process_tool_calls_once(app.clone(), session_arc.clone(), &mode_id, model_id_opt).await;
+    handle_tool_step_outcome(
+        app,
+        session_arc,
+        context,
+        outcome,
+        effective_n_ctx,
+        image_token_mode,
+    )
+    .await
+}
+
+async fn handle_tool_step_outcome(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    context: &GenerationAttemptContext,
+    outcome: ToolStepOutcome,
+    effective_n_ctx: Option<usize>,
+    image_token_mode: refact_core::provider_types::ImageTokenMode,
+) -> GenerationLoopControl {
+    let GenerationAttemptContext {
+        thread,
+        chat_id,
+        chat_label,
+        ..
+    } = context;
+    match outcome {
         ToolStepOutcome::NoToolCalls => {
             if handle_task_agent_reasoning_token_stop(
                 app.clone(),
@@ -2266,7 +2300,7 @@ async fn process_successful_generation(
                 return GenerationLoopControl::Stop;
             }
             if maybe_recover_after_length_stop(
-                gcx.clone(),
+                app.gcx.clone(),
                 &session_arc,
                 &thread,
                 effective_n_ctx,
@@ -2430,17 +2464,40 @@ pub fn start_generation(
                 if crate::agents::seal::is_sealed(&app, &chat_id).await {
                     break;
                 }
-                let thread = session_arc.lock().await.thread.clone();
-                match process_tool_calls_once(
+                let context = {
+                    let session = session_arc.lock().await;
+                    GenerationAttemptContext {
+                        thread: session.thread.clone(),
+                        chat_id,
+                        chat_label: generation_chat_label(&session.thread),
+                        abort_flag: session.abort_flag.clone(),
+                    }
+                };
+                let (effective_n_ctx, image_token_mode) = generation_context_budget(
+                    &gcx,
+                    &context.thread.model,
+                    context.thread.context_tokens_cap,
+                )
+                .await;
+                let outcome = process_tool_calls_once(
                     app.clone(),
                     session_arc.clone(),
-                    &thread.mode,
-                    Some(&thread.model),
+                    &context.thread.mode,
+                    Some(&context.thread.model),
+                )
+                .await;
+                match handle_tool_step_outcome(
+                    &app,
+                    &session_arc,
+                    &context,
+                    outcome,
+                    effective_n_ctx,
+                    image_token_mode,
                 )
                 .await
                 {
-                    ToolStepOutcome::Stop | ToolStepOutcome::Paused => break,
-                    ToolStepOutcome::Continue | ToolStepOutcome::NoToolCalls => {}
+                    GenerationLoopControl::Stop => break,
+                    GenerationLoopControl::Continue => {}
                 }
             }
             let (context, generation_result) =
