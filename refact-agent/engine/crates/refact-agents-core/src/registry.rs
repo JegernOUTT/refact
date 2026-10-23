@@ -2690,7 +2690,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn old_terminal_records_are_pruned_on_write() {
+    async fn old_terminal_records_within_retention_are_kept_on_write() {
         let (temp, registry) = registry().await;
         let (old, _, _) = registry.create(request("parent")).await.unwrap();
         registry
@@ -2713,7 +2713,7 @@ mod tests {
         let persisted = storage::load_all(&temp.path().join("agents"))
             .await
             .unwrap();
-        assert!(!persisted.contains_key(&old.agent_id));
+        assert!(persisted.contains_key(&old.agent_id));
         assert!(persisted.contains_key(&recent.agent_id));
         assert!(persisted.contains_key(&live.agent_id));
     }

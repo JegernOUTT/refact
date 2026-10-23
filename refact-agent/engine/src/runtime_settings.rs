@@ -220,6 +220,7 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_bool("strict_path_scope_default"),
     coordination_integer("max_path_scope_entries", 1, 100_000),
     coordination_integer("agent_closed_retained_max", 1, 100_000),
+    coordination_integer("agent_terminal_retained_max", 50, 10_000),
     coordination_integer("presence_heartbeat_interval_ms", 100, 3_600_000),
     coordination_integer("presence_stale_after_ms", 100, 86_400_000),
     coordination_integer("lease_ttl_ms", 1, 86_400_000),

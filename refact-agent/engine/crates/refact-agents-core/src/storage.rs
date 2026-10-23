@@ -2,18 +2,17 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use tokio::fs;
 
-use crate::types::{BackgroundAgent, BgAgentStatus};
+use crate::types::BackgroundAgent;
 
 mod migrations;
 
 pub const SCHEMA_VERSION: u32 = 2;
 const RECORDS_FILE: &str = "records.json";
 const RESULTS_DIR: &str = "results";
-pub const TERMINAL_RETENTION_DAYS: i64 = 7;
-pub const MAX_RECORDS: usize = 2000;
+const STALE_TMP_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
 
 static TMP_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 const RENAME_ATTEMPTS: usize = 5;
@@ -67,46 +66,70 @@ fn is_transient_rename_error(error: &std::io::Error) -> bool {
     )
 }
 
-fn record_terminal_timestamp(record: &BackgroundAgent) -> Option<DateTime<Utc>> {
-    let finished = match record.status {
-        BgAgentStatus::Completed
-        | BgAgentStatus::Failed
-        | BgAgentStatus::Cancelled
-        | BgAgentStatus::Interrupted
-        | BgAgentStatus::Closed => record.finished_at.or(Some(record.last_update_at)),
-        _ => None,
-    };
-    finished
-}
-
-fn prune_records(records: &mut Vec<BackgroundAgent>, now: DateTime<Utc>) {
-    let cutoff = now - Duration::days(TERMINAL_RETENTION_DAYS);
-    records.retain(|record| {
-        if !record.status.is_terminal() || !record.pending_deliveries.is_empty() {
-            return true;
-        }
-        record_terminal_timestamp(record)
-            .map(|timestamp| timestamp >= cutoff)
-            .unwrap_or(false)
-    });
-    if records.len() <= MAX_RECORDS {
-        return;
-    }
+fn prune_records(records: &mut Vec<BackgroundAgent>, retained_terminal: usize) {
     records.sort_by(|a, b| {
-        a.created_at
-            .cmp(&b.created_at)
+        b.finished_at
+            .unwrap_or(b.last_update_at)
+            .cmp(&a.finished_at.unwrap_or(a.last_update_at))
             .then(a.agent_id.cmp(&b.agent_id))
     });
-    let mut excess = records.len().saturating_sub(MAX_RECORDS);
-    let mut retained = Vec::with_capacity(records.len().saturating_sub(excess));
-    for record in records.drain(..) {
-        if excess > 0 && record.status.is_terminal() && record.pending_deliveries.is_empty() {
-            excess -= 1;
+    let mut terminal_count = 0;
+    records.retain(|record| {
+        if !record.status.is_terminal() {
+            return true;
+        }
+        terminal_count += 1;
+        terminal_count <= retained_terminal || !record.pending_deliveries.is_empty()
+    });
+}
+
+async fn remove_stale_tmp_files(storage_root: &Path) {
+    let Ok(mut entries) = fs::read_dir(storage_root).await else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut count = 0;
+    let mut bytes = 0;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(suffix) = name
+            .strip_prefix("records.json.")
+            .and_then(|name| name.strip_suffix(".tmp"))
+        else {
+            continue;
+        };
+        let pid = suffix
+            .split('.')
+            .next()
+            .and_then(|pid| pid.parse::<u32>().ok());
+        if pid == Some(std::process::id()) {
             continue;
         }
-        retained.push(record);
+        let Ok(metadata) = fs::symlink_metadata(entry.path()).await else {
+            continue;
+        };
+        if !metadata.is_file()
+            || !metadata
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age > STALE_TMP_AGE)
+        {
+            continue;
+        }
+        if fs::remove_file(entry.path()).await.is_ok() {
+            count += 1;
+            bytes += metadata.len();
+        }
     }
-    *records = retained;
+    if count > 0 {
+        tracing::info!(
+            count,
+            bytes,
+            "Removed stale background agent records temp files"
+        );
+    }
 }
 
 pub async fn save_all(
@@ -124,7 +147,10 @@ pub async fn save_all(
         }
     }
     let before: Vec<String> = records.iter().map(|r| r.agent_id.clone()).collect();
-    prune_records(&mut records, Utc::now());
+    prune_records(
+        &mut records,
+        refact_work_core::coordination_settings().agent_terminal_retained_max,
+    );
     fs::create_dir_all(storage_root)
         .await
         .map_err(|e| format!("Failed to create background agents directory: {e}"))?;
@@ -243,6 +269,7 @@ async fn preserve_quarantine(source: &Path, whole_file: bool) -> Result<PathBuf,
 pub(crate) async fn load_all_with_report(
     storage_root: &Path,
 ) -> Result<(HashMap<String, BackgroundAgent>, Option<QuarantineReport>), String> {
+    remove_stale_tmp_files(storage_root).await;
     let records_path = storage_root.join(RECORDS_FILE);
     let content = match fs::read(&records_path).await {
         Ok(content) => content,
@@ -613,6 +640,8 @@ async fn load_launch_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::DateTime;
+    use crate::types::BgAgentStatus;
 
     #[tokio::test]
     async fn run_config_is_generation_bound_create_only_and_separate_from_launch() {
@@ -1251,7 +1280,7 @@ mod tests {
                 false,
             ));
         let mut records = vec![record];
-        prune_records(&mut records, now);
+        prune_records(&mut records, 0);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].pending_deliveries.len(), 1);
     }
@@ -1276,7 +1305,7 @@ mod tests {
         }
         let unrelated = temp.path().join("runs").join(format!("{old}.notes.json"));
         std::fs::write(&unrelated, "keep").unwrap();
-        let records = vec![
+        let mut records = vec![
             make_record(
                 &live,
                 BgAgentStatus::Running,
@@ -1290,6 +1319,14 @@ mod tests {
                 Some(now - Duration::days(10)),
             ),
         ];
+        for index in 0..refact_work_core::coordination_settings().agent_terminal_retained_max {
+            records.push(make_record(
+                &format!("recent-{index}"),
+                BgAgentStatus::Completed,
+                now,
+                Some(now),
+            ));
+        }
         save_all(temp.path(), records).await.unwrap();
         let loaded = load_all(temp.path()).await.unwrap();
         assert!(loaded.contains_key(&live));
@@ -1340,7 +1377,7 @@ mod tests {
             ),
         ];
 
-        prune_records(&mut records, now);
+        prune_records(&mut records, 1);
 
         assert_eq!(records.len(), 2);
         assert!(records.iter().any(|record| record.agent_id == "running"));
@@ -1355,10 +1392,11 @@ mod tests {
     #[test]
     fn prune_records_caps_oldest_terminal_records_first() {
         let now = Utc::now();
+        let retained = refact_work_core::coordination_settings().agent_terminal_retained_max;
         let mut records = Vec::new();
         records.push(make_record("live", BgAgentStatus::Running, now, None));
-        for index in 0..(MAX_RECORDS + 20) {
-            let created_at = now - Duration::minutes((MAX_RECORDS + 20 - index) as i64);
+        for index in 0..(retained + 20) {
+            let created_at = now - Duration::minutes((retained + 20 - index) as i64);
             records.push(make_record(
                 &format!("terminal-{index}"),
                 BgAgentStatus::Completed,
@@ -1367,14 +1405,14 @@ mod tests {
             ));
         }
 
-        prune_records(&mut records, now);
+        prune_records(&mut records, retained);
 
-        assert_eq!(records.len(), MAX_RECORDS);
+        assert_eq!(records.len(), retained + 1);
         assert!(records.iter().any(|record| record.agent_id == "live"));
         assert!(!records.iter().any(|record| record.agent_id == "terminal-0"));
         assert!(records
             .iter()
-            .any(|record| record.agent_id == "terminal-21"));
+            .any(|record| record.agent_id == "terminal-20"));
     }
 }
 

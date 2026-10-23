@@ -149,6 +149,7 @@ pub struct CoordinationSettings {
     pub max_path_scope_entries: usize,
     /// Prior-run outcomes retained on a closed or continued child record.
     pub agent_closed_retained_max: usize,
+    pub agent_terminal_retained_max: usize,
     /// Milliseconds a coordination-store connection waits for a competing
     /// writer before reporting the database as busy.
     pub store_busy_timeout_ms: u64,
@@ -395,6 +396,7 @@ impl Default for CoordinationSettings {
             strict_path_scope_default: false,
             max_path_scope_entries: 256,
             agent_closed_retained_max: 64,
+            agent_terminal_retained_max: 500,
             store_busy_timeout_ms: 5_000,
             store_allow_non_local_filesystem: false,
             presence_heartbeat_interval_ms: 15_000,
@@ -518,6 +520,19 @@ fn not_greater(
 impl CoordinationSettings {
     pub fn validate(&self) -> Result<(), SettingsError> {
         let mut v = Vec::new();
+        at_least(
+            &mut v,
+            "agent_terminal_retained_max",
+            self.agent_terminal_retained_max as u64,
+            50,
+        );
+        not_greater(
+            &mut v,
+            "agent_terminal_retained_max",
+            self.agent_terminal_retained_max as u64,
+            "agent terminal history limit",
+            10_000,
+        );
         at_least(
             &mut v,
             "max_undo_entries_per_file",
@@ -1242,6 +1257,17 @@ impl CoordinationSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_terminal_retention_defaults_and_bounds() {
+        let defaults: CoordinationSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.agent_terminal_retained_max, 500);
+        for value in [0, 49, 50, 500, 10_000, 10_001, usize::MAX] {
+            let mut settings = defaults.clone();
+            settings.agent_terminal_retained_max = value;
+            assert_eq!(settings.validate().is_ok(), (50..=10_000).contains(&value));
+        }
+    }
 
     #[test]
     fn delivery_and_wait_defaults_are_generous_and_consistent() {
