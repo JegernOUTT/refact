@@ -180,6 +180,11 @@ async fn call_outside_ceiling_is_refused_by_the_dispatcher() {
 #[tokio::test]
 async fn confirmation_required_call_fails_closed() {
     let (app, ccx, thread, _workspace) = fixture().await;
+    crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all(
+        &app.gcx.config_dir,
+    )
+    .await
+    .unwrap();
     let mode_dir = app.gcx.config_dir.join("modes");
     tokio::fs::create_dir_all(&mode_dir).await.unwrap();
     tokio::fs::write(
