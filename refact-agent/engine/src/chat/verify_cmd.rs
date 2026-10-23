@@ -20,9 +20,12 @@ const COMMAND_HINTS: &[&str] = &[
     "cmp", "jq", "wc", "head", "tail",
 ];
 
-pub(crate) const VERIFY_COMMAND_DESCRIPTION: &str = "Optional recognised executable verification command with valid quoting and no shell operators except a leading `cd <dir> &&`, subject to policy acceptance; a failing or unrun command blocks goal completion.";
+pub(crate) const VERIFY_COMMAND_DESCRIPTION: &str = "Optional recognised executable verification command with valid quoting and no shell operators except a leading `cd <dir> &&`, subject to policy acceptance; a failing or unrun command blocks goal completion. Agent-proposed commands must be read-only and use paths inside the worktree.";
 
 const SHELL_OPERATOR_REASON: &str = "shell operators (`|`, `>`, `;`, `&&` except a leading `cd <dir> &&`) are not supported in verify_command; use a single command";
+
+const PROSE_REASON: &str =
+    "Proposed text is prose, not an executable command (contains prose tokens)";
 
 // Words that never appear in a real invocation but are common in acceptance-criteria prose. Hints
 // like `make` and `go` are also ordinary English verbs, so a bare line containing any of these is
@@ -363,9 +366,7 @@ pub(crate) fn validate_command_hint(argv: &[String]) -> Result<(), String> {
         .filter(|token| !is_assignment_token(token))
         .any(|token| PROSE_TOKENS.contains(&token.to_ascii_lowercase().as_str()))
     {
-        return Err(
-            "Proposed text is prose, not an executable command (contains prose tokens)".to_string(),
-        );
+        return Err(PROSE_REASON.to_string());
     }
     let program = argv
         .iter()
@@ -376,6 +377,163 @@ pub(crate) fn validate_command_hint(argv: &[String]) -> Result<(), String> {
             "program `{program}` is not a recognised verification command; recognised: {}",
             COMMAND_HINTS.join(", ")
         ));
+    }
+    Ok(())
+}
+
+pub(crate) fn unparseable_proposal_prose_reason(command: &str) -> Option<String> {
+    for end in command
+        .char_indices()
+        .filter_map(|(index, character)| character.is_whitespace().then_some(index))
+        .chain(std::iter::once(command.len()))
+    {
+        let Ok(tokens) = shell_words::split(&command[..end]) else {
+            continue;
+        };
+        let rest = if tokens.first().is_some_and(|token| token == "cd") {
+            if tokens.get(2).is_none_or(|token| token != "&&") {
+                continue;
+            }
+            &tokens[3..]
+        } else {
+            tokens.as_slice()
+        };
+        if let Some(program) = rest.iter().find(|token| !is_assignment_token(token)) {
+            return (!COMMAND_HINTS.contains(&program.as_str())
+                && command
+                    .split(|character: char| !character.is_alphanumeric())
+                    .any(|word| PROSE_TOKENS.contains(&word.to_ascii_lowercase().as_str())))
+            .then(|| PROSE_REASON.to_string());
+        }
+    }
+    None
+}
+
+pub(crate) fn validate_read_only_proposal(argv: &[String]) -> Result<(), String> {
+    let program = argv.first().map(String::as_str).unwrap_or_default();
+    if program == "git" {
+        const READ_ONLY_SUBCOMMANDS: &[&str] = &[
+            "log",
+            "show",
+            "diff",
+            "status",
+            "rev-parse",
+            "ls-files",
+            "ls-tree",
+            "cat-file",
+            "merge-base",
+            "describe",
+            "blame",
+            "grep",
+            "shortlog",
+            "rev-list",
+            "name-rev",
+            "show-ref",
+            "for-each-ref",
+            "diff-tree",
+            "diff-index",
+            "diff-files",
+            "check-ignore",
+            "check-attr",
+            "cherry",
+            "range-diff",
+            "count-objects",
+        ];
+        let subcommand = argv
+            .iter()
+            .skip(1)
+            .find(|token| token.as_str() != "--no-pager")
+            .map(String::as_str)
+            .unwrap_or_default();
+        if subcommand.starts_with("-C") {
+            return Err(
+                "git -C is not allowed in an agent-proposed verify_command; use a leading `cd <dir> &&`".to_string(),
+            );
+        }
+        if subcommand.starts_with("-c")
+            || [
+                "--config-env",
+                "--exec-path",
+                "--git-dir",
+                "--work-tree",
+                "--namespace",
+            ]
+            .iter()
+            .any(|option| subcommand == *option || subcommand.starts_with(&format!("{option}=")))
+        {
+            return Err(format!(
+                "git global option `{subcommand}` can change configuration or execution and is not allowed in an agent-proposed verify_command"
+            ));
+        }
+        if matches!(subcommand, "-p" | "--paginate") {
+            return Err(format!(
+                "git global option `{subcommand}` runs a pager and is not allowed in an agent-proposed verify_command; use --no-pager"
+            ));
+        }
+        if !READ_ONLY_SUBCOMMANDS.contains(&subcommand) {
+            return Err(format!(
+                "git subcommand `{subcommand}` is not read-only; allowed: {}",
+                READ_ONLY_SUBCOMMANDS.join(", ")
+            ));
+        }
+        for token in argv.iter().skip(1) {
+            let option = token.split_once('=').map_or(token.as_str(), |(key, _)| key);
+            let reason = match option {
+                "--output" => Some("writes a file"),
+                "--ext-diff" => Some("runs an external diff program"),
+                "--textconv" => Some("runs an external text conversion program"),
+                "--filters" => Some("runs external filters"),
+                _ if token.starts_with("-O") || token.starts_with("--open-files-in-pager") => {
+                    Some("opens files in a pager program")
+                }
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                return Err(format!(
+                    "git option `{option}` {reason} and is not allowed in an agent-proposed verify_command"
+                ));
+            }
+        }
+    }
+    if program == "rg" {
+        for token in argv.iter().skip(1) {
+            if token == "--pre" || token.starts_with("--pre=") || token.starts_with("--pre-glob") {
+                return Err(format!(
+                    "rg option `{token}` enables an external preprocessor and is not allowed in an agent-proposed verify_command"
+                ));
+            }
+        }
+    }
+    if program == "jq"
+        && argv.iter().skip(1).any(|token| {
+            token
+                .split(|character: char| !character.is_alphanumeric() && character != '_')
+                .any(|identifier| identifier == "env")
+        })
+    {
+        return Err(
+            "jq identifier `env` exposes environment variables and is not allowed in an agent-proposed verify_command".to_string(),
+        );
+    }
+    for token in argv {
+        let value = if token.starts_with("--") {
+            token.split_once('=').map(|(_, value)| value)
+        } else {
+            None
+        };
+        for candidate in std::iter::once(token.as_str()).chain(value) {
+            let path = Path::new(candidate);
+            if path.is_absolute()
+                || path.has_root()
+                || path
+                    .components()
+                    .any(|component| component == Component::ParentDir)
+            {
+                return Err(
+                    "paths outside the worktree are not allowed in an agent-proposed verify_command".to_string(),
+                );
+            }
+        }
     }
     Ok(())
 }

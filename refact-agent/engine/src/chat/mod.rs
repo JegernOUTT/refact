@@ -95,6 +95,8 @@ pub(crate) mod verify_cmd;
 #[cfg(test)]
 mod verify_command_boundary_tests;
 #[cfg(test)]
+mod verify_command_readonly_tests;
+#[cfg(test)]
 mod verify_line_parsing_tests;
 
 pub use session::{

@@ -20,7 +20,8 @@ use crate::chat::evidence_cache::CacheDeclaration;
 use crate::chat::evidence_revision::ContentRevision;
 use crate::chat::types::{CriterionEvidence, CriterionVerdict, GoalCriterion, VerdictSource};
 use crate::chat::verify_cmd::{
-    instruction_commands, parse_verification_argv, validate_command_hint, VerifyCommandPolicy,
+    instruction_commands, parse_verification_argv, unparseable_proposal_prose_reason,
+    validate_command_hint, validate_read_only_proposal, VerifyCommandPolicy,
 };
 use crate::global_context::GlobalContext;
 use crate::tasks::types::{BoardCard, VerificationOutcome, VerificationResult};
@@ -215,10 +216,20 @@ impl VerificationSpec {
         let parsed = parse_verification_argv(&self.command).map_err(|reason| SpecRejection {
             verdict: EvidenceVerdict::Blocked,
             outcome: VerificationOutcome::Rejected,
-            reason: format!("Cannot run as a command: {}", reason),
+            reason: self
+                .proposed_by
+                .is_untrusted_proposal()
+                .then(|| unparseable_proposal_prose_reason(&self.command))
+                .flatten()
+                .unwrap_or_else(|| format!("Cannot run as a command: {}", reason)),
         })?;
         if self.proposed_by.is_untrusted_proposal() {
             validate_command_hint(&parsed.argv).map_err(|reason| SpecRejection {
+                verdict: EvidenceVerdict::Blocked,
+                outcome: VerificationOutcome::Rejected,
+                reason,
+            })?;
+            validate_read_only_proposal(&parsed.argv).map_err(|reason| SpecRejection {
                 verdict: EvidenceVerdict::Blocked,
                 outcome: VerificationOutcome::Rejected,
                 reason,
