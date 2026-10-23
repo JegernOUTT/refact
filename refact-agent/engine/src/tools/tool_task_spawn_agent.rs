@@ -228,32 +228,213 @@ fn map_task_base_branch_error(error: String, base_branch: Option<&str>) -> Strin
     format!("Failed to create task-agent worktree: {}", error)
 }
 
-pub(crate) fn find_abandoned_worktrees(board: &crate::tasks::types::TaskBoard) -> Vec<String> {
+fn retained_worktree_cards(board: &crate::tasks::types::TaskBoard) -> Vec<&BoardCard> {
     board
         .cards
         .iter()
         .filter(|card| card.column != "doing" && card.column != "failed")
-        .filter_map(|card| {
-            let worktree = card.agent_worktree.as_ref()?;
-            if !std::path::Path::new(worktree).exists() {
-                return None;
-            }
-            Some(format!(
-                "- {} ({}) in column `{}`: `{}`",
-                card.id, card.title, card.column, worktree
-            ))
+        .filter(|card| {
+            card.agent_worktree
+                .as_deref()
+                .is_some_and(|worktree| Path::new(worktree).exists())
         })
         .collect()
 }
 
-pub(crate) fn abandoned_worktrees_error(action: &str, abandoned_worktrees: &[String]) -> String {
+const SPAWN_GATE_MAX_CHANGED_FILES: usize = 4096;
+
+fn branch_changes(
+    root: &Path,
+    branch: &str,
+    base: &str,
+) -> Result<(bool, Vec<PathBuf>), git2::Error> {
+    let repo = git2::Repository::discover(root)?;
+    let branch = repo.revparse_single(branch)?.peel_to_commit()?;
+    let base = repo.revparse_single(base)?.peel_to_commit()?;
+    if branch.id() == base.id() || repo.graph_descendant_of(base.id(), branch.id())? {
+        return Ok((true, Vec::new()));
+    }
+    let ancestor = repo
+        .find_commit(repo.merge_base(base.id(), branch.id())?)?
+        .tree()?;
+    let branch = branch.tree()?;
+    let base = base.tree()?;
+    let mut paths = std::collections::BTreeSet::new();
+    repo.diff_tree_to_tree(Some(&ancestor), Some(&branch), None)?
+        .foreach(
+            &mut |delta, _| {
+                for path in [delta.old_file().path(), delta.new_file().path()]
+                    .into_iter()
+                    .flatten()
+                {
+                    paths.insert(path.to_path_buf());
+                }
+                paths.len() <= SPAWN_GATE_MAX_CHANGED_FILES
+            },
+            None,
+            None,
+            None,
+        )?;
+    let entry = |tree: &git2::Tree<'_>, path: &Path| match tree.get_path(path) {
+        Ok(entry) => Ok(Some((entry.id(), entry.filemode()))),
+        Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(error),
+    };
+    let mut merged = true;
+    for path in &paths {
+        if entry(&base, path)? != entry(&branch, path)? {
+            merged = false;
+            break;
+        }
+    }
+    Ok((merged, paths.into_iter().collect()))
+}
+
+fn spawn_gate_path(root: &Path, worktree: Option<&str>, path: &Path) -> PathBuf {
+    let relative = path
+        .strip_prefix(root)
+        .ok()
+        .or_else(|| worktree.and_then(|worktree| path.strip_prefix(worktree).ok()));
+    let path = relative.unwrap_or(path);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn find_abandoned_worktrees(
+    board: &crate::tasks::types::TaskBoard,
+    card_id: &str,
+    root: &Path,
+    base: &str,
+    action: &str,
+) -> Result<Option<String>, String> {
+    let card = board
+        .get_card(card_id)
+        .ok_or_else(|| format!("Card {card_id} not found"))?;
+    let mut dependencies = std::collections::HashSet::new();
+    let mut pending = card.depends_on.clone();
+    while let Some(id) = pending.pop() {
+        if dependencies.insert(id.clone()) {
+            if let Some(dependency) = board.get_card(&id) {
+                pending.extend(dependency.depends_on.iter().cloned());
+            }
+        }
+    }
+    let targets: Vec<_> = card
+        .target_files
+        .iter()
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| spawn_gate_path(root, card.agent_worktree.as_deref(), Path::new(path)))
+        .collect();
+    let mut blockers = Vec::new();
+    let mut unmerged = Vec::new();
+    for other in retained_worktree_cards(board) {
+        if other.id == card_id {
+            continue;
+        }
+        let branch = other.agent_branch.as_deref().unwrap_or("<unknown branch>");
+        let changes = branch_changes(root, branch, base);
+        if changes.as_ref().is_ok_and(|(merged, _)| *merged) {
+            continue;
+        }
+        let paths = changes
+            .map(|(_, paths)| paths)
+            .unwrap_or_else(|_| other.target_files.iter().map(PathBuf::from).collect());
+        let overlap = paths.iter().find(|path| {
+            let path = spawn_gate_path(root, other.agent_worktree.as_deref(), path);
+            targets
+                .iter()
+                .any(|target| path.starts_with(target) || target.starts_with(&path))
+        });
+        let mut reasons = Vec::new();
+        if dependencies.contains(&other.id) {
+            reasons.push("dependency (direct or transitive)".to_string());
+        }
+        if let Some(path) = overlap {
+            reasons.push(format!("file overlap: {}", path.display()));
+        }
+        let label = format!("{} (`{branch}`)", other.id);
+        if !reasons.is_empty() {
+            blockers.push(format!("- {label}: {}", reasons.join("; ")));
+        }
+        unmerged.push(label);
+    }
+    if !blockers.is_empty() {
+        return Err(abandoned_worktrees_error(action, &blockers));
+    }
+    Ok((!unmerged.is_empty()).then(|| {
+        format!(
+        "Warning: unmerged task work remains: {}. Merge these cards when verification is complete.",
+        unmerged.join(", ")
+    )
+    }))
+}
+
+pub(crate) async fn scoped_worktree_gate(
+    board: &crate::tasks::types::TaskBoard,
+    card_id: &str,
+    root: &Path,
+    base_branch: Option<&str>,
+    base_commit: Option<&str>,
+    action: &str,
+) -> Result<Option<String>, String> {
+    let board = board.clone();
+    let card_id = card_id.to_string();
+    let root = root.to_path_buf();
+    let base_branch = base_branch.map(str::to_string);
+    let base_commit = base_commit.map(str::to_string);
+    let action = action.to_string();
+    tokio::task::spawn_blocking(move || {
+        let resolved_branch = base_branch.as_deref().filter(|branch| {
+            git::discover_repo(&root)
+                .and_then(|repo| git::commit_for_branch(&repo, branch))
+                .is_ok()
+        });
+        let base = resolved_branch.or(base_commit.as_deref()).unwrap_or("HEAD");
+        let note = resolved_branch.is_none().then(|| {
+            let kind = if base_commit.is_some() {
+                "pinned base commit"
+            } else {
+                "workspace HEAD"
+            };
+            format!(
+                "Base branch `{}` is unavailable; merged-work recognition used {kind} `{base}`.",
+                base_branch.as_deref().unwrap_or("not recorded")
+            )
+        });
+        match find_abandoned_worktrees(&board, &card_id, &root, base, &action) {
+            Ok(Some(warning)) => Ok(Some(match note {
+                Some(note) => format!("{warning} {note}"),
+                None => warning,
+            })),
+            Err(error) => Err(match note {
+                Some(note) => format!("{error}\n{note}"),
+                None => error,
+            }),
+            result => result,
+        }
+    })
+    .await
+    .map_err(|error| format!("Task worktree spawn check failed: {error}"))?
+}
+
+fn abandoned_worktrees_error(action: &str, blockers: &[String]) -> String {
     format!(
-        "Cannot {} while abandoned task worktrees exist. Resolve each one, then retry:\n\
-         - to keep the work: `merge_agent(card_id=...)`\n\
-         - to discard it without merging: remove the worktree directly with \
-         `git worktree remove <path> --force` (add `git branch -D <branch>` to drop its branch)\n\n{}",
-        action,
-        abandoned_worktrees.join("\n")
+        "Cannot {action}: unmerged task work blocks this card. Merge the blocking cards with `merge_agent(card_id=...)`, then retry:\n{}",
+        blockers.join("\n")
     )
 }
 
@@ -1003,6 +1184,7 @@ struct PreparedSpawn {
     workspace_root: PathBuf,
     app: crate::app_state::AppState,
     original_card: BoardCard,
+    worktree_warning: Option<String>,
 }
 
 struct PersistedSpawn {
@@ -1119,13 +1301,6 @@ async fn prepare_spawn(
     validate_id(&request.card_id, "card_id")?;
 
     let board = storage::load_board(request.gcx.clone(), &request.task_id).await?;
-    let abandoned_worktrees = find_abandoned_worktrees(&board);
-    if !abandoned_worktrees.is_empty() {
-        return Err(abandoned_worktrees_error(
-            "spawn a new task agent",
-            &abandoned_worktrees,
-        ));
-    }
     let card = board
         .get_card(&request.card_id)
         .ok_or_else(|| format!("Card {} not found", request.card_id))?;
@@ -1166,6 +1341,22 @@ async fn prepare_spawn(
         .as_ref()
         .map(|worktree| worktree.source_workspace_root.clone())
         .unwrap_or_else(|| workspace_root.clone());
+    let (base_branch, base_commit) = resolve_spawn_base(
+        explicit_base_branch.clone(),
+        explicit_base_commit.clone(),
+        request.planner_worktree.as_ref(),
+        &workspace_root,
+        &task_meta,
+    );
+    let worktree_warning = scoped_worktree_gate(
+        &board,
+        &request.card_id,
+        &workspace_root,
+        base_branch.as_deref(),
+        base_commit.as_deref(),
+        "spawn a new task agent",
+    )
+    .await?;
     let (app, depth) = {
         let ccx = request.ccx.lock().await;
         (ccx.app.clone(), ccx.subchat_depth)
@@ -1192,6 +1383,7 @@ async fn prepare_spawn(
         workspace_root,
         app,
         original_card,
+        worktree_warning,
     })
 }
 
@@ -1216,7 +1408,7 @@ async fn persist_spawn(prepared: PreparedSpawn) -> Result<PersistedSpawn, String
     let claim_card = card_id.clone();
     let claim_agent = agent_id.clone();
     let claim_chat = agent_chat_id.clone();
-    let response = json!({
+    let mut response = json!({
         "summary": format!("Agent queued: {}", original.title),
         "card_id": card_id,
         "agent_id": agent_id,
@@ -1225,6 +1417,9 @@ async fn persist_spawn(prepared: PreparedSpawn) -> Result<PersistedSpawn, String
         "execution_state": "queued",
         "worktree": null,
     });
+    if let Some(warning) = prepared.worktree_warning {
+        response["warning"] = json!(warning);
+    }
     let tracked_chat = agent_chat_id.clone();
     let (accepted, acceptance) = tokio::sync::oneshot::channel();
     let registered = crate::tasks::admission::spawn_tracked(&tracked_chat, async move {
@@ -2128,11 +2323,9 @@ mod tests {
             Some(tempdir.path().join("missing").to_string_lossy().to_string()),
         ));
 
-        let abandoned = find_abandoned_worktrees(&board);
+        let abandoned = retained_worktree_cards(&board);
         assert_eq!(abandoned.len(), 1);
-        assert!(abandoned[0].contains("T-1"));
-        assert!(!abandoned[0].contains("T-2"));
-        assert!(!abandoned[0].contains("T-3"));
+        assert_eq!(abandoned[0].id, "T-1");
     }
 
     #[test]
@@ -2334,49 +2527,36 @@ mod tests {
             Some(worktree_path.to_string_lossy().to_string()),
         ));
 
-        let abandoned = find_abandoned_worktrees(&board);
+        let abandoned = retained_worktree_cards(&board);
         assert_eq!(abandoned.len(), 1, "only done card should be flagged");
-        assert!(
-            !abandoned[0].contains("T-1"),
-            "failed card retained worktree should not block spawning"
-        );
-        assert!(
-            abandoned[0].contains("T-2"),
-            "done card with retained worktree should still be flagged"
-        );
+        assert_eq!(abandoned[0].id, "T-2");
     }
 
     #[test]
-    fn abandoned_worktrees_error_names_merge_and_merge_free_remedies() {
-        let abandoned = vec!["- T-2 (Card) in column `done`: `/tmp/agent-worktree`".to_string()];
+    fn abandoned_worktrees_error_names_blockers_and_merge_remedy() {
+        let abandoned =
+            vec!["- T-2 (`agent-branch`): dependency (direct or transitive)".to_string()];
 
         let message = abandoned_worktrees_error("spawn a new task agent", &abandoned);
 
         assert!(
-            message.contains("Cannot spawn a new task agent while abandoned task worktrees exist"),
+            message.contains("Cannot spawn a new task agent: unmerged task work blocks this card"),
             "{message}"
         );
         assert!(
             message.contains("merge_agent(card_id=...)"),
             "message must name the merge path: {message}"
         );
+        assert!(!message.contains("git branch -D"), "{message}");
         assert!(
-            message.contains("git worktree remove <path> --force"),
-            "message must name a discard path that the verifier cannot block: {message}"
-        );
-        assert!(
-            message.contains("without merging"),
-            "message must make the merge-free path explicit: {message}"
-        );
-        assert!(
-            message.contains("/tmp/agent-worktree"),
-            "offending worktrees must still be listed: {message}"
+            message.contains("T-2 (`agent-branch`): dependency"),
+            "blocking cards and their reasons must be listed: {message}"
         );
     }
 
     #[test]
     fn abandoned_worktrees_error_is_shared_between_spawn_agent_and_spawn_ab() {
-        let abandoned = vec!["- T-2 (Card) in column `done`: `/tmp/agent-worktree`".to_string()];
+        let abandoned = vec!["- T-2 (`agent-branch`): file overlap: src/lib.rs".to_string()];
 
         let spawn_agent_message = abandoned_worktrees_error("spawn a new task agent", &abandoned);
         let spawn_ab_message = abandoned_worktrees_error("spawn A/B agents", &abandoned);
@@ -2384,10 +2564,10 @@ mod tests {
         for message in [&spawn_agent_message, &spawn_ab_message] {
             assert!(message.contains("merge_agent(card_id=...)"), "{message}");
             assert!(
-                message.contains("git worktree remove <path> --force"),
+                message.contains("T-2 (`agent-branch`): file overlap: src/lib.rs"),
                 "{message}"
             );
-            assert!(message.contains("/tmp/agent-worktree"), "{message}");
+            assert!(!message.contains("git branch -D"), "{message}");
         }
         assert!(
             spawn_ab_message.contains("Cannot spawn A/B agents"),

@@ -18,9 +18,8 @@ use crate::tasks::types::{AbVariantInfo, AbVariants, BoardCard, StatusUpdate};
 use crate::tools::task_tool_helpers::{wait_for_agent_abort, AGENT_ABORT_TIMEOUT};
 use crate::tasks::assignment::{self, Assignment};
 use crate::tools::tool_task_spawn_agent::{
-    abandoned_worktrees_error, build_agent_thread_params, find_abandoned_worktrees,
-    prepare_agent_worktree_with_suffix, resolve_agent_model, resolve_invoking_planner_chat_id,
-    PreparedWorktree,
+    build_agent_thread_params, scoped_worktree_gate, prepare_agent_worktree_with_suffix,
+    resolve_agent_model, resolve_invoking_planner_chat_id, PreparedWorktree,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::service::WorktreeService;
@@ -1047,13 +1046,6 @@ impl Tool for ToolSpawnAb {
         };
 
         let board = storage::load_board(gcx.clone(), &task_id).await?;
-        let abandoned_worktrees = find_abandoned_worktrees(&board);
-        if !abandoned_worktrees.is_empty() {
-            return Err(abandoned_worktrees_error(
-                "spawn A/B agents",
-                &abandoned_worktrees,
-            ));
-        }
         let card = board
             .get_card(card_id)
             .ok_or_else(|| format!("Card {} not found", card_id))?;
@@ -1094,6 +1086,15 @@ impl Tool for ToolSpawnAb {
         let source_root = source_root
             .or(crate::files_correction::get_active_project_path(gcx.clone()).await)
             .ok_or("No active project for A/B agents")?;
+        let worktree_warning = scoped_worktree_gate(
+            &board,
+            card_id,
+            &source_root,
+            task_meta.base_branch.as_deref(),
+            task_meta.base_commit.as_deref(),
+            "spawn A/B agents",
+        )
+        .await?;
         let project = crate::coordination::roots::project_identity(&source_root);
         let root_chat_id = if root_chat_id.is_empty() {
             &planner_chat_id
@@ -1113,18 +1114,21 @@ impl Tool for ToolSpawnAb {
             depth,
         )
         .await?;
-        let result_message = json!({
+        let mut result_message = json!({
             "summary": format!("A/B agents queued: {card_title}"),
             "card_id": card_id,
             "execution_state": "queued",
             "variant_a": { "agent_id": variants.a.agent_id, "agent_chat_id": variants.a.chat_id, "model": variants.a.model, "worktree": null },
             "variant_b": { "agent_id": variants.b.agent_id, "agent_chat_id": variants.b.chat_id, "model": variants.b.model, "worktree": null },
-        }).to_string();
+        });
+        if let Some(warning) = worktree_warning {
+            result_message["warning"] = json!(warning);
+        }
         Ok((
             false,
             vec![ContextEnum::ChatMessage(ChatMessage {
                 role: "tool".to_string(),
-                content: ChatContent::SimpleText(result_message),
+                content: ChatContent::SimpleText(result_message.to_string()),
                 tool_calls: None,
                 tool_call_id: tool_call_id.clone(),
                 ..Default::default()

@@ -16,6 +16,8 @@ mod card_seal_tests;
 mod dependency_gate_ab_restart_tests;
 #[cfg(test)]
 mod dependency_gate_paths_tests;
+#[cfg(test)]
+mod spawn_gate_tests;
 
 #[cfg(test)]
 mod assignment_typed_tests;
