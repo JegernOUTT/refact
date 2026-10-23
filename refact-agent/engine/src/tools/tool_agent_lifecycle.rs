@@ -14,6 +14,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate};
+use crate::tools::task_tool_helpers::{wait_for_agent_stop, CANCEL_AGENT_STOP_TIMEOUT};
 use crate::tools::planner_delivery::{self, CardGuard, CardTarget};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::service::WorktreeService;
@@ -29,6 +30,7 @@ struct PlannerContext {
 #[derive(Default, Clone)]
 struct LifecycleCardSnapshot {
     title: String,
+    column: String,
     agent_chat_id: Option<String>,
     agent_worktree: Option<String>,
     agent_branch: Option<String>,
@@ -40,6 +42,7 @@ impl LifecycleCardSnapshot {
     fn from_card(card: &BoardCard) -> Self {
         Self {
             title: card.title.clone(),
+            column: card.column.clone(),
             agent_chat_id: card.agent_chat_id.clone(),
             agent_worktree: card.agent_worktree.clone(),
             agent_branch: card.agent_branch.clone(),
@@ -167,18 +170,83 @@ fn state_label(state: Option<SessionState>) -> String {
         .unwrap_or_else(|| "unavailable".to_string())
 }
 
-fn push_report_text(report: &PushReport, command_name: &str) -> String {
+async fn abort_report_text(
+    report: &PushReport,
+    facade: &dyn ChatSessionFacade,
+    chat_id: &str,
+) -> (bool, String) {
     if report.pushed {
-        format!(
-            "{} command queued; prior agent state: {}",
-            command_name,
-            state_label(report.prior_state)
-        )
+        match wait_for_agent_stop(facade, chat_id).await {
+            Ok(()) => (
+                true,
+                format!(
+                    "Agent stopped; prior agent state: {}",
+                    state_label(report.prior_state)
+                ),
+            ),
+            Err(error) => (false, format!("Abort not confirmed: {}", error)),
+        }
     } else if let Some(reason) = report.skipped_reason.as_deref() {
-        format!("{} command not queued: {}", command_name, reason)
+        (false, format!("Abort not requested: {}", reason))
     } else {
-        "No live agent session found; no command was queued.".to_string()
+        (
+            true,
+            "No live agent session found; no abort was needed.".to_string(),
+        )
     }
+}
+
+async fn stop_terminal_card_sessions(
+    planner: &PlannerContext,
+    card_id: &str,
+) -> Result<Vec<String>, String> {
+    let sessions: Vec<_> = planner
+        .gcx
+        .chat_sessions
+        .read()
+        .await
+        .iter()
+        .map(|(id, session)| (id.clone(), session.clone()))
+        .collect();
+    let mut requested = Vec::new();
+    for (chat_id, session) in sessions {
+        let prior_state = {
+            let session = session.lock().await;
+            let matches_card = session.thread.task_meta.as_ref().is_some_and(|meta| {
+                meta.task_id == planner.task_id
+                    && meta.card_id.as_deref() == Some(card_id)
+                    && meta.role == "agents"
+            });
+            (matches_card
+                && matches!(
+                    session.runtime.state,
+                    SessionState::Generating | SessionState::ExecutingTools
+                ))
+            .then_some(session.runtime.state)
+        };
+        if let Some(prior_state) = prior_state {
+            planner
+                .chat_facade
+                .push_priority_command(&chat_id, ChatCommand::Abort {})
+                .await?;
+            requested.push((chat_id, prior_state));
+        }
+    }
+    Ok(futures::future::join_all(
+        requested
+            .into_iter()
+            .map(|(chat_id, prior_state)| async move {
+                let report = PushReport {
+                    pushed: true,
+                    prior_state: Some(prior_state),
+                    skipped_reason: None,
+                };
+                let (_, text) =
+                    abort_report_text(&report, planner.chat_facade.as_ref(), &chat_id).await;
+                format!("{}: {}", chat_id, text)
+            }),
+    )
+    .await)
 }
 
 fn card_state_error(action: &str, card_id: &str, column: &str) -> String {
@@ -257,6 +325,9 @@ async fn load_doing_card_snapshot(
     let card = board
         .get_card(card_id)
         .ok_or_else(|| format!("Card {} not found", card_id))?;
+    if action == "cancel" && matches!(card.column.as_str(), "done" | "failed") {
+        return Ok(LifecycleCardSnapshot::from_card(card));
+    }
     if action == "cancel"
         && card
             .ab_variants
@@ -595,7 +666,7 @@ fn cancel_description() -> ToolDesc {
         source: lifecycle_source(),
         experimental: false,
         allow_parallel: false,
-        description: "Planner-only tool that gracefully aborts a task agent, marks its card failed, and retains the worktree by default for restart_agent.".to_string(),
+        description: "Planner-only tool that immediately aborts a task agent and confirms whether it stopped. Marks doing cards failed and retains the worktree by default for restart_agent; done/failed cards keep their column.".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -706,6 +777,25 @@ impl Tool for ToolCancelAgent {
         let snapshot =
             load_doing_card_snapshot(planner.gcx.clone(), &planner.task_id, &card_id, "cancel")
                 .await?;
+        if matches!(snapshot.column.as_str(), "done" | "failed") {
+            let reports = stop_terminal_card_sessions(&planner, &card_id).await?;
+            if reports.is_empty() {
+                return Err(card_state_error("cancel", &card_id, &snapshot.column));
+            }
+            return Ok((
+                false,
+                vec![tool_message(
+                    tool_call_id,
+                    format!(
+                        "{} ({})\n{}\nCard column unchanged: {}. Worktree retained.",
+                        card_id,
+                        snapshot.title,
+                        reports.join("\n"),
+                        snapshot.column
+                    ),
+                )],
+            ));
+        }
         if let Some(variants) = snapshot
             .ab_variants
             .as_ref()
@@ -752,13 +842,28 @@ impl Tool for ToolCancelAgent {
             .await?;
             let mut errors = Vec::new();
             for variant in [&variants.a, &variants.b] {
-                if let Err(error) = crate::tools::task_tool_helpers::wait_for_agent_abort(
-                    planner.gcx.clone(),
-                    &variant.chat_id,
-                    crate::tools::task_tool_helpers::AGENT_ABORT_TIMEOUT,
-                )
-                .await
-                {
+                let stop = async {
+                    crate::tasks::admission::cancel_setup_and_wait(
+                        &variant.chat_id,
+                        CANCEL_AGENT_STOP_TIMEOUT,
+                    )
+                    .await?;
+                    if planner
+                        .chat_facade
+                        .session_state(&variant.chat_id)
+                        .await?
+                        .is_some()
+                    {
+                        planner
+                            .chat_facade
+                            .push_priority_command(&variant.chat_id, ChatCommand::Abort {})
+                            .await?;
+                        wait_for_agent_stop(planner.chat_facade.as_ref(), &variant.chat_id).await?;
+                    }
+                    Ok::<(), String>(())
+                }
+                .await;
+                if let Err(error) = stop {
                     errors.push(error);
                 }
             }
@@ -811,11 +916,8 @@ impl Tool for ToolCancelAgent {
         .await?;
 
         // Also invalidate queued setup; it has no chat session to receive Abort.
-        crate::tasks::admission::cancel_setup_and_wait(
-            &agent_chat_id,
-            crate::tools::task_tool_helpers::AGENT_ABORT_TIMEOUT,
-        )
-        .await?;
+        crate::tasks::admission::cancel_setup_and_wait(&agent_chat_id, CANCEL_AGENT_STOP_TIMEOUT)
+            .await?;
         let push_report = push_if_card_current_and_live(
             planner.gcx.clone(),
             &planner.task_id,
@@ -826,9 +928,14 @@ impl Tool for ToolCancelAgent {
             ChatCommand::Abort {},
         )
         .await?;
+        let (stopped, stop_text) =
+            abort_report_text(&push_report, planner.chat_facade.as_ref(), &agent_chat_id).await;
 
         let mut cleanup_skipped_reason: Option<String> = None;
         let cleanup_result = if retain_worktree {
+            CleanupResult::default()
+        } else if !stopped {
+            cleanup_skipped_reason = Some(stop_text.clone());
             CleanupResult::default()
         } else {
             match crate::tools::task_tool_helpers::wait_for_agent_abort(
@@ -900,11 +1007,7 @@ impl Tool for ToolCancelAgent {
 
         let output = format!(
             "✅ Cancelled {} ({})\n\n{}\n{}\nFinal report: Cancelled: {}",
-            card_id,
-            snapshot.title,
-            push_report_text(&push_report, "Abort"),
-            cleanup_text,
-            reason
+            card_id, snapshot.title, stop_text, cleanup_text, reason
         );
 
         Ok((false, vec![tool_message(tool_call_id, output)]))
@@ -1094,7 +1197,7 @@ impl Tool for ToolResumeAgent {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use refact_core::chat_types::{DeliveryOutcome, PendingDelivery, PushMode};
     use crate::app_state::AppState;
@@ -1106,20 +1209,22 @@ mod tests {
     };
     use std::sync::Mutex as StdMutex;
 
-    struct MockChatFacade {
+    pub(crate) struct MockChatFacade {
         state: StdMutex<Option<SessionState>>,
         pushed: StdMutex<Vec<(String, ChatCommand)>>,
         delivered: StdMutex<Vec<(String, PendingDelivery)>>,
         mutate_on_probe: StdMutex<Option<(Arc<GlobalContext>, bool)>>,
+        pub(crate) ignore_abort: bool,
     }
 
     impl MockChatFacade {
-        fn new(state: Option<SessionState>) -> Self {
+        pub(crate) fn new(state: Option<SessionState>) -> Self {
             Self {
                 state: StdMutex::new(state),
                 pushed: StdMutex::new(vec![]),
                 delivered: StdMutex::new(vec![]),
                 mutate_on_probe: StdMutex::new(None),
+                ignore_abort: false,
             }
         }
 
@@ -1164,6 +1269,17 @@ mod tests {
             Ok(())
         }
 
+        async fn push_priority_command(
+            &self,
+            chat_id: &str,
+            command: ChatCommand,
+        ) -> Result<(), String> {
+            if matches!(command, ChatCommand::Abort {}) && !self.ignore_abort {
+                *self.state.lock().unwrap() = Some(SessionState::Idle);
+            }
+            self.push_command(chat_id, command).await
+        }
+
         async fn deliver_messages(
             &self,
             chat_id: &str,
@@ -1205,7 +1321,7 @@ mod tests {
         }
     }
 
-    fn test_card(
+    pub(crate) fn test_card(
         column: &str,
         agent_chat_id: Option<String>,
         worktree: Option<String>,
@@ -1291,7 +1407,7 @@ mod tests {
         }
     }
 
-    async fn write_task(
+    pub(crate) async fn write_task(
         root: &std::path::Path,
         card: BoardCard,
     ) -> Arc<crate::global_context::GlobalContext> {
@@ -1315,7 +1431,7 @@ mod tests {
         gcx
     }
 
-    async fn planner_ccx(
+    pub(crate) async fn planner_ccx(
         gcx: Arc<crate::global_context::GlobalContext>,
         facade: Arc<dyn ChatSessionFacade>,
         role: &str,
@@ -1345,14 +1461,14 @@ mod tests {
         ))
     }
 
-    fn args(items: &[(&str, Value)]) -> HashMap<String, Value> {
+    pub(crate) fn args(items: &[(&str, Value)]) -> HashMap<String, Value> {
         items
             .iter()
             .map(|(key, value)| ((*key).to_string(), value.clone()))
             .collect()
     }
 
-    fn output_text(result: (bool, Vec<ContextEnum>)) -> String {
+    pub(crate) fn output_text(result: (bool, Vec<ContextEnum>)) -> String {
         match result.1.into_iter().next().unwrap() {
             ContextEnum::ChatMessage(message) => match message.content {
                 ChatContent::SimpleText(text) => text,

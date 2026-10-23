@@ -191,6 +191,20 @@ impl EngineChatSessionFacade {
         if let Some(guard) = &supervision_guard {
             crate::buddy::supervision_authority::validate_chat_command(guard, chat_id, &command)?;
         }
+        if priority && matches!(command, refact_chat_api::ChatCommand::Abort {}) {
+            session.apply_priority_abort();
+            let should_save = session.trajectory_dirty;
+            drop(session);
+            if should_save {
+                chat::trajectories::maybe_save_trajectory_with_intent(
+                    app,
+                    session_arc,
+                    chat::types::TrajectoryCommitIntent::Required,
+                )
+                .await;
+            }
+            return Ok(());
+        }
         let custom_request_id = client_request_id.is_some();
         let request = refact_chat_api::CommandRequest {
             native_approval_guard: None,

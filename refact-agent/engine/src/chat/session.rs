@@ -3889,6 +3889,13 @@ impl ChatSession {
         self.task_agent_error = Some(error);
     }
 
+    pub(crate) fn apply_priority_abort(&mut self) {
+        self.suppress_delivery_wakes();
+        self.abort_stream();
+        self.clear_pending_tool_calls_for_interruption();
+        self.stop_goal_on_manual_abort();
+    }
+
     pub fn abort_stream(&mut self) {
         self.pending_context_rebuild = None;
         self.pending_mode_handoff = None;

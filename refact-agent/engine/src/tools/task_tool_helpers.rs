@@ -164,7 +164,7 @@ pub(crate) async fn wait_for_agent_abort(
     };
     let processor_running = {
         let mut session = session_arc.lock().await;
-        session.abort_stream();
+        session.apply_priority_abort();
         session.close_event_channel();
         session.queue_notify.notify_waiters();
         session.queue_processor_running.clone()
@@ -202,6 +202,37 @@ pub(crate) async fn wait_for_agent_abort(
 }
 
 pub(crate) const AGENT_ABORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+pub(crate) const CANCEL_AGENT_STOP_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
+pub(crate) async fn wait_for_agent_stop(
+    chat_facade: &dyn refact_runtime_api::ChatSessionFacade,
+    chat_id: &str,
+) -> Result<(), String> {
+    let wait = async {
+        loop {
+            if !matches!(
+                chat_facade.session_state(chat_id).await?,
+                Some(
+                    refact_runtime_api::SessionState::Generating
+                        | refact_runtime_api::SessionState::ExecutingTools
+                )
+            ) {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    };
+    tokio::time::timeout(CANCEL_AGENT_STOP_TIMEOUT, wait)
+        .await
+        .map_err(|_| {
+            format!(
+                "abort requested; agent still running after {} s",
+                CANCEL_AGENT_STOP_TIMEOUT.as_secs()
+            )
+        })?
+}
 
 #[cfg(test)]
 mod tests {

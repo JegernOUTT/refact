@@ -11,6 +11,8 @@ pub mod shell_gate_llm;
 pub mod tools_description;
 pub mod tools_list;
 
+#[cfg(test)]
+mod cancel_agent_stop_tests;
 pub mod design_tools;
 pub mod subagent_phases;
 pub(crate) mod task_tool_helpers;

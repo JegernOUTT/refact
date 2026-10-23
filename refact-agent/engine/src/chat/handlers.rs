@@ -564,10 +564,7 @@ pub async fn handle_v1_chat_command(
     }
 
     if matches!(request.command, ChatCommand::Abort {}) {
-        session.suppress_delivery_wakes();
-        session.abort_stream();
-        session.clear_pending_tool_calls_for_interruption();
-        session.stop_goal_on_manual_abort();
+        session.apply_priority_abort();
         let should_save_trajectory = session.trajectory_dirty;
         session.remember_accepted_request(&request.client_request_id);
         session.emit(ChatEvent::Ack {
