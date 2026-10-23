@@ -1136,10 +1136,9 @@ impl Tool for ToolTaskBoardDeleteCard {
             .and_then(|v| v.as_str())
             .ok_or("Missing 'card_id'")?;
         storage::update_board_atomic(gcx.clone(), &task_id, |board| {
-            if !board.cards.iter().any(|card| card.id == card_id) {
-                return Err(format!("Card {} not found", card_id));
-            }
-            board.cards.retain(|card| card.id != card_id);
+            board
+                .remove_card(card_id)
+                .ok_or_else(|| format!("Card {} not found", card_id))?;
             Ok(())
         })
         .await?;
@@ -1494,6 +1493,74 @@ mod tests {
             ContextEnum::ChatMessage(message) => message.content.content_text_only(),
             _ => panic!("expected a tool chat message"),
         }
+    }
+
+    #[tokio::test]
+    async fn delete_attested_card_prunes_metadata_before_reusing_id() {
+        let report = crate::tasks::types::VerifierReport {
+            passed: true,
+            ..Default::default()
+        };
+        let mut done = card("T-1", "Reviewed", "done", "P1", vec![]);
+        done.verifier_report = Some(report.clone());
+        let mut board = TaskBoard {
+            cards: vec![done],
+            owner_chat_id: Some("planner-chat".into()),
+            reviewer_chat_ids: vec!["reviewer-chat".into()],
+            ..Default::default()
+        };
+        board
+            .attest_review("T-1", "reviewer-chat", &report, "t0".into(), false)
+            .unwrap();
+        board
+            .claim_card("T-1", "agent-chat", "key", "t0".into())
+            .unwrap();
+        board
+            .record_dependency_override("T-1", "planner-chat", "verified", "t0".into())
+            .unwrap();
+        board
+            .finalize_card("T-1", "planner-chat", false, "t0".into())
+            .unwrap();
+        let (gcx, _temp) = setup_task(board).await;
+        let ccx = chat_ccx(gcx.clone(), "planner-chat").await;
+
+        ToolTaskBoardDeleteCard::new()
+            .tool_execute(
+                ccx.clone(),
+                &"delete".to_string(),
+                &HashMap::from([("card_id".to_string(), json!("T-1"))]),
+            )
+            .await
+            .expect("deleting an attested and finalized card must persist");
+
+        let deleted = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        assert_eq!(deleted.rev, 1);
+        assert!(deleted.get_card("T-1").is_none());
+        assert!(deleted.review_attestations.is_empty());
+        assert!(deleted.card_claims.is_empty());
+        assert!(deleted.dependency_overrides.is_empty());
+        assert!(deleted.card_outcomes.is_empty());
+
+        ToolTaskBoardCreateCard::new()
+            .tool_execute(
+                ccx,
+                &"create".to_string(),
+                &HashMap::from([
+                    ("card_id".to_string(), json!("T-1")),
+                    ("title".to_string(), json!("Replacement")),
+                ]),
+            )
+            .await
+            .unwrap();
+
+        let recreated = storage::load_board(gcx, "task-1").await.unwrap();
+        assert_eq!(recreated.rev, 2);
+        assert_eq!(recreated.get_card("T-1").unwrap().column, "planned");
+        assert!(!recreated.card_is_finalized("T-1"));
+        assert!(recreated.review_attestations.is_empty());
+        assert!(recreated.card_claims.is_empty());
+        assert!(recreated.dependency_overrides.is_empty());
+        assert!(recreated.card_outcomes.is_empty());
     }
 
     #[tokio::test]

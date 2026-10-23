@@ -1790,6 +1790,17 @@ impl TaskBoard {
         self.cards.iter_mut().find(|c| c.id == card_id)
     }
 
+    pub fn remove_card(&mut self, card_id: &str) -> Option<BoardCard> {
+        self.review_attestations.remove(card_id);
+        self.card_claims.remove(card_id);
+        self.dependency_overrides.remove(card_id);
+        self.card_outcomes.remove(card_id);
+        self.cards
+            .iter()
+            .position(|card| card.id == card_id)
+            .map(|index| self.cards.remove(index))
+    }
+
     pub fn get_dependency_reports(&self, card_id: &str) -> Vec<(String, String)> {
         let card = match self.get_card(card_id) {
             Some(c) => c,
@@ -2599,6 +2610,94 @@ mod tests {
             )
             .unwrap();
         board
+    }
+
+    #[test]
+    fn remove_card_prunes_metadata_before_reusing_a_finalized_id() {
+        let mut board = reviewed_board();
+        let mut other = board.get_card("T-1").unwrap().clone();
+        other.id = "T-2".into();
+        board.cards.push(other);
+        for card_id in ["T-1", "T-2"] {
+            board
+                .attest_review(
+                    card_id,
+                    "reviewer-chat",
+                    &passing_verifier_report(),
+                    now(),
+                    false,
+                )
+                .unwrap();
+            board
+                .claim_card(card_id, "agent-chat", "key", now())
+                .unwrap();
+            board
+                .record_dependency_override(card_id, "planner-chat", "verified", now())
+                .unwrap();
+            board.record_card_outcome(
+                card_id,
+                vec![requirement("summary")],
+                vec![fragment("summary", "Implemented.")],
+            );
+            board
+                .finalize_card(card_id, "planner-chat", false, now())
+                .unwrap();
+        }
+        let mut expected = serde_json::to_value(&board).unwrap();
+        expected["cards"].as_array_mut().unwrap().remove(0);
+        for map in [
+            "review_attestations",
+            "card_claims",
+            "dependency_overrides",
+            "card_outcomes",
+        ] {
+            expected[map].as_object_mut().unwrap().remove("T-1");
+        }
+        assert!(board.card_is_finalized("T-1"));
+
+        let removed = board.remove_card("T-1").unwrap();
+
+        assert_eq!(removed.id, "T-1");
+        assert_eq!(removed.column, "done");
+        assert!(removed.verifier_report.is_some());
+        assert!(board.get_card("T-1").is_none());
+        assert!(board.validate_for_write(256, 256).is_ok());
+        board
+            .cards
+            .push(card("T-1", "Replacement", "planned", vec![]));
+
+        assert!(!board.card_is_finalized("T-1"));
+        assert!(board.card_claim("T-1").is_none());
+        assert!(!board.dependency_overrides.contains_key("T-1"));
+        assert!(!board.review_attestations.contains_key("T-1"));
+        assert!(board.card_outcome("T-1").is_none());
+        expected["cards"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::to_value(board.get_card("T-1").unwrap()).unwrap());
+        assert_eq!(serde_json::to_value(&board).unwrap(), expected);
+        assert!(board.validate_for_write(256, 256).is_ok());
+        assert!(board.remove_card("missing").is_none());
+        assert_eq!(serde_json::to_value(&board).unwrap(), expected);
+    }
+
+    #[test]
+    fn remove_card_leaves_dependents_for_dependency_validation() {
+        let mut board = TaskBoard {
+            cards: vec![
+                card("T-1", "Dependency", "done", vec![]),
+                card("T-2", "Dependent", "planned", vec!["T-1"]),
+            ],
+            ..Default::default()
+        };
+
+        board.remove_card("T-1").unwrap();
+
+        assert_eq!(board.get_card("T-2").unwrap().depends_on, vec!["T-1"]);
+        assert_eq!(
+            board.validate_for_write(256, 256),
+            Err("Card T-2 dependency T-1 does not exist".into())
+        );
     }
 
     fn fragment(name: &str, content: &str) -> OutcomeFragment {

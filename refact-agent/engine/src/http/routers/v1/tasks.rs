@@ -583,22 +583,17 @@ pub async fn handle_patch_board(
                 card.final_report_structured = None;
             }
             BoardPatch::DeleteCard { card_id, force } => {
-                match board.cards.iter().position(|c| c.id == card_id) {
-                    None => return Err("card not found".to_string()),
-                    Some(idx) => {
-                        let is_active = {
-                            let card = &board.cards[idx];
-                            card.column == "doing"
-                                || card.agent_chat_id.is_some()
-                                || card.agent_worktree.is_some()
-                                || card.agent_branch.is_some()
-                        };
-                        if is_active && !force.unwrap_or(false) {
-                            return Err(format!("active agent card: {}", card_id));
-                        }
-                        board.cards.remove(idx);
-                    }
+                let card = board
+                    .get_card(&card_id)
+                    .ok_or_else(|| "card not found".to_string())?;
+                let is_active = card.column == "doing"
+                    || card.agent_chat_id.is_some()
+                    || card.agent_worktree.is_some()
+                    || card.agent_branch.is_some();
+                if is_active && !force.unwrap_or(false) {
+                    return Err(format!("active agent card: {}", card_id));
                 }
+                board.remove_card(&card_id);
             }
         }
 
@@ -2035,6 +2030,91 @@ mod tests {
 
         assert_eq!(comment.id.len(), 36);
         assert!(Uuid::parse_str(&comment.id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_attested_card_prunes_metadata_before_reusing_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let task_id = "task-del-attested";
+        let gcx = setup_task(temp.path(), task_id).await;
+        let _ = handle_patch_board(
+            State(app(gcx.clone())),
+            Path(task_id.to_string()),
+            Json(create_card_request(0, "card-a")),
+        )
+        .await
+        .unwrap();
+        let (reviewed, ()) = storage::update_board_atomic(gcx.clone(), task_id, |board| {
+            let report = crate::tasks::types::VerifierReport {
+                passed: true,
+                ..Default::default()
+            };
+            board.owner_chat_id = Some("planner-chat".into());
+            board.reviewer_chat_ids = vec!["reviewer-chat".into()];
+            let card = board.get_card_mut("card-a").unwrap();
+            card.column = "done".into();
+            card.verifier_report = Some(report.clone());
+            board.attest_review("card-a", "reviewer-chat", &report, "t0".into(), false)?;
+            board
+                .claim_card("card-a", "agent-chat", "key", "t0".into())
+                .unwrap();
+            board
+                .record_dependency_override("card-a", "planner-chat", "verified", "t0".into())
+                .unwrap();
+            board
+                .finalize_card("card-a", "planner-chat", false, "t0".into())
+                .unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let Json(deleted) = handle_patch_board(
+            State(app(gcx.clone())),
+            Path(task_id.to_string()),
+            Json(UpdateBoardRequest {
+                rev: reviewed.rev,
+                patch: BoardPatch::DeleteCard {
+                    card_id: "card-a".into(),
+                    force: None,
+                },
+            }),
+        )
+        .await
+        .expect("deleting an attested and finalized card must persist");
+
+        assert_eq!(deleted.rev, reviewed.rev + 1);
+        assert!(deleted.get_card("card-a").is_none());
+        assert!(deleted.review_attestations.is_empty());
+        assert!(deleted.card_claims.is_empty());
+        assert!(deleted.dependency_overrides.is_empty());
+        assert!(deleted.card_outcomes.is_empty());
+        let persisted = storage::load_board(gcx.clone(), task_id).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&persisted).unwrap(),
+            serde_json::to_value(&deleted).unwrap()
+        );
+
+        let Json(recreated) = handle_patch_board(
+            State(app(gcx.clone())),
+            Path(task_id.to_string()),
+            Json(create_card_request(deleted.rev, "card-a")),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(recreated.rev, deleted.rev + 1);
+        assert_eq!(recreated.get_card("card-a").unwrap().column, "planned");
+        assert!(!recreated.card_is_finalized("card-a"));
+        assert!(recreated.review_attestations.is_empty());
+        assert!(recreated.card_claims.is_empty());
+        assert!(recreated.dependency_overrides.is_empty());
+        assert!(recreated.card_outcomes.is_empty());
+        let persisted = storage::load_board(gcx, task_id).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&persisted).unwrap(),
+            serde_json::to_value(&recreated).unwrap()
+        );
     }
 
     #[tokio::test]
