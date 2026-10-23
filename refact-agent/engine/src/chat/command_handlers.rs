@@ -293,8 +293,12 @@ async fn handle_update_goal(context: &QueueCommandContext, note: String) -> Queu
     let policy = crate::chat::verify_cmd::VerifyCommandPolicy::load(app.gcx.clone()).await;
     let result = {
         let mut session = session_arc.lock().await;
-        crate::chat::evidence::validate_session_goal_verify_commands(&session, &policy)
-            .and_then(|()| handle_update_goal_command(&mut session, note))
+        handle_update_goal_command(&mut session, note).map(|result| {
+            for advisory in crate::chat::evidence::unverifiable_goal_criteria(&session, &policy) {
+                tracing::info!(chat_id = %session.chat_id, %advisory, "UpdateGoal appended with advisory");
+            }
+            result
+        })
     };
     match result {
         Ok(_) => {

@@ -529,9 +529,6 @@ pub async fn handle_v1_chat_command(
                     policy,
                 )
             }
-            ChatCommand::UpdateGoal { .. } => {
-                super::evidence::validate_session_goal_verify_commands(&session, policy)
-            }
             _ => Ok(()),
         };
         if let Err(error) = validation {
@@ -855,6 +852,14 @@ pub async fn handle_v1_chat_command(
             .unwrap());
     }
 
+    let goal_advisory = if matches!(&request.command, ChatCommand::UpdateGoal { .. }) {
+        goal_policy
+            .as_ref()
+            .map(|policy| super::evidence::unverifiable_goal_criteria(&session, policy))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let client_request_id_for_ack = request.client_request_id.clone();
     let enqueue_outcome = session.enqueue_accepted_command(request);
     if enqueue_outcome == EnqueueCommandOutcome::Rejected {
@@ -877,6 +882,9 @@ pub async fn handle_v1_chat_command(
             .unwrap());
     }
 
+    for advisory in goal_advisory {
+        tracing::info!(%chat_id, %advisory, "UpdateGoal accepted with advisory");
+    }
     session.remember_accepted_request(&client_request_id_for_ack);
     session.emit(ChatEvent::Ack {
         client_request_id: client_request_id_for_ack,

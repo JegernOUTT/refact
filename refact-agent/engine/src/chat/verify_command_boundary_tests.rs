@@ -4,10 +4,11 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
+use tracing::instrument::WithSubscriber;
 
 use super::evidence::{
-    validate_goal_verify_commands, EvidenceDefaults, SpecAuthority, VerificationSpec,
-    EVIDENCE_POLICY_AUTHORITY,
+    unverifiable_goal_criteria, validate_goal_verify_commands, EvidenceDefaults, SpecAuthority,
+    VerificationSpec, EVIDENCE_POLICY_AUTHORITY,
 };
 use super::types::{ChatCommand, ChatSession, CommandRequest, GoalBudget, GoalCriterion};
 use super::verify_cmd::{VerifyCommandPolicy, VERIFY_COMMAND_DESCRIPTION};
@@ -252,13 +253,13 @@ async fn subagent_goal_with_unacceptable_verify_command_is_refused_before_spawn(
 }
 
 #[tokio::test]
-async fn update_goal_validates_queued_criteria_before_appending_a_delta() {
+async fn update_goal_appends_the_note_and_warns_about_an_unverifiable_criterion() {
     let (_dir, app, ccx, session) = context().await;
     let mut goal =
         super::internal_roles::goal("agent", 1, "Ship", None, true, GoalBudget::default());
-    goal.extra.get_mut("goal").unwrap()["criteria"] = json!([criterion("git log | grep paths")]);
+    goal.extra.get_mut("goal").unwrap()["criteria"] = json!([criterion("git log -1 | grep x")]);
     session.lock().await.queue_post_tool_side_effect(goal);
-    let error = tool(&app, "update_goal")
+    let (_, result) = tool(&app, "update_goal")
         .await
         .tool_execute(
             ccx,
@@ -266,35 +267,142 @@ async fn update_goal_validates_queued_criteria_before_appending_a_delta() {
             &HashMap::from([("note".into(), json!("Update"))]),
         )
         .await
-        .unwrap_err();
-    assert!(error.contains("shell operators"), "{error}");
+        .expect("an installed criterion must not prevent a progress note");
+    let crate::call_validation::ContextEnum::ChatMessage(result) = &result[0] else {
+        panic!("expected tool result");
+    };
+    let text = result.content.content_text_only();
+    let (result, advisory) = text.split_once("\n\nAdvisory:\n").unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(result).unwrap(),
+        json!({"seq":1,"truncated":false})
+    );
+    assert!(
+        advisory.contains("criterion `C1` verify_command can never run:"),
+        "{advisory}"
+    );
+    assert!(advisory.contains("shell operators"), "{advisory}");
     let session = session.lock().await;
     assert_eq!(session.post_tool_side_effects.len(), 1);
-    assert!(session.pending_deliveries.is_empty());
+    let projection = session.try_accepted_control_projection().unwrap();
+    let deltas: Vec<_> = projection
+        .messages
+        .iter()
+        .filter(|message| {
+            message
+                .extra
+                .get("event")
+                .is_some_and(|event| event["subkind"] == "goal_delta")
+        })
+        .collect();
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].content.content_text_only(), "Update");
+    assert_eq!(deltas[0].extra["event"]["payload"]["seq"], 1);
+    let goal =
+        super::goal_snapshot_from_messages(&projection.messages, projection.goal.as_ref()).unwrap();
+    assert_eq!(goal.criteria, vec![criterion("git log -1 | grep x")]);
     assert!(session.messages.is_empty());
 }
 
 #[tokio::test]
-async fn http_goal_commands_refuse_unacceptable_criteria_before_enqueue() {
+async fn update_goal_without_criteria_problems_has_no_advisory() {
+    for criteria in [vec![], vec![criterion("git status --short")]] {
+        let (_dir, app, ccx, session) = context().await;
+        session.lock().await.install_goal_with_criteria(
+            "agent",
+            "Ship",
+            true,
+            GoalBudget::default(),
+            criteria,
+        );
+        let (_, result) = tool(&app, "update_goal")
+            .await
+            .tool_execute(
+                ccx.clone(),
+                &"call".into(),
+                &HashMap::from([("note".into(), json!("Update"))]),
+            )
+            .await
+            .unwrap();
+        let crate::call_validation::ContextEnum::ChatMessage(result) = &result[0] else {
+            panic!("expected tool result");
+        };
+        let text = result.content.content_text_only();
+        let value: Value =
+            serde_json::from_str(&text).expect("clean result stays JSON without advisory");
+        assert_eq!(value["seq"], 1);
+        assert_eq!(value["truncated"], false);
+        assert!(!text.contains("Advisory"), "{text}");
+    }
+}
+
+#[test]
+fn goal_advisory_lists_every_refused_criterion_under_current_policy() {
+    let mut session = ChatSession::new("legacy-goal".into());
+    let mut denied = criterion("git status");
+    denied.id = "C2".into();
+    let mut allowed = criterion("rg --files");
+    allowed.id = "C3".into();
+    let prose = GoalCriterion {
+        id: "C4".into(),
+        text: "Judge this".into(),
+        ..Default::default()
+    };
+    session.install_goal_with_criteria(
+        "agent",
+        "Ship",
+        true,
+        GoalBudget::default(),
+        vec![criterion("git log -1 | grep x"), denied, allowed, prose],
+    );
+    let policy =
+        VerifyCommandPolicy::from_shell_policy(&crate::tools::shell_gate::ShellGatePolicy {
+            deny: vec!["git *".into()],
+            ..Default::default()
+        });
+    let advisory = unverifiable_goal_criteria(&session, &policy);
+    assert_eq!(advisory.len(), 2, "{advisory:?}");
+    assert!(advisory[0].starts_with("criterion `C1` verify_command can never run:"));
+    assert!(advisory[0].contains("shell operators"));
+    assert!(advisory[1]
+        .starts_with("criterion `C2` verify_command can never run: Denied by shell policy"));
+}
+
+#[tokio::test]
+async fn http_update_goal_with_an_unverifiable_criterion_is_not_a_bad_request() {
     let (_dir, app, _ccx, session) = context().await;
+    let log_file = tempfile::NamedTempFile::new_in(_dir.path()).unwrap();
+    let writer = log_file.reopen().unwrap();
+    let subscriber = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(move || writer.try_clone().unwrap())
+            .finish(),
+    );
     for command in [
         ChatCommand::SetGoal {
             content: "Ship".into(),
             budget: None,
-            criteria: Some(vec![criterion("git log | grep paths")]),
+            criteria: Some(vec![criterion("git log -1 | grep x")]),
         },
         ChatCommand::UpdateGoal {
             note: "Update".into(),
         },
     ] {
-        if matches!(command, ChatCommand::UpdateGoal { .. }) {
-            session.lock().await.install_goal_with_criteria(
+        let update = matches!(command, ChatCommand::UpdateGoal { .. });
+        if update {
+            let mut session = session.lock().await;
+            session.install_goal_with_criteria(
                 "agent",
                 "Ship",
                 true,
                 GoalBudget::default(),
-                vec![criterion("git log | grep paths")],
+                vec![criterion("git log -1 | grep x")],
             );
+            session
+                .queue_processor_running
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         let before = session.lock().await.messages.clone();
         let request = CommandRequest {
@@ -309,20 +417,104 @@ async fn http_goal_commands_refuse_unacceptable_criteria_before_enqueue() {
             Path("verify-boundary".into()),
             serde_json::to_vec(&request).unwrap().into(),
         )
+        .with_subscriber(subscriber.clone())
         .await
         .unwrap();
-        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.status(),
+            if update {
+                axum::http::StatusCode::ACCEPTED
+            } else {
+                axum::http::StatusCode::BAD_REQUEST
+            }
+        );
         let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
         let body: Value = serde_json::from_slice(&body).unwrap();
-        assert!(body.to_string().contains("shell operators"), "{body}");
+        if update {
+            assert_eq!(body, json!({"status":"accepted"}));
+        } else {
+            assert!(body.to_string().contains("shell operators"), "{body}");
+        }
         let session = session.lock().await;
         assert_eq!(
             serde_json::to_value(&session.messages).unwrap(),
             serde_json::to_value(before).unwrap()
         );
-        assert!(session.command_queue.is_empty());
+        assert_eq!(session.command_queue.len(), usize::from(update));
         assert!(session.pending_deliveries.is_empty());
     }
+    let processor_running = session.lock().await.queue_processor_running.clone();
+    let processor = tokio::spawn(
+        super::process_command_queue(app, session.clone(), processor_running)
+            .with_subscriber(subscriber),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let mut session = session.lock().await;
+            if session.messages.iter().any(|message| {
+                message
+                    .extra
+                    .get("event")
+                    .is_some_and(|event| event["subkind"] == "goal_delta")
+            }) {
+                session.closed = true;
+                session.queue_notify.notify_one();
+                break;
+            }
+            drop(session);
+            tokio::task::yield_now().await;
+        }
+        processor.await.unwrap();
+    })
+    .await
+    .expect("queued UpdateGoal must append the note despite installed criteria");
+    let session = session.lock().await;
+    let deltas: Vec<_> = session
+        .messages
+        .iter()
+        .filter(|message| {
+            message
+                .extra
+                .get("event")
+                .is_some_and(|event| event["subkind"] == "goal_delta")
+        })
+        .collect();
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].content.content_text_only(), "Update");
+    assert_eq!(
+        session.goal.as_ref().unwrap().criteria,
+        vec![criterion("git log -1 | grep x")]
+    );
+    assert!(session.command_queue.is_empty());
+    let logs = std::fs::read_to_string(log_file.path()).unwrap();
+    for source in [
+        "UpdateGoal accepted with advisory",
+        "UpdateGoal appended with advisory",
+    ] {
+        let advisory = logs
+            .lines()
+            .find(|line| line.contains(source))
+            .expect(source);
+        assert!(
+            advisory.contains("criterion `C1` verify_command can never run:"),
+            "{advisory}"
+        );
+        assert!(advisory.contains("shell operators"), "{advisory}");
+    }
+}
+
+#[test]
+fn goal_advisory_tolerates_an_unreadable_projection() {
+    let mut session = ChatSession::new("invalid-projection".into());
+    let mut invalid =
+        crate::call_validation::ChatMessage::new("compression_report".into(), "broken".into());
+    invalid.extra.insert(
+        "compression_report".into(),
+        json!({"kind":"reconstructed_history", "schema_version":999}),
+    );
+    session.messages.push(invalid);
+    assert!(session.try_accepted_control_projection().is_err());
+    assert!(unverifiable_goal_criteria(&session, &VerifyCommandPolicy::permissive()).is_empty());
 }
 
 #[tokio::test]

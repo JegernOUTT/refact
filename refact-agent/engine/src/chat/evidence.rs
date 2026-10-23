@@ -878,17 +878,34 @@ fn explain_completion(gates: &GateOutcome, decision: &CompletionDecision) {
     explain(Explanation::new(kind, outcome, rule, inputs));
 }
 
-pub(crate) fn validate_session_goal_verify_commands(
+pub(crate) fn unverifiable_goal_criteria(
     session: &crate::chat::types::ChatSession,
     policy: &VerifyCommandPolicy,
-) -> Result<(), String> {
-    let projection = session.try_accepted_control_projection()?;
-    if let Some(goal) =
+) -> Vec<String> {
+    let projection = match session.try_accepted_control_projection() {
+        Ok(projection) => projection,
+        Err(error) => {
+            tracing::warn!(chat_id = %session.chat_id, %error, "Cannot inspect goal criteria for advisory");
+            return Vec::new();
+        }
+    };
+    let Some(goal) =
         crate::chat::goal_snapshot_from_messages(&projection.messages, projection.goal.as_ref())
-    {
-        validate_goal_verify_commands(&goal.criteria, policy)?;
-    }
-    Ok(())
+    else {
+        return Vec::new();
+    };
+    let defaults = EvidenceDefaults::from_settings();
+    goal.criteria
+        .iter()
+        .filter_map(|criterion| {
+            goal_criterion_command_rejection(criterion, policy, &defaults).map(|rejection| {
+                format!(
+                    "criterion `{}` verify_command can never run: {}",
+                    criterion.id, rejection.reason
+                )
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn validate_goal_verify_commands(
@@ -897,26 +914,32 @@ pub(crate) fn validate_goal_verify_commands(
 ) -> Result<(), String> {
     let defaults = EvidenceDefaults::from_settings();
     for criterion in criteria {
-        let Some(command) = &criterion.verify_command else {
-            continue;
-        };
-        VerificationSpec::propose(
-            format!("criterion:{}", criterion.id),
-            command,
-            SpecAuthority::AgentProposal {
-                agent: "goal author".to_string(),
-            },
-            &defaults,
-        )
-        .accept(policy, EVIDENCE_POLICY_AUTHORITY)
-        .map_err(|rejection| {
-            format!(
+        if let Some(rejection) = goal_criterion_command_rejection(criterion, policy, &defaults) {
+            return Err(format!(
                 "criterion `{}` verify_command: {}",
                 criterion.id, rejection.reason
-            )
-        })?;
+            ));
+        }
     }
     Ok(())
+}
+
+fn goal_criterion_command_rejection(
+    criterion: &GoalCriterion,
+    policy: &VerifyCommandPolicy,
+    defaults: &EvidenceDefaults,
+) -> Option<SpecRejection> {
+    let command = criterion.verify_command.as_ref()?;
+    VerificationSpec::propose(
+        format!("criterion:{}", criterion.id),
+        command,
+        SpecAuthority::AgentProposal {
+            agent: "goal author".to_string(),
+        },
+        defaults,
+    )
+    .accept(policy, EVIDENCE_POLICY_AUTHORITY)
+    .err()
 }
 
 /// Specs the goal's criteria carry. `verify_hint` is prose for the judge and is

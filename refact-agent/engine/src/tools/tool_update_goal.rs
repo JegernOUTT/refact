@@ -63,12 +63,11 @@ impl Tool for ToolUpdateGoal {
         }
         .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
 
-        let (seq, result_truncation) = {
+        let (seq, result_truncation, advisory) = {
             let mut session = session_arc.lock().await;
             if !has_base_goal_including_queued(&session)? {
                 return Err("no goal to update; call set_goal first".to_string());
             }
-            crate::chat::evidence::validate_session_goal_verify_commands(&session, &policy)?;
             let seq = goal_delta_count_including_queued(&session)? + 1;
             let (delta, result_truncation) = internal_roles::goal_delta_with_truncation(
                 "tool.update_goal",
@@ -79,16 +78,19 @@ impl Tool for ToolUpdateGoal {
             let mut delivery = PendingDelivery::new(messages, push, "tool.update_goal", false);
             delivery.after_tool_call_id = Some(tool_call_id.clone());
             session.enqueue_delivery(delivery)?;
-            (seq, result_truncation)
+            let advisory = crate::chat::evidence::unverifiable_goal_criteria(&session, &policy);
+            (seq, result_truncation, advisory)
         };
+        let mut result = update_goal_tool_result(seq, result_truncation).to_string();
+        if !advisory.is_empty() {
+            result.push_str(&format!("\n\nAdvisory:\n- {}", advisory.join("\n- ")));
+        }
 
         Ok((
             false,
             vec![ContextEnum::ChatMessage(ChatMessage {
                 role: "tool".to_string(),
-                content: ChatContent::SimpleText(
-                    update_goal_tool_result(seq, result_truncation).to_string(),
-                ),
+                content: ChatContent::SimpleText(result),
                 tool_call_id: tool_call_id.clone(),
                 ..Default::default()
             })],
