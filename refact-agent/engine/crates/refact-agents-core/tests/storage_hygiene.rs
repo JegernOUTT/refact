@@ -227,6 +227,9 @@ async fn persisted_records_keep_history_fields() {
             result_summary: None,
             error: Some("first run stopped".into()),
             finished_at: Some(now - TimeDelta::days(2)),
+            worktree_id: None,
+            worktree_branch: None,
+            merge_status: None,
         },
         AgentRunOutcome {
             run_generation: 2,
@@ -235,6 +238,9 @@ async fn persisted_records_keep_history_fields() {
             result_summary: Some("second run completed".into()),
             error: None,
             finished_at: Some(now - TimeDelta::days(1)),
+            worktree_id: None,
+            worktree_branch: None,
+            merge_status: None,
         },
     ];
 
