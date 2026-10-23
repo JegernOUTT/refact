@@ -23,6 +23,8 @@ mod merge_agent_legacy_conflict_tests;
 #[cfg(test)]
 mod merge_agent_target_checkout_tests;
 #[cfg(test)]
+mod restart_capture_followup_tests;
+#[cfg(test)]
 mod restart_fresh_diff_tests;
 pub mod subagent_phases;
 pub(crate) mod task_tool_helpers;

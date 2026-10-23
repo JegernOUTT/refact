@@ -117,8 +117,9 @@ async fn fresh_restart_diff_report(
 async fn restore_card_after_restart_failure(
     gcx: Arc<GlobalContext>,
     task_id: &str,
-    original_card: BoardCard,
+    mut original_card: BoardCard,
     guard_chat_id: String,
+    status_update: Option<String>,
 ) {
     let stats_gcx = gcx.clone();
     let _ = storage::update_board_atomic(gcx, task_id, move |board| {
@@ -126,6 +127,12 @@ async fn restore_card_after_restart_failure(
             .get_card(&original_card.id)
             .is_some_and(|card| card.column == "doing")
         {
+            if let Some(message) = status_update {
+                original_card.status_updates.push(StatusUpdate {
+                    timestamp: Utc::now().to_rfc3339(),
+                    message,
+                });
+            }
             restore_original_card_if_current_agent(board, &original_card, &guard_chat_id);
         }
         Ok(())
@@ -519,6 +526,7 @@ impl Tool for ToolTaskRestartAgent {
                         &task_id,
                         original.clone(),
                         agent_chat_id.clone(),
+                        None,
                     )
                     .await;
                     return Err("restart caller cancelled during claim".into());
@@ -662,11 +670,15 @@ impl ToolTaskRestartAgent {
         let diff_report = match fresh_restart_diff_report(&original_card, force).await {
             Ok(report) => report,
             Err(error) => {
+                tracing::warn!(card_id, reason = %error, "Fresh restart refused after it was queued");
                 restore_card_after_restart_failure(
                     gcx.clone(),
                     task_id,
                     original_card,
                     agent_chat_id.to_string(),
+                    Some(format!(
+                        "Fresh restart refused after it was queued: {error}; retry with force=true to restart without the capture"
+                    )),
                 )
                 .await;
                 return Err(error);
@@ -768,6 +780,7 @@ impl ToolTaskRestartAgent {
                 task_id,
                 original_card,
                 agent_chat_id.to_string(),
+                None,
             )
             .await;
             return Err(e);
@@ -857,6 +870,7 @@ impl ToolTaskRestartAgent {
                 task_id,
                 original_card,
                 agent_chat_id.to_string(),
+                None,
             )
             .await;
             return Err(e);
@@ -1214,6 +1228,7 @@ mod tests {
                             "task-1",
                             old,
                             task_id.clone(),
+                            None,
                         )
                         .await;
                     }

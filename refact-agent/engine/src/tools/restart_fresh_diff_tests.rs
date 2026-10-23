@@ -18,7 +18,7 @@ use crate::tools::tool_task_restart_agent::ToolTaskRestartAgent;
 use crate::tools::tool_task_spawn_agent::{prepare_agent_worktree, PreparedWorktree};
 use crate::tools::tools_description::Tool;
 
-fn git(root: &Path, args: &[&str]) -> String {
+pub(crate) fn git(root: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
         .current_dir(root)
@@ -32,18 +32,18 @@ fn git(root: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-struct Fixture {
+pub(crate) struct Fixture {
     _temp: tempfile::TempDir,
-    gcx: Arc<GlobalContext>,
-    source: PathBuf,
-    app: AppState,
+    pub(crate) gcx: Arc<GlobalContext>,
+    pub(crate) source: PathBuf,
+    pub(crate) app: AppState,
     ccx: Arc<Mutex<AtCommandsContext>>,
-    facade: Arc<RecordingFacade>,
-    old: PreparedWorktree,
+    pub(crate) facade: Arc<RecordingFacade>,
+    pub(crate) old: PreparedWorktree,
 }
 
 impl Fixture {
-    async fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         let (gcx, temp, source) = setup_repo_task().await;
         let meta = storage::load_task_meta(gcx.clone(), "task-1")
             .await
@@ -124,7 +124,7 @@ impl Fixture {
         }
     }
 
-    async fn restart(&self, mode: &str, force: bool) -> Result<String, String> {
+    pub(crate) async fn restart(&self, mode: &str, force: bool) -> Result<String, String> {
         let (_, output) = ToolTaskRestartAgent::new()
             .tool_execute(
                 self.ccx.clone(),

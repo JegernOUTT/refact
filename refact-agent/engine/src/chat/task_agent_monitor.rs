@@ -1707,6 +1707,7 @@ pub(crate) async fn capture_failed_agent_diff(
     base_branch: Option<&str>,
 ) -> Result<String, String> {
     let worktree = agent_worktree.to_string();
+    let branch_only = base_commit.is_none();
     let base = base_commit
         .or(base_branch)
         .ok_or("Cannot capture diff: card has no recorded base commit or branch")?
@@ -1714,14 +1715,37 @@ pub(crate) async fn capture_failed_agent_diff(
     tokio::task::spawn_blocking(move || {
         let repo = git2::Repository::open(&worktree)
             .map_err(|error| format!("Cannot open worktree '{worktree}': {error}"))?;
-        let base_tree = repo
+        let base_object = repo
             .revparse_single(&base)
-            .and_then(|object| object.peel_to_tree())
             .map_err(|error| format!("Cannot resolve card base '{base}': {error}"))?;
-        let head_tree = repo
+        let mut base_tree = base_object
+            .peel_to_tree()
+            .map_err(|error| format!("Cannot resolve card base '{base}': {error}"))?;
+        let head = repo
             .head()
-            .and_then(|head| head.peel_to_tree())
+            .and_then(|head| head.peel_to_commit())
             .map_err(|error| format!("Cannot resolve worktree HEAD: {error}"))?;
+        let head_tree = head
+            .tree()
+            .map_err(|error| format!("Cannot resolve worktree HEAD: {error}"))?;
+        let mut base_note = String::new();
+        if branch_only {
+            let base_tip = base_object
+                .peel_to_commit()
+                .map_err(|error| format!("Cannot resolve card base '{base}': {error}"))?;
+            match repo.merge_base(base_tip.id(), head.id()) {
+                Ok(merge_base) => {
+                    base_tree = repo
+                        .find_commit(merge_base)
+                        .and_then(|commit| commit.tree())
+                        .map_err(|error| format!("Cannot resolve card merge base: {error}"))?;
+                }
+                Err(error) if error.code() == git2::ErrorCode::NotFound => {
+                    base_note = format!("base: {base} tip (no merge base found)\n\n");
+                }
+                Err(error) => return Err(format!("Cannot find card merge base: {error}")),
+            }
+        }
         let committed = repo
             .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)
             .map_err(|error| format!("Cannot capture committed diff: {error}"))?;
@@ -1771,10 +1795,15 @@ pub(crate) async fn capture_failed_agent_diff(
                 report.push_str("\n```\n");
             }
         }
-        if report.is_empty() {
+        if report.is_empty() && base_note.is_empty() {
             Ok("\n\nNo changes in previous worktree.".to_string())
         } else {
-            Ok(format!("\n\n## Changes made before failure\n\n{report}"))
+            if report.is_empty() {
+                report.push_str("No changes in previous worktree.");
+            }
+            Ok(format!(
+                "\n\n## Changes made before failure\n\n{base_note}{report}"
+            ))
         }
     })
     .await
