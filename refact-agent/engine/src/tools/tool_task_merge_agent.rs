@@ -1837,61 +1837,55 @@ async fn run_legacy_git_merge(commit: LegacyMergeCommit) -> Result<LegacyMergeGi
         )
     };
     if let Err(error) = merge_result {
-        let status = run_git_in(&state.workspace_root, &["status", "--porcelain"])
-            .await
-            .unwrap_or_default();
-        if status.lines().any(is_merge_conflict_line) {
-            let conflict_files: Vec<String> = status
-                .lines()
-                .filter(|line| is_merge_conflict_line(line))
-                .filter_map(|line| line.get(3..).map(|file| file.to_string()))
-                .collect();
-            let conflict_msg = format!(
-                r#"# Merge Conflicts Detected
-
-**Card:** {}
-**Branch:** {} → {}
-**Strategy:** {}
-
-## Conflicting Files
-{}
-
-## Current State
-The merge is **in progress** with conflict markers in the files above.
-
-## How to Resolve
-
-### Option 1: Resolve manually
-1. Open each conflicting file
-2. Look for conflict markers: `<<<<<<<`, `=======`, `>>>>>>>`
-3. Edit to keep the correct code (remove markers)
-4. Stage resolved files: `git add <file>`
-5. Complete merge: `git commit -m "Resolved conflicts from {}"`
-
-### Option 2: Accept one side entirely
-- Keep base branch version: `git checkout --ours <file>`
-- Keep agent branch version: `git checkout --theirs <file>`
-- Then: `git add <file>` and `git commit`
-
-### Option 3: Abort and retry
-```
-git merge --abort
-```
-Then investigate why conflicts occurred and create a fix card.
-
-## Conflict Details
-Use `cat <file>` to see conflict markers in each file."#,
-                state.request.card_id,
-                agent_branch,
-                state.base_branch,
-                state.request.strategy,
-                conflict_files
-                    .iter()
-                    .map(|file| format!("- {}", file))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                agent_branch
-            );
+        let conflict_files = crate::worktrees::git::conflict_files_for_path(&state.workspace_root);
+        if !conflict_files.is_empty() {
+            let cleanup_args: &[&str] = if state.request.strategy == "squash" {
+                &["reset", "--merge", "HEAD"]
+            } else {
+                &["merge", "--abort"]
+            };
+            let cleanup_result = run_git_in(&state.workspace_root, cleanup_args)
+                .await
+                .and_then(|_| {
+                    crate::worktrees::git::ensure_clean_worktree(
+                        &state.workspace_root,
+                        "Merge target after conflict cleanup",
+                    )
+                });
+            let aborted = cleanup_result.is_ok();
+            let response = MergeWorktreeResponse {
+                id: String::new(),
+                status: "conflict".to_string(),
+                merged: false,
+                strategy: state.request.strategy.clone(),
+                source_branch: agent_branch.clone(),
+                target_branch: state.base_branch.clone(),
+                committed_uncommitted: None,
+                merge_commit: None,
+                cleanup: None,
+                conflict: Some(crate::worktrees::types::WorktreeConflictState {
+                    files: conflict_files,
+                    aborted,
+                    merge_in_progress: crate::worktrees::git::has_merge_in_progress(
+                        &state.workspace_root,
+                    ),
+                    instructions: if aborted {
+                        "The merge was aborted and cleaned up; no conflict markers were left behind. Merge the source branch changes against the target branch yourself, then retry."
+                    } else {
+                        "Conflict cleanup failed. Inspect the target workspace and warnings before retrying."
+                    }
+                    .to_string(),
+                }),
+                dirty_baseline: None,
+                affected_references: Vec::new(),
+                affected_reference_count: 0,
+                warnings: cleanup_result
+                    .err()
+                    .map(|error| format!("Failed to clean up merge conflicts: {}", error))
+                    .into_iter()
+                    .collect(),
+            };
+            let conflict_msg = merge_response_message(&state.request.card_id, &response, None);
             return Ok(LegacyMergeGitResult {
                 commit,
                 squash_nothing_to_commit: true,
