@@ -14,6 +14,5 @@ rust-embed.workspace = true
 md5.workspace = true
 dunce.workspace = true
 tracing.workspace = true
-
-[dev-dependencies]
+chrono.workspace = true
 tempfile.workspace = true

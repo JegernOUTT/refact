@@ -4241,6 +4241,7 @@ dependencies = [
 name = "refact-yaml-configs"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "dunce",
  "md5",
  "refact-core",

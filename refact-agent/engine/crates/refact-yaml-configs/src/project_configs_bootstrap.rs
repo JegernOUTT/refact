@@ -1,7 +1,9 @@
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use tokio::fs;
 use tracing::{info, warn};
 
@@ -26,12 +28,19 @@ struct DefaultConfigs;
 
 #[derive(Deserialize)]
 struct SchemaVersionOnly {
-    #[serde(default = "default_schema_version")]
     schema_version: u32,
 }
 
-fn default_schema_version() -> u32 {
-    1
+fn is_known_shipped_checksum(checksum_key: &str, checksum: &str) -> bool {
+    static SHIPPED_DEFAULTS: OnceLock<HashMap<String, Vec<(u32, String)>>> = OnceLock::new();
+    SHIPPED_DEFAULTS
+        .get_or_init(|| {
+            serde_json::from_str(include_str!("shipped_defaults.json"))
+                .expect("embedded shipped defaults manifest must be valid")
+        })
+        .get(checksum_key)
+        .map(|entries| entries.iter().any(|(_, shipped)| shipped == checksum))
+        .unwrap_or(false)
 }
 
 pub async fn global_configs_try_create_all(config_dir: &Path) -> Result<(), String> {
@@ -201,6 +210,82 @@ fn carry_forward_baseline(
     }
 }
 
+fn sync_config_dir(_path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(_path)?.sync_all()?;
+    Ok(())
+}
+
+fn write_default_atomically(path: &Path, content: &str) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "config path has no parent",
+        )
+    })?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        temp.as_file().set_permissions(metadata.permissions())?;
+    }
+    temp.write_all(content.as_bytes())?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|e| e.error)?;
+    sync_config_dir(parent)
+}
+
+async fn upgrade_unbaselined_default(
+    path: &Path,
+    existing_content: &str,
+    content: &str,
+    known_shipped: bool,
+) -> Result<Option<PathBuf>, String> {
+    let path = path.to_path_buf();
+    let existing_content = existing_content.to_owned();
+    let content = content.to_owned();
+    tokio::task::spawn_blocking(move || -> std::io::Result<Option<PathBuf>> {
+        let backup = if known_shipped {
+            None
+        } else {
+            let mut name = path
+                .file_name()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "config path has no filename",
+                    )
+                })?
+                .to_os_string();
+            name.push(format!(
+                ".bak-{}",
+                chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+            ));
+            let backup = path.with_file_name(name);
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&backup)?;
+            file.write_all(existing_content.as_bytes())?;
+            file.sync_all()?;
+            sync_config_dir(backup.parent().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "backup path has no parent",
+                )
+            })?)?;
+            Some(backup)
+        };
+        write_default_atomically(&path, &content)?;
+        Ok(backup)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
 async fn write_default_if_unchanged(
     path: &Path,
     checksum_key: &str,
@@ -227,6 +312,30 @@ async fn write_default_if_unchanged(
             return;
         }
     };
+
+    if !existing_checksums.contains_key(checksum_key) {
+        let Ok(version) = serde_yaml::from_str::<SchemaVersionOnly>(&existing_content) else {
+            return;
+        };
+        if version.schema_version >= default_version {
+            return;
+        }
+        let known_shipped =
+            is_known_shipped_checksum(checksum_key, &compute_checksum(&existing_content));
+        match upgrade_unbaselined_default(path, &existing_content, content, known_shipped).await {
+            Ok(backup) => {
+                if let Some(backup) = backup {
+                    warn!(
+                        "Upgraded unbaselined config {:?} from v{} to v{}; backup: {:?}",
+                        path, version.schema_version, default_version, backup
+                    );
+                }
+                new_checksums.insert(checksum_key.to_string(), new_checksum);
+            }
+            Err(e) => warn!("Failed to upgrade unbaselined config {:?}: {}", path, e),
+        }
+        return;
+    }
 
     if is_effectively_empty(&existing_content) {
         info!(
@@ -356,6 +465,10 @@ pub fn get_default_checksum(kind: &str, filename: &str) -> Option<String> {
     let content = std::str::from_utf8(file.data.as_ref()).ok()?;
     Some(compute_checksum(content))
 }
+
+#[cfg(test)]
+#[path = "unbaselined_defaults_tests.rs"]
+mod unbaselined_defaults_tests;
 
 #[cfg(test)]
 mod tests {
@@ -669,7 +782,7 @@ tools:
     }
 
     #[tokio::test]
-    async fn test_bootstrap_restores_baseline_for_pristine_file_without_checksums() {
+    async fn test_bootstrap_keeps_pristine_file_without_checksums_unbaselined() {
         let temp = tempfile::tempdir().unwrap();
         let config_dir = temp.path();
         global_configs_try_create_all(config_dir).await.unwrap();
@@ -691,8 +804,8 @@ tools:
         let saved: HashMap<String, String> = serde_yaml::from_str(&checksums_content).unwrap();
         assert_eq!(
             saved.get("modes/agent.yaml"),
-            Some(&compute_checksum(&original)),
-            "pristine default must be re-recognized as baseline"
+            None,
+            "equal-version default must stay unbaselined"
         );
     }
     #[tokio::test]

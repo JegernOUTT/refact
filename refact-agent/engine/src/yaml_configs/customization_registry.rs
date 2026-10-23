@@ -691,6 +691,39 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
+    #[tokio::test]
+    async fn backup_is_not_loaded_as_a_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("modes/task_agent.yaml");
+        let old = "schema_version: 1\nid: backup_only_mode\nprompt: Local customization\n";
+        write_file(&path, old);
+
+        global_configs_try_create_all(temp.path()).await.unwrap();
+
+        let backups: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("task_agent.yaml.bak-")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(tokio::fs::read(&backups[0]).await.unwrap(), old.as_bytes());
+        let yaml_paths = collect_yaml_paths(path.parent().unwrap()).await;
+        assert!(yaml_paths.contains(&path));
+        assert!(!yaml_paths.contains(&backups[0]));
+
+        let registry = load_registry_from_dir(temp.path()).await;
+        assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+        assert!(registry.modes.contains_key("task_agent"));
+        assert!(!registry.modes.contains_key("backup_only_mode"));
+    }
+
     fn load_default_registry_for_tests() -> ProjectRegistry {
         use crate::yaml_configs::project_configs_bootstrap::global_configs_try_create_all;
 
