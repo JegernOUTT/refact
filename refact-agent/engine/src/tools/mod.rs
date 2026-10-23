@@ -12,6 +12,8 @@ pub mod tools_description;
 pub mod tools_list;
 
 #[cfg(test)]
+mod cancel_agent_discard_tests;
+#[cfg(test)]
 mod cancel_agent_stop_tests;
 pub mod design_tools;
 #[cfg(test)]

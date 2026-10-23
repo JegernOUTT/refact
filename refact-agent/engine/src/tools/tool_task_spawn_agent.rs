@@ -433,7 +433,7 @@ pub(crate) async fn scoped_worktree_gate(
 
 fn abandoned_worktrees_error(action: &str, blockers: &[String]) -> String {
     format!(
-        "Cannot {action}: unmerged task work blocks this card. Merge the blocking cards with `merge_agent(card_id=...)`, then retry:\n{}",
+        "Cannot {action}: unmerged task work blocks this card. Merge the blocking cards with `merge_agent(card_id=...)` or discard unwanted done/failed worktrees with `cancel_agent(card_id=..., discard_worktree=true)`, then retry:\n{}",
         blockers.join("\n")
     )
 }
@@ -2551,6 +2551,10 @@ mod tests {
         );
         assert!(!message.contains("git branch -D"), "{message}");
         assert!(
+            message.contains("cancel_agent(card_id=..., discard_worktree=true)"),
+            "{message}"
+        );
+        assert!(
             message.contains("T-2 (`agent-branch`): dependency"),
             "blocking cards and their reasons must be listed: {message}"
         );
@@ -2570,6 +2574,10 @@ mod tests {
                 "{message}"
             );
             assert!(!message.contains("git branch -D"), "{message}");
+            assert!(
+                message.contains("cancel_agent(card_id=..., discard_worktree=true)"),
+                "{message}"
+            );
         }
         assert!(
             spawn_ab_message.contains("Cannot spawn A/B agents"),

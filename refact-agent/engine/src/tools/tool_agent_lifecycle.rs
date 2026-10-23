@@ -668,6 +668,190 @@ fn lifecycle_source() -> ToolSource {
     }
 }
 
+fn validate_discard_card(card: &BoardCard) -> Result<(), String> {
+    if card.column == "doing" {
+        return Err(format!(
+            "Cannot discard worktree for card {}: cancel the agent first.",
+            card.id
+        ));
+    }
+    if !matches!(card.column.as_str(), "done" | "failed") {
+        return Err(format!(
+            "Cannot discard worktree for card {}: expected done or failed, found '{}'.",
+            card.id, card.column
+        ));
+    }
+    if card
+        .agent_worktree
+        .as_deref()
+        .is_none_or(|path| path.trim().is_empty())
+    {
+        return Err(format!("Card {} has no worktree to discard.", card.id));
+    }
+    Ok(())
+}
+
+fn validate_discard_snapshot(
+    card: &BoardCard,
+    snapshot: &LifecycleCardSnapshot,
+) -> Result<(), String> {
+    validate_discard_card(card)?;
+    if card.column != snapshot.column
+        || card.agent_chat_id != snapshot.agent_chat_id
+        || card.agent_worktree != snapshot.agent_worktree
+        || card.agent_worktree_name != snapshot.agent_worktree_name
+        || card.agent_branch != snapshot.agent_branch
+    {
+        return Err(format!("Card {} changed before worktree discard.", card.id));
+    }
+    Ok(())
+}
+
+async fn discard_registered_worktree(
+    planner: &PlannerContext,
+    card_id: &str,
+    args: &HashMap<String, Value>,
+) -> Result<String, String> {
+    let keep_branch = optional_bool(args, "keep_branch", true);
+    let force = optional_bool(args, "force", false);
+    let board = storage::load_board(planner.gcx.clone(), &planner.task_id).await?;
+    let card = board
+        .get_card(card_id)
+        .ok_or_else(|| format!("Card {} not found", card_id))?;
+    validate_discard_card(card)?;
+    let snapshot = LifecycleCardSnapshot::from_card(card);
+    let worktree = normalized_existing_or_lexical_path(Path::new(
+        card.agent_worktree
+            .as_deref()
+            .ok_or("Card has no worktree")?,
+    ))?;
+    let reports = stop_live_card_sessions(
+        &planner.gcx,
+        planner.chat_facade.as_ref(),
+        &planner.task_id,
+        card_id,
+    )
+    .await?;
+    for report in reports {
+        report.result.map_err(|error| {
+            format!(
+                "Cannot discard worktree: stop not confirmed for {}: {}",
+                report.chat_id, error
+            )
+        })?;
+    }
+    let project_dirs = crate::files_correction::get_project_dirs(planner.gcx.clone()).await;
+    for source_root in project_dirs {
+        let service =
+            WorktreeService::new_async(planner.gcx.cache_dir.clone(), source_root).await?;
+        let registry = service.load_registry().await?;
+        let record = registry.records.iter().find(|record| {
+            snapshot.agent_worktree_name.as_deref().map_or_else(
+                || {
+                    normalized_existing_or_lexical_path(&record.meta.root)
+                        .ok()
+                        .as_ref()
+                        == Some(&worktree)
+                },
+                |name| record.meta.id == name,
+            )
+        });
+        let Some(record) = record else { continue };
+        let view = service.get_worktree(&record.meta.id).await?;
+        if view.meta.kind != "task_agent"
+            || view.meta.task_id.as_deref() != Some(planner.task_id.as_str())
+            || view.meta.card_id.as_deref() != Some(card_id)
+            || normalized_existing_or_lexical_path(&view.meta.root)? != worktree
+            || snapshot
+                .agent_branch
+                .as_ref()
+                .is_some_and(|branch| view.meta.branch.as_ref() != Some(branch))
+        {
+            return Err(format!(
+                "Registered worktree '{}' does not match card {}.",
+                record.meta.id, card_id
+            ));
+        }
+        if !keep_branch {
+            validate_safe_branch(&planner.task_id, card_id, view.meta.branch.as_deref())?;
+        }
+        if view.status.path_exists {
+            let root = view.meta.root.clone();
+            let dirty =
+                tokio::task::spawn_blocking(move || crate::worktrees::git::dirty_baseline(&root))
+                    .await
+                    .map_err(|error| format!("Worktree status task failed: {}", error))??;
+            if !force {
+                if let Some(dirty) = dirty {
+                    let omitted = if dirty.files.len() > 20 || dirty.files_truncated {
+                        "\n(additional dirty files omitted)"
+                    } else {
+                        ""
+                    };
+                    return Err(format!(
+                        "Cannot discard dirty worktree '{}'; retry with force=true to discard uncommitted changes. Dirty files (up to 20):\n{}{}",
+                        worktree.display(), dirty.files.into_iter().take(20).collect::<Vec<_>>().join("\n"), omitted
+                    ));
+                }
+            }
+        }
+        let board = storage::load_board(planner.gcx.clone(), &planner.task_id).await?;
+        validate_discard_snapshot(
+            board
+                .get_card(card_id)
+                .ok_or("Card removed before discard")?,
+            &snapshot,
+        )?;
+        let removed = service
+            .delete_worktree(&view.meta.id, !keep_branch, true)
+            .await?;
+        if !removed.deleted {
+            return Err("Worktree removal was not confirmed; card fields retained.".into());
+        }
+        let branch_note = if keep_branch {
+            "Branch kept."
+        } else if removed.branch_deleted {
+            "Branch deleted."
+        } else {
+            "Branch deletion was not confirmed."
+        };
+        let reason =
+            optional_string(args, "reason").unwrap_or_else(|| "Discarded by planner".into());
+        let mut message = format!(
+            "Removed worktree '{}'. {} {}",
+            worktree.display(),
+            branch_note,
+            reason
+        );
+        if !removed.warnings.is_empty() {
+            message.push_str(&format!("\nWarnings: {}", removed.warnings.join("; ")));
+        }
+        storage::update_board_atomic(planner.gcx.clone(), &planner.task_id, |board| {
+            let card = board
+                .get_card_mut(card_id)
+                .ok_or("Card removed before discard update")?;
+            validate_discard_snapshot(card, &snapshot)?;
+            card.agent_worktree = None;
+            card.agent_worktree_name = None;
+            card.agent_branch = None;
+            card.status_updates.push(StatusUpdate {
+                timestamp: Utc::now().to_rfc3339(),
+                message: message.clone(),
+            });
+            Ok(())
+        })
+        .await?;
+        return Ok(format!(
+            "{} ({})\n{}\nCard column unchanged: {}.",
+            card_id, snapshot.title, message, snapshot.column
+        ));
+    }
+    Err(format!(
+        "Worktree '{}' for card {} is not registered with the worktree registry, so it cannot be discarded through cancel_agent. Restore its registry association before retrying; nothing discarded.",
+        worktree.display(), card_id
+    ))
+}
+
 fn cancel_description() -> ToolDesc {
     ToolDesc {
         name: "cancel_agent".to_string(),
@@ -675,7 +859,7 @@ fn cancel_description() -> ToolDesc {
         source: lifecycle_source(),
         experimental: false,
         allow_parallel: false,
-        description: "Planner-only tool that immediately aborts a task agent and confirms whether it stopped. Marks doing cards failed and retains the worktree by default for restart_agent; done/failed cards keep their column.".to_string(),
+        description: "Planner-only tool that immediately aborts a task agent and confirms whether it stopped. Marks doing cards failed and retains the worktree by default for restart_agent; done/failed cards keep their column. Set discard_worktree=true to remove a done/failed card's registered worktree and clear its worktree fields.".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -685,18 +869,33 @@ fn cancel_description() -> ToolDesc {
                 },
                 "reason": {
                     "type": "string",
-                    "description": "Planner-visible cancellation reason"
+                    "description": "Planner-visible cancellation reason; required unless discard_worktree=true"
                 },
                 "retain_worktree": {
                     "type": "boolean",
                     "description": "Keep the agent worktree for restart_agent. Default: true"
+                },
+                "discard_worktree": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Discard a done/failed card's registered worktree. On doing cards, cancel the agent first."
+                },
+                "keep_branch": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Keep the branch when discarding the worktree. Default: true"
+                },
+                "force": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Allow discard_worktree to destroy uncommitted changes. Default: false"
                 },
                 "task_id": {
                     "type": "string",
                     "description": "Task ID (optional if chat is bound to a task)"
                 }
             },
-            "required": ["card_id", "reason"]
+            "required": ["card_id"]
         }),
         output_schema: None,
         annotations: None,
@@ -781,6 +980,10 @@ impl Tool for ToolCancelAgent {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let planner = planner_context(&ccx, args, "cancel_agent").await?;
         let card_id = required_string(args, "card_id")?;
+        if optional_bool(args, "discard_worktree", false) {
+            let output = discard_registered_worktree(&planner, &card_id, args).await?;
+            return Ok((false, vec![tool_message(tool_call_id, output)]));
+        }
         let reason = required_string(args, "reason")?;
         let retain_worktree = optional_bool(args, "retain_worktree", true);
         let snapshot =
@@ -1541,10 +1744,7 @@ pub(crate) mod tests {
         assert!(cancel.description.contains("Planner-only"));
         assert!(pause.description.contains("Planner-only"));
         assert!(resume.description.contains("Planner-only"));
-        assert_eq!(
-            cancel.input_schema["required"],
-            json!(["card_id", "reason"])
-        );
+        assert_eq!(cancel.input_schema["required"], json!(["card_id"]));
         assert_eq!(pause.input_schema["required"], json!(["card_id", "reason"]));
         assert_eq!(resume.input_schema["required"], json!(["card_id"]));
         assert!(cancel.input_schema["properties"]
