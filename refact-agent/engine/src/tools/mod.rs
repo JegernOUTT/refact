@@ -14,6 +14,8 @@ pub mod tools_list;
 #[cfg(test)]
 mod cancel_agent_stop_tests;
 pub mod design_tools;
+#[cfg(test)]
+mod merge_agent_target_checkout_tests;
 pub mod subagent_phases;
 pub(crate) mod task_tool_helpers;
 #[cfg(test)]

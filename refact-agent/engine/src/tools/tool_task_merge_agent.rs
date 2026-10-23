@@ -28,7 +28,7 @@ fn git_merge_lock(workspace_root: &std::path::Path) -> Arc<AMutex<()>> {
     merge_lock_for(workspace_root)
 }
 
-async fn merge_under_available_lease<F, Fut>(
+pub(super) async fn merge_under_available_lease<F, Fut>(
     app: &crate::app_state::AppState,
     service: &WorktreeService,
     worktree_id: &str,
@@ -49,18 +49,57 @@ where
         Output = Result<crate::chat::post_merge_check::PostMergeCheckResult, String>,
     >,
 {
+    let target = request
+        .target_branch
+        .clone()
+        .ok_or("Merge target branch is required")?;
+    let service = service.for_merge_target(&target).await?;
     let Some(leases) = crate::coordination::leases::leases_for(app).await else {
-        return service
-            .merge_worktree(worktree_id, request)
+        let delete_requested = request.delete_after_merge;
+        let mut response = service
+            .merge_worktree(
+                worktree_id,
+                MergeWorktreeRequest {
+                    delete_after_merge: false,
+                    ..request
+                },
+            )
+            .await?;
+        let verification = if response.merged {
+            verify_merged_checkout(
+                app.gcx.clone(),
+                check,
+                post_merge_check,
+                service.merge_checkout_root().to_path_buf(),
+                response.merge_commit.clone(),
+            )
             .await
-            .map(|response| (response, None, false));
+        } else {
+            None
+        };
+        if delete_requested
+            && (response.merged || response.status == "nothing_to_merge")
+            && verification
+                .as_ref()
+                .map_or(true, |result| result.passed || result.auto_reverted)
+        {
+            let cleanup = service.delete_worktree(worktree_id, true, true).await?;
+            response.cleanup = Some(crate::worktrees::types::WorktreeRemovalResult {
+                worktree_deleted: cleanup.deleted,
+                branch_deleted: cleanup.branch_deleted,
+                registry_deleted: cleanup.deleted,
+                stale_path: cleanup.stale_path,
+                warnings: cleanup.warnings,
+            });
+        }
+        return Ok((response, verification, false));
     };
     let settings = crate::file_activity::settings();
     let gate = crate::coordination::merge_gate::MergeGate::new(leases, &settings);
     let gcx = app.gcx.clone();
     let outcome = crate::coordination::merge_gate::merge_under_lease(
         &gate,
-        service,
+        &service,
         worktree_id,
         request,
         None,
@@ -94,7 +133,7 @@ async fn verify_merged_checkout<F, Fut>(
     gcx: Arc<GlobalContext>,
     check: F,
     request: Option<crate::chat::post_merge_check::PostMergeCheckRequest>,
-    _checkout: std::path::PathBuf,
+    checkout: std::path::PathBuf,
     merge_commit: Option<String>,
 ) -> Option<crate::coordination::merge_gate::MergeVerification>
 where
@@ -111,6 +150,7 @@ where
             "merge produced no commit".to_string(),
         ));
     };
+    request.workspace_root = checkout;
     request.expected_merge_commit = merge_commit.clone();
     Some(post_merge_verification(
         check(gcx, request).await,
@@ -1373,14 +1413,65 @@ struct LegacyMergeGitResult {
     branch_deleted: bool,
 }
 
-async fn merge_legacy_task_worktree(state: MergeState) -> Result<(bool, Vec<ContextEnum>), String> {
-    let preparation = match prepare_legacy_merge(state).await? {
-        LegacyPreparationOutcome::Complete(result) => return Ok(result),
-        LegacyPreparationOutcome::Ready(preparation) => preparation,
+async fn merge_legacy_task_worktree(
+    mut state: MergeState,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    ensure_legacy_agent_worktree_checkout(
+        &state.workspace_root,
+        state
+            .card
+            .agent_worktree
+            .as_deref()
+            .ok_or("Card has no agent worktree")?,
+        state
+            .card
+            .agent_branch
+            .as_deref()
+            .ok_or("Card has no agent branch")?,
+    )?;
+    let source = state.workspace_root.clone();
+    let target = state.base_branch.clone();
+    let checkout = tokio::task::spawn_blocking(move || {
+        crate::worktrees::git::prepare_merge_checkout(&source, &target)
+    })
+    .await
+    .map_err(|error| format!("Merge target resolution failed: {error}"))??;
+    state.workspace_root = checkout.root.clone();
+    let app = crate::app_state::AppState::from_gcx(state.request.gcx.clone()).await;
+    let renewal = if let Some(leases) = crate::coordination::leases::leases_for(&app).await {
+        let gate = crate::coordination::merge_gate::MergeGate::new(
+            leases.clone(),
+            &crate::file_activity::settings(),
+        );
+        let key = crate::coordination::merge_gate::checkout_key(&state.workspace_root);
+        let slot = gate
+            .acquire(&key)
+            .await
+            .map_err(|error| error.to_string())?;
+        Some(crate::coordination::leases::LeaseRenewal::spawn(
+            leases,
+            slot.holder().clone(),
+        ))
+    } else {
+        None
     };
-    let commit = prepare_legacy_merge_commit(preparation).await?;
-    let git_result = run_legacy_git_merge(commit).await?;
-    finish_legacy_merge(git_result).await
+    let result = async {
+        let preparation = match prepare_legacy_merge(state).await? {
+            LegacyPreparationOutcome::Complete(result) => return Ok(result),
+            LegacyPreparationOutcome::Ready(preparation) => preparation,
+        };
+        let commit = prepare_legacy_merge_commit(preparation).await?;
+        let git_result = run_legacy_git_merge(commit).await?;
+        finish_legacy_merge(git_result).await
+    }
+    .await;
+    if let Some(mut renewal) = renewal {
+        renewal
+            .shutdown()
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    result
 }
 
 async fn prepare_legacy_merge(state: MergeState) -> Result<LegacyPreparationOutcome, String> {
@@ -1682,6 +1773,8 @@ async fn run_legacy_git_merge(commit: LegacyMergeCommit) -> Result<LegacyMergeGi
     let agent_worktree = &commit.preparation.agent_worktree;
     let merge_lock = git_merge_lock(&state.workspace_root);
     let _guard = merge_lock.lock().await;
+    crate::worktrees::git::validate_merge_checkout(&state.workspace_root, &state.base_branch)?;
+    crate::worktrees::git::ensure_clean_worktree(&state.workspace_root, "Merge target")?;
     run_git_in(&state.workspace_root, &["checkout", &state.base_branch])
         .await
         .map_err(|error| format!("Failed to checkout base branch: {}", error))?;

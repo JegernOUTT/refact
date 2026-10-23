@@ -319,7 +319,7 @@ where
     F: FnOnce(PathBuf, Option<String>) -> Fut,
     Fut: Future<Output = Option<MergeVerification>>,
 {
-    let checkout = checkout_key(service.source_workspace_root());
+    let checkout = checkout_key(service.merge_checkout_root());
     let slot = gate.acquire(&checkout).await?;
     let renewal = LeaseRenewal::spawn(slot.leases.clone(), slot.holder.clone());
     let waited_for_lease_ms = slot.waited_ms();
@@ -343,7 +343,7 @@ where
     let post_merge = match response.merged {
         true => {
             verify_merged_tree(
-                service.source_workspace_root().to_path_buf(),
+                service.merge_checkout_root().to_path_buf(),
                 response.merge_commit.clone(),
             )
             .await

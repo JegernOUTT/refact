@@ -53,6 +53,7 @@ pub struct WorktreeService {
     cache_dir: PathBuf,
     source_workspace_root: PathBuf,
     project_hash: String,
+    merge_checkout: Option<Arc<git::MergeCheckout>>,
 }
 
 impl WorktreeService {
@@ -83,11 +84,32 @@ impl WorktreeService {
             cache_dir,
             source_workspace_root,
             project_hash,
+            merge_checkout: None,
         }
     }
 
     pub fn source_workspace_root(&self) -> &Path {
         &self.source_workspace_root
+    }
+
+    pub fn merge_checkout_root(&self) -> &Path {
+        self.merge_checkout
+            .as_ref()
+            .map_or(self.source_workspace_root(), |checkout| &checkout.root)
+    }
+
+    pub async fn for_merge_target(&self, target: &str) -> Result<Self, String> {
+        validate_branch_name(target)?;
+        let source = self.source_workspace_root.clone();
+        let target = target.to_string();
+        let checkout =
+            tokio::task::spawn_blocking(move || git::prepare_merge_checkout(&source, &target))
+                .await
+                .map_err(|error| format!("Merge target resolution failed: {error}"))??;
+        Ok(Self {
+            merge_checkout: Some(Arc::new(checkout)),
+            ..self.clone()
+        })
     }
 
     pub fn project_hash(&self) -> &str {
@@ -625,7 +647,7 @@ impl WorktreeService {
             if let Some(target_branch) = request.target_branch.as_deref() {
                 validate_branch_name(target_branch)?;
             }
-            let merge_lock = merge_lock_for(service.source_workspace_root());
+            let merge_lock = merge_lock_for(service.merge_checkout_root());
             let _merge_guard = merge_lock.lock().await;
             let _registry_guard = registry_write_lock().lock().await;
             let registry = service.load_registry_unlocked().await?;
@@ -777,8 +799,12 @@ impl WorktreeService {
         }
         let affected_references = record.references.clone();
         let affected_reference_count = affected_references.len();
+        let target_root = self.merge_checkout_root();
+        if self.merge_checkout.is_some() {
+            git::validate_merge_checkout(target_root, &target_branch)?;
+        }
         if !request.acknowledge_dirty_baseline {
-            if let Some(baseline) = git::dirty_baseline(&record.meta.source_workspace_root)? {
+            if let Some(baseline) = git::dirty_baseline(target_root)? {
                 return Ok(MergeWorktreeResponse {
                     id: id.to_string(),
                     status: "dirty_baseline".to_string(),
@@ -802,12 +828,8 @@ impl WorktreeService {
                 });
             }
         }
-        git::ensure_no_merge_in_progress(&record.meta.source_workspace_root, "Target workspace")?;
-        git::ensure_dirty_worktree_on_branch(
-            &record.meta.source_workspace_root,
-            "Target workspace",
-            &target_branch,
-        )?;
+        git::ensure_no_merge_in_progress(target_root, "Target workspace")?;
+        git::ensure_dirty_worktree_on_branch(target_root, "Target workspace", &target_branch)?;
         let commit_message = request
             .commit_message
             .clone()
@@ -881,19 +903,12 @@ impl WorktreeService {
                 warnings: preflight_warnings,
             });
         }
-        let target_stash = git::stash_dirty_worktree(
-            &record.meta.source_workspace_root,
-            "Target workspace",
-            Some(&target_branch),
-        )?;
-        if let Err(e) = git::checkout_branch(&record.meta.source_workspace_root, &target_branch) {
+        let target_stash =
+            git::stash_dirty_worktree(target_root, "Target workspace", Some(&target_branch))?;
+        if let Err(e) = git::checkout_branch(target_root, &target_branch) {
             let mut cleanup_warnings = Vec::new();
             if let Some(stash) = target_stash.as_ref() {
-                restore_target_stash(
-                    &record.meta.source_workspace_root,
-                    stash,
-                    &mut cleanup_warnings,
-                );
+                restore_target_stash(target_root, stash, &mut cleanup_warnings);
             }
             return Err(format_merge_failure(
                 &format!("Failed to checkout target branch '{}'", target_branch),
@@ -901,16 +916,12 @@ impl WorktreeService {
                 cleanup_warnings,
             ));
         }
-        let target_pre_merge_head = match git::head_rev(&record.meta.source_workspace_root) {
+        let target_pre_merge_head = match git::head_rev(target_root) {
             Ok(head) => head,
             Err(e) => {
                 let mut cleanup_warnings = Vec::new();
                 if let Some(stash) = target_stash.as_ref() {
-                    restore_target_stash(
-                        &record.meta.source_workspace_root,
-                        stash,
-                        &mut cleanup_warnings,
-                    );
+                    restore_target_stash(target_root, stash, &mut cleanup_warnings);
                 }
                 return Err(format_merge_failure(
                     "Failed to read target workspace HEAD after checkout",
@@ -920,13 +931,10 @@ impl WorktreeService {
             }
         };
         let merge_result = if request.strategy.as_str() == "squash" {
-            git::run_git(
-                &record.meta.source_workspace_root,
-                &["merge", "--squash", &source_branch],
-            )
+            git::run_git(target_root, &["merge", "--squash", &source_branch])
         } else {
             git::run_git_with_refact_author(
-                &record.meta.source_workspace_root,
+                target_root,
                 &[
                     "merge",
                     "--no-ff",
@@ -938,27 +946,18 @@ impl WorktreeService {
             )
         };
         if let Err(e) = merge_result {
-            let conflict_files = git::conflict_files_for_path(&record.meta.source_workspace_root);
-            let merge_abort_warnings =
-                git::cleanup_failed_merge(&record.meta.source_workspace_root);
+            let conflict_files = git::conflict_files_for_path(target_root);
+            let merge_abort_warnings = git::cleanup_failed_merge(target_root);
             let merge_abort_ok = merge_abort_warnings.is_empty();
             let mut cleanup_warnings = merge_abort_warnings;
             let stash_restored = if let Some(stash) = target_stash.as_ref() {
-                restore_target_stash(
-                    &record.meta.source_workspace_root,
-                    stash,
-                    &mut cleanup_warnings,
-                )
+                restore_target_stash(target_root, stash, &mut cleanup_warnings)
             } else {
                 true
             };
             if !conflict_files.is_empty() {
                 let cleanup_ok = merge_abort_ok && stash_restored;
-                let conflict = post_cleanup_conflict_state(
-                    &record.meta.source_workspace_root,
-                    conflict_files,
-                    cleanup_ok,
-                );
+                let conflict = post_cleanup_conflict_state(target_root, conflict_files, cleanup_ok);
                 return Ok(MergeWorktreeResponse {
                     id: id.to_string(),
                     status: "conflict".to_string(),
@@ -980,17 +979,12 @@ impl WorktreeService {
         }
         if request.strategy.as_str() == "squash" {
             if let Err(e) = git::run_git_with_refact_author(
-                &record.meta.source_workspace_root,
+                target_root,
                 &["commit", "-m", &commit_message, "--no-gpg-sign"],
             ) {
-                let mut cleanup_warnings =
-                    git::cleanup_failed_merge(&record.meta.source_workspace_root);
+                let mut cleanup_warnings = git::cleanup_failed_merge(target_root);
                 if let Some(stash) = target_stash.as_ref() {
-                    restore_target_stash(
-                        &record.meta.source_workspace_root,
-                        stash,
-                        &mut cleanup_warnings,
-                    );
+                    restore_target_stash(target_root, stash, &mut cleanup_warnings);
                 }
                 return Err(format_merge_failure(
                     "Failed to commit squash merge",
@@ -1000,7 +994,7 @@ impl WorktreeService {
             }
         }
         let mut warnings = preflight_warnings;
-        let merge_commit = match git::head_rev(&record.meta.source_workspace_root) {
+        let merge_commit = match git::head_rev(target_root) {
             Ok(head) => Some(head),
             Err(e) => {
                 warnings.push(format!("Failed to read merge commit: {}", e));
@@ -1008,21 +1002,15 @@ impl WorktreeService {
             }
         };
         if let Some(stash) = target_stash.as_ref() {
-            match git::apply_and_drop_stash(&record.meta.source_workspace_root, stash) {
+            match git::apply_and_drop_stash(target_root, stash) {
                 Ok(stash_warnings) => warnings.extend(stash_warnings),
                 Err(e) => {
-                    let conflict_files =
-                        git::conflict_files_for_path(&record.meta.source_workspace_root);
-                    let mut cleanup_warnings =
-                        git::reset_hard(&record.meta.source_workspace_root, &target_pre_merge_head);
+                    let conflict_files = git::conflict_files_for_path(target_root);
+                    let mut cleanup_warnings = git::reset_hard(target_root, &target_pre_merge_head);
                     let reset_ok = cleanup_warnings.is_empty();
-                    let stash_restored = restore_target_stash(
-                        &record.meta.source_workspace_root,
-                        stash,
-                        &mut cleanup_warnings,
-                    );
-                    let restored_conflicts =
-                        git::conflict_files_for_path(&record.meta.source_workspace_root);
+                    let stash_restored =
+                        restore_target_stash(target_root, stash, &mut cleanup_warnings);
+                    let restored_conflicts = git::conflict_files_for_path(target_root);
                     cleanup_warnings.insert(
                         0,
                         format!(
@@ -1032,7 +1020,7 @@ impl WorktreeService {
                     );
                     let cleanup_ok = reset_ok && stash_restored;
                     let conflict = post_cleanup_conflict_state(
-                        &record.meta.source_workspace_root,
+                        target_root,
                         if conflict_files.is_empty() {
                             restored_conflicts
                         } else {

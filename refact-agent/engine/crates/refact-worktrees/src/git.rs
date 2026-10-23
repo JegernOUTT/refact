@@ -466,6 +466,89 @@ pub fn prune_worktrees(source_root: &Path) -> Result<(), String> {
     run_git(source_root, &["worktree", "prune"]).map(|_| ())
 }
 
+#[derive(Debug)]
+pub struct MergeCheckout {
+    pub root: PathBuf,
+    source_root: PathBuf,
+    temporary: Option<tempfile::TempDir>,
+}
+
+impl Drop for MergeCheckout {
+    fn drop(&mut self) {
+        if let Some(temporary) = self.temporary.take() {
+            if run_git(
+                &self.source_root,
+                &["worktree", "remove", &self.root.to_string_lossy()],
+            )
+            .is_err()
+            {
+                temporary.keep();
+            }
+        }
+    }
+}
+
+pub fn prepare_merge_checkout(source_root: &Path, target: &str) -> Result<MergeCheckout, String> {
+    run_git(source_root, &["worktree", "list", "--porcelain"])?;
+    let mut targets = list_git_worktrees(source_root)
+        .into_iter()
+        .filter(|entry| entry.branch.as_deref() == Some(target));
+    if let Some(entry) = targets.next() {
+        if targets.next().is_some() {
+            return Err(format!(
+                "Target branch '{}' is checked out more than once",
+                target
+            ));
+        }
+        ensure_checkout_on_branch(&entry.root, "Merge target", target)?;
+        return Ok(MergeCheckout {
+            root: dunce::canonicalize(&entry.root).map_err(|error| error.to_string())?,
+            source_root: source_root.to_path_buf(),
+            temporary: None,
+        });
+    }
+    if ensure_clean_worktree(source_root, "Source workspace").is_ok() {
+        return Ok(MergeCheckout {
+            root: source_root.to_path_buf(),
+            source_root: source_root.to_path_buf(),
+            temporary: None,
+        });
+    }
+    let temporary = tempfile::Builder::new()
+        .prefix("refact-merge-target-")
+        .tempdir()
+        .map_err(|error| error.to_string())?;
+    let root = temporary.path().join("worktree");
+    run_git(
+        source_root,
+        &["worktree", "add", &root.to_string_lossy(), target],
+    )?;
+    Ok(MergeCheckout {
+        root,
+        source_root: source_root.to_path_buf(),
+        temporary: Some(temporary),
+    })
+}
+
+pub fn validate_merge_checkout(root: &Path, target: &str) -> Result<(), String> {
+    for entry in list_git_worktrees(root) {
+        if entry.branch.as_deref() == Some(target)
+            && dunce::canonicalize(&entry.root).map_err(|error| error.to_string())?
+                != dunce::canonicalize(root).map_err(|error| error.to_string())?
+        {
+            return Err(format!(
+                "Merge target '{}' moved to another checkout",
+                target
+            ));
+        }
+    }
+    let repo = discover_repo(root)?;
+    if current_branch(&repo).as_deref() != Some(target) {
+        ensure_clean_worktree(root, "Merge target before branch switch")?;
+    }
+    Ok(())
+}
+
 fn parse_numstat(output: &str) -> HashMap<String, (Option<usize>, Option<usize>)> {
     output
         .lines()
