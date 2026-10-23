@@ -31,6 +31,9 @@ mod seal_refusal_tests;
 mod seal_wake_tests;
 
 #[cfg(test)]
+mod seal_lookup_tests;
+
+#[cfg(test)]
 mod launch_intent_spawn_tests;
 
 #[cfg(test)]

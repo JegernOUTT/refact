@@ -8,21 +8,12 @@ pub async fn is_sealed(app: &AppState, chat_id: &str) -> bool {
 }
 
 pub async fn seal_reason(app: &AppState, chat_id: &str) -> Option<SealReason> {
-    if let Some(record) = app
-        .agents
-        .list_all()
-        .await
-        .into_iter()
-        .find(|record| record.child_chat_id.as_deref() == Some(chat_id))
-    {
-        return record
-            .status
-            .is_terminal()
-            .then(|| SealReason::AgentTerminal {
-                agent_id: record.agent_id,
-                status: record.status.as_str().to_string(),
-                run_generation: record.run_generation,
-            });
+    if let Some((agent_id, status, run_generation)) = app.agents.child_chat_status(chat_id).await {
+        return status.is_terminal().then(|| SealReason::AgentTerminal {
+            agent_id,
+            status: status.as_str().to_string(),
+            run_generation,
+        });
     }
 
     let session = app.chat.sessions.read().await.get(chat_id).cloned()?;
@@ -31,14 +22,14 @@ pub async fn seal_reason(app: &AppState, chat_id: &str) -> Option<SealReason> {
         return None;
     }
     let card_id = task_meta.card_id?;
-    let board = match storage::load_board(app.gcx.clone(), &task_meta.task_id).await {
-        Ok(board) => board,
+    let card = match storage::card_seal_state(app.gcx.clone(), &task_meta.task_id, &card_id).await {
+        Ok(card) => card,
         Err(error) => {
             tracing::warn!(chat_id, task_id = %task_meta.task_id, %error, "Failed to read task board for chat seal");
             return None;
         }
     };
-    let column = match board.get_card(&card_id) {
+    let column = match card {
         None => "deleted".to_string(),
         Some(card)
             if card.column != "doing"

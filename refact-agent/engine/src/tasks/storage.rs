@@ -23,6 +23,106 @@ use crate::coordination::board_rows::{self, BoardProvenance};
 const TASKS_DIR: &str = "tasks";
 const PLANNER_ID_COUNTER_FILE: &str = "planner_next_id";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CardSealState {
+    pub column: String,
+    pub agent_chat_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BoardStamp {
+    modified: std::time::SystemTime,
+    len: u64,
+}
+
+#[derive(Default)]
+struct CachedCardStates {
+    stamp: Option<BoardStamp>,
+    cards: std::collections::HashMap<String, CardSealState>,
+}
+
+impl CachedCardStates {
+    fn replace(&mut self, stamp: Option<BoardStamp>, board: &TaskBoard) {
+        self.cards = board
+            .cards
+            .iter()
+            .map(|card| {
+                (
+                    card.id.clone(),
+                    CardSealState {
+                        column: card.column.clone(),
+                        agent_chat_id: card.agent_chat_id.clone(),
+                    },
+                )
+            })
+            .collect();
+        self.stamp = stamp;
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CardStateCache {
+    tasks: std::sync::Mutex<
+        std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<CachedCardStates>>>,
+    >,
+    #[cfg(test)]
+    parses: std::sync::atomic::AtomicUsize,
+}
+
+impl CardStateCache {
+    fn task(&self, task_dir: &Path) -> Arc<tokio::sync::Mutex<CachedCardStates>> {
+        self.tasks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entry(task_dir.to_path_buf())
+            .or_default()
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parse_count(&self) -> usize {
+        self.parses.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+async fn board_stamp(path: &Path) -> Result<Option<BoardStamp>, String> {
+    match fs::metadata(path).await {
+        Ok(meta) => Ok(Some(BoardStamp {
+            modified: meta.modified().map_err(|error| error.to_string())?,
+            len: meta.len(),
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+pub(crate) async fn card_seal_state(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    card_id: &str,
+) -> Result<Option<CardSealState>, String> {
+    let task_dir = find_task_dir(gcx.clone(), task_id).await?;
+    let task_dir = board_lock::canonical_dir(&task_dir).await?;
+    let board_path = task_dir.join("board.yaml");
+    let entry = gcx.task_card_states.task(&task_dir);
+    {
+        let cached = entry.lock().await;
+        if let Some(stamp) = board_stamp(&board_path).await? {
+            if cached.stamp.as_ref() == Some(&stamp) {
+                return Ok(cached.cards.get(card_id).cloned());
+            }
+        }
+    }
+    let _guard = board_lock::acquire_board(&task_dir).await?;
+    let mut cached = entry.lock().await;
+    let stamp = board_stamp(&board_path).await?;
+    if stamp.is_none() || cached.stamp != stamp {
+        let board = read_board_from_dir(&gcx, &task_dir).await?;
+        cached.replace(stamp, &board);
+    }
+    Ok(cached.cards.get(card_id).cloned())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BoardConflict {
     pub expected: u64,
@@ -192,17 +292,18 @@ pub async fn save_task_meta(
 }
 
 pub async fn load_board(gcx: Arc<GlobalContext>, task_id: &str) -> Result<TaskBoard, String> {
-    let task_dir = find_task_dir(gcx, task_id).await?;
-    read_board_from_dir(&task_dir).await
+    let task_dir = find_task_dir(gcx.clone(), task_id).await?;
+    read_board_from_dir(&gcx, &task_dir).await
 }
 
-async fn read_board_from_dir(task_dir: &Path) -> Result<TaskBoard, String> {
-    read_board_with_provenance(task_dir)
+async fn read_board_from_dir(gcx: &GlobalContext, task_dir: &Path) -> Result<TaskBoard, String> {
+    read_board_with_provenance(gcx, task_dir)
         .await
         .map(|(board, _)| board)
 }
 
 async fn read_board_with_provenance(
+    gcx: &GlobalContext,
     task_dir: &Path,
 ) -> Result<(TaskBoard, BoardProvenance), String> {
     let board_path = task_dir.join("board.yaml");
@@ -212,6 +313,12 @@ async fn read_board_with_provenance(
     let content = fs::read_to_string(&board_path)
         .await
         .map_err(|e| e.to_string())?;
+    #[cfg(test)]
+    gcx.task_card_states
+        .parses
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(test))]
+    let _ = gcx;
     let value: serde_yaml::Value = serde_yaml::from_str(&content).map_err(|e| e.to_string())?;
     let board = serde_yaml::from_value(value.clone()).map_err(|e| e.to_string())?;
     let provenance = value
@@ -248,12 +355,15 @@ async fn write_board_locked(
             serde_yaml::to_value(provenance).map_err(|e| e.to_string())?,
         );
     let content = serde_yaml::to_string(&value).map_err(|e| e.to_string())?;
+    let entry = gcx.task_card_states.task(task_dir);
+    let mut cached = entry.lock().await;
     crate::file_activity::write_file_durably(
         &board_path,
         content.as_bytes(),
         crate::file_activity::ReplaceMode::Replace,
     )
     .await?;
+    cached.replace(board_stamp(&board_path).await.unwrap_or(None), board);
     gcx.work_boards.publish(task_dir, Some((board, provenance)));
     Ok(())
 }
@@ -398,7 +508,7 @@ pub async fn create_board(
     validate_board(board, &settings).map_err(BoardSaveError::from)?;
     let source = board_rows::actor_provenance(&gcx).await?;
     let (task_dir, guard) = locked_task_dir(gcx.clone(), task_id).await?;
-    let existing = read_board_from_dir(&task_dir).await?;
+    let existing = read_board_from_dir(&gcx, &task_dir).await?;
     if task_dir.join("board.yaml").exists() {
         return Err(BoardSaveError::Conflict(BoardConflict {
             expected: 0,
@@ -446,7 +556,7 @@ pub async fn save_board_checked(
     validate_board(board, &settings).map_err(BoardSaveError::Failed)?;
     let source = board_rows::actor_provenance(&gcx).await?;
     let (task_dir, guard) = locked_task_dir(gcx.clone(), task_id).await?;
-    let (existing, previous) = read_board_with_provenance(&task_dir).await?;
+    let (existing, previous) = read_board_with_provenance(&gcx, &task_dir).await?;
     if existing.rev != expected_rev {
         return Err(BoardSaveError::Conflict(BoardConflict {
             expected: expected_rev,
@@ -586,7 +696,7 @@ where
     let source = board_rows::actor_provenance(&gcx).await?;
     let (task_dir, guard) = locked_task_dir(gcx.clone(), task_id).await?;
 
-    let (existing, previous) = read_board_with_provenance(&task_dir).await?;
+    let (existing, previous) = read_board_with_provenance(&gcx, &task_dir).await?;
     let mut board = existing.clone();
     let failed_before: HashSet<String> = board
         .cards
@@ -942,6 +1052,11 @@ pub async fn delete_task(gcx: Arc<GlobalContext>, task_id: &str) -> Result<(), S
     fs::remove_dir_all(&task_dir)
         .await
         .map_err(|e| e.to_string())?;
+    gcx.task_card_states
+        .tasks
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(guard.dir());
     gcx.work_boards.publish(guard.dir(), None);
     drop(guard);
     if let Some(tasks_dir) = tasks_dir {

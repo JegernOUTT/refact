@@ -182,13 +182,46 @@ struct RunnerDeliveryState {
 }
 
 pub struct BackgroundAgentRegistry {
-    records: RwLock<HashMap<String, BackgroundAgent>>,
+    records: RwLock<AgentRecords>,
     runtime: RwLock<HashMap<String, AgentRuntime>>,
     storage_root: PathBuf,
     write_state: Mutex<RegistryWriteState>,
     storage_write: Mutex<()>,
     questions: QuestionRegistry,
     quarantine: Option<storage::QuarantineReport>,
+    #[cfg(any(test, feature = "test-support"))]
+    list_all_calls: std::sync::atomic::AtomicUsize,
+}
+
+#[derive(Default)]
+struct AgentRecords {
+    by_id: HashMap<String, BackgroundAgent>,
+    by_child: HashMap<String, String>,
+}
+
+impl std::ops::Deref for AgentRecords {
+    type Target = HashMap<String, BackgroundAgent>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.by_id
+    }
+}
+
+impl AgentRecords {
+    fn insert(&mut self, agent_id: String, record: BackgroundAgent) {
+        if let Some(previous) = self.by_id.insert(agent_id.clone(), record) {
+            if let Some(child) = previous.child_chat_id {
+                self.by_child.remove(&child);
+            }
+        }
+        if let Some(child) = &self.by_id[&agent_id].child_chat_id {
+            self.by_child.insert(child.clone(), agent_id);
+        }
+    }
+
+    fn get_mut(&mut self, agent_id: &str) -> Option<&mut BackgroundAgent> {
+        self.by_id.get_mut(agent_id)
+    }
 }
 
 struct RegistryWriteState {
@@ -233,14 +266,20 @@ impl BackgroundAgentRegistry {
                 .flat_map(|record| record.questions.iter().cloned()),
             now,
         );
+        let mut indexed = AgentRecords::default();
+        for (agent_id, record) in records {
+            indexed.insert(agent_id, record);
+        }
         Ok(Arc::new(Self {
-            records: RwLock::new(records),
+            records: RwLock::new(indexed),
             runtime: RwLock::new(HashMap::new()),
             storage_root,
             write_state: Mutex::new(RegistryWriteState::default()),
             storage_write: Mutex::new(()),
             questions,
             quarantine,
+            #[cfg(any(test, feature = "test-support"))]
+            list_all_calls: std::sync::atomic::AtomicUsize::new(0),
         }))
     }
 
@@ -1189,6 +1228,8 @@ impl BackgroundAgentRegistry {
     }
 
     pub async fn list_all(&self) -> Vec<BackgroundAgent> {
+        #[cfg(any(test, feature = "test-support"))]
+        self.list_all_calls.fetch_add(1, Ordering::Relaxed);
         let mut records: Vec<BackgroundAgent> =
             self.records.read().await.values().cloned().collect();
         records.sort_by(|a, b| {
@@ -1201,12 +1242,19 @@ impl BackgroundAgentRegistry {
     }
 
     pub async fn find_agent_id_by_child_chat_id(&self, chat_id: &str) -> Option<String> {
-        self.records
-            .read()
-            .await
-            .values()
-            .find(|record| record.child_chat_id.as_deref() == Some(chat_id))
-            .map(|record| record.agent_id.clone())
+        self.records.read().await.by_child.get(chat_id).cloned()
+    }
+
+    pub async fn child_chat_status(&self, chat_id: &str) -> Option<(String, BgAgentStatus, u64)> {
+        let records = self.records.read().await;
+        let agent_id = records.by_child.get(chat_id)?;
+        let record = records.by_id.get(agent_id)?;
+        Some((agent_id.clone(), record.status, record.run_generation))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn list_all_calls_for_test(&self) -> usize {
+        self.list_all_calls.load(Ordering::Relaxed)
     }
 
     pub fn try_child_chat_index(&self) -> Option<HashMap<String, String>> {
@@ -1226,8 +1274,8 @@ impl BackgroundAgentRegistry {
     #[cfg(any(test, feature = "test-support"))]
     pub async fn records_write_guard_for_test(
         &self,
-    ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<String, BackgroundAgent>> {
-        self.records.write().await
+    ) -> tokio::sync::RwLockMappedWriteGuard<'_, HashMap<String, BackgroundAgent>> {
+        tokio::sync::RwLockWriteGuard::map(self.records.write().await, |records| &mut records.by_id)
     }
 
     pub async fn list_descendants(&self, agent_id: &str) -> Vec<BackgroundAgent> {
@@ -2331,6 +2379,52 @@ mod tests {
             worktree_id: None,
             worktree_branch: None,
         }
+    }
+
+    #[tokio::test]
+    async fn child_chat_index_tracks_binding_replacement_completion_and_restore() {
+        let (temp, registry) = registry().await;
+        let record = registry.create(request("parent")).await.unwrap().0;
+        assert_eq!(registry.child_chat_status("child-a").await, None);
+        registry
+            .mark_running(&record.agent_id, "child-a".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            registry.find_agent_id_by_child_chat_id("child-a").await,
+            Some(record.agent_id.clone())
+        );
+        registry
+            .mark_running(&record.agent_id, "child-b".into())
+            .await
+            .unwrap();
+        assert_eq!(registry.child_chat_status("child-a").await, None);
+        let mut finished = completion();
+        finished.child_chat_id = Some("child-c".into());
+        let completed = registry
+            .mark_completed(&record.agent_id, finished)
+            .await
+            .unwrap();
+        assert_eq!(registry.child_chat_status("child-b").await, None);
+        assert_eq!(
+            registry.child_chat_status("child-c").await,
+            Some((record.agent_id.clone(), BgAgentStatus::Completed, 1))
+        );
+        registry
+            .reopen(&record.agent_id, "parent", completed.change_seq, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            registry.child_chat_status("child-c").await,
+            Some((record.agent_id.clone(), BgAgentStatus::Queued, 2))
+        );
+        let restored = BackgroundAgentRegistry::new(temp.path().join("agents"))
+            .await
+            .unwrap();
+        assert_eq!(
+            restored.child_chat_status("child-c").await,
+            Some((record.agent_id, BgAgentStatus::Interrupted, 2))
+        );
     }
 
     #[tokio::test]
