@@ -175,6 +175,15 @@ pub fn read_workspace_lease_holder(path: &Path) -> Option<WorkspaceLeaseInfo> {
 }
 
 fn read_workspace_lease_holder_after_acquire(path: &Path) -> Option<WorkspaceLeaseInfo> {
+    read_workspace_lease_holder_with_wait(path, || {
+        std::thread::sleep(Duration::from_millis(5));
+    })
+}
+
+fn read_workspace_lease_holder_with_wait(
+    path: &Path,
+    mut wait: impl FnMut(),
+) -> Option<WorkspaceLeaseInfo> {
     for _ in 0..20 {
         if let Some(holder) = read_workspace_lease_holder(path) {
             return Some(holder);
@@ -182,7 +191,7 @@ fn read_workspace_lease_holder_after_acquire(path: &Path) -> Option<WorkspaceLea
         if path.exists() {
             return None;
         }
-        std::thread::sleep(Duration::from_millis(5));
+        wait();
     }
     read_workspace_lease_holder(path)
 }
@@ -239,8 +248,7 @@ pub struct WorkspaceLease {
     root: PathBuf,
     path: PathBuf,
     info_path: PathBuf,
-    // The flock stays held because the descriptor stays open; dropping this frees it.
-    _file: RwLock<File>,
+    _file: File,
 }
 
 impl WorkspaceLease {
@@ -254,6 +262,18 @@ impl WorkspaceLease {
 
     pub fn info_path(&self) -> &Path {
         &self.info_path
+    }
+}
+
+impl Drop for WorkspaceLease {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Err(error) = self._file.unlock() {
+            tracing::warn!(
+                "failed to unlock workspace lease {}: {error}",
+                self.path.display()
+            );
+        }
     }
 }
 
@@ -330,19 +350,21 @@ fn try_acquire_workspace_lease_in(
             error,
         });
     }
-    // Forgetting the guard skips funlock; the flock stays held until the File descriptor closes,
-    // i.e. until this WorkspaceLease is dropped.
     std::mem::forget(guard);
     Ok(WorkspaceLease {
         root: root.to_path_buf(),
         path,
         info_path,
-        _file: lock,
+        _file: lock.into_inner(),
     })
 }
 
 pub fn probe_workspace_lease(root: &Path) -> Option<WorkspaceLeaseConflict> {
-    let path = workspace_lease_path(root);
+    probe_workspace_lease_in(&engine_locks_dir(), root)
+}
+
+fn probe_workspace_lease_in(locks_dir: &Path, root: &Path) -> Option<WorkspaceLeaseConflict> {
+    let path = workspace_lease_path_in(locks_dir, root);
     let file = OpenOptions::new().read(true).write(true).open(&path).ok()?;
     let mut lock = RwLock::new(file);
     let busy = match lock.try_write() {
@@ -354,7 +376,9 @@ pub fn probe_workspace_lease(root: &Path) -> Option<WorkspaceLeaseConflict> {
     };
     busy.then(|| WorkspaceLeaseConflict {
         root: root.to_path_buf(),
-        holder: read_workspace_lease_holder_after_acquire(&workspace_lease_info_path(root)),
+        holder: read_workspace_lease_holder_after_acquire(&workspace_lease_info_path_in(
+            locks_dir, root,
+        )),
         path,
     })
 }
@@ -432,32 +456,6 @@ mod tests {
         drop(guard);
         let _second_guard = try_lock(&mut second).unwrap();
     }
-    struct LocksDirGuard {
-        previous: Option<std::ffi::OsString>,
-        _dir: tempfile::TempDir,
-    }
-
-    impl LocksDirGuard {
-        fn set() -> Self {
-            let dir = tempfile::tempdir().unwrap();
-            let previous = std::env::var_os(ENGINE_LOCKS_DIR_ENV);
-            std::env::set_var(ENGINE_LOCKS_DIR_ENV, dir.path());
-            Self {
-                previous,
-                _dir: dir,
-            }
-        }
-    }
-
-    impl Drop for LocksDirGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => std::env::set_var(ENGINE_LOCKS_DIR_ENV, value),
-                None => std::env::remove_var(ENGINE_LOCKS_DIR_ENV),
-            }
-        }
-    }
-
     const LEASE_HOLDER_ROOT_ENV: &str = "REFACT_TEST_LEASE_HOLDER_ROOT";
 
     fn test_info() -> WorkspaceLeaseInfo {
@@ -470,34 +468,58 @@ mod tests {
         let Ok(root) = std::env::var(LEASE_HOLDER_ROOT_ENV) else {
             return;
         };
-        let _lease = try_acquire_workspace_lease(Path::new(&root), &test_info()).unwrap();
+        let locks_dir = std::env::var_os(ENGINE_LOCKS_DIR_ENV).unwrap();
+        let _lease =
+            try_acquire_workspace_lease_in(Path::new(&locks_dir), Path::new(&root), &test_info())
+                .unwrap();
         println!("lease taken");
         std::thread::sleep(std::time::Duration::from_secs(120));
     }
 
     #[test]
-    #[serial_test::serial(daemon)]
     fn workspace_lease_acquires_and_releases() {
-        let _guard = LocksDirGuard::set();
+        let locks_dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let lease = try_acquire_workspace_lease(root.path(), &test_info()).unwrap();
+        let lease =
+            try_acquire_workspace_lease_in(locks_dir.path(), root.path(), &test_info()).unwrap();
         assert!(lease.path().exists());
         let holder = read_workspace_lease_holder(lease.info_path()).unwrap();
         assert_eq!(holder.pid, std::process::id());
         assert_eq!(holder.http_port, 8001);
         let lease_path = lease.path().to_path_buf();
         drop(lease);
-        let reacquired = try_acquire_workspace_lease(root.path(), &test_info()).unwrap();
+        let reacquired =
+            try_acquire_workspace_lease_in(locks_dir.path(), root.path(), &test_info()).unwrap();
         assert_eq!(reacquired.path(), lease_path.as_path());
     }
 
+    #[cfg(unix)]
     #[test]
-    #[serial_test::serial(daemon)]
-    fn workspace_lease_second_acquire_reports_holder() {
-        let _guard = LocksDirGuard::set();
+    fn workspace_lease_drop_unlocks_while_a_duplicate_descriptor_is_open() {
+        let locks_dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let _first = try_acquire_workspace_lease(root.path(), &test_info()).unwrap();
-        let error = try_acquire_workspace_lease(root.path(), &test_info()).unwrap_err();
+        let lease =
+            try_acquire_workspace_lease_in(locks_dir.path(), root.path(), &test_info()).unwrap();
+        let duplicate = lease._file.try_clone().unwrap();
+        assert!(probe_workspace_lease_in(locks_dir.path(), root.path()).is_some());
+
+        drop(lease);
+
+        assert!(probe_workspace_lease_in(locks_dir.path(), root.path()).is_none());
+        let _reacquired =
+            try_acquire_workspace_lease_in(locks_dir.path(), root.path(), &test_info()).unwrap();
+        drop(duplicate);
+        assert!(probe_workspace_lease_in(locks_dir.path(), root.path()).is_some());
+    }
+
+    #[test]
+    fn workspace_lease_second_acquire_reports_holder() {
+        let locks_dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let _first =
+            try_acquire_workspace_lease_in(locks_dir.path(), root.path(), &test_info()).unwrap();
+        let error = try_acquire_workspace_lease_in(locks_dir.path(), root.path(), &test_info())
+            .unwrap_err();
         let WorkspaceLeaseError::Busy(conflict) = error else {
             panic!("expected busy error");
         };
@@ -512,11 +534,10 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(daemon)]
     fn workspace_lease_holder_unreadable_when_file_is_malformed() {
-        let _guard = LocksDirGuard::set();
+        let locks_dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let path = workspace_lease_info_path(root.path());
+        let path = workspace_lease_info_path_in(locks_dir.path(), root.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"not json at all").unwrap();
         assert!(read_workspace_lease_holder(&path).is_none());
@@ -527,48 +548,68 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(daemon)]
     fn workspace_lease_probe_matches_lock_state() {
-        let _guard = LocksDirGuard::set();
+        let locks_dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        assert!(probe_workspace_lease(root.path()).is_none());
-        let lease = try_acquire_workspace_lease(root.path(), &test_info()).unwrap();
-        let conflict = probe_workspace_lease(root.path()).expect("probe must see the holder");
+        assert!(probe_workspace_lease_in(locks_dir.path(), root.path()).is_none());
+        let lease =
+            try_acquire_workspace_lease_in(locks_dir.path(), root.path(), &test_info()).unwrap();
+        let info_path = lease.info_path().to_path_buf();
+        let conflict = probe_workspace_lease_in(locks_dir.path(), root.path())
+            .expect("probe must see the holder");
         assert_eq!(
             conflict.holder.map(|info| info.pid),
             Some(std::process::id())
         );
         drop(lease);
-        assert!(probe_workspace_lease(root.path()).is_none());
+        assert!(info_path.exists());
+        assert!(probe_workspace_lease_in(locks_dir.path(), root.path()).is_none());
     }
 
     #[test]
-    #[serial_test::serial(daemon)]
     fn workspace_lease_probe_waits_for_holder_metadata_publish() {
-        let _guard = LocksDirGuard::set();
+        let locks_dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let lease = try_acquire_workspace_lease(root.path(), &test_info()).unwrap();
+        let lease =
+            try_acquire_workspace_lease_in(locks_dir.path(), root.path(), &test_info()).unwrap();
         let info_path = lease.info_path().to_path_buf();
         std::fs::remove_file(&info_path).unwrap();
         let holder = test_info();
         let expected_pid = holder.pid;
-        let writer = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(25));
+        let mut waits = 0;
+        let published = read_workspace_lease_holder_with_wait(&info_path, || {
+            waits += 1;
             write_lease_info(&info_path, &holder).unwrap();
         });
+        assert_eq!(waits, 1);
+        assert_eq!(published.map(|holder| holder.pid), Some(expected_pid));
 
-        let conflict = probe_workspace_lease(root.path()).expect("lease is held");
+        let conflict =
+            probe_workspace_lease_in(locks_dir.path(), root.path()).expect("lease is held");
 
-        writer.join().unwrap();
         assert_eq!(conflict.holder.map(|holder| holder.pid), Some(expected_pid));
     }
 
     #[test]
-    #[serial_test::serial(daemon)]
+    fn workspace_lease_holder_retry_is_bounded_and_skips_malformed_metadata() {
+        let locks_dir = tempfile::tempdir().unwrap();
+        let path = locks_dir.path().join("missing.json");
+        let mut waits = 0;
+        let holder = read_workspace_lease_holder_with_wait(&path, || waits += 1);
+        assert!(holder.is_none());
+        assert_eq!(waits, 20);
+
+        std::fs::write(&path, b"not json").unwrap();
+        let holder = read_workspace_lease_holder_with_wait(&path, || {
+            panic!("malformed metadata must not be retried");
+        });
+        assert!(holder.is_none());
+    }
+
+    #[test]
     fn workspace_lease_survives_holder_crash() {
-        let _guard = LocksDirGuard::set();
+        let locks_dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let locks_dir = engine_locks_dir();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -577,7 +618,7 @@ mod tests {
                 "--nocapture",
                 "--test-threads=1",
             ])
-            .env(ENGINE_LOCKS_DIR_ENV, &locks_dir)
+            .env(ENGINE_LOCKS_DIR_ENV, locks_dir.path())
             .env(LEASE_HOLDER_ROOT_ENV, root.path())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -585,7 +626,7 @@ mod tests {
             .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            if probe_workspace_lease(root.path()).is_some() {
+            if probe_workspace_lease_in(locks_dir.path(), root.path()).is_some() {
                 break;
             }
             assert!(
@@ -594,12 +635,16 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        assert!(try_acquire_workspace_lease(root.path(), &test_info()).is_err());
+        assert!(
+            try_acquire_workspace_lease_in(locks_dir.path(), root.path(), &test_info()).is_err()
+        );
         child.kill().unwrap();
         let _ = child.wait().unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            if let Ok(lease) = try_acquire_workspace_lease(root.path(), &test_info()) {
+            if let Ok(lease) =
+                try_acquire_workspace_lease_in(locks_dir.path(), root.path(), &test_info())
+            {
                 drop(lease);
                 break;
             }
@@ -612,7 +657,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(daemon)]
     fn workspace_lease_key_is_alias_insensitive() {
         let root = tempfile::tempdir().unwrap();
         let cache_dir = tempfile::tempdir().unwrap();
@@ -631,7 +675,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[serial_test::serial(daemon)]
     fn workspace_lease_key_follows_symlinks() {
         let parent = tempfile::tempdir().unwrap();
         let cache_dir = tempfile::tempdir().unwrap();
@@ -706,7 +749,6 @@ mod tests {
     /// takes a shared advisory lease, so a per-worktree lease would let two engines write one
     /// database. See the `normalize_workspace_roots` doc comment for the full argument.
     #[test]
-    #[serial_test::serial(daemon)]
     fn worktrees_of_one_project_intentionally_share_a_lease_key() {
         let cache_dir = tempfile::tempdir().unwrap();
         let source = tempfile::tempdir().unwrap();
@@ -745,7 +787,6 @@ mod tests {
     /// The collapse must not swallow genuinely different projects: worktrees of two different
     /// source roots still get two distinct lease keys, so two projects can run two engines.
     #[test]
-    #[serial_test::serial(daemon)]
     fn worktrees_of_different_projects_keep_distinct_lease_keys() {
         let cache_dir = tempfile::tempdir().unwrap();
         let first_source = tempfile::tempdir().unwrap();
@@ -778,7 +819,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(daemon)]
     fn workspace_lease_set_rolls_back_on_conflict() {
         let locks_dir = tempfile::tempdir().unwrap();
         let first = tempfile::tempdir().unwrap();
@@ -797,18 +837,17 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(daemon)]
     fn workspace_lease_set_acquires_every_root() {
-        let _guard = LocksDirGuard::set();
+        let locks_dir = tempfile::tempdir().unwrap();
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
         let roots = vec![first.path().to_path_buf(), second.path().to_path_buf()];
-        let set = acquire_workspace_leases(&roots, &test_info()).unwrap();
+        let set = acquire_workspace_leases_in(locks_dir.path(), &roots, &test_info()).unwrap();
         assert_eq!(set.len(), 2);
         assert!(set.holds(first.path()));
-        assert!(probe_workspace_lease(second.path()).is_some());
+        assert!(probe_workspace_lease_in(locks_dir.path(), second.path()).is_some());
         drop(set);
-        assert!(probe_workspace_lease(first.path()).is_none());
-        assert!(probe_workspace_lease(second.path()).is_none());
+        assert!(probe_workspace_lease_in(locks_dir.path(), first.path()).is_none());
+        assert!(probe_workspace_lease_in(locks_dir.path(), second.path()).is_none());
     }
 }
