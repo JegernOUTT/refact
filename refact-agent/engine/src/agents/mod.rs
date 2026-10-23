@@ -37,6 +37,9 @@ mod seal_wake_tests;
 mod seal_lookup_tests;
 
 #[cfg(test)]
+mod hygiene_tool_exposure_tests;
+
+#[cfg(test)]
 mod launch_intent_spawn_tests;
 
 #[cfg(test)]

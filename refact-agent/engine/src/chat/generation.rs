@@ -782,12 +782,16 @@ async fn ensure_session_preamble_inner(app: AppState, session_arc: Arc<AMutex<Ch
             .map(|worktree| worktree.root.to_string_lossy().into_owned());
         let tools_for_mode = app
             .tool_registry
-            .get_tools_index_for_mode_and_scope(
+            .acquire_tool_catalog(
                 &thread.mode,
                 Some(&model_rec.base.id),
                 execution_scope.as_deref(),
             )
             .await;
+        let tools_for_mode =
+            crate::tools::tools_list::filter_tool_catalog_for_chat(&app, &chat_id, tools_for_mode)
+                .await;
+        let tools_for_mode = &tools_for_mode.index;
         if tools_for_mode.mcp_lazy_mode {
             mcp_lazy_total = Some(tools_for_mode.mcp_total_count);
         }
@@ -2618,13 +2622,15 @@ pub async fn run_llm_generation(
     let catalog = match existing_catalog {
         Some(catalog) => catalog,
         None => {
-            app.tool_registry
+            let catalog = app
+                .tool_registry
                 .acquire_tool_catalog(
                     &thread.mode,
                     Some(&model_rec.base.id),
                     execution_scope.as_deref(),
                 )
-                .await
+                .await;
+            crate::tools::tools_list::filter_tool_catalog_for_chat(&app, &thread.id, catalog).await
         }
     };
     let mcp_lazy_active = catalog.index.mcp_lazy_mode;

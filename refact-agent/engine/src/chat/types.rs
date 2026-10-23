@@ -349,6 +349,7 @@ pub struct ChatSession {
     pub closed_flag: Arc<AtomicBool>,
     pub external_reload_pending: Option<ExternalReloadPending>,
     pub last_prompt_messages: Vec<ChatMessage>,
+    pub(crate) tool_exposure_has_parent: Arc<tokio::sync::OnceCell<bool>>,
     pub tool_catalog: Option<Arc<ToolCatalogSnapshot>>,
     pub turn_tool_pool: Option<TurnToolPool>,
     pub pending_max_new_tokens_boost: Option<usize>,

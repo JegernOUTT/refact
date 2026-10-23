@@ -510,7 +510,7 @@ impl Tool for ToolAgentMessage {
             self.config_path.clone(),
             "agent_message",
             "Agent Message",
-            "Send a message to a child or descendant agent, or use to=parent to ask or notify the parent agent.",
+            "Send a message to a child or descendant agent; to=parent asks or notifies the parent agent and is only available to background subagents.",
             json!({
                 "type": "object",
                 "properties": {
@@ -561,7 +561,7 @@ impl Tool for ToolAgentMessage {
         if to == "parent" {
             let Some(agent_id) = caller_agent_id else {
                 return Err(
-                    "You are not a subagent; use an agent id to message a child.".to_string(),
+                    "this chat has no parent agent; to=parent is only available to background subagents".to_string(),
                 );
             };
             let caller = app.agents.get_any(&agent_id).await?;

@@ -3964,6 +3964,12 @@ async fn subchat_single_internal(
             .into_iter()
             .map(|tool| tool.tool_description())
             .collect::<Vec<_>>();
+        let (app, chat_id) = {
+            let context = ccx.lock().await;
+            (context.app.clone(), context.chat_id.clone())
+        };
+        let has_parent = crate::tools::tools_list::chat_has_parent_agent(&app, &chat_id).await;
+        crate::tools::tools_list::filter_chat_tools(&mut tools_turned_on_by_cmdline, has_parent);
         let policy = crate::tools::tools_list::tool_access_policy(gcx.clone()).await;
         if !policy.tool_access.providers.is_empty() {
             let provider = crate::tools::tools_list::provider_of_model(model_id);

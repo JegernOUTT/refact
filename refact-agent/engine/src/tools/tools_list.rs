@@ -2912,6 +2912,50 @@ pub async fn get_available_tools(gcx: Arc<GlobalContext>) -> Vec<Box<dyn Tool + 
 
 type DescribedTool = (ToolGroupCategory, ToolDesc, Box<dyn Tool + Send>);
 
+pub(crate) async fn chat_has_parent_agent(app: &crate::app_state::AppState, chat_id: &str) -> bool {
+    let session = app.chat.sessions.read().await.get(chat_id).cloned();
+    let Some(session) = session else {
+        return app.agents.child_chat_status(chat_id).await.is_some();
+    };
+    let has_parent = session.lock().await.tool_exposure_has_parent.clone();
+    *has_parent
+        .get_or_init(|| async { app.agents.child_chat_status(chat_id).await.is_some() })
+        .await
+}
+
+pub(crate) fn filter_chat_tools(tools: &mut Vec<ToolDesc>, has_parent: bool) {
+    tools.retain(|tool| has_parent || tool.name != "progress_report");
+}
+
+pub(crate) async fn filter_tool_catalog_for_chat(
+    app: &crate::app_state::AppState,
+    chat_id: &str,
+    catalog: Arc<refact_runtime_api::ToolCatalogSnapshot>,
+) -> Arc<refact_runtime_api::ToolCatalogSnapshot> {
+    if chat_has_parent_agent(app, chat_id).await
+        || !catalog
+            .index
+            .tools
+            .iter()
+            .any(|tool| tool.name == "progress_report")
+    {
+        return catalog;
+    }
+    let mut filtered = (*catalog).clone();
+    filter_chat_tools(&mut filtered.index.tools, false);
+    filtered
+        .policy
+        .retain(|tool| tool.name != "progress_report");
+    let names = filtered
+        .index
+        .tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<Vec<_>>();
+    filtered.aliases = refact_tool_api::build_registry_from_names(&names);
+    Arc::new(filtered)
+}
+
 fn select_and_order_mode_tools(
     described_tools: Vec<DescribedTool>,
     mode_tools: &[String],
