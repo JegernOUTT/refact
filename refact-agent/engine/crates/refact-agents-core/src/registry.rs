@@ -629,6 +629,7 @@ impl BackgroundAgentRegistry {
             updated.result_summary = None;
             updated.result_payload_path = None;
             updated.current_tool = None;
+            updated.merge_status = None;
             touch_record(&mut updated, Utc::now());
             records.insert(agent_id.to_string(), updated.clone());
             runtime.insert(
@@ -2208,6 +2209,9 @@ fn record_previous_run(updated: &mut BackgroundAgent, previous: &BackgroundAgent
         result_summary: previous.result_summary.clone(),
         error: previous.error.clone(),
         finished_at: previous.finished_at,
+        worktree_id: previous.worktree_id.clone(),
+        worktree_branch: previous.worktree_branch.clone(),
+        merge_status: previous.merge_status.clone(),
     });
     trim_previous_runs(updated);
 }
@@ -3341,6 +3345,14 @@ mod tests {
         let (_temp, registry) = registry().await;
         let (record, _, _) = registry.create(request("parent")).await.unwrap();
         registry
+            .set_worktree_metadata(
+                &record.agent_id,
+                Some("wt-first".into()),
+                Some("child-first".into()),
+            )
+            .await
+            .unwrap();
+        registry
             .mark_running(&record.agent_id, "child-chat".into())
             .await
             .unwrap();
@@ -3352,8 +3364,12 @@ mod tests {
             .add_usage(&record.agent_id, 42, Some(0.25))
             .await
             .unwrap();
-        let completed = registry
+        registry
             .mark_completed(&record.agent_id, completion())
+            .await
+            .unwrap();
+        let completed = registry
+            .set_merge_status(&record.agent_id, "merged")
             .await
             .unwrap();
 
@@ -3381,6 +3397,7 @@ mod tests {
         assert!(continued.result_summary.is_none());
         assert_eq!(continued.step_count, 3);
         assert_eq!(continued.tokens_used, 42);
+        assert!(continued.merge_status.is_none());
         assert_eq!(continued.previous_runs.len(), 1);
         assert_eq!(continued.previous_runs[0].run_generation, 1);
         assert_eq!(continued.previous_runs[0].status, BgAgentStatus::Completed);
@@ -3389,6 +3406,29 @@ mod tests {
             Some("done")
         );
         assert_eq!(continued.previous_runs[0].step_count, 3);
+        assert_eq!(
+            continued.previous_runs[0].worktree_id.as_deref(),
+            Some("wt-first")
+        );
+        assert_eq!(
+            continued.previous_runs[0].worktree_branch.as_deref(),
+            Some("child-first")
+        );
+        assert_eq!(
+            continued.previous_runs[0].merge_status.as_deref(),
+            Some("merged")
+        );
+        let restored: BackgroundAgent =
+            serde_json::from_value(serde_json::to_value(&continued).unwrap()).unwrap();
+        assert_eq!(restored.previous_runs, continued.previous_runs);
+        let mut legacy = serde_json::to_value(&continued.previous_runs[0]).unwrap();
+        for field in ["worktree_id", "worktree_branch", "merge_status"] {
+            legacy.as_object_mut().unwrap().remove(field);
+        }
+        let legacy: AgentRunOutcome = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.worktree_id.is_none());
+        assert!(legacy.worktree_branch.is_none());
+        assert!(legacy.merge_status.is_none());
     }
 
     #[test]
@@ -3440,6 +3480,9 @@ mod tests {
                 result_summary: None,
                 error: None,
                 finished_at: None,
+                worktree_id: None,
+                worktree_branch: None,
+                merge_status: None,
             })
             .collect();
         overfull.close_reason = Some("stale reason on a completed record".into());

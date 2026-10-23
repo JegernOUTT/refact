@@ -333,6 +333,7 @@ fn build_completion_event(record: &BackgroundAgent) -> refact_core::chat_types::
             "edited_files": edited_files,
             "diff_summary": diff_summary,
             "conflict_summary": conflict_summary,
+            "worktree_id": record.worktree_id,
             "worktree_branch": record.worktree_branch,
             "merge_status": record.merge_status,
             "tokens_used": record.tokens_used,
@@ -354,6 +355,7 @@ fn build_push_message(record: &BackgroundAgent) -> String {
     let mut lines = vec![
         "[background subagent finished]".to_string(),
         format!("agent_id: {}", record.agent_id),
+        format!("run_generation: {}", record.run_generation),
         format!("status: {}", record.status.as_str()),
         format!("title: {}", record.title),
         format!(
