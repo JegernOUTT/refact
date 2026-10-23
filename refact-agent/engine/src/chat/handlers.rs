@@ -541,6 +541,55 @@ pub async fn handle_v1_chat_command(
         }
     }
 
+    if let ChatCommand::AnswerQuestions {
+        tool_call_id,
+        answers,
+        asked_at_ms,
+    } = &request.command
+    {
+        if crate::agents::approval::is_user_approval(tool_call_id) {
+            if request.supervision_guard.is_some() {
+                return Err(ScratchError::new(
+                    StatusCode::FORBIDDEN,
+                    "command approval requires an explicit user response".into(),
+                ));
+            }
+            drop(session);
+            let result = crate::agents::approval::apply_user_answer(
+                &app,
+                &session_arc,
+                tool_call_id,
+                answers.clone(),
+                *asked_at_ms,
+                &request.client_request_id,
+            )
+            .await;
+            let mut session = session_arc.lock().await;
+            if result.is_ok() {
+                session.remember_accepted_request(&request.client_request_id);
+            }
+            let accepted = result.is_ok();
+            let payload = match result {
+                Ok(()) => serde_json::json!({"applied":true}),
+                Err(error) => serde_json::json!({"error":error}),
+            };
+            session.emit(ChatEvent::Ack {
+                client_request_id: request.client_request_id,
+                accepted,
+                result: Some(payload.clone()),
+            });
+            return Ok(Response::builder()
+                .status(if accepted {
+                    StatusCode::OK
+                } else {
+                    StatusCode::BAD_REQUEST
+                })
+                .header("Content-Type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap());
+        }
+    }
+
     // Delivery edits must bypass the command processor: it awaits the running
     // turn, precisely when a user needs to reprioritize or cancel a delivery.
     if matches!(

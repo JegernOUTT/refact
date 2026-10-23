@@ -6,6 +6,14 @@ use crate::call_validation::{ChatMessage, ChatToolCall};
 use crate::chat::types::ThreadParams;
 use refact_work_core::{ApprovalDecision, PendingApproval};
 
+#[path = "approval_user.rs"]
+mod user;
+pub(crate) use user::{answer_from_user, apply_user_answer, is_user_approval};
+
+#[cfg(test)]
+#[path = "approval_routing_tests.rs"]
+mod routing_tests;
+
 struct PendingApprovalGuard {
     registry: refact_work_core::ApprovalRegistry,
     questions: refact_chat_api::QuestionRegistry,
@@ -13,6 +21,7 @@ struct PendingApprovalGuard {
     parent: String,
     generation: u64,
     request_id: String,
+    question_id: String,
     execution: Option<Arc<super::execution::RunExecution>>,
     abort: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
@@ -24,7 +33,7 @@ impl Drop for PendingApprovalGuard {
             .cancel(&self.parent, self.generation, &self.request_id, now_ms());
         let _ = self
             .questions
-            .cancel(&self.request_id, &self.asker, chrono::Utc::now());
+            .cancel(&self.question_id, &self.asker, chrono::Utc::now());
         if let Some(execution) = &self.execution {
             execution.cancel();
         }
@@ -95,7 +104,10 @@ pub async fn request(
         .get(&target.parent_id)
         .cloned()
         .ok_or("parent session unavailable for approval")?;
-    let parent_thread = parent_session.lock().await.thread.clone();
+    let (parent_thread, escalate) = {
+        let parent = parent_session.lock().await;
+        (parent.thread.clone(), !user::parent_can_answer(&parent))
+    };
     let request_id = uuid::Uuid::new_v4().to_string();
     let args = serde_json::from_str(&call.function.arguments)
         .map_err(|e| format!("invalid tool arguments: {e}"))?;
@@ -129,10 +141,15 @@ pub async fn request(
         ),
         execution,
     };
+    let instructions = if escalate {
+        "Escalated to the user because the parent session cannot answer: agent_approval is absent from its effective tool list. Waiting for user approval; nothing has been approved.".to_string()
+    } else {
+        format!("Use agent_approval with request_id {request_id} and action approve or reject.")
+    };
     let mut notice = crate::chat::internal_roles::event(
         crate::chat::internal_roles::EventSubkind::SystemNotice, "agents.approval",
         serde_json::json!({"agent_id":agent_id,"request_id":request_id,"tool_call_id":call.id}),
-        format!("Child {} needs command approval: {} {}\nExecution binding: {}\nReason: {}\nUse agent_approval with request_id {} and action approve or reject.", target.title, pending.tool_name, pending.args, serde_json::to_string(&pending.execution).map_err(|_| "approval binding serialization failed")?, reason, request_id),
+        format!("Child {} needs command approval (request {}): {} {}\nExecution binding: {}\nReason: {}\n{}", target.title, request_id, pending.tool_name, pending.args, serde_json::to_string(&pending.execution).map_err(|_| "approval binding serialization failed")?, reason, instructions),
     );
     {
         let context = ccx.lock().await;
@@ -160,23 +177,6 @@ pub async fn request(
     app.agent_approvals
         .register(pending.clone(), created)
         .map_err(|e| format!("approval registration: {e:?}"))?;
-    app.questions()
-        .ask(
-            refact_chat_api::AskQuestion::new(
-                refact_chat_api::QuestionKind::PermissionEscalation,
-                &agent_id,
-                &target.parent_id,
-                format!("{}:{}", agent_id, call.id),
-                format!("{} {}", pending.tool_name, pending.args),
-            )
-            .with_id(&request_id)
-            .with_options(Some(vec!["approve".into(), "reject".into()]))
-            .with_expiry_secs(Some(
-                refact_work_core::coordination_settings().approval_timeout_secs,
-            )),
-            chrono::Utc::now(),
-        )
-        .map_err(|error| format!("approval question registration: {error}"))?;
     let execution = app.agent_executions.get(&child_chat_id);
     let mut pending_guard = PendingApprovalGuard {
         registry: app.agent_approvals.clone(),
@@ -185,13 +185,37 @@ pub async fn request(
         parent: target.parent_id.clone(),
         generation: pending.run_generation,
         request_id: request_id.clone(),
+        question_id: request_id.clone(),
         execution: execution.clone(),
         abort: Some(abort.clone()),
     };
+    if !escalate {
+        app.questions()
+            .ask(
+                refact_chat_api::AskQuestion::new(
+                    refact_chat_api::QuestionKind::PermissionEscalation,
+                    &agent_id,
+                    &target.parent_id,
+                    format!("{}:{}", agent_id, call.id),
+                    format!("{} {}", pending.tool_name, pending.args),
+                )
+                .with_id(&request_id)
+                .with_options(Some(vec!["approve".into(), "reject".into()]))
+                .with_expiry_secs(Some(
+                    refact_work_core::coordination_settings().approval_timeout_secs,
+                )),
+                chrono::Utc::now(),
+            )
+            .map_err(|error| format!("approval question registration: {error}"))?;
+    }
     if let Some(execution) = &execution {
         execution.park().await.map_err(|e| e.to_string())?;
     }
     target.set_waiting(app, true).await?;
+    user::show_waiting(app, &target, escalate).await?;
+    if escalate {
+        pending_guard.question_id = user::ask(app, &pending, &agent_id, &notice).await?;
+    }
     let delivered = crate::chat::deliver_to_chat(
         app.clone(),
         &target.parent_id,
@@ -199,7 +223,7 @@ pub async fn request(
             vec![notice],
             refact_core::chat_types::PushMode::Append,
             "agents.approval".to_string(),
-            true,
+            !escalate,
         ),
     )
     .await;
@@ -212,15 +236,18 @@ pub async fn request(
         );
         return Err(error);
     }
-    let result = match crate::questions::park_and_wait(
-        app,
-        &child_chat_id,
-        &abort,
-        app.agent_approvals.wait(&request_id, now_ms()),
-    )
+    let result = match crate::questions::park_and_wait(app, &child_chat_id, &abort, async {
+        if escalate {
+            user::wait(app, &pending, &pending_guard.question_id).await?;
+        }
+        app.agent_approvals
+            .wait(&request_id, now_ms())
+            .await
+            .map_err(|e| format!("approval wait: {e:?}"))
+    })
     .await
     {
-        Ok(decision) => decision.map_err(|e| format!("approval wait: {e:?}")),
+        Ok(decision) => decision,
         Err(_) => {
             let _ = app.agent_approvals.cancel(
                 &target.parent_id,
@@ -232,7 +259,9 @@ pub async fn request(
         }
     };
     if let Ok(decision) = &result {
-        settle_escalation_question(app, &request_id, &agent_id, &target.parent_id, *decision);
+        if !escalate {
+            settle_escalation_question(app, &request_id, &agent_id, &target.parent_id, *decision);
+        }
     }
     if abort.load(std::sync::atomic::Ordering::Relaxed)
         || app
@@ -454,6 +483,7 @@ pub(crate) mod tests {
                 parent: "parent".into(),
                 generation: 1,
                 request_id: "request".into(),
+                question_id: "request".into(),
                 execution: None,
                 abort: None,
             });
@@ -829,7 +859,7 @@ pub(crate) mod tests {
         }
     }
 
-    async fn board_fixture() -> Fixture {
+    pub(crate) async fn board_fixture() -> Fixture {
         let mut fixture = fixture().await;
         fixture.app.agent_executions.finish("subchat-approval-test");
         let child_id = format!("board-child-{}", uuid::Uuid::new_v4());

@@ -666,6 +666,22 @@ async fn handle_answer_questions(
             return QueueCommandOutcome::Continue;
         }
         leave_attention_questions(&app, attention_questions);
+        match crate::agents::approval::answer_from_user(
+            &app,
+            &session_arc,
+            &tool_call_id,
+            &resolution_id,
+        )
+        .await
+        {
+            Ok(true) => return QueueCommandOutcome::Continue,
+            Ok(false) => {}
+            Err(error) => {
+                let mut session = session_arc.lock().await;
+                reject_question_answers(&mut session, &resolution_id, error);
+                return QueueCommandOutcome::Continue;
+            }
+        }
         {
             let mut session = session_arc.lock().await;
             let chat_id = session.chat_id.clone();
