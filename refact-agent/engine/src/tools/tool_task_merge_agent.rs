@@ -17,7 +17,7 @@ use crate::chat::verifier::{load_expected_card_state, outcome_is_infrastructure}
 use crate::tasks::types::VerificationOutcome;
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
-use crate::tools::task_tool_helpers::require_bound_planner_task;
+use crate::tools::task_tool_helpers::{require_bound_planner_task, stop_live_card_sessions};
 use crate::worktrees::service::{merge_lock_for, WorktreeService};
 use crate::worktrees::types::{
     MergeWorktreeRequest, MergeWorktreeResponse, WorktreeMergeStrategy, WorktreeRecordView,
@@ -1190,6 +1190,7 @@ async fn merge_registered_task_worktree(
 
 struct MergeRequest {
     gcx: Arc<GlobalContext>,
+    chat_facade: Arc<dyn refact_runtime_api::ChatSessionFacade>,
     task_id: String,
     card_id: String,
     strategy: String,
@@ -1228,6 +1229,7 @@ async fn resolve_merge_request(
             .to_string());
     }
     let gcx = ccx_lock.app.gcx.clone();
+    let chat_facade = ccx_lock.app.chat.facade.clone();
     drop(ccx_lock);
 
     let task_id = require_bound_planner_task(&ccx, args).await?;
@@ -1244,6 +1246,7 @@ async fn resolve_merge_request(
     }
     Ok(MergeRequest {
         gcx,
+        chat_facade,
         task_id,
         card_id,
         strategy,
@@ -1254,26 +1257,44 @@ async fn resolve_merge_request(
     })
 }
 
-async fn resolve_merge_state(request: MergeRequest) -> Result<MergeState, String> {
-    let project_dirs = crate::files_correction::get_project_dirs(request.gcx.clone()).await;
-    let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
-    let is_git_repo = tokio::process::Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(workspace_root)
-        .output()
-        .await
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-    if !is_git_repo {
-        return Err("Workspace is not a git repository".to_string());
-    }
-
+async fn resolve_merge_state<F, Fut>(
+    request: MergeRequest,
+    git_probe: F,
+) -> Result<MergeState, String>
+where
+    F: FnOnce(std::path::PathBuf) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
     let board = storage::load_board(request.gcx.clone(), &request.task_id).await?;
     let card = board
         .get_card(&request.card_id)
         .ok_or(format!("Card {} not found", request.card_id))?;
     let verifier_warning = ensure_verifier_allows_merge(card, request.force)?;
     let completion_warning = ensure_card_done_allows_merge(card, request.force)?;
+    if request.force && card.column == "doing" {
+        let reports = stop_live_card_sessions(
+            &request.gcx,
+            request.chat_facade.as_ref(),
+            &request.task_id,
+            &request.card_id,
+        )
+        .await
+        .map_err(|error| format!("agent still running; cancel it first: {}", error))?;
+        for report in reports {
+            report.result.map_err(|error| {
+                format!(
+                    "agent still running; cancel it first ({}): {}",
+                    report.chat_id, error
+                )
+            })?;
+        }
+    }
+    let project_dirs = crate::files_correction::get_project_dirs(request.gcx.clone()).await;
+    let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
+    if !git_probe(workspace_root.clone()).await {
+        return Err("Workspace is not a git repository".to_string());
+    }
+
     let expected_assignee = card.assignee.clone();
     let expected_agent_chat_id = card.agent_chat_id.clone();
     let task_meta = storage::load_task_meta(request.gcx.clone(), &request.task_id).await?;
@@ -1329,6 +1350,21 @@ async fn execute_merge_state(state: MergeState) -> Result<(bool, Vec<ContextEnum
 
 pub struct ToolTaskMergeAgent;
 
+pub(super) async fn merge_agent_with_git_probe<F, Fut>(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    tool_call_id: &str,
+    args: &HashMap<String, Value>,
+    git_probe: F,
+) -> Result<(bool, Vec<ContextEnum>), String>
+where
+    F: FnOnce(std::path::PathBuf) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let request = resolve_merge_request(ccx, args, tool_call_id).await?;
+    let state = resolve_merge_state(request, git_probe).await?;
+    execute_merge_state(state).await
+}
+
 impl ToolTaskMergeAgent {
     pub fn new() -> Self {
         Self
@@ -1375,9 +1411,16 @@ impl Tool for ToolTaskMergeAgent {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let request = resolve_merge_request(ccx, args, tool_call_id).await?;
-        let state = resolve_merge_state(request).await?;
-        execute_merge_state(state).await
+        merge_agent_with_git_probe(ccx, tool_call_id, args, |root| async move {
+            tokio::process::Command::new("git")
+                .args(["rev-parse", "--is-inside-work-tree"])
+                .current_dir(root)
+                .output()
+                .await
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        })
+        .await
     }
 
     fn tool_depends_on(&self) -> Vec<String> {

@@ -206,6 +206,65 @@ pub(crate) const AGENT_ABORT_TIMEOUT: std::time::Duration = std::time::Duration:
 pub(crate) const CANCEL_AGENT_STOP_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(10);
 
+pub(crate) struct AgentStopReport {
+    pub chat_id: String,
+    pub prior_state: refact_runtime_api::SessionState,
+    pub result: Result<(), String>,
+}
+
+pub(crate) async fn stop_live_card_sessions(
+    gcx: &GlobalContext,
+    chat_facade: &dyn refact_runtime_api::ChatSessionFacade,
+    task_id: &str,
+    card_id: &str,
+) -> Result<Vec<AgentStopReport>, String> {
+    use refact_runtime_api::SessionState;
+
+    let sessions: Vec<_> = gcx
+        .chat_sessions
+        .read()
+        .await
+        .iter()
+        .map(|(id, session)| (id.clone(), session.clone()))
+        .collect();
+    let mut requested = Vec::new();
+    for (chat_id, session) in sessions {
+        let prior_state = {
+            let session = session.lock().await;
+            let matches_card = session.thread.task_meta.as_ref().is_some_and(|meta| {
+                meta.task_id == task_id
+                    && meta.card_id.as_deref() == Some(card_id)
+                    && meta.role == "agents"
+            });
+            (matches_card
+                && matches!(
+                    session.runtime.state,
+                    SessionState::Generating | SessionState::ExecutingTools
+                ))
+            .then_some(session.runtime.state)
+        };
+        if let Some(prior_state) = prior_state {
+            chat_facade
+                .push_priority_command(&chat_id, refact_chat_api::ChatCommand::Abort {})
+                .await?;
+            requested.push((chat_id, prior_state));
+        }
+    }
+    Ok(futures::future::join_all(
+        requested
+            .into_iter()
+            .map(|(chat_id, prior_state)| async move {
+                let result = wait_for_agent_stop(chat_facade, &chat_id).await;
+                AgentStopReport {
+                    chat_id,
+                    prior_state,
+                    result,
+                }
+            }),
+    )
+    .await)
+}
+
 pub(crate) async fn wait_for_agent_stop(
     chat_facade: &dyn refact_runtime_api::ChatSessionFacade,
     chat_id: &str,

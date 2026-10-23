@@ -17,24 +17,24 @@ use crate::worktrees::types::{CreateWorktreeRequest, MergeWorktreeRequest, Workt
 
 use super::tool_task_merge_agent::merge_under_available_lease;
 
-const TARGET: &str = "refact/chat/planner";
+pub(super) const TARGET: &str = "refact/chat/planner";
 
-fn git(root: &Path, args: &[&str]) -> String {
+pub(super) fn git(root: &Path, args: &[&str]) -> String {
     run_git(root, args).unwrap_or_else(|error| panic!("git {args:?}: {error}"))
 }
 
-struct Fixture {
+pub(super) struct Fixture {
     _temp: tempfile::TempDir,
-    gcx: Arc<GlobalContext>,
-    service: WorktreeService,
-    source: PathBuf,
-    planner: PathBuf,
-    agent: PathBuf,
+    pub(super) gcx: Arc<GlobalContext>,
+    pub(super) service: WorktreeService,
+    pub(super) source: PathBuf,
+    pub(super) planner: PathBuf,
+    pub(super) agent: PathBuf,
     id: String,
 }
 
 impl Fixture {
-    async fn new(planner_checkout: bool) -> Self {
+    pub(super) async fn new(planner_checkout: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir(&source).unwrap();
@@ -109,7 +109,7 @@ impl Fixture {
         }
     }
 
-    fn write_board(&self, legacy: bool) {
+    pub(super) fn write_board(&self, legacy: bool) {
         let branch = git(&self.agent, &["branch", "--show-current"]);
         let card: crate::tasks::types::BoardCard = serde_json::from_value(serde_json::json!({
             "id": "T-1",

@@ -14,7 +14,9 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate};
-use crate::tools::task_tool_helpers::{wait_for_agent_stop, CANCEL_AGENT_STOP_TIMEOUT};
+use crate::tools::task_tool_helpers::{
+    stop_live_card_sessions, wait_for_agent_stop, CANCEL_AGENT_STOP_TIMEOUT,
+};
 use crate::tools::planner_delivery::{self, CardGuard, CardTarget};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::service::WorktreeService;
@@ -200,53 +202,25 @@ async fn stop_terminal_card_sessions(
     planner: &PlannerContext,
     card_id: &str,
 ) -> Result<Vec<String>, String> {
-    let sessions: Vec<_> = planner
-        .gcx
-        .chat_sessions
-        .read()
-        .await
-        .iter()
-        .map(|(id, session)| (id.clone(), session.clone()))
-        .collect();
-    let mut requested = Vec::new();
-    for (chat_id, session) in sessions {
-        let prior_state = {
-            let session = session.lock().await;
-            let matches_card = session.thread.task_meta.as_ref().is_some_and(|meta| {
-                meta.task_id == planner.task_id
-                    && meta.card_id.as_deref() == Some(card_id)
-                    && meta.role == "agents"
-            });
-            (matches_card
-                && matches!(
-                    session.runtime.state,
-                    SessionState::Generating | SessionState::ExecutingTools
-                ))
-            .then_some(session.runtime.state)
-        };
-        if let Some(prior_state) = prior_state {
-            planner
-                .chat_facade
-                .push_priority_command(&chat_id, ChatCommand::Abort {})
-                .await?;
-            requested.push((chat_id, prior_state));
-        }
-    }
-    Ok(futures::future::join_all(
-        requested
-            .into_iter()
-            .map(|(chat_id, prior_state)| async move {
-                let report = PushReport {
-                    pushed: true,
-                    prior_state: Some(prior_state),
-                    skipped_reason: None,
-                };
-                let (_, text) =
-                    abort_report_text(&report, planner.chat_facade.as_ref(), &chat_id).await;
-                format!("{}: {}", chat_id, text)
-            }),
+    Ok(stop_live_card_sessions(
+        &planner.gcx,
+        planner.chat_facade.as_ref(),
+        &planner.task_id,
+        card_id,
     )
-    .await)
+    .await?
+    .into_iter()
+    .map(|report| {
+        let text = match report.result {
+            Ok(()) => format!(
+                "Agent stopped; prior agent state: {}",
+                state_label(Some(report.prior_state))
+            ),
+            Err(error) => format!("Abort not confirmed: {}", error),
+        };
+        format!("{}: {}", report.chat_id, text)
+    })
+    .collect())
 }
 
 fn card_state_error(action: &str, card_id: &str, column: &str) -> String {
