@@ -55,13 +55,29 @@ pub async fn model_caller(
         .await
         .get(chat_id)
         .cloned()
-        .ok_or_else(WorkError::not_visible)?;
+        .ok_or_else(|| {
+            WorkError::new(
+                "not_found_or_not_visible",
+                "caller chat session not found or not visible",
+                false,
+            )
+        })?;
     let (source, checkout, root, worktree_id) = {
-        let session = session.try_lock().map_err(|_| WorkError::unavailable())?;
+        let session = session.lock().await;
         if !session.thread.model.is_empty() && session.thread.model != model_id {
-            return Err(WorkError::policy_unavailable());
+            return Err(WorkError::new(
+                "policy_unavailable",
+                "caller model changed; request a new launch",
+                false,
+            ));
         }
-        let source = session_source_root(&session).ok_or_else(WorkError::scope_denied)?;
+        let source = session_source_root(&session).ok_or_else(|| {
+            WorkError::new(
+                "scope_denied",
+                "caller chat has no trusted project scope",
+                false,
+            )
+        })?;
         let checkout = session
             .thread
             .worktree
@@ -82,22 +98,46 @@ pub async fn model_caller(
     };
     let source_root = roots::resolve_source_workspace_root(app.gcx.clone(), source.to_str())
         .await
-        .map_err(|_| WorkError::scope_denied())?;
+        .map_err(|_| {
+            WorkError::new(
+                "scope_denied",
+                "caller project scope is not available or authorized",
+                false,
+            )
+        })?;
     if let Some(id) = worktree_id {
         let roots = roots::load_project_roots(app.gcx.clone(), source_root.clone()).await;
         let registered = roots
             .get(&id)
             .and_then(|root| root.path.as_ref())
-            .ok_or_else(WorkError::scope_denied)?;
+            .ok_or_else(|| {
+                WorkError::new("scope_denied", "caller worktree is not registered", false)
+            })?;
         if canonical_candidate(Path::new(registered))? != canonical_candidate(&checkout)? {
-            return Err(WorkError::scope_denied());
+            return Err(WorkError::new(
+                "scope_denied",
+                "caller checkout does not match its registered worktree",
+                false,
+            ));
         }
     }
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
         .await
-        .map_err(|_| WorkError::policy_unavailable())?;
+        .map_err(|_| {
+            WorkError::new(
+                "policy_unavailable",
+                "caller model capabilities could not be loaded",
+                true,
+            )
+        })?;
     let model = crate::caps::resolve_chat_model(caps, model_id)
-        .map_err(|_| WorkError::policy_unavailable())?
+        .map_err(|_| {
+            WorkError::new(
+                "policy_unavailable",
+                "caller model is not available in the current catalog",
+                true,
+            )
+        })?
         .base
         .clone();
     Ok(WorkCaller {
@@ -187,6 +227,82 @@ pub fn canonical_candidate(path: &Path) -> Result<PathBuf, WorkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn caller_fixture() -> (
+        AppState,
+        std::sync::Arc<tokio::sync::Mutex<ChatSession>>,
+        tempfile::TempDir,
+    ) {
+        let workspace = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().canonicalize().unwrap()];
+        let (root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            "test/model".into(),
+            std::sync::Arc::new(crate::caps::ChatModelRecord {
+                base: BaseModelRecord {
+                    id: "test/model".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        );
+        {
+            let mut state = gcx.caps_state.write().await;
+            state.caps = Some(std::sync::Arc::new(caps));
+            state.loaded_project_root = Some(root);
+            state.last_attempted_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+        }
+        let app = AppState::from_gcx(gcx).await;
+        let mut parent = ChatSession::new("parent".into());
+        parent.thread.model = "test/model".into();
+        parent.work_project_root = Some(workspace.path().into());
+        let parent = std::sync::Arc::new(tokio::sync::Mutex::new(parent));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("parent".into(), parent.clone());
+        (app, parent, workspace)
+    }
+
+    #[tokio::test]
+    async fn model_caller_waits_for_parent_session_update() {
+        let (app, parent, workspace) = caller_fixture().await;
+        let mut update = parent.lock().await;
+        let caller = model_caller(&app, "parent", "test/model");
+        tokio::pin!(caller);
+        assert!(futures::poll!(&mut caller).is_pending());
+        assert!(app.chat.sessions.try_write().is_ok());
+        update.last_activity = std::time::Instant::now();
+        drop(update);
+
+        let caller = caller.await.unwrap();
+        assert_eq!(caller.source_root, workspace.path().canonicalize().unwrap());
+        assert_eq!(caller.checkout_root, workspace.path());
+        assert_eq!(caller.model.unwrap().id, "test/model");
+    }
+
+    #[tokio::test]
+    async fn model_caller_rejects_model_change_after_waiting_for_parent() {
+        let (app, parent, _workspace) = caller_fixture().await;
+        let mut update = parent.lock().await;
+        let caller = model_caller(&app, "parent", "test/model");
+        tokio::pin!(caller);
+        assert!(futures::poll!(&mut caller).is_pending());
+        update.thread.model = "different/model".into();
+        drop(update);
+
+        let error = caller.await.err().expect("changed caller must be rejected");
+        assert_eq!(error.code, "policy_unavailable");
+        assert_eq!(error.message, "caller model changed; request a new launch");
+        assert!(!error.retryable);
+    }
 
     #[test]
     fn file_scope_rejects_traversal_and_prefix_siblings() {

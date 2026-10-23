@@ -195,7 +195,9 @@ impl Tool for ToolSubagent {
             Some(
                 crate::coordination::scope::model_caller(&app, &parent_chat_id, &current_model)
                     .await
-                    .map_err(|_| "launch caller scope or model unavailable")?,
+                    .map_err(|error| {
+                        format!("launch caller scope or model unavailable: {error}")
+                    })?,
             )
         } else {
             None
@@ -558,7 +560,9 @@ impl Tool for ToolSubagent {
             let current =
                 crate::coordination::scope::model_caller(&app, &parent_chat_id, &current_model)
                     .await
-                    .map_err(|_| "launch caller changed during preparation")?;
+                    .map_err(|error| {
+                        format!("launch caller changed during preparation: {error}")
+                    })?;
             if current.source_root != scope.caller.source_root
                 || current.checkout_root != scope.caller.checkout_root
             {
@@ -1622,6 +1626,80 @@ mod tests {
                     .expect("subagent must be publicly reachable")
                     .messages
             })
+    }
+
+    #[tokio::test]
+    async fn launch_caller_failure_reports_its_cause() {
+        let (ccx, app, parent, _workspace) = profile_parent().await;
+        let mut request = args();
+        request.insert(
+            "launch_spec".into(),
+            json!({"deliverable":{"evidence_required":true}}),
+        );
+        parent.lock().await.thread.model =
+            "https://secret-user:secret-token@private.invalid".into();
+
+        let error = ToolSubagent {
+            config_path: String::new(),
+        }
+        .tool_execute(ccx.clone(), &"call".into(), &request)
+        .await
+        .unwrap_err();
+        assert!(
+            error.starts_with("launch caller scope or model unavailable: "),
+            "{error}"
+        );
+        assert!(
+            error.contains("caller model changed; request a new launch"),
+            "{error}"
+        );
+        assert!(!error.contains("secret-user"));
+        assert!(!error.contains("secret-token"));
+        assert!(!error.contains("private.invalid"));
+
+        app.chat.sessions.write().await.remove("profile-parent");
+        let error = ToolSubagent {
+            config_path: String::new(),
+        }
+        .tool_execute(ccx, &"call".into(), &request)
+        .await
+        .unwrap_err();
+        assert!(
+            error.contains("caller chat session not found or not visible"),
+            "{error}"
+        );
+        assert!(app.agents.list_all().await.is_empty());
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+    }
+
+    #[tokio::test]
+    async fn launch_spec_preview_waits_for_parent_update() {
+        let (ccx, app, parent, _workspace) = profile_parent().await;
+        let mut update = parent.lock().await;
+        let mut request = args();
+        request.insert("action".into(), json!("preview"));
+        request.insert(
+            "launch_spec".into(),
+            json!({"deliverable":{"evidence_required":true}}),
+        );
+        let mut tool = ToolSubagent {
+            config_path: String::new(),
+        };
+        let call = "contended-preview".to_string();
+        let result = tool.tool_execute(ccx.clone(), &call, &request);
+        tokio::pin!(result);
+        assert!(futures::poll!(&mut result).is_pending());
+        assert!(ccx.try_lock().is_ok());
+        update.last_activity = std::time::Instant::now();
+        drop(update);
+
+        let (_, messages) = result.await.unwrap();
+        let preview = message(messages);
+        assert_eq!(preview.extra["preview"], true);
+        assert_eq!(preview.extra["effective_model"], "test/default");
+        assert_eq!(preview.extra["deliverable"]["evidence_required"], true);
+        assert!(preview.extra.get("launch_blocked").is_none());
+        assert!(app.agents.list_all().await.is_empty());
     }
 
     #[tokio::test]
