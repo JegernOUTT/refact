@@ -188,6 +188,7 @@ pub struct BackgroundAgentRegistry {
     write_state: Mutex<RegistryWriteState>,
     storage_write: Mutex<()>,
     questions: QuestionRegistry,
+    quarantine: Option<storage::QuarantineReport>,
 }
 
 struct RegistryWriteState {
@@ -220,7 +221,7 @@ impl BackgroundAgentRegistry {
         tokio::fs::create_dir_all(&storage_root)
             .await
             .map_err(|e| format!("Failed to create background agent registry directory: {e}"))?;
-        let mut records = storage::load_all(&storage_root).await?;
+        let (mut records, quarantine) = storage::load_all_with_report(&storage_root).await?;
         normalize_delivery_state(&mut records);
         normalize_run_history(&mut records);
         reconcile_interrupted(&storage_root, &mut records).await?;
@@ -239,7 +240,12 @@ impl BackgroundAgentRegistry {
             write_state: Mutex::new(RegistryWriteState::default()),
             storage_write: Mutex::new(()),
             questions,
+            quarantine,
         }))
+    }
+
+    pub fn quarantine_report(&self) -> Option<&storage::QuarantineReport> {
+        self.quarantine.as_ref()
     }
 
     /// The single tracked question service. Every question family shares this
@@ -2073,16 +2079,27 @@ impl BackgroundAgentRegistry {
         }
         write_state.pending = true;
         if write_state.flush_task.is_none() {
-            let registry = Arc::clone(self);
+            let registry = Arc::downgrade(self);
             let wait_for = WRITE_DEBOUNCE
                 .checked_sub(now.duration_since(write_state.last_write.unwrap_or(now)))
                 .unwrap_or(Duration::ZERO);
             write_state.flush_task = Some(tokio::spawn(async move {
                 tokio::time::sleep(wait_for).await;
-                let records = registry.records.read().await;
-                let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
-                drop(records);
-                let _ = registry.flush_records(snapshot).await;
+                loop {
+                    let Some(registry) = registry.upgrade() else {
+                        return;
+                    };
+                    match registry.flush_records(Vec::new()).await {
+                        Ok(()) => return,
+                        Err(error) => tracing::error!(
+                            "Failed to save background agents at {}: {error}; retrying in {} seconds",
+                            registry.storage_root.join("records.json").display(),
+                            WRITE_DEBOUNCE.as_secs()
+                        ),
+                    }
+                    drop(registry);
+                    tokio::time::sleep(WRITE_DEBOUNCE).await;
+                }
             }));
         }
         Ok(())

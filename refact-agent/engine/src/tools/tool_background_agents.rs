@@ -1315,7 +1315,11 @@ impl Tool for ToolAgentList {
         let filter = parse_agent_list_filter(args)?;
         let (app, parent_chat_id) = background_agent_context(&ccx).await;
         let records = app.agents.list_for_parent(&parent_chat_id, filter).await;
-        Ok(tool_message(tool_call_id, format_agent_table(&records)))
+        let mut content = format_agent_table(&records);
+        if let Some(report) = app.agents.quarantine_report() {
+            content = format!("{report}\n\n{content}");
+        }
+        Ok(tool_message(tool_call_id, content))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -1733,6 +1737,56 @@ mod tests {
             },
             _ => panic!("expected chat message"),
         }
+    }
+
+    #[tokio::test]
+    async fn quarantine_is_visible_in_agent_list() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".refact").join("background_agents");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let bad = json!({"schema_version": 999, "agent_id": "unsupported"});
+        tokio::fs::write(root.join("records.json"), json!([bad]).to_string())
+            .await
+            .unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            temp.path().to_path_buf(),
+            config.path().to_path_buf(),
+        )
+        .await;
+        let report = gcx.agents.quarantine_report().unwrap().clone();
+        let app = AppState::from_gcx(gcx).await;
+        let ccx = Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                app,
+                4096,
+                20,
+                false,
+                vec![],
+                PARENT.to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ));
+        let output = output_text(
+            ToolAgentList {
+                config_path: String::new(),
+            }
+            .tool_execute(ccx, &"list".to_string(), &HashMap::new())
+            .await
+            .unwrap(),
+        );
+        assert!(output.starts_with("WARNING: Background agent data quarantined"));
+        assert!(output.contains(&report.path.display().to_string()));
+        assert!(output.contains("Record count: 1"));
+        assert!(output.contains("Unsupported background agent schema version: 999"));
+        assert!(output.contains("Total: 0"));
+        let sidecar: Value =
+            serde_json::from_slice(&tokio::fs::read(&report.path).await.unwrap()).unwrap();
+        assert_eq!(sidecar[0]["record"], bad);
     }
 
     #[tokio::test]

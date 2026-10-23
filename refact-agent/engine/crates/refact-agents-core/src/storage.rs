@@ -181,22 +181,96 @@ async fn remove_agent_files(storage_root: &Path, agent_id: &str) {
 }
 
 pub async fn load_all(storage_root: &Path) -> Result<HashMap<String, BackgroundAgent>, String> {
+    Ok(load_all_with_report(storage_root).await?.0)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuarantineReport {
+    pub path: PathBuf,
+    pub record_count: Option<usize>,
+    pub first_reason: String,
+}
+
+impl std::fmt::Display for QuarantineReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count = self
+            .record_count
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| "unknown (entire file)".into());
+        write!(
+            f,
+            "WARNING: Background agent data quarantined at {}. Record count: {count}. First reason: {}",
+            self.path.display(),
+            self.first_reason
+        )
+    }
+}
+
+async fn preserve_quarantine(source: &Path, whole_file: bool) -> Result<PathBuf, String> {
+    let directory = source.parent().ok_or("Quarantine directory unavailable")?;
+    let mut timestamp = Utc::now();
+    loop {
+        let stamp = timestamp.format("%Y%m%dT%H%M%SZ");
+        let name = if whole_file {
+            format!("records.json.unreadable-{stamp}")
+        } else {
+            format!("records.unreadable-{stamp}.json")
+        };
+        let destination = directory.join(name);
+        match fs::hard_link(source, &destination).await {
+            Ok(()) => {
+                fs::remove_file(source).await.map_err(|error| {
+                    format!(
+                        "Failed to finish quarantine move to {}: {error}",
+                        destination.display()
+                    )
+                })?;
+                return Ok(destination);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                timestamp += Duration::seconds(1);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to quarantine background agents at {}: {error}",
+                    destination.display()
+                ));
+            }
+        }
+    }
+}
+
+pub(crate) async fn load_all_with_report(
+    storage_root: &Path,
+) -> Result<(HashMap<String, BackgroundAgent>, Option<QuarantineReport>), String> {
     let records_path = storage_root.join(RECORDS_FILE);
-    if !records_path.exists() {
-        return Ok(HashMap::new());
-    }
-    let content = fs::read_to_string(&records_path)
-        .await
-        .map_err(|e| format!("Failed to read background agents file: {e}"))?;
-    if content.trim().is_empty() {
-        return Ok(HashMap::new());
-    }
-    let mut snapshot: Vec<serde_json::Value> = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse background agents file: {e}"))?;
-    let migrated = migrations::migrate(&mut snapshot)?;
-    let records: Vec<BackgroundAgent> = snapshot
-        .iter()
-        .map(|value| {
+    let content = match fs::read(&records_path).await {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((HashMap::new(), None));
+        }
+        Err(error) => return Err(format!("Failed to read background agents file: {error}")),
+    };
+    let original: Vec<serde_json::Value> = match serde_json::from_slice(&content) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let report = QuarantineReport {
+                path: preserve_quarantine(&records_path, true).await?,
+                record_count: None,
+                first_reason: format!("Failed to parse background agents file: {error}"),
+            };
+            tracing::error!("{report}");
+            return Ok((HashMap::new(), Some(report)));
+        }
+    };
+    let mut snapshot = Vec::new();
+    let mut records = HashMap::new();
+    let mut unreadable = Vec::new();
+    let mut migrated = false;
+    for original in original {
+        let mut value = original.clone();
+        let loaded = (|| {
+            let changed = migrations::migrate(std::slice::from_mut(&mut value))?;
             let record: BackgroundAgent = serde_json::from_value(value.clone())
                 .map_err(|e| format!("Failed to parse background agents file: {e}"))?;
             for question in &record.questions {
@@ -204,10 +278,50 @@ pub async fn load_all(storage_root: &Path) -> Result<HashMap<String, BackgroundA
                     format!("Invalid background agent question {}: {e}", question.id)
                 })?;
             }
-            Ok(record)
-        })
-        .collect::<Result<_, String>>()?;
-    if migrated {
+            Ok::<_, String>((record, changed))
+        })();
+        match loaded {
+            Ok((record, changed)) => {
+                migrated |= changed;
+                snapshot.push(value);
+                records.insert(record.agent_id.clone(), record);
+            }
+            Err(reason) => {
+                unreadable.push(serde_json::json!({"reason": reason, "record": original}))
+            }
+        }
+    }
+    let report = if unreadable.is_empty() {
+        None
+    } else {
+        let bytes = serde_json::to_vec_pretty(&unreadable)
+            .map_err(|error| format!("Failed to serialize background agent quarantine: {error}"))?;
+        let tmp = tmp_path_for(&records_path);
+        let staging = LaunchStaging(tmp.clone());
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .await
+            .map_err(|error| format!("Failed to create background agent quarantine: {error}"))?;
+        use tokio::io::AsyncWriteExt;
+        file.write_all(&bytes)
+            .await
+            .map_err(|error| format!("Failed to write background agent quarantine: {error}"))?;
+        file.sync_all()
+            .await
+            .map_err(|error| format!("Failed to flush background agent quarantine: {error}"))?;
+        drop(file);
+        let report = QuarantineReport {
+            path: preserve_quarantine(&tmp, false).await?,
+            record_count: Some(unreadable.len()),
+            first_reason: unreadable[0]["reason"].as_str().unwrap().to_string(),
+        };
+        drop(staging);
+        tracing::error!("{report}");
+        Some(report)
+    };
+    if migrated || report.is_some() {
         let content = serde_json::to_vec_pretty(&snapshot)
             .map_err(|e| format!("Failed to serialize migrated background agents: {e}"))?;
         let tmp_path = tmp_path_for(&records_path);
@@ -219,10 +333,7 @@ pub async fn load_all(storage_root: &Path) -> Result<HashMap<String, BackgroundA
         }
         atomic_write_file(&tmp_path, &records_path).await?;
     }
-    Ok(records
-        .into_iter()
-        .map(|record| (record.agent_id.clone(), record))
-        .collect())
+    Ok((records, report))
 }
 
 pub async fn save_record(storage_root: &Path, record: &BackgroundAgent) -> Result<(), String> {
@@ -873,7 +984,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_snapshot_never_partially_commits_a_migration() {
+    async fn invalid_records_are_preserved_without_partially_migrating_them() {
         let temp = tempfile::tempdir().unwrap();
         let now = Utc::now();
         let mut valid = serde_json::to_value(make_record(
@@ -935,13 +1046,20 @@ mod tests {
         ] {
             let original = serde_json::to_vec(&serde_json::json!([valid, invalid])).unwrap();
             fs::write(&path, &original).await.unwrap();
-            assert!(load_all(temp.path()).await.is_err(), "accepted {invalid}");
-            assert_eq!(fs::read(&path).await.unwrap(), original);
-            assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+            let (loaded, report) = load_all_with_report(temp.path()).await.unwrap();
+            assert_eq!(loaded.len(), 1, "accepted {invalid}");
+            assert_eq!(loaded["valid"].schema_version, SCHEMA_VERSION);
+            let report = report.unwrap();
+            assert_eq!(report.record_count, Some(1));
+            let quarantined: serde_json::Value =
+                serde_json::from_slice(&fs::read(report.path).await.unwrap()).unwrap();
+            assert_eq!(quarantined[0]["record"], invalid);
+            assert!(!quarantined[0]["reason"].as_str().unwrap().is_empty());
         }
         fs::write(&path, b"[{invalid").await.unwrap();
-        assert!(load_all(temp.path()).await.is_err());
-        assert_eq!(fs::read(&path).await.unwrap(), b"[{invalid");
+        let (loaded, report) = load_all_with_report(temp.path()).await.unwrap();
+        assert!(loaded.is_empty());
+        assert_eq!(fs::read(report.unwrap().path).await.unwrap(), b"[{invalid");
     }
 
     #[tokio::test]
