@@ -11,6 +11,65 @@ use refact_work_core::CoordinationSettings;
 
 use crate::coordination::metrics::{self, Decision, Explanation};
 
+#[derive(Default)]
+pub(crate) struct CapacityWatch {
+    waiting: std::sync::Mutex<Option<(tokio::time::Instant, String)>>,
+}
+
+impl CapacityWatch {
+    pub(crate) fn waiting(&self) -> Option<(Duration, String)> {
+        self.waiting
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|(started, provider)| (started.elapsed(), provider.clone()))
+    }
+}
+
+tokio::task_local! {
+    static CAPACITY_WATCH: (std::sync::Arc<CapacityWatch>, std::sync::Arc<std::sync::atomic::AtomicU64>);
+}
+
+pub(crate) async fn watch_capacity<F: std::future::Future>(
+    watch: std::sync::Arc<CapacityWatch>,
+    activity: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    work: F,
+) -> F::Output {
+    CAPACITY_WATCH.scope((watch, activity), work).await
+}
+
+struct CapacityWait;
+
+impl CapacityWait {
+    fn new(bucket: &str) -> Self {
+        let _ = CAPACITY_WATCH.try_with(|(watch, _)| {
+            *watch
+                .waiting
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some((
+                tokio::time::Instant::now(),
+                bucket.split('/').next().unwrap_or("unknown").to_string(),
+            ));
+        });
+        Self
+    }
+}
+
+impl Drop for CapacityWait {
+    fn drop(&mut self) {
+        let _ = CAPACITY_WATCH.try_with(|(watch, activity)| {
+            *watch
+                .waiting
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
+            activity.store(
+                chrono::Utc::now().timestamp_millis().max(0) as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        });
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PressureRetry {
     Retry {
@@ -197,6 +256,7 @@ pub async fn acquire(
         Ok(permit) => return Ok(Some(permit)),
         Err(refusal) => refusal,
     };
+    let _waiting = CapacityWait::new(bucket);
     let mut backoff_ms = 25u64;
 
     loop {
@@ -240,6 +300,12 @@ pub async fn acquire(
             }
         }
 
+        if abort_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            return Err("Aborted".to_string());
+        }
         let Some(next) = admit_recheck(bucket, priority) else {
             return Ok(None);
         };

@@ -43,6 +43,11 @@ fn now_ms() -> u64 {
 fn session_state(session: &ChatSession) -> WorkStateTag {
     use crate::chat::types::SessionState;
     if session.closed {
+        if session.thread.link_type.as_deref() == Some("review_stage")
+            && session.runtime.state == SessionState::Error
+        {
+            return WorkStateTag::Cancelled;
+        }
         return WorkStateTag::Completed;
     }
     match session.runtime.state {

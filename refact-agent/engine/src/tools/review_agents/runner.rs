@@ -131,6 +131,34 @@ pub fn inherited_worktree(ctx: &StageCtx) -> Option<WorktreeMeta> {
     ctx.worktree.clone()
 }
 
+pub(super) async fn finish_stage_session(gcx: Arc<GlobalContext>, trace: &str, run: &StageRun) {
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    let session = app.chat.sessions.read().await.get(trace).cloned();
+    let Some(session) = session else {
+        return;
+    };
+    {
+        let mut session = session.lock().await;
+        session.abort_flag.store(true, Ordering::SeqCst);
+        session.abort_notify.notify_waiters();
+        session.command_queue.clear();
+        session.pending_deliveries.clear();
+        session.runner_pending_deliveries.clear();
+        session.emit_queue_update();
+        let state = if run.status == crate::tools::review_types::StageStatusKind::Ok {
+            crate::chat::types::SessionState::Completed
+        } else {
+            crate::chat::types::SessionState::Error
+        };
+        session.set_runtime_state(state, run.reason.clone());
+        session.increment_version();
+        session.close_event_channel();
+    }
+    if let Err(error) = crate::chat::trajectories::try_save_trajectory(app, session).await {
+        tracing::warn!(%trace, %error, "Failed to save terminal review stage");
+    }
+}
+
 pub async fn run_stage(gcx: Arc<GlobalContext>, ctx: StageCtx, job: StageJob) -> StageProduct {
     let trace_chat_id = job.trace_chat_id.clone();
     let mut product = run_stage_inner(gcx, ctx, job).await;
@@ -367,7 +395,7 @@ fn summary_with_rejections(summary: String, rejected: &[String]) -> Option<Strin
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::tools::review_agents::contract::parse_stage_output;
     use crate::tools::review_agents::stages::embedded_catalog;
@@ -402,7 +430,7 @@ mod tests {
         }
     }
 
-    fn ctx_with_worktree(worktree: Option<WorktreeMeta>) -> StageCtx {
+    pub(crate) fn ctx_with_worktree(worktree: Option<WorktreeMeta>) -> StageCtx {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
         StageCtx {
             review_id: "rv-1".to_string(),

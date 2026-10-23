@@ -4,6 +4,9 @@ pub mod prompts;
 pub mod runner;
 pub mod stages;
 
+#[cfg(test)]
+mod stage_capacity_tests;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -30,6 +33,8 @@ type BoxedProduct = Pin<Box<dyn Future<Output = StageProduct> + Send>>;
 pub trait StageExecutor: Send + Sync {
     async fn execute(&self, job: StageJob, activity: Arc<AtomicU64>) -> StageProduct;
 
+    async fn finish(&self, _trace: &str, _run: &StageRun) {}
+
     fn abort_flag(&self) -> Option<Arc<AtomicBool>> {
         None
     }
@@ -38,15 +43,37 @@ pub trait StageExecutor: Send + Sync {
 pub struct SubchatExecutor {
     pub gcx: Arc<GlobalContext>,
     pub ctx: StageCtx,
+    forwarders: tokio::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
+}
+
+impl SubchatExecutor {
+    pub fn new(gcx: Arc<GlobalContext>, ctx: StageCtx) -> Self {
+        Self {
+            gcx,
+            ctx,
+            forwarders: Default::default(),
+        }
+    }
 }
 
 #[async_trait]
 impl StageExecutor for SubchatExecutor {
     async fn execute(&self, job: StageJob, activity: Arc<AtomicU64>) -> StageProduct {
         let (ctx, forwarder) = monitor_ctx(&self.ctx, activity);
-        let product = run_stage(self.gcx.clone(), ctx, job).await;
-        forwarder.abort();
-        product
+        self.forwarders
+            .lock()
+            .await
+            .insert(job.trace_chat_id.clone(), forwarder);
+        run_stage(self.gcx.clone(), ctx, job).await
+    }
+
+    async fn finish(&self, trace: &str, run: &StageRun) {
+        let forwarder = self.forwarders.lock().await.remove(trace);
+        if let Some(forwarder) = forwarder {
+            forwarder.abort();
+            let _ = forwarder.await;
+        }
+        runner::finish_stage_session(self.gcx.clone(), trace, run).await;
     }
 
     fn abort_flag(&self) -> Option<Arc<AtomicBool>> {
@@ -140,6 +167,8 @@ async fn watch_stage(
 ) -> StageProduct {
     let started = now_ms();
     activity.store(started, Ordering::Relaxed);
+    let capacity = Arc::new(crate::llm::pressure::CapacityWatch::default());
+    let work = crate::llm::pressure::watch_capacity(capacity.clone(), activity.clone(), work);
     let idle_limit_ms = idle_limit.as_millis() as u64;
     let poll = poll.max(Duration::from_millis(1));
     tokio::pin!(work);
@@ -155,6 +184,30 @@ async fn watch_stage(
                     .is_some_and(|parent| parent.load(Ordering::SeqCst))
                 {
                     abort.store(true, Ordering::SeqCst);
+                    return match tokio::time::timeout(grace.max(Duration::from_millis(1)), &mut work).await {
+                        Ok(product) => product,
+                        Err(_) => stage_product(
+                            StageRun::not_run(&label, "review cancelled")
+                                .with_trace_chat_id(Some(trace.clone())),
+                        ),
+                    };
+                }
+                if let Some((waited, provider)) = capacity.waiting() {
+                    if waited > idle_limit {
+                        break stage_product(
+                            StageRun::timed_out(
+                                &label,
+                                None,
+                                now_ms().saturating_sub(started),
+                                &format!(
+                                    "waiting for provider capacity ({provider}); not dispatched within {}s",
+                                    idle_limit.as_secs()
+                                ),
+                            )
+                            .with_trace_chat_id(Some(trace.clone())),
+                        );
+                    }
+                    continue;
                 }
                 let idle_ms = now_ms().saturating_sub(activity.load(Ordering::Relaxed));
                 if idle_ms > idle_limit_ms {
@@ -168,6 +221,48 @@ async fn watch_stage(
         Ok(product) => salvaged(product, fallback.run),
         Err(_) => fallback,
     }
+}
+
+async fn run_watched_stage(
+    executor: Arc<dyn StageExecutor>,
+    job: StageJob,
+    idle_limit: Duration,
+    poll: Duration,
+    grace: Duration,
+    parent_abort: Option<Arc<AtomicBool>>,
+) -> StageProduct {
+    let label = job.label.clone();
+    let trace = job.trace_chat_id.clone();
+    let abort = job.abort.clone();
+    let activity = Arc::new(AtomicU64::new(now_ms()));
+    let panic_label = label.clone();
+    let panic_trace = trace.clone();
+    let stamp = activity.clone();
+    let started = now_ms();
+    let runner = executor.clone();
+    let work: BoxedProduct = Box::pin(async move {
+        match std::panic::AssertUnwindSafe(runner.execute(job, stamp))
+            .catch_unwind()
+            .await
+        {
+            Ok(product) => product,
+            Err(_) => panicked(&panic_label, &panic_trace, started),
+        }
+    });
+    let product = watch_stage(
+        label,
+        trace.clone(),
+        idle_limit,
+        poll,
+        grace,
+        activity,
+        abort,
+        parent_abort,
+        work,
+    )
+    .await;
+    executor.finish(&trace, &product.run).await;
+    product
 }
 
 pub async fn run_stage_jobs(
@@ -187,7 +282,6 @@ pub async fn run_stage_jobs(
         let parent_abort = parent_abort.clone();
         async move {
             let label = job.label.clone();
-            let trace = job.trace_chat_id.clone();
             let abort = job.abort.clone();
             let Ok(_permit) = semaphore.acquire_owned().await else {
                 abort.store(true, Ordering::SeqCst);
@@ -200,32 +294,7 @@ pub async fn run_stage_jobs(
                 abort.store(true, Ordering::SeqCst);
                 return cancelled_before_start(&label);
             }
-            let activity = Arc::new(AtomicU64::new(now_ms()));
-            let panic_label = label.clone();
-            let panic_trace = trace.clone();
-            let stamp = activity.clone();
-            let started = now_ms();
-            let work: BoxedProduct = Box::pin(async move {
-                match std::panic::AssertUnwindSafe(executor.execute(job, stamp))
-                    .catch_unwind()
-                    .await
-                {
-                    Ok(product) => product,
-                    Err(_) => panicked(&panic_label, &panic_trace, started),
-                }
-            });
-            watch_stage(
-                label,
-                trace,
-                idle_limit,
-                poll,
-                params.grace,
-                activity,
-                abort,
-                parent_abort,
-                work,
-            )
-            .await
+            run_watched_stage(executor, job, idle_limit, poll, params.grace, parent_abort).await
         }
     });
     futures::future::join_all(futures).await
@@ -252,7 +321,7 @@ mod tests {
         )
     }
 
-    fn job(label: &str, stage_id: &str) -> StageJob {
+    pub(super) fn job(label: &str, stage_id: &str) -> StageJob {
         StageJob {
             spec: spec_for(stage_id),
             label: label.to_string(),
@@ -277,7 +346,7 @@ mod tests {
         }
     }
 
-    fn params(parallel_depth: usize) -> ScheduleParams {
+    pub(super) fn params(parallel_depth: usize) -> ScheduleParams {
         ScheduleParams {
             parallel_depth,
             idle_timeout: Duration::from_secs(120),

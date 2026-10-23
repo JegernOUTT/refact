@@ -675,10 +675,7 @@ pub(crate) async fn run_review(
             .map(PathBuf::as_path),
         &ctx.review_id,
     );
-    let executor: Arc<dyn StageExecutor> = Arc::new(SubchatExecutor {
-        gcx: gcx.clone(),
-        ctx: ctx.clone(),
-    });
+    let executor: Arc<dyn StageExecutor> = Arc::new(SubchatExecutor::new(gcx.clone(), ctx.clone()));
 
     let mut findings: Vec<ReviewFinding> = Vec::new();
     let mut scratch_written = false;
