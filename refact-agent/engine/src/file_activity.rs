@@ -1086,6 +1086,39 @@ fn stale_message(path: &Path, state: &ActorState, attribution: &str) -> String {
     )
 }
 
+pub fn record_visible_read(
+    actor: &str,
+    file: &refact_core::chat_types::ContextFile,
+    text: &str,
+) -> ReadObservation {
+    let expected: Vec<_> = text.lines().collect();
+    let total = expected.len();
+    let shown: Vec<_> = file
+        .file_content
+        .lines()
+        .filter_map(|line| {
+            let (number, content) = line.split_once(" | ")?;
+            Some((number.trim().parse::<usize>().ok()?, content))
+        })
+        .collect();
+    let whole = file.line1 <= 1
+        && file.line2 >= total
+        && shown.len() == total
+        && shown
+            .iter()
+            .enumerate()
+            .all(|(index, (line, content))| *line == index + 1 && *content == expected[index]);
+    record_read(
+        Some(actor),
+        Path::new(&file.file_name),
+        text,
+        file.line1,
+        file.line2,
+        total,
+        (!whole).then(|| "only the rendered range survived output processing".into()),
+    )
+}
+
 /// Records what a chat actually saw. `content` must be the full authoritative
 /// text that was loaded, even when only part of it was rendered.
 pub fn record_read(

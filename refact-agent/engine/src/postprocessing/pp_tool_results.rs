@@ -64,32 +64,7 @@ pub async fn postprocess_tool_results(
                     let Some(text) = snapshots.get(&path) else {
                         continue;
                     };
-                    let total = text.lines().count();
-                    let expected: Vec<_> = text.lines().collect();
-                    let shown: Vec<_> = file
-                        .file_content
-                        .lines()
-                        .filter_map(|line| {
-                            let (number, content) = line.split_once(" | ")?;
-                            Some((number.trim().parse::<usize>().ok()?, content))
-                        })
-                        .collect();
-                    let whole = file.line1 <= 1
-                        && file.line2 >= total
-                        && shown.len() == total
-                        && shown.iter().enumerate().all(|(index, (line, content))| {
-                            *line == index + 1 && *content == expected[index]
-                        });
-                    let stamp = crate::file_activity::record_read(
-                        Some(&actor),
-                        &path,
-                        text,
-                        file.line1,
-                        file.line2,
-                        total,
-                        (!whole)
-                            .then(|| "only the rendered range survived output processing".into()),
-                    );
+                    let stamp = crate::file_activity::record_visible_read(&actor, file, text);
                     stamps.push(stamp);
                 }
                 if !stamps.is_empty() {

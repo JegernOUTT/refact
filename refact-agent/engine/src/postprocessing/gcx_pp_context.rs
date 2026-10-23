@@ -27,6 +27,10 @@ impl PPContextTrait for GcxPPContext {
         Ok(text)
     }
 
+    async fn read_file_for_dedup(&self, path: &PathBuf) -> Result<String, String> {
+        get_file_text_from_memory_or_disk(self.0.clone(), path).await
+    }
+
     async fn correct_to_nearest_filename(&self, path: &str, limit: usize) -> Vec<String> {
         correct_to_nearest_filename(self.0.clone(), &path.to_string(), false, limit).await
     }
@@ -45,5 +49,15 @@ impl PPContextTrait for GcxPPContext {
 
     fn canonical_path(&self, path: &str) -> PathBuf {
         canonical_path(path)
+    }
+
+    fn record_deduplicated_read(
+        &self,
+        file: &refact_core::chat_types::ContextFile,
+        current_text: &str,
+    ) {
+        if let Some(actor) = crate::file_activity::current_actor() {
+            crate::file_activity::record_visible_read(&actor, file, current_text);
+        }
     }
 }

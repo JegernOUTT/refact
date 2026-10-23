@@ -56,6 +56,10 @@ pub async fn postprocess_tool_results(
     truncation_exempt_tool_call_ids: &HashSet<String>,
 ) -> Vec<ChatMessage> {
     let mut result = Vec::new();
+    let visible_history = refact_core::active_context::active_context(existing_messages)
+        .map(|view| view.messages)
+        .unwrap_or_default();
+    let existing_messages = visible_history.as_slice();
 
     let (diff_messages, other_messages): (Vec<_>, Vec<_>) =
         tool_messages.into_iter().partition(|m| m.role == "diff");
@@ -272,7 +276,8 @@ fn deduplicate_web_search_tool_results(
     }
 }
 
-fn deduplicate_and_merge_context_files(
+async fn deduplicate_and_merge_context_files(
+    ctx: Arc<dyn PPContextTrait>,
     context_files: Vec<ContextFile>,
     existing_messages: &[ChatMessage],
 ) -> (Vec<ContextFile>, Vec<String>) {
@@ -296,6 +301,12 @@ fn deduplicate_and_merge_context_files(
         if files.len() == 1 {
             let cf = files.remove(0);
             if let Some((msg_idx, tool_name)) = find_coverage_in_history(&cf, existing_messages) {
+                if !record_deduplicated_file(ctx.as_ref(), &cf, existing_messages, msg_idx, None)
+                    .await
+                {
+                    result.push(cf);
+                    continue;
+                }
                 let range = if cf.line1 > 0 && cf.line2 > 0 {
                     format!("{}:{}-{}", cf.file_name, cf.line1, cf.line2)
                 } else {
@@ -318,6 +329,12 @@ fn deduplicate_and_merge_context_files(
 
         for cf in merged {
             if let Some((msg_idx, tool_name)) = find_coverage_in_history(&cf, existing_messages) {
+                if !record_deduplicated_file(ctx.as_ref(), &cf, existing_messages, msg_idx, None)
+                    .await
+                {
+                    result.push(cf);
+                    continue;
+                }
                 let range = if cf.line1 > 0 && cf.line2 > 0 {
                     format!("{}:{}-{}", cf.file_name, cf.line1, cf.line2)
                 } else {
@@ -336,6 +353,91 @@ fn deduplicate_and_merge_context_files(
     }
 
     (result, notes)
+}
+
+async fn record_deduplicated_file(
+    ctx: &dyn PPContextTrait,
+    file: &ContextFile,
+    messages: &[ChatMessage],
+    message_index: usize,
+    current_text: Option<&str>,
+) -> bool {
+    let loaded;
+    let text = match current_text {
+        Some(text) => text,
+        None => match ctx
+            .read_file_for_dedup(&PathBuf::from(&file.file_name))
+            .await
+        {
+            Ok(text) => {
+                loaded = text;
+                &loaded
+            }
+            Err(_) => return false,
+        },
+    };
+    if file.file_rev.as_ref() != Some(&official_text_hashing_function(text)) {
+        return false;
+    }
+    let message = &messages[message_index];
+    if message.extra.get("_ui_only").and_then(|v| v.as_bool()) == Some(true)
+        || message.extra.get("ui_only").and_then(|v| v.as_bool()) == Some(true)
+    {
+        return false;
+    }
+    let files = match &message.content {
+        ChatContent::ContextFiles(files) => files.clone(),
+        ChatContent::SimpleText(text) => match serde_json::from_str::<Vec<ContextFile>>(text) {
+            Ok(files) => files,
+            Err(_) => return false,
+        },
+        _ => return false,
+    };
+    for existing in files {
+        if canonical_path_simple(&existing.file_name) != canonical_path_simple(&file.file_name)
+            || existing.file_rev != file.file_rev
+            || has_truncation_markers(&existing.file_content)
+        {
+            continue;
+        }
+        if file.file_name.contains("://") {
+            return existing.file_content == text;
+        }
+        let lines: Vec<_> = text.lines().collect();
+        let start = normalize_line_start(file.line1, lines.len());
+        let end = normalize_line_end(file.line2, lines.len(), start);
+        let shown: Vec<_> = existing
+            .file_content
+            .lines()
+            .filter_map(|line| {
+                let (number, content) = line.split_once(" | ")?;
+                Some((number.trim().parse::<usize>().ok()?, content, line))
+            })
+            .filter(|(number, _, _)| *number > start && *number <= end)
+            .collect();
+        if shown.len() != end - start
+            || !shown
+                .iter()
+                .enumerate()
+                .all(|(index, (number, content, _))| {
+                    *number == start + index + 1 && *content == lines[start + index]
+                })
+            || (lines.is_empty() && !existing.file_content.is_empty())
+        {
+            continue;
+        }
+        let mut visible = file.clone();
+        visible.line1 = start + 1;
+        visible.line2 = end;
+        visible.file_content = shown
+            .iter()
+            .map(|(_, _, line)| *line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        ctx.record_deduplicated_read(&visible, text);
+        return true;
+    }
+    false
 }
 
 fn merge_overlapping_ranges(mut files: Vec<ContextFile>) -> Vec<ContextFile> {
@@ -459,7 +561,7 @@ async fn postprocess_context_file_results(
     existing_messages: &[ChatMessage],
 ) -> (Option<ChatMessage>, Vec<String>, usize) {
     let (deduped_files, dedup_notes) =
-        deduplicate_and_merge_context_files(context_files, existing_messages);
+        deduplicate_and_merge_context_files(ctx.clone(), context_files, existing_messages).await;
 
     let (skip_pp_files, mut pp_files): (Vec<_>, Vec<_>) =
         deduped_files.into_iter().partition(|cf| cf.skip_pp);
@@ -586,18 +688,37 @@ async fn fill_skip_pp_files_with_budget(
             cf.file_rev = Some(official_text_hashing_function(&cf.file_content));
 
             if let Some(dup_info) = find_duplicate_in_history(&cf, existing_messages) {
-                let range = if cf.line1 > 0 && cf.line2 > 0 {
-                    format!("{}:{}-{}", cf.file_name, cf.line1, cf.line2)
+                let current_text = if cf.file_name.contains("://") {
+                    Some(cf.file_content.clone())
                 } else {
-                    cf.file_name.clone()
+                    ctx.read_file_for_dedup(&PathBuf::from(&cf.file_name))
+                        .await
+                        .ok()
                 };
-                notes.push(format!(
-                    "📎 Skipped `{}`: already retrieved in message #{} via `{}`.",
-                    range,
-                    dup_info.0 + 1,
-                    dup_info.1
-                ));
-                continue;
+                if let Some(text) = current_text {
+                    if record_deduplicated_file(
+                        ctx.as_ref(),
+                        &cf,
+                        existing_messages,
+                        dup_info.0,
+                        Some(&text),
+                    )
+                    .await
+                    {
+                        let range = if cf.line1 > 0 && cf.line2 > 0 {
+                            format!("{}:{}-{}", cf.file_name, cf.line1, cf.line2)
+                        } else {
+                            cf.file_name.clone()
+                        };
+                        notes.push(format!(
+                            "📎 Skipped `{}`: already retrieved in message #{} via `{}`.",
+                            range,
+                            dup_info.0 + 1,
+                            dup_info.1
+                        ));
+                        continue;
+                    }
+                }
             }
 
             cf.file_content = truncate_tool_text_lines(&cf.file_content);
@@ -641,18 +762,28 @@ async fn fill_skip_pp_files_with_budget(
                 cf.file_rev = Some(official_text_hashing_function(&text));
 
                 if let Some(dup_info) = find_duplicate_in_history(&cf, existing_messages) {
-                    let range = if cf.line1 > 0 && cf.line2 > 0 {
-                        format!("{}:{}-{}", cf.file_name, cf.line1, cf.line2)
-                    } else {
-                        cf.file_name.clone()
-                    };
-                    notes.push(format!(
-                        "📎 Skipped `{}`: already retrieved in message #{} via `{}`.",
-                        range,
-                        dup_info.0 + 1,
-                        dup_info.1
-                    ));
-                    continue;
+                    if record_deduplicated_file(
+                        ctx.as_ref(),
+                        &cf,
+                        existing_messages,
+                        dup_info.0,
+                        Some(&text),
+                    )
+                    .await
+                    {
+                        let range = if cf.line1 > 0 && cf.line2 > 0 {
+                            format!("{}:{}-{}", cf.file_name, cf.line1, cf.line2)
+                        } else {
+                            cf.file_name.clone()
+                        };
+                        notes.push(format!(
+                            "📎 Skipped `{}`: already retrieved in message #{} via `{}`.",
+                            range,
+                            dup_info.0 + 1,
+                            dup_info.1
+                        ));
+                        continue;
+                    }
                 }
 
                 let lines: Vec<&str> = text.lines().collect();
@@ -1437,38 +1568,52 @@ mod tests {
         assert_eq!(merged.len(), 2);
     }
 
-    #[test]
-    fn test_deduplicate_same_file_different_tools() {
+    #[tokio::test]
+    async fn test_deduplicate_same_file_different_tools() {
         let files = vec![
             make_context_file("test.rs", 1, 50),
             make_context_file("test.rs", 40, 100),
             make_context_file("other.rs", 1, 20),
         ];
-        let (result, _notes) = deduplicate_and_merge_context_files(files, &[]);
+        let (result, _notes) =
+            deduplicate_and_merge_context_files(Arc::new(NoopPPContext), files, &[]).await;
         assert_eq!(result.len(), 2);
         let test_file = result.iter().find(|f| f.file_name == "test.rs").unwrap();
         assert_eq!(test_file.line1, 1);
         assert_eq!(test_file.line2, 100);
     }
 
-    #[test]
-    fn test_deduplicate_against_history() {
-        let files = vec![make_context_file("test.rs", 1, 50)];
-        let history = vec![make_context_file_message(vec![make_context_file(
-            "test.rs", 1, 100,
-        )])];
-        let (result, notes) = deduplicate_and_merge_context_files(files, &history);
+    #[tokio::test]
+    async fn test_deduplicate_against_history() {
+        let text = "content\n".repeat(100);
+        let mut file = make_context_file_with_rev(
+            "test.rs",
+            1,
+            50,
+            Some(official_text_hashing_function(&text)),
+        );
+        let files = vec![file.clone()];
+        file.line2 = 100;
+        file.file_content = format_lines_with_numbers(&text.lines().collect::<Vec<_>>(), 0, 100);
+        let history = vec![make_context_file_message(vec![file])];
+        let (result, notes) = deduplicate_and_merge_context_files(
+            Arc::new(StaticPPContext { content: text }),
+            files,
+            &history,
+        )
+        .await;
         assert_eq!(result.len(), 0);
         assert!(!notes.is_empty());
     }
 
-    #[test]
-    fn test_deduplicate_partial_coverage() {
+    #[tokio::test]
+    async fn test_deduplicate_partial_coverage() {
         let files = vec![make_context_file("test.rs", 80, 150)];
         let history = vec![make_context_file_message(vec![make_context_file(
             "test.rs", 1, 100,
         )])];
-        let (result, _notes) = deduplicate_and_merge_context_files(files, &history);
+        let (result, _notes) =
+            deduplicate_and_merge_context_files(Arc::new(NoopPPContext), files, &history).await;
         assert_eq!(result.len(), 1);
     }
 
