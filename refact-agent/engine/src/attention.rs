@@ -388,6 +388,7 @@ pub enum AttentionEntryState {
     Defaulted,
     Rejected,
     Cancelled,
+    Withdrawn,
     Expired,
 }
 
@@ -399,6 +400,7 @@ impl AttentionEntryState {
             QuestionState::Defaulted => Self::Defaulted,
             QuestionState::Rejected => Self::Rejected,
             QuestionState::Cancelled => Self::Cancelled,
+            QuestionState::Withdrawn => Self::Withdrawn,
             QuestionState::Expired => Self::Expired,
         }
     }
@@ -827,7 +829,9 @@ impl AttentionBudget {
     }
 
     pub fn blocked_runs(&self, question_id: &str) -> usize {
-        self.guard()
+        let mut state = self.guard();
+        self.sweep(&mut state, Utc::now());
+        state
             .tracked
             .get(question_id)
             .map(|tracked| tracked.waiters.len())
@@ -835,8 +839,9 @@ impl AttentionBudget {
     }
 
     pub fn questions_for_waiter(&self, waiter: &str) -> Vec<String> {
-        let mut questions: Vec<String> = self
-            .guard()
+        let mut state = self.guard();
+        self.sweep(&mut state, Utc::now());
+        let mut questions: Vec<String> = state
             .tracked
             .iter()
             .filter(|(_, tracked)| tracked.waiters.contains(waiter))

@@ -39,7 +39,7 @@ mod tool_agent_chat_summary;
 mod tool_agent_diff;
 pub mod tool_agent_interact;
 pub(crate) mod tool_agent_lifecycle;
-mod tool_agent_planner_qna;
+pub(crate) mod tool_agent_planner_qna;
 mod tool_agent_pulse;
 mod tool_agent_steer;
 mod tool_ast_definition;

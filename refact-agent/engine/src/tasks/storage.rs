@@ -384,10 +384,35 @@ async fn commit_board(
     task_dir: &Path,
     task_id: &str,
     existing: &TaskBoard,
-    board: &TaskBoard,
+    board: &mut TaskBoard,
     provenance: &BoardProvenance,
 ) -> Result<(), String> {
+    let mut withdrawals = Vec::new();
+    for previous in &existing.cards {
+        let ended = match board.get_card(&previous.id) {
+            None => previous.column == "doing",
+            Some(next) => {
+                (previous.column == "doing" && next.column != "doing")
+                    || (previous.column != "doing" && next.column == "doing")
+                    || (previous.column == "doing"
+                        && previous.agent_chat_id.as_ref().is_some_and(|old| {
+                            next.agent_chat_id.as_ref().is_some_and(|new| old != new)
+                        }))
+            }
+        };
+        if ended {
+            let mut removed = previous.clone();
+            let card = board.get_card_mut(&previous.id).unwrap_or(&mut removed);
+            let ids = crate::tools::tool_agent_planner_qna::record_withdrawn_questions(
+                gcx, task_id, card,
+            );
+            withdrawals.push((card.clone(), ids));
+        }
+    }
     write_board_locked(gcx, &guard, task_dir, board, provenance).await?;
+    for (card, ids) in withdrawals {
+        crate::tools::tool_agent_planner_qna::settle_withdrawn_questions(gcx, task_id, &card, &ids);
+    }
     drop(guard);
     let changed = existing
         .cards
@@ -516,13 +541,14 @@ pub async fn create_board(
         }));
     }
     let provenance = board_rows::write_provenance(board, None, source);
+    let mut board = board.clone();
     commit_board(
         &gcx,
         guard,
         &task_dir,
         task_id,
         &existing,
-        board,
+        &mut board,
         &provenance,
     )
     .await?;
@@ -564,13 +590,14 @@ pub async fn save_board_checked(
         }));
     }
     let provenance = board_rows::write_provenance(board, Some((&existing, &previous)), source);
+    let mut board = board.clone();
     commit_board(
         &gcx,
         guard,
         &task_dir,
         task_id,
         &existing,
-        board,
+        &mut board,
         &provenance,
     )
     .await?;
@@ -761,7 +788,7 @@ where
         &task_dir,
         task_id,
         &existing,
-        &board,
+        &mut board,
         &provenance,
     )
     .await?;

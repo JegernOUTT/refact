@@ -19,6 +19,9 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType
 
 const ASK_PREFIX: &str = "[ASK:";
 const REPLY_PREFIX: &str = "[REPLY:";
+const WITHDRAWN_PREFIX: &str = "[WITHDRAWN:";
+const WITHDRAWN_REPLY: &str =
+    "question was withdrawn when the agent finished; nothing was delivered";
 
 use crate::questions::{
     board_card_asker as board_question_asker, board_planner_answerer as board_question_answerer,
@@ -58,7 +61,7 @@ fn reseed_board_question(
         + chrono::Duration::seconds(
             questions.limits().default_expiry_secs.min(i64::MAX as u64) as i64
         );
-    let Ok(contract) = refact_chat_api::QuestionContract::pending(
+    let Ok(mut contract) = refact_chat_api::QuestionContract::pending(
         question_id,
         refact_chat_api::QuestionKind::BoardPlanner,
         board_question_asker(task_id, &card.id),
@@ -75,6 +78,9 @@ fn reseed_board_question(
     ) else {
         return;
     };
+    if withdrawn_ids(card).contains(question_id) {
+        contract.state = refact_chat_api::QuestionState::Withdrawn;
+    }
     let _ = questions.register(contract, now);
 }
 
@@ -280,6 +286,84 @@ fn parse_reply(message: &str) -> Option<(&str, &str)> {
     parse_status_id(message, REPLY_PREFIX)
 }
 
+fn withdrawn_ids(card: &BoardCard) -> HashSet<String> {
+    card.status_updates
+        .iter()
+        .filter_map(|update| update.message.strip_prefix(WITHDRAWN_PREFIX))
+        .filter_map(|rest| rest.split_once(']').map(|(ids, _)| ids))
+        .flat_map(|ids| ids.split(','))
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+pub(crate) fn record_withdrawn_questions(
+    gcx: &GlobalContext,
+    task_id: &str,
+    card: &mut BoardCard,
+) -> Vec<String> {
+    let withdrawn = withdrawn_ids(card);
+    let replied: HashSet<_> = card
+        .status_updates
+        .iter()
+        .filter_map(|update| parse_reply(&update.message).map(|(id, _)| id.to_string()))
+        .collect();
+    let mut ids: Vec<_> =
+        card.status_updates
+            .iter()
+            .filter_map(|update| parse_ask(&update.message).map(|(id, _)| id.to_string()))
+            .filter(|id| !withdrawn.contains(id) && !replied.contains(id))
+            .filter(|id| {
+                gcx.agents.questions().get(id).is_none_or(|question| {
+                    question.state == refact_chat_api::QuestionState::Pending
+                })
+            })
+            .collect();
+    ids.extend(
+        gcx.agents
+            .questions()
+            .pending_for_asker(&board_question_asker(task_id, &card.id), Utc::now())
+            .into_iter()
+            .filter(|question| {
+                question.kind == refact_chat_api::QuestionKind::BoardPlanner
+                    && !replied.contains(&question.id)
+                    && !withdrawn.contains(&question.id)
+            })
+            .map(|question| question.id),
+    );
+    ids.sort();
+    ids.dedup();
+    if !ids.is_empty() {
+        card.status_updates.push(StatusUpdate {
+            timestamp: Utc::now().to_rfc3339(),
+            message: format!(
+                "[WITHDRAWN:{}] Questions withdrawn when the agent finished",
+                ids.join(",")
+            ),
+        });
+    }
+    ids
+}
+
+pub(crate) fn settle_withdrawn_questions(
+    gcx: &Arc<GlobalContext>,
+    task_id: &str,
+    card: &BoardCard,
+    ids: &[String],
+) {
+    for id in ids {
+        reseed_board_question(gcx, task_id, card, id);
+        let _ = gcx.agents.questions().withdraw(
+            id,
+            &board_question_asker(task_id, &card.id),
+            Utc::now(),
+        );
+    }
+    if !ids.is_empty() {
+        gcx.attention.outstanding(Utc::now());
+    }
+}
+
 fn parse_block_marker(message: &str) -> Option<&str> {
     let rest = message.strip_prefix(ASK_PREFIX)?;
     let id = rest.strip_suffix(":block] agent flagged for planner attention")?;
@@ -324,13 +408,14 @@ fn collect_unanswered_questions(cards: &[BoardCard]) -> Vec<UnansweredQuestion> 
 
     let mut seen = HashSet::new();
     let mut questions = Vec::new();
-    for card in cards {
+    for card in cards.iter().filter(|card| card.column == "doing") {
+        let withdrawn = withdrawn_ids(card);
         for update in &card.status_updates {
             let Some((id, text)) = parse_ask(&update.message) else {
                 continue;
             };
             let key = (card.id.clone(), id.to_string());
-            if replied.contains(&key) || !seen.insert(key.clone()) {
+            if replied.contains(&key) || withdrawn.contains(id) || !seen.insert(key.clone()) {
                 continue;
             }
             let (question, mut urgency) = split_question_and_urgency(text);
@@ -463,11 +548,20 @@ impl Tool for ToolAgentAskPlanner {
             None
         };
         let card_id_for_update = card_id.clone();
+        let asking_chat_id = ccx.lock().await.chat_id.clone();
         let timestamp = Utc::now().to_rfc3339();
         if let Err(error) = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
             let card = board
                 .get_card_mut(&card_id_for_update)
                 .ok_or_else(|| format!("Card {} not found", card_id_for_update))?;
+            if card.column != "doing"
+                || card
+                    .agent_chat_id
+                    .as_deref()
+                    .is_some_and(|owner| owner != asking_chat_id)
+            {
+                return Err("agent question requires the current doing card agent".to_string());
+            }
             card.status_updates.push(StatusUpdate {
                 timestamp: timestamp.clone(),
                 message: message.clone(),
@@ -616,41 +710,76 @@ impl Tool for ToolPlannerReply {
             .ok()
             .and_then(|board| board.get_card(&card_id).cloned())
         {
+            if card.column != "doing"
+                || withdrawn_ids(&card).contains(&question_id)
+                || gcx
+                    .agents
+                    .questions()
+                    .get(&question_id)
+                    .is_some_and(|question| {
+                        question.state == refact_chat_api::QuestionState::Withdrawn
+                    })
+            {
+                return Ok((
+                    false,
+                    vec![tool_message(tool_call_id, WITHDRAWN_REPLY.to_string())],
+                ));
+            }
             reseed_board_question(&gcx, &task_id, &card, &question_id);
         }
 
         let card_id_for_update = card_id.clone();
         let question_id_for_update = question_id.clone();
         let answer_for_update = answer.clone();
-        let (_, (recorded, target)) =
-            storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
-                let card = board
-                    .get_card_mut(&card_id_for_update)
-                    .ok_or_else(|| format!("Card {} not found", card_id_for_update))?;
-                if !card_has_ask(card, &question_id_for_update) {
-                    return Err(format!(
-                        "Question {} not found on card {}",
-                        question_id_for_update, card_id_for_update
-                    ));
-                }
-                let target = card
-                    .agent_chat_id
-                    .clone()
-                    .map(|chat_id| CardTarget::from_card(card, chat_id));
-                if card.status_updates.iter().any(|update| {
-                    parse_reply(&update.message)
-                        .map(|(id, _)| id == question_id_for_update)
-                        .unwrap_or(false)
-                }) {
-                    return Ok((false, target));
-                }
-                card.status_updates.push(StatusUpdate {
-                    timestamp: Utc::now().to_rfc3339(),
-                    message: format!("[REPLY:{}] {}", question_id_for_update, answer_for_update),
-                });
-                Ok((true, target))
-            })
-            .await?;
+        let questions = gcx.agents.questions().clone();
+        let result = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+            let card = board
+                .get_card_mut(&card_id_for_update)
+                .ok_or_else(|| format!("Card {} not found", card_id_for_update))?;
+            if !card_has_ask(card, &question_id_for_update) {
+                return Err(format!(
+                    "Question {} not found on card {}",
+                    question_id_for_update, card_id_for_update
+                ));
+            }
+            if card.column != "doing"
+                || withdrawn_ids(card).contains(&question_id_for_update)
+                || questions
+                    .get(&question_id_for_update)
+                    .is_some_and(|question| {
+                        question.state == refact_chat_api::QuestionState::Withdrawn
+                    })
+            {
+                return Err(WITHDRAWN_REPLY.to_string());
+            }
+            let target = card
+                .agent_chat_id
+                .clone()
+                .map(|chat_id| CardTarget::from_card(card, chat_id));
+            if card.status_updates.iter().any(|update| {
+                parse_reply(&update.message)
+                    .map(|(id, _)| id == question_id_for_update)
+                    .unwrap_or(false)
+            }) {
+                return Ok((false, target));
+            }
+            card.status_updates.push(StatusUpdate {
+                timestamp: Utc::now().to_rfc3339(),
+                message: format!("[REPLY:{}] {}", question_id_for_update, answer_for_update),
+            });
+            Ok((true, target))
+        })
+        .await;
+        let (_, (recorded, target)) = match result {
+            Ok(result) => result,
+            Err(error) if error == WITHDRAWN_REPLY => {
+                return Ok((
+                    false,
+                    vec![tool_message(tool_call_id, WITHDRAWN_REPLY.to_string())],
+                ));
+            }
+            Err(error) => return Err(error),
+        };
 
         let question_state = if recorded {
             match gcx.agents.questions().answer(
@@ -754,8 +883,16 @@ impl Tool for ToolTaskQuestionsList {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let task_id = planner_task_id(&ccx, args, "task_questions_list").await?;
         let gcx = ccx.lock().await.app.gcx.clone();
-        let board = storage::load_board(gcx, &task_id).await?;
-        let questions = collect_unanswered_questions(&board.cards);
+        let board = storage::load_board(gcx.clone(), &task_id).await?;
+        let questions: Vec<_> = collect_unanswered_questions(&board.cards)
+            .into_iter()
+            .filter(|question| {
+                gcx.agents
+                    .questions()
+                    .settlement(&question.question_id, Utc::now())
+                    .is_none()
+            })
+            .collect();
         Ok((
             false,
             vec![tool_message(
@@ -881,7 +1018,11 @@ mod tests {
                 20,
                 false,
                 vec![],
-                format!("{}-chat", role),
+                if role == "agents" {
+                    format!("agent-chat-{}", card_id.unwrap_or_default())
+                } else {
+                    format!("{}-chat", role)
+                },
                 None,
                 "model".to_string(),
                 Some(ThreadTaskMeta {
@@ -1414,8 +1555,12 @@ mod tests {
                     .await
                     .unwrap(),
             );
-            assert!(output.contains("Reply recorded"));
-            assert!(output.to_lowercase().contains("not delivered"));
+            if column == "doing" {
+                assert!(output.contains("Reply recorded"));
+                assert!(output.to_lowercase().contains("not delivered"));
+            } else {
+                assert_eq!(output, WITHDRAWN_REPLY);
+            }
         }
     }
 

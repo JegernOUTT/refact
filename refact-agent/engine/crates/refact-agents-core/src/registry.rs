@@ -274,6 +274,16 @@ impl BackgroundAgentRegistry {
                 .flat_map(|record| record.questions.iter().cloned()),
             now,
         );
+        for record in records
+            .values_mut()
+            .filter(|record| record.status.is_terminal())
+        {
+            let previous = record.questions.clone();
+            withdraw_record_questions(&questions, record, now);
+            if previous != record.questions {
+                storage::save_record(&storage_root, record).await?;
+            }
+        }
         let mut indexed = AgentRecords::default();
         for (agent_id, record) in records {
             indexed.insert(agent_id, record);
@@ -827,11 +837,15 @@ impl BackgroundAgentRegistry {
     ) -> Result<BackgroundAgent, String> {
         let answerer = {
             let records = self.records.read().await;
-            records
+            let record = records
                 .get(agent_id)
-                .ok_or_else(|| "agent not found".to_string())?
-                .parent_chat_id
-                .clone()
+                .ok_or_else(|| "agent not found".to_string())?;
+            if record.status.is_terminal() {
+                return Err(
+                    "question was withdrawn when the agent finished; nothing was delivered".into(),
+                );
+            }
+            record.parent_chat_id.clone()
         };
         let settled = match self
             .questions
@@ -909,6 +923,7 @@ impl BackgroundAgentRegistry {
             }
             updated.error = None;
             updated.finished_at = Some(now);
+            self.withdraw_questions(&mut updated, now);
             touch_record(&mut updated, now);
             records.insert(agent_id.to_string(), updated.clone());
             let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
@@ -957,6 +972,7 @@ impl BackgroundAgentRegistry {
             updated.current_tool = None;
             updated.result_payload_path = Some(result_payload_path);
             updated.finished_at = Some(now);
+            self.withdraw_questions(&mut updated, now);
             touch_record(&mut updated, now);
             records.insert(agent_id.to_string(), updated.clone());
             let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
@@ -998,6 +1014,7 @@ impl BackgroundAgentRegistry {
             updated.current_tool = None;
             updated.result_payload_path = Some(result_payload_path);
             updated.finished_at = Some(now);
+            self.withdraw_questions(&mut updated, now);
             touch_record(&mut updated, now);
             records.insert(agent_id.to_string(), updated.clone());
             let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
@@ -1032,6 +1049,7 @@ impl BackgroundAgentRegistry {
             updated.error = Some(reason);
             updated.current_tool = None;
             updated.finished_at = Some(now);
+            self.withdraw_questions(&mut updated, now);
             touch_record(&mut updated, now);
             records.insert(agent_id.to_string(), updated.clone());
             let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
@@ -1083,6 +1101,7 @@ impl BackgroundAgentRegistry {
             updated.close_reason = reason;
             updated.current_tool = None;
             updated.finished_at = Some(now);
+            self.withdraw_questions(&mut updated, now);
             touch_record(&mut updated, now);
             records.insert(agent_id.to_string(), updated.clone());
             let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
@@ -2167,6 +2186,10 @@ impl BackgroundAgentRegistry {
         }
     }
 
+    fn withdraw_questions(&self, record: &mut BackgroundAgent, now: DateTime<Utc>) {
+        withdraw_record_questions(&self.questions, record, now);
+    }
+
     #[doc(hidden)]
     pub async fn flush_pending_writes_for_test(&self) -> Result<(), String> {
         let snapshot: Vec<BackgroundAgent> = self.records.read().await.values().cloned().collect();
@@ -2276,6 +2299,36 @@ fn normalize_delivery_state(records: &mut HashMap<String, BackgroundAgent>) {
         if record.dropped_deliveries.len() > settings.delivery_status_retention {
             let overflow = record.dropped_deliveries.len() - settings.delivery_status_retention;
             record.dropped_deliveries.drain(..overflow);
+        }
+    }
+}
+
+fn withdraw_record_questions(
+    questions: &QuestionRegistry,
+    record: &mut BackgroundAgent,
+    now: DateTime<Utc>,
+) {
+    for pending in questions.pending_for_asker(&record.agent_id, now) {
+        if pending.kind == QuestionKind::AgentParent
+            && !record
+                .questions
+                .iter()
+                .any(|question| question.id == pending.id)
+        {
+            record.questions.push(pending);
+        }
+    }
+    for question in &mut record.questions {
+        if question.kind != QuestionKind::AgentParent {
+            continue;
+        }
+        if let Some(current) = questions.get(&question.id) {
+            *question = current;
+        }
+        if question.state == refact_chat_api::QuestionState::Pending {
+            if let Ok(withdrawn) = questions.withdraw(&question.id, &question.asker, now) {
+                *question = withdrawn;
+            }
         }
     }
 }

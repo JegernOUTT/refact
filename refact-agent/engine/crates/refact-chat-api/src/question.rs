@@ -28,6 +28,7 @@ pub enum QuestionState {
     Defaulted,
     Rejected,
     Cancelled,
+    Withdrawn,
     Expired,
 }
 
@@ -282,6 +283,7 @@ pub enum QuestionSettlement {
     Defaulted(String),
     Rejected,
     Cancelled,
+    Withdrawn,
     Expired,
 }
 
@@ -292,6 +294,7 @@ impl QuestionSettlement {
             Self::Defaulted(_) => QuestionState::Defaulted,
             Self::Rejected => QuestionState::Rejected,
             Self::Cancelled => QuestionState::Cancelled,
+            Self::Withdrawn => QuestionState::Withdrawn,
             Self::Expired => QuestionState::Expired,
         }
     }
@@ -538,6 +541,15 @@ impl QuestionRegistry {
         self.settle(id, asker, true, QuestionState::Cancelled, None, now)
     }
 
+    pub fn withdraw(
+        &self,
+        id: &str,
+        asker: &str,
+        now: DateTime<Utc>,
+    ) -> Result<QuestionContract, QuestionError> {
+        self.settle(id, asker, true, QuestionState::Withdrawn, None, now)
+    }
+
     fn settle(
         &self,
         id: &str,
@@ -703,6 +715,7 @@ impl QuestionRegistry {
             )),
             QuestionState::Rejected => Some(QuestionSettlement::Rejected),
             QuestionState::Cancelled => Some(QuestionSettlement::Cancelled),
+            QuestionState::Withdrawn => Some(QuestionSettlement::Withdrawn),
             QuestionState::Expired => Some(QuestionSettlement::Expired),
         }
     }
@@ -852,6 +865,7 @@ mod tests {
         for settle in [
             QuestionState::Rejected,
             QuestionState::Cancelled,
+            QuestionState::Withdrawn,
             QuestionState::Answered,
         ] {
             let registry = registry();
@@ -864,6 +878,9 @@ mod tests {
                 }
                 QuestionState::Cancelled => {
                     registry.cancel(&question.id, "asker", now).unwrap();
+                }
+                QuestionState::Withdrawn => {
+                    registry.withdraw(&question.id, "asker", now).unwrap();
                 }
                 _ => {
                     registry
@@ -1086,6 +1103,7 @@ mod tests {
         for (settle, expected) in [
             (None, QuestionSettlement::Expired),
             (Some("cancel"), QuestionSettlement::Cancelled),
+            (Some("withdraw"), QuestionSettlement::Withdrawn),
             (Some("reject"), QuestionSettlement::Rejected),
             (Some("answer"), QuestionSettlement::Answered("yes".into())),
         ] {
@@ -1104,6 +1122,9 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 match settle {
                     "cancel" => settling.cancel(&question.id, "asker", Utc::now()).unwrap(),
+                    "withdraw" => settling
+                        .withdraw(&question.id, "asker", Utc::now())
+                        .unwrap(),
                     "reject" => settling
                         .reject(&question.id, "answerer", Utc::now())
                         .unwrap(),

@@ -1132,13 +1132,13 @@ mod tests {
         );
         let question = registry.questions().get("restored-question").unwrap();
         assert_eq!(question, record.questions[0]);
-        assert_eq!(question.state, refact_chat_api::QuestionState::Pending);
+        assert_eq!(question.state, refact_chat_api::QuestionState::Withdrawn);
         assert!(registry
             .answer_question("bgagent-restored", "restored-question", "Yes".into())
             .await
-            .is_ok());
-        let answered = registry.get_any("bgagent-restored").await.unwrap();
-        assert_eq!(answered.questions[0].answered(), Some("Yes"));
+            .is_err());
+        let withdrawn = registry.get_any("bgagent-restored").await.unwrap();
+        assert!(withdrawn.questions[0].answered().is_none());
     }
 
     #[tokio::test]
@@ -1165,6 +1165,7 @@ mod tests {
                         QuestionState::Defaulted,
                         QuestionState::Rejected,
                         QuestionState::Cancelled,
+                        QuestionState::Withdrawn,
                         QuestionState::Expired,
                     ] {
                         let service = QuestionRegistry::new(QuestionLimits::default()).unwrap();
@@ -1201,6 +1202,9 @@ mod tests {
                             QuestionState::Cancelled => {
                                 service.cancel(&id, &record.agent_id, now).unwrap()
                             }
+                            QuestionState::Withdrawn => {
+                                service.withdraw(&id, &record.agent_id, now).unwrap()
+                            }
                             QuestionState::Defaulted | QuestionState::Expired => {
                                 service.expire(now + Duration::seconds(61));
                                 service.get(&id).unwrap()
@@ -1213,7 +1217,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(record.questions.len(), 65);
+        assert_eq!(record.questions.len(), 78);
         for version in [1, SCHEMA_VERSION] {
             let mut to_save = record.clone();
             to_save.schema_version = version;
@@ -1225,20 +1229,32 @@ mod tests {
                 load_all(temp.path()).await.unwrap()[&record.agent_id],
                 record
             );
+            assert_eq!(fs::read(&path).await.unwrap(), bytes);
+            assert_eq!(
+                fs::metadata(&path).await.unwrap().modified().unwrap(),
+                modified
+            );
+            let mut terminal = record.clone();
+            for question in &mut terminal.questions {
+                if question.kind == QuestionKind::AgentParent
+                    && question.state == QuestionState::Pending
+                {
+                    question.state = QuestionState::Withdrawn;
+                }
+            }
             let restarted = crate::BackgroundAgentRegistry::new(temp.path().to_path_buf())
                 .await
                 .unwrap();
-            assert_eq!(restarted.get_any(&record.agent_id).await.unwrap(), record);
-            for question in &record.questions {
+            assert_eq!(restarted.get_any(&record.agent_id).await.unwrap(), terminal);
+            for question in &terminal.questions {
                 assert_eq!(
                     restarted.questions().get(&question.id).as_ref(),
                     Some(question)
                 );
             }
-            assert_eq!(fs::read(&path).await.unwrap(), bytes);
             assert_eq!(
-                fs::metadata(&path).await.unwrap().modified().unwrap(),
-                modified
+                load_all(temp.path()).await.unwrap()[&record.agent_id],
+                terminal
             );
         }
     }

@@ -63,6 +63,8 @@ pub mod post_merge_check;
 pub mod prepare;
 pub mod prompt_snippets;
 pub mod prompts;
+#[cfg(test)]
+mod questions_closure_tests;
 mod queue;
 pub(crate) mod retry_policy;
 pub mod review_reuse;
