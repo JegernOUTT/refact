@@ -3618,6 +3618,8 @@ fn fallback_failed_record(agent_id: String, req: SpawnRequest, error: String) ->
         prompt: req.prompt,
         target_files: req.target_files,
         status: crate::agents::types::BgAgentStatus::Failed,
+        paused_by: None,
+        paused_at: None,
         progress: None,
         step_count: 0,
         last_activity: None,

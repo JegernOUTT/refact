@@ -19,6 +19,9 @@ pub(crate) mod tool_authority;
 pub use refact_agents_core::{registry, storage, types};
 
 #[cfg(test)]
+mod pause_tests;
+
+#[cfg(test)]
 mod spawn_lifecycle_tests;
 
 #[cfg(test)]

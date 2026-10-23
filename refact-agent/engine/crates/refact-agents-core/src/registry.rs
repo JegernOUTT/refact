@@ -84,6 +84,7 @@ impl NativeNote {
 #[derive(Default)]
 pub struct PauseGate {
     requested: AtomicBool,
+    parent_requested: AtomicBool,
     quiescent: AtomicBool,
     wake: Notify,
     quiescence: Notify,
@@ -91,7 +92,7 @@ pub struct PauseGate {
 
 impl PauseGate {
     pub fn is_requested(&self) -> bool {
-        self.requested.load(Ordering::SeqCst)
+        self.requested.load(Ordering::SeqCst) || self.parent_requested.load(Ordering::SeqCst)
     }
 
     pub fn is_quiescent(&self) -> bool {
@@ -105,6 +106,13 @@ impl PauseGate {
     pub fn release(&self) {
         self.requested.store(false, Ordering::SeqCst);
         self.wake.notify_waiters();
+    }
+
+    fn set_parent_requested(&self, requested: bool) {
+        self.parent_requested.store(requested, Ordering::SeqCst);
+        if !requested {
+            self.wake.notify_waiters();
+        }
     }
 
     /// Unblock a parked loop without releasing the pause; the loop observes
@@ -323,6 +331,8 @@ impl BackgroundAgentRegistry {
             prompt: req.prompt,
             target_files: req.target_files,
             status: BgAgentStatus::Queued,
+            paused_by: None,
+            paused_at: None,
             progress: None,
             step_count: 0,
             last_activity: None,
@@ -631,6 +641,8 @@ impl BackgroundAgentRegistry {
             updated.current_tool = None;
             updated.merge_status = None;
             touch_record(&mut updated, Utc::now());
+            let pause = Arc::new(PauseGate::default());
+            pause.set_parent_requested(updated.paused_by.is_some());
             records.insert(agent_id.to_string(), updated.clone());
             runtime.insert(
                 agent_id.to_string(),
@@ -639,7 +651,7 @@ impl BackgroundAgentRegistry {
                     notify: notify.clone(),
                     interrupt_notify: Arc::new(Notify::new()),
                     inbox: Arc::new(Mutex::new(VecDeque::new())),
-                    pause: Arc::new(PauseGate::default()),
+                    pause,
                     native_notes: Arc::new(Mutex::new(VecDeque::new())),
                     delivery_state: Arc::new(Mutex::new(RunnerDeliveryState::default())),
                 },
@@ -1947,6 +1959,68 @@ impl BackgroundAgentRegistry {
             .ok_or_else(|| "agent is not running in this process".to_string())
     }
 
+    pub async fn set_parent_pause(
+        &self,
+        agent_id: &str,
+        caller_chat_id: &str,
+        paused: bool,
+    ) -> Result<BackgroundAgent, String> {
+        let updated = {
+            let mut records = self.records.write().await;
+            let record = records
+                .get_mut(agent_id)
+                .ok_or_else(|| "agent not found".to_string())?;
+            if record.parent_chat_id != caller_chat_id
+                && record.parent_root_chat_id.as_deref() != Some(caller_chat_id)
+            {
+                return Err("agent not found".to_string());
+            }
+            if record.status.is_terminal() {
+                return Err(refact_chat_api::SealReason::AgentTerminal {
+                    agent_id: record.agent_id.clone(),
+                    status: record.status.as_str().to_string(),
+                    run_generation: record.run_generation,
+                }
+                .message());
+            }
+            let runtime = self.runtime.read().await;
+            let runtime = runtime
+                .get(agent_id)
+                .ok_or_else(|| "agent is not running in this process".to_string())?;
+            if paused != record.is_paused() {
+                let now = Utc::now();
+                record.paused_by = paused.then(|| caller_chat_id.to_string());
+                record.paused_at = paused.then_some(now);
+                touch_record(record, now);
+            }
+            runtime.pause.set_parent_requested(paused);
+            record.clone()
+        };
+        self.flush_records(Vec::new()).await?;
+        Ok(updated)
+    }
+
+    pub async fn child_chat_paused(&self, chat_id: &str) -> bool {
+        let records = self.records.read().await;
+        let Some(record) = records
+            .by_child
+            .get(chat_id)
+            .and_then(|agent_id| records.by_id.get(agent_id))
+        else {
+            return false;
+        };
+        if record.status.is_terminal() {
+            return false;
+        }
+        record.is_paused()
+            || self
+                .runtime
+                .read()
+                .await
+                .get(&record.agent_id)
+                .is_some_and(|runtime| runtime.pause.is_requested())
+    }
+
     pub async fn release_pause(&self, agent_id: &str) -> Result<PauseStatus, String> {
         self.live_runtime(agent_id).await?.pause.release();
         self.pause_status(agent_id)
@@ -2085,7 +2159,12 @@ impl BackgroundAgentRegistry {
     }
 
     async fn retire_runtime(&self, agent_id: &str) {
-        self.runtime.write().await.remove(agent_id);
+        if let Some(runtime) = self.runtime.write().await.remove(agent_id) {
+            if runtime.pause.is_requested() {
+                runtime.abort_flag.store(true, Ordering::SeqCst);
+                runtime.pause.wake_for_abort();
+            }
+        }
     }
 
     #[doc(hidden)]

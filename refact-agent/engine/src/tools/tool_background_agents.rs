@@ -42,6 +42,8 @@ pub struct ToolAgentResume {
 #[derive(Debug, PartialEq, Eq)]
 enum AgentResumeAction {
     Inspect,
+    Pause,
+    Release,
     Close {
         expected_run_generation: Option<u64>,
         reason: Option<String>,
@@ -67,6 +69,8 @@ enum AgentResumeAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LifecycleOutcome {
     Inspected,
+    Paused,
+    Released,
     Closed,
     AlreadyClosed,
     Queued,
@@ -75,7 +79,13 @@ enum LifecycleOutcome {
 impl LifecycleOutcome {
     /// True only when the call changed the child's lifecycle right now.
     fn accepted(self) -> bool {
-        matches!(self, LifecycleOutcome::Closed | LifecycleOutcome::Queued)
+        matches!(
+            self,
+            LifecycleOutcome::Closed
+                | LifecycleOutcome::Queued
+                | LifecycleOutcome::Paused
+                | LifecycleOutcome::Released
+        )
     }
 
     /// The state to report. An accepted continuation is queued: the agent is
@@ -88,6 +98,8 @@ impl LifecycleOutcome {
                 BgAgentStatus::Closed.as_str()
             }
             LifecycleOutcome::Inspected => status.as_str(),
+            LifecycleOutcome::Paused => "paused",
+            LifecycleOutcome::Released => status.as_str(),
         }
     }
 
@@ -95,6 +107,12 @@ impl LifecycleOutcome {
         match self {
             LifecycleOutcome::Inspected => {
                 "Child inspected; no limits, lifecycle or execution state changed."
+            }
+            LifecycleOutcome::Paused => {
+                "Parent pause requested. In-flight work may finish; the child parks at its next model/tool boundary without consuming another turn."
+            }
+            LifecycleOutcome::Released => {
+                "Parent pause released. The same running child may continue; other supervision or approval gates remain in effect."
             }
             LifecycleOutcome::Closed => {
                 "Child closed. It holds no execution slot; its history, goal and plan stay resumable."
@@ -115,7 +133,7 @@ fn agent_resume_schema() -> Value {
         "additionalProperties": false,
         "properties": {
             "agent_id": {"type": "string", "minLength": 1},
-            "action": {"type": "string", "enum": ["inspect", "close", "raise_and_resume", "resume", "continue"]},
+            "action": {"type": "string", "enum": ["inspect", "close", "raise_and_resume", "resume", "continue", "pause", "release"]},
             "instruction": {"type": "string", "minLength": 1, "description": "Optional exact parent follow-up for resume or continue; appended after preserved child history."},
             "reconcile_incomplete": {"type": "boolean", "default": false, "description": "For resume or continue only: explicitly acknowledge missing tool outcomes as unknown without replaying calls. Inspect side effects before enabling."},
             "reason": {"type": "string", "minLength": 1, "description": "For close only: why this child is being closed."},
@@ -138,7 +156,8 @@ fn agent_resume_schema() -> Value {
             {"properties": {"action": {"const": "close"}}, "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["expected_change_seq"]}, {"required": ["instruction"]}, {"required": ["reconcile_incomplete"]}]}},
             {"properties": {"action": {"const": "raise_and_resume"}}, "required": ["max_steps", "expected_change_seq"], "not": {"anyOf": [{"required": ["instruction"]}, {"required": ["reconcile_incomplete"]}, {"required": ["reason"]}, {"required": ["expected_run_generation"]}]}},
             {"properties": {"action": {"const": "resume"}}, "required": ["expected_change_seq"], "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["reason"]}, {"required": ["expected_run_generation"]}]}},
-            {"properties": {"action": {"const": "continue"}}, "required": ["expected_change_seq"], "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["reason"]}, {"required": ["expected_run_generation"]}]}}
+            {"properties": {"action": {"const": "continue"}}, "required": ["expected_change_seq"], "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["reason"]}, {"required": ["expected_run_generation"]}]}},
+            {"properties": {"action": {"enum": ["pause", "release"]}}, "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["expected_change_seq"]}, {"required": ["instruction"]}, {"required": ["reconcile_incomplete"]}, {"required": ["reason"]}, {"required": ["expected_run_generation"]}]}}
         ]
     })
 }
@@ -191,6 +210,19 @@ fn parse_agent_resume_args(
             .ok_or_else(|| "expected_change_seq must be a positive integer".to_string())
     };
     let action = match args.get("action").and_then(Value::as_str) {
+        Some(action @ ("pause" | "release")) => {
+            if args
+                .keys()
+                .any(|key| !matches!(key.as_str(), "agent_id" | "action"))
+            {
+                return Err(format!("{action} only accepts agent_id and action"));
+            }
+            if action == "pause" {
+                AgentResumeAction::Pause
+            } else {
+                AgentResumeAction::Release
+            }
+        }
         Some("inspect") => {
             if [
                 "max_steps",
@@ -283,11 +315,10 @@ fn parse_agent_resume_args(
                 reconcile_incomplete: optional_reconcile(args)?,
             }
         }
-        _ => {
-            return Err(
-                "action must be inspect, close, resume, continue or raise_and_resume".to_string(),
-            )
-        }
+        _ => return Err(
+            "action must be inspect, close, resume, continue, raise_and_resume, pause or release"
+                .to_string(),
+        ),
     };
     Ok((agent_id, action))
 }
@@ -721,6 +752,13 @@ fn format_status_chip(status: BgAgentStatus) -> &'static str {
     }
 }
 
+pub(crate) fn format_agent_status_chip(record: &BackgroundAgent) -> String {
+    record
+        .pause_label()
+        .map(|label| format!("⏸ {label}"))
+        .unwrap_or_else(|| format_status_chip(record.status).to_string())
+}
+
 fn human_age(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let seconds = now.signed_duration_since(then).num_seconds().max(0);
     if seconds == 0 {
@@ -777,7 +815,7 @@ fn format_agent_table(rows: &[BackgroundAgent]) -> String {
             "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
             markdown_cell(&row.agent_id, 80),
             kind_label(row.kind),
-            format_status_chip(row.status),
+            format_agent_status_chip(row),
             markdown_cell(&row.title, 80),
             markdown_cell(row.current_tool.as_deref().unwrap_or("-"), 60),
             row.tokens_used,
@@ -810,11 +848,24 @@ fn format_agent_counts(rows: &[BackgroundAgent]) -> String {
     let counts = statuses
         .into_iter()
         .filter_map(|status| {
-            let count = rows.iter().filter(|row| row.status == status).count();
+            let count = rows
+                .iter()
+                .filter(|row| row.status == status && !row.is_paused())
+                .count();
             (count > 0).then(|| format!("{}: {count}", status.as_str()))
         })
         .collect::<Vec<_>>()
         .join(", ");
+    let paused = rows.iter().filter(|row| row.is_paused()).count();
+    let counts = if paused > 0 {
+        if counts.is_empty() {
+            format!("paused: {paused}")
+        } else {
+            format!("{counts}, paused: {paused}")
+        }
+    } else {
+        counts
+    };
     format!("Total: {} ({}).", rows.len(), counts)
 }
 
@@ -835,10 +886,7 @@ fn format_list_line(result: &mut String, label: &str, values: &[String]) {
 fn format_agent_status_block(record: &BackgroundAgent) -> String {
     let now = Utc::now();
     let mut result = format!("# {}: {}\n", kind_title(record.kind), record.title);
-    result.push_str(&format!(
-        "- Status: {}\n",
-        format_status_chip(record.status)
-    ));
+    result.push_str(&format!("- Status: {}\n", format_agent_status_chip(record)));
     result.push_str(&format!("- Agent ID: {}\n", record.agent_id));
     result.push_str(&format!("- Kind: {}\n", kind_label(record.kind)));
     let started = record
@@ -916,7 +964,7 @@ async fn format_agent_result(
     if !record.status.is_terminal() {
         return Ok(format!(
             "Agent has not finished yet. Current status: {}. Use agent_wait to block.",
-            format_status_chip(record.status)
+            format_agent_status_chip(record)
         ));
     }
 
@@ -1111,7 +1159,7 @@ impl Tool for ToolAgentResume {
             self.config_path.clone(),
             "agent_resume",
             "Agent Resume",
-            "Inspect, close, resume or continue a direct child on its saved history, plan and goal. close stops a live child and releases its execution slot while keeping it resumable. resume restarts a stopped or closed child; continue asks an already-completed child for another turn without rewriting its earlier completion. Both may append a parent instruction; incomplete tool outcomes require explicit reconciliation and are never replayed. raise_and_resume increases a stopped per-child step cap. Resuming and continuing require expected_change_seq from inspect, and are reported as queued, never as completed. Cannot change global Settings, goal budgets, policy or provider quotas. Saved runtime configuration must still be available.",
+            "Inspect, close, resume or continue a direct child on its saved history, plan and goal. pause parks a live child at its next model/tool boundary; release removes the parent pause without starting a new generation. Only the parent or its root may pause/release, and the pause survives restart and explicit recovery. close stops a live child and releases its execution slot while keeping it resumable. resume restarts a stopped or closed child; continue asks an already-completed child for another turn without rewriting its earlier completion. Both may append a parent instruction; incomplete tool outcomes require explicit reconciliation and are never replayed. raise_and_resume increases a stopped per-child step cap. Resuming and continuing require expected_change_seq from inspect, and are reported as queued, never as completed. Cannot change global Settings, goal budgets, policy or provider quotas. Saved runtime configuration must still be available.",
             agent_resume_schema(),
         );
         description.allow_parallel = false;
@@ -1131,11 +1179,41 @@ impl Tool for ToolAgentResume {
             .get_any(&agent_id)
             .await
             .map_err(|error| map_registry_error(&agent_id, error))?;
-        if record.parent_chat_id != chat_id {
+        let pause_control = matches!(
+            action,
+            AgentResumeAction::Pause | AgentResumeAction::Release
+        );
+        if record.parent_chat_id != chat_id
+            && !(pause_control && record.parent_root_chat_id.as_deref() == Some(chat_id.as_str()))
+        {
             return Err(not_found_error(&agent_id));
         }
         let outcome = match action {
             AgentResumeAction::Inspect => LifecycleOutcome::Inspected,
+            AgentResumeAction::Pause | AgentResumeAction::Release => {
+                let paused = matches!(action, AgentResumeAction::Pause);
+                record = app
+                    .agents
+                    .set_parent_pause(&agent_id, &chat_id, paused)
+                    .await
+                    .map_err(|error| map_registry_error(&agent_id, error))?;
+                crate::agents::spawn::emit_background_agent_update(app.clone(), &record).await;
+                let pause = app.agents.pause_status(&agent_id).await;
+                return Ok(tool_message(tool_call_id, json!({
+                    "summary": if paused { LifecycleOutcome::Paused.summary() } else { LifecycleOutcome::Released.summary() },
+                    "action": args.get("action"),
+                    "accepted": true,
+                    "agent_id": record.agent_id,
+                    "child_chat_id": record.child_chat_id,
+                    "status": if record.is_paused() { "paused" } else { record.status.as_str() },
+                    "paused_by": record.paused_by,
+                    "paused_at": record.paused_at,
+                    "pause": pause,
+                    "change_seq": record.change_seq,
+                    "run_generation": record.run_generation,
+                    "step_count": record.step_count,
+                }).to_string()));
+            }
             AgentResumeAction::Close {
                 expected_run_generation,
                 reason,
@@ -1250,7 +1328,9 @@ impl Tool for ToolAgentResume {
             "accepted": outcome.accepted(),
             "agent_id": record.agent_id,
             "child_chat_id": record.child_chat_id,
-            "status": outcome.state(record.status),
+            "status": if record.is_paused() { "paused" } else { outcome.state(record.status) },
+            "paused_by": record.paused_by,
+            "paused_at": record.paused_at,
             "change_seq": record.change_seq,
             "run_generation": record.run_generation,
             "step_count": record.step_count,
@@ -1279,7 +1359,9 @@ impl Tool for ToolAgentResume {
         Ok(MatchConfirmDeny {
             result: match action {
                 AgentResumeAction::Inspect => MatchConfirmDenyResult::PASS,
-                AgentResumeAction::Close { .. }
+                AgentResumeAction::Pause
+                | AgentResumeAction::Release
+                | AgentResumeAction::Close { .. }
                 | AgentResumeAction::RaiseAndResume { .. }
                 | AgentResumeAction::Resume { .. }
                 | AgentResumeAction::ContinueTurn { .. } => MatchConfirmDenyResult::CONFIRMATION,
@@ -2784,7 +2866,15 @@ mod tests {
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(
             schema["properties"]["action"]["enum"],
-            json!(["inspect", "close", "raise_and_resume", "resume", "continue"])
+            json!([
+                "inspect",
+                "close",
+                "raise_and_resume",
+                "resume",
+                "continue",
+                "pause",
+                "release"
+            ])
         );
         assert_eq!(
             schema["oneOf"][2]["required"],
@@ -3022,7 +3112,15 @@ mod tests {
         .input_schema;
         assert_eq!(
             schema["properties"]["action"]["enum"],
-            json!(["inspect", "close", "raise_and_resume", "resume", "continue"])
+            json!([
+                "inspect",
+                "close",
+                "raise_and_resume",
+                "resume",
+                "continue",
+                "pause",
+                "release"
+            ])
         );
     }
 

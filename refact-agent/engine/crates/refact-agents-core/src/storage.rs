@@ -830,6 +830,8 @@ mod tests {
             prompt: "prompt".to_string(),
             target_files: Vec::new(),
             status,
+            paused_by: None,
+            paused_at: None,
             progress: None,
             step_count: 0,
             last_activity: None,

@@ -148,6 +148,10 @@ pub struct BackgroundAgent {
     pub prompt: String,
     pub target_files: Vec<String>,
     pub status: BgAgentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_at: Option<DateTime<Utc>>,
     pub progress: Option<String>,
     pub step_count: u32,
     pub last_activity: Option<String>,
@@ -219,6 +223,22 @@ pub struct BackgroundAgent {
 
 fn initial_run_generation() -> u64 {
     1
+}
+
+impl BackgroundAgent {
+    pub fn is_paused(&self) -> bool {
+        !self.status.is_terminal() && self.paused_by.is_some()
+    }
+
+    pub fn pause_label(&self) -> Option<String> {
+        self.is_paused().then(|| {
+            format!(
+                "paused (by {}, since {})",
+                self.paused_by.as_deref().unwrap_or_default(),
+                self.paused_at.map(|at| at.to_rfc3339()).unwrap_or_default(),
+            )
+        })
+    }
 }
 
 impl From<&BackgroundAgent> for BackgroundAgentSummary {

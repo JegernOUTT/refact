@@ -2458,6 +2458,9 @@ async fn runner_model_turn(
         )
     };
     loop {
+        if hold_native_pause(&ccx, config).await {
+            return Err("Aborted".to_string());
+        }
         let execution = app.agent_executions.get(&chat_id);
         let _operation = if let Some(execution) = &execution {
             Some(
@@ -2947,7 +2950,7 @@ async fn run_subchat_with_wrap_up(
     let mut empty_choice_retry_count = 0usize;
 
     loop {
-        if is_aborted(&config.abort_flag) {
+        if hold_native_pause(&ccx, config).await {
             if config.soft_abort {
                 return Ok((messages, true));
             }
@@ -3252,16 +3255,16 @@ async fn execute_pending_tool_calls(
             cgcx.abort_flag.clone(),
         )
     };
-    let native_pause = if matches!(tools_policy, ToolsPolicy::Supervised { .. }) {
-        let agent_id = agent_id.ok_or_else(|| {
-            "supervised native tool dispatch missing background agent identity".to_string()
-        })?;
-        Some(app.agents.pause_gate(&agent_id).await.ok_or_else(|| {
-            "supervised native tool dispatch missing live registry runtime".to_string()
-        })?)
+    let native_pause = if let Some(agent_id) = agent_id {
+        app.agents.pause_gate(&agent_id).await
     } else {
         None
     };
+    if matches!(tools_policy, ToolsPolicy::Supervised { .. }) && native_pause.is_none() {
+        return Err(
+            "supervised native tool dispatch missing background agent identity".to_string(),
+        );
+    }
     let last = match messages.last() {
         Some(m) => m,
         None => return Ok(messages),

@@ -53,6 +53,15 @@ pub(crate) async fn monitor_once(app: AppState) -> Result<(), String> {
         .map(|record| record.agent_id.clone())
         .collect();
     for record in records {
+        if record.is_paused()
+            || app
+                .agents
+                .pause_status(&record.agent_id)
+                .await
+                .is_some_and(|pause| pause.requested)
+        {
+            continue;
+        }
         if matches!(
             record.status,
             BgAgentStatus::Running | BgAgentStatus::WaitingForApproval

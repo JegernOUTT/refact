@@ -527,6 +527,8 @@ fn summary_maps_introspection_and_question_state() {
         prompt: "Fix frogs".to_string(),
         target_files: vec!["src/frog.rs".to_string()],
         status: BgAgentStatus::Running,
+        paused_by: None,
+        paused_at: None,
         progress: Some("testing".to_string()),
         step_count: 3,
         last_activity: None,

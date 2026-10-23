@@ -219,6 +219,9 @@ pub async fn dispatch_goal_nudge(
     if crate::agents::seal::is_sealed(&app, &chat_id).await {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Sealed);
     }
+    if app.agents.child_chat_paused(&chat_id).await {
+        return GoalNudgeOutcome::Skipped(GoalNudgeSkip::IntentionallyWaiting);
+    }
     let now_ms = epoch_ms_now();
     let (outcome, processor_flag) = {
         let mut session = session_arc.lock().await;

@@ -9,7 +9,7 @@ use tokio::sync::Mutex as AMutex;
 #[cfg(test)]
 use crate::agents::registry::InboxMessage;
 use refact_core::chat_types::{PendingDelivery, PushMode};
-use crate::agents::types::{BackgroundAgent, BgAgentStatus};
+use crate::agents::types::BackgroundAgent;
 use crate::app_state::AppState;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
@@ -398,19 +398,6 @@ fn short_id(agent_id: &str) -> &str {
     agent_id.get(..agent_id.len().min(16)).unwrap_or(agent_id)
 }
 
-fn status_chip(status: BgAgentStatus) -> &'static str {
-    match status {
-        BgAgentStatus::Queued => "⏳ queued",
-        BgAgentStatus::Running => "🟢 running",
-        BgAgentStatus::WaitingForApproval => "✋ waiting",
-        BgAgentStatus::Completed => "✅ completed",
-        BgAgentStatus::Failed => "❌ failed",
-        BgAgentStatus::Cancelled => "⏹ cancelled",
-        BgAgentStatus::Interrupted => "⚠ interrupted",
-        BgAgentStatus::Closed => "🔒 closed",
-    }
-}
-
 fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
@@ -446,7 +433,7 @@ fn overview_line(record: &BackgroundAgent, depth: usize) -> String {
         "  ".repeat(depth),
         short_id(&record.agent_id),
         record.title,
-        status_chip(record.status),
+        crate::tools::tool_background_agents::format_agent_status_chip(record),
         record.step_count,
         record.current_tool.as_deref().unwrap_or("-"),
         targets,
