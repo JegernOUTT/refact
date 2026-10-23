@@ -322,6 +322,8 @@ pub(crate) async fn deliver_to_card(
                 }
             }
         }
+    } else if let Ok(state) = facade.session_state(&target.chat_id).await {
+        prior_state = state;
     }
 
     match facade.deliver_messages(&target.chat_id, pending).await {
@@ -414,7 +416,204 @@ pub(crate) fn truncate_chars(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use refact_chat_api::ChatCommand;
+    use refact_runtime_api::{
+        ChatSessionSnapshot, ChatSessionUpdate, CreateSessionRequest, RuntimeTrajectorySnapshot,
+    };
     use serde_json::json;
+    use std::sync::Mutex;
+
+    struct StateFacade {
+        state: Result<Option<SessionState>, String>,
+        probes: Mutex<Vec<String>>,
+        queued: Mutex<Vec<(String, ChatCommand)>>,
+    }
+
+    impl StateFacade {
+        fn new(state: Result<Option<SessionState>, String>) -> Self {
+            Self {
+                state,
+                probes: Mutex::new(vec![]),
+                queued: Mutex::new(vec![]),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ChatSessionFacade for StateFacade {
+        async fn session_snapshot(&self, _chat_id: &str) -> Result<ChatSessionSnapshot, String> {
+            unreachable!()
+        }
+
+        async fn update_session(
+            &self,
+            _chat_id: &str,
+            _update: ChatSessionUpdate,
+        ) -> Result<(), String> {
+            unreachable!()
+        }
+
+        async fn create_session(&self, _request: CreateSessionRequest) -> Result<(), String> {
+            unreachable!()
+        }
+
+        async fn push_command(&self, chat_id: &str, command: ChatCommand) -> Result<(), String> {
+            self.queued
+                .lock()
+                .unwrap()
+                .push((chat_id.to_string(), command));
+            Ok(())
+        }
+
+        async fn session_state(&self, chat_id: &str) -> Result<Option<SessionState>, String> {
+            assert!(self.queued.lock().unwrap().is_empty());
+            self.probes.lock().unwrap().push(chat_id.to_string());
+            self.state.clone()
+        }
+
+        async fn maybe_save_session(&self, _chat_id: &str) -> Result<(), String> {
+            unreachable!()
+        }
+
+        async fn save_trajectory_snapshot(
+            &self,
+            _snapshot: RuntimeTrajectorySnapshot,
+        ) -> Result<(), String> {
+            unreachable!()
+        }
+    }
+
+    async fn delivery_fixture() -> (tempfile::TempDir, Arc<GlobalContext>, String, CardTarget) {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let task = storage::create_task(gcx.clone(), "Planner delivery state")
+            .await
+            .unwrap();
+        let card = test_card("doing", Some("chat-1"));
+        let target = CardTarget::from_card(&card, "chat-1".to_string());
+        storage::save_board(
+            gcx.clone(),
+            &task.id,
+            &crate::tasks::types::TaskBoard {
+                cards: vec![card],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        (temp, gcx, task.id, target)
+    }
+
+    fn assert_queued(facade: &StateFacade, target: &CardTarget) {
+        assert_eq!(*facade.probes.lock().unwrap(), vec![target.chat_id.clone()]);
+        let queued = facade.queued.lock().unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].0, target.chat_id);
+        let ChatCommand::DeliverMessages { delivery } = &queued[0].1 else {
+            panic!("expected a queued delivery");
+        };
+        assert_eq!(delivery.push, PushMode::Append);
+        assert_eq!(delivery.source, "agent_steer");
+        assert!(delivery.wake);
+        assert_eq!(delivery.messages.len(), 1);
+        assert_eq!(
+            delivery.messages[0].content.content_text_only(),
+            "Steer message"
+        );
+    }
+
+    #[tokio::test]
+    async fn steer_receipt_reports_prior_state_without_requiring_a_live_session() {
+        let (_temp, gcx, task_id, target) = delivery_fixture().await;
+        let facade = Arc::new(StateFacade::new(Ok(Some(SessionState::Generating))));
+        let report = deliver_to_card(
+            gcx,
+            facade.clone(),
+            &task_id,
+            &target,
+            CardGuard::doing(),
+            single_message_delivery(
+                "Steer message".to_string(),
+                PushMode::Append,
+                "agent_steer",
+                true,
+            ),
+        )
+        .await;
+
+        assert!(
+            matches!(
+                report,
+                DeliveryReport::Delivered {
+                    outcome: DeliveryOutcome::Queued,
+                    prior_state: Some(SessionState::Generating),
+                }
+            ),
+            "{}",
+            report.describe("Steer")
+        );
+        assert!(report
+            .describe("Steer")
+            .contains("prior agent state: generating"));
+        assert_eq!(report.receipt()["prior_state"], "generating");
+        assert_queued(&facade, &target);
+    }
+
+    #[tokio::test]
+    async fn steer_to_session_without_state_still_queues() {
+        let (_temp, gcx, task_id, target) = delivery_fixture().await;
+        for state in [Ok(None), Err("state unavailable".to_string())] {
+            let facade = Arc::new(StateFacade::new(state));
+            let report = deliver_to_card(
+                gcx.clone(),
+                facade.clone(),
+                &task_id,
+                &target,
+                CardGuard::doing(),
+                single_message_delivery(
+                    "Steer message".to_string(),
+                    PushMode::Append,
+                    "agent_steer",
+                    true,
+                ),
+            )
+            .await;
+
+            assert!(matches!(
+                report,
+                DeliveryReport::Delivered {
+                    outcome: DeliveryOutcome::Queued,
+                    prior_state: None,
+                }
+            ));
+            assert!(report
+                .describe("Steer")
+                .contains("prior agent state: unavailable"));
+            assert!(report.reached_agent());
+            assert_queued(&facade, &target);
+        }
+    }
+
+    #[tokio::test]
+    async fn required_live_session_without_state_is_not_delivered() {
+        let (_temp, gcx, task_id, target) = delivery_fixture().await;
+        let facade = Arc::new(StateFacade::new(Ok(None)));
+        let report = deliver_to_card(
+            gcx,
+            facade.clone(),
+            &task_id,
+            &target,
+            CardGuard::doing_with_live_session(),
+            single_message_delivery("Reply".to_string(), PushMode::Append, "planner_reply", true),
+        )
+        .await;
+
+        assert!(matches!(report, DeliveryReport::NoLiveSession));
+        assert_eq!(*facade.probes.lock().unwrap(), vec![target.chat_id]);
+        assert!(facade.queued.lock().unwrap().is_empty());
+    }
 
     fn args(items: &[(&str, Value)]) -> HashMap<String, Value> {
         items
