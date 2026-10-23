@@ -105,6 +105,8 @@ pub use refact_providers;
 pub mod attention;
 pub mod attention_delivery;
 #[cfg(test)]
+mod attention_leave_tests;
+#[cfg(test)]
 mod attention_timeout_tests;
 pub mod providers;
 pub mod questions;

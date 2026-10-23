@@ -670,6 +670,7 @@ impl AttentionBudget {
                     deliveries: tracked
                         .deliveries
                         .iter()
+                        .filter(|(waiter, _)| tracked.waiters.contains(waiter))
                         .map(|(_, delivery)| delivery.clone())
                         .collect(),
                     expires_at,
@@ -800,6 +801,7 @@ impl AttentionBudget {
                 deliveries: tracked
                     .deliveries
                     .iter()
+                    .filter(|(waiter, _)| tracked.waiters.contains(waiter))
                     .map(|(_, delivery)| delivery.clone())
                     .collect(),
             });
@@ -830,6 +832,18 @@ impl AttentionBudget {
             .get(question_id)
             .map(|tracked| tracked.waiters.len())
             .unwrap_or_default()
+    }
+
+    pub fn questions_for_waiter(&self, waiter: &str) -> Vec<String> {
+        let mut questions: Vec<String> = self
+            .guard()
+            .tracked
+            .iter()
+            .filter(|(_, tracked)| tracked.waiters.contains(waiter))
+            .map(|(id, _)| id.clone())
+            .collect();
+        questions.sort();
+        questions
     }
 
     /// Block until the shared question settles. Every waiter on one question

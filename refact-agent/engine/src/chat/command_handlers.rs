@@ -504,12 +504,42 @@ async fn handle_set_params(
     QueueCommandOutcome::Finished
 }
 
+fn pending_attention_questions(
+    app: &AppState,
+    session: &ChatSession,
+) -> Vec<(String, Vec<String>)> {
+    let budget = app.attention();
+    session
+        .pending_questions
+        .iter()
+        .filter(|set| set.status == PendingQuestionStatus::Pending)
+        .map(|set| {
+            let waiter = format!("{}:{}", session.chat_id, set.tool_call_id);
+            let question_ids = budget.questions_for_waiter(&waiter);
+            (waiter, question_ids)
+        })
+        .collect()
+}
+
+fn leave_attention_questions(app: &AppState, questions: Vec<(String, Vec<String>)>) {
+    let budget = app.attention();
+    let now = Utc::now();
+    for (waiter, question_ids) in questions {
+        for question_id in question_ids {
+            if let Err(error) = budget.leave(&question_id, &waiter, now) {
+                tracing::debug!(%error, %question_id, %waiter, "attention waiter already left");
+            }
+        }
+    }
+}
+
 async fn handle_abort(context: &QueueCommandContext) -> QueueCommandOutcome {
     let app = context.app.clone();
     let session_arc = context.session_arc.clone();
     let mut session = session_arc.lock().await;
     session.suppress_delivery_wakes();
     session.abort_stream();
+    let attention_questions = pending_attention_questions(&app, &session);
     let questions_cancelled = session.cancel_pending_questions();
     let browser_cancelled =
         browser_decisions::cancel_pending_browser_message(&mut session.pending_browser_message)
@@ -519,6 +549,7 @@ async fn handle_abort(context: &QueueCommandContext) -> QueueCommandOutcome {
     }
     let goal_stopped = session.stop_goal_on_manual_abort();
     drop(session);
+    leave_attention_questions(&app, attention_questions);
     if goal_stopped
         || questions_cancelled
         || browser_cancelled
@@ -551,6 +582,7 @@ async fn handle_answer_questions(
         .and_then(|question_id| app.questions().get(question_id))
         .and_then(|question| question.default_answer);
     let mut staged_message_id: Option<String> = None;
+    let mut attention_questions = Vec::new();
     let resolved = {
         let mut session = session_arc.lock().await;
         let chat_id = session.chat_id.clone();
@@ -568,6 +600,11 @@ async fn handle_answer_questions(
         ) {
             Ok(resolved) => {
                 if resolved {
+                    if !request_id.starts_with("attention-timeout:") {
+                        let waiter = format!("{chat_id}:{tool_call_id}");
+                        let question_ids = app.attention().questions_for_waiter(&waiter);
+                        attention_questions.push((waiter, question_ids));
+                    }
                     if let (Some(question_id), Some(default_answer)) = (
                         request_id.strip_prefix("attention-timeout:"),
                         timeout_default_notice,
@@ -624,6 +661,7 @@ async fn handle_answer_questions(
             release_answer_questions_failure(&mut session, &resolution_id, error, rolled_back);
             return QueueCommandOutcome::Continue;
         }
+        leave_attention_questions(&app, attention_questions);
         {
             let mut session = session_arc.lock().await;
             let chat_id = session.chat_id.clone();
@@ -1532,8 +1570,10 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
     let request_id = &context.request_id;
     let mut accepted_user_messages = Vec::new();
     let questions_cancelled;
+    let attention_questions;
     {
         let mut session = session_arc.lock().await;
+        attention_questions = pending_attention_questions(&app, &session);
         questions_cancelled = session.cancel_pending_questions();
 
         if let Some((ctx_messages, _)) = browser_ctx_result {
@@ -1627,6 +1667,7 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
         }
     }
 
+    leave_attention_questions(&app, attention_questions);
     for accepted_user_message in accepted_user_messages {
         let _ = maybe_enqueue_chat_reaction(app.clone(), accepted_user_message).await;
     }
