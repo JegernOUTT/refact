@@ -242,6 +242,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
 class WorkerServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
     def __init__(self, server_address, handler, ping_message):
         super().__init__(server_address, handler)
         self.ping_message = ping_message

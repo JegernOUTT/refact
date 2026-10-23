@@ -179,6 +179,8 @@ pub struct Supervisor {
     /// Lets regression tests hold the lease until the restart actually waits at the probe.
     #[cfg(test)]
     self_held_lease_wait_started: tokio::sync::Notify,
+    #[cfg(test)]
+    test_port_pairs: SyncMutex<VecDeque<PortPair>>,
     idle_timeout_secs: u64,
     worker_executable: Result<PathBuf, String>,
     client: reqwest::Client,
@@ -232,10 +234,13 @@ impl Supervisor {
             reaping_child_pids: Arc::new(SyncRwLock::new(HashSet::new())),
             #[cfg(test)]
             self_held_lease_wait_started: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            test_port_pairs: SyncMutex::new(VecDeque::new()),
             idle_timeout_secs,
             worker_executable,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(2))
+                .pool_max_idle_per_host(0)
                 .no_proxy()
                 .build()
                 .expect("failed to build daemon supervisor http client"),
@@ -1042,6 +1047,37 @@ impl Supervisor {
                 .await?
             {
                 ReadinessOutcome::Superseded(info) => return Ok(info),
+                ReadinessOutcome::ForeignResponder => {
+                    let _guard = slot.op_lock.lock().await;
+                    if let Some(info) = info_if_generation_changed(&slot, generation).await {
+                        return Ok(info);
+                    }
+                    let exit = self.kill_generation_child(&slot, generation).await?;
+                    if matches!(exit, GenerationExit::Timeout) {
+                        self.handoff_generation_child_to_reaper(
+                            &slot,
+                            &spec.project_id,
+                            generation,
+                            false,
+                        )
+                        .await;
+                    }
+                    let info = self
+                        .mark_failed(
+                            &slot,
+                            &spec.project_id,
+                            "worker port held by another service".to_string(),
+                        )
+                        .await;
+                    let _ = self.events.emit(
+                        "worker_exited", Some(spec.project_id.clone()),
+                        json!({"reason": "foreign_responder", "retrying_ports": attempt < MAX_PORT_BUSY_RETRIES}),
+                    ).await;
+                    if attempt < MAX_PORT_BUSY_RETRIES {
+                        continue;
+                    }
+                    return Ok(info);
+                }
                 ReadinessOutcome::Ready => {
                     let monitor = self.monitor_handle(slot.clone(), spec.clone(), generation);
                     let info = {
@@ -1195,7 +1231,13 @@ impl Supervisor {
 
     fn reserve_port_pair(&self) -> Result<PortReservation, String> {
         for _ in 0..32 {
-            let ports = crate::daemon::ports::allocate_port_pair()?;
+            #[cfg(test)]
+            let ports = self.test_port_pairs.lock().pop_front();
+            #[cfg(not(test))]
+            let ports: Option<PortPair> = None;
+            let ports = ports
+                .map(Ok)
+                .unwrap_or_else(crate::daemon::ports::allocate_port_pair)?;
             let mut reserved = self.reserved_ports.lock();
             if reserved.contains(&ports.http_port) || reserved.contains(&ports.lsp_port) {
                 continue;
@@ -1369,6 +1411,9 @@ impl Supervisor {
             };
             if let Ok(response) = response {
                 if let Ok(body) = response.text().await {
+                    if !body.trim().is_empty() && body.trim() != nonce {
+                        return Ok(ReadinessOutcome::ForeignResponder);
+                    }
                     if body.trim() == nonce
                         && lsp_port_accepts(lsp_port).await
                         && info_if_pid_changed(slot, generation, pid).await.is_none()
@@ -1868,6 +1913,7 @@ impl Drop for PortReservation {
 
 enum ReadinessOutcome {
     Superseded(WorkerInfo),
+    ForeignResponder,
     Ready,
     Exited(Option<i32>),
     Timeout,
@@ -2540,6 +2586,144 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(daemon)]
+    async fn foreign_readiness_responder_reallocates_or_fails_without_waiting() {
+        use hyper::service::{make_service_fn, service_fn};
+        use hyper::{Body, Response, Server, StatusCode};
+        use std::convert::Infallible;
+
+        let Some(_env) = EnvGuard::fake_worker() else {
+            return;
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let foreign_port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let service = make_service_fn(|_| async {
+            Ok::<_, Infallible>(service_fn(|_| async {
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .status(StatusCode::SERVICE_UNAVAILABLE)
+                        .body(Body::from("Proxy key is incorrect"))
+                        .unwrap(),
+                )
+            }))
+        });
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(
+            Server::from_tcp(listener)
+                .unwrap()
+                .serve(service)
+                .with_graceful_shutdown(async {
+                    let _ = stop_rx.await;
+                }),
+        );
+        let python = std::env::var("PYTHON3").unwrap_or_else(|_| "python3".to_string());
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fake_worker.py");
+        let wrapper = format!(
+            "import runpy, sys, threading\nscript = sys.argv.pop(1)\n\
+            if sys.argv[sys.argv.index('--http-port') + 1] == '{foreign_port}':\n    threading.Event().wait()\n\
+            runpy.run_path(script, run_name='__main__')\n"
+        );
+        std::env::set_var(
+            "REFACT_DAEMON_WORKER_CMD",
+            shell_words::join([
+                python.as_str(),
+                "-c",
+                wrapper.as_str(),
+                script.to_str().unwrap(),
+            ]),
+        );
+        for recover in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let events = EventBus::new(dir.path().join("events.jsonl"));
+            let supervisor = Supervisor::new(events.clone(), dir.path().join("daemon"), 0);
+            let lsp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let ports = PortPair {
+                http_port: foreign_port,
+                lsp_port: lsp.local_addr().unwrap().port(),
+            };
+            supervisor
+                .test_port_pairs
+                .lock()
+                .extend(std::iter::repeat_n(
+                    ports,
+                    if recover { 1 } else { MAX_PORT_BUSY_RETRIES },
+                ));
+            let entry = test_entry(dir.path().to_path_buf());
+            let result =
+                tokio::time::timeout(Duration::from_secs(30), supervisor.ensure_worker(&entry))
+                    .await;
+            let starts = events
+                .snapshot()
+                .await
+                .into_iter()
+                .filter(|event| event.kind == "worker_starting")
+                .collect::<Vec<_>>();
+            supervisor.stop_all().await;
+            let info = result
+                .expect("foreign responder must not exhaust readiness timeout")
+                .unwrap();
+            if recover {
+                assert_eq!(info.state, WorkerState::Ready);
+                assert_ne!(info.http_port, foreign_port);
+                assert_ne!(info.lsp_port, ports.lsp_port);
+                assert_eq!(starts.len(), 2);
+                assert_ne!(starts[0].payload["pid"], starts[1].payload["pid"]);
+            } else {
+                assert_eq!(
+                    info.state,
+                    WorkerState::Failed {
+                        reason: "worker port held by another service".to_string(),
+                    }
+                );
+                assert_eq!(starts.len(), MAX_PORT_BUSY_RETRIES);
+            }
+        }
+        stop_tx.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(daemon)]
+    async fn fake_worker_reaches_ready_without_dns() {
+        let Some(_env) = EnvGuard::fake_worker() else {
+            return;
+        };
+        let python = std::env::var("PYTHON3").unwrap_or_else(|_| "python3".to_string());
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fake_worker.py");
+        let wrapper = concat!(
+            "import runpy, socket, sys\n",
+            "from unittest.mock import patch\n",
+            "script = sys.argv.pop(1)\n",
+            "failure = RuntimeError('fake worker must not resolve DNS')\n",
+            "with patch.object(socket, 'getfqdn', side_effect=failure):\n",
+            "    runpy.run_path(script, run_name='__main__')\n",
+        );
+        std::env::set_var(
+            "REFACT_DAEMON_WORKER_CMD",
+            shell_words::join([python.as_str(), "-c", wrapper, script.to_str().unwrap()]),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let daemon_dir = dir.path().join("daemon");
+        let supervisor = Supervisor::new(
+            EventBus::new(dir.path().join("events.jsonl")),
+            daemon_dir.clone(),
+            0,
+        );
+        let entry = test_entry(dir.path().to_path_buf());
+
+        let ready =
+            tokio::time::timeout(Duration::from_secs(30), supervisor.ensure_worker(&entry)).await;
+        let log = std::fs::read_to_string(daemon_dir.join("logs/worker-project.log")).unwrap();
+        supervisor.stop_all().await;
+
+        let ready = ready
+            .expect("fake worker startup must not wait for DNS")
+            .unwrap();
+        assert_eq!(ready.state, WorkerState::Ready, "{log}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
