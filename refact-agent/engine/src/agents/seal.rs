@@ -1,20 +1,55 @@
 pub use refact_chat_api::SealReason;
 
 use crate::app_state::AppState;
+use crate::tasks::storage;
 
 pub async fn seal_reason(app: &AppState, chat_id: &str) -> Option<SealReason> {
-    let record = app
+    if let Some(record) = app
         .agents
         .list_all()
         .await
         .into_iter()
-        .find(|record| record.child_chat_id.as_deref() == Some(chat_id))?;
-    if !record.status.is_terminal() {
+        .find(|record| record.child_chat_id.as_deref() == Some(chat_id))
+    {
+        return record
+            .status
+            .is_terminal()
+            .then(|| SealReason::AgentTerminal {
+                agent_id: record.agent_id,
+                status: record.status.as_str().to_string(),
+                run_generation: record.run_generation,
+            });
+    }
+
+    let session = app.chat.sessions.read().await.get(chat_id).cloned()?;
+    let task_meta = session.lock().await.thread.task_meta.clone()?;
+    if task_meta.role != "agents" {
         return None;
     }
-    Some(SealReason::AgentTerminal {
-        agent_id: record.agent_id,
-        status: record.status.as_str().to_string(),
-        run_generation: record.run_generation,
+    let card_id = task_meta.card_id?;
+    let board = match storage::load_board(app.gcx.clone(), &task_meta.task_id).await {
+        Ok(board) => board,
+        Err(error) => {
+            tracing::warn!(chat_id, task_id = %task_meta.task_id, %error, "Failed to read task board for chat seal");
+            return None;
+        }
+    };
+    let column = match board.get_card(&card_id) {
+        None => "deleted".to_string(),
+        Some(card)
+            if card.column != "doing"
+                || card
+                    .agent_chat_id
+                    .as_deref()
+                    .is_some_and(|owner| owner != chat_id) =>
+        {
+            card.column.clone()
+        }
+        Some(_) => return None,
+    };
+    Some(SealReason::TaskCardLeftDoing {
+        task_id: task_meta.task_id,
+        card_id,
+        column,
     })
 }
