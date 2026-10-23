@@ -443,6 +443,21 @@ async fn announce_generation_retry(
     );
 }
 
+pub(crate) async fn inject_token_budget_for_chat(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    effective_n_ctx: usize,
+    cadence: usize,
+    image_token_mode: refact_core::provider_types::ImageTokenMode,
+) -> bool {
+    let chat_id = session_arc.lock().await.chat_id.clone();
+    if crate::agents::seal::is_sealed(app, &chat_id).await {
+        return false;
+    }
+    let mut session = session_arc.lock().await;
+    maybe_inject_token_budget_instruction(&mut session, effective_n_ctx, cadence, image_token_mode)
+}
+
 fn maybe_inject_token_budget_instruction(
     session: &mut ChatSession,
     effective_n_ctx: usize,
@@ -1451,13 +1466,18 @@ fn length_stop_continue_instruction(kind: LengthStopKind) -> ChatMessage {
     }
 }
 
-async fn maybe_recover_after_length_stop(
+pub(crate) async fn maybe_recover_after_length_stop(
     gcx: Arc<crate::global_context::GlobalContext>,
     session_arc: &Arc<AMutex<ChatSession>>,
     thread: &ThreadParams,
     effective_n_ctx: Option<usize>,
     image_token_mode: refact_core::provider_types::ImageTokenMode,
 ) -> bool {
+    let app = AppState::from_gcx(gcx.clone()).await;
+    let chat_id = session_arc.lock().await.chat_id.clone();
+    if crate::agents::seal::is_sealed(&app, &chat_id).await {
+        return false;
+    }
     let (kind, dead_end_message_id, attempts, trailing_budget_marker_id) = {
         let session = session_arc.lock().await;
         if !matches!(
@@ -1502,6 +1522,9 @@ async fn maybe_recover_after_length_stop(
     )
     .await;
 
+    if crate::agents::seal::is_sealed(&app, &chat_id).await {
+        return false;
+    }
     if thread.max_tokens.is_some() && kind == LengthStopKind::PartialOutput {
         if !compacted {
             return false;
@@ -1695,6 +1718,10 @@ async fn start_generation_iteration(
     session_arc: &Arc<AMutex<ChatSession>>,
     gcx: &Arc<crate::global_context::GlobalContext>,
 ) -> GenerationAttemptStart {
+    let chat_id = session_arc.lock().await.chat_id.clone();
+    if crate::agents::seal::is_sealed(app, &chat_id).await {
+        return GenerationAttemptStart::Stop;
+    }
     match crate::chat::context_rebuild::drain_pending(gcx.clone(), session_arc).await {
         Ok(true) => return GenerationAttemptStart::Stop,
         Err(error) => {
@@ -2146,6 +2173,9 @@ async fn process_successful_generation(
         abort_flag,
     } = context;
 
+    if crate::agents::seal::is_sealed(app, chat_id).await {
+        return GenerationLoopControl::Stop;
+    }
     {
         let mut session = session_arc.lock().await;
         session.provider_usage_stale = false;
@@ -2200,13 +2230,14 @@ async fn process_successful_generation(
     };
 
     if let Some(effective_n_ctx) = effective_n_ctx {
-        let mut session = session_arc.lock().await;
-        maybe_inject_token_budget_instruction(
-            &mut session,
+        inject_token_budget_for_chat(
+            app,
+            session_arc,
             effective_n_ctx,
             TOKEN_BUDGET_CADENCE,
             image_token_mode,
-        );
+        )
+        .await;
     }
 
     maybe_save_trajectory_background_with_intent(

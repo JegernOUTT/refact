@@ -9,9 +9,8 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::evidence::EvidenceVerdict;
 use crate::chat::goal_verifier::{
-    apply_goal_verdict_guarded_with_delivery, begin_goal_verification_if_needed,
-    run_goal_verification, GoalVerificationApplyOutcome, GoalVerificationBegin,
-    GoalVerificationFork, GoalVerdict,
+    apply_goal_verdict_for_chat, begin_goal_verification_if_needed, run_goal_verification,
+    GoalVerificationApplyOutcome, GoalVerificationBegin, GoalVerificationFork, GoalVerdict,
 };
 use crate::chat::types::{ChatSession, PushMode};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
@@ -77,6 +76,9 @@ impl Tool for ToolValidateGoal {
             None => return Err(format!("chat session `{chat_id}` not found")),
         };
 
+        if crate::agents::seal::is_sealed(&app, &chat_id).await {
+            return Err("sealed chat cannot validate a goal".to_string());
+        }
         let (begin, fork) = {
             let mut session = session_arc.lock().await;
             let begin = begin_validate_goal(&mut session);
@@ -104,6 +106,9 @@ impl Tool for ToolValidateGoal {
         let reply = match run_goal_verification(app.clone(), session_arc.clone()).await {
             Ok(reply) => reply,
             Err(error) => {
+                if crate::agents::seal::is_sealed(&app, &chat_id).await {
+                    return Err("chat was sealed during goal validation".to_string());
+                }
                 reset_after_verifier_error_with_delivery(
                     session_arc.clone(),
                     &error,
@@ -121,17 +126,16 @@ impl Tool for ToolValidateGoal {
 
         let verdict = reply.verdict.clone();
         let verifier_reply = reply.verifier_reply.clone();
-        let outcome = {
-            let mut session = session_arc.lock().await;
-            apply_goal_verdict_guarded_with_delivery(
-                &mut session,
-                "validate_goal",
-                reply,
-                fork,
-                push,
-                Some(tool_call_id),
-            )
-        };
+        let outcome = apply_goal_verdict_for_chat(
+            &app,
+            &session_arc,
+            "validate_goal",
+            reply,
+            fork,
+            push,
+            Some(tool_call_id),
+        )
+        .await;
         if outcome == GoalVerificationApplyOutcome::Waiting {
             crate::chat::goal_wait::begin_goal_wait_park(app, session_arc).await;
         }
@@ -181,6 +185,9 @@ fn validation_content(
         }
         GoalVerificationApplyOutcome::Superseded => {
             "Goal state changed during validation; verdict discarded.".to_string()
+        }
+        GoalVerificationApplyOutcome::Sealed => {
+            "Chat was sealed during validation; verdict discarded.".to_string()
         }
         GoalVerificationApplyOutcome::Waiting => match verdict {
             GoalVerdict::Wait(wait) => format!(

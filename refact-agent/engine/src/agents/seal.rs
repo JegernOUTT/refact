@@ -3,6 +3,10 @@ pub use refact_chat_api::SealReason;
 use crate::app_state::AppState;
 use crate::tasks::storage;
 
+pub async fn is_sealed(app: &AppState, chat_id: &str) -> bool {
+    seal_reason(app, chat_id).await.is_some()
+}
+
 pub async fn seal_reason(app: &AppState, chat_id: &str) -> Option<SealReason> {
     if let Some(record) = app
         .agents

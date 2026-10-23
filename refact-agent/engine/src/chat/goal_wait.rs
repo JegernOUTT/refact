@@ -99,6 +99,9 @@ pub async fn settle_goal_wait(
     subject: &GoalWaitSubject,
     resume: GoalWaitResume,
 ) -> bool {
+    if crate::agents::seal::is_sealed(&app, chat_id).await {
+        return false;
+    }
     let session_arc = {
         let sessions = app.chat.sessions.read().await;
         sessions.get(chat_id).cloned()

@@ -57,11 +57,7 @@ pub async fn deliver_to_chat(
         }
     }
 
-    if !delivery.wake
-        || crate::agents::seal::seal_reason(&app, chat_id)
-            .await
-            .is_none()
-    {
+    if !delivery.wake || !crate::agents::seal::is_sealed(&app, chat_id).await {
         if let Some(result) =
             crate::agents::delivery::route_to_runner(&app, chat_id, delivery.clone()).await
         {
@@ -101,10 +97,7 @@ pub async fn deliver_to_chat(
         _ => None,
     };
 
-    let sealed = delivery.wake
-        && crate::agents::seal::seal_reason(&app, chat_id)
-            .await
-            .is_some();
+    let sealed = delivery.wake && crate::agents::seal::is_sealed(&app, chat_id).await;
     let (accepted, status, wake, should_start_processor, processor_running, queue_notify) = {
         let mut session = session_arc.lock().await;
         let wake = delivery.wake && !sealed;

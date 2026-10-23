@@ -2859,6 +2859,8 @@ pub async fn process_tool_calls_once(
 
     let session_merge_span =
         perf_diagnostics::span(PerfComponent::ToolSessionMergeEvents, None, None);
+    let chat_id = session_arc.lock().await.chat_id.clone();
+    let sealed = crate::agents::seal::is_sealed(&app, &chat_id).await;
     let mut verify_completion = false;
     {
         let mut session = session_arc.lock().await;
@@ -2873,6 +2875,7 @@ pub async fn process_tool_calls_once(
         if tool_initiated_stop {
             if final_state == SessionState::Completed
                 && completion_trigger.is_some()
+                && !sealed
                 && should_verify_goal_on_done(&session)
             {
                 session.set_runtime_state(SessionState::ExecutingTools, None);

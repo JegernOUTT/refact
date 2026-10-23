@@ -20,6 +20,9 @@ use crate::chat::types::ChatSession;
 use crate::exec::{ExecStatus, ProcessCompletionEvent, ProcessSpawnEvent};
 use crate::global_context::SharedGlobalContext;
 
+const SEALED_PROCESS_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+const SEALED_PROCESS_KILL_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Stable, restart-safe dedupe key for a process completion notice. The exec
 /// process id is unique per process, so one completion can only land once even
 /// if the broadcast is replayed or the engine restarts mid-delivery.
@@ -31,9 +34,16 @@ pub fn spawn_notification_subscriber(gcx: SharedGlobalContext) -> JoinHandle<()>
     let mut completion_rx = gcx.exec_registry.subscribe_completion();
     let mut spawn_rx = gcx.exec_registry.subscribe_spawn();
     tokio::spawn(async move {
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let mut cleanup = tokio::time::interval_at(
+            tokio::time::Instant::now() + SEALED_PROCESS_SWEEP_INTERVAL,
+            SEALED_PROCESS_SWEEP_INTERVAL,
+        );
+        cleanup.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = wait_for_shutdown(gcx.clone()) => break,
+                _ = cleanup.tick() => stop_sealed_chat_processes(&app).await,
                 event = completion_rx.recv() => match event {
                     Ok(event) => handle_process_completion(gcx.clone(), event).await,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
@@ -53,6 +63,65 @@ pub fn spawn_notification_subscriber(gcx: SharedGlobalContext) -> JoinHandle<()>
     })
 }
 
+pub(crate) async fn stop_sealed_chat_processes(app: &crate::app_state::AppState) {
+    let mut processes = Vec::new();
+    for status in [
+        crate::exec::ExecStatusKind::Running,
+        crate::exec::ExecStatusKind::Starting,
+    ] {
+        processes.extend(
+            app.gcx
+                .exec_registry
+                .list(crate::exec::ExecProcessFilter {
+                    status: Some(status),
+                    ..Default::default()
+                })
+                .await,
+        );
+    }
+    let mut owners = std::collections::HashSet::new();
+    for process in processes
+        .into_iter()
+        .filter(|process| process.meta.mode != crate::exec::ExecMode::Foreground)
+    {
+        let Some(chat_id) = process.meta.owner.chat_id.as_deref() else {
+            continue;
+        };
+        if owners.insert(chat_id.to_string()) && crate::agents::seal::is_sealed(app, chat_id).await
+        {
+            stop_chat_processes(&app.gcx, chat_id).await;
+        }
+    }
+}
+
+pub(crate) async fn stop_chat_processes(gcx: &SharedGlobalContext, chat_id: &str) {
+    let processes = gcx
+        .exec_registry
+        .list(crate::exec::ExecProcessFilter {
+            chat_id: Some(chat_id.to_string()),
+            ..Default::default()
+        })
+        .await;
+    for process in processes.into_iter().filter(|process| {
+        !process.status.is_terminal() && process.meta.mode != crate::exec::ExecMode::Foreground
+    }) {
+        match tokio::time::timeout(
+            SEALED_PROCESS_KILL_TIMEOUT,
+            gcx.exec_registry.kill(&process.meta.process_id),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%chat_id, process_id = %process.meta.process_id, %error, "Failed to stop sealed chat process")
+            }
+            Err(_) => {
+                tracing::warn!(%chat_id, process_id = %process.meta.process_id, "Timed out stopping sealed chat process")
+            }
+        }
+    }
+}
+
 async fn wait_for_shutdown(gcx: SharedGlobalContext) {
     while !gcx.shutdown_flag.load(Ordering::Relaxed) {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -60,6 +129,10 @@ async fn wait_for_shutdown(gcx: SharedGlobalContext) {
 }
 
 pub(crate) async fn handle_process_spawn(gcx: SharedGlobalContext, event: ProcessSpawnEvent) {
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    if crate::agents::seal::is_sealed(&app, &event.chat_id).await {
+        stop_chat_processes(&gcx, &event.chat_id).await;
+    }
     let session_arc = {
         let sessions = gcx.chat_sessions.read().await;
         sessions.get(&event.chat_id).cloned()
@@ -112,16 +185,19 @@ pub(crate) async fn deliver_process_completion(
     event: &ProcessCompletionEvent,
 ) -> Result<DeliveryOutcome, String> {
     let chat_id = event.chat_id.clone();
-    let outcome = crate::chat::delivery::deliver_to_chat(
-        app.clone(),
-        &chat_id,
-        process_completion_delivery(event),
-    )
-    .await;
-    if matches!(
-        &outcome,
-        Ok(DeliveryOutcome::Delivered | DeliveryOutcome::Queued)
-    ) {
+    let sealed = crate::agents::seal::is_sealed(&app, &chat_id).await;
+    let mut delivery = process_completion_delivery(event);
+    if sealed {
+        delivery.wake = false;
+        delivery.push = PushMode::WhenIdle;
+    }
+    let outcome = crate::chat::delivery::deliver_to_chat(app.clone(), &chat_id, delivery).await;
+    if !sealed
+        && matches!(
+            &outcome,
+            Ok(DeliveryOutcome::Delivered | DeliveryOutcome::Queued)
+        )
+    {
         let summary = process_completion_message(event)
             .content
             .content_text_only();
@@ -134,15 +210,17 @@ pub(crate) async fn deliver_process_completion(
         )
         .await;
     }
-    crate::chat::goal_wait::settle_goal_wait(
-        app,
-        &chat_id,
-        &refact_chat_api::GoalWaitSubject::Process {
-            process_id: event.process_id.to_string(),
-        },
-        refact_chat_api::GoalWaitResume::Settled,
-    )
-    .await;
+    if !sealed {
+        crate::chat::goal_wait::settle_goal_wait(
+            app,
+            &chat_id,
+            &refact_chat_api::GoalWaitSubject::Process {
+                process_id: event.process_id.to_string(),
+            },
+            refact_chat_api::GoalWaitResume::Settled,
+        )
+        .await;
+    }
     outcome
 }
 

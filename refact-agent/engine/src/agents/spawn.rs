@@ -3164,7 +3164,12 @@ async fn finalize_nested_spawn_worktree(
     }
 }
 
-async fn push_sibling_notice(app: &AppState, agent_id: &str, req: &SpawnRequest, text: String) {
+pub(crate) async fn push_sibling_notice(
+    app: &AppState,
+    agent_id: &str,
+    req: &SpawnRequest,
+    text: String,
+) {
     let root_chat_id = req
         .parent_root_chat_id
         .as_deref()
@@ -3175,6 +3180,11 @@ async fn push_sibling_notice(app: &AppState, agent_id: &str, req: &SpawnRequest,
             && (record.parent_root_chat_id.as_deref() == Some(root_chat_id)
                 || record.parent_chat_id == root_chat_id)
     }) {
+        if let Some(chat_id) = sibling.child_chat_id.as_deref() {
+            if crate::agents::seal::is_sealed(app, chat_id).await {
+                continue;
+            }
+        }
         if let Err(error) = crate::agents::delivery::deliver_to_agent(
             app.clone(),
             &sibling.agent_id,
@@ -3258,6 +3268,13 @@ async fn emit_subagent_hook(
 }
 
 pub async fn emit_background_agent_update(app: AppState, record: &BackgroundAgent) {
+    if record.status.is_terminal() {
+        if let Some(chat_id) = record.child_chat_id.as_deref() {
+            if crate::agents::seal::is_sealed(&app, chat_id).await {
+                crate::chat::notifications::stop_chat_processes(&app.gcx, chat_id).await;
+            }
+        }
+    }
     if app.gcx.hooks_config.enabled
         && record.status.is_terminal()
         && app

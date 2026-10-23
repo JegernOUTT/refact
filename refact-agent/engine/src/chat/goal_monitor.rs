@@ -76,6 +76,7 @@ pub enum GoalNudgeSkip {
     NotStalled,
     QueueRejected,
     Quiescent,
+    Sealed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +177,9 @@ pub async fn handle_goal_turn_end(app: AppState, session_arc: Arc<AMutex<ChatSes
         GoalNudgeTrigger::InlineTurnEnd,
     )
     .await;
+    if outcome == GoalNudgeOutcome::Skipped(GoalNudgeSkip::Sealed) {
+        return true;
+    }
     if goal_turn_end_blocks_completion(outcome) {
         return true;
     }
@@ -211,6 +215,10 @@ pub async fn dispatch_goal_nudge(
     session_arc: Arc<AMutex<ChatSession>>,
     trigger: GoalNudgeTrigger,
 ) -> GoalNudgeOutcome {
+    let chat_id = session_arc.lock().await.chat_id.clone();
+    if crate::agents::seal::is_sealed(&app, &chat_id).await {
+        return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Sealed);
+    }
     let now_ms = epoch_ms_now();
     let (outcome, processor_flag) = {
         let mut session = session_arc.lock().await;

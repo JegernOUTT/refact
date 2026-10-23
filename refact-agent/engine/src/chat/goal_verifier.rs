@@ -109,6 +109,7 @@ pub enum GoalVerificationApplyOutcome {
     Waiting,
     Superseded,
     NoGoal,
+    Sealed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +169,10 @@ pub async fn verify_goal_before_completion(
     session_arc: Arc<AMutex<ChatSession>>,
     trigger: &str,
 ) -> GoalCompletionGateOutcome {
+    let chat_id = session_arc.lock().await.chat_id.clone();
+    if crate::agents::seal::is_sealed(&app, &chat_id).await {
+        return GoalCompletionGateOutcome::Passthrough;
+    }
     let (begin, fork) = {
         let mut session = session_arc.lock().await;
         let now_ms = epoch_ms_now();
@@ -204,6 +209,9 @@ pub async fn verify_goal_before_completion(
     let reply = match run_goal_verification(app.clone(), session_arc.clone()).await {
         Ok(reply) => reply,
         Err(error) => {
+            if crate::agents::seal::is_sealed(&app, &chat_id).await {
+                return GoalCompletionGateOutcome::Passthrough;
+            }
             let aborted = {
                 let session = session_arc.lock().await;
                 session.user_interrupt_flag.load(Ordering::SeqCst) || error == ABORT_ERROR_MESSAGE
@@ -226,10 +234,16 @@ pub async fn verify_goal_before_completion(
         }
     }
 
-    let outcome = {
-        let mut session = session_arc.lock().await;
-        apply_goal_verdict_guarded(&mut session, trigger, reply, fork)
-    };
+    let outcome = apply_goal_verdict_for_chat(
+        &app,
+        &session_arc,
+        trigger,
+        reply,
+        fork,
+        PushMode::Append,
+        None,
+    )
+    .await;
     if outcome == GoalVerificationApplyOutcome::Waiting {
         crate::chat::goal_wait::begin_goal_wait_park(app, session_arc).await;
     }
@@ -241,6 +255,7 @@ pub async fn verify_goal_before_completion(
         GoalVerificationApplyOutcome::Waiting => GoalCompletionGateOutcome::Waiting,
         GoalVerificationApplyOutcome::Superseded => GoalCompletionGateOutcome::Rearmed,
         GoalVerificationApplyOutcome::NoGoal => GoalCompletionGateOutcome::Passthrough,
+        GoalVerificationApplyOutcome::Sealed => GoalCompletionGateOutcome::Passthrough,
     }
 }
 
@@ -619,6 +634,10 @@ pub async fn run_goal_verifier(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> Result<GoalVerifierReply, String> {
+    let chat_id = session_arc.lock().await.chat_id.clone();
+    if crate::agents::seal::is_sealed(&app, &chat_id).await {
+        return Err(ABORT_ERROR_MESSAGE.to_string());
+    }
     let gcx = app.gcx.clone();
     let (thread, messages, goal_text, criteria, chat_id, abort_notify, source_facts) = {
         let session = session_arc.lock().await;
@@ -957,6 +976,10 @@ pub async fn run_goal_verification(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> Result<GoalVerifierReply, String> {
+    let chat_id = session_arc.lock().await.chat_id.clone();
+    if crate::agents::seal::is_sealed(&app, &chat_id).await {
+        return Err(ABORT_ERROR_MESSAGE.to_string());
+    }
     let result = run_goal_verification_inner(app.clone(), session_arc.clone()).await;
     crate::chat::goal_validation_hook::emit_goal_validation(&app, &session_arc, &result).await;
     result
@@ -1169,6 +1192,25 @@ where
 /// commands, edits, or compaction rewrites that landed mid-verification; a
 /// `trajectory_version` mismatch means the verdict may describe messages that
 /// no longer exist, so the goal is re-armed for a fresh verification instead.
+pub async fn apply_goal_verdict_for_chat(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    trigger: &str,
+    reply: GoalVerifierReply,
+    fork: GoalVerificationFork,
+    push: PushMode,
+    tool_call_id: Option<&str>,
+) -> GoalVerificationApplyOutcome {
+    let chat_id = session_arc.lock().await.chat_id.clone();
+    if crate::agents::seal::is_sealed(app, &chat_id).await {
+        crate::buddy::supervision_proof::discard_pending(&chat_id, &reply.verifier_reply);
+        return GoalVerificationApplyOutcome::Sealed;
+    }
+    let mut session = session_arc.lock().await;
+    apply_goal_verdict_guarded_with_delivery(&mut session, trigger, reply, fork, push, tool_call_id)
+}
+
+#[cfg(test)]
 pub fn apply_goal_verdict_guarded(
     session: &mut ChatSession,
     trigger: &str,

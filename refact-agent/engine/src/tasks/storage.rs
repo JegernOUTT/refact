@@ -268,6 +268,94 @@ async fn locked_task_dir(
     Ok((canonical, guard))
 }
 
+async fn commit_board(
+    gcx: &Arc<GlobalContext>,
+    guard: BoardLockGuard,
+    task_dir: &Path,
+    task_id: &str,
+    existing: &TaskBoard,
+    board: &TaskBoard,
+    provenance: &BoardProvenance,
+) -> Result<(), String> {
+    write_board_locked(gcx, &guard, task_dir, board, provenance).await?;
+    drop(guard);
+    let changed = existing
+        .cards
+        .iter()
+        .filter(|card| {
+            card.column == "doing"
+                && board.get_card(&card.id).is_none_or(|next| {
+                    next.column != "doing" || next.agent_chat_id != card.agent_chat_id
+                })
+        })
+        .map(|card| card.id.as_str())
+        .collect::<HashSet<_>>();
+    if changed.is_empty() {
+        return Ok(());
+    }
+    let mut stopped = HashSet::new();
+    for card in existing
+        .cards
+        .iter()
+        .filter(|card| changed.contains(card.id.as_str()))
+    {
+        if let Some(chat_id) = card.agent_chat_id.as_deref() {
+            if board.get_card(&card.id).is_none_or(|next| {
+                next.column != "doing"
+                    || next
+                        .agent_chat_id
+                        .as_deref()
+                        .is_some_and(|id| id != chat_id)
+            }) && stopped.insert(chat_id.to_string())
+            {
+                crate::chat::notifications::stop_chat_processes(gcx, chat_id).await;
+            }
+        }
+    }
+    for process in gcx
+        .exec_registry
+        .list(Default::default())
+        .await
+        .into_iter()
+        .filter(|process| !process.status.is_terminal())
+    {
+        let Some(chat_id) = process
+            .meta
+            .owner
+            .chat_id
+            .filter(|id| !stopped.contains(id))
+        else {
+            continue;
+        };
+        let session = gcx.chat_sessions.read().await.get(&chat_id).cloned();
+        let Some(session) = session else {
+            continue;
+        };
+        let meta = match session.try_lock() {
+            Ok(session) => session.thread.task_meta.clone(),
+            Err(_) => continue,
+        };
+        let Some(meta) = meta.filter(|meta| meta.task_id == task_id && meta.role == "agents")
+        else {
+            continue;
+        };
+        let Some(card_id) = meta.card_id.filter(|id| changed.contains(id.as_str())) else {
+            continue;
+        };
+        if board.get_card(&card_id).is_none_or(|card| {
+            card.column != "doing"
+                || card
+                    .agent_chat_id
+                    .as_deref()
+                    .is_some_and(|id| id != chat_id)
+        }) && stopped.insert(chat_id.clone())
+        {
+            crate::chat::notifications::stop_chat_processes(gcx, &chat_id).await;
+        }
+    }
+    Ok(())
+}
+
 async fn board_coordination(
     gcx: Arc<GlobalContext>,
     task_id: &str,
@@ -318,7 +406,16 @@ pub async fn create_board(
         }));
     }
     let provenance = board_rows::write_provenance(board, None, source);
-    write_board_locked(&gcx, &guard, &task_dir, board, &provenance).await?;
+    commit_board(
+        &gcx,
+        guard,
+        &task_dir,
+        task_id,
+        &existing,
+        board,
+        &provenance,
+    )
+    .await?;
     Ok(())
 }
 
@@ -357,7 +454,16 @@ pub async fn save_board_checked(
         }));
     }
     let provenance = board_rows::write_provenance(board, Some((&existing, &previous)), source);
-    write_board_locked(&gcx, &guard, &task_dir, board, &provenance).await?;
+    commit_board(
+        &gcx,
+        guard,
+        &task_dir,
+        task_id,
+        &existing,
+        board,
+        &provenance,
+    )
+    .await?;
     Ok(())
 }
 
@@ -531,8 +637,16 @@ where
         .collect::<Vec<_>>();
     board.rev += 1;
     let provenance = board_rows::write_provenance(&board, Some((&existing, &previous)), source);
-    write_board_locked(&gcx, &guard, &task_dir, &board, &provenance).await?;
-    drop(guard);
+    commit_board(
+        &gcx,
+        guard,
+        &task_dir,
+        task_id,
+        &existing,
+        &board,
+        &provenance,
+    )
+    .await?;
     if !new_failed.is_empty() {
         let user_activity = gcx.user_activity.clone();
         if let Ok(mut ring) = user_activity.try_lock() {
@@ -1198,15 +1312,10 @@ mod tests {
         );
         assert_eq!(
             guarded_callers,
-            [
-                "create_board",
-                "save_board",
-                "save_board_checked",
-                "update_board_atomic_with_reviewer"
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect()
+            ["commit_board", "save_board"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
         );
     }
 
