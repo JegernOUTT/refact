@@ -2792,7 +2792,7 @@ mod tests {
         let mut second = delivery(PushMode::Append);
         second.supersede_key = Some("steer:card".into());
         let mut soon = delivery(PushMode::Append);
-        soon.expires_at_ms = Some(now_ms + 40);
+        soon.expires_at_ms = Some(u64::MAX);
         for pending in [first.clone(), second.clone(), soon.clone()] {
             assert_eq!(
                 registry
@@ -2810,7 +2810,22 @@ mod tests {
             registry.delivery_status(&record.agent_id, &second.id).await,
             DeliveryStatus::Pending
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            registry.delivery_status(&record.agent_id, &soon.id).await,
+            DeliveryStatus::Pending
+        );
+        registry
+            .update_record(&record.agent_id, |record, now| {
+                record
+                    .pending_deliveries
+                    .iter_mut()
+                    .find(|pending| pending.id == soon.id)
+                    .unwrap()
+                    .expires_at_ms = Some((now.timestamp_millis() as u64).saturating_sub(1));
+                Ok(())
+            })
+            .await
+            .unwrap();
         let drained = registry
             .drain_deliveries(&record.agent_id, true)
             .await
@@ -2934,7 +2949,7 @@ mod tests {
         old_steer.supersede_key = Some("agent_steer:T-1".into());
         let mut new_steer = delivery(PushMode::Preempt);
         new_steer.supersede_key = Some("agent_steer:T-1".into());
-        new_steer.expires_at_ms = Some(now_ms() + 40);
+        new_steer.expires_at_ms = Some(u64::MAX);
         registry
             .enqueue_delivery(&record.agent_id, old_steer.clone())
             .await
@@ -2949,7 +2964,24 @@ mod tests {
                 .await,
             DeliveryStatus::Superseded
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            registry
+                .delivery_status(&record.agent_id, &new_steer.id)
+                .await,
+            DeliveryStatus::Pending
+        );
+        registry
+            .update_record(&record.agent_id, |record, now| {
+                record
+                    .pending_deliveries
+                    .iter_mut()
+                    .find(|pending| pending.id == new_steer.id)
+                    .unwrap()
+                    .expires_at_ms = Some((now.timestamp_millis() as u64).saturating_sub(1));
+                Ok(())
+            })
+            .await
+            .unwrap();
         assert!(registry
             .drain_deliveries(&record.agent_id, true)
             .await

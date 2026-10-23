@@ -23823,7 +23823,7 @@ mod tests {
         session_arc
     }
 
-    #[serial(trajectory_perf)]
+    #[serial(trajectory_perf, runtime_settings)]
     #[tokio::test]
     async fn self_write_fingerprint_computed_without_reading_file_back() {
         crate::runtime_settings::reset_for_test();
@@ -23867,7 +23867,7 @@ mod tests {
         clear_all_trajectory_self_writes();
     }
 
-    #[serial(trajectory_perf)]
+    #[serial(trajectory_perf, runtime_settings)]
     #[tokio::test]
     async fn self_write_is_suppressed() {
         crate::runtime_settings::reset_for_test();
@@ -23908,7 +23908,7 @@ mod tests {
         clear_all_trajectory_self_writes();
     }
 
-    #[serial(trajectory_perf)]
+    #[serial(trajectory_perf, runtime_settings)]
     #[tokio::test]
     async fn external_edit_is_not_suppressed() {
         crate::runtime_settings::reset_for_test();
@@ -23952,7 +23952,7 @@ mod tests {
         clear_all_trajectory_self_writes();
     }
 
-    #[serial(trajectory_perf)]
+    #[serial(trajectory_perf, runtime_settings)]
     #[tokio::test]
     async fn suppression_respects_runtime_switch() {
         crate::runtime_settings::reset_for_test();
@@ -24128,7 +24128,7 @@ mod tests {
         clear_all_trajectory_self_writes();
     }
 
-    #[serial(trajectory_perf)]
+    #[serial(trajectory_perf, runtime_settings)]
     #[tokio::test]
     async fn trajectory_watcher_self_write_disable_restores_external_reload_path() {
         crate::runtime_settings::reset_for_test();
