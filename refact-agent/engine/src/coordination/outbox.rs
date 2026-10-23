@@ -255,7 +255,7 @@ fn state_for_status(status: DeliveryStatus) -> Option<DeliveryState> {
         DeliveryStatus::Consumed => Some(DeliveryState::Consumed),
         DeliveryStatus::Expired => Some(DeliveryState::Expired),
         DeliveryStatus::Superseded => Some(DeliveryState::Superseded),
-        DeliveryStatus::Failed => Some(DeliveryState::Failed),
+        DeliveryStatus::Sealed | DeliveryStatus::Failed => Some(DeliveryState::Failed),
         DeliveryStatus::Unknown => None,
     }
 }

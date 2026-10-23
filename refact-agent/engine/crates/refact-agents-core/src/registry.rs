@@ -1721,6 +1721,7 @@ impl BackgroundAgentRegistry {
             DeliveryStatus::Consumed
                 | DeliveryStatus::Expired
                 | DeliveryStatus::Superseded
+                | DeliveryStatus::Sealed
                 | DeliveryStatus::Failed
         ) {
             return Err("delivery status is not terminal".to_string());

@@ -509,6 +509,7 @@ impl Tool for ToolAgentAskPlanner {
                         Ok(DeliveryOutcome::Duplicate) => "\n\nBlocking question already accepted; duplicate not delivered.",
                         Ok(DeliveryOutcome::Expired) => "\n\nPlanner wake expired before delivery; the question is durably recorded and will surface on the planner's next task_list call.",
                         Ok(DeliveryOutcome::Superseded) => "\n\nPlanner wake was superseded before delivery; the question is durably recorded and will surface on the planner's next task_list call.",
+                        Ok(DeliveryOutcome::Sealed) => "\n\nPlanner wake was dropped because the chat is sealed; the question is durably recorded and will surface on the planner's next task_list call.",
                         Err(error) => {
                             tracing::warn!(
                                 "agent_ask_planner: failed to wake planner for blocking question {} on card {}: {}",

@@ -183,7 +183,7 @@ pub async fn push_completion_to_parent(
                 )
                 .await?;
         }
-        Ok(DeliveryOutcome::Expired | DeliveryOutcome::Superseded) => {
+        Ok(DeliveryOutcome::Expired | DeliveryOutcome::Superseded | DeliveryOutcome::Sealed) => {
             app.agents
                 .set_completion_message_id_for_run(
                     &record.agent_id,

@@ -268,6 +268,7 @@ fn delivery_outcome_text(to: &str, outcome: refact_chat_api::DeliveryOutcome) ->
         DeliveryOutcome::Superseded => {
             format!("Message NOT queued for {to}: a newer message on the same stream replaced it.")
         }
+        DeliveryOutcome::Sealed => format!("Message NOT queued for {to}: the chat is sealed."),
     }
 }
 
@@ -1258,6 +1259,7 @@ mod tests {
             (refact_chat_api::DeliveryOutcome::Duplicate, "NOT queued"),
             (refact_chat_api::DeliveryOutcome::Expired, "NOT queued"),
             (refact_chat_api::DeliveryOutcome::Superseded, "NOT queued"),
+            (refact_chat_api::DeliveryOutcome::Sealed, "NOT queued"),
             (refact_chat_api::DeliveryOutcome::Queued, "queued for"),
             (refact_chat_api::DeliveryOutcome::Delivered, "delivered to"),
         ] {

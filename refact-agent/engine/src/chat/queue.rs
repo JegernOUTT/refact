@@ -1333,6 +1333,28 @@ pub async fn resolve_worktree_setparams_update(
     thread: &ThreadParams,
     patch: &serde_json::Value,
 ) -> Result<Option<WorktreeSetParamsUpdate>, String> {
+    let rebinds_worktree = patch.get("worktree_id").is_some_and(|id| {
+        id.as_str()
+            != thread
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.id.as_str())
+    }) || patch.get("worktree").is_some_and(|worktree| {
+        worktree.is_null() || Some(worktree) != serde_json::to_value(&thread.worktree).ok().as_ref()
+    });
+    if rebinds_worktree {
+        if let Some(reason) = crate::agents::seal::seal_reason(&app, chat_id).await {
+            return Err(reason.message());
+        }
+        if app
+            .agents
+            .find_agent_id_by_child_chat_id(chat_id)
+            .await
+            .is_some()
+        {
+            return Err("Background agent child chats cannot change their worktree".to_string());
+        }
+    }
     if let Some(worktree_id) = patch.get("worktree_id") {
         let worktree_id = worktree_id
             .as_str()

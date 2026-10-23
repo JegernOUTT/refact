@@ -174,6 +174,11 @@ pub async fn recover_runner_deliveries(app: &AppState, chat_id: &str) -> Result<
             DeliveryOutcome::Superseded => {
                 return Err("recovered delivery was superseded inconsistently".to_string());
             }
+            DeliveryOutcome::Sealed => {
+                app.agents
+                    .record_delivery_status(&agent_id, &id, refact_chat_api::DeliveryStatus::Sealed)
+                    .await?;
+            }
         }
     }
     publish_runner_queue(app, &agent_id).await;

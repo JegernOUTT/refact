@@ -407,6 +407,7 @@ async fn handle_set_params(
         Err(e) => {
             warn!("SetParams worktree update rejected: {}", e);
             let mut session = session_arc.lock().await;
+            reject_guard(&mut session, &context.request_id, e.clone());
             let compression_phase = session.compression_phase;
             let compression_reason = session.compression_reason;
             let event = session.runtime_update_event(
@@ -1173,6 +1174,12 @@ async fn handle_user_message(
     suppress_auto_enrichment: bool,
     client_message_id: Option<String>,
 ) -> QueueCommandOutcome {
+    let chat_id = context.session_arc.lock().await.chat_id.clone();
+    if let Some(reason) = crate::agents::seal::seal_reason(&context.app, &chat_id).await {
+        let mut session = context.session_arc.lock().await;
+        reject_guard(&mut session, &context.request_id, reason.message());
+        return QueueCommandOutcome::Continue;
+    }
     let prepared = Box::pin(prepare_user_message(
         context,
         content,

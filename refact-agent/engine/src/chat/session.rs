@@ -2679,6 +2679,16 @@ impl ChatSession {
         }
     }
 
+    pub(crate) fn drop_sealed_delivery(&mut self, id: String) -> DeliveryOutcome {
+        if self.knows_delivery_id(&id) {
+            return DeliveryOutcome::Duplicate;
+        }
+        self.record_dropped_delivery(id, DeliveryStatus::Sealed);
+        self.emit_queue_update();
+        self.mark_persisted_runtime_changed();
+        DeliveryOutcome::Sealed
+    }
+
     fn record_dropped_delivery(&mut self, id: String, status: DeliveryStatus) {
         self.dropped_deliveries.retain(|known| known.id != id);
         self.dropped_deliveries

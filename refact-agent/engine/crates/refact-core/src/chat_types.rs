@@ -1341,6 +1341,7 @@ pub enum DeliveryOutcome {
     /// A later delivery with the same supersede key replaced it while it was
     /// still pending; nothing from it was appended.
     Superseded,
+    Sealed,
 }
 
 /// Lifecycle of one delivery id as far as the recipient session knows.
@@ -1352,6 +1353,7 @@ pub enum DeliveryStatus {
     Consumed,
     Expired,
     Superseded,
+    Sealed,
     Failed,
     Unknown,
 }
@@ -1631,6 +1633,7 @@ mod delivery_tests {
             (DeliveryStatus::Consumed, "consumed"),
             (DeliveryStatus::Expired, "expired"),
             (DeliveryStatus::Superseded, "superseded"),
+            (DeliveryStatus::Sealed, "sealed"),
             (DeliveryStatus::Failed, "failed"),
             (DeliveryStatus::Unknown, "unknown"),
         ] {

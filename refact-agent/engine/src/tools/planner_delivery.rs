@@ -155,6 +155,7 @@ impl DeliveryReport {
                     DeliveryOutcome::Duplicate => "duplicate",
                     DeliveryOutcome::Expired => "expired",
                     DeliveryOutcome::Superseded => "superseded",
+                    DeliveryOutcome::Sealed => "sealed",
                 },
                 None,
                 prior_state.map(|state| state.to_string()),
@@ -185,6 +186,7 @@ impl DeliveryReport {
                 DeliveryOutcome::Superseded => {
                     "not delivered (replaced by a newer message with the same key)".to_string()
                 }
+                DeliveryOutcome::Sealed => "not delivered (the chat is sealed)".to_string(),
             },
             DeliveryReport::NoLiveSession => "not delivered (no live agent session)".to_string(),
             DeliveryReport::Skipped { reason } => format!("not delivered ({})", reason),
@@ -212,6 +214,9 @@ impl DeliveryReport {
                     ),
                     DeliveryOutcome::Superseded => format!(
                         "{action} message was NOT delivered: a newer message with the same key replaced it."
+                    ),
+                    DeliveryOutcome::Sealed => format!(
+                        "{action} message was NOT delivered: the chat is sealed."
                     ),
                     DeliveryOutcome::Queued | DeliveryOutcome::Delivered => format!(
                         "{action} message {}; prior agent state: {state}",
@@ -507,6 +512,7 @@ mod tests {
             (DeliveryOutcome::Duplicate, "duplicate"),
             (DeliveryOutcome::Expired, "expired"),
             (DeliveryOutcome::Superseded, "superseded"),
+            (DeliveryOutcome::Sealed, "sealed"),
         ] {
             let report = DeliveryReport::Delivered {
                 outcome,
