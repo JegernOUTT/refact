@@ -314,6 +314,10 @@ async fn write_default_if_unchanged(
     };
 
     if !existing_checksums.contains_key(checksum_key) {
+        if compute_checksum(&existing_content) == new_checksum {
+            new_checksums.insert(checksum_key.to_string(), new_checksum);
+            return;
+        }
         let Ok(version) = serde_yaml::from_str::<SchemaVersionOnly>(&existing_content) else {
             return;
         };
@@ -782,7 +786,7 @@ tools:
     }
 
     #[tokio::test]
-    async fn test_bootstrap_keeps_pristine_file_without_checksums_unbaselined() {
+    async fn test_bootstrap_restores_baseline_for_pristine_file_without_checksums() {
         let temp = tempfile::tempdir().unwrap();
         let config_dir = temp.path();
         global_configs_try_create_all(config_dir).await.unwrap();
@@ -804,8 +808,8 @@ tools:
         let saved: HashMap<String, String> = serde_yaml::from_str(&checksums_content).unwrap();
         assert_eq!(
             saved.get("modes/agent.yaml"),
-            None,
-            "equal-version default must stay unbaselined"
+            Some(&compute_checksum(&original)),
+            "pristine default must be re-recognized as baseline"
         );
     }
     #[tokio::test]
