@@ -82,6 +82,38 @@ async fn cleanup_old_worktree(
     }
 }
 
+async fn fresh_restart_diff_report(
+    card: &BoardCard,
+    force: bool,
+) -> Result<Option<String>, String> {
+    if card.agent_worktree.is_none()
+        && card.agent_worktree_name.is_none()
+        && card.agent_branch.is_none()
+    {
+        return Ok(None);
+    }
+    let capture = match card.agent_worktree.as_deref() {
+        Some(worktree) => {
+            crate::chat::task_agent_monitor::capture_failed_agent_diff(
+                worktree,
+                card.base_commit.as_deref(),
+                card.base_branch.as_deref(),
+            )
+            .await
+        }
+        None => Err("Previous worktree path is missing".to_string()),
+    };
+    match capture {
+        Ok(diff) => Ok(Some(format!("Fresh restart: previous worktree diff captured.{diff}"))),
+        Err(error) if force => Ok(Some(format!(
+            "Fresh restart forced; no diff captured: {error}"
+        ))),
+        Err(error) => Err(format!(
+            "Fresh restart refused: {error}. Previous worktree retained; use force=true to restart without capturing its diff."
+        )),
+    }
+}
+
 async fn restore_card_after_restart_failure(
     gcx: Arc<GlobalContext>,
     task_id: &str,
@@ -285,7 +317,7 @@ impl Tool for ToolTaskRestartAgent {
                     },
                     "force": {
                         "type": "boolean",
-                        "description": "If true, allow restarting even if an agent is currently running on this card (sends abort to old agent first)."
+                        "description": "If true, allow restarting an active agent (aborts it first) and allow a fresh restart when the previous worktree diff cannot be captured, recording the capture failure."
                     },
                     "suggested_steps": {
                         "type": "integer",
@@ -422,6 +454,9 @@ impl Tool for ToolTaskRestartAgent {
         board
             .dependency_gate(card_id)
             .map_err(storage::violation_error)?;
+        if mode == "fresh" {
+            fresh_restart_diff_report(card, force).await?;
+        }
         let card_title = card.title.clone();
         let card_instructions = card.instructions.clone();
         let dependency_context = board
@@ -546,6 +581,7 @@ impl Tool for ToolTaskRestartAgent {
                         &queued,
                         &agent_id,
                         &agent_chat_id,
+                        force,
                     )
                     .await
                 }
@@ -619,9 +655,23 @@ impl ToolTaskRestartAgent {
         queued_card: &BoardCard,
         agent_id: &str,
         agent_chat_id: &str,
+        force: bool,
     ) -> Result<String, String> {
         let gcx = app.gcx.clone();
         let original_card = card.clone();
+        let diff_report = match fresh_restart_diff_report(&original_card, force).await {
+            Ok(report) => report,
+            Err(error) => {
+                restore_card_after_restart_failure(
+                    gcx.clone(),
+                    task_id,
+                    original_card,
+                    agent_chat_id.to_string(),
+                )
+                .await;
+                return Err(error);
+            }
+        };
 
         let mut restart_task_meta = task_meta.clone();
         if original_card.base_branch.is_some() || original_card.base_commit.is_some() {
@@ -667,6 +717,12 @@ impl ToolTaskRestartAgent {
                     .get_card_mut(&card_id_owned)
                     .ok_or(format!("Card {} not found", card_id_owned))?;
                 ensure_restart_source_current(card, &source_card)?;
+                if let Some(message) = diff_report {
+                    card.status_updates.push(StatusUpdate {
+                        timestamp: Utc::now().to_rfc3339(),
+                        message,
+                    });
+                }
                 mark_card_restarted_fresh(
                     card,
                     &agent_id_clone,

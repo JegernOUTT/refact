@@ -1145,8 +1145,12 @@ async fn mark_agent_as_failed(
         } else {
             (None, None, None)
         };
-        let diff_report = if let (Some(ref wt), Some(ref br)) = (&worktree, &branch) {
-            capture_failed_agent_diff(app.clone(), wt, br, worktree_name.as_deref()).await
+        let diff_report = if let (Some(wt), Some(card)) =
+            (worktree.as_deref(), board.get_card(card_id))
+        {
+            capture_failed_agent_diff(wt, card.base_commit.as_deref(), card.base_branch.as_deref())
+                .await
+                .unwrap_or_else(|error| format!("\n\nNo diff captured: {error}"))
         } else {
             String::new()
         };
@@ -1698,70 +1702,83 @@ pub(crate) async fn remove_agent_worktree_and_branch(
 }
 
 pub(crate) async fn capture_failed_agent_diff(
-    _app: AppState,
     agent_worktree: &str,
-    agent_branch: &str,
-    _agent_worktree_name: Option<&str>,
-) -> String {
-    let worktree_path = Path::new(agent_worktree);
-    let mut diff_report = String::new();
-
-    if worktree_path.exists() {
-        let uncommitted_diff = Command::new("git")
-            .args(["diff", "HEAD"])
-            .current_dir(worktree_path)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_default();
-
-        let committed_diff = Command::new("git")
-            .args(["log", "--patch", "--reverse", "HEAD@{upstream}..HEAD"])
-            .current_dir(worktree_path)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_default();
-
-        let committed_diff = if committed_diff.is_empty() {
-            Command::new("git")
-                .args(["diff", &format!("{}~1..HEAD", agent_branch)])
-                .current_dir(worktree_path)
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                .unwrap_or_default()
-        } else {
-            committed_diff
-        };
-
-        if !committed_diff.is_empty() || !uncommitted_diff.is_empty() {
-            diff_report.push_str("\n\n## Changes made before failure\n\n");
-            if !committed_diff.is_empty() {
-                diff_report.push_str("### Committed changes\n```diff\n");
-                let truncated: String = committed_diff.chars().take(2000).collect();
-                diff_report.push_str(&truncated);
-                if committed_diff.len() > 2000 {
-                    diff_report.push_str("\n... (truncated)");
+    base_commit: Option<&str>,
+    base_branch: Option<&str>,
+) -> Result<String, String> {
+    let worktree = agent_worktree.to_string();
+    let base = base_commit
+        .or(base_branch)
+        .ok_or("Cannot capture diff: card has no recorded base commit or branch")?
+        .to_string();
+    tokio::task::spawn_blocking(move || {
+        let repo = git2::Repository::open(&worktree)
+            .map_err(|error| format!("Cannot open worktree '{worktree}': {error}"))?;
+        let base_tree = repo
+            .revparse_single(&base)
+            .and_then(|object| object.peel_to_tree())
+            .map_err(|error| format!("Cannot resolve card base '{base}': {error}"))?;
+        let head_tree = repo
+            .head()
+            .and_then(|head| head.peel_to_tree())
+            .map_err(|error| format!("Cannot resolve worktree HEAD: {error}"))?;
+        let committed = repo
+            .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)
+            .map_err(|error| format!("Cannot capture committed diff: {error}"))?;
+        let mut options = git2::DiffOptions::new();
+        options
+            .include_untracked(true)
+            .recurse_untracked_dirs(true)
+            .show_untracked_content(true);
+        let uncommitted = repo
+            .diff_tree_to_workdir_with_index(Some(&head_tree), Some(&mut options))
+            .map_err(|error| format!("Cannot capture uncommitted diff: {error}"))?;
+        let mut report = String::new();
+        for (title, diff) in [
+            ("Committed changes", committed),
+            ("Uncommitted changes", uncommitted),
+        ] {
+            let mut patch = String::new();
+            let mut chars = 0;
+            let mut truncated = false;
+            diff.print(git2::DiffFormat::Patch, |_, _, line| {
+                let prefix = match line.origin() {
+                    '+' => "+",
+                    '-' => "-",
+                    ' ' => " ",
+                    _ => "",
+                };
+                for ch in prefix
+                    .chars()
+                    .chain(String::from_utf8_lossy(line.content()).chars())
+                {
+                    if chars < 2000 {
+                        patch.push(ch);
+                        chars += 1;
+                    } else {
+                        truncated = true;
+                        break;
+                    }
                 }
-                diff_report.push_str("\n```\n");
-            }
-            if !uncommitted_diff.is_empty() {
-                diff_report.push_str("### Uncommitted changes\n```diff\n");
-                let truncated: String = uncommitted_diff.chars().take(2000).collect();
-                diff_report.push_str(&truncated);
-                if uncommitted_diff.len() > 2000 {
-                    diff_report.push_str("\n... (truncated)");
+                true
+            })
+            .map_err(|error| format!("Cannot render {title}: {error}"))?;
+            if !patch.is_empty() {
+                report.push_str(&format!("### {title}\n```diff\n{patch}"));
+                if truncated {
+                    report.push_str("\n... (truncated)");
                 }
-                diff_report.push_str("\n```\n");
+                report.push_str("\n```\n");
             }
         }
-    }
-
-    diff_report
+        if report.is_empty() {
+            Ok("\n\nNo changes in previous worktree.".to_string())
+        } else {
+            Ok(format!("\n\n## Changes made before failure\n\n{report}"))
+        }
+    })
+    .await
+    .map_err(|error| format!("Diff capture task failed: {error}"))?
 }
 
 pub async fn update_card_heartbeat(
