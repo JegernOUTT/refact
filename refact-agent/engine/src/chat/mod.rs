@@ -93,6 +93,8 @@ mod verifier_false_fail_tests;
 mod verifier_infra_tests;
 pub(crate) mod verify_cmd;
 #[cfg(test)]
+mod verify_command_boundary_tests;
+#[cfg(test)]
 mod verify_line_parsing_tests;
 
 pub use session::{

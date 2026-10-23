@@ -10,14 +10,19 @@ use crate::global_context::GlobalContext;
 use crate::tasks::types::BoardCard;
 use crate::tools::shell_gate::{ApprovalMode, ShellGatePolicy};
 
-// COMMAND_HINTS is only an extraction heuristic for scraping bare lines out of markdown prose; it
-// is not a security boundary and never gates execution.
+// COMMAND_HINTS separates prose from command proposals, not authorized from unauthorized execution;
+// execution still goes through VerifyCommandPolicy deny rules and the existing approval path.
 const COMMAND_HINTS: &[&str] = &[
     "cargo", "npm", "npx", "pnpm", "yarn", "bun", "deno", "node", "pytest", "python", "python3",
     "tox", "poetry", "uv", "go", "make", "cmake", "ninja", "bazel", "just", "gradle", "gradlew",
     "mvn", "dotnet", "dart", "flutter", "swift", "ruby", "rake", "bundle", "mix", "zig",
-    "composer", "php", "tsc", "jest", "vitest", "ctest",
+    "composer", "php", "tsc", "jest", "vitest", "ctest", "git", "grep", "rg", "test", "ls", "diff",
+    "cmp", "jq", "wc", "head", "tail",
 ];
+
+pub(crate) const VERIFY_COMMAND_DESCRIPTION: &str = "Optional recognised executable verification command with valid quoting and no shell operators except a leading `cd <dir> &&`, subject to policy acceptance; a failing or unrun command blocks goal completion.";
+
+const SHELL_OPERATOR_REASON: &str = "shell operators (`|`, `>`, `;`, `&&` except a leading `cd <dir> &&`) are not supported in verify_command; use a single command";
 
 // Words that never appear in a real invocation but are common in acceptance-criteria prose. Hints
 // like `make` and `go` are also ordinary English verbs, so a bare line containing any of these is
@@ -103,7 +108,7 @@ pub(crate) fn parse_verification_argv(command: &str) -> Result<ParsedVerificatio
         (Some(PathBuf::from(&tokens[1])), &tokens[3..])
     } else {
         if tokens.iter().any(|token| token == "&&") {
-            return Err("only a leading 'cd <dir> &&' prefix is allowed".to_string());
+            return Err(SHELL_OPERATOR_REASON.to_string());
         }
         (None, tokens.as_slice())
     };
@@ -116,7 +121,7 @@ pub(crate) fn parse_verification_argv(command: &str) -> Result<ParsedVerificatio
         return Err("missing command after cd prefix".to_string());
     }
     if rest.iter().any(|token| token.contains('&')) {
-        return Err("ampersand is only allowed in a leading cd prefix".to_string());
+        return Err(SHELL_OPERATOR_REASON.to_string());
     }
 
     let boundary = rest
@@ -349,15 +354,30 @@ pub(crate) fn looks_like_command(command: &str) -> bool {
     } else {
         tokens.as_slice()
     };
-    if rest
+    validate_command_hint(rest).is_ok()
+}
+
+pub(crate) fn validate_command_hint(argv: &[String]) -> Result<(), String> {
+    if argv
         .iter()
         .filter(|token| !is_assignment_token(token))
         .any(|token| PROSE_TOKENS.contains(&token.to_ascii_lowercase().as_str()))
     {
-        return false;
+        return Err(
+            "Proposed text is prose, not an executable command (contains prose tokens)".to_string(),
+        );
     }
-    let program = rest.iter().find(|token| !is_assignment_token(token));
-    program.is_some_and(|program| COMMAND_HINTS.contains(&program.as_str()))
+    let program = argv
+        .iter()
+        .find(|token| !is_assignment_token(token))
+        .ok_or_else(|| "missing command".to_string())?;
+    if !COMMAND_HINTS.contains(&program.as_str()) {
+        return Err(format!(
+            "program `{program}` is not a recognised verification command; recognised: {}",
+            COMMAND_HINTS.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 fn push_expanded_unique(commands: &mut Vec<String>, command: &str) {
@@ -426,9 +446,7 @@ fn reject_shell_character(character: char) -> Result<(), String> {
         '(' | ')' | '{' | '}' => Err("shell grouping is not allowed".to_string()),
         '*' | '?' | '[' | ']' => Err("globs are not allowed".to_string()),
         '~' => Err("home expansion is not allowed".to_string()),
-        ';' => Err("command separators are not allowed".to_string()),
-        '|' => Err("pipes are not allowed".to_string()),
-        '<' | '>' => Err("redirects are not allowed".to_string()),
+        ';' | '|' | '<' | '>' => Err(SHELL_OPERATOR_REASON.to_string()),
         _ => Ok(()),
     }
 }

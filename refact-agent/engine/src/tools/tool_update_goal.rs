@@ -56,6 +56,7 @@ impl Tool for ToolUpdateGoal {
             let cgcx = ccx.lock().await;
             (cgcx.app.gcx.clone(), cgcx.chat_id.clone())
         };
+        let policy = crate::chat::verify_cmd::VerifyCommandPolicy::load(gcx.clone()).await;
         let session_arc = {
             let sessions = gcx.chat_sessions.read().await;
             sessions.get(&chat_id).cloned()
@@ -67,6 +68,7 @@ impl Tool for ToolUpdateGoal {
             if !has_base_goal_including_queued(&session)? {
                 return Err("no goal to update; call set_goal first".to_string());
             }
+            crate::chat::evidence::validate_session_goal_verify_commands(&session, &policy)?;
             let seq = goal_delta_count_including_queued(&session)? + 1;
             let (delta, result_truncation) = internal_roles::goal_delta_with_truncation(
                 "tool.update_goal",

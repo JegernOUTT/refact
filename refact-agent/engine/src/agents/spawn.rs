@@ -454,6 +454,10 @@ pub struct LaunchEffective {
 }
 
 async fn validate_launch_request(app: &AppState, req: &SpawnRequest) -> Result<PathBuf, String> {
+    if let Some(goal) = &req.goal {
+        let policy = crate::chat::verify_cmd::VerifyCommandPolicy::load(app.gcx.clone()).await;
+        crate::chat::evidence::validate_goal_verify_commands(&goal.criteria, &policy)?;
+    }
     let max_depth = crate::runtime_settings::current()
         .coordination
         .max_subchat_depth;

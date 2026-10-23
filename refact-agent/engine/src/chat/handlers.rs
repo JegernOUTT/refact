@@ -486,6 +486,14 @@ pub async fn handle_v1_chat_command(
     let request: CommandRequest = serde_json::from_slice(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
+    let goal_policy = if matches!(
+        &request.command,
+        ChatCommand::SetGoal { .. } | ChatCommand::UpdateGoal { .. }
+    ) {
+        Some(super::verify_cmd::VerifyCommandPolicy::load(app.gcx.clone()).await)
+    } else {
+        None
+    };
     let sessions = app.chat.sessions.clone();
 
     let session_arc = get_or_create_session_with_trajectory(app.clone(), &sessions, &chat_id).await;
@@ -511,6 +519,29 @@ pub async fn handle_v1_chat_command(
     if let Err(error) = super::queue::prepare_guarded_command(&mut session, &request) {
         super::queue::reject_guard(&mut session, &request.client_request_id, error.clone());
         return Err(ScratchError::new(StatusCode::CONFLICT, error));
+    }
+
+    if let Some(policy) = &goal_policy {
+        let validation = match &request.command {
+            ChatCommand::SetGoal { criteria, .. } => {
+                super::evidence::validate_goal_verify_commands(
+                    criteria.as_deref().unwrap_or_default(),
+                    policy,
+                )
+            }
+            ChatCommand::UpdateGoal { .. } => {
+                super::evidence::validate_session_goal_verify_commands(&session, policy)
+            }
+            _ => Ok(()),
+        };
+        if let Err(error) = validation {
+            super::queue::reject_guard(&mut session, &request.client_request_id, error.clone());
+            return Ok(command_error_response(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                error,
+            ));
+        }
     }
 
     // Delivery edits must bypass the command processor: it awaits the running

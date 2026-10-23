@@ -20,7 +20,7 @@ use crate::chat::evidence_cache::CacheDeclaration;
 use crate::chat::evidence_revision::ContentRevision;
 use crate::chat::types::{CriterionEvidence, CriterionVerdict, GoalCriterion, VerdictSource};
 use crate::chat::verify_cmd::{
-    instruction_commands, looks_like_command, parse_verification_argv, VerifyCommandPolicy,
+    instruction_commands, parse_verification_argv, validate_command_hint, VerifyCommandPolicy,
 };
 use crate::global_context::GlobalContext;
 use crate::tasks::types::{BoardCard, VerificationOutcome, VerificationResult};
@@ -212,21 +212,18 @@ impl VerificationSpec {
         policy: &VerifyCommandPolicy,
         accepted_by: &str,
     ) -> Result<Self, SpecRejection> {
-        if self.proposed_by.is_untrusted_proposal() && !looks_like_command(&self.command) {
-            return Err(SpecRejection {
-                verdict: EvidenceVerdict::Blocked,
-                outcome: VerificationOutcome::Rejected,
-                reason: format!(
-                    "Proposed text is prose, not an executable command: {}",
-                    self.command
-                ),
-            });
-        }
         let parsed = parse_verification_argv(&self.command).map_err(|reason| SpecRejection {
             verdict: EvidenceVerdict::Blocked,
             outcome: VerificationOutcome::Rejected,
             reason: format!("Cannot run as a command: {}", reason),
         })?;
+        if self.proposed_by.is_untrusted_proposal() {
+            validate_command_hint(&parsed.argv).map_err(|reason| SpecRejection {
+                verdict: EvidenceVerdict::Blocked,
+                outcome: VerificationOutcome::Rejected,
+                reason,
+            })?;
+        }
         policy
             .check(&self.command)
             .map_err(|reason| SpecRejection {
@@ -868,6 +865,47 @@ fn explain_completion(gates: &GateOutcome, decision: &CompletionDecision) {
         ),
     };
     explain(Explanation::new(kind, outcome, rule, inputs));
+}
+
+pub(crate) fn validate_session_goal_verify_commands(
+    session: &crate::chat::types::ChatSession,
+    policy: &VerifyCommandPolicy,
+) -> Result<(), String> {
+    let projection = session.try_accepted_control_projection()?;
+    if let Some(goal) =
+        crate::chat::goal_snapshot_from_messages(&projection.messages, projection.goal.as_ref())
+    {
+        validate_goal_verify_commands(&goal.criteria, policy)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_goal_verify_commands(
+    criteria: &[GoalCriterion],
+    policy: &VerifyCommandPolicy,
+) -> Result<(), String> {
+    let defaults = EvidenceDefaults::from_settings();
+    for criterion in criteria {
+        let Some(command) = &criterion.verify_command else {
+            continue;
+        };
+        VerificationSpec::propose(
+            format!("criterion:{}", criterion.id),
+            command,
+            SpecAuthority::AgentProposal {
+                agent: "goal author".to_string(),
+            },
+            &defaults,
+        )
+        .accept(policy, EVIDENCE_POLICY_AUTHORITY)
+        .map_err(|rejection| {
+            format!(
+                "criterion `{}` verify_command: {}",
+                criterion.id, rejection.reason
+            )
+        })?;
+    }
+    Ok(())
 }
 
 /// Specs the goal's criteria carry. `verify_hint` is prose for the judge and is

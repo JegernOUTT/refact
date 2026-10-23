@@ -45,7 +45,7 @@ impl Tool for ToolSetGoal {
                                 "id": {"type": "string", "description": "Short stable id, e.g. C1."},
                                 "text": {"type": "string", "description": "The criterion itself."},
                                 "verify_hint": {"type": "string", "description": "Optional prose hint for the judge. Never executed."},
-                                "verify_command": {"type": "string", "description": "Optional command that decides this criterion by execution. Runs only after policy acceptance; a failing or unrun command blocks goal completion."}
+                                "verify_command": {"type": "string", "description": crate::chat::verify_cmd::VERIFY_COMMAND_DESCRIPTION}
                             },
                             "required": ["id", "text"]
                         }
@@ -79,6 +79,8 @@ impl Tool for ToolSetGoal {
             let cgcx = ccx.lock().await;
             (cgcx.app.gcx.clone(), cgcx.chat_id.clone())
         };
+        let policy = crate::chat::verify_cmd::VerifyCommandPolicy::load(gcx.clone()).await;
+        crate::chat::evidence::validate_goal_verify_commands(&criteria, &policy)?;
         let session_arc = {
             let sessions = gcx.chat_sessions.read().await;
             sessions.get(&chat_id).cloned()

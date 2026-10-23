@@ -101,7 +101,7 @@ impl Tool for ToolSubagent {
                     "tools": {"type": "string", "description": "Optional comma-separated tool names. Omit to inherit all parent-chat tools."},
                     "model_type": {"type": "string", "enum": MODEL_TYPES, "description": "Configured model slot. Ignored when model_name is supplied."},
                     "model_name": {"type": "string", "description": "Concrete chat model id. Takes precedence over model_type."},
-                    "goal": {"description": "Optional string or object {content, criteria?, budget?}; use goal.budget.max_turns for a step limit."},
+                    "goal": {"description": format!("Optional string or object {{content, criteria?, budget?}}; use goal.budget.max_turns for a step limit. For criteria[].verify_command: {}", crate::chat::verify_cmd::VERIFY_COMMAND_DESCRIPTION)},
                     "plan": {"type": "string", "description": "Optional installed plan; it is ground truth for the child."},
                     "worktree": {"type": "string", "enum": ["inherit", "isolated"], "default": "inherit", "description": "Use the parent worktree or create an isolated worktree."},
                     "push": PushMode::schema(),
@@ -207,6 +207,10 @@ impl Tool for ToolSubagent {
             None => crate::file_activity::settings(),
         };
         let args = parse_subagent_args_with_limits(args, &limits)?;
+        if let Some(goal) = &args.goal {
+            let policy = crate::chat::verify_cmd::VerifyCommandPolicy::load(gcx.clone()).await;
+            crate::chat::evidence::validate_goal_verify_commands(&goal.criteria, &policy)?;
+        }
         crate::agents::sandbox_contract::preflight(
             args.sandbox.clone(),
             crate::exec::command_policy::baseline_sandbox_mode(Some("agent")),

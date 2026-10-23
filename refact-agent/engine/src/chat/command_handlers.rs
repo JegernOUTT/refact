@@ -211,6 +211,14 @@ async fn handle_set_goal(
     let session_arc = context.session_arc.clone();
     let request_id = &context.request_id;
     let supervision_guard = context.supervision_guard.as_ref();
+    let policy = crate::chat::verify_cmd::VerifyCommandPolicy::load(app.gcx.clone()).await;
+    if let Err(error) = crate::chat::evidence::validate_goal_verify_commands(
+        criteria.as_deref().unwrap_or_default(),
+        &policy,
+    ) {
+        reject_guard(&mut *session_arc.lock().await, request_id, error);
+        return QueueCommandOutcome::Continue;
+    }
     let result = {
         let mut session = session_arc.lock().await;
         let chat_id = session.chat_id.clone();
@@ -282,9 +290,11 @@ async fn handle_set_goal_budget(
 async fn handle_update_goal(context: &QueueCommandContext, note: String) -> QueueCommandOutcome {
     let app = context.app.clone();
     let session_arc = context.session_arc.clone();
+    let policy = crate::chat::verify_cmd::VerifyCommandPolicy::load(app.gcx.clone()).await;
     let result = {
         let mut session = session_arc.lock().await;
-        handle_update_goal_command(&mut session, note)
+        crate::chat::evidence::validate_session_goal_verify_commands(&session, &policy)
+            .and_then(|()| handle_update_goal_command(&mut session, note))
     };
     match result {
         Ok(_) => {
