@@ -82,7 +82,7 @@ async fn v1_fixture_from_historical_question_struct_initializes_registry() {
         );
         assert_eq!(question.asked_at, now);
     }
-    assert_eq!(migrated.questions[0].state, QuestionState::Pending);
+    assert_eq!(migrated.questions[0].state, QuestionState::Withdrawn);
     assert_eq!(migrated.questions[1].state, QuestionState::Answered);
     assert_eq!(migrated.questions[1].answered(), Some("Unit tests"));
     assert_eq!(migrated.questions[1].answered_at, Some(now));
