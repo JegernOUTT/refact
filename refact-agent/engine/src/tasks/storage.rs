@@ -378,15 +378,12 @@ async fn locked_task_dir(
     Ok((canonical, guard))
 }
 
-async fn commit_board(
-    gcx: &Arc<GlobalContext>,
-    guard: BoardLockGuard,
-    task_dir: &Path,
+fn record_board_withdrawals(
+    gcx: &GlobalContext,
     task_id: &str,
     existing: &TaskBoard,
     board: &mut TaskBoard,
-    provenance: &BoardProvenance,
-) -> Result<(), String> {
+) -> Vec<(BoardCard, Vec<String>)> {
     let mut withdrawals = Vec::new();
     for previous in &existing.cards {
         let ended = match board.get_card(&previous.id) {
@@ -409,6 +406,19 @@ async fn commit_board(
             withdrawals.push((card.clone(), ids));
         }
     }
+    withdrawals
+}
+
+async fn commit_board(
+    gcx: &Arc<GlobalContext>,
+    guard: BoardLockGuard,
+    task_dir: &Path,
+    task_id: &str,
+    existing: &TaskBoard,
+    board: &TaskBoard,
+    provenance: &BoardProvenance,
+    withdrawals: Vec<(BoardCard, Vec<String>)>,
+) -> Result<(), String> {
     write_board_locked(gcx, &guard, task_dir, board, provenance).await?;
     for (card, ids) in withdrawals {
         crate::tools::tool_agent_planner_qna::settle_withdrawn_questions(gcx, task_id, &card, &ids);
@@ -540,16 +550,18 @@ pub async fn create_board(
             actual: existing.rev,
         }));
     }
-    let provenance = board_rows::write_provenance(board, None, source);
     let mut board = board.clone();
+    let withdrawals = record_board_withdrawals(&gcx, task_id, &existing, &mut board);
+    let provenance = board_rows::write_provenance(&board, None, source);
     commit_board(
         &gcx,
         guard,
         &task_dir,
         task_id,
         &existing,
-        &mut board,
+        &board,
         &provenance,
+        withdrawals,
     )
     .await?;
     Ok(())
@@ -589,16 +601,18 @@ pub async fn save_board_checked(
             actual: existing.rev,
         }));
     }
-    let provenance = board_rows::write_provenance(board, Some((&existing, &previous)), source);
     let mut board = board.clone();
+    let withdrawals = record_board_withdrawals(&gcx, task_id, &existing, &mut board);
+    let provenance = board_rows::write_provenance(&board, Some((&existing, &previous)), source);
     commit_board(
         &gcx,
         guard,
         &task_dir,
         task_id,
         &existing,
-        &mut board,
+        &board,
         &provenance,
+        withdrawals,
     )
     .await?;
     Ok(())
@@ -781,6 +795,7 @@ where
         })
         .collect::<Vec<_>>();
     board.rev += 1;
+    let withdrawals = record_board_withdrawals(&gcx, task_id, &existing, &mut board);
     let provenance = board_rows::write_provenance(&board, Some((&existing, &previous)), source);
     commit_board(
         &gcx,
@@ -788,8 +803,9 @@ where
         &task_dir,
         task_id,
         &existing,
-        &mut board,
+        &board,
         &provenance,
+        withdrawals,
     )
     .await?;
     if !new_failed.is_empty() {

@@ -23,3 +23,5 @@ mod spawn_gate_tests;
 
 #[cfg(test)]
 mod assignment_typed_tests;
+#[cfg(test)]
+mod withdrawal_provenance_tests;

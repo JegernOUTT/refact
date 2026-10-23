@@ -23,16 +23,16 @@ use crate::tools::tool_agent_planner_qna::{
 use crate::tools::tool_task_agent_finish::ToolTaskAgentFinish;
 use crate::tools::tools_description::Tool;
 
-struct Fixture {
+pub(crate) struct Fixture {
     _temp: tempfile::TempDir,
-    app: AppState,
-    task_id: String,
-    agent_id: String,
+    pub(crate) app: AppState,
+    pub(crate) task_id: String,
+    pub(crate) agent_id: String,
     agent: Arc<Mutex<ChatSession>>,
     planner: Arc<Mutex<ChatSession>>,
 }
 
-async fn fixture() -> Fixture {
+pub(crate) async fn fixture() -> Fixture {
     let (_temp, app, task_id, agent_id, agent, planner) = setup_monitor_case(
         "doing",
         SessionState::ExecutingTools,
@@ -87,7 +87,7 @@ fn text(result: (bool, Vec<ContextEnum>)) -> String {
     }
 }
 
-async fn ask(f: &Fixture) -> String {
+pub(crate) async fn ask(f: &Fixture) -> String {
     ToolAgentAskPlanner::new()
         .tool_execute(
             context(f, false).await,
