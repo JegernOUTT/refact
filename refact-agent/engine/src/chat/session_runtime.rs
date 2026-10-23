@@ -297,6 +297,29 @@ pub async fn get_or_create_session_with_trajectory(
         }
     }
 
+    if let Some(meta) = session
+        .thread
+        .task_meta
+        .clone()
+        .filter(|meta| meta.role == "agents")
+    {
+        if let Some(card_id) = meta.card_id.as_deref() {
+            match crate::tasks::storage::load_board(gcx.clone(), &meta.task_id).await {
+                Ok(board) => {
+                    if let Some(card) = board
+                        .get_card(card_id)
+                        .filter(|card| card.column == "doing")
+                    {
+                        if let Some(since) = card.paused_at.clone() {
+                            session.set_planner_pause(since, card.paused_by.clone());
+                            session.planner_pause_at_boundary();
+                        }
+                    }
+                }
+                Err(error) => warn!("Failed to restore planner pause for {chat_id}: {error}"),
+            }
+        }
+    }
     session.trajectory_events_tx = Some(trajectory_events_tx.clone());
 
     let (session_arc, inserted) = {

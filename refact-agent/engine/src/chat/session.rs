@@ -673,6 +673,8 @@ impl ChatSession {
             },
             messages: Vec::new(),
             runtime: RuntimeState::default(),
+            planner_pause: None,
+            planner_pause_pending_tools: false,
             goal: None,
             goal_active: false,
             goal_status: None,
@@ -814,6 +816,8 @@ impl ChatSession {
             thread,
             messages,
             runtime,
+            planner_pause: None,
+            planner_pause_pending_tools: false,
             goal,
             goal_active,
             goal_status,
@@ -2390,6 +2394,9 @@ impl ChatSession {
     }
 
     fn delivery_envelope_boundary_open(&self, delivery: &PendingDelivery) -> bool {
+        if self.planner_paused() || self.planner_pause_pending_tools {
+            return false;
+        }
         let kinds: HashSet<_> = delivery
             .messages
             .iter()
@@ -3248,6 +3255,34 @@ impl ChatSession {
         self.add_message(report_message);
     }
 
+    pub(crate) fn set_planner_pause(&mut self, since: String, by: Option<String>) {
+        self.planner_pause = Some(PlannerPause { since, by });
+        self.queue_notify.notify_one();
+    }
+
+    pub(crate) fn clear_planner_pause(&mut self) -> bool {
+        let cleared = self.planner_pause.take().is_some();
+        if cleared {
+            self.queue_notify.notify_one();
+        }
+        cleared
+    }
+
+    pub(crate) fn planner_paused(&self) -> bool {
+        self.planner_pause.is_some()
+    }
+
+    pub(crate) fn planner_pause_at_boundary(&mut self) -> bool {
+        if !self.planner_paused() {
+            return false;
+        }
+        self.planner_pause_pending_tools |= self.has_pending_tool_result_window();
+        if self.runtime.pause_reasons.is_empty() {
+            self.set_runtime_state(SessionState::Idle, None);
+        }
+        true
+    }
+
     pub fn set_runtime_state(&mut self, state: SessionState, error: Option<String>) {
         let old_state = self.runtime.state;
         let old_error = self.runtime.error.clone();
@@ -3590,6 +3625,9 @@ impl ChatSession {
     }
 
     pub fn start_stream(&mut self) -> Option<(String, Arc<AtomicBool>)> {
+        if self.planner_pause_at_boundary() {
+            return None;
+        }
         if crate::chat::context_rebuild::compression_attempt_active(self)
             || self.pending_context_rebuild.is_some()
             || self.pending_mode_handoff.is_some()
@@ -3892,6 +3930,7 @@ impl ChatSession {
     }
 
     pub(crate) fn apply_priority_abort(&mut self) {
+        self.planner_pause_pending_tools = false;
         self.suppress_delivery_wakes();
         self.abort_stream();
         self.clear_pending_tool_calls_for_interruption();

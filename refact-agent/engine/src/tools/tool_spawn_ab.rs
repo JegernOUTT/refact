@@ -1282,6 +1282,8 @@ pub(crate) mod tests {
             created_at: Utc::now().to_rfc3339(),
             started_at: None,
             last_heartbeat_at: None,
+            paused_at: None,
+            paused_by: None,
             completed_at: None,
             agent_branch: None,
             agent_worktree: None,

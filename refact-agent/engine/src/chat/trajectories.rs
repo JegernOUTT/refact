@@ -20013,6 +20013,8 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let session = ChatSession {
+            planner_pause: None,
+            planner_pause_pending_tools: false,
             pending_questions: Vec::new(),
             chat_id: "test-123".to_string(),
             work_provenance: Default::default(),
@@ -20178,6 +20180,8 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let mut session = ChatSession {
+            planner_pause: None,
+            planner_pause_pending_tools: false,
             pending_questions: Vec::new(),
             chat_id: "skill-test".to_string(),
             work_provenance: Default::default(),
@@ -24444,6 +24448,8 @@ mod tests {
                 created_at: "2024-01-01T00:00:00Z".to_string(),
                 started_at: None,
                 last_heartbeat_at: None,
+                paused_at: None,
+                paused_by: None,
                 completed_at: None,
                 agent_branch: Some("refact/task/card".to_string()),
                 agent_worktree: Some(agent_worktree.to_string_lossy().to_string()),
@@ -24589,6 +24595,8 @@ mod tests {
                 created_at: "2024-01-01T00:00:00Z".to_string(),
                 started_at: None,
                 last_heartbeat_at: None,
+                paused_at: None,
+                paused_by: None,
                 completed_at: None,
                 agent_branch: Some("refact/task/card-mismatch".to_string()),
                 agent_worktree: Some(agent_worktree.to_string_lossy().to_string()),

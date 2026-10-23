@@ -262,6 +262,7 @@ async fn record_agent_attention(
                 return Err(format!("Card {} not found", card_id_owned));
             };
             if card.column != "doing"
+                || card.paused_at.is_some()
                 || expected_agent_id_owned
                     .as_ref()
                     .is_some_and(|expected| card.assignee.as_ref() != Some(expected))
@@ -385,6 +386,7 @@ pub(super) async fn clear_agent_attention(
     storage::update_board_atomic(app.gcx.clone(), task_id, move |board| {
         if let Some(card) = board.get_card_mut(&card_id) {
             if card.column == "doing"
+                && card.paused_at.is_none()
                 && expected_agent_id
                     .as_ref()
                     .is_none_or(|expected| card.assignee.as_ref() == Some(expected))
@@ -491,7 +493,7 @@ fn agent_session_idle_stall_ready(
     card: &BoardCard,
     has_open_question: bool,
 ) -> bool {
-    if card.column != "doing" || card.agent_chat_id.is_none() {
+    if card.column != "doing" || card.paused_at.is_some() || card.agent_chat_id.is_none() {
         return false;
     }
     if has_open_question {
@@ -727,6 +729,7 @@ async fn record_stall_planner_notification(
             .get_card_mut(&card_id_owned)
             .ok_or_else(|| format!("Card {} not found", card_id_owned))?;
         if card.column != "doing"
+            || card.paused_at.is_some()
             || card.agent_chat_id.as_deref() != Some(agent_chat_id_owned.as_str())
             || card.assignee.is_none()
             || !stall_planner_notify_allowed(card, now)
@@ -1074,7 +1077,7 @@ async fn mark_agent_as_failed(
                 return Ok((card_title, false, false));
             }
 
-            if card.column != "doing" {
+            if card.column != "doing" || card.paused_at.is_some() {
                 let card_title = card.title.clone();
                 return Ok((card_title, false, false));
             }
@@ -1975,7 +1978,7 @@ async fn sweep_planner_wake_ups(app: AppState) -> Result<(), String> {
 }
 
 /// Check all active tasks for stuck agents
-pub(super) async fn check_for_stuck_agents(app: AppState) -> Result<(), String> {
+pub(crate) async fn check_for_stuck_agents(app: AppState) -> Result<(), String> {
     let task_metas = storage::list_tasks(app.gcx.clone()).await?;
 
     for task_meta in task_metas {
@@ -1988,7 +1991,7 @@ pub(super) async fn check_for_stuck_agents(app: AppState) -> Result<(), String> 
         let sessions = app.chat.sessions.clone();
 
         for card in &board.cards {
-            if card.column != "doing" || card.assignee.is_none() {
+            if card.column != "doing" || card.paused_at.is_some() || card.assignee.is_none() {
                 continue;
             }
             if card.ab_variants.is_some() && card.agent_chat_id.is_none() {
@@ -2246,6 +2249,8 @@ pub(crate) mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             started_at: Some(chrono::Utc::now().to_rfc3339()),
             last_heartbeat_at: None,
+            paused_at: None,
+            paused_by: None,
             completed_at: None,
             agent_branch: None,
             agent_worktree: None,

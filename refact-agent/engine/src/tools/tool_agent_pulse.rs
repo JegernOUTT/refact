@@ -701,6 +701,8 @@ mod tests {
             created_at: created_at.clone(),
             started_at: Some(created_at),
             last_heartbeat_at: Some(heartbeat_at),
+            paused_at: None,
+            paused_by: None,
             completed_at: None,
             agent_branch: None,
             agent_worktree: None,

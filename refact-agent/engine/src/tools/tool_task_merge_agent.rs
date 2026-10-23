@@ -2307,6 +2307,8 @@ mod worktree_merge_tool_tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             started_at: None,
             last_heartbeat_at: None,
+            paused_at: None,
+            paused_by: None,
             completed_at: Some(chrono::Utc::now().to_rfc3339()),
             agent_branch: Some(branch.to_string()),
             agent_worktree: Some(root.to_string_lossy().to_string()),

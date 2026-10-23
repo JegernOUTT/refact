@@ -712,6 +712,14 @@ where
     }
     let result = updater(&mut board)?;
     for card in &mut board.cards {
+        if card.column != "doing"
+            || existing.get_card(&card.id).is_some_and(|old| {
+                card.agent_chat_id.is_some() && card.agent_chat_id != old.agent_chat_id
+            })
+        {
+            card.paused_at = None;
+            card.paused_by = None;
+        }
         if card.column != "doing" {
             card.attention = None;
         }
@@ -1551,6 +1559,8 @@ mod tests {
                     created_at: now.clone(),
                     started_at: None,
                     last_heartbeat_at: None,
+                    paused_at: None,
+                    paused_by: None,
                     completed_at: None,
                     agent_branch: None,
                     agent_worktree: None,
@@ -1720,6 +1730,8 @@ mod tests {
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 started_at: None,
                 last_heartbeat_at: None,
+                paused_at: None,
+                paused_by: None,
                 completed_at: None,
                 agent_branch: None,
                 agent_worktree: None,
@@ -1870,6 +1882,8 @@ mod tests {
                         created_at: "2026-01-01T00:00:00Z".to_string(),
                         started_at: None,
                         last_heartbeat_at: None,
+                        paused_at: None,
+                        paused_by: None,
                         completed_at: None,
                         agent_branch: None,
                         agent_worktree: None,
@@ -2068,6 +2082,8 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             started_at: None,
             last_heartbeat_at: None,
+            paused_at: None,
+            paused_by: None,
             completed_at: None,
             agent_branch: None,
             agent_worktree: None,

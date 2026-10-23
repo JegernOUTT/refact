@@ -1726,6 +1726,9 @@ async fn start_generation_iteration(
     if crate::agents::seal::is_sealed(app, &chat_id).await {
         return GenerationAttemptStart::Stop;
     }
+    if session_arc.lock().await.planner_pause_at_boundary() {
+        return GenerationAttemptStart::Stop;
+    }
     match crate::chat::context_rebuild::drain_pending(gcx.clone(), session_arc).await {
         Ok(true) => return GenerationAttemptStart::Stop,
         Err(error) => {
@@ -2414,6 +2417,32 @@ pub fn start_generation(
         let mut network_retry_attempt = 0usize;
         let mut turn_guard = TurnDepthGuard::enter(app.clone(), session_arc.clone()).await;
         loop {
+            let resume_tools = {
+                let mut session = session_arc.lock().await;
+                if session.planner_paused() {
+                    false
+                } else {
+                    std::mem::take(&mut session.planner_pause_pending_tools)
+                }
+            };
+            if resume_tools {
+                let chat_id = session_arc.lock().await.chat_id.clone();
+                if crate::agents::seal::is_sealed(&app, &chat_id).await {
+                    break;
+                }
+                let thread = session_arc.lock().await.thread.clone();
+                match process_tool_calls_once(
+                    app.clone(),
+                    session_arc.clone(),
+                    &thread.mode,
+                    Some(&thread.model),
+                )
+                .await
+                {
+                    ToolStepOutcome::Stop | ToolStepOutcome::Paused => break,
+                    ToolStepOutcome::Continue | ToolStepOutcome::NoToolCalls => {}
+                }
+            }
             let (context, generation_result) =
                 match start_generation_iteration(&app, &session_arc, &gcx).await {
                     GenerationAttemptStart::Continue => continue,

@@ -2369,6 +2369,9 @@ pub async fn process_tool_calls_once(
     mode_id: &str,
     model_id: Option<&str>,
 ) -> ToolStepOutcome {
+    if session_arc.lock().await.planner_pause_at_boundary() {
+        return ToolStepOutcome::Stop;
+    }
     let session_extraction_span =
         perf_diagnostics::span(PerfComponent::ToolSessionExtraction, None, None);
     let (

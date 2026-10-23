@@ -285,12 +285,20 @@ impl TrajectoryCommitIntent {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PlannerPause {
+    pub since: String,
+    pub by: Option<String>,
+}
+
 pub struct ChatSession {
     pub chat_id: String,
     pub derived_privacy_zones: crate::privacy::records::DerivedPrivacyZones,
     pub thread: ThreadParams,
     pub messages: Vec<ChatMessage>,
     pub runtime: RuntimeState,
+    pub(crate) planner_pause: Option<PlannerPause>,
+    pub(crate) planner_pause_pending_tools: bool,
     pub goal: Option<GoalSnapshot>,
     pub goal_active: bool,
     pub goal_status: Option<GoalStatus>,

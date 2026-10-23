@@ -212,6 +212,8 @@ fn card(worktree: &Path, base_branch: &str) -> BoardCard {
         created_at: chrono::Utc::now().to_rfc3339(),
         started_at: None,
         last_heartbeat_at: None,
+        paused_at: None,
+        paused_by: None,
         completed_at: Some(chrono::Utc::now().to_rfc3339()),
         agent_branch: None,
         agent_worktree: Some(worktree.to_string_lossy().to_string()),

@@ -1167,6 +1167,8 @@ mod tests {
             created_at: Utc::now().to_rfc3339(),
             started_at: Some(Utc::now().to_rfc3339()),
             last_heartbeat_at: None,
+            paused_at: None,
+            paused_by: None,
             completed_at: None,
             agent_branch: Some("legacy-branch".to_string()),
             agent_worktree: worktree,

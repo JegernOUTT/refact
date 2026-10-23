@@ -11,6 +11,8 @@ pub mod types;
 pub mod waves;
 
 #[cfg(test)]
+mod board_pause_tests;
+#[cfg(test)]
 mod card_seal_tests;
 #[cfg(test)]
 mod dependency_gate_ab_restart_tests;

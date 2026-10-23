@@ -606,6 +606,8 @@ mod tests {
             created_at: "2026-05-22T00:00:00Z".to_string(),
             started_at: None,
             last_heartbeat_at: None,
+            paused_at: None,
+            paused_by: None,
             completed_at: None,
             agent_branch: None,
             agent_worktree: None,

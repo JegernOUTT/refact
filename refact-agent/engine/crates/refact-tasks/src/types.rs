@@ -1037,6 +1037,10 @@ pub struct BoardCard {
     pub started_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_heartbeat_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_by: Option<String>,
     pub completed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_branch: Option<String>,
@@ -1828,6 +1832,8 @@ mod tests {
             created_at: "2026-05-16T00:00:00Z".into(),
             started_at: None,
             last_heartbeat_at: None,
+            paused_at: None,
+            paused_by: None,
             completed_at: None,
             agent_branch: None,
             agent_worktree: None,

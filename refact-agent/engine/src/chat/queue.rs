@@ -1462,6 +1462,19 @@ async fn select_next_command(session_arc: &Arc<AMutex<ChatSession>>) -> Option<S
             .empty_locks
             .fetch_add(1, Ordering::Relaxed);
         (None, Some(waiter))
+    } else if session.planner_paused() {
+        let command = session
+            .command_queue
+            .iter()
+            .position(|request| matches!(request.command, ChatCommand::Abort {}))
+            .and_then(|index| session.command_queue.remove(index));
+        if let Some(request) = command.as_ref() {
+            session.record_command_queue_wait(&request.client_request_id);
+            session.emit_queue_update();
+            (command, None)
+        } else {
+            (None, Some(waiter))
+        }
     } else if state == SessionState::WaitingIde {
         if let Some(idx) = find_allowed_command_while_waiting_ide(&session.command_queue) {
             let cmd = session.command_queue.remove(idx);

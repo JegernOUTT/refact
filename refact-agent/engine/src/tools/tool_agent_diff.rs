@@ -1165,6 +1165,8 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             started_at: None,
             last_heartbeat_at: None,
+            paused_at: None,
+            paused_by: None,
             completed_at: Some(chrono::Utc::now().to_rfc3339()),
             agent_branch: branch,
             agent_worktree: worktree,
