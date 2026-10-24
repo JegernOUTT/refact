@@ -184,6 +184,8 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("delivery_max_ttl_secs", 1, 2_592_000),
     coordination_integer("delivery_max_pending", 1, 1_000_000),
     coordination_integer("delivery_status_retention", 1, 4_000_000),
+    coordination_integer("agent_followup_max_count", 1, 100_000),
+    coordination_integer("agent_followup_max_bytes", 1, 64 * 1024 * 1024),
     coordination_integer("agent_message_max_chars", 1, 4_000_000),
     coordination_integer("peer_grant_default_ttl_secs", 1, 2_592_000),
     coordination_integer("peer_grant_max_ttl_secs", 1, 2_592_000),

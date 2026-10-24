@@ -31,6 +31,13 @@ pub struct InboxMessage {
     pub queued_at: DateTime<Utc>,
 }
 
+#[derive(Debug)]
+pub struct AgentMessageReceipt {
+    pub outcome: DeliveryOutcome,
+    pub finished_status: Option<BgAgentStatus>,
+    pub dropped_followups: Vec<String>,
+}
+
 type NativeNoteAuthorizer = Arc<dyn Fn(&str, &str) -> Result<String, String> + Send + Sync>;
 
 /// A queued native steering note. It carries no text of its own: the text is
@@ -278,9 +285,9 @@ impl BackgroundAgentRegistry {
             .values_mut()
             .filter(|record| record.status.is_terminal())
         {
-            let previous = record.questions.clone();
-            withdraw_record_questions(&questions, record, now);
-            if previous != record.questions {
+            let previous = record.clone();
+            settle_terminal_record(&questions, record, now);
+            if previous != *record {
                 storage::save_record(&storage_root, record).await?;
             }
         }
@@ -356,6 +363,7 @@ impl BackgroundAgentRegistry {
             completion_pushed_at: None,
             completion_push: PushMode::Append,
             pending_deliveries: Vec::new(),
+            followups: Vec::new(),
             delivery_ids: Vec::new(),
             dropped_deliveries: Vec::new(),
             deferred_at: None,
@@ -650,6 +658,9 @@ impl BackgroundAgentRegistry {
             updated.result_payload_path = None;
             updated.current_tool = None;
             updated.merge_status = None;
+            let mut followups = std::mem::take(&mut updated.followups);
+            followups.append(&mut updated.pending_deliveries);
+            updated.pending_deliveries = followups;
             touch_record(&mut updated, Utc::now());
             let pause = Arc::new(PauseGate::default());
             pause.set_parent_requested(updated.paused_by.is_some());
@@ -923,7 +934,7 @@ impl BackgroundAgentRegistry {
             }
             updated.error = None;
             updated.finished_at = Some(now);
-            self.withdraw_questions(&mut updated, now);
+            self.settle_terminal(&mut updated, now);
             touch_record(&mut updated, now);
             records.insert(agent_id.to_string(), updated.clone());
             let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
@@ -972,7 +983,7 @@ impl BackgroundAgentRegistry {
             updated.current_tool = None;
             updated.result_payload_path = Some(result_payload_path);
             updated.finished_at = Some(now);
-            self.withdraw_questions(&mut updated, now);
+            self.settle_terminal(&mut updated, now);
             touch_record(&mut updated, now);
             records.insert(agent_id.to_string(), updated.clone());
             let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
@@ -1014,7 +1025,7 @@ impl BackgroundAgentRegistry {
             updated.current_tool = None;
             updated.result_payload_path = Some(result_payload_path);
             updated.finished_at = Some(now);
-            self.withdraw_questions(&mut updated, now);
+            self.settle_terminal(&mut updated, now);
             touch_record(&mut updated, now);
             records.insert(agent_id.to_string(), updated.clone());
             let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
@@ -1049,7 +1060,7 @@ impl BackgroundAgentRegistry {
             updated.error = Some(reason);
             updated.current_tool = None;
             updated.finished_at = Some(now);
-            self.withdraw_questions(&mut updated, now);
+            self.settle_terminal(&mut updated, now);
             touch_record(&mut updated, now);
             records.insert(agent_id.to_string(), updated.clone());
             let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
@@ -1101,7 +1112,7 @@ impl BackgroundAgentRegistry {
             updated.close_reason = reason;
             updated.current_tool = None;
             updated.finished_at = Some(now);
-            self.withdraw_questions(&mut updated, now);
+            self.settle_terminal(&mut updated, now);
             touch_record(&mut updated, now);
             records.insert(agent_id.to_string(), updated.clone());
             let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
@@ -1573,26 +1584,50 @@ impl BackgroundAgentRegistry {
     pub async fn enqueue_delivery(
         &self,
         agent_id: &str,
-        mut delivery: PendingDelivery,
+        delivery: PendingDelivery,
     ) -> Result<DeliveryOutcome, String> {
-        let runtime = self
-            .runtime
-            .read()
+        self.enqueue_delivery_inner(agent_id, delivery, false)
             .await
-            .get(agent_id)
-            .cloned()
-            .ok_or_else(|| "agent is not running in this process".to_string())?;
-        let state = runtime.delivery_state.lock().await;
-        if state.sealed {
-            return Err("agent delivery turn already finished".to_string());
-        }
-        let mut outcome = DeliveryOutcome::Queued;
+            .map(|receipt| receipt.outcome)
+    }
+
+    pub async fn enqueue_agent_message(
+        &self,
+        agent_id: &str,
+        delivery: PendingDelivery,
+    ) -> Result<AgentMessageReceipt, String> {
+        self.enqueue_delivery_inner(agent_id, delivery, true).await
+    }
+
+    async fn enqueue_delivery_inner(
+        &self,
+        agent_id: &str,
+        mut delivery: PendingDelivery,
+        allow_followup: bool,
+    ) -> Result<AgentMessageReceipt, String> {
+        let runtime = self.runtime.read().await.get(agent_id).cloned();
+        let state = match &runtime {
+            Some(runtime) => Some(runtime.delivery_state.lock().await),
+            None => None,
+        };
+        let mut receipt = AgentMessageReceipt {
+            outcome: DeliveryOutcome::Queued,
+            finished_status: None,
+            dropped_followups: Vec::new(),
+        };
         let preempt = delivery.push == PushMode::Preempt;
-        let claimed = state.claimed.clone();
+        let claimed = state
+            .as_ref()
+            .map(|state| state.claimed.clone())
+            .unwrap_or_default();
         let settings = refact_work_core::coordination_settings();
         delivery.ensure_ttl_secs(now_ms(), settings.delivery_default_ttl_secs);
         self.update_record(agent_id, |record, now| {
             if record.delivery_ids.contains(&delivery.id)
+                || record
+                    .followups
+                    .iter()
+                    .any(|pending| pending.id == delivery.id)
                 || record
                     .dropped_deliveries
                     .iter()
@@ -1602,15 +1637,33 @@ impl BackgroundAgentRegistry {
                     .iter()
                     .any(|pending| pending.id == delivery.id)
             {
-                outcome = DeliveryOutcome::Duplicate;
+                receipt.outcome = DeliveryOutcome::Duplicate;
                 return Ok(());
             }
-            if record.status.is_terminal() {
+            let terminal = record.status.is_terminal();
+            if terminal && !allow_followup {
                 return Err("agent already finished".to_string());
+            }
+            if !terminal {
+                let state = state
+                    .as_ref()
+                    .ok_or("agent is not running in this process")?;
+                if state.sealed {
+                    return Err("agent delivery turn already finished".to_string());
+                }
             }
             if delivery.is_expired_at(now.timestamp_millis().max(0) as u64) {
                 record_dropped_delivery(record, delivery.id.clone(), DeliveryStatus::Expired);
-                outcome = DeliveryOutcome::Expired;
+                receipt.outcome = DeliveryOutcome::Expired;
+                return Ok(());
+            }
+            if terminal {
+                if followup_bytes(&delivery) > settings.agent_followup_max_bytes {
+                    return Err("message exceeds the configured follow-up byte limit".into());
+                }
+                record.followups.push(delivery);
+                receipt.dropped_followups = trim_followups(record);
+                receipt.finished_status = Some(record.status);
                 return Ok(());
             }
             if delivery.supersede_key.is_some() {
@@ -1636,10 +1689,15 @@ impl BackgroundAgentRegistry {
             Ok(())
         })
         .await?;
-        if preempt && outcome == DeliveryOutcome::Queued {
-            runtime.interrupt_notify.notify_one();
+        if preempt
+            && receipt.outcome == DeliveryOutcome::Queued
+            && receipt.finished_status.is_none()
+        {
+            if let Some(runtime) = &runtime {
+                runtime.interrupt_notify.notify_one();
+            }
         }
-        Ok(outcome)
+        Ok(receipt)
     }
 
     pub async fn update_pending_delivery(
@@ -1688,6 +1746,7 @@ impl BackgroundAgentRegistry {
             record
                 .pending_deliveries
                 .retain(|delivery| delivery.id != id);
+            record.followups.retain(|delivery| delivery.id != id);
             if !record.delivery_ids.iter().any(|delivered| delivered == id) {
                 record.delivery_ids.push(id.to_string());
             }
@@ -1708,6 +1767,7 @@ impl BackgroundAgentRegistry {
             let was_pending = record
                 .pending_deliveries
                 .iter()
+                .chain(&record.followups)
                 .any(|delivery| delivery.id == id);
             let was_delivered = record.delivery_ids.iter().any(|delivered| delivered == id);
             if !was_pending && !was_delivered {
@@ -1716,6 +1776,7 @@ impl BackgroundAgentRegistry {
             record
                 .pending_deliveries
                 .retain(|delivery| delivery.id != id);
+            record.followups.retain(|delivery| delivery.id != id);
             record.delivery_ids.retain(|delivered| delivered != id);
             record_dropped_delivery(record, id.to_string(), DeliveryStatus::Consumed);
             Ok(())
@@ -1734,6 +1795,7 @@ impl BackgroundAgentRegistry {
         if record
             .pending_deliveries
             .iter()
+            .chain(&record.followups)
             .any(|pending| pending.id == id)
         {
             return DeliveryStatus::Pending;
@@ -1775,6 +1837,9 @@ impl BackgroundAgentRegistry {
         let record = records
             .get(agent_id)
             .ok_or_else(|| "agent not found".to_string())?;
+        if record.status.is_terminal() {
+            return Err("agent already finished".into());
+        }
         let deliveries = record
             .pending_deliveries
             .iter()
@@ -1810,6 +1875,7 @@ impl BackgroundAgentRegistry {
             record
                 .pending_deliveries
                 .retain(|delivery| delivery.id != id);
+            record.followups.retain(|delivery| delivery.id != id);
             record.delivery_ids.retain(|delivered| delivered != id);
             record_dropped_delivery(record, id.to_string(), status);
             Ok(())
@@ -2186,8 +2252,8 @@ impl BackgroundAgentRegistry {
         }
     }
 
-    fn withdraw_questions(&self, record: &mut BackgroundAgent, now: DateTime<Utc>) {
-        withdraw_record_questions(&self.questions, record, now);
+    fn settle_terminal(&self, record: &mut BackgroundAgent, now: DateTime<Utc>) {
+        settle_terminal_record(&self.questions, record, now);
     }
 
     #[doc(hidden)]
@@ -2262,6 +2328,7 @@ fn normalize_delivery_state(records: &mut HashMap<String, BackgroundAgent>) {
     let settings = refact_work_core::coordination_settings();
     let now_ms = now_ms();
     for record in records.values_mut() {
+        trim_followups(record);
         let mut superseded = Vec::new();
         let mut expired = Vec::new();
         let mut newest_by_key: HashMap<String, String> = HashMap::new();
@@ -2303,11 +2370,35 @@ fn normalize_delivery_state(records: &mut HashMap<String, BackgroundAgent>) {
     }
 }
 
-fn withdraw_record_questions(
+fn settle_terminal_record(
     questions: &QuestionRegistry,
     record: &mut BackgroundAgent,
     now: DateTime<Utc>,
 ) {
+    let now_ms = now.timestamp_millis().max(0) as u64;
+    let pending = std::mem::take(&mut record.pending_deliveries);
+    for delivery in pending {
+        if delivery.is_expired_at(now_ms) {
+            record_dropped_delivery(record, delivery.id, DeliveryStatus::Expired);
+        } else if record.delivery_ids.contains(&delivery.id)
+            || record
+                .dropped_deliveries
+                .iter()
+                .any(|dropped| dropped.id == delivery.id)
+            || record
+                .followups
+                .iter()
+                .any(|followup| followup.id == delivery.id)
+        {
+            continue;
+        } else {
+            record.followups.push(delivery);
+        }
+    }
+    let dropped = trim_followups(record);
+    if !dropped.is_empty() {
+        tracing::warn!(agent_id = %record.agent_id, ?dropped, "Oldest agent follow-ups dropped at capacity");
+    }
     for pending in questions.pending_for_asker(&record.agent_id, now) {
         if pending.kind == QuestionKind::AgentParent
             && !record
@@ -2331,6 +2422,27 @@ fn withdraw_record_questions(
             }
         }
     }
+}
+
+fn followup_bytes(delivery: &PendingDelivery) -> usize {
+    serde_json::to_vec(delivery).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+fn trim_followups(record: &mut BackgroundAgent) -> Vec<String> {
+    let settings = refact_work_core::coordination_settings();
+    let mut bytes = record.followups.iter().fold(0usize, |total, delivery| {
+        total.saturating_add(followup_bytes(delivery))
+    });
+    let mut dropped = Vec::new();
+    while record.followups.len() > settings.agent_followup_max_count
+        || bytes > settings.agent_followup_max_bytes
+    {
+        let delivery = record.followups.remove(0);
+        bytes = bytes.saturating_sub(followup_bytes(&delivery));
+        dropped.push(delivery.id.clone());
+        record_dropped_delivery(record, delivery.id, DeliveryStatus::Failed);
+    }
+    dropped
 }
 
 fn record_previous_run(updated: &mut BackgroundAgent, previous: &BackgroundAgent) {
@@ -2906,6 +3018,185 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_effects_preserve_only_eligible_followups_for_every_status() {
+        let (temp, registry) = registry().await;
+        for status in [
+            BgAgentStatus::Completed,
+            BgAgentStatus::Failed,
+            BgAgentStatus::Cancelled,
+            BgAgentStatus::Interrupted,
+            BgAgentStatus::Closed,
+        ] {
+            let (record, _, _) = registry.create(request("parent")).await.unwrap();
+            let mut old = delivery(PushMode::Append);
+            old.supersede_key = Some("steer".into());
+            let mut newest = delivery(PushMode::Append);
+            newest.supersede_key = Some("steer".into());
+            newest.expires_at_ms = Some(u64::MAX);
+            let mut expired = delivery(PushMode::WhenIdle);
+            expired.expires_at_ms = Some(u64::MAX);
+            for pending in [old.clone(), newest.clone(), expired.clone()] {
+                registry
+                    .enqueue_delivery(&record.agent_id, pending)
+                    .await
+                    .unwrap();
+            }
+            registry
+                .update_record(&record.agent_id, |record, _| {
+                    record
+                        .pending_deliveries
+                        .iter_mut()
+                        .find(|pending| pending.id == expired.id)
+                        .unwrap()
+                        .expires_at_ms = Some(1);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let terminal = match status {
+                BgAgentStatus::Completed => registry
+                    .mark_completed(&record.agent_id, completion())
+                    .await
+                    .unwrap(),
+                BgAgentStatus::Failed => registry
+                    .mark_failed(&record.agent_id, "failed".into())
+                    .await
+                    .unwrap(),
+                BgAgentStatus::Cancelled => registry
+                    .mark_cancelled(&record.agent_id, None)
+                    .await
+                    .unwrap(),
+                BgAgentStatus::Interrupted => registry
+                    .mark_interrupted(&record.agent_id, "interrupted".into())
+                    .await
+                    .unwrap(),
+                BgAgentStatus::Closed => {
+                    registry
+                        .mark_closed(&record.agent_id, None, None)
+                        .await
+                        .unwrap()
+                        .0
+                }
+                _ => unreachable!(),
+            };
+            assert!(terminal.pending_deliveries.is_empty(), "{status:?}");
+            assert_eq!(terminal.followups, vec![newest.clone()], "{status:?}");
+            assert_eq!(
+                registry
+                    .delivery_status(&record.agent_id, &expired.id)
+                    .await,
+                DeliveryStatus::Expired
+            );
+            assert_eq!(
+                registry.delivery_status(&record.agent_id, &old.id).await,
+                DeliveryStatus::Superseded
+            );
+            let saved = storage::load_all(&temp.path().join("agents"))
+                .await
+                .unwrap();
+            assert_eq!(saved[&record.agent_id].followups, terminal.followups);
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_followups_restore_reopen_atomically_and_return_on_failure() {
+        let (temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+        registry
+            .mark_completed(&record.agent_id, completion())
+            .await
+            .unwrap();
+        let mut pending = delivery(PushMode::WhenIdle);
+        pending.expires_at_ms = Some(u64::MAX);
+        let receipt = registry
+            .enqueue_agent_message(&record.agent_id, pending.clone())
+            .await
+            .unwrap();
+        assert_eq!(receipt.finished_status, Some(BgAgentStatus::Completed));
+        let restored = BackgroundAgentRegistry::new(temp.path().join("agents"))
+            .await
+            .unwrap();
+        let terminal = restored.get_any(&record.agent_id).await.unwrap();
+        assert_eq!(terminal.followups, vec![pending.clone()]);
+        let reopened = restored
+            .reopen(&record.agent_id, "parent", terminal.change_seq, false)
+            .await
+            .unwrap()
+            .0;
+        assert!(reopened.followups.is_empty());
+        assert_eq!(reopened.pending_deliveries, vec![pending.clone()]);
+        let saved = storage::load_all(&temp.path().join("agents"))
+            .await
+            .unwrap();
+        assert!(saved[&record.agent_id].followups.is_empty());
+        assert_eq!(
+            saved[&record.agent_id].pending_deliveries,
+            vec![pending.clone()]
+        );
+        let failed = restored
+            .mark_failed(&record.agent_id, "worktree preparation failed".into())
+            .await
+            .unwrap();
+        assert!(failed.pending_deliveries.is_empty());
+        assert_eq!(failed.followups, vec![pending.clone()]);
+        assert_eq!(
+            restored
+                .enqueue_agent_message(&record.agent_id, pending)
+                .await
+                .unwrap()
+                .outcome,
+            DeliveryOutcome::Duplicate
+        );
+    }
+
+    #[tokio::test]
+    async fn racing_termination_never_strands_an_accepted_agent_message() {
+        let (_temp, registry) = registry().await;
+        for _ in 0..20 {
+            let (record, _, _) = registry.create(request("parent")).await.unwrap();
+            let mut pending = delivery(PushMode::Append);
+            pending.expires_at_ms = Some(u64::MAX);
+            let (receipt, terminal) = tokio::join!(
+                registry.enqueue_agent_message(&record.agent_id, pending.clone()),
+                registry.mark_completed(&record.agent_id, completion()),
+            );
+            assert!(receipt.is_ok(), "{receipt:?}");
+            terminal.unwrap();
+            let after = registry.get_any(&record.agent_id).await.unwrap();
+            assert!(after.pending_deliveries.is_empty());
+            assert_eq!(after.followups, vec![pending]);
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_followup_is_refused_without_dropping_existing_messages() {
+        let (_temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+        registry
+            .mark_completed(&record.agent_id, completion())
+            .await
+            .unwrap();
+        let mut pending = delivery(PushMode::Append);
+        pending.expires_at_ms = Some(u64::MAX);
+        registry
+            .enqueue_agent_message(&record.agent_id, pending.clone())
+            .await
+            .unwrap();
+        let mut oversized = delivery(PushMode::Append);
+        oversized.source =
+            "x".repeat(refact_work_core::coordination_settings().agent_followup_max_bytes);
+        assert!(registry
+            .enqueue_agent_message(&record.agent_id, oversized)
+            .await
+            .unwrap_err()
+            .contains("byte limit"));
+        assert_eq!(
+            registry.get_any(&record.agent_id).await.unwrap().followups,
+            vec![pending]
+        );
+    }
+
+    #[tokio::test]
     async fn runner_deliveries_expire_and_supersede_without_reaching_the_agent() {
         let (_temp, registry) = registry().await;
         let (record, _cancel, _) = registry.create(request("parent")).await.unwrap();
@@ -3336,7 +3627,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            restored.pending_deliveries(&record.agent_id).await[0].id,
+            restored.get_any(&record.agent_id).await.unwrap().followups[0].id,
             message.id
         );
         registry
@@ -3601,6 +3892,7 @@ mod tests {
         assert_eq!(legacy.run_generation, 1);
         assert!(legacy.close_reason.is_none());
         assert!(legacy.previous_runs.is_empty());
+        assert!(legacy.followups.is_empty());
 
         let retained = refact_work_core::coordination_settings().agent_closed_retained_max;
         let mut overfull = legacy.clone();

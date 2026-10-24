@@ -28,6 +28,9 @@ mod spawn_lifecycle_tests;
 mod continue_after_merge_tests;
 
 #[cfg(test)]
+mod followup_queue_tests;
+
+#[cfg(test)]
 mod seal_tests;
 
 #[cfg(test)]

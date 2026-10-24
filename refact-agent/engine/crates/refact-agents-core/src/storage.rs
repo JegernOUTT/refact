@@ -848,6 +848,7 @@ mod tests {
             previous_runs: Vec::new(),
             completion_push: Default::default(),
             pending_deliveries: Vec::new(),
+            followups: Vec::new(),
             delivery_ids: Vec::new(),
             dropped_deliveries: Vec::new(),
             model: "model".to_string(),

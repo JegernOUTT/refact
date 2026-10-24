@@ -2119,6 +2119,7 @@ pub(super) async fn resume_agent_inner(
             return Err(error);
         }
     }
+    let continuation_start = messages.len();
     let (notice_source, notice_text) = continuation_notice(old.status);
     messages.push(event(
         EventSubkind::SystemNotice,
@@ -2240,6 +2241,17 @@ pub(super) async fn resume_agent_inner(
                         .map_err(|_| "saved child model unavailable")?;
                 let model = crate::caps::resolve_chat_model(caps, &config.model)
                     .map_err(|_| "saved child model unavailable")?;
+                let deliveries = super::delivery::drain_authorized(&app, &agent_id, true).await?;
+                let mut followup_messages = Vec::new();
+                for delivery in &deliveries {
+                    if !messages.iter().any(|message| {
+                        refact_core::chat_types::delivery_id_of_message(message)
+                            == Some(delivery.id.as_str())
+                    }) {
+                        followup_messages.extend(delivery.stamp_messages());
+                    }
+                }
+                messages.splice(continuation_start..continuation_start, followup_messages);
                 super::launch_spec::clear_current_context(&app.gcx, &messages, &model.base)?;
                 let current = crate::chat::trajectories::load_trajectory_for_chat(
                     app.gcx.clone(),
@@ -2289,7 +2301,22 @@ pub(super) async fn resume_agent_inner(
                     live_revision.as_deref(),
                     true,
                 )
-                .await
+                .await?;
+                let session = app
+                    .chat
+                    .sessions
+                    .read()
+                    .await
+                    .get(&child_chat_id)
+                    .cloned()
+                    .ok_or("child session unavailable")?;
+                crate::chat::trajectories::flush_trajectory_for_session(app.clone(), session)
+                    .await?;
+                for delivery in deliveries {
+                    app.agents.consume_delivery(&agent_id, &delivery.id).await?;
+                }
+                super::delivery::publish_runner_queue(&app, &agent_id).await;
+                Ok::<_, String>(())
             }
             .await;
             if let Err(error) = validation {
@@ -3630,6 +3657,7 @@ fn fallback_failed_record(agent_id: String, req: SpawnRequest, error: String) ->
         diff_summary: None,
         conflict_summary: None,
         pending_deliveries: Vec::new(),
+        followups: Vec::new(),
         delivery_ids: Vec::new(),
         dropped_deliveries: Vec::new(),
         completion_push: req.completion_push,

@@ -583,7 +583,7 @@ impl Tool for ToolAgentMessage {
             return Ok(output(tool_call_id, "Note sent to parent.".to_string()));
         }
 
-        let (target, peer_mail) = can_message_agent(
+        let (_target, peer_mail) = can_message_agent(
             &app,
             &chat_id,
             &root_chat_id,
@@ -605,12 +605,6 @@ impl Tool for ToolAgentMessage {
                 .answer_question(&to, &question_id, text.clone())
                 .await?;
             crate::agents::spawn::emit_background_agent_update(app.clone(), &updated).await;
-            if target.status.is_terminal() {
-                return Ok(output(
-                    tool_call_id,
-                    format!("Answer recorded for finished agent {to}."),
-                ));
-            }
         }
         let message_text = reply_to
             .as_deref()
@@ -636,8 +630,24 @@ impl Tool for ToolAgentMessage {
         delivery.peer_mail = peer_mail;
         delivery.set_ttl_secs(ttl_secs);
         let delivery_id = delivery.id.clone();
-        let outcome = crate::agents::delivery::deliver_to_agent(app, &to, delivery).await?;
-        let text = delivery_outcome_text(&to, outcome);
+        let receipt = app.agents.enqueue_agent_message(&to, delivery).await?;
+        crate::agents::delivery::publish_runner_queue(&app, &to).await;
+        let outcome = receipt.outcome;
+        let saved = receipt.finished_status.is_some();
+        let mut text = match receipt.finished_status {
+            Some(status) => format!(
+                "Agent {to} finished (status {}); message saved as a follow-up and will be delivered when you continue it with agent_resume action=continue.",
+                status.as_str(),
+            ),
+            None => delivery_outcome_text(&to, outcome),
+        };
+        if !receipt.dropped_followups.is_empty() {
+            text.push_str(&format!(
+                " Follow-up queue capacity reached: dropped {} oldest follow-up(s): {}.",
+                receipt.dropped_followups.len(),
+                receipt.dropped_followups.join(", "),
+            ));
+        }
         let mut result = output(tool_call_id, text);
         if let Some(ContextEnum::ChatMessage(message)) = result.1.first_mut() {
             message.extra.insert(
@@ -645,8 +655,10 @@ impl Tool for ToolAgentMessage {
                 json!({
                     "kind": "agent_message",
                     "delivery_id": delivery_id,
-                    "outcome": outcome,
-                    "accepted": matches!(
+                    "outcome": if saved { json!("followup_saved") } else { json!(outcome) },
+                    "finished_status": receipt.finished_status.map(|status| status.as_str()),
+                    "dropped_followups": receipt.dropped_followups,
+                    "accepted": saved || matches!(
                         outcome,
                         refact_chat_api::DeliveryOutcome::Queued
                             | refact_chat_api::DeliveryOutcome::Delivered

@@ -167,6 +167,8 @@ pub struct BackgroundAgent {
     pub completion_push: PushMode,
     #[serde(default)]
     pub pending_deliveries: Vec<PendingDelivery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub followups: Vec<PendingDelivery>,
     #[serde(default)]
     pub delivery_ids: Vec<String>,
     /// Deliveries dropped before the runner consumed them (deadline passed or

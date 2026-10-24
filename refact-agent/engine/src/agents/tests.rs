@@ -542,6 +542,7 @@ fn summary_maps_introspection_and_question_state() {
         completion_pushed_at: None,
         completion_push: Default::default(),
         pending_deliveries: Vec::new(),
+        followups: Vec::new(),
         delivery_ids: Vec::new(),
         dropped_deliveries: Vec::new(),
         deferred_at: None,
@@ -2137,7 +2138,7 @@ async fn storage_save_record_preserves_existing_records() {
 }
 
 #[tokio::test]
-async fn runner_pending_recovery_preserves_id_and_never_wakes() {
+async fn runner_pending_recovery_retains_followups_until_explicit_continue() {
     let (_gcx, app, session, _workspace) = app_with_parent_session("runner-recovery").await;
     let record = create_agent(&app.agents, "parent", BgAgentKind::Subagent).await;
     app.agents
@@ -2169,15 +2170,18 @@ async fn runner_pending_recovery_preserves_id_and_never_wakes() {
         crate::agents::delivery::recover_runner_deliveries(&app, "runner-recovery")
             .await
             .unwrap(),
-        1
+        0
     );
     assert!(app
         .agents
         .pending_deliveries(&record.agent_id)
         .await
         .is_empty());
+    let record = app.agents.get_any(&record.agent_id).await.unwrap();
+    assert_eq!(record.followups.len(), 1);
+    assert_eq!(record.followups[0].id, "recover-id");
     let session = session.lock().await;
-    assert!(session.messages.iter().any(
+    assert!(!session.messages.iter().any(
         |message| refact_core::chat_types::delivery_id_of_message(message) == Some("recover-id")
     ));
     assert!(session
