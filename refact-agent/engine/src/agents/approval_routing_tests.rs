@@ -193,6 +193,160 @@ async fn approval_for_parent_without_agent_approval_escalates_to_user_immediatel
     assert!(!fixture.dir.path().join("approval.txt").exists());
 }
 
+async fn assert_stale_user_answer(
+    fixture: &Fixture,
+    parent: &Arc<Mutex<ChatSession>>,
+    pending: &PendingApproval,
+) {
+    let contract = fixture
+        .app
+        .questions()
+        .pending_for_asker(&fixture.agent_id, chrono::Utc::now())
+        .pop()
+        .unwrap();
+    let set = parent.lock().await.pending_questions[0].clone();
+    let response = crate::chat::handle_v1_chat_command(
+        axum::extract::State(fixture.app.clone()),
+        axum::extract::Path("parent".into()),
+        hyper::body::Bytes::from(
+            serde_json::json!({
+                "client_request_id":"stale-user-answer", "type":"answer_questions",
+                "tool_call_id":set.tool_call_id, "asked_at_ms":set.asked_at_ms,
+                "answers":[{"id":pending.id,"answer":"approve"}],
+            })
+            .to_string(),
+        ),
+    )
+    .await
+    .unwrap();
+    let settled = fixture.app.questions().get(&contract.id).unwrap();
+    assert_eq!(
+        settled.state,
+        QuestionState::Withdrawn,
+        "stale child approval must be withdrawn before recording the user answer"
+    );
+    assert_eq!(settled.answer, None);
+    assert_eq!(settled.answered_at, None);
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        body["error"],
+        "approval no longer pending: the child run ended or was replaced; nothing was approved"
+    );
+    assert_eq!(
+        fixture.app.agent_approvals.wait_now(&pending.id, now_ms()),
+        Err(ApprovalError::NotApproved)
+    );
+    assert_eq!(
+        fixture.app.agent_approvals.consume_user_once(
+            "parent",
+            &pending.id,
+            pending.run_generation,
+            &set.tool_call_id,
+            now_ms(),
+        ),
+        Err(ApprovalError::NotApproved)
+    );
+    assert!(fixture.ccx.lock().await.approved_executions.is_empty());
+    assert!(!fixture.dir.path().join("approval.txt").exists());
+    assert_eq!(fixture.app.attention().blocked_runs(&contract.id), 0);
+    assert!(fixture
+        .app
+        .attention()
+        .questions_for_waiter(&fixture.agent_id)
+        .is_empty());
+    let session = parent.lock().await;
+    let set = &session.pending_questions[0];
+    assert_eq!(
+        set.status,
+        crate::chat::types::PendingQuestionStatus::Cancelled
+    );
+    assert!(set.answers.is_empty());
+    assert_eq!(set.resolution_id, None);
+    assert!(session.messages.iter().any(|message| {
+        message.extra.get("event").is_some_and(|event| {
+            event["payload"]["state"] == "withdrawn"
+                && event["payload"]["reason"]
+                    .as_str()
+                    .is_some_and(|reason| !reason.is_empty())
+        })
+    }));
+}
+
+#[tokio::test]
+async fn user_answer_after_child_terminal_is_refused_before_settling() {
+    let fixture = fixture().await;
+    let parent = parent(&fixture, false).await;
+    let call = fixture.call("shell");
+    let mut future = Box::pin(request(&fixture.app, &fixture.ccx, &call, "needs approval"));
+    let pending = ready(&fixture, &mut future, &parent).await;
+    fixture
+        .app
+        .agents
+        .mark_failed(&fixture.agent_id, "child ended".into())
+        .await
+        .unwrap();
+    assert_stale_user_answer(&fixture, &parent, &pending).await;
+    assert!(future.await.is_err());
+    assert!(fixture.ccx.lock().await.approved_executions.is_empty());
+    assert_eq!(
+        fixture.app.agent_approvals.wait_now(&pending.id, now_ms()),
+        Ok(ApprovalDecision::Cancelled)
+    );
+}
+
+#[tokio::test]
+async fn user_answer_after_card_replacement_is_refused() {
+    let fixture = super::tests::board_fixture().await;
+    let parent = parent(&fixture, false).await;
+    let child_id = fixture.ccx.lock().await.chat_id.clone();
+    let call = fixture.call("shell");
+    let mut future = Box::pin(request(&fixture.app, &fixture.ccx, &call, "board approval"));
+    let pending = ready(&fixture, &mut future, &parent).await;
+    crate::tasks::storage::update_board_atomic(fixture.app.gcx.clone(), "approval-task", |board| {
+        board.get_card_mut("card").unwrap().agent_chat_id = Some("replacement".into());
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_stale_user_answer(&fixture, &parent, &pending).await;
+    assert!(future.await.is_err());
+    assert!(fixture.ccx.lock().await.approved_executions.is_empty());
+    crate::tasks::admission::end(&child_id).await;
+}
+
+#[tokio::test]
+async fn user_answer_after_child_generation_changes_is_refused() {
+    let fixture = fixture().await;
+    let parent = parent(&fixture, false).await;
+    let call = fixture.call("shell");
+    let mut future = Box::pin(request(&fixture.app, &fixture.ccx, &call, "needs approval"));
+    let pending = ready(&fixture, &mut future, &parent).await;
+    let terminal = fixture
+        .app
+        .agents
+        .mark_failed(&fixture.agent_id, "old run ended".into())
+        .await
+        .unwrap();
+    fixture
+        .app
+        .agents
+        .reopen(&fixture.agent_id, "parent", terminal.change_seq, false)
+        .await
+        .unwrap();
+    let current = fixture
+        .app
+        .agents
+        .mark_running(&fixture.agent_id, "replacement-child-chat".into())
+        .await
+        .unwrap();
+    assert_ne!(current.run_generation, pending.run_generation);
+    assert_stale_user_answer(&fixture, &parent, &pending).await;
+    assert!(future.await.is_err());
+    assert!(fixture.ccx.lock().await.approved_executions.is_empty());
+}
+
 #[tokio::test]
 async fn approval_for_parent_with_agent_approval_still_goes_to_parent() {
     let fixture = fixture().await;

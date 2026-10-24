@@ -258,6 +258,52 @@ pub(crate) async fn answer_from_user(
         .as_str()
         .filter(|answer| matches!(*answer, "approve" | "reject"))
         .ok_or("user approval requires approve or reject")?;
+    let target =
+        super::super::approval_target::ApprovalTarget::resolve(app, &pending.child_work_id)
+            .await
+            .and_then(|target| target.check(&pending));
+    if let Err(reason) = target {
+        let now = chrono::Utc::now();
+        let refusal =
+            "approval no longer pending: the child run ended or was replaced; nothing was approved";
+        app.questions()
+            .withdraw(&contract.id, &contract.asker, now)
+            .map_err(|error| format!("user approval withdrawal: {error}"))?;
+        let _ = app
+            .attention()
+            .leave(&contract.id, &pending.child_work_id, now);
+        {
+            let mut session = session.lock().await;
+            if let Some(set) = session.pending_questions.iter_mut().find(|set| {
+                set.tool_call_id == tool_call_id
+                    && set.resolution_id.as_deref() == Some(resolution_id)
+            }) {
+                set.status = PendingQuestionStatus::Cancelled;
+                set.answers.clear();
+                set.resolution_id = None;
+                session.increment_version();
+            }
+            session.add_message(crate::chat::internal_roles::event(
+                crate::chat::internal_roles::EventSubkind::SystemNotice,
+                "agents.approval",
+                serde_json::json!({"request_id": id, "state": "withdrawn", "reason": reason}),
+                refusal,
+            ));
+        }
+        if let Err(error) = crate::chat::trajectories::try_save_trajectory_with_intent(
+            app.clone(),
+            session.clone(),
+            crate::chat::types::TrajectoryCommitIntent::Required,
+        )
+        .await
+        {
+            tracing::warn!(%error, request_id = id, "failed to persist stale approval withdrawal");
+        }
+        let mut session = session.lock().await;
+        let snapshot = session.snapshot();
+        session.emit(snapshot);
+        return Err(refusal.into());
+    }
     app.questions()
         .answer(&contract.id, "user", answer.into(), chrono::Utc::now())
         .map_err(|error| format!("user approval answer: {error}"))?;
