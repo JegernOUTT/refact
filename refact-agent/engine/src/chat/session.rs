@@ -674,6 +674,7 @@ impl ChatSession {
             messages: Vec::new(),
             runtime: RuntimeState::default(),
             planner_pause: None,
+            planner_pause_revision: 0,
             planner_pause_pending_tools: false,
             goal: None,
             goal_active: false,
@@ -817,6 +818,7 @@ impl ChatSession {
             messages,
             runtime,
             planner_pause: None,
+            planner_pause_revision: 0,
             planner_pause_pending_tools: false,
             goal,
             goal_active,
@@ -3255,12 +3257,35 @@ impl ChatSession {
         self.add_message(report_message);
     }
 
+    pub(crate) fn update_card_planner_pause(
+        &mut self,
+        task_id: &str,
+        card_id: &str,
+        pause: Option<(String, Option<String>)>,
+    ) -> bool {
+        if !self.thread.task_meta.as_ref().is_some_and(|meta| {
+            meta.task_id == task_id
+                && meta.card_id.as_deref() == Some(card_id)
+                && meta.role == "agents"
+        }) {
+            return false;
+        }
+        if let Some((since, by)) = pause {
+            self.set_planner_pause(since, by);
+        } else {
+            self.clear_planner_pause();
+        }
+        true
+    }
+
     pub(crate) fn set_planner_pause(&mut self, since: String, by: Option<String>) {
+        self.planner_pause_revision += 1;
         self.planner_pause = Some(PlannerPause { since, by });
         self.queue_notify.notify_one();
     }
 
     pub(crate) fn clear_planner_pause(&mut self) -> bool {
+        self.planner_pause_revision += 1;
         let cleared = self.planner_pause.take().is_some();
         if cleared {
             self.queue_notify.notify_one();

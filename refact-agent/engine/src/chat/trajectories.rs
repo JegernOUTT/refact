@@ -20014,6 +20014,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let session = ChatSession {
             planner_pause: None,
+            planner_pause_revision: 0,
             planner_pause_pending_tools: false,
             pending_questions: Vec::new(),
             chat_id: "test-123".to_string(),
@@ -20181,6 +20182,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let mut session = ChatSession {
             planner_pause: None,
+            planner_pause_revision: 0,
             planner_pause_pending_tools: false,
             pending_questions: Vec::new(),
             chat_id: "skill-test".to_string(),

@@ -29,6 +29,8 @@ mod plan_fold_compaction_tests;
 #[cfg(test)]
 mod planner_pause_edge_tests;
 #[cfg(test)]
+mod planner_pause_load_race_tests;
+#[cfg(test)]
 pub(crate) use generation::prepare_project_work_context;
 #[cfg(test)]
 pub(crate) use generation::{

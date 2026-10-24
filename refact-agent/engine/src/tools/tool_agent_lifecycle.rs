@@ -151,19 +151,9 @@ async fn update_live_card_pause(
     let mut updated = Vec::new();
     for session in sessions {
         let mut session = session.lock().await;
-        if !session.thread.task_meta.as_ref().is_some_and(|meta| {
-            meta.task_id == planner.task_id
-                && meta.card_id.as_deref() == Some(card_id)
-                && meta.role == "agents"
-        }) {
-            continue;
+        if session.update_card_planner_pause(&planner.task_id, card_id, pause.clone()) {
+            updated.push(session.chat_id.clone());
         }
-        if let Some((since, by)) = &pause {
-            session.set_planner_pause(since.clone(), by.clone());
-        } else {
-            session.clear_planner_pause();
-        }
-        updated.push(session.chat_id.clone());
     }
     updated
 }

@@ -169,6 +169,51 @@ async fn compact_reconstruction_privacy_on_open(
     }
 }
 
+async fn reconcile_loaded_card_pause(app: &AppState, session_arc: &Arc<AMutex<ChatSession>>) {
+    let (meta, revision) = {
+        let session = session_arc.lock().await;
+        let Some(meta) = session
+            .thread
+            .task_meta
+            .clone()
+            .filter(|meta| meta.role == "agents")
+        else {
+            return;
+        };
+        (meta, session.planner_pause_revision)
+    };
+    let Some(card_id) = meta.card_id.as_deref() else {
+        return;
+    };
+    let board = match crate::tasks::storage::load_board(app.gcx.clone(), &meta.task_id).await {
+        Ok(board) => board,
+        Err(error) => {
+            warn!(
+                "Failed to reconcile planner pause for {} card {card_id}: {error}",
+                meta.task_id
+            );
+            return;
+        }
+    };
+    let pause = board
+        .get_card(card_id)
+        .filter(|card| card.column == "doing")
+        .and_then(|card| {
+            card.paused_at
+                .as_ref()
+                .map(|since| (since.clone(), card.paused_by.clone()))
+        });
+    #[cfg(test)]
+    super::planner_pause_load_race_tests::after_reconcile_board_read().await;
+
+    let mut session = session_arc.lock().await;
+    if session.planner_pause_revision == revision
+        && session.update_card_planner_pause(&meta.task_id, card_id, pause)
+    {
+        session.planner_pause_at_boundary();
+    }
+}
+
 pub async fn get_or_create_session_with_trajectory(
     app: AppState,
     sessions: &SessionsMap,
@@ -306,21 +351,25 @@ pub async fn get_or_create_session_with_trajectory(
         if let Some(card_id) = meta.card_id.as_deref() {
             match crate::tasks::storage::load_board(gcx.clone(), &meta.task_id).await {
                 Ok(board) => {
-                    if let Some(card) = board
+                    let pause = board
                         .get_card(card_id)
                         .filter(|card| card.column == "doing")
-                    {
-                        if let Some(since) = card.paused_at.clone() {
-                            session.set_planner_pause(since, card.paused_by.clone());
-                            session.planner_pause_at_boundary();
-                        }
-                    }
+                        .and_then(|card| {
+                            card.paused_at
+                                .as_ref()
+                                .map(|since| (since.clone(), card.paused_by.clone()))
+                        });
+                    session.update_card_planner_pause(&meta.task_id, card_id, pause);
+                    session.planner_pause_at_boundary();
                 }
                 Err(error) => warn!("Failed to restore planner pause for {chat_id}: {error}"),
             }
         }
     }
     session.trajectory_events_tx = Some(trajectory_events_tx.clone());
+
+    #[cfg(test)]
+    super::planner_pause_load_race_tests::before_session_insert(&session).await;
 
     let (session_arc, inserted) = {
         let mut sessions_write = sessions.write().await;
@@ -333,6 +382,10 @@ pub async fn get_or_create_session_with_trajectory(
             std::collections::hash_map::Entry::Occupied(e) => (e.get().clone(), false),
         }
     };
+
+    if inserted {
+        reconcile_loaded_card_pause(&app, &session_arc).await;
+    }
 
     if inserted && is_new {
         let app_hook = AppState::from_gcx(gcx.clone()).await;

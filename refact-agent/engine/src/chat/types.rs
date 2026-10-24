@@ -298,6 +298,7 @@ pub struct ChatSession {
     pub messages: Vec<ChatMessage>,
     pub runtime: RuntimeState,
     pub(crate) planner_pause: Option<PlannerPause>,
+    pub(crate) planner_pause_revision: u64,
     pub(crate) planner_pause_pending_tools: bool,
     pub goal: Option<GoalSnapshot>,
     pub goal_active: bool,
