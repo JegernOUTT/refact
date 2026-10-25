@@ -133,7 +133,7 @@ fn agent_resume_schema() -> Value {
         "additionalProperties": false,
         "properties": {
             "agent_id": {"type": "string", "minLength": 1},
-            "action": {"type": "string", "enum": ["inspect", "close", "raise_and_resume", "resume", "continue", "pause", "release"]},
+            "action": {"type": "string", "enum": ["inspect", "close", "raise_and_resume", "resume", "continue", "pause", "release"], "description": "inspect, pause and release accept only agent_id and action. close additionally accepts reason and expected_run_generation. raise_and_resume requires max_steps and expected_change_seq only. resume and continue require expected_change_seq and optionally accept instruction and reconcile_incomplete."},
             "instruction": {"type": "string", "minLength": 1, "description": "Optional exact parent follow-up for resume or continue; appended after preserved child history."},
             "reconcile_incomplete": {"type": "boolean", "default": false, "description": "For resume or continue only: explicitly acknowledge missing tool outcomes as unknown without replaying calls. Inspect side effects before enabling."},
             "reason": {"type": "string", "minLength": 1, "description": "For close only: why this child is being closed."},
@@ -147,18 +147,10 @@ fn agent_resume_schema() -> Value {
             },
             "expected_change_seq": {
                 "type": "integer", "minimum": 1,
-                "description": "Exact change_seq returned by inspect, required for any resume or continue."
+                "description": "Exact change_seq returned by inspect, required for raise_and_resume, resume and continue."
             }
         },
-        "required": ["agent_id", "action"],
-        "oneOf": [
-            {"properties": {"action": {"const": "inspect"}}, "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["expected_change_seq"]}, {"required": ["instruction"]}, {"required": ["reconcile_incomplete"]}, {"required": ["reason"]}, {"required": ["expected_run_generation"]}]}},
-            {"properties": {"action": {"const": "close"}}, "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["expected_change_seq"]}, {"required": ["instruction"]}, {"required": ["reconcile_incomplete"]}]}},
-            {"properties": {"action": {"const": "raise_and_resume"}}, "required": ["max_steps", "expected_change_seq"], "not": {"anyOf": [{"required": ["instruction"]}, {"required": ["reconcile_incomplete"]}, {"required": ["reason"]}, {"required": ["expected_run_generation"]}]}},
-            {"properties": {"action": {"const": "resume"}}, "required": ["expected_change_seq"], "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["reason"]}, {"required": ["expected_run_generation"]}]}},
-            {"properties": {"action": {"const": "continue"}}, "required": ["expected_change_seq"], "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["reason"]}, {"required": ["expected_run_generation"]}]}},
-            {"properties": {"action": {"enum": ["pause", "release"]}}, "not": {"anyOf": [{"required": ["max_steps"]}, {"required": ["expected_change_seq"]}, {"required": ["instruction"]}, {"required": ["reconcile_incomplete"]}, {"required": ["reason"]}, {"required": ["expected_run_generation"]}]}}
-        ]
+        "required": ["agent_id", "action"]
     })
 }
 
@@ -2854,7 +2846,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_resume_schema_is_scoped_and_requires_mutation_revision() {
+    fn agent_resume_schema_is_scoped() {
         let description = ToolAgentResume {
             config_path: String::new(),
         }
@@ -2876,16 +2868,6 @@ mod tests {
                 "release"
             ])
         );
-        assert_eq!(
-            schema["oneOf"][2]["required"],
-            json!(["max_steps", "expected_change_seq"])
-        );
-        for branch in [3, 4] {
-            assert_eq!(
-                schema["oneOf"][branch]["required"],
-                json!(["expected_change_seq"])
-            );
-        }
         for field in ["max_steps", "expected_change_seq"] {
             assert_eq!(schema["properties"][field]["type"], "integer");
             assert_eq!(schema["properties"][field]["minimum"], 1);

@@ -312,23 +312,13 @@ impl Tool for ToolTeamRoleGrant {
                 "properties": {
                     "team": {"type": "string", "minLength": 1},
                     "role": {"type": "string", "minLength": 1},
-                    "member_agent_id": {"type": "string", "minLength": 1},
-                    "member_chat_id": {"type": "string", "minLength": 1},
-                    "recipient_agent_id": {"type": "string", "minLength": 1},
-                    "recipient_chat_id": {"type": "string", "minLength": 1},
+                    "member_agent_id": {"type": "string", "minLength": 1, "description": "Provide exactly one of member_agent_id or member_chat_id."},
+                    "member_chat_id": {"type": "string", "minLength": 1, "description": "Provide exactly one of member_agent_id or member_chat_id."},
+                    "recipient_agent_id": {"type": "string", "minLength": 1, "description": "Provide exactly one of recipient_agent_id or recipient_chat_id."},
+                    "recipient_chat_id": {"type": "string", "minLength": 1, "description": "Provide exactly one of recipient_agent_id or recipient_chat_id."},
                     "authority": {"type": "string", "enum": ["metadata", "mail", "control"]}
                 },
-                "required": ["team", "role", "authority"],
-                "allOf": [
-                    {"oneOf": [
-                        {"required": ["member_agent_id"], "not": {"required": ["member_chat_id"]}},
-                        {"required": ["member_chat_id"], "not": {"required": ["member_agent_id"]}}
-                    ]},
-                    {"oneOf": [
-                        {"required": ["recipient_agent_id"], "not": {"required": ["recipient_chat_id"]}},
-                        {"required": ["recipient_chat_id"], "not": {"required": ["recipient_agent_id"]}}
-                    ]}
-                ]
+                "required": ["team", "role", "authority"]
             }),
             output_schema: None,
             annotations: None,
