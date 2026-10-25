@@ -54,41 +54,60 @@ const focusableSelector = [
   "[tabindex]",
 ].join(",");
 
+const collapsedFocusOwners = new WeakMap<
+  HTMLElement,
+  { tabIndex: string | null; owners: Set<HTMLElement> }
+>();
+
 function useCollapsedFocusGuard(
   ref: React.RefObject<HTMLElement>,
   active: boolean,
 ): void {
   React.useLayoutEffect(() => {
     const root = ref.current;
-    if (!root) return;
+    if (!root || !active) return;
 
-    const elements = Array.from(
-      root.querySelectorAll<HTMLElement>(focusableSelector),
-    );
-
-    if (active) {
-      root.setAttribute("inert", "");
-      for (const element of elements) {
-        if (element.dataset.rfPreviousTabIndex !== undefined) continue;
-        element.dataset.rfPreviousTabIndex =
-          element.getAttribute("tabindex") ?? "";
+    const owned = new Set<HTMLElement>();
+    const release = (element: HTMLElement) => {
+      owned.delete(element);
+      const state = collapsedFocusOwners.get(element);
+      if (!state) return;
+      state.owners.delete(root);
+      if (state.owners.size > 0) return;
+      if (state.tabIndex === null) element.removeAttribute("tabindex");
+      else element.setAttribute("tabindex", state.tabIndex);
+      collapsedFocusOwners.delete(element);
+    };
+    const sync = () => {
+      for (const element of owned) {
+        if (!root.contains(element)) release(element);
+      }
+      for (const element of root.querySelectorAll<HTMLElement>(
+        focusableSelector,
+      )) {
+        if (!owned.has(element)) {
+          const state = collapsedFocusOwners.get(element) ?? {
+            tabIndex: element.getAttribute("tabindex"),
+            owners: new Set<HTMLElement>(),
+          };
+          state.owners.add(root);
+          collapsedFocusOwners.set(element, state);
+          owned.add(element);
+        }
         element.tabIndex = -1;
       }
-      return;
-    }
+    };
 
-    root.removeAttribute("inert");
-    for (const element of elements) {
-      const previousTabIndex = element.dataset.rfPreviousTabIndex;
-      if (previousTabIndex === undefined) continue;
-      if (previousTabIndex) {
-        element.setAttribute("tabindex", previousTabIndex);
-      } else {
-        element.removeAttribute("tabindex");
-      }
-      delete element.dataset.rfPreviousTabIndex;
-    }
-  });
+    root.setAttribute("inert", "");
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(root, { childList: true, subtree: true });
+    return () => {
+      observer.disconnect();
+      root.removeAttribute("inert");
+      for (const element of owned) release(element);
+    };
+  }, [active, ref]);
 }
 
 export function ToolCard({
