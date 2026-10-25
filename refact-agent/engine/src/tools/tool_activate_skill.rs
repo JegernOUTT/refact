@@ -13,7 +13,6 @@ use crate::ext::skills_context::expand_skill_includes;
 use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
 };
-use refact_chat_api::{ActiveCommandContext, PendingSkillDeactivation};
 
 pub struct ToolActivateSkill {
     pub config_path: String,
@@ -56,9 +55,6 @@ async fn activate_skill_inner(
     if !skill.index.user_invocable {
         return Err(format!("Skill '{}' is not available for activation", name));
     }
-    if skill.index.disable_model_invocation {
-        return Err(format!("Skill '{}' cannot be activated by the model", name));
-    }
     let body = expand_skill_includes(&skill.body, &skill.skill_dir).await;
     Ok(ActivatedSkill {
         body,
@@ -80,7 +76,7 @@ impl Tool for ToolActivateSkill {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Load a skill's full instructions into the current context. Use when you determine a skill from the available index is relevant to the user's request. Once activated, the skill's instructions guide your approach. When you're done with the skill's task, you MUST call deactivate_skill with a thorough report.".to_string(),
+            description: "Load a skill's full instructions into the current context. Use when you determine a skill from the available index is relevant to the user's request. Once activated, the skill's instructions guide your approach.".to_string(),
             input_schema: json_schema_from_params(
                 &[("name", "string", "Name of the skill to activate")],
                 &["name"],
@@ -116,12 +112,8 @@ impl Tool for ToolActivateSkill {
                 sessions.get(&chat_id).cloned()
             };
             if let Some(session_arc) = session_arc_opt {
-                let mut session = session_arc.lock().await;
+                let session = session_arc.lock().await;
                 if session.thread.active_skill.as_deref() == Some(name.as_str()) {
-                    if session.active_command.started_at_index.is_none() {
-                        session.active_command.started_at_index = Some(session.messages.len());
-                        session.active_command.name = name.clone();
-                    }
                     return Ok((false, vec![
                         ContextEnum::ChatMessage(ChatMessage {
                             role: "tool".to_string(),
@@ -130,12 +122,6 @@ impl Tool for ToolActivateSkill {
                             ..Default::default()
                         }),
                     ]));
-                }
-                if let Some(ref current) = session.thread.active_skill {
-                    return Err(format!(
-                        "Skill '{}' is currently active. Call deactivate_skill first before activating a different skill.",
-                        current
-                    ));
                 }
             }
         }
@@ -154,8 +140,6 @@ impl Tool for ToolActivateSkill {
                 session.active_command.name = name.clone();
                 session.active_command.allowed_tools = activated.allowed_tools.clone();
                 session.active_command.model_override = activated.model_override.clone();
-                session.active_command.started_at_index = Some(session.messages.len());
-                session.active_command.activation_tool_call_id = Some(tool_call_id.clone());
                 session.set_active_skill(name.clone());
             }
         }
@@ -177,112 +161,6 @@ impl Tool for ToolActivateSkill {
                     ..Default::default()
                 }),
             ],
-        ))
-    }
-}
-
-pub struct ToolDeactivateSkill {
-    pub config_path: String,
-}
-
-#[async_trait]
-impl Tool for ToolDeactivateSkill {
-    fn tool_description(&self) -> ToolDesc {
-        ToolDesc {
-            name: "deactivate_skill".to_string(),
-            display_name: "Deactivate Skill".to_string(),
-            source: ToolSource {
-                source_type: ToolSourceType::Builtin,
-                config_path: self.config_path.clone(),
-            },
-            experimental: false,
-            allow_parallel: false,
-            description: "Deactivate the currently active skill with a completion report. The report should be a thorough overview of what was done, what happened, and what was changed. After deactivation, the skill execution messages are compacted into the report, keeping chat history clean while preserving knowledge of what occurred.".to_string(),
-            input_schema: json_schema_from_params(
-                &[("report", "string", "A thorough overview of what was done, what happened, what was changed during the skill execution. Use clear markdown formatting.")],
-                &["report"],
-            ),
-            output_schema: None,
-            annotations: None,
-        }
-    }
-
-    async fn tool_execute(
-        &mut self,
-        ccx: Arc<AMutex<AtCommandsContext>>,
-        tool_call_id: &String,
-        args: &HashMap<String, Value>,
-    ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let report =
-            match args.get("report") {
-                Some(Value::String(s)) => s.clone(),
-                Some(v) => return Err(format!("argument `report` is not a string: {:?}", v)),
-                None => return Err(
-                    "argument `report` is missing. Provide a thorough overview of what was done."
-                        .to_string(),
-                ),
-            };
-
-        let (gcx, chat_id) = {
-            let cgcx = ccx.lock().await;
-            (cgcx.app.gcx.clone(), cgcx.chat_id.clone())
-        };
-
-        {
-            let session_arc_opt = {
-                let sessions = gcx.chat_sessions.read().await;
-                sessions.get(&chat_id).cloned()
-            };
-            if let Some(session_arc) = session_arc_opt {
-                let mut session = session_arc.lock().await;
-                let skill_name = match session.thread.active_skill.clone() {
-                    Some(name) => name,
-                    None => return Err("No active skill to deactivate".to_string()),
-                };
-                let start_index = session
-                    .active_command
-                    .started_at_index
-                    .unwrap_or(session.messages.len());
-                session.pending_skill_deactivation = Some(PendingSkillDeactivation {
-                    start_index,
-                    report: report.clone(),
-                    skill_name: skill_name.clone(),
-                    activation_tool_call_id: session.active_command.activation_tool_call_id.clone(),
-                });
-                let compaction_note = if session.active_command.started_at_index.is_some() {
-                    String::new()
-                } else {
-                    tracing::warn!("deactivate_skill: no started_at_index for skill '{}', reporting without compaction", skill_name);
-                    " (Note: skill history compaction was skipped — activation anchor was not set.)"
-                        .to_string()
-                };
-                session.active_command = ActiveCommandContext::default();
-                session.clear_active_skill();
-                return Ok((
-                    false,
-                    vec![ContextEnum::ChatMessage(ChatMessage {
-                        role: "tool".to_string(),
-                        content: ChatContent::SimpleText(format!(
-                            "✅ Skill '{}' deactivated. Report has been recorded.{}",
-                            skill_name, compaction_note
-                        )),
-                        tool_call_id: tool_call_id.clone(),
-                        ..Default::default()
-                    })],
-                ));
-            }
-        }
-
-        Ok((
-            false,
-            vec![ContextEnum::ChatMessage(ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText(
-                    "✅ Skill deactivated. Report has been recorded.".to_string(),
-                ),
-                tool_call_id: tool_call_id.clone(),
-                ..Default::default()
-            })],
         ))
     }
 }
@@ -471,42 +349,6 @@ mod tests {
         assert!(content.contains("skills/visual-skill/..."));
     }
 
-    #[tokio::test]
-    async fn test_deactivate_skill_clears_active_command() {
-        use refact_chat_api::ActiveCommandContext;
-
-        let mut active = ActiveCommandContext {
-            name: "my-skill".to_string(),
-            allowed_tools: vec!["cat".to_string(), "tree".to_string()],
-            model_override: Some("gpt-4o".to_string()),
-            context_fork: None,
-            started_at_index: Some(5),
-            activation_tool_call_id: None,
-        };
-        assert_eq!(active.started_at_index, Some(5));
-
-        active = ActiveCommandContext::default();
-
-        assert!(active.name.is_empty());
-        assert!(active.allowed_tools.is_empty());
-        assert!(active.model_override.is_none());
-        assert!(active.context_fork.is_none());
-        assert!(active.started_at_index.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_deactivate_skill_when_no_active_skill() {
-        use refact_chat_api::ActiveCommandContext;
-
-        let active = ActiveCommandContext::default();
-        let cleared = ActiveCommandContext::default();
-
-        assert_eq!(active.name, cleared.name);
-        assert_eq!(active.allowed_tools, cleared.allowed_tools);
-        assert_eq!(active.model_override, cleared.model_override);
-        assert_eq!(active.started_at_index, cleared.started_at_index);
-    }
-
     #[test]
     fn test_activate_skill_not_parallel() {
         let tool = ToolActivateSkill {
@@ -516,103 +358,6 @@ mod tests {
             !tool.tool_description().allow_parallel,
             "activate_skill must have allow_parallel = false"
         );
-    }
-
-    #[test]
-    fn test_deactivate_skill_no_context_file() {
-        let result: Vec<ContextEnum> = vec![ContextEnum::ChatMessage(ChatMessage {
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText(
-                "✅ Skill 'my-skill' deactivated. Report has been recorded.".to_string(),
-            ),
-            tool_call_id: "tc1".to_string(),
-            ..Default::default()
-        })];
-        let has_context_file = result
-            .iter()
-            .any(|e| matches!(e, ContextEnum::ContextFile(_)));
-        assert!(
-            !has_context_file,
-            "deactivate_skill must not return ContextFile"
-        );
-        let has_chat_message = result
-            .iter()
-            .any(|e| matches!(e, ContextEnum::ChatMessage(_)));
-        assert!(
-            has_chat_message,
-            "deactivate_skill must return a ChatMessage"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_activate_rejects_disable_model_invocation() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_skill(
-            tmp.path(),
-            "locked-skill",
-            "name: locked-skill\ndescription: Locked skill\nuser-invocable: true\ndisable-model-invocation: true",
-            "Sensitive instructions",
-        )
-        .await;
-
-        let ext_dirs = make_ext_dirs(tmp.path());
-        let result = activate_skill_inner(&ext_dirs, "locked-skill").await;
-        assert!(result.is_err());
-        let msg = result.unwrap_err();
-        assert!(
-            msg.contains("cannot be activated by the model"),
-            "Expected 'cannot be activated by the model' in error: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn test_activate_started_at_uses_message_count() {
-        use refact_chat_api::ActiveCommandContext;
-
-        let mut ctx = ActiveCommandContext::default();
-        assert!(ctx.started_at_index.is_none());
-
-        // Simulate: at activation time, there are 3 messages already in session
-        ctx.started_at_index = Some(3);
-        assert_eq!(ctx.started_at_index, Some(3));
-
-        // After reset, index is cleared
-        ctx = ActiveCommandContext::default();
-        assert!(ctx.started_at_index.is_none());
-    }
-
-    #[test]
-    fn test_deactivate_uses_active_skill_not_active_command() {
-        use refact_chat_api::{ActiveCommandContext, ThreadParams};
-
-        let mut thread = ThreadParams {
-            id: "test".to_string(),
-            active_skill: Some("real-skill".to_string()),
-            ..Default::default()
-        };
-        let mut active_command = ActiveCommandContext {
-            name: "some-slash-command".to_string(),
-            started_at_index: Some(0),
-            activation_tool_call_id: None,
-            ..Default::default()
-        };
-
-        let skill_name = match thread.active_skill.clone() {
-            Some(name) => name,
-            None => panic!("Expected active_skill to be set"),
-        };
-        assert_eq!(
-            skill_name, "real-skill",
-            "Must use active_skill, not active_command.name"
-        );
-        assert_ne!(skill_name, active_command.name);
-
-        let cleared_command = ActiveCommandContext::default();
-        active_command = cleared_command;
-        thread.active_skill = None;
-        assert!(thread.active_skill.is_none());
-        assert!(active_command.name.is_empty());
     }
 
     #[test]

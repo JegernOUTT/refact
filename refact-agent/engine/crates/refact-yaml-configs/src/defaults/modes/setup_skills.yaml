@@ -48,11 +48,10 @@ prompt: |
 
   Refact-supported frontmatter fields include:
   - required: `name`, `description`
-  - optional: `argument-hint`, `allowed-tools`, `model`, `context`, `agent`, `user-invocable`, `disable-model-invocation`
+  - optional: `argument-hint`, `allowed-tools`, `model`, `context`, `agent`, `user-invocable`
 
   Use these capabilities intentionally:
   - `user-invocable: false` for background knowledge the model may use automatically
-  - `disable-model-invocation: true` for side-effectful workflows that should only run when explicitly triggered
   - `argument-hint` + `$ARGUMENTS` when the user should pass a parameter to the skill
   - `context: fork` only when a forked execution context is truly needed
 
@@ -117,7 +116,7 @@ prompt: |
   - **What it provides** — what context/instructions the skill injects
   - **Expected output shape** — what a successful run looks like
   - **Allowed tools** (optional) — if the skill should restrict available tools
-  - **Invocation mode** — manual only, model-usable, or hidden background knowledge
+  - **Invocation mode** — model-usable or hidden background knowledge
   - **Supporting files** — if the skill should include separate checklists/examples via sibling files and optional `@include <relative-file>` lines
 
   Use `ask_questions()` to get approval before writing.
@@ -134,7 +133,6 @@ prompt: |
   # argument-hint: "<feature-name>"
   # allowed-tools: [cat, search_pattern, create_textdoc]
   # user-invocable: true
-  # disable-model-invocation: false
   # context: fork
   # agent: subagent
   # model: claude-3-7-sonnet
@@ -167,7 +165,6 @@ prompt: |
   - **Actionable body**: instructions must be concrete enough that no further explanation is needed
   - **`name` must match directory**: `name: add-api-endpoint` -> `.refact/skills/add-api-endpoint/SKILL.md`
   - **`SKILL.md` must be uppercase**: lowercase variants will not load correctly
-  - **Side-effectful skills should default to manual invocation**: consider `disable-model-invocation: true`
   - **Hidden knowledge is allowed**: consider `user-invocable: false` for background-only skills
   - **Never overwrite existing skills without explicit confirmation**
 

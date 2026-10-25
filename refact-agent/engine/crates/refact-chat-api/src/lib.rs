@@ -34,7 +34,7 @@ pub use sub_goal::{
 pub use chat_local_types::{
     max_queue_size, session_cleanup_interval, session_idle_timeout, stream_heartbeat,
     stream_idle_timeout, stream_total_timeout, install_runtime_timeouts, EnqueueCommandOutcome,
-    PendingBrowserMessage, PendingSkillDeactivation, RuntimeChatTimeouts, TrajectorySourceIdentity,
+    PendingBrowserMessage, RuntimeChatTimeouts, TrajectorySourceIdentity,
 };
 pub use notification_event::{NotificationEvent, NotificationQuestion};
 pub use seal::SealReason;
@@ -1541,8 +1541,6 @@ pub struct ActiveCommandContext {
     pub allowed_tools: Vec<String>,
     pub model_override: Option<String>,
     pub context_fork: Option<String>,
-    pub started_at_index: Option<usize>,
-    pub activation_tool_call_id: Option<String>,
 }
 
 #[cfg(test)]

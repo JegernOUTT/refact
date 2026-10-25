@@ -2426,13 +2426,6 @@ async fn execute_regular_tool_calls(
             }
         }
 
-        {
-            let mut session = session_arc.lock().await;
-            if session.pending_skill_deactivation.is_some() {
-                session.perform_skill_deactivation_cleanup();
-            }
-        }
-
         if was_aborted || tool_initiated_stop {
             maybe_save_trajectory_with_intent(
                 app.clone(),

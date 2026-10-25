@@ -1432,7 +1432,6 @@ mod tests {
             "argument-hint",
             "allowed-tools",
             "user-invocable",
-            "disable-model-invocation",
             "@include <relative-file>",
         ] {
             assert!(

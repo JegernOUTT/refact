@@ -66,18 +66,6 @@ const SkillForm: React.FC<SkillFormProps> = ({ data, onChange, disabled }) => {
             />
           }
         />
-        <FieldStack
-          label="Disable Model Invocation"
-          control={
-            <FieldSwitch
-              checked={data.disable_model_invocation}
-              onChange={(disable_model_invocation) =>
-                onChange({ disable_model_invocation })
-              }
-              disabled={disabled}
-            />
-          }
-        />
       </div>
 
       <FieldStack
@@ -224,7 +212,6 @@ export const SkillEditor: React.FC<SkillEditorProps> = ({
           body: {
             description: localData.description,
             user_invocable: localData.user_invocable,
-            disable_model_invocation: localData.disable_model_invocation,
             argument_hint: localData.argument_hint,
             allowed_tools: localData.allowed_tools,
             model: localData.model,

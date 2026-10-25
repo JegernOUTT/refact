@@ -29,7 +29,7 @@ pub fn select_relevant_skills(
 ) -> Vec<String> {
     let mut scored: Vec<(f32, String)> = skills
         .iter()
-        .filter(|s| s.user_invocable && !s.disable_model_invocation)
+        .filter(|s| s.user_invocable)
         .filter_map(|s| {
             let score = skill_relevance_score(&s.description, user_message);
             if score >= threshold {
@@ -49,16 +49,11 @@ mod tests {
     use super::*;
     use crate::config_dirs::CommandSource;
 
-    fn make_skill_index(
-        name: &str,
-        description: &str,
-        disable_model_invocation: bool,
-    ) -> SkillIndex {
+    fn make_skill_index(name: &str, description: &str) -> SkillIndex {
         SkillIndex {
             name: name.to_string(),
             description: description.to_string(),
             user_invocable: true,
-            disable_model_invocation,
             source: CommandSource::GlobalRefact,
         }
     }
@@ -125,9 +120,8 @@ mod tests {
             make_skill_index(
                 "security-review",
                 "reviews code for security vulnerabilities",
-                false,
             ),
-            make_skill_index("code-explainer", "explains code using analogies", false),
+            make_skill_index("code-explainer", "explains code using analogies"),
         ];
         let selected = select_relevant_skills(&skills, "security vulnerability review", 2, 0.1);
         assert!(selected.contains(&"security-review".to_string()));
@@ -138,32 +132,17 @@ mod tests {
         let skills = vec![make_skill_index(
             "security-review",
             "reviews security vulnerabilities",
-            false,
         )];
         let selected = select_relevant_skills(&skills, "breakfast cereal", 2, 0.5);
         assert!(selected.is_empty());
     }
 
     #[test]
-    fn test_skills_select_disable_model_invocation_prevents_auto_trigger() {
-        let skills = vec![make_skill_index(
-            "security-review",
-            "reviews security vulnerabilities code",
-            true,
-        )];
-        let selected = select_relevant_skills(&skills, "security review vulnerabilities", 2, 0.1);
-        assert!(
-            selected.is_empty(),
-            "disable_model_invocation should prevent auto-trigger"
-        );
-    }
-
-    #[test]
     fn test_skills_select_respects_max_skills() {
         let skills = vec![
-            make_skill_index("skill1", "rust code review analysis checks", false),
-            make_skill_index("skill2", "rust code analysis review checks", false),
-            make_skill_index("skill3", "rust review code analysis checks", false),
+            make_skill_index("skill1", "rust code review analysis checks"),
+            make_skill_index("skill2", "rust code analysis review checks"),
+            make_skill_index("skill3", "rust review code analysis checks"),
         ];
         let selected = select_relevant_skills(&skills, "rust code review analysis", 2, 0.1);
         assert!(selected.len() <= 2, "Should not exceed max_skills");
@@ -178,8 +157,8 @@ mod tests {
     #[test]
     fn test_skills_select_returns_highest_scoring() {
         let skills = vec![
-            make_skill_index("low-scorer", "completely unrelated topic", false),
-            make_skill_index("high-scorer", "security review vulnerabilities code", false),
+            make_skill_index("low-scorer", "completely unrelated topic"),
+            make_skill_index("high-scorer", "security review vulnerabilities code"),
         ];
         let selected = select_relevant_skills(&skills, "security review vulnerabilities", 1, 0.1);
         assert_eq!(selected, vec!["high-scorer"]);
@@ -188,8 +167,8 @@ mod tests {
     #[test]
     fn test_skills_select_threshold_filters() {
         let skills = vec![
-            make_skill_index("low-match", "code quality", false),
-            make_skill_index("high-match", "security review vulnerabilities audit", false),
+            make_skill_index("low-match", "code quality"),
+            make_skill_index("high-match", "security review vulnerabilities audit"),
         ];
         let low_threshold = select_relevant_skills(&skills, "security review", 2, 0.01);
         let high_threshold = select_relevant_skills(&skills, "security review", 2, 0.5);
@@ -205,7 +184,6 @@ mod tests {
             name: "security-review".to_string(),
             description: "reviews security vulnerabilities code".to_string(),
             user_invocable: false,
-            disable_model_invocation: false,
             source: CommandSource::GlobalRefact,
         }];
         let selected = select_relevant_skills(&skills, "security review vulnerabilities", 2, 0.1);

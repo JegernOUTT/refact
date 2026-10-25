@@ -270,7 +270,6 @@ describe("SkillEditor", () => {
           name: "my_skill",
           description: "A test skill",
           user_invocable: true,
-          disable_model_invocation: false,
           allowed_tools: ["shell"],
           model: null,
           context: null,

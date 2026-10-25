@@ -147,7 +147,6 @@ const TUI_TOOL_FAMILY_REGISTRY: &[(&str, ToolFamily)] = &[
     ("agent_message", ToolFamily::Server),
     ("progress_report", ToolFamily::Server),
     ("activate_skill", ToolFamily::KnowledgeSearch),
-    ("deactivate_skill", ToolFamily::KnowledgeSearch),
     ("knowledge", ToolFamily::KnowledgeSearch),
     ("create_knowledge", ToolFamily::KnowledgeSearch),
     ("get_trajectory_context", ToolFamily::KnowledgeSearch),
@@ -308,7 +307,6 @@ mod tests {
         "subagent",
         "tasks_set",
         "activate_skill",
-        "deactivate_skill",
         "knowledge",
         "create_knowledge",
         "get_trajectory_context",
@@ -440,8 +438,8 @@ mod tests {
             .iter()
             .copied()
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(current_static_builtin_constructor_count(), 163);
-        assert_eq!(CURRENT_STATIC_BUILTIN_TOOL_NAMES.len(), 163);
+        assert_eq!(current_static_builtin_constructor_count(), 162);
+        assert_eq!(CURRENT_STATIC_BUILTIN_TOOL_NAMES.len(), 162);
         assert_eq!(
             CURRENT_STATIC_BUILTIN_TOOL_NAMES.len(),
             current_static_builtin_constructor_count(),

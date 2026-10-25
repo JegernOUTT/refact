@@ -602,9 +602,6 @@ async fn get_builtin_tools(
         Box::new(crate::tools::tool_activate_skill::ToolActivateSkill {
             config_path: config_path.clone(),
         }),
-        Box::new(crate::tools::tool_activate_skill::ToolDeactivateSkill {
-            config_path: config_path.clone(),
-        }),
         Box::new(crate::tools::tool_knowledge::ToolGetKnowledge {
             config_path: config_path.clone(),
         }),

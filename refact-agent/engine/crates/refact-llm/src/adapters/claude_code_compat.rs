@@ -193,7 +193,6 @@ pub const CC_TOOL_RENAMES: &[(&str, &str)] = &[
     ("get_trajectory_context", "hist_get"),
     // Skills
     ("activate_skill", "load_skill"),
-    ("deactivate_skill", "unload_skill"),
 ];
 
 pub fn cc_rename_base_tool(base_name: &str) -> &str {
@@ -287,7 +286,6 @@ const CC_SYSTEM_REPLACEMENTS: &[(&str, &str)] = &[
     ("get_trajectory_context",   "hist_get"),
     // Skills
     ("activate_skill",           "load_skill"),
-    ("deactivate_skill",         "unload_skill"),
     // ─── CD_INSTRUCTIONS and SHELL_INSTRUCTIONS sections (prompt_snippets.rs) ────
     // These snippets contain Refact-specific fingerprints (emoji markers, tool wizard
     // hints, product names) that Anthropic's billing detection picks up.
@@ -995,7 +993,6 @@ mod tests {
         assert_eq!(cc_resolve_tool_name("t_hist_search"), "search_trajectories");
         assert_eq!(cc_resolve_tool_name("t_hist_get"), "get_trajectory_context");
         assert_eq!(cc_resolve_tool_name("t_load_skill"), "activate_skill");
-        assert_eq!(cc_resolve_tool_name("t_unload_skill"), "deactivate_skill");
         assert_eq!(cc_resolve_tool_name("t_ctx_probe"), "compress_chat_probe");
         assert_eq!(cc_resolve_tool_name("t_ctx_apply"), "compress_chat_apply");
         assert_eq!(cc_resolve_tool_name("t_switch_mode"), "handoff_to_mode");

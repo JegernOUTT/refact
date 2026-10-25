@@ -45,7 +45,6 @@ pub struct SkillIndex {
     pub name: String,
     pub description: String,
     pub user_invocable: bool,
-    pub disable_model_invocation: bool,
     pub source: CommandSource,
 }
 
@@ -103,7 +102,6 @@ async fn load_skill_from_dir(skill_dir: &Path, source: CommandSource) -> Option<
         return None;
     }
     let user_invocable = yaml_bool(&fm, "user-invocable", true);
-    let disable_model_invocation = yaml_bool(&fm, "disable-model-invocation", false);
     let argument_hint = yaml_str(&fm, "argument-hint");
     let allowed_tools = yaml_str_list(&fm, "allowed-tools");
     let model = fm
@@ -122,7 +120,6 @@ async fn load_skill_from_dir(skill_dir: &Path, source: CommandSource) -> Option<
         name,
         description,
         user_invocable,
-        disable_model_invocation,
         source,
     };
     Some(SkillFull {
@@ -177,7 +174,6 @@ async fn load_skill_index_only(skill_dir: &Path, source: CommandSource) -> Optio
         name,
         description,
         user_invocable: yaml_bool(&fm, "user-invocable", true),
-        disable_model_invocation: yaml_bool(&fm, "disable-model-invocation", false),
         source,
     })
 }
@@ -319,7 +315,7 @@ mod tests {
 
         tokio::fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nname: my_skill\ndescription: A useful skill\nargument-hint: \"<arg>\"\nallowed-tools:\n  - search\nmodel: gpt-4o\ncontext: fork\nuser-invocable: true\ndisable-model-invocation: false\n---\nDo something useful with $ARGUMENTS",
+            "---\nname: my_skill\ndescription: A useful skill\nargument-hint: \"<arg>\"\nallowed-tools:\n  - search\nmodel: gpt-4o\ncontext: fork\nuser-invocable: true\n---\nDo something useful with $ARGUMENTS",
         )
         .await
         .unwrap();
@@ -331,7 +327,6 @@ mod tests {
         assert_eq!(full.index.name, "my_skill");
         assert_eq!(full.index.description, "A useful skill");
         assert!(full.index.user_invocable);
-        assert!(!full.index.disable_model_invocation);
         assert_eq!(full.argument_hint, "<arg>");
         assert_eq!(full.allowed_tools, vec!["search"]);
         assert_eq!(full.model, Some("gpt-4o".to_string()));
@@ -397,7 +392,6 @@ mod tests {
             .await
             .unwrap();
         assert!(full.index.user_invocable);
-        assert!(!full.index.disable_model_invocation);
         assert!(full.model.is_none());
         assert!(full.context.is_none());
         assert!(full.agent.is_none());
@@ -590,7 +584,6 @@ mod tests {
         assert_eq!(index.name, "large_skill");
         assert_eq!(index.description, "Large body skill");
         assert!(index.user_invocable);
-        assert!(!index.disable_model_invocation);
     }
 
     #[tokio::test]

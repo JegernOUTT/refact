@@ -10,7 +10,7 @@ use refact_runtime_api::{ToolCatalogSnapshot, TurnToolPool};
 pub use refact_chat_api::chat_local_types::{
     max_queue_size, session_cleanup_interval, session_idle_timeout, stream_heartbeat,
     stream_idle_timeout, stream_total_timeout, EnqueueCommandOutcome, PendingBrowserMessage,
-    PendingSkillDeactivation, TrajectorySourceIdentity,
+    TrajectorySourceIdentity,
 };
 pub use refact_chat_api::{
     delivery_id_of_message, ActiveCommandContext, BackgroundAgentSummary, BrowserMeta, CausalStamp,
@@ -391,7 +391,6 @@ pub struct ChatSession {
     pub active_command: ActiveCommandContext,
     pub skills_available_count: usize,
     pub skills_included: Vec<String>,
-    pub pending_skill_deactivation: Option<PendingSkillDeactivation>,
     pub post_turn_task_handles: Vec<tokio::task::JoinHandle<()>>,
     pub(crate) openai_codex_websocket: super::openai_codex_ws::OpenAICodexWebSocketSession,
     pub suppress_auto_enrichment_for_next_turn: bool,

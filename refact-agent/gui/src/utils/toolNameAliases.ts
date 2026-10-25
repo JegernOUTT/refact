@@ -35,7 +35,6 @@ const CC_TOOL_ALIASES: Partial<Record<string, string>> = {
   hist_search: "search_trajectories",
   hist_get: "get_trajectory_context",
   load_skill: "activate_skill",
-  unload_skill: "deactivate_skill",
 };
 
 const CLAUDE_CODE_TOOL_ALIASES: Partial<Record<string, string>> = {

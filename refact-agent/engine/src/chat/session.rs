@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use serde_json::json;
 use tokio::sync::{broadcast, Mutex as AMutex, Notify, RwLock as ARwLock};
-use tracing::{info, warn};
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::call_validation::{ChatContent, ChatMessage, ChatUsage};
@@ -755,7 +755,6 @@ impl ChatSession {
             active_command: ActiveCommandContext::default(),
             skills_available_count: 0,
             skills_included: Vec::new(),
-            pending_skill_deactivation: None,
             post_turn_task_handles: Vec::new(),
             openai_codex_websocket: Default::default(),
             suppress_auto_enrichment_for_next_turn: false,
@@ -782,9 +781,6 @@ impl ChatSession {
         waiting_for_card_ids: Vec<String>,
         goal: Option<GoalSnapshot>,
     ) -> Self {
-        // active_skill is runtime state — if the server restarted mid-skill, the compaction
-        // anchor (started_at_index) is lost. Clear it so the session starts cleanly rather
-        // than leaving the user locked into a ghost skill that can never be deactivated.
         thread.active_skill = None;
         let goal = goal_snapshot_from_messages(&messages, goal.as_ref()).or(goal);
         let (goal_active, goal_status, goal_turns_used, goal_tokens_used, goal_no_progress_turns) =
@@ -899,7 +895,6 @@ impl ChatSession {
             active_command: ActiveCommandContext::default(),
             skills_available_count: 0,
             skills_included: Vec::new(),
-            pending_skill_deactivation: None,
             post_turn_task_handles: Vec::new(),
             openai_codex_websocket: Default::default(),
             suppress_auto_enrichment_for_next_turn: false,
@@ -1645,11 +1640,6 @@ impl ChatSession {
 
     pub fn set_active_skill(&mut self, name: String) {
         self.thread.active_skill = Some(name);
-        self.increment_version();
-    }
-
-    pub fn clear_active_skill(&mut self) {
-        self.thread.active_skill = None;
         self.increment_version();
     }
 
@@ -3196,65 +3186,6 @@ impl ChatSession {
             self.increment_version();
             self.touch();
         }
-    }
-
-    pub fn perform_skill_deactivation_cleanup(&mut self) {
-        let Some(pending) = self.pending_skill_deactivation.take() else {
-            return;
-        };
-
-        if pending.start_index > self.messages.len() {
-            warn!(
-                "Skill deactivation cleanup: start_index {} is beyond messages.len() {} for skill '{}', skipping compaction",
-                pending.start_index,
-                self.messages.len(),
-                pending.skill_name
-            );
-            return;
-        }
-
-        let activation_tool_message =
-            pending
-                .activation_tool_call_id
-                .as_ref()
-                .and_then(|tool_id| {
-                    self.messages
-                        .iter()
-                        .skip(pending.start_index)
-                        .find(|msg| msg.role == "tool" && msg.tool_call_id == *tool_id)
-                        .cloned()
-                });
-
-        if pending.start_index > self.messages.len() {
-            warn!(
-                "Skill deactivation cleanup: start_index {} is beyond messages.len() {} for skill '{}', skipping compaction",
-                pending.start_index,
-                self.messages.len(),
-                pending.skill_name
-            );
-            return;
-        }
-
-        info!(
-            "Skill deactivation cleanup: compacting messages from index {} for skill '{}'",
-            pending.start_index, pending.skill_name
-        );
-        self.truncate_messages(pending.start_index);
-
-        if let Some(tool_message) = activation_tool_message {
-            self.add_message(tool_message);
-        }
-
-        let report_content = format!(
-            "## Skill Report: {}\n\n✅ Skill '{}' executed successfully.\n\nHere is the compactified result. The full skill conversation was compactified and removed from the thread.\n\n{}",
-            pending.skill_name, pending.skill_name, pending.report
-        );
-        let report_message = ChatMessage {
-            role: "plain_text".to_string(),
-            content: ChatContent::SimpleText(report_content),
-            ..Default::default()
-        };
-        self.add_message(report_message);
     }
 
     pub(crate) fn update_card_planner_pause(
@@ -9332,8 +9263,6 @@ mod tests {
             allowed_tools: vec!["cat".to_string()],
             model_override: Some("gpt-4".to_string()),
             context_fork: Some("subagent".to_string()),
-            started_at_index: None,
-            activation_tool_call_id: None,
         };
         assert_eq!(
             session.active_command.context_fork,
@@ -9371,234 +9300,12 @@ mod tests {
     }
 
     #[test]
-    fn test_set_clear_active_skill() {
+    fn test_set_active_skill() {
         let mut session = make_session();
         assert!(session.thread.active_skill.is_none());
         session.set_active_skill("test-skill".to_string());
         assert_eq!(session.thread.active_skill, Some("test-skill".to_string()));
         assert!(session.trajectory_dirty);
-        session.clear_active_skill();
-        assert!(session.thread.active_skill.is_none());
-    }
-
-    fn make_user_message(text: &str) -> ChatMessage {
-        ChatMessage {
-            message_id: uuid::Uuid::new_v4().to_string(),
-            role: "user".to_string(),
-            content: crate::call_validation::ChatContent::SimpleText(text.to_string()),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_skill_deactivation_cleanup_compacts_messages() {
-        let mut session = make_session();
-
-        // Add 2 pre-skill messages
-        session.add_message(make_user_message("pre-skill message 1"));
-        session.add_message(make_user_message("pre-skill message 2"));
-        let anchor = session.messages.len(); // = 2
-
-        // Add skill-run messages that should be removed
-        session.add_message(make_user_message("skill run message A"));
-        session.add_message(make_user_message("skill run message B"));
-        session.add_message(make_user_message("skill run message C"));
-        assert_eq!(session.messages.len(), 5);
-
-        session.pending_skill_deactivation = Some(crate::chat::types::PendingSkillDeactivation {
-            start_index: anchor,
-            skill_name: "my-skill".to_string(),
-            report: "Did useful things.".to_string(),
-            activation_tool_call_id: None,
-        });
-
-        session.perform_skill_deactivation_cleanup();
-
-        // 2 pre-skill messages + 1 report = 3 total
-        assert_eq!(session.messages.len(), 3, "Expected 2 pre-skill + 1 report");
-        let last = session.messages.last().unwrap();
-        assert_eq!(last.role, "plain_text");
-        if let crate::call_validation::ChatContent::SimpleText(ref text) = last.content {
-            assert!(
-                text.contains("## Skill Report: my-skill"),
-                "Report header missing: {}",
-                text
-            );
-            assert!(
-                text.contains("Skill 'my-skill' executed successfully"),
-                "Report preface missing: {}",
-                text
-            );
-            assert!(
-                text.contains("Did useful things."),
-                "Report body missing: {}",
-                text
-            );
-        } else {
-            panic!("Expected SimpleText content in report message");
-        }
-        // pending is consumed
-        assert!(session.pending_skill_deactivation.is_none());
-    }
-
-    #[test]
-    fn test_skill_deactivation_cleanup_noop_when_no_pending() {
-        let mut session = make_session();
-        session.add_message(make_user_message("msg1"));
-        session.add_message(make_user_message("msg2"));
-
-        session.perform_skill_deactivation_cleanup();
-        // Nothing changed
-        assert_eq!(session.messages.len(), 2);
-    }
-
-    #[test]
-    fn test_skill_deactivation_keeps_activation_tool_message() {
-        let mut session = make_session();
-
-        session.add_message(make_user_message("pre-skill"));
-        let anchor = session.messages.len();
-
-        let tool_message = ChatMessage {
-            message_id: uuid::Uuid::new_v4().to_string(),
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText("Skill activated".to_string()),
-            tool_call_id: "call_activate_skill".to_string(),
-            tool_failed: Some(false),
-            ..Default::default()
-        };
-        session.add_message(tool_message);
-
-        session.add_message(ChatMessage {
-            message_id: uuid::Uuid::new_v4().to_string(),
-            role: "context_file".to_string(),
-            content: ChatContent::SimpleText("Skill body".to_string()),
-            ..Default::default()
-        });
-        session.add_message(make_user_message("skill run"));
-
-        session.pending_skill_deactivation = Some(crate::chat::types::PendingSkillDeactivation {
-            start_index: anchor,
-            skill_name: "tool-skill".to_string(),
-            report: "Wrapped up".to_string(),
-            activation_tool_call_id: Some("call_activate_skill".to_string()),
-        });
-
-        session.perform_skill_deactivation_cleanup();
-
-        assert_eq!(
-            session.messages.len(),
-            3,
-            "Expected pre-skill + tool + report"
-        );
-        assert_eq!(
-            session.messages[1].role, "tool",
-            "Activation tool message must remain"
-        );
-        assert_eq!(session.messages[1].tool_call_id, "call_activate_skill");
-        assert_eq!(session.messages.last().unwrap().role, "plain_text");
-    }
-
-    #[test]
-    fn test_skill_deactivation_skips_exact_activation_tool_call_id() {
-        let mut session = make_session();
-
-        session.add_message(make_user_message("pre-skill"));
-        let anchor = session.messages.len();
-
-        let unrelated_tool = ChatMessage {
-            message_id: uuid::Uuid::new_v4().to_string(),
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText("Unrelated tool".to_string()),
-            tool_call_id: "call_other_tool".to_string(),
-            tool_failed: Some(false),
-            ..Default::default()
-        };
-        session.add_message(unrelated_tool);
-
-        let activation_tool = ChatMessage {
-            message_id: uuid::Uuid::new_v4().to_string(),
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText("Skill activated".to_string()),
-            tool_call_id: "call_activate_skill".to_string(),
-            tool_failed: Some(false),
-            ..Default::default()
-        };
-        session.add_message(activation_tool);
-
-        session.add_message(ChatMessage {
-            message_id: uuid::Uuid::new_v4().to_string(),
-            role: "cd_instruction".to_string(),
-            content: ChatContent::SimpleText("Skill body".to_string()),
-            ..Default::default()
-        });
-        session.add_message(make_user_message("skill run"));
-
-        session.pending_skill_deactivation = Some(crate::chat::types::PendingSkillDeactivation {
-            start_index: anchor,
-            skill_name: "tool-skill".to_string(),
-            report: "Wrapped up".to_string(),
-            activation_tool_call_id: Some("call_activate_skill".to_string()),
-        });
-
-        session.perform_skill_deactivation_cleanup();
-
-        assert_eq!(
-            session.messages.len(),
-            3,
-            "Expected pre-skill + activation tool + report"
-        );
-        assert_eq!(session.messages[1].tool_call_id, "call_activate_skill");
-    }
-
-    #[test]
-    fn test_skill_deactivation_without_anchor_still_records_report() {
-        let mut session = make_session();
-        session.add_message(make_user_message("pre-skill"));
-
-        session.pending_skill_deactivation = Some(crate::chat::types::PendingSkillDeactivation {
-            start_index: session.messages.len(),
-            skill_name: "no-anchor".to_string(),
-            report: "All done".to_string(),
-            activation_tool_call_id: None,
-        });
-
-        session.perform_skill_deactivation_cleanup();
-
-        assert_eq!(session.messages.len(), 2, "Expected pre-skill + report");
-        let last = session.messages.last().unwrap();
-        assert_eq!(last.role, "plain_text");
-        if let crate::call_validation::ChatContent::SimpleText(ref text) = last.content {
-            assert!(text.contains("## Skill Report: no-anchor"));
-            assert!(text.contains("All done"));
-        }
-    }
-
-    #[test]
-    fn test_skill_deactivation_cleanup_rejects_out_of_range_index() {
-        let mut session = make_session();
-        session.add_message(make_user_message("only message"));
-        assert_eq!(session.messages.len(), 1);
-
-        session.pending_skill_deactivation = Some(crate::chat::types::PendingSkillDeactivation {
-            start_index: 99, // beyond messages.len()
-            skill_name: "bad-skill".to_string(),
-            report: "report".to_string(),
-            activation_tool_call_id: None,
-        });
-
-        session.perform_skill_deactivation_cleanup();
-
-        // No truncation, no report added — skipped with warning
-        assert_eq!(
-            session.messages.len(),
-            1,
-            "Messages must not be modified on bad index"
-        );
-        assert!(
-            session.pending_skill_deactivation.is_none(),
-            "pending must be consumed even on skip"
-        );
     }
 
     #[test]
@@ -9619,7 +9326,7 @@ mod tests {
         );
         assert!(
             session.thread.active_skill.is_none(),
-            "active_skill must be cleared on restore: compaction anchor is lost after restart"
+            "active_skill must be cleared on restore"
         );
     }
 

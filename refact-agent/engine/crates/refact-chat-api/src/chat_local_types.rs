@@ -186,14 +186,6 @@ pub struct PendingBrowserMessage {
     pub skill_context_msg: Option<ChatMessage>,
 }
 
-#[derive(Debug, Clone)]
-pub struct PendingSkillDeactivation {
-    pub start_index: usize,
-    pub report: String,
-    pub skill_name: String,
-    pub activation_tool_call_id: Option<String>,
-}
-
 pub fn is_segment_summary(message: &ChatMessage) -> bool {
     if message.role != "assistant" || is_ui_only_message(message) {
         return false;

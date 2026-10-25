@@ -1114,11 +1114,6 @@ async fn handle_browser_context_decision(
             }
         }
 
-        if pending.skill_activation_name.is_some()
-            && session.active_command.started_at_index.is_none()
-        {
-            session.active_command.started_at_index = Some(session.messages.len());
-        }
         if let Some(skill_msg) = pending.skill_context_msg {
             session.add_message(skill_msg);
         }
@@ -1303,15 +1298,9 @@ async fn prepare_user_message(
                     allowed_tools: expanded.allowed_tools,
                     model_override: expanded.model_override,
                     context_fork: expanded.context_fork,
-                    started_at_index: None,
-                    activation_tool_call_id: None,
                 };
             }
             Ok(None) => {
-                // No slash command — only reset active_command when no skill is
-                // active. While a skill is active, active_command carries the
-                // compaction anchor (started_at_index) and must not be wiped on
-                // every normal user message.
                 let mut session = session_arc.lock().await;
                 if session.thread.active_skill.is_none() {
                     session.active_command = ActiveCommandContext::default();
@@ -1605,12 +1594,6 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
             if let Some(screenshot) = ctx_messages.screenshot {
                 session.add_message(screenshot);
             }
-        }
-
-        // Set compaction anchor for slash-command skill activation before any skill
-        // messages are added, so deactivate_skill can truncate back to this point.
-        if skill_activation_name.is_some() && session.active_command.started_at_index.is_none() {
-            session.active_command.started_at_index = Some(session.messages.len());
         }
 
         if let Some(skill_msg) = skill_context_msg {

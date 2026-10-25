@@ -28,7 +28,6 @@ const MOCK_SKILL_DETAIL = {
   name: "my_skill",
   description: "Existing description",
   user_invocable: true,
-  disable_model_invocation: false,
   allowed_tools: [],
   model: null,
   context: null,

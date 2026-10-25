@@ -42,7 +42,6 @@ export interface SkillDetail {
   name: string;
   description: string;
   user_invocable: boolean;
-  disable_model_invocation: boolean;
   allowed_tools: string[];
   model: string | null;
   context: string | null;

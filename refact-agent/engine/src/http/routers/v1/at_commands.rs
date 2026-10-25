@@ -808,7 +808,6 @@ mod tests {
             name: name.to_string(),
             description: desc.to_string(),
             user_invocable,
-            disable_model_invocation: false,
             source: CommandSource::GlobalRefact,
         }
     }

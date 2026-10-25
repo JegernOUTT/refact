@@ -317,7 +317,6 @@ pub fn prepare_markdown(
     if kind == "skills" {
         fm.insert("name".into(), name.into());
         if before.is_none() {
-            fm.insert("disable-model-invocation".into(), true.into());
             fm.insert("user-invocable".into(), false.into());
         }
     }

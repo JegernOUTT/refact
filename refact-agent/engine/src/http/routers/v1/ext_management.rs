@@ -490,7 +490,6 @@ fn build_skill_frontmatter(
     name: &str,
     description: Option<&str>,
     user_invocable: Option<bool>,
-    disable_model_invocation: Option<bool>,
     argument_hint: Option<&str>,
     allowed_tools: Option<&[String]>,
     model: Option<Option<&str>>,
@@ -515,12 +514,6 @@ fn build_skill_frontmatter(
         map.insert(
             serde_yaml::Value::String("user-invocable".to_string()),
             serde_yaml::Value::Bool(ui),
-        );
-    }
-    if let Some(dmi) = disable_model_invocation {
-        map.insert(
-            serde_yaml::Value::String("disable-model-invocation".to_string()),
-            serde_yaml::Value::Bool(dmi),
         );
     }
     if let Some(ah) = argument_hint {
@@ -804,7 +797,6 @@ pub struct SkillDetailResponse {
     pub name: String,
     pub description: String,
     pub user_invocable: bool,
-    pub disable_model_invocation: bool,
     pub allowed_tools: Vec<String>,
     pub model: Option<String>,
     pub context: Option<String>,
@@ -904,7 +896,6 @@ pub async fn handle_v1_ext_skill_get(
                     name: full.index.name.clone(),
                     description: full.index.description.clone(),
                     user_invocable: full.index.user_invocable,
-                    disable_model_invocation: full.index.disable_model_invocation,
                     allowed_tools: full.allowed_tools.clone(),
                     model: full.model.clone(),
                     context: full.context.clone(),
@@ -928,8 +919,6 @@ pub struct SaveSkillRequest {
     pub description: Option<String>,
     #[serde(default)]
     pub user_invocable: Option<bool>,
-    #[serde(default)]
-    pub disable_model_invocation: Option<bool>,
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
     #[serde(default)]
@@ -1027,7 +1016,6 @@ pub async fn handle_v1_ext_skill_put(
             &name,
             req.description.as_deref(),
             req.user_invocable,
-            req.disable_model_invocation,
             req.argument_hint.as_deref(),
             req.allowed_tools.as_deref(),
             model_opt,
@@ -1087,8 +1075,6 @@ pub struct CreateSkillRequest {
     #[serde(default)]
     pub user_invocable: Option<bool>,
     #[serde(default)]
-    pub disable_model_invocation: Option<bool>,
-    #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
     #[serde(default)]
     pub model: Option<String>,
@@ -1135,7 +1121,6 @@ pub async fn handle_v1_ext_skill_post(
         &req.name,
         Some(&req.description),
         req.user_invocable,
-        req.disable_model_invocation,
         req.argument_hint.as_deref(),
         req.allowed_tools.as_deref(),
         req.model.as_ref().map(|m| Some(m.as_str())),
@@ -1914,7 +1899,6 @@ mod tests {
             serde_yaml::Value::Mapping(existing),
             "new-name",
             Some("new desc"),
-            None,
             None,
             None,
             None,

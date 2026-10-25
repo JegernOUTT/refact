@@ -368,7 +368,6 @@ tools:
   - search_symbol_definition
   - search_semantic
   - activate_skill
-  - deactivate_skill
   - knowledge
   - search_trajectories
   - get_trajectory_context
