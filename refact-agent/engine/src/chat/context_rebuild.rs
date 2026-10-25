@@ -312,8 +312,7 @@ pub(crate) fn token_cap_to_symbol_budget(
     } else {
         ((rest_tokens as u128 * symbols as u128) / tokens as u128).min(usize::MAX as u128) as usize
     };
-    control_symbols
-        .saturating_add(rest_symbols.min(symbols.saturating_sub(1)))
+    control_symbols.saturating_add(rest_symbols.min(symbols.saturating_sub(1)))
 }
 
 pub(crate) fn is_abandoned_note(message: &ChatMessage) -> bool {
@@ -335,7 +334,10 @@ fn noted_call_ids(note: &ChatMessage) -> impl Iterator<Item = &str> {
         .filter_map(|c| c.get("tool_call_id").and_then(serde_json::Value::as_str))
 }
 
-pub(crate) fn rebuild_notes(source: &[ChatMessage], abandoned: &[AbandonedCall]) -> Vec<ChatMessage> {
+pub(crate) fn rebuild_notes(
+    source: &[ChatMessage],
+    abandoned: &[AbandonedCall],
+) -> Vec<ChatMessage> {
     let mut seen = std::collections::HashSet::new();
     let mut notes: Vec<ChatMessage> = source
         .iter()
@@ -838,16 +840,13 @@ where
                 } else {
                     CompressionPhase::Failed
                 },
-                result
-                    .as_ref()
-                    .err()
-                    .map(|error| {
-                        if is_routine_rebuild_skip(error) {
-                            CompressionReason::SourceChanged
-                        } else {
-                            CompressionReason::TransientFailure
-                        }
-                    }),
+                result.as_ref().err().map(|error| {
+                    if is_routine_rebuild_skip(error) {
+                        CompressionReason::SourceChanged
+                    } else {
+                        CompressionReason::TransientFailure
+                    }
+                }),
             );
         }
         let messages_after = active_context(&session.messages)
@@ -1048,8 +1047,7 @@ pub async fn rebuild_session(
         if serde_json::to_value(&raw).ok() != serde_json::to_value(&hook_messages).ok() {
             return Err(SKIP_CHANGED_DURING_HOOK.into());
         }
-        let (normalized, abandoned) =
-            normalize_rebuild_input(&raw, &live_tool_call_ids(&session));
+        let (normalized, abandoned) = normalize_rebuild_input(&raw, &live_tool_call_ids(&session));
         if normalized.is_empty() || pending_tools(&normalized) {
             return Err(SKIP_PENDING_TOOLS.into());
         }
@@ -1223,9 +1221,10 @@ pub async fn rebuild_session(
     )
     .map(|mut report| {
         if !abandoned.is_empty() {
-            report
-                .extra
-                .insert(NORMALIZATION_REPORT_EXTRA.into(), abandoned_summary(&abandoned));
+            report.extra.insert(
+                NORMALIZATION_REPORT_EXTRA.into(),
+                abandoned_summary(&abandoned),
+            );
         }
         report
     })
