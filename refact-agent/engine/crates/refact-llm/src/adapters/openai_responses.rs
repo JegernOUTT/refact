@@ -392,6 +392,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
             | "response.refusal.done"
             | "response.content_part.added"
             | "response.content_part.done"
+            | "response.metadata"
             | "keepalive" => {
                 tracing::trace!("{} (redundant/lifecycle, skipping)", event_type);
             }
