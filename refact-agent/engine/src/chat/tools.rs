@@ -396,20 +396,18 @@ fn is_editing_tool(tool_name: &str) -> bool {
 // ToolBudget so running many of them at once does not chop each report to a
 // fair-share fragment; overall context pressure is handled later by chat
 // compression instead.
-const TOOL_RESULT_TRUNCATION_EXEMPT_TOOLS: &[&str] = &[
-    "review",
-    "code_review",
-    "subagent",
-    "agent_wait",
-    "agent_result",
-];
+const TOOL_RESULT_TRUNCATION_EXEMPT_TOOLS: &[&str] =
+    &["review", "code_review", "subagent", "wait", "agent_result"];
 
 fn is_tool_result_truncation_exempt(tool_name: &str) -> bool {
     TOOL_RESULT_TRUNCATION_EXEMPT_TOOLS.contains(&tool_name)
 }
 
 fn should_auto_approve_confirmation(thread: &ThreadParams, tool_name: &str) -> bool {
-    if matches!(tool_name, "agent_approval" | "agent_resume") {
+    if matches!(
+        tool_name,
+        "agent_approval" | "agent_lifecycle" | "pause" | "resume"
+    ) {
         return false;
     }
     if thread.autonomous_no_confirm {
@@ -697,7 +695,7 @@ mod tests {
             if self.runtime_failure {
                 return Err("deterministic runtime failure".to_string());
             }
-            let delay = if self.name == "sleep" {
+            let delay = if self.name == "wait" {
                 std::time::Duration::from_secs(8)
             } else {
                 std::time::Duration::from_millis(20)
@@ -731,7 +729,7 @@ mod tests {
 
     impl DeterministicToolRegistry {
         fn tools(&self) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
-            ["alpha", "beta", "sleep"]
+            ["alpha", "beta", "wait"]
                 .into_iter()
                 .map(|name| {
                     Box::new(DeterministicTool {
@@ -1226,7 +1224,7 @@ mod tests {
         let mut catalog = ToolCatalogSnapshot {
             index: refact_runtime_api::ToolRegistryIndex {
                 tools: vec![
-                    deterministic_tool_desc("agent_wait"),
+                    deterministic_tool_desc("wait"),
                     deterministic_tool_desc("shell"),
                 ],
                 mcp_lazy_mode: false,
@@ -1235,11 +1233,11 @@ mod tests {
             },
             policy: Vec::new(),
             aliases: refact_tool_api::build_registry_from_names(&vec![
-                "agent_wait".into(),
+                "wait".into(),
                 "shell".into(),
             ]),
         };
-        let call = deterministic_tool_call("wait", "agent_wait");
+        let call = deterministic_tool_call("wait", "wait");
         assert!(recognized_runner_wait(&catalog, &call));
         assert!(!recognized_runner_wait(
             &catalog,
@@ -1251,7 +1249,7 @@ mod tests {
 
     #[test]
     fn runner_capacity_refusal_keeps_tool_call_pairing() {
-        let call = deterministic_tool_call("paired", "agent_wait");
+        let call = deterministic_tool_call("paired", "wait");
         let (index, _, messages, files) = runner_capacity_error(2, &call, "cancelled");
         assert_eq!(index, 2);
         assert!(files.is_empty());
@@ -1376,8 +1374,8 @@ mod tests {
                 id: "tool-sleep".to_string(),
                 index: None,
                 function: crate::call_validation::ChatToolFunction {
-                    name: "sleep".to_string(),
-                    arguments: r#"{"duration_ms":8000,"description":"Wait eight seconds"}"#
+                    name: "wait".to_string(),
+                    arguments: r#"{"target":{"kind":"duration","duration_ms":8000},"description":"Wait eight seconds"}"#
                         .to_string(),
                 },
                 tool_type: "function".to_string(),
@@ -1703,7 +1701,7 @@ mod tests {
     fn test_tool_result_truncation_exempt_tools() {
         assert!(is_tool_result_truncation_exempt("code_review"));
         assert!(is_tool_result_truncation_exempt("subagent"));
-        assert!(is_tool_result_truncation_exempt("agent_wait"));
+        assert!(is_tool_result_truncation_exempt("wait"));
         assert!(is_tool_result_truncation_exempt("agent_result"));
         assert!(!is_tool_result_truncation_exempt("cat"));
         assert!(!is_tool_result_truncation_exempt("shell"));
@@ -2812,7 +2810,19 @@ pub async fn process_tool_calls_once(
                     &tool_call.function.name,
                 );
             match tool_name.as_str() {
-                "ask_questions" | "wait_agents" => final_state = SessionState::WaitingUserInput,
+                "ask_questions" => final_state = SessionState::WaitingUserInput,
+                "wait"
+                    if tool_results.iter().any(|m| {
+                        m.tool_call_id == tool_call.id
+                            && m.tool_failed != Some(true)
+                            && serde_json::from_str::<serde_json::Value>(
+                                &m.content.content_text_only(),
+                            )
+                            .is_ok_and(|body| body["outcome"] == "parked")
+                    }) =>
+                {
+                    final_state = SessionState::WaitingUserInput
+                }
                 "task_done" | "finish" => {
                     final_state = SessionState::Completed;
                     completion_trigger = Some(tool_name.to_string());
@@ -2965,8 +2975,10 @@ fn compute_final_action(
     if matches!(mode_action, Some("deny")) {
         return "deny";
     }
-    if matches!(tool_name, "agent_approval" | "agent_resume")
-        && *tool_result == MatchConfirmDenyResult::CONFIRMATION
+    if matches!(
+        tool_name,
+        "agent_approval" | "agent_lifecycle" | "pause" | "resume"
+    ) && *tool_result == MatchConfirmDenyResult::CONFIRMATION
     {
         return "ask";
     }
@@ -3577,8 +3589,7 @@ async fn execute_single_tool(
             serde_json::Map::from_iter(args.into_iter()),
         ),
     );
-    // Sleep must finish cooperatively so its accumulated ticks are not discarded.
-    let execution = if interruptible && tool_call.function.name != "sleep" {
+    let execution = if interruptible && tool_call.function.name != "wait" {
         let interrupt = crate::tools::tools_description::WaitInterrupt::from_context(&ccx).await;
         tokio::select! {
             result = execution_future => result,
@@ -3763,7 +3774,7 @@ async fn runner_capacity_wait<T>(
 /// Tools whose whole job is to block: the runner parks its execution permit for
 /// the duration instead of occupying a slot while idle.
 pub(crate) fn is_recognized_runner_wait_name(name: &str) -> bool {
-    matches!(name, "agent_wait" | "process_wait" | "sleep")
+    matches!(name, "wait")
 }
 
 fn recognized_runner_wait(catalog: &ToolCatalogSnapshot, call: &ChatToolCall) -> bool {
@@ -4435,7 +4446,7 @@ mod interruptible_wait_tests {
                     crate::app_state::AppToolRegistry::with_fixture_tool_factory(
                         base_app.gcx.clone(),
                         Arc::new(|| {
-                            vec![Box::new(crate::tools::tool_sleep::ToolSleep {
+                            vec![Box::new(crate::tools::tool_wait::ToolWait {
                                 config_path: String::new(),
                             })
                                 as Box<dyn crate::tools::tools_description::Tool + Send>]
@@ -4465,7 +4476,7 @@ mod interruptible_wait_tests {
                 )
                 .await,
             ));
-            let desc = crate::tools::tool_sleep::ToolSleep {
+            let desc = crate::tools::tool_wait::ToolWait {
                 config_path: String::new(),
             }
             .tool_description();
@@ -4484,8 +4495,8 @@ mod interruptible_wait_tests {
                 index: Some(0),
                 tool_type: "function".into(),
                 function: crate::call_validation::ChatToolFunction {
-                    name: "sleep".into(),
-                    arguments: serde_json::json!({"duration_ms":30000,"description":"wait"})
+                    name: "wait".into(),
+                    arguments: serde_json::json!({"target":{"kind":"duration","duration_ms":30000},"description":"wait"})
                         .to_string(),
                 },
                 extra_content: None,
@@ -4551,8 +4562,8 @@ mod interruptible_wait_tests {
                     .unwrap()
                     .unwrap();
             assert!(!corrected);
-            assert_eq!(messages[0].extra["sleep"]["interrupted"], true);
-            assert!(messages[0].extra["sleep"]["reason"]
+            assert_eq!(messages[0].extra["wait"]["interrupted"], true);
+            assert!(messages[0].extra["wait"]["reason"]
                 .as_str()
                 .unwrap()
                 .contains("message arrived"));

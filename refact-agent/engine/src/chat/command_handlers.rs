@@ -38,16 +38,40 @@ pub(super) async fn handle_queue_command(
         native_guard: request.native_approval_guard,
         supervision_guard: request.supervision_guard,
     };
+    if matches!(
+        &request.command,
+        ChatCommand::SetGoal { .. }
+            | ChatCommand::UpdateGoal { .. }
+            | ChatCommand::SetGoalBudget { .. }
+            | ChatCommand::GoalControl { .. }
+    ) {
+        if let Err(error) = crate::tasks::goal::hydrate_session_task_goal(
+            context.app.gcx.clone(),
+            &context.session_arc,
+        )
+        .await
+        {
+            reject_guard(
+                &mut *context.session_arc.lock().await,
+                &context.request_id,
+                error,
+            );
+            return QueueCommandOutcome::Continue;
+        }
+    }
     match request.command {
         ChatCommand::SetGoal {
             content,
             budget,
             criteria,
-        } => Box::pin(handle_set_goal(&context, content, budget, criteria)).await,
+            plan,
+        } => Box::pin(handle_set_goal(&context, content, budget, criteria, plan)).await,
         ChatCommand::SetGoalBudget { budget } => {
             Box::pin(handle_set_goal_budget(&context, budget)).await
         }
-        ChatCommand::UpdateGoal { note } => Box::pin(handle_update_goal(&context, note)).await,
+        ChatCommand::UpdateGoal { note, plan } => {
+            Box::pin(handle_update_goal(&context, note, plan)).await
+        }
         ChatCommand::GoalControl { action } => {
             Box::pin(handle_goal_control(&context, action)).await
         }
@@ -230,6 +254,7 @@ async fn handle_set_goal(
     content: String,
     budget: Option<GoalBudget>,
     criteria: Option<Vec<GoalCriterion>>,
+    plan: Option<refact_chat_api::GoalPlanInstall>,
 ) -> QueueCommandOutcome {
     let app = context.app.clone();
     let session_arc = context.session_arc.clone();
@@ -255,6 +280,7 @@ async fn handle_set_goal(
                     content,
                     budget,
                     criteria,
+                    plan,
                 ))
             },
         ) {
@@ -267,6 +293,12 @@ async fn handle_set_goal(
     };
     match result {
         Ok(_) => {
+            if let Err(error) =
+                crate::tasks::goal::commit_session_task_goal(app.gcx.clone(), &session_arc).await
+            {
+                emit_goal_command_error(&mut *session_arc.lock().await, error);
+                return QueueCommandOutcome::Finished;
+            }
             maybe_save_trajectory_with_intent(
                 app.clone(),
                 session_arc.clone(),
@@ -295,6 +327,12 @@ async fn handle_set_goal_budget(
     };
     match result {
         Ok(_) => {
+            if let Err(error) =
+                crate::tasks::goal::commit_session_task_goal(app.gcx.clone(), &session_arc).await
+            {
+                emit_goal_command_error(&mut *session_arc.lock().await, error);
+                return QueueCommandOutcome::Finished;
+            }
             maybe_save_trajectory_with_intent(
                 app.clone(),
                 session_arc.clone(),
@@ -311,13 +349,17 @@ async fn handle_set_goal_budget(
     QueueCommandOutcome::Finished
 }
 
-async fn handle_update_goal(context: &QueueCommandContext, note: String) -> QueueCommandOutcome {
+async fn handle_update_goal(
+    context: &QueueCommandContext,
+    note: Option<String>,
+    plan: Option<refact_chat_api::GoalPlanMutation>,
+) -> QueueCommandOutcome {
     let app = context.app.clone();
     let session_arc = context.session_arc.clone();
     let policy = crate::chat::verify_cmd::VerifyCommandPolicy::load(app.gcx.clone()).await;
     let result = {
         let mut session = session_arc.lock().await;
-        handle_update_goal_command(&mut session, note).map(|result| {
+        handle_update_goal_command(&mut session, note, plan).map(|result| {
             for advisory in crate::chat::evidence::unverifiable_goal_criteria(&session, &policy) {
                 tracing::info!(chat_id = %session.chat_id, %advisory, "UpdateGoal appended with advisory");
             }
@@ -326,6 +368,12 @@ async fn handle_update_goal(context: &QueueCommandContext, note: String) -> Queu
     };
     match result {
         Ok(_) => {
+            if let Err(error) =
+                crate::tasks::goal::commit_session_task_goal(app.gcx.clone(), &session_arc).await
+            {
+                emit_goal_command_error(&mut *session_arc.lock().await, error);
+                return QueueCommandOutcome::Finished;
+            }
             maybe_save_trajectory_with_intent(
                 app.clone(),
                 session_arc.clone(),
@@ -364,6 +412,12 @@ async fn handle_goal_control(context: &QueueCommandContext, action: String) -> Q
     };
     match result {
         Ok(_) => {
+            if let Err(error) =
+                crate::tasks::goal::commit_session_task_goal(app.gcx.clone(), &session_arc).await
+            {
+                emit_goal_command_error(&mut *session_arc.lock().await, error);
+                return QueueCommandOutcome::Finished;
+            }
             maybe_save_trajectory_with_intent(
                 app.clone(),
                 session_arc.clone(),
@@ -1221,6 +1275,12 @@ async fn handle_deliver_messages(
             }
         }
         Ok(_) => {
+            if let Err(error) =
+                crate::tasks::goal::commit_session_task_goal(app.gcx.clone(), &session_arc).await
+            {
+                emit_goal_command_error(&mut *session_arc.lock().await, error);
+                return QueueCommandOutcome::Finished;
+            }
             maybe_save_trajectory_with_intent(
                 app.clone(),
                 session_arc.clone(),

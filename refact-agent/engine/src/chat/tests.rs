@@ -1813,6 +1813,7 @@ mod tests {
         let app = AppState::from_gcx(gcx).await;
         let mut session = ChatSession::new("plan-agent-test".to_string());
         session.thread.mode = "explore".to_string();
+        session.install_goal("explore", "Inspect and implement", true, Default::default());
 
         let old_mode = session.thread.mode.clone();
         let patch = json!({"mode": "agent"});
@@ -1827,13 +1828,11 @@ mod tests {
         )
         .await;
 
-        let plans = crate::chat::plan_role::plan_history(&session);
-        assert_eq!(plans.len(), 1);
-        let plan = plans[0];
-        assert_eq!(plan.extra["plan"]["mode"], json!("agent"));
-        assert_eq!(plan.extra["plan"]["version"], json!(1));
-        assert!(plan.extra["plan"]["supersedes"].is_null());
-        let content = plan.content.content_text_only();
+        let plan = session.goal.as_ref().unwrap().plan.as_ref().unwrap();
+        assert_eq!(plan.mode, "agent");
+        assert_eq!(plan.version, 1);
+        assert!(crate::chat::plan_role::plan_history(&session).is_empty());
+        let content = &plan.content;
         assert!(content.contains("Mode: Agent"));
         assert!(content.contains("src/"));
         assert!(!content.contains("%MODE_NAME%"));
@@ -1847,6 +1846,7 @@ mod tests {
         let app = AppState::from_gcx(gcx).await;
         let mut session = ChatSession::new("plan-version-test".to_string());
         session.thread.mode = "explore".to_string();
+        session.install_goal("explore", "Complete the task", true, Default::default());
 
         let old_mode = session.thread.mode.clone();
         let patch = json!({"mode": "agent"});
@@ -1861,15 +1861,15 @@ mod tests {
         )
         .await;
 
-        session.add_message(crate::chat::internal_roles::plan_delta(
-            "tool.set_plan",
-            json!({"seq": 1}),
+        let goal_id = crate::chat::goal_role::current_base_goal(&session)
+            .unwrap()
+            .message_id;
+        session.add_message(crate::chat::internal_roles::goal_delta(
+            "tool.update_goal",
+            json!({"target":"plan","goal_id":goal_id,"seq": 1}),
             "keep this update",
         ));
-        let base_plan_id = crate::chat::plan_role::current_base_plan(&session)
-            .unwrap()
-            .message_id
-            .clone();
+        let before = session.goal.as_ref().unwrap().plan.clone().unwrap();
         let old_mode = session.thread.mode.clone();
         let patch = json!({"mode": "task_planner"});
         let (changed, _) = crate::chat::queue::apply_setparams_patch(&mut session.thread, &patch);
@@ -1888,13 +1888,13 @@ mod tests {
             .iter()
             .filter(|message| message.role == "plan")
             .collect();
-        assert_eq!(chronological.len(), 1);
-        assert_eq!(chronological[0].message_id, base_plan_id);
-        assert_eq!(chronological[0].extra["plan"]["version"], json!(1));
-        assert_eq!(chronological[0].extra["plan"]["mode"], json!("agent"));
-        let deltas = crate::chat::plan_role::plan_delta_events(&session);
-        assert_eq!(deltas.len(), 1);
-        assert_eq!(deltas[0].content.content_text_only(), "keep this update");
+        assert!(chronological.is_empty());
+        let plan = session.goal.as_ref().unwrap().plan.as_ref().unwrap();
+        assert_eq!(plan.version, before.version);
+        assert_eq!(plan.mode, before.mode);
+        assert_eq!(plan.content, before.content);
+        assert_eq!(plan.delta_count, 1);
+        assert!(plan.content.contains("keep this update"));
     }
 
     #[tokio::test]

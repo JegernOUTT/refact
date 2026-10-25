@@ -1,0 +1,143 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use async_trait::async_trait;
+use serde_json::{json, Value};
+use tokio::sync::Mutex as AMutex;
+use crate::at_commands::at_commands::AtCommandsContext;
+use crate::call_validation::ContextEnum;
+use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
+
+pub struct ToolWait {
+    pub config_path: String,
+}
+
+#[async_trait]
+impl Tool for ToolWait {
+    fn tool_description(&self) -> ToolDesc {
+        let task_schema = super::tool_task_check_agents::agent_status_input_schema();
+        let mut task_properties = task_schema["properties"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        task_properties.insert("kind".into(), json!({"const":"task_agents"}));
+        ToolDesc {
+            name:"wait".into(), display_name:"Wait".into(),
+            source:ToolSource {source_type:ToolSourceType::Builtin,config_path:self.config_path.clone()},
+            experimental:false, allow_parallel:true,
+            description:"Wait for a duration, process, any one authorized child agent, or park the task planner awaiting matching agents. Interruption never cancels the target. Duration ticks are enqueued after the wait tool result. Task agent timeout is 30–1800 seconds in milliseconds.".into(),
+            input_schema:json!({"type":"object","additionalProperties":false,"properties":{
+                "target":{"oneOf":[
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"duration"},"duration_ms":{"type":"integer","minimum":100,"maximum":3600000},"tick_interval_ms":{"type":"integer","minimum":5000}},"required":["kind","duration_ms"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"process"},"process_id":{"type":"string","minLength":1}},"required":["kind","process_id"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"agents"},"agent_ids":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"string","minLength":1}}},"required":["kind","agent_ids"]},
+                    {"type":"object","additionalProperties":false,"properties":task_properties,"required":["kind"]}
+                ]},
+                "description":{"type":"string","minLength":1,"maxLength":80},
+                "timeout_ms":{"type":"integer","minimum":0},
+                "push":refact_core::chat_types::PushMode::schema()
+            },"required":["target"]}), output_schema:None,annotations:None,
+        }
+    }
+    async fn tool_execute(
+        &mut self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        args: &HashMap<String, Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        for key in args.keys() {
+            if !matches!(
+                key.as_str(),
+                "target" | "description" | "timeout_ms" | "push"
+            ) {
+                return Err(format!("Unknown argument '{key}'"));
+            }
+        }
+        let target = args
+            .get("target")
+            .and_then(Value::as_object)
+            .ok_or("target must be an object")?;
+        let kind = target
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or("target.kind is required")?;
+        let fields: &[&str] = match kind {
+            "duration" => &["kind", "duration_ms", "tick_interval_ms"],
+            "process" => &["kind", "process_id"],
+            "agents" => &["kind", "agent_ids"],
+            "task_agents" => &[
+                "kind",
+                "task_id",
+                "card_ids",
+                "status_filter",
+                "format",
+                "priority_filter",
+                "min_age_minutes",
+                "sort",
+                "limit",
+                "offset",
+                "since_seq",
+                "group_by",
+            ],
+            _ => {
+                return Err("target.kind must be duration, process, agents, or task_agents".into())
+            }
+        };
+        for key in target.keys() {
+            if !fields.contains(&key.as_str()) {
+                return Err(format!("'{key}' is not applicable to {kind}"));
+            }
+        }
+        if kind == "duration" && args.contains_key("timeout_ms") {
+            return Err("timeout_ms is not applicable to duration".into());
+        }
+        if kind != "duration" && (args.contains_key("description") || args.contains_key("push")) {
+            return Err("description and push apply only to duration".into());
+        }
+        let mut operation: HashMap<String, Value> = target
+            .iter()
+            .filter(|(k, _)| k.as_str() != "kind")
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for key in ["description", "push", "timeout_ms"] {
+            if let Some(value) = args.get(key) {
+                operation.insert(key.into(), value.clone());
+            }
+        }
+        match kind {
+            "duration" => {
+                super::tool_sleep::execute_duration_wait(ccx, tool_call_id, &operation).await
+            }
+            "process" => {
+                super::tool_process::execute_process_wait(ccx, tool_call_id, &operation).await
+            }
+            "agents" => {
+                super::tool_background_agents::execute_agents_wait(ccx, tool_call_id, &operation)
+                    .await
+            }
+            "task_agents" => {
+                if let Some(value) = operation.remove("timeout_ms") {
+                    let ms = value.as_u64().ok_or("timeout_ms must be an integer")?;
+                    if !(30_000..=1_800_000).contains(&ms) {
+                        return Err(
+                            "task_agents timeout_ms must be between 30000 and 1800000".into()
+                        );
+                    }
+                    if ms % 1000 != 0 {
+                        return Err("task_agents timeout_ms must use whole seconds".into());
+                    }
+                    operation.insert("wake_up_after_secs".into(), json!(ms / 1000));
+                }
+                super::tool_task_wait_for_agents::execute_task_agents_wait(
+                    ccx,
+                    tool_call_id,
+                    &operation,
+                )
+                .await
+            }
+            _ => unreachable!(),
+        }
+    }
+    fn has_config_path(&self) -> Option<String> {
+        Some(self.config_path.clone())
+    }
+}

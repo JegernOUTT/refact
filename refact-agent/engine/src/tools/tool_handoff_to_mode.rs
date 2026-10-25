@@ -17,9 +17,6 @@ use crate::chat::trajectories::{
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tasks::storage;
-use crate::tools::tool_task_documents::{
-    create_document_at, documents_dir_for_task, next_available_slug_at,
-};
 use refact_chat_history::trajectory_ops::sanitize_messages_for_new_thread;
 use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 use refact_runtime_api::SessionState;
@@ -97,9 +94,6 @@ fn apply_overrides(decisions: &mut ParsedDecisions, args: &HashMap<String, Value
     }
     if let Some(handoff_message) = parse_optional_string(args, "handoff_message") {
         decisions.handoff_message = handoff_message;
-    }
-    if let Some(initial_plan) = parse_optional_string(args, "initial_plan") {
-        decisions.initial_plan = Some(initial_plan);
     }
 }
 
@@ -180,27 +174,6 @@ async fn ensure_task_for_planner_handoff(
         card_id: None,
         planner_chat_id: Some(chat_id),
     }))
-}
-
-async fn create_initial_plan_document(
-    gcx: Arc<crate::global_context::GlobalContext>,
-    task_id: &str,
-    plan_text: &str,
-) -> Result<String, String> {
-    let documents_dir = documents_dir_for_task(gcx, task_id).await?;
-    let slug = next_available_slug_at(&documents_dir, "initial-plan").await?;
-    create_document_at(
-        &documents_dir,
-        &slug,
-        "Initial Plan",
-        "plan",
-        plan_text,
-        true,
-        Vec::new(),
-        "planner",
-    )
-    .await?;
-    Ok(slug)
 }
 
 /// The destination always starts with the same authoritative report artifact.
@@ -291,6 +264,15 @@ pub(crate) fn transition_goal(
     target_id: &str,
     mode: &str,
 ) -> Result<crate::agentic::mode_transition::GoalTransferResult, String> {
+    if goal.is_some_and(|goal| matches!(goal.owner, Some(refact_chat_api::GoalOwner::Task { .. })))
+    {
+        return Ok(crate::agentic::mode_transition::GoalTransferResult {
+            source_messages: raw.to_vec(),
+            source_goal: None,
+            target_messages: Vec::new(),
+            target_goal: None,
+        });
+    }
     let input =
         refact_core::active_context::legacy_rebuild_input(raw).map_err(|e| e.to_string())?;
     let mut transfer = transfer_goal_ownership(
@@ -324,6 +306,107 @@ pub(crate) async fn persist_transition(
     snapshot: &TrajectorySnapshot,
     transfer: &crate::agentic::mode_transition::GoalTransferResult,
 ) -> Result<(), String> {
+    let Some(meta) = snapshot
+        .task_meta
+        .as_ref()
+        .filter(|meta| snapshot.mode == "task_planner" && meta.role == "planner")
+    else {
+        return persist_goal_transition(gcx, source, snapshot, transfer).await;
+    };
+    let canonical = crate::tasks::goal::preflight_planner_transition(
+        gcx.clone(),
+        &meta.task_id,
+        &source.chat_id,
+        source.goal.as_ref(),
+    )
+    .await?;
+    let mut destination = snapshot.clone();
+    let mut staged = destination.clone();
+    staged.goal = None;
+    staged.goal_ledger.clear();
+    let mut messages = refact_core::active_context::legacy_rebuild_input(&staged.messages)
+        .map_err(|e| e.to_string())?;
+    messages.retain(|message| {
+        !matches!(message.role.as_str(), "goal" | "plan")
+            && !matches!(
+                message
+                    .extra
+                    .get("event")
+                    .and_then(|event| event.get("subkind"))
+                    .and_then(Value::as_str),
+                Some("goal_delta" | "plan_delta" | "goal_pursuit")
+            )
+    });
+    staged.messages = transition_report(
+        &messages,
+        source.trajectory_version,
+        snapshot.model.clone(),
+        source.thread.mode.clone(),
+        snapshot.mode.clone(),
+    )?;
+    crate::chat::trajectories::save_trajectory_snapshot(gcx.clone(), staged).await?;
+    crate::tasks::goal::move_planner_controller(
+        gcx.clone(),
+        &meta.task_id,
+        &source.chat_id,
+        &snapshot.chat_id,
+    )
+    .await?;
+    let result = if let Some(record) = canonical {
+        destination.goal = record.snapshot(&meta.task_id);
+        destination.goal_ledger = record.ledger;
+        messages.extend(record.messages);
+        destination.messages = transition_report(
+            &messages,
+            source.trajectory_version,
+            snapshot.model.clone(),
+            source.thread.mode.clone(),
+            snapshot.mode.clone(),
+        )?;
+        crate::chat::trajectories::save_trajectory_snapshot(gcx.clone(), destination).await
+    } else {
+        match persist_goal_transition(gcx.clone(), source, &destination, transfer).await {
+            Ok(()) => {
+                crate::tasks::goal::initialize_transition_goal(
+                    gcx.clone(),
+                    &meta.task_id,
+                    &snapshot.chat_id,
+                    refact_core::active_context::legacy_rebuild_input(&snapshot.messages)
+                        .map_err(|e| e.to_string())?,
+                    snapshot.goal_ledger.clone(),
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        }
+    };
+    result.map_err(|error| {
+        format!(
+            "Planner destination {} retained; activation requires recovery: {error}",
+            snapshot.chat_id
+        )
+    })?;
+    if source.goal.as_ref().is_some_and(|goal| {
+        goal.owner
+            == Some(refact_chat_api::GoalOwner::Task {
+                id: meta.task_id.clone(),
+            })
+    }) {
+        if let Some(goal) = source.goal.as_mut() {
+            goal.active = false;
+            goal.status = refact_chat_api::GoalStatus::Paused;
+        }
+        source.emit_goal_status();
+    }
+    Ok(())
+}
+
+async fn persist_goal_transition(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    source: &mut crate::chat::types::ChatSession,
+    snapshot: &TrajectorySnapshot,
+    transfer: &crate::agentic::mode_transition::GoalTransferResult,
+) -> Result<(), String> {
     use crate::chat::trajectories::{save_trajectory_snapshot, trajectory_snapshot_from_session};
     if !transfer.transferred() {
         return save_trajectory_snapshot(gcx, snapshot.clone()).await;
@@ -334,7 +417,16 @@ pub(crate) async fn persist_transition(
     let mut active = refact_core::active_context::active_context(&staged.messages)
         .map_err(|e| e.to_string())?
         .messages;
-    active.retain(|m| m.role != "goal" && m.role != "goal_delta");
+    active.retain(|m| {
+        m.role != "goal"
+            && !matches!(
+                m.extra
+                    .get("event")
+                    .and_then(|event| event.get("subkind"))
+                    .and_then(Value::as_str),
+                Some("goal_delta" | "plan_delta" | "goal_pursuit")
+            )
+    });
     staged.messages = transition_report(
         &active,
         source.trajectory_version,
@@ -437,10 +529,6 @@ impl Tool for ToolHandoffToMode {
                 "handoff_message": {
                     "type": "string",
                     "description": "Short handoff message for the new chat"
-                },
-                "initial_plan": {
-                    "type": "string",
-                    "description": "Optional plan text to save as the initial task document when target_mode is task_planner"
                 }
             },
             "required": ["target_mode"]
@@ -689,13 +777,29 @@ async fn finalize_handoff_inner(
     };
 
     apply_overrides(&mut decisions, args);
-    let plan_body = parse_optional_string(args, "initial_plan")
-            .or_else(|| parse_optional_string(args, "summary"))
-            .or_else(|| parse_optional_string(args, "context_summary"))
-            .or_else(|| parse_optional_string(args, "handoff_message"))
-            .unwrap_or_else(|| {
-                "# Initial Plan\n\nNo plan content provided at handoff. Edit this document or use doc_create.".to_string()
-            });
+    if args.contains_key("initial_plan") {
+        return Err("initial_plan was removed; carry or install goal.plan instead".into());
+    }
+
+    let prepared_task_meta = ensure_task_for_planner_handoff(
+        gcx.clone(),
+        &canonical_mode,
+        existing_task_meta,
+        &chat_id,
+        thread.root_chat_id.as_deref(),
+    )
+    .await?;
+    if canonical_mode == "task_planner" {
+        if let Some(meta) = &prepared_task_meta {
+            crate::tasks::goal::preflight_planner_transition(
+                gcx.clone(),
+                &meta.task_id,
+                &chat_id,
+                source_goal.as_ref(),
+            )
+            .await?;
+        }
+    }
 
     let outcome = Box::pin(crate::agentic::mode_transition::reconstruct_context(
         gcx.clone(),
@@ -736,7 +840,7 @@ async fn finalize_handoff_inner(
         return Err("Handoff acknowledgement disappeared".into());
     }
     let new_chat_id = Uuid::new_v4().to_string();
-    let mut task_meta = existing_task_meta;
+    let mut task_meta = prepared_task_meta;
     if canonical_mode == "task_planner" {
         if let Some(meta) = task_meta.as_mut() {
             meta.role = "planner".into();
@@ -837,45 +941,7 @@ async fn finalize_handoff_inner(
 
     persist_transition(gcx.clone(), &mut source, &snapshot, &transferred_goal).await?;
     drop(source);
-    // Task/document creation happens only after a durable destination exists.
-    let task_setup = ensure_task_for_planner_handoff(
-        gcx.clone(),
-        &canonical_mode,
-        task_meta.clone(),
-        &new_chat_id,
-        root_chat_id.as_deref(),
-    )
-    .await;
-    let (mut task_meta, mut task_error) = match task_setup {
-        Ok(meta) => (meta, None),
-        Err(error) => (snapshot.task_meta.clone(), Some(error)),
-    };
-    if canonical_mode == "task_planner" {
-        if let Some(meta) = task_meta.as_mut() {
-            meta.planner_chat_id = Some(new_chat_id.clone());
-        }
-    }
-    let (initial_plan_doc_slug, initial_plan_doc_error) = if canonical_mode == "task_planner" {
-        if let Some(meta) = &task_meta {
-            match create_initial_plan_document(gcx.clone(), &meta.task_id, &plan_body).await {
-                Ok(slug) => (Some(slug), None),
-                Err(error) => (None, Some(error)),
-            }
-        } else {
-            (None, None)
-        }
-    } else {
-        (None, None)
-    };
-    if let Some(meta) = &task_meta {
-        let mut destination = snapshot.clone();
-        destination.version += 2;
-        destination.task_meta = Some(meta.clone());
-        if let Err(error) = chat_facade.save_trajectory_snapshot(destination).await {
-            task_error = Some(error);
-            task_meta = snapshot.task_meta.clone();
-        }
-    }
+    let task_error: Option<String> = None;
     let result = json!({
         "type": "handoff_to_mode",
         "status": "completed",
@@ -887,8 +953,6 @@ async fn finalize_handoff_inner(
         "root_chat_id": root_chat_id,
         "parent_id": chat_id,
         "link_type": "handoff",
-        "initial_plan_document": initial_plan_doc_slug,
-        "initial_plan_error": initial_plan_doc_error,
         "task_setup_error": task_error,
     });
 

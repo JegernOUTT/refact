@@ -67,13 +67,34 @@ pub fn goal_delta_events<S: GoalRoleSession + ?Sized>(session: &S) -> Vec<&ChatM
         .goal_role_messages()
         .iter()
         .filter(|message| {
-            message.role == EVENT_ROLE
+            let base = current_base_goal(session);
+            let belongs = base.map_or(true, |base| {
+                message
+                    .extra
+                    .get("event")
+                    .unwrap_or(&serde_json::Value::Null)["payload"]["goal_id"]
+                    .as_str()
+                    .map_or(true, |id| id == base.message_id)
+                    && session
+                        .goal_role_messages()
+                        .iter()
+                        .position(|m| std::ptr::eq(m, *message))
+                        .unwrap_or(0)
+                        > session
+                            .goal_role_messages()
+                            .iter()
+                            .position(|m| std::ptr::eq(m, base))
+                            .unwrap_or(0)
+            });
+            belongs
+                && message.role == EVENT_ROLE
                 && message
                     .extra
                     .get("event")
                     .and_then(|event| event.get("subkind"))
                     .and_then(|subkind| subkind.as_str())
                     == Some("goal_delta")
+                && !is_plan_delta(message)
         })
         .collect()
 }
@@ -206,6 +227,226 @@ pub fn goal_version(message: &ChatMessage) -> Option<u32> {
         .get("version")?
         .as_u64()
         .and_then(|version| u32::try_from(version).ok())
+}
+
+pub fn is_plan_delta(message: &ChatMessage) -> bool {
+    message
+        .extra
+        .get("event")
+        .and_then(|v| v.get("payload"))
+        .and_then(|v| v.get("target"))
+        .and_then(|v| v.as_str())
+        == Some("plan")
+}
+
+struct MessageGoals<'a>(&'a [ChatMessage]);
+impl GoalRoleSession for MessageGoals<'_> {
+    fn goal_role_messages(&self) -> &[ChatMessage] {
+        self.0
+    }
+    fn add_goal_role_message(&mut self, _: ChatMessage) {
+        unreachable!("read-only projection")
+    }
+}
+impl crate::plan_role::PlanRoleSession for MessageGoals<'_> {
+    fn plan_role_messages(&self) -> &[ChatMessage] {
+        self.0
+    }
+    fn add_plan_role_message(&mut self, _: ChatMessage) {
+        unreachable!("read-only projection")
+    }
+}
+
+pub fn import_legacy_plan(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let view = MessageGoals(messages);
+    let base = current_base_goal(&view);
+    if base.is_some_and(|base| base.extra["goal"].get("plan").is_some())
+        || messages.iter().any(|m| {
+            is_plan_delta(m)
+                && m.extra.get("event").unwrap_or(&serde_json::Value::Null)["payload"]
+                    .get("plan")
+                    .is_some()
+                && base.is_some_and(|base| {
+                    m.extra.get("event").unwrap_or(&serde_json::Value::Null)["payload"]["goal_id"]
+                        .as_str()
+                        .map_or(true, |id| id == base.message_id)
+                })
+        })
+    {
+        return messages.to_vec();
+    }
+    let Some(plan) = crate::plan_role::current_base_plan(&view) else {
+        return messages.to_vec();
+    };
+    let mut out = messages.to_vec();
+    let goal_id = match base {
+        Some(base) => base.message_id.clone(),
+        None => {
+            let mut goal = internal_roles::goal(
+                "legacy_import",
+                1,
+                "Implement the approved plan.",
+                None,
+                true,
+                GoalBudget::default(),
+            );
+            goal.extra["goal"]["status"] = serde_json::json!("paused");
+            goal.message_id = format!("legacy-plan-goal-{}", plan.message_id);
+            goal.extra["goal"]["created_at_ms"] = plan.extra["plan"]["created_at_ms"].clone();
+            let id = goal.message_id.clone();
+            out.push(goal);
+            id
+        }
+    };
+    let mut imported = serde_json::json!({
+        "content": plan.content.content_text_only(),
+        "mode": plan.extra["plan"]["mode"],
+        "version": plan.extra["plan"]["version"],
+        "created_at_ms": plan.extra["plan"]["created_at_ms"],
+        "message_id": plan.message_id,
+        "legacy_source": plan.message_id,
+    });
+    if let Some(checkpoint) = crate::plan_role::plan_delta_events(&view)
+        .into_iter()
+        .filter_map(crate::role_projection::checkpoint_provenance)
+        .last()
+    {
+        imported["checkpoint"] = serde_json::to_value(checkpoint).unwrap_or_default();
+    }
+    let mut install = internal_roles::goal_delta(
+        "goal.legacy_import",
+        serde_json::json!({
+            "target":"plan", "goal_id":goal_id, "plan":imported, "seq":0
+        }),
+        "Legacy plan imported",
+    );
+    install.message_id = format!("legacy-plan-install-{}-{}", goal_id, plan.message_id);
+    out.push(install);
+    for (seq, content) in crate::plan_role::plan_delta_history(&view) {
+        let mut delta = internal_roles::goal_delta(
+            "goal.legacy_import",
+            serde_json::json!({
+                "target":"plan", "goal_id":goal_id, "seq":seq
+            }),
+            content,
+        );
+        delta.message_id = format!("legacy-plan-note-{}-{}-{}", goal_id, plan.message_id, seq);
+        out.push(delta);
+    }
+    out
+}
+
+pub fn goal_revision_from_messages(messages: &[ChatMessage]) -> u64 {
+    let view = MessageGoals(messages);
+    let Some(base) = current_base_goal(&view) else {
+        return 0;
+    };
+    let start = messages
+        .iter()
+        .position(|m| std::ptr::eq(m, base))
+        .unwrap_or(0);
+    let base_revision = base.extra["goal"]["revision"].as_u64().unwrap_or(1);
+    base_revision
+        + messages
+            .iter()
+            .skip(start + 1)
+            .filter(|m| {
+                m.extra.get("event").unwrap_or(&serde_json::Value::Null)["subkind"] == "goal_delta"
+                    && m.extra.get("event").unwrap_or(&serde_json::Value::Null)["payload"]
+                        ["goal_id"]
+                        .as_str()
+                        .map_or(true, |id| id == base.message_id)
+            })
+            .count() as u64
+}
+
+pub fn current_goal_plan(
+    messages: &[ChatMessage],
+    limits: ProjectionLimits,
+    include_history: bool,
+) -> Option<crate::GoalPlanSnapshot> {
+    let messages = import_legacy_plan(messages);
+    let view = MessageGoals(&messages);
+    let base = current_base_goal(&view)?;
+    let mut plan = base.extra["goal"].get("plan").cloned().or_else(|| {
+        messages
+            .iter()
+            .filter(|m| is_plan_delta(m))
+            .filter(|m| {
+                m.extra.get("event").unwrap_or(&serde_json::Value::Null)["payload"]["goal_id"]
+                    .as_str()
+                    .map_or(true, |id| id == base.message_id)
+            })
+            .find_map(|m| {
+                m.extra.get("event").unwrap_or(&serde_json::Value::Null)["payload"]
+                    .get("plan")
+                    .cloned()
+            })
+    });
+    let mut history = Vec::new();
+    for message in &messages {
+        if !is_plan_delta(message) {
+            continue;
+        }
+        let payload = &message
+            .extra
+            .get("event")
+            .unwrap_or(&serde_json::Value::Null)["payload"];
+        if payload["goal_id"]
+            .as_str()
+            .is_some_and(|id| id != base.message_id)
+        {
+            continue;
+        }
+        if let Some(installed) = payload.get("plan") {
+            if plan.is_none() {
+                plan = Some(installed.clone());
+            }
+        } else if plan.is_some() {
+            history.push(crate::GoalPlanHistoryEntry {
+                seq: delta_revision(message, history.len()),
+                content: message.content.content_text_only(),
+            });
+        }
+    }
+    let plan = plan?;
+    let body = plan["content"].as_str()?;
+    let mode = plan["mode"].as_str().unwrap_or_default();
+    let version = plan["version"].as_u64().unwrap_or(1) as u32;
+    let created_at_ms = plan["created_at_ms"].as_u64().unwrap_or_default();
+    let message_id = plan["message_id"].as_str().unwrap_or(&base.message_id);
+    let prefold = plan
+        .get("checkpoint")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    let deltas = history
+        .iter()
+        .map(|h| ProjectedDelta {
+            seq: h.seq,
+            note: &h.content,
+        })
+        .collect::<Vec<_>>();
+    let projected = project_role_with_prefold(
+        ProjectedRole::Plan,
+        &ApprovedBase {
+            message_id,
+            mode,
+            version,
+            created_at_ms,
+            body,
+        },
+        prefold.as_ref(),
+        &deltas,
+        limits,
+    );
+    Some(crate::GoalPlanSnapshot {
+        content: projected.text,
+        mode: mode.into(),
+        version,
+        created_at_ms,
+        delta_count: projected.delta_count,
+        checkpoint: projected.checkpoint,
+        history: if include_history { history } else { Vec::new() },
+    })
 }
 
 #[cfg(test)]
@@ -381,6 +622,19 @@ mod tests {
             "second update",
         ));
 
+        let legacy = internal_roles::plan("agent", 1, "Keep approved plan", None);
+        session.add_message(legacy.clone());
+        let imported = import_legacy_plan(&session.messages);
+        assert_eq!(
+            serde_json::to_value(import_legacy_plan(&imported)).unwrap(),
+            serde_json::to_value(&imported).unwrap()
+        );
+        assert!(imported
+            .iter()
+            .any(|m| serde_json::to_value(m).unwrap() == serde_json::to_value(&legacy).unwrap()));
+        let plan = current_goal_plan(&imported, ProjectionLimits::default(), true).unwrap();
+        assert_eq!(plan.content, "Keep approved plan");
+        assert_eq!(plan.delta_count, 0);
         let synthesized = synthesize_current_goal(&session).unwrap();
 
         assert_eq!(

@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn nothing_is_callable_until_the_ceiling_grants_the_backing_tool() {
-        let none = capabilities(&ToolsPolicy::None).unwrap();
+        let none = capabilities(&ceiling(&["agent_wait"])).unwrap();
 
         assert!(none.is_empty());
         assert!(none.schemas().is_empty());
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn a_call_outside_the_ceiling_is_denied_even_though_it_is_declared() {
-        let capabilities = capabilities(&ceiling(&["progress_report", "agent_wait"])).unwrap();
+        let capabilities = capabilities(&ceiling(&["progress_report", "wait"])).unwrap();
 
         let denied = capabilities
             .authorize(&HostCall::new(
@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn granted_schemas_describe_only_granted_operations() {
-        let capabilities = capabilities(&ceiling(&["subagent", "agent_wait"])).unwrap();
+        let capabilities = capabilities(&ceiling(&["subagent", "wait"])).unwrap();
 
         let names: Vec<String> = capabilities
             .schemas()

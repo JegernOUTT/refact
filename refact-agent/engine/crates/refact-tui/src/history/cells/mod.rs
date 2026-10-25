@@ -597,6 +597,15 @@ fn subchat_lines(card: &ToolCard, width: usize) -> Vec<Line<'static>> {
 }
 
 fn command_label(card: &ToolCard) -> String {
+    if matches!(
+        card.name.as_str(),
+        "wait" | "schedule" | "pause" | "resume" | "agent_lifecycle" | "agent_resume"
+    ) {
+        let action = argument_value(card, &["action", "for", "kind", "target"]).unwrap_or_default();
+        return format!("{} {}", tool_display_name(&card.name), action)
+            .trim()
+            .to_string();
+    }
     argument_value(card, &["command", "cmd"])
         .map(|command| format!("$ {command}"))
         .or_else(|| argument_value(card, &["process_id"]).map(|id| format!("process {id}")))

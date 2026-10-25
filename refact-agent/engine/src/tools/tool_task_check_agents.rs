@@ -1319,7 +1319,7 @@ mod tests {
     use crate::app_state::AppState;
     use crate::chat::types::TaskMeta as ThreadTaskMeta;
     use crate::tasks::types::{BoardCard, TaskBoard, TaskMeta as StoredTaskMeta, TaskStatus};
-    use crate::tools::tool_task_wait_for_agents::ToolTaskWaitForAgents;
+    use crate::tools::tool_wait::ToolWait;
     use crate::tools::tools_description::Tool;
 
     fn now() -> DateTime<Utc> {
@@ -1954,10 +1954,16 @@ mod tests {
             .await
             .insert("planner-chat".to_string(), session_arc.clone());
 
-        let result = ToolTaskWaitForAgents::new()
-            .tool_execute(ccx.clone(), &"call".to_string(), &HashMap::new())
-            .await
-            .unwrap();
+        let result = ToolWait {
+            config_path: String::new(),
+        }
+        .tool_execute(
+            ccx.clone(),
+            &"call".to_string(),
+            &args(&[("target", json!({"kind": "task_agents"}))]),
+        )
+        .await
+        .unwrap();
 
         let output = tool_output_text(result);
         assert!(output.contains("T-AB/a"));
@@ -1997,14 +2003,19 @@ mod tests {
             .await
             .insert("planner-chat".to_string(), session_arc.clone());
 
-        let result = ToolTaskWaitForAgents::new()
-            .tool_execute(
-                ccx.clone(),
-                &"call".to_string(),
-                &args(&[("card_ids", json!(["T-1"]))]),
-            )
-            .await
-            .unwrap();
+        let result = ToolWait {
+            config_path: String::new(),
+        }
+        .tool_execute(
+            ccx.clone(),
+            &"call".to_string(),
+            &args(&[(
+                "target",
+                json!({"kind": "task_agents", "card_ids": ["T-1"]}),
+            )]),
+        )
+        .await
+        .unwrap();
 
         let ContextEnum::ChatMessage(message) = &result.1[0] else {
             panic!("expected chat message")
@@ -2143,14 +2154,19 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let ccx = planner_ccx(gcx, "planner").await;
 
-        let err = ToolTaskWaitForAgents::new()
-            .tool_execute(
-                ccx,
-                &"call".to_string(),
-                &args(&[("task_id", json!("task-2"))]),
-            )
-            .await
-            .unwrap_err();
+        let err = ToolWait {
+            config_path: String::new(),
+        }
+        .tool_execute(
+            ccx,
+            &"call".to_string(),
+            &args(&[(
+                "target",
+                json!({"kind": "task_agents", "task_id": "task-2"}),
+            )]),
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(
             err,

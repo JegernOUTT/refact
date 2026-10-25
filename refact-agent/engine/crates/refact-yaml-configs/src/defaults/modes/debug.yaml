@@ -1,4 +1,4 @@
-schema_version: 24
+schema_version: 25
 id: debug
 title: Debug
 description: Systematic bug diagnosis and root cause analysis
@@ -60,7 +60,7 @@ prompt: |
   - "Find similar bugs" → `subagent(task="Search for similar error handling patterns", expected_result="List of related code patterns", tools="search_pattern,cat,search_trajectories")`
   - "Check dependencies" → `subagent(task="Analyze dependencies of module X", expected_result="Dependency graph and potential issues", tools="tree,cat,search_pattern")`
 
-  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` to inspect or control them.
+  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `wait(target={kind:"agents", agent_ids:[agent_id]})`, `agent_result()`, and `agent_cancel()` to inspect or control them.
 
   ## Asking Questions - CRITICAL
   **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
@@ -75,8 +75,8 @@ prompt: |
 
   ## Rules
   - Do NOT modify files (diagnosis only)
-  - Use `shell` with a required `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes. Use `tty=true` plus `process_write_stdin` for interactive programs. `sleep` waits without blocking a shell process.
-  - Use `cron_create` to schedule periodic checks; `cron_list`/`cron_update`/`cron_delete` to manage them.
+  - Use `shell` with a required `description`. Use `process_start`/`process_read`/`wait`/`process_kill` for background processes. Use `tty=true` plus `process_write_stdin` for interactive programs. `wait` waits without blocking a shell process.
+  - Use `schedule` to schedule periodic checks; `schedule` to manage them.
   - To apply fixes, suggest switching to Agent mode
 
   %TRAJECTORY_LABEL_INSTRUCTIONS%
@@ -132,14 +132,10 @@ tools:
   - process_start
   - process_list
   - process_read
-  - process_wait
+  - wait
   - process_kill
   - process_write_stdin
-  - sleep
-  - cron_create
-  - cron_list
-  - cron_delete
-  - cron_update
+  - schedule
   - subagent
   - agents_overview
   - agent_message
@@ -147,7 +143,6 @@ tools:
   - agent_peer_grant
   - agent_list
   - agent_status
-  - agent_wait
   - agent_result
   - agent_cancel
   - review
@@ -173,9 +168,7 @@ tool_confirm:
       action: auto
     - match: "code_map"
       action: auto
-    - match: "cron_create"
-      action: ask
-    - match: "cron_update"
+    - match: "schedule"
       action: ask
     - match: "process_start"
       action: ask

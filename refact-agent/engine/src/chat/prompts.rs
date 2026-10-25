@@ -103,6 +103,9 @@ async fn task_brief_for_plan_template(
     let Some(meta) = task_meta else {
         return String::new();
     };
+    if meta.role == "planner" {
+        return "The task goal owns the plan. Read get_goal and update goal.plan; task documents are reference artifacts, not a second planning authority.".into();
+    }
 
     match crate::tasks::storage::load_task_meta(app.gcx.clone(), &meta.task_id).await {
         Ok(task) => {

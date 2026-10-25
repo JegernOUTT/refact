@@ -30,11 +30,12 @@ impl Tool for ToolSetGoal {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Install the chat's single active goal. Fails if a goal already exists — use `update_goal` to evolve it.".to_string(),
+            description: "Install the current owner's goal with optional success criteria and execution plan. Task-planning goals start paused until the user approves pursuit. Fails if a goal already exists — use update_goal to evolve it.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "push": PushMode::schema(),
+                    "plan": {"type":"object", "properties":{"content":{"type":"string"}}, "required":["content"], "additionalProperties":false},
                     "content": {"type": "string", "description": "Full goal body. Required."},
                     "criteria": {
                         "type": "array",
@@ -69,6 +70,17 @@ impl Tool for ToolSetGoal {
         if content.trim().is_empty() {
             return Err("argument `content` must be non-empty".to_string());
         }
+        let plan: Option<refact_chat_api::GoalPlanInstall> = args
+            .get("plan")
+            .map(|v| {
+                serde_json::from_value(v.clone())
+                    .map_err(|e| format!("argument `plan` is malformed: {e}"))
+            })
+            .transpose()?;
+        let plan_meta = plan
+            .as_ref()
+            .map(|p| goal_role::goal_plan_metadata(&p.content, "agent"))
+            .transpose()?;
         let criteria: Vec<refact_chat_api::GoalCriterion> = match args.get("criteria") {
             None | Some(Value::Null) => Vec::new(),
             Some(value) => serde_json::from_value(value.clone())
@@ -87,6 +99,7 @@ impl Tool for ToolSetGoal {
         }
         .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
 
+        crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), &session_arc).await?;
         let report = {
             let mut session = session_arc.lock().await;
             if current_goal_including_queued(&session)?.is_some() {
@@ -100,10 +113,22 @@ impl Tool for ToolSetGoal {
                 &criteria,
                 push,
                 tool_call_id,
+                plan_meta,
             )?;
             report
         };
 
+        if let Err(error) =
+            crate::tasks::goal::commit_session_task_goal(gcx.clone(), &session_arc).await
+        {
+            let mut session = session_arc.lock().await;
+            session
+                .pending_deliveries
+                .retain(|d| d.after_tool_call_id.as_deref() != Some(tool_call_id.as_str()));
+            drop(session);
+            let _ = crate::tasks::goal::hydrate_session_task_goal(gcx, &session_arc).await;
+            return Err(error);
+        }
         let result = json!({
             "version": report.version,
             "supersedes": report.supersedes,
@@ -128,8 +153,23 @@ fn queue_goal_side_effect(
     criteria: &[refact_chat_api::GoalCriterion],
     push: PushMode,
     tool_call_id: &str,
+    plan: Option<Value>,
 ) -> Result<GoalInstallReport, String> {
     let mut message = internal_roles::goal(mode, 1, body, None, true, GoalBudget::default());
+    if mode == "plan"
+        || session
+            .thread
+            .task_meta
+            .as_ref()
+            .is_some_and(|meta| meta.role == "planner")
+    {
+        message.extra["goal"]["status"] = json!("paused");
+    }
+    message.extra["goal"]["owner"] = json!({"kind":"chat", "id":session.chat_id});
+    message.extra["goal"]["revision"] = json!(1);
+    if let Some(plan) = plan {
+        message.extra["goal"]["plan"] = plan;
+    }
     if !criteria.is_empty() {
         if let Some(meta) = message
             .extra
@@ -422,7 +462,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_goal_side_effects_are_after_tool_result() {
-        let (gcx, ccx) = ccx_for_session("agent").await;
+        let (gcx, ccx) = ccx_for_session("plan").await;
         let session_arc = gcx
             .chat_sessions
             .read()
@@ -462,6 +502,16 @@ mod tests {
             .collect();
         assert_eq!(roles, vec!["assistant", "tool", "goal", "event"]);
         assert_openai_tool_result_not_preceded_by_hidden_role(session.messages.clone());
+        assert_eq!(
+            session.goal.as_ref().unwrap().status,
+            refact_chat_api::GoalStatus::Paused
+        );
+        assert_eq!(
+            crate::tools::tool_handoff_to_mode::transition_source_goal(&session)
+                .unwrap()
+                .status,
+            refact_chat_api::GoalStatus::Paused
+        );
     }
 
     #[tokio::test]

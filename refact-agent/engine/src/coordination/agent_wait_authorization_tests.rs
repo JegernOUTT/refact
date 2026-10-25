@@ -6,8 +6,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::coordination::deadlock_identity_tests::{
     app_with_workspace, create_running_record, parked_run, parked_ticket, work_scope,
 };
-use crate::tools::tool_background_agents::ToolAgentWait;
-use crate::tools::tools_description::Tool;
+use crate::tools::tool_background_agents::execute_agents_wait;
 use refact_work_core::{AdmissionRequest, CoordinationSettings, WorkKey};
 use tokio::sync::Mutex;
 
@@ -58,7 +57,7 @@ async fn run_unauthorized_wait(in_any: bool) -> (String, String, bool) {
         ])
     } else {
         HashMap::from([
-            ("agent_id".to_string(), serde_json::json!(foreign_id)),
+            ("agent_ids".to_string(), serde_json::json!([foreign_id])),
             ("timeout_ms".to_string(), serde_json::json!(1000)),
         ])
     };
@@ -89,12 +88,9 @@ async fn run_unauthorized_wait(in_any: bool) -> (String, String, bool) {
     while !ready.load(Ordering::SeqCst) {
         tokio::task::yield_now().await;
     }
-    let error = ToolAgentWait {
-        config_path: String::new(),
-    }
-    .tool_execute(ccx, &"unauthorized-wait".to_string(), &args)
-    .await
-    .unwrap_err();
+    let error = execute_agents_wait(ccx, &"unauthorized-wait".to_string(), &args)
+        .await
+        .unwrap_err();
     completed.store(true, Ordering::SeqCst);
     probe.join().unwrap();
     (error, foreign_id, saw_caller_edge.load(Ordering::SeqCst))

@@ -97,6 +97,7 @@ import {
 } from "../../utils/chatUiPersistence";
 import { MemoryInboxPanel } from "./TaskMemories/MemoryInboxPanel";
 import { DocumentsPanel } from "./TaskDocuments/DocumentsPanel";
+import { TaskGoalPanel } from "./TaskGoalPanel";
 import { CardCommentsSection } from "./CardComments";
 import {
   isActionableWorktree,
@@ -1092,6 +1093,7 @@ interface TaskWorkspaceProps {
 }
 
 export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
+  const [goalOpen, setGoalOpen] = useState(false);
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
   const {
@@ -1530,6 +1532,12 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           openChatTab();
         })
         .catch((err: unknown) => {
+          dispatch(
+            tasksApi.util.invalidateTags([
+              { type: "TaskGoal", id: taskId },
+              { type: "TaskTrajectories", id: `${taskId}/planner` },
+            ]),
+          );
           showNotification(`Create failed: ${parsePlannerDeleteError(err)}`);
         });
     },
@@ -1987,6 +1995,16 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
             <button
               type="button"
               className={styles.headerActionButton}
+              onClick={() => setGoalOpen(true)}
+              aria-label="Task goal"
+              title="Task-owned goal and plan"
+            >
+              <Target size={15} />
+              <Text size="1">Goal</Text>
+            </button>
+            <button
+              type="button"
+              className={styles.headerActionButton}
               onClick={handleNewPlanner}
               disabled={isCreatingPlanner}
               aria-label="New task planner"
@@ -2075,6 +2093,21 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
           )}
         </Box>
       </Tabs>
+
+      <Dialog open={goalOpen} onOpenChange={setGoalOpen}>
+        <Dialog.Content
+          maxWidth="760px"
+          maxHeight="calc(100dvh - var(--rf-space-5))"
+        >
+          <Dialog.Title>Task goal</Dialog.Title>
+          {goalOpen && <TaskGoalPanel key={taskId} taskId={taskId} />}
+          <Dialog.Close asChild>
+            <Button size="sm" variant="soft">
+              Close
+            </Button>
+          </Dialog.Close>
+        </Dialog.Content>
+      </Dialog>
 
       <Dialog
         open={Boolean(selectedCard)}

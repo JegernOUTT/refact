@@ -85,7 +85,7 @@ pub fn declare_agent_wait(
         false => Vec::new(),
     };
     app.wait_graph
-        .declare(from, WaitKind::AgentWait, selected, "agent_wait")
+        .declare(from, WaitKind::AgentWait, selected, "wait")
 }
 
 /// One consistent capture of everything that can block a run.

@@ -1,4 +1,4 @@
-schema_version: 23
+schema_version: 24
 id: setup
 title: Setup Project
 description: Analyze the project and configure Refact artifacts (AGENTS, commands, skills, subagents, integrations, knowledge)
@@ -122,7 +122,7 @@ prompt: |
   - `search_trajectories()` + `get_trajectory_context()` — reuse validated commands, patterns, and prior setup decisions
 
   **Verification:**
-  - `shell()` — verify installed tooling and confirm candidate commands actually work before documenting them. Always set `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes; `sleep` to wait without blocking a shell; `cron_create`/`cron_list`/`cron_update`/`cron_delete` for scheduled automation.
+  - `shell()` — verify installed tooling and confirm candidate commands actually work before documenting them. Always set `description`. Use `process_start`/`process_read`/`wait`/`process_kill` for background processes; `wait` to wait without blocking a shell; `schedule` for scheduled automation.
 
   **Research:**
   - `web_search()` — quick lookup for unfamiliar tools, frameworks, or MCP servers
@@ -259,14 +259,10 @@ tools:
   - process_start
   - process_list
   - process_read
-  - process_wait
+  - wait
   - process_kill
   - process_write_stdin
-  - sleep
-  - cron_create
-  - cron_list
-  - cron_delete
-  - cron_update
+  - schedule
   - search_trajectories
   - get_trajectory_context
   - knowledge
@@ -329,9 +325,7 @@ tool_confirm:
       action: ask
     - match: "process_kill"
       action: ask
-    - match: "cron_create"
-      action: ask
-    - match: "cron_update"
+    - match: "schedule"
       action: ask
     - match: "create_textdoc"
       action: ask

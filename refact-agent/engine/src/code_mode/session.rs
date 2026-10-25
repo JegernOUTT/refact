@@ -270,7 +270,7 @@ mod tests {
     fn orchestrator() -> Capabilities {
         capabilities(&ToolsPolicy::Only(vec![
             "subagent".into(),
-            "agent_wait".into(),
+            "wait".into(),
             "progress_report".into(),
         ]))
         .unwrap()

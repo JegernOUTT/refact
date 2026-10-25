@@ -203,7 +203,7 @@ async fn message_to_completed_child_is_saved_and_delivered_on_continue() {
         }
         let (text, receipt) = send(&fixture.app, &first, "saved first follow-up").await;
         assert!(text.contains("finished (status completed)"), "{text}");
-        assert!(text.contains("agent_resume action=continue"), "{text}");
+        assert!(text.contains("agent_lifecycle action=continue"), "{text}");
         assert!(!text.contains("queued"), "{text}");
         assert_eq!(receipt["outcome"], "followup_saved");
         assert_eq!(receipt["accepted"], true);

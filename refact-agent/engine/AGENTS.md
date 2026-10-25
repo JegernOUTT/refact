@@ -189,143 +189,13 @@ Compression rules live in `crates/refact-chat-history/src/compression_exemption.
 
 Wire mapping rules: provider adapters must never send literal `event`, `goal`, or `plan` roles. Normal `event` lowers to provider-visible user context with structured `<event subkind="..." source="...">` framing. Base `goal` lowers as `<goal mode="..." version="...">...` and must appear before `<plan>` whenever both are present; `event(goal_delta)` lowers as append-only `<goal-update seq="...">...` blocks. Base `plan` lowers as `<plan mode="..." version="...">...`; `event(plan_delta)` lowers as append-only `<plan-update seq="...">...` blocks. This keeps cached base goal/plan bytes stable while still exposing synthesized current goal and plan text to the model. `event(goal_pursuit)` remains a generic event block. Preserve Anthropic thinking/signature block order across hidden-role lowering.
 
-### Plan tools
+### Goal-owned planning
 
-#### `set_plan`
+`set_goal({content, criteria?, plan?: {content}, push?})` installs one goal owned by the current chat or task. `update_goal({note?, plan?: {content} | {note}, push?})` requires at least one change: `plan.content` installs an absent plan and `plan.note` appends an update. Existing approved bases are not rewritten. `get_goal({include_history?})` returns the goal, owner/revision, nested plan projection and optional full histories. `validate_goal` checks the outcome and explicit criteria, not whether every plan step was followed.
 
-Model-facing prompt: "Install the chat's single detailed implementation plan (Markdown). Provide exactly one of `content` (full plan body) or `path` (absolute path to a `.md` report). Fails if a plan already exists — use `update_plan` to evolve it."
+The plan base lives under goal metadata; updates use `event(goal_delta)` with `payload.target = "plan"`. Outcome deltas exclude plan-targeted notes. Shared types and deterministic bounded projections live in `refact-chat-api`; full history is retained even when old deltas are folded for context budgeting. Legacy `plan`/`plan_delta` messages remain readable for historical import/display only; standalone plan tools are not callable.
 
-Schema:
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "content": { "type": "string", "description": "Full Markdown plan body. Optional; provide exactly one of content or path." },
-    "path": { "type": "string", "description": "Absolute path to a .md report to install as the plan" },
-    "summary": { "type": "string", "description": "Short description of what changed, ≤120 chars. Optional." }
-  },
-  "required": []
-}
-```
-
-Returns `{ "version": 1, "supersedes": null }`, queues one hidden `plan`, and appends `event(system_notice, "tool.set_plan", {version, summary}, "Plan updated to v1")`. It rejects missing/non-string arguments, rejects calls that provide both or neither of `content` and `path`, rejects empty content, rejects `summary` longer than 120 chars, and rejects any second install before queuing with `a plan already exists; use update_plan to change it`. The stored base plan is capped at 96KB chars and records truncation metadata when capped. Available by default in `agent`, `task_planner`, and `task_agent` modes.
-
-Example:
-
-```json
-{"content":"## Plan\n- Inspect scheduler docs\n- Update runbooks","summary":"Document scheduler surface"}
-```
-
-#### `update_plan`
-
-Model-facing prompt: "Append an incremental update to the current plan (cache-safe delta merged into the current plan). Use when the plan evolves; it does not rewrite the original plan."
-
-Schema:
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "note": { "type": "string", "description": "Plan update note. Required." },
-    "summary": { "type": "string", "description": "Short description of what changed, ≤120 chars. Optional." }
-  },
-  "required": ["note"]
-}
-```
-
-Returns `{ "seq": number, "truncated": false }` for normal notes. Notes are capped at 16KB chars (`MAX_PLAN_DELTA_CHARS`); when capped, the result is `{ "seq": number, "truncated": true, "original_chars": number, "kept_chars": number }`. It queues one hidden `event(plan_delta, "tool.update_plan", {seq, summary, truncated?, original_chars?, kept_chars?}, note)`, and appends `event(system_notice, "tool.update_plan", {seq, summary}, "Plan updated (delta N)")`. It requires an existing or queued base plan, rejects empty `note`, and rejects `summary` longer than 120 chars. `plan_delta` is append-only, snake_case on the wire, `Never` compressed, hidden from the normal transcript and general EventLog, and merged with the base plan for current-plan consumers.
-
-#### `get_plan`
-
-Model-facing prompt: "Read the current plan installed on this chat. Returns the bounded current projection, mode, base version, creation timestamp, delta count, and checkpoint provenance when older updates were folded."
-
-Schema:
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "include_history": { "type": "boolean", "description": "Return the complete append-only delta history instead of only the bounded projection." }
-  },
-  "required": []
-}
-```
-
-Returns `{ "plan": null }` when no plan is installed or `{ "plan": { "content", "mode", "version", "created_at_ms", "delta_count", "checkpoint" } }`, plus `history` when `include_history` is true. `content` is the deterministic projection of the base `plan` plus append-only `plan_delta` notes; the base plan bytes are never rewritten.
-
-### Approved-base checkpoints
-
-`crates/refact-chat-api/src/role_projection.rs` holds one pure `project_role()` used by both hidden roles. Given the approved base and the ordered deltas it always returns byte-identical text, so the same trajectory projects the same way on every read.
-
-- The approved base body is copied verbatim and is never truncated or rewritten; only the delta region is bounded.
-- Deltas beyond `plan_checkpoint_delta_threshold` (or beyond `plan_projection_max_chars`) collapse into a checkpoint line carrying approval provenance — folded revision, approved base version, installing mode, and `created_at_ms`. The most recent deltas stay verbatim.
-- Checkpointing is a context-budget decision, not a retention decision: nothing is removed from the trajectory, no `Never`-exempt message is dropped, and no wire prefix changes. `get_plan`/`get_goal` with `include_history: true` return the complete delta trail.
-- Both bounds are live trajectory settings registered in `src/runtime_settings.rs` and published by `http/routers/v1/settings_config.rs`; read them through `runtime_settings::plan_projection_limits()`.
-
-### Goal tools
-
-Goal state has two synchronized representations: hidden `goal` + `event(goal_delta|goal_pursuit)` messages in chat history, and the `GoalSnapshot` projection exposed on snapshots, runtime updates, trajectories, and GUI state. All shared goal API types live in `crates/refact-chat-api/src/lib.rs`.
-
-#### `set_goal`
-
-Model-facing prompt: "Install the chat's single active goal. Fails if a goal already exists — use `update_goal` to evolve it."
-
-Schema:
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "content": { "type": "string", "description": "Full goal body. Required." }
-  },
-  "required": ["content"]
-}
-```
-
-Returns `{ "version": 1, "supersedes": null }`, queues one hidden `goal`, and appends `event(system_notice, "tool.set_goal", {version}, "Goal updated to v1")`. It rejects missing/non-string/empty `content` and rejects any second install with `goal already exists; use update_goal`. The stored base goal is capped at 96KB chars and records truncation metadata when capped. Available by default in `agent`, `task_planner`, and `task_agent` modes.
-
-#### `update_goal`
-
-Model-facing prompt: "Append an incremental update to the current goal. Use when the goal evolves; it does not rewrite the original goal."
-
-Schema:
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "note": { "type": "string", "description": "Goal update note. Required." }
-  },
-  "required": ["note"]
-}
-```
-
-Returns `{ "seq": number, "truncated": false }` for normal notes. Notes are capped at 16KB chars (`MAX_GOAL_DELTA_CHARS`); when capped, the result is `{ "seq": number, "truncated": true, "original_chars": number, "kept_chars": number }`. It queues one hidden `event(goal_delta, "tool.update_goal", {seq, truncated?, original_chars?, kept_chars?}, note)`. It requires an existing or queued base goal and rejects empty `note`.
-
-#### `get_goal`
-
-Model-facing prompt: "Read the current goal installed on this chat. Returns the bounded goal projection, checkpoint provenance, status, version, delta count, budget counters, latest verifier verdict, and gaps."
-
-Schema:
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "include_history": { "type": "boolean", "description": "Return the complete append-only delta history instead of only the bounded projection." }
-  },
-  "required": []
-}
-```
-
-Returns `{ "goal": null }` when no goal is installed or `{ "goal": { "content", "checkpoint", "status", "version", "delta_count", "turns_used", "tokens_used", "latest_verdict", "gaps" } }`, plus `history` when `include_history` is true. `content` is the deterministic projection of the base `goal` plus append-only `goal_delta` notes (see Approved-base checkpoints); the base goal bytes are never rewritten.
-
-Goal restore keeps persisted status separate from authorization-to-autocontinue: loading a trajectory never re-arms pursuit on its own, and an explicitly paused or stopped goal stays that way even when the base goal message still records `active: true`.
-
-#### `validate_goal`
-
-Agent-facing completion check: validates the active goal against its success criteria, marks it `completed` and disables pursuit when met, or re-arms the active goal with returned gaps when unmet.
+A task's canonical control history, ledger and revision live in `goal.json`. Planner chats attach through the board controller rather than owning independent copies. Other task artifacts and document/memory APIs remain intact. Newly created planning-only goals are owned but paused until explicit user approval. Import preserves existing goal status, budgets, progress and source history; ambiguous authority is reported, never guessed. Loading old data does not itself authorize pursuit.
 
 ### Goal pursuit contract
 
@@ -347,7 +217,7 @@ Every goal mutation is also recorded in an append-only ledger (`refact-chat-api:
 
 ### Evidence, cadence, and off-ramps
 
-Turn accounting is evidence-based: a tool result added while a goal is installed sets `goal_turn_evidence` unless the tool failed (`tool_failed = true`) or resolves to an introspection/no-op tool (`sleep`, `get_goal`, `get_plan`, `pause_goal`, `snooze_goal`); `goal_record_progress_from_usage` counts the turn as progress when evidence exists or completion tokens meet `no_progress_token_threshold`, and it also accumulates `progress.cost_used_cents` from `usage.metering_usd.total_usd`. `GoalBudget.max_cost_cents` is an optional hard limit checked alongside turns/tokens/minutes. Nudge events are contentful: the hidden message body carries the truncated synthesized goal, remaining gaps from the last verifier attempt, and progress/budget counters, plus a pointer to `validate_goal`/`snooze_goal`/`pause_goal`. The `pause_goal` tool (agent off-ramp) purges queued goal regenerates and parks the goal `paused` until the user resumes; `snooze_goal(minutes)` sets `GoalSnapshot.snoozed_until_ms` (1-1440 min) — the monitor skips snoozed goals (`GoalNudgeSkip::Snoozed`) and the snooze clears on the next user message via `goal_reset_no_progress`. `GoalSnapshot.stop_reason` records why a goal stopped (`goal_control`, `manual_abort`, `pause_goal: …`) and clears when the goal re-arms.
+Turn accounting is evidence-based: a tool result added while a goal is installed sets `goal_turn_evidence` unless the tool failed (`tool_failed = true`) or resolves to an introspection/no-op tool (`wait`, `get_goal`, `pause`, `resume`); `goal_record_progress_from_usage` counts the turn as progress when evidence exists or completion tokens meet `no_progress_token_threshold`, and it also accumulates `progress.cost_used_cents` from `usage.metering_usd.total_usd`. `GoalBudget.max_cost_cents` is an optional hard limit checked alongside turns/tokens/minutes. Nudge events are contentful: the hidden message body carries the truncated synthesized goal, remaining gaps from the last verifier attempt, and progress/budget counters, plus a pointer to `validate_goal`/`pause`/`pause`. The `pause` tool (agent off-ramp) purges queued goal regenerates and parks the goal `paused` until the user resumes; `snooze_goal(minutes)` sets `GoalSnapshot.snoozed_until_ms` (1-1440 min) — the monitor skips snoozed goals (`GoalNudgeSkip::Snoozed`) and the snooze clears on the next user message via `goal_reset_no_progress`. `GoalSnapshot.stop_reason` records why a goal stopped (`goal_control`, `manual_abort`, `pause_goal: …`) and clears when the goal re-arms.
 
 ### Criteria and verification tiers
 
@@ -359,7 +229,7 @@ Turn accounting is evidence-based: a tool result added while a goal is installed
 
 ### Plan transitions
 
-`handoff_to_mode` and mode-transition endpoints create a pinned `initial-plan` task document when transitioning into Task Planner with an `initial_plan`. The document is created with kind `plan`, role `planner`, and `pinned=true`; failures are non-blocking and reported/logged without mutating the source chat's cached provider state.
+`handoff_to_mode` and mode transitions carry or attach the goal with its nested plan. They do not create new authoritative planning documents. Old initial-plan documents remain readable references; fresh standalone handoff plan parameters are not accepted.
 
 ### Anthropic Thinking/Signatures
 
@@ -406,7 +276,7 @@ OpenAI conversion lives in `src/llm/adapters/openai_chat.rs` (`convert_messages_
 
 ~50+ tools, filtered by mode/capabilities/config. Registered in `tools_list.rs`.
 
-**Categories**: Codebase search (CodeGraph definitions, tree, cat, regex, semantic memory) · CodeGraph analysis (overview, health, git risk, why, duplication, dead code, security scan, PR blast, map) · Codebase change (create/update/rm/mv/undo/apply_patch — confirmation required) · Web (fetch, search, Chrome automation) · Code execution (shell, process_*, sleep, cron_*) · System integrations (cmdline_*, service_*) · Knowledge (search, create, trajectories) · Agent (subagent, review — a multi-agent review swarm with normal/deep depths and idle-based agent watchdogs; see `docs/review_pipeline.md`) · Task management (~18 tools) · IDE (open_file, paste_text) · Integration-defined + MCP tools.
+**Categories**: Codebase search (CodeGraph definitions, tree, cat, regex, semantic memory) · CodeGraph analysis (overview, health, git risk, why, duplication, dead code, security scan, PR blast, map) · Codebase change (create/update/rm/mv/undo/apply_patch — confirmation required) · Web (fetch, search, Chrome automation) · Code execution (shell, process_*, wait, schedule, pause/resume) · System integrations (cmdline_*, service_*) · Knowledge (search, create, trajectories) · Agent (subagent, review — a multi-agent review swarm with normal/deep depths and idle-based agent watchdogs; see `docs/review_pipeline.md`) · Task management (~18 tools) · IDE (open_file, paste_text) · Integration-defined + MCP tools.
 
 Tool trait: `tool_execute(&mut self, ccx, tool_call_id, args) -> Result<(bool, Vec<ContextEnum>)>`.
 
@@ -420,8 +290,8 @@ child's inherit-all policy; an explicit comma-separated list is validated agains
 catalog. `model_name` selects a concrete configured chat model and takes precedence over `model_type`,
 whose valid slots are `default`, `light`, `thinking`, `buddy`, `model_2`, and `task_planner`.
 
-The optional `goal` accepts a string or `{content, criteria?, budget?}` object; use
-`goal.budget.max_turns` to bound child steps. `plan` installs the child's plan. `target_files` communicates
+The optional `goal` accepts a string or `{content, criteria?, budget?, plan?: {content}}` object; use
+`goal.budget.max_turns` to bound child steps. `goal.plan` installs the child's execution plan. `target_files` communicates
 expected edit targets and is compared with active peers for collision warnings. `worktree` is `inherit` by
 default or `isolated`; isolated worktrees default `auto_merge` to true and retain conflict state for the
 parent to inspect. The old `delegate` tool is not registered; legacy delegate records remain supported for
@@ -431,7 +301,7 @@ The interaction surface is `agents_overview`, `agent_message`, and child-only `p
 `agents_overview` renders the root-scoped agent tree with active work and questions.
 `agent_message` sends to a child or descendant, or uses `to: "parent"` for a note or a tracked question
 with `expects_reply`; a parent answers a question with its `reply_to` id. `progress_report` publishes a
-child's concise status line. Existing lifecycle tools are `agent_list`, `agent_status`, `agent_wait`,
+child's concise status line. Existing lifecycle tools are `agent_list`, `agent_status`, `wait`,
 `agent_result`, and `agent_cancel` (which cancels descendants by default). Agent records and their live
 introspection fields are emitted through snapshots and `background_agent_updated` SSE events.
 
@@ -455,8 +325,8 @@ next to `effective_model`.
 
 #### Launch spec extras and deliverable contracts
 
-`launch_spec.include_parent_goal` / `include_parent_plan` copy the parent's current goal/plan text as
-`context_file` messages tagged `{type: parent_goal|parent_plan, historical: true,
+`launch_spec.include_parent_goal` copies the parent's goal and nested plan text as
+`context_file` messages tagged `{type: parent_goal, historical: true,
 trusted_as_instructions: false}`; they never install child control state. `launch_spec.deliverable`
 (`required_sections`, `output_schema`, `evidence_required`; shared type
 `refact_chat_api::DeliverableContract`) is validated against the Settings launch bounds, rendered
@@ -576,9 +446,9 @@ Schema highlights: `process_id: string` required, optional `since_seq`, optional
 
 Empty-output reads are normal for long-running processes that have not emitted new chunks yet. Use the returned cursor for the next poll.
 
-#### `process_wait`
+#### Process completion
 
-Schema highlights: `process_id: string` required, optional `timeout_ms`, optional output filters. Waits until terminal status or timeout, then returns final/partial transcript metadata.
+Use `wait({target:{kind:"process",process_id},timeout_ms?})`. It returns terminal/partial process evidence with an explicit wait outcome. Interruption stops waiting, not the underlying process. Process read, output subscriptions, startup readiness and stdin yield remain specialized IO operations.
 
 #### `process_kill`
 
@@ -636,25 +506,15 @@ Edge cases: reject non-PTY processes with a clear error; cap `yield_time_ms`; pr
 
 Foreground processes and records without `chat_id` do not inject notifications. Closed/missing chats are dropped cleanly. Current SSE delivery is the ordinary `MessageAdded` envelope carrying the hidden event; keep any future dedicated `ProcessCompleted` envelope additive and update GUI docs/tests together.
 
-### `sleep`
+### Execution control
 
-Model-facing prompt: "Wait for the specified duration. User-interruptible at any time. Use when you have nothing to do, when waiting for something, or when the user asks you to pause. Prefer this over Bash(sleep ...) — it doesn't hold a shell process. You can call this concurrently with other tools."
+The three semantic families expose four tools:
 
-Schema:
+- `wait`: tagged duration/process/agents/task_agents target. Duration uses `duration_ms` (100 ms–1 h), optional tick interval, and top-level description; other targets accept a timeout. Child waits settle on the first terminal authorized child. Task-agent waits are planner-bound and return `parked`, not completion, with a best-effort 30–1800-second deadline. Interruption never cancels target work; duration tick events follow the tool result.
+- `schedule`: `action: create|list|update|delete`, using existing cron/interval/one-shot/webhook jobs and durable/session storage. Update supports `run_now`; enable/disable belongs to pause/resume.
+- `pause` / `resume`: tagged `target.kind: goal|child|card|schedule`. Goal `until_ms` is a bounded timed snooze; indefinite/manual/safety holds remain user-resumable only. Child controls require `expected_run_generation` and release only the cooperative parent hold, never recovery. Card controls require planner authority. Schedule controls change future eligibility, not running executions.
 
-```json
-{
-  "type": "object",
-  "properties": {
-    "duration_ms": { "type": "integer", "minimum": 100, "maximum": 3600000 },
-    "tick_interval_ms": { "type": "integer", "minimum": 5000 },
-    "description": { "type": "string", "description": "Short description (≤80 chars)." }
-  },
-  "required": ["duration_ms", "description"]
-}
-```
-
-Returns `{ "slept_ms": number, "interrupted": boolean }`. If `tick_interval_ms` is set, it injects `event(tick, "tool.sleep", {elapsed_ms, remaining_ms}, "tick")` at each interval. Edge cases: duration max is 1 hour; abort returns early; description must be ≤80 chars.
+Recovery stays separate: `agent_lifecycle(action: inspect|close|recover|continue|raise_and_recover)` retains generation/CAS, saved configuration and incomplete-outcome reconciliation. Retired tool names have no callable aliases; historical tool cards remain readable.
 
 ## Scheduler / Automation Platform
 
@@ -736,7 +596,7 @@ mutually exclusive with `cron`, `every`, `at`, and `tz`.
 | `agent_turn` | `{ kind, prompt, target, mode?, model?, tools? }` | Enqueues a `ChatCommand::UserMessage`. Existing-chat targets require an open/restorable chat id. Isolated targets create a fresh `cron_<job_id>_<fire_ms>` chat per fire. |
 | `command` | `{ kind, argv, target, cwd?, env?, timeout_secs? }` | No-agent path. Runs via the exec registry as a foreground non-PTY command. `command` input is shell-split into `argv`; `command_argv` is used verbatim. `cwd` must stay inside the active project. Default timeout is 300s, capped at 3600s. |
 
-Public `cron_create` does not expose `env`; it stores `env: null`. Command output is captured
+Public `schedule(action="create")` does not expose `env`; it stores `env: null`. Command output is captured
 from stdout/stderr with exec transcript limits. Command jobs can target chat for output delivery,
 but `webhook`, `notifier`, and `none` deliveries do not require a chat target.
 
@@ -780,158 +640,9 @@ must use `chat` delivery.
 - Recurring jobs auto-expire after `auto_expire_after_ms` when set. The default for recurring jobs is
   30 days; one-shot jobs use `0`.
 
-### Cron tools
+### Schedule tool
 
-#### `cron_create`
-
-Model-facing prompt: schedule an agent prompt or command for cron, interval, one-shot, or webhook
-triggering. Cron expressions are standard 5-field expressions evaluated in the local timezone unless
-`tz` is supplied. Webhook jobs never time-fire.
-
-Schema:
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "cron": { "type": "string", "description": "Standard 5-field cron expression in local time. Required unless every or at is set." },
-    "every": { "type": "string", "description": "Interval such as 30m, 2h, or 1d. Mutually exclusive with cron and at." },
-    "at": { "type": "string", "description": "One-shot time as RFC3339 or relative duration such as in 30m. Mutually exclusive with cron and every." },
-    "trigger": {
-      "type": "object",
-      "properties": {
-        "kind": { "type": "string", "enum": ["webhook"] },
-        "hook_id": { "type": "string", "description": "Inbound daemon hook id that fires this job." }
-      },
-      "required": ["kind", "hook_id"],
-      "description": "Webhook trigger. Mutually exclusive with cron, every, and at. Webhook jobs never time-fire."
-    },
-    "hook_id": { "type": "string", "description": "Shortcut for trigger {kind:'webhook', hook_id}." },
-    "tz": { "type": "string", "description": "IANA timezone for cron schedules, such as UTC or Asia/Kolkata." },
-    "prompt": { "type": "string", "description": "Prompt enqueued at each fire time. Mutually exclusive with command and command_argv." },
-    "command": { "type": "string", "description": "Command line to shell-split and run without an agent turn. Mutually exclusive with prompt and command_argv." },
-    "command_argv": { "type": "array", "items": { "type": "string" }, "description": "Command argv to run without an agent turn. Mutually exclusive with prompt and command." },
-    "cwd": { "type": "string", "description": "Optional command working directory, resolved under the active project." },
-    "timeout_secs": { "type": "integer", "description": "Optional command timeout in seconds." },
-    "delivery": {
-      "oneOf": [
-        { "type": "string", "enum": ["chat", "none"] },
-        {
-          "type": "object",
-          "properties": {
-            "kind": { "type": "string", "enum": ["webhook"] },
-            "url": { "type": "string" },
-            "token": { "type": "string" }
-          },
-          "required": ["url"]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": { "type": "string", "enum": ["notifier"] },
-            "integration_id": { "type": "string" },
-            "target": { "type": "string" }
-          },
-          "required": ["integration_id"]
-        }
-      ],
-      "description": "Delivery target: chat (default), none, webhook {url, token?}, or notifier {integration_id, target?}."
-    },
-    "recurring": { "type": "boolean", "default": true },
-    "durable": { "type": "boolean", "description": "Persist in the current project when true; stay session-only when false. Omitted defaults to durable when a project store exists." },
-    "isolated": { "type": "boolean", "default": false, "description": "Create a fresh isolated chat session for each fire instead of enqueueing into the current chat." },
-    "description": { "type": "string", "description": "Short description (≤80 chars) shown in cron_list UI." }
-  },
-  "required": ["description"]
-}
-```
-
-Validation: one schedule source (`cron` / `every` / `at` / webhook) and one action
-(`prompt` / `command` / `command_argv`) are required. Descriptions over 80 chars,
-invalid timezones, schedules with no match in the next year, and more than 50 jobs are rejected.
-`prompt` with non-chat delivery is rejected.
-
-Returns `{ id, human_schedule, recurring, durable, action_kind, delivery, isolated }` and appends a
-`system_notice` event summarizing the created job. Webhook tokens are stored for delivery but returned
-only as `has_token`.
-
-Examples:
-
-```json
-{"cron":"0 9 * * 1-5","prompt":"Prepare the daily standup summary","recurring":true,"durable":true,"description":"Daily standup prep"}
-{"every":"30m","command":"cargo check","delivery":"none","description":"Build check"}
-{"at":"in 30m","command_argv":["python3","scripts/check.py"],"delivery":{"kind":"webhook","url":"https://example.test/hook","token":"secret"},"description":"One-shot check"}
-{"hook_id":"deploy","command":"./deploy.sh","delivery":{"kind":"notifier","integration_id":"notifier_telegram","target":"12345"},"description":"Deploy hook"}
-```
-
-#### `cron_list`
-
-Model-facing prompt: list scheduled tasks with target chat and mode, optionally filtering by
-session-only or durable scope.
-
-Schema:
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "scope": { "type": "string", "enum": ["session", "durable", "all"], "default": "all" }
-  },
-  "required": []
-}
-```
-
-Returns an array sorted by `next_fire_at_ms` then `id`. Tool rows contain
-`{ id, cron, human_schedule, description, prompt, action_kind, delivery, chat_id, target,
-isolated, mode, recurring, durable, next_fire_at_ms, fire_count, created_at_ms }`. `prompt` is
-truncated to 200 chars; non-time triggers have `next_fire_at_ms: 0`.
-
-#### `cron_update`
-
-Model-facing prompt: update, pause, resume, or run a scheduled task by ID.
-
-Schema:
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "id": { "type": "string" },
-    "cron": { "type": "string" },
-    "every": { "type": "string" },
-    "at": { "type": "string" },
-    "tz": { "type": "string" },
-    "prompt": { "type": "string" },
-    "description": { "type": "string" },
-    "enabled": { "type": "boolean" },
-    "run_now": { "type": "boolean" }
-  },
-  "required": ["id"]
-}
-```
-
-Schedule updates use the same `parse_schedule()` rules as create; `tz` must accompany a cron
-schedule. Updating to `at` forces `recurring=false`. `prompt` can only change `agent_turn` jobs;
-command jobs reject prompt updates. `enabled=false` pauses and records `paused_at_ms`; `enabled=true`
-resumes. `run_now=true` sets `trigger_at_ms` and wakes the runner. Returns
-`{ id, updated: true, human_schedule }`.
-
-#### `cron_delete`
-
-Model-facing prompt: cancel a scheduled task by ID.
-
-Schema:
-
-```json
-{
-  "type": "object",
-  "properties": { "id": { "type": "string" } },
-  "required": ["id"]
-}
-```
-
-Removes from the session store first, then the active durable store. Returns `{ "removed": boolean }`
-and notifies the runner only when a job was removed.
+`schedule` dispatches create/list/update/delete through strict action-specific fields. Create preserves exactly one cron/every/at/webhook trigger and exactly one prompt/command/argv action, scope, durability, delivery, recurrence and timezone validation. List accepts scope. Update accepts job ID, schedule/prompt/description changes and `run_now`; use pause/resume for enabled state. Delete removes by ID. Stored job IDs, run history, existing scheduler feature HTTP routes and historical cron-fire events stay intact. Old cron tool names are not registered.
 
 ### HTTP scheduler surface
 
@@ -945,8 +656,8 @@ Routes live under `/v1/scheduler/cron`:
 | `POST /v1/scheduler/cron/:id/run` | none | Sets `trigger_at_ms`; returns `{ id, triggered: true }`. |
 | `DELETE /v1/scheduler/cron/:id` | none | `{ removed }` |
 
-HTTP creation mirrors `cron_create` plus `chat_id` and `mode`. If `durable` is omitted, HTTP and
-`cron_create` persist into the active project store when one exists; explicit `durable: false`
+HTTP creation mirrors `schedule(action="create")` plus `chat_id` and `mode`. If `durable` is omitted, HTTP and
+`schedule(action="create")` persist into the active project store when one exists; explicit `durable: false`
 keeps the job session-only. If the request creates an agent turn or uses `chat` delivery, `chat_id`
 must name an existing open chat. HTTP list responses flatten trigger details for the GUI and still
 redact webhook tokens as `has_token`.

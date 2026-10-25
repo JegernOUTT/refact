@@ -23,10 +23,6 @@ pub struct ToolAgentStatus {
     pub config_path: String,
 }
 
-pub struct ToolAgentWait {
-    pub config_path: String,
-}
-
 pub struct ToolAgentResult {
     pub config_path: String,
 }
@@ -35,15 +31,9 @@ pub struct ToolAgentCancel {
     pub config_path: String,
 }
 
-pub struct ToolAgentResume {
-    pub config_path: String,
-}
-
 #[derive(Debug, PartialEq, Eq)]
-enum AgentResumeAction {
+enum AgentLifecycleAction {
     Inspect,
-    Pause,
-    Release,
     Close {
         expected_run_generation: Option<u64>,
         reason: Option<String>,
@@ -69,8 +59,6 @@ enum AgentResumeAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LifecycleOutcome {
     Inspected,
-    Paused,
-    Released,
     Closed,
     AlreadyClosed,
     Queued,
@@ -79,13 +67,7 @@ enum LifecycleOutcome {
 impl LifecycleOutcome {
     /// True only when the call changed the child's lifecycle right now.
     fn accepted(self) -> bool {
-        matches!(
-            self,
-            LifecycleOutcome::Closed
-                | LifecycleOutcome::Queued
-                | LifecycleOutcome::Paused
-                | LifecycleOutcome::Released
-        )
+        matches!(self, LifecycleOutcome::Closed | LifecycleOutcome::Queued)
     }
 
     /// The state to report. An accepted continuation is queued: the agent is
@@ -98,8 +80,6 @@ impl LifecycleOutcome {
                 BgAgentStatus::Closed.as_str()
             }
             LifecycleOutcome::Inspected => status.as_str(),
-            LifecycleOutcome::Paused => "paused",
-            LifecycleOutcome::Released => status.as_str(),
         }
     }
 
@@ -107,12 +87,6 @@ impl LifecycleOutcome {
         match self {
             LifecycleOutcome::Inspected => {
                 "Child inspected; no limits, lifecycle or execution state changed."
-            }
-            LifecycleOutcome::Paused => {
-                "Parent pause requested. In-flight work may finish; the child parks at its next model/tool boundary without consuming another turn."
-            }
-            LifecycleOutcome::Released => {
-                "Parent pause released. The same running child may continue; other supervision or approval gates remain in effect."
             }
             LifecycleOutcome::Closed => {
                 "Child closed. It holds no execution slot; its history, goal and plan stay resumable."
@@ -127,15 +101,14 @@ impl LifecycleOutcome {
     }
 }
 
-fn agent_resume_schema() -> Value {
+fn agent_lifecycle_schema() -> Value {
     json!({
-        "type": "object",
-        "additionalProperties": false,
+        "type": "object", "additionalProperties": false,
         "properties": {
             "agent_id": {"type": "string", "minLength": 1},
-            "action": {"type": "string", "enum": ["inspect", "close", "raise_and_resume", "resume", "continue", "pause", "release"], "description": "inspect, pause and release accept only agent_id and action. close additionally accepts reason and expected_run_generation. raise_and_resume requires max_steps and expected_change_seq only. resume and continue require expected_change_seq and optionally accept instruction and reconcile_incomplete."},
-            "instruction": {"type": "string", "minLength": 1, "description": "Optional exact parent follow-up for resume or continue; appended after preserved child history."},
-            "reconcile_incomplete": {"type": "boolean", "default": false, "description": "For resume or continue only: explicitly acknowledge missing tool outcomes as unknown without replaying calls. Inspect side effects before enabling."},
+            "action": {"type": "string", "enum": ["inspect", "close", "raise_and_recover", "recover", "continue"], "description": "inspect accepts only agent_id and action. close additionally accepts reason and expected_run_generation. raise_and_recover requires max_steps and expected_change_seq only. recover and continue require expected_change_seq and optionally accept instruction and reconcile_incomplete."},
+            "instruction": {"type": "string", "minLength": 1, "description": "Optional exact parent follow-up for recover or continue; appended after preserved child history."},
+            "reconcile_incomplete": {"type": "boolean", "default": false, "description": "For recover or continue only: explicitly acknowledge missing tool outcomes as unknown without replaying calls. Inspect side effects before enabling."},
             "reason": {"type": "string", "minLength": 1, "description": "For close only: why this child is being closed."},
             "expected_run_generation": {
                 "type": "integer", "minimum": 1,
@@ -143,174 +116,93 @@ fn agent_resume_schema() -> Value {
             },
             "max_steps": {
                 "type": "integer", "minimum": 1,
-                "description": "New per-child total step cap, required for raise_and_resume. Must increase the stopped cap without exceeding the Settings ceiling."
+                "description": "New per-child total step cap, required for raise_and_recover. Must increase the stopped cap without exceeding the Settings ceiling."
             },
             "expected_change_seq": {
                 "type": "integer", "minimum": 1,
-                "description": "Exact change_seq returned by inspect, required for raise_and_resume, resume and continue."
+                "description": "Exact change_seq returned by inspect, required for raise_and_recover, recover and continue."
             }
         },
         "required": ["agent_id", "action"]
     })
 }
 
-fn parse_agent_resume_args(
+fn parse_agent_lifecycle_args(
     args: &HashMap<String, Value>,
-) -> Result<(String, AgentResumeAction), String> {
+) -> Result<(String, AgentLifecycleAction), String> {
+    let action = parse_required_string(args, "action")?;
+    let allowed: &[&str] = match action.as_str() {
+        "inspect" => &[],
+        "close" => &["reason", "expected_run_generation"],
+        "recover" | "continue" => &["instruction", "reconcile_incomplete", "expected_change_seq"],
+        "raise_and_recover" => &["max_steps", "expected_change_seq"],
+        _ => {
+            return Err(
+                "action must be inspect, close, recover, continue or raise_and_recover".into(),
+            )
+        }
+    };
     for key in args.keys() {
-        if !matches!(
-            key.as_str(),
-            "agent_id"
-                | "action"
-                | "max_steps"
-                | "expected_change_seq"
-                | "instruction"
-                | "reconcile_incomplete"
-                | "reason"
-                | "expected_run_generation"
-        ) {
-            return Err(format!("Unknown argument '{key}'"));
+        if !matches!(key.as_str(), "agent_id" | "action") && !allowed.contains(&key.as_str()) {
+            return Err(format!("{action} does not accept '{key}'"));
         }
     }
     let agent_id = parse_required_string(args, "agent_id")?;
-    let optional_instruction = |args: &HashMap<String, Value>| -> Result<Option<String>, String> {
-        args.get("instruction")
-            .map(|value| {
-                value
-                    .as_str()
-                    .filter(|text| !text.trim().is_empty())
+    let positive = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0)
+            .ok_or_else(|| format!("{key} must be a positive integer"))
+    };
+    let text = |key: &str| {
+        args.get(key)
+            .map(|v| {
+                v.as_str()
+                    .filter(|s| !s.trim().is_empty())
                     .map(str::to_string)
-                    .ok_or_else(|| "instruction must be a non-empty string".to_string())
+                    .ok_or_else(|| format!("{key} must be a non-empty string"))
             })
             .transpose()
     };
-    let optional_reconcile = |args: &HashMap<String, Value>| -> Result<bool, String> {
-        Ok(args
-            .get("reconcile_incomplete")
-            .map(|value| {
-                value
-                    .as_bool()
-                    .ok_or("reconcile_incomplete must be a boolean")
-            })
-            .transpose()?
-            .unwrap_or(false))
-    };
-    let required_change_seq = |args: &HashMap<String, Value>| -> Result<u64, String> {
-        args.get("expected_change_seq")
-            .and_then(Value::as_u64)
-            .filter(|value| *value > 0)
-            .ok_or_else(|| "expected_change_seq must be a positive integer".to_string())
-    };
-    let action = match args.get("action").and_then(Value::as_str) {
-        Some(action @ ("pause" | "release")) => {
-            if args
-                .keys()
-                .any(|key| !matches!(key.as_str(), "agent_id" | "action"))
-            {
-                return Err(format!("{action} only accepts agent_id and action"));
-            }
-            if action == "pause" {
-                AgentResumeAction::Pause
+    let action = match action.as_str() {
+        "inspect" => AgentLifecycleAction::Inspect,
+        "close" => AgentLifecycleAction::Close {
+            expected_run_generation: args
+                .get("expected_run_generation")
+                .map(|_| positive("expected_run_generation"))
+                .transpose()?,
+            reason: text("reason")?,
+        },
+        "raise_and_recover" => AgentLifecycleAction::RaiseAndResume {
+            max_steps: usize::try_from(positive("max_steps")?)
+                .map_err(|_| "max_steps is too large".to_string())?,
+            expected_change_seq: positive("expected_change_seq")?,
+        },
+        action => {
+            let expected_change_seq = positive("expected_change_seq")?;
+            let instruction = text("instruction")?;
+            let reconcile_incomplete = args
+                .get("reconcile_incomplete")
+                .map(|v| {
+                    v.as_bool()
+                        .ok_or_else(|| "reconcile_incomplete must be a boolean".to_string())
+                })
+                .transpose()?
+                .unwrap_or(false);
+            if action == "recover" {
+                AgentLifecycleAction::Resume {
+                    expected_change_seq,
+                    instruction,
+                    reconcile_incomplete,
+                }
             } else {
-                AgentResumeAction::Release
+                AgentLifecycleAction::ContinueTurn {
+                    expected_change_seq,
+                    instruction,
+                    reconcile_incomplete,
+                }
             }
         }
-        Some("inspect") => {
-            if [
-                "max_steps",
-                "expected_change_seq",
-                "instruction",
-                "reconcile_incomplete",
-                "reason",
-                "expected_run_generation",
-            ]
-            .iter()
-            .any(|key| args.contains_key(*key))
-            {
-                return Err("inspect does not accept mutation fields".to_string());
-            }
-            AgentResumeAction::Inspect
-        }
-        Some("close") => {
-            if [
-                "max_steps",
-                "expected_change_seq",
-                "instruction",
-                "reconcile_incomplete",
-            ]
-            .iter()
-            .any(|key| args.contains_key(*key))
-            {
-                return Err("close only accepts reason and expected_run_generation".to_string());
-            }
-            AgentResumeAction::Close {
-                expected_run_generation: args
-                    .get("expected_run_generation")
-                    .map(|value| {
-                        value.as_u64().filter(|value| *value > 0).ok_or_else(|| {
-                            "expected_run_generation must be a positive integer".to_string()
-                        })
-                    })
-                    .transpose()?,
-                reason: args
-                    .get("reason")
-                    .map(|value| {
-                        value
-                            .as_str()
-                            .filter(|text| !text.trim().is_empty())
-                            .map(str::to_string)
-                            .ok_or_else(|| "reason must be a non-empty string".to_string())
-                    })
-                    .transpose()?,
-            }
-        }
-        Some("continue") => {
-            if args.contains_key("max_steps") {
-                return Err(
-                    "continue does not change limits; use raise_and_resume for a stopped cap"
-                        .into(),
-                );
-            }
-            AgentResumeAction::ContinueTurn {
-                expected_change_seq: required_change_seq(args)?,
-                instruction: optional_instruction(args)?,
-                reconcile_incomplete: optional_reconcile(args)?,
-            }
-        }
-        Some("raise_and_resume") => {
-            if args.contains_key("instruction") || args.contains_key("reconcile_incomplete") {
-                return Err(
-                    "raise_and_resume does not accept instruction or reconcile_incomplete".into(),
-                );
-            }
-            let positive_integer = |key: &str| {
-                args.get(key)
-                    .and_then(Value::as_u64)
-                    .filter(|value| *value > 0)
-                    .ok_or_else(|| format!("{key} must be a positive integer"))
-            };
-            AgentResumeAction::RaiseAndResume {
-                max_steps: usize::try_from(positive_integer("max_steps")?)
-                    .map_err(|_| "max_steps is too large".to_string())?,
-                expected_change_seq: positive_integer("expected_change_seq")?,
-            }
-        }
-        Some("resume") => {
-            if args.contains_key("max_steps") {
-                return Err(
-                    "resume does not change limits; use raise_and_resume for a stopped cap".into(),
-                );
-            }
-            AgentResumeAction::Resume {
-                expected_change_seq: required_change_seq(args)?,
-                instruction: optional_instruction(args)?,
-                reconcile_incomplete: optional_reconcile(args)?,
-            }
-        }
-        _ => return Err(
-            "action must be inspect, close, resume, continue, raise_and_resume, pause or release"
-                .to_string(),
-        ),
     };
     Ok((agent_id, action))
 }
@@ -388,32 +280,6 @@ fn agent_status_schema() -> Value {
     agent_id_schema(serde_json::Map::new())
 }
 
-fn agent_wait_schema() -> Value {
-    let settings = refact_work_core::coordination_settings();
-    json!({
-        "type": "object",
-        "properties": {
-            "agent_id": {
-                "type": "string",
-                "description": "Background agent ID, for example bgagent-... Use agent_ids to wait for the first of several."
-            },
-            "agent_ids": {
-                "type": "array",
-                "items": {"type": "string"},
-                "minItems": 1,
-                "maxItems": settings.agent_wait_max_agents,
-                "description": "Wait for whichever of these agents (spawned by this chat) reaches a terminal state first."
-            },
-            "timeout_ms": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": settings.agent_wait_max_ms,
-                "description": format!("How long to wait for completion. Default: {}", settings.agent_wait_default_ms)
-            }
-        }
-    })
-}
-
 fn parse_wait_targets(
     args: &HashMap<String, Value>,
     max_agents: usize,
@@ -431,10 +297,16 @@ fn parse_wait_targets(
             .collect::<Result<Vec<_>, _>>()?,
         Some(_) => return Err("argument `agent_ids` must be an array of agent ids".to_string()),
     };
-    if let Some(single) = args.get("agent_id").and_then(Value::as_str) {
-        if !single.trim().is_empty() {
-            ids.push(single.trim().to_string());
+    for key in args.keys() {
+        if !matches!(key.as_str(), "agent_ids" | "timeout_ms") {
+            return Err(format!("Unknown argument '{key}'"));
         }
+    }
+    if ids.len() > max_agents.min(128) {
+        return Err(format!(
+            "`agent_ids` supports at most {} agents per wait",
+            max_agents.min(128)
+        ));
     }
     ids.dedup();
     let mut seen = std::collections::HashSet::new();
@@ -818,7 +690,7 @@ fn format_agent_table(rows: &[BackgroundAgent]) -> String {
     result.push('\n');
     result.push_str(&format_agent_counts(rows));
     result.push_str(
-        "\nUse `agent_status(agent_id=...)`, `agent_wait(...)`, or `agent_result(...)` to follow up.",
+        "\nUse `agent_status(agent_id=...)`, `wait with target.kind agents`, or `agent_result(...)` to follow up.",
     );
     result
 }
@@ -940,7 +812,7 @@ fn format_agent_status_block(record: &BackgroundAgent) -> String {
         format_optional_line(&mut result, "Close reason", record.close_reason.as_deref());
         if record.status == BgAgentStatus::Closed {
             result.push_str(
-                "\n(Closed, not finished. agent_resume with action inspect, then resume, continues this same child.)\n",
+                "\n(Closed, not finished. agent_lifecycle with action inspect, then recover, continues this same child.)\n",
             );
         }
     } else {
@@ -955,7 +827,7 @@ async fn format_agent_result(
 ) -> Result<String, String> {
     if !record.status.is_terminal() {
         return Ok(format!(
-            "Agent has not finished yet. Current status: {}. Use agent_wait to block.",
+            "Agent has not finished yet. Current status: {}. wait with target.kind agents to block.",
             format_agent_status_chip(record)
         ));
     }
@@ -1144,177 +1016,220 @@ fn payload_string_list(payload: &Value, key: &str) -> Option<Vec<String>> {
     (!values.is_empty()).then_some(values)
 }
 
-#[async_trait]
-impl Tool for ToolAgentResume {
-    fn tool_description(&self) -> ToolDesc {
-        let mut description = background_agent_tool_desc(
-            self.config_path.clone(),
-            "agent_resume",
-            "Agent Resume",
-            "Inspect, close, resume or continue a direct child on its saved history, plan and goal. pause parks a live child at its next model/tool boundary; release removes the parent pause without starting a new generation. Only the parent or its root may pause/release, and the pause survives restart and explicit recovery. close stops a live child and releases its execution slot while keeping it resumable. resume restarts a stopped or closed child; continue asks an already-completed child for another turn without rewriting its earlier completion. Both may append a parent instruction; incomplete tool outcomes require explicit reconciliation and are never replayed. raise_and_resume increases a stopped per-child step cap. Resuming and continuing require expected_change_seq from inspect, and are reported as queued, never as completed. Cannot change global Settings, goal budgets, policy or provider quotas. Saved runtime configuration must still be available.",
-            agent_resume_schema(),
-        );
-        description.allow_parallel = false;
-        description
-    }
+pub(crate) fn agent_lifecycle_description(config_path: &str) -> ToolDesc {
+    let mut description = background_agent_tool_desc(
+        config_path.to_string(), "agent_lifecycle", "Agent Lifecycle",
+        "Inspect, close, recover or continue a direct child on its saved history, plan and goal. Recover restarts a stopped or closed child; continue asks a completed child for another turn. raise_and_recover increases a stopped per-child step cap within Settings. Mutations require the inspected revision; incomplete outcomes require explicit reconciliation and are never replayed. Accepted continuations are queued, never completed. Cannot change global Settings, goal budgets, policy or provider quotas.",
+        agent_lifecycle_schema(),
+    );
+    description.allow_parallel = false;
+    description
+}
 
+pub(crate) async fn child_pause_resume(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    tool_call_id: &String,
+    args: &HashMap<String, Value>,
+    resume: bool,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    let agent_id = parse_required_string(args, "agent_id")?;
+    let (app, chat_id) = background_agent_context(&ccx).await;
+    let record = app
+        .agents
+        .get_any(&agent_id)
+        .await
+        .map_err(|e| map_registry_error(&agent_id, e))?;
+    if record.parent_chat_id != chat_id
+        && record.parent_root_chat_id.as_deref() != Some(chat_id.as_str())
+    {
+        return Err(not_found_error(&agent_id));
+    }
+    {
+        let expected = args
+            .get("expected_run_generation")
+            .ok_or_else(|| "expected_run_generation is required".to_string())?;
+        let expected = expected
+            .as_u64()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| "expected_run_generation must be a positive integer".to_string())?;
+        if expected != record.run_generation {
+            return Err("child moved to another generation".into());
+        }
+    }
+    let record = app
+        .agents
+        .set_parent_pause_checked(&agent_id, &chat_id, !resume, record.run_generation)
+        .await
+        .map_err(|e| map_registry_error(&agent_id, e))?;
+    crate::agents::spawn::emit_background_agent_update(app.clone(), &record).await;
+    let pause = app.agents.pause_status(&agent_id).await;
+    Ok(tool_message(tool_call_id, json!({
+        "summary": if resume { "Parent pause released; other gates remain in effect." } else { "Parent pause requested; child parks at its next safe boundary." },
+        "accepted": true, "agent_id": record.agent_id, "child_chat_id": record.child_chat_id,
+        "status": if record.is_paused() { "paused" } else { record.status.as_str() },
+        "paused_by": record.paused_by, "paused_at": record.paused_at, "pause": pause,
+        "change_seq": record.change_seq, "run_generation": record.run_generation, "step_count": record.step_count
+    }).to_string()))
+}
+
+pub struct ToolAgentLifecycle {
+    pub config_path: String,
+}
+
+#[async_trait]
+impl Tool for ToolAgentLifecycle {
+    fn tool_description(&self) -> ToolDesc {
+        agent_lifecycle_description(&self.config_path)
+    }
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (agent_id, action) = parse_agent_resume_args(args)?;
-        let (app, chat_id) = background_agent_context(&ccx).await;
-        let mut record = app
-            .agents
-            .get_any(&agent_id)
-            .await
-            .map_err(|error| map_registry_error(&agent_id, error))?;
-        let pause_control = matches!(
-            action,
-            AgentResumeAction::Pause | AgentResumeAction::Release
-        );
-        if record.parent_chat_id != chat_id
-            && !(pause_control && record.parent_root_chat_id.as_deref() == Some(chat_id.as_str()))
-        {
-            return Err(not_found_error(&agent_id));
-        }
-        let outcome = match action {
-            AgentResumeAction::Inspect => LifecycleOutcome::Inspected,
-            AgentResumeAction::Pause | AgentResumeAction::Release => {
-                let paused = matches!(action, AgentResumeAction::Pause);
-                record = app
-                    .agents
-                    .set_parent_pause(&agent_id, &chat_id, paused)
-                    .await
-                    .map_err(|error| map_registry_error(&agent_id, error))?;
-                crate::agents::spawn::emit_background_agent_update(app.clone(), &record).await;
-                let pause = app.agents.pause_status(&agent_id).await;
-                return Ok(tool_message(tool_call_id, json!({
-                    "summary": if paused { LifecycleOutcome::Paused.summary() } else { LifecycleOutcome::Released.summary() },
-                    "action": args.get("action"),
-                    "accepted": true,
-                    "agent_id": record.agent_id,
-                    "child_chat_id": record.child_chat_id,
-                    "status": if record.is_paused() { "paused" } else { record.status.as_str() },
-                    "paused_by": record.paused_by,
-                    "paused_at": record.paused_at,
-                    "pause": pause,
-                    "change_seq": record.change_seq,
-                    "run_generation": record.run_generation,
-                    "step_count": record.step_count,
-                }).to_string()));
-            }
-            AgentResumeAction::Close {
+        agent_lifecycle_execute(ccx, tool_call_id, args).await
+    }
+    async fn match_against_confirm_deny(
+        &self,
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        args: &HashMap<String, Value>,
+    ) -> Result<crate::tools::tools_description::MatchConfirmDeny, String> {
+        agent_lifecycle_match_against_confirm_deny(ccx, args).await
+    }
+    fn tool_depends_on(&self) -> Vec<String> {
+        vec![]
+    }
+}
+
+pub(crate) async fn agent_lifecycle_execute(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    tool_call_id: &String,
+    args: &HashMap<String, Value>,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    let (agent_id, action) = parse_agent_lifecycle_args(args)?;
+    let (app, chat_id) = background_agent_context(&ccx).await;
+    let mut record = app
+        .agents
+        .get_any(&agent_id)
+        .await
+        .map_err(|error| map_registry_error(&agent_id, error))?;
+    if record.parent_chat_id != chat_id {
+        return Err(not_found_error(&agent_id));
+    }
+    let outcome = match action {
+        AgentLifecycleAction::Inspect => LifecycleOutcome::Inspected,
+        AgentLifecycleAction::Close {
+            expected_run_generation,
+            reason,
+        } => {
+            let (closed, already_closed) = crate::agents::lifecycle::close_agent(
+                app.clone(),
+                &chat_id,
+                &agent_id,
                 expected_run_generation,
                 reason,
-            } => {
-                let (closed, already_closed) = crate::agents::lifecycle::close_agent(
-                    app.clone(),
-                    &chat_id,
-                    &agent_id,
-                    expected_run_generation,
-                    reason,
-                )
-                .await
-                .map_err(|error| map_registry_error(&agent_id, error))?;
-                record = closed;
-                if already_closed {
-                    LifecycleOutcome::AlreadyClosed
-                } else {
-                    LifecycleOutcome::Closed
-                }
+            )
+            .await
+            .map_err(|error| map_registry_error(&agent_id, error))?;
+            record = closed;
+            if already_closed {
+                LifecycleOutcome::AlreadyClosed
+            } else {
+                LifecycleOutcome::Closed
             }
-            AgentResumeAction::Resume {
+        }
+        AgentLifecycleAction::Resume {
+            expected_change_seq,
+            instruction,
+            reconcile_incomplete,
+        } => {
+            if record.status == BgAgentStatus::Completed {
+                return Err(
+                    "this child already completed; use action continue to ask it for another turn"
+                        .to_string(),
+                );
+            }
+            record = crate::agents::spawn::resume_agent(
+                app.clone(),
+                &chat_id,
+                &agent_id,
+                None,
                 expected_change_seq,
                 instruction,
                 reconcile_incomplete,
-            } => {
-                if record.status == BgAgentStatus::Completed {
-                    return Err("this child already completed; use action continue to ask it for another turn".to_string());
-                }
-                record = crate::agents::spawn::resume_agent(
-                    app.clone(),
-                    &chat_id,
-                    &agent_id,
-                    None,
-                    expected_change_seq,
-                    instruction,
-                    reconcile_incomplete,
-                )
-                .await?;
-                LifecycleOutcome::Queued
-            }
-            AgentResumeAction::ContinueTurn {
-                expected_change_seq,
-                instruction,
-                reconcile_incomplete,
-            } => {
-                if record.status != BgAgentStatus::Completed {
-                    return Err(format!(
-                        "continue applies to a completed child; this one is {}. Use action resume instead.",
+            )
+            .await?;
+            LifecycleOutcome::Queued
+        }
+        AgentLifecycleAction::ContinueTurn {
+            expected_change_seq,
+            instruction,
+            reconcile_incomplete,
+        } => {
+            if record.status != BgAgentStatus::Completed {
+                return Err(format!(
+                        "continue applies to a completed child; this one is {}. Use action recover instead.",
                         record.status.as_str()
                     ));
-                }
-                record = crate::agents::spawn::resume_agent(
-                    app.clone(),
-                    &chat_id,
-                    &agent_id,
-                    None,
-                    expected_change_seq,
-                    instruction,
-                    reconcile_incomplete,
-                )
-                .await?;
-                LifecycleOutcome::Queued
             }
-            AgentResumeAction::RaiseAndResume {
+            record = crate::agents::spawn::resume_agent(
+                app.clone(),
+                &chat_id,
+                &agent_id,
+                None,
+                expected_change_seq,
+                instruction,
+                reconcile_incomplete,
+            )
+            .await?;
+            LifecycleOutcome::Queued
+        }
+        AgentLifecycleAction::RaiseAndResume {
+            max_steps,
+            expected_change_seq,
+        } => {
+            record = crate::agents::spawn::resume_capped_agent(
+                app.clone(),
+                &chat_id,
+                &agent_id,
                 max_steps,
                 expected_change_seq,
-            } => {
-                record = crate::agents::spawn::resume_capped_agent(
-                    app.clone(),
-                    &chat_id,
-                    &agent_id,
-                    max_steps,
-                    expected_change_seq,
-                )
-                .await?;
-                LifecycleOutcome::Queued
-            }
-        };
-        let recovered = crate::agents::spawn::recover_run_config(&app, &chat_id, &agent_id)
+            )
+            .await?;
+            LifecycleOutcome::Queued
+        }
+    };
+    let recovered = crate::agents::spawn::recover_run_config(&app, &chat_id, &agent_id)
+        .await
+        .ok();
+    let max_steps = recovered.as_ref().map(|run| run.config.max_steps);
+    let tool_authority = recovered.as_ref().map(|run| {
+        json!({
+            "tools": run.config.tools,
+            "migrated_from_legacy_all": run.authority_migrated,
+        })
+    });
+    let cap_stop = if record.status == BgAgentStatus::Failed {
+        record
+            .error
+            .as_deref()
+            .and_then(crate::agents::types::CapStop::from_error)
+    } else {
+        None
+    };
+    let scope_available = recovered.is_some();
+    let settings_ceiling = if let Some(run) = &recovered {
+        crate::runtime_settings::coordination_for_project(&run.root)
             .await
-            .ok();
-        let max_steps = recovered.as_ref().map(|run| run.config.max_steps);
-        let tool_authority = recovered.as_ref().map(|run| {
-            json!({
-                "tools": run.config.tools,
-                "migrated_from_legacy_all": run.authority_migrated,
-            })
-        });
-        let cap_stop = if record.status == BgAgentStatus::Failed {
-            record
-                .error
-                .as_deref()
-                .and_then(crate::agents::types::CapStop::from_error)
-        } else {
-            None
-        };
-        let scope_available = recovered.is_some();
-        let settings_ceiling = if let Some(run) = &recovered {
-            crate::runtime_settings::coordination_for_project(&run.root)
-                .await
-                .ok()
-                .map(|limits| limits.subagent_max_steps)
-        } else {
-            None
-        };
-        let steps_left = scope_available
-            && max_steps.is_some_and(|limit| limit > record.step_count as usize)
-            && cap_stop.is_none();
-        Ok(tool_message(tool_call_id, json!({
+            .ok()
+            .map(|limits| limits.subagent_max_steps)
+    } else {
+        None
+    };
+    let steps_left = scope_available
+        && max_steps.is_some_and(|limit| limit > record.step_count as usize)
+        && cap_stop.is_none();
+    Ok(tool_message(tool_call_id, json!({
             "summary": outcome.summary(),
             "action": args.get("action"),
             "accepted": outcome.accepted(),
@@ -1339,33 +1254,30 @@ impl Tool for ToolAgentResume {
             "tool_authority": tool_authority,
             "original_scope_available": scope_available,
         }).to_string()))
-    }
+}
 
-    async fn match_against_confirm_deny(
-        &self,
-        _ccx: Arc<AMutex<AtCommandsContext>>,
-        args: &HashMap<String, Value>,
-    ) -> Result<crate::tools::tools_description::MatchConfirmDeny, String> {
-        use crate::tools::tools_description::{MatchConfirmDeny, MatchConfirmDenyResult};
-        let (agent_id, action) = parse_agent_resume_args(args)?;
-        Ok(MatchConfirmDeny {
-            result: match action {
-                AgentResumeAction::Inspect => MatchConfirmDenyResult::PASS,
-                AgentResumeAction::Pause
-                | AgentResumeAction::Release
-                | AgentResumeAction::Close { .. }
-                | AgentResumeAction::RaiseAndResume { .. }
-                | AgentResumeAction::Resume { .. }
-                | AgentResumeAction::ContinueTurn { .. } => MatchConfirmDenyResult::CONFIRMATION,
-            },
-            command: format!("agent_resume {agent_id} {action:?}"),
-            rule: "default".to_string(),
-        })
-    }
-
-    fn tool_depends_on(&self) -> Vec<String> {
-        vec![]
-    }
+pub(crate) async fn agent_lifecycle_match_against_confirm_deny(
+    _ccx: Arc<AMutex<AtCommandsContext>>,
+    args: &HashMap<String, Value>,
+) -> Result<crate::tools::tools_description::MatchConfirmDeny, String> {
+    use crate::tools::tools_description::{MatchConfirmDeny, MatchConfirmDenyResult};
+    let (agent_id, action) = parse_agent_lifecycle_args(args)?;
+    Ok(MatchConfirmDeny {
+        result: match action {
+            AgentLifecycleAction::Inspect => MatchConfirmDenyResult::PASS,
+            AgentLifecycleAction::Close { .. }
+            | AgentLifecycleAction::RaiseAndResume { .. }
+            | AgentLifecycleAction::Resume { .. }
+            | AgentLifecycleAction::ContinueTurn { .. } => MatchConfirmDenyResult::CONFIRMATION,
+        },
+        command: format!(
+            "agent_lifecycle {agent_id} {}",
+            args.get("action")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+        ),
+        rule: "default".to_string(),
+    })
 }
 
 #[async_trait]
@@ -1437,164 +1349,163 @@ impl Tool for ToolAgentStatus {
     }
 }
 
-#[async_trait]
-impl Tool for ToolAgentWait {
-    fn tool_description(&self) -> ToolDesc {
-        background_agent_tool_desc(
-            self.config_path.clone(),
-            "agent_wait",
-            "Agent Wait",
-            "Wait for one background agent spawned by this chat (agent_id), or for the first of several (agent_ids), to reach a terminal state; on timeout return current statuses instead. Waiting parks this runner's execution slot.",
-            agent_wait_schema(),
+pub(crate) async fn execute_agents_wait(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    tool_call_id: &String,
+    args: &HashMap<String, Value>,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    let settings = refact_work_core::coordination_settings();
+    let targets = parse_wait_targets(args, settings.agent_wait_max_agents)?;
+    let timeout_ms = parse_wait_timeout_ms(
+        args,
+        settings.agent_wait_default_ms,
+        settings.agent_wait_max_ms,
+    )?;
+    let (app, parent_chat_id, background_agent_id) = {
+        let context = ccx.lock().await;
+        (
+            context.app.clone(),
+            context.chat_id.clone(),
+            context.background_agent_id.clone(),
         )
-    }
-
-    async fn tool_execute(
-        &mut self,
-        ccx: Arc<AMutex<AtCommandsContext>>,
-        tool_call_id: &String,
-        args: &HashMap<String, Value>,
-    ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let settings = refact_work_core::coordination_settings();
-        let targets = parse_wait_targets(args, settings.agent_wait_max_agents)?;
-        let timeout_ms = parse_wait_timeout_ms(
-            args,
-            settings.agent_wait_default_ms,
-            settings.agent_wait_max_ms,
-        )?;
-        let (app, parent_chat_id, background_agent_id) = {
-            let context = ccx.lock().await;
-            (
-                context.app.clone(),
-                context.chat_id.clone(),
-                context.background_agent_id.clone(),
-            )
-        };
-        if targets.len() == 1 {
-            let agent_id = &targets[0];
-            app.agents
-                .get(&parent_chat_id, agent_id)
-                .await
-                .map_err(|error| map_registry_error(agent_id, error))?;
-            let waiting = crate::coordination::deadlock::declare_agent_wait(
-                &app,
-                &parent_chat_id,
-                background_agent_id.as_deref(),
-                &targets,
-            );
-            let record = tokio::select! {
-                settled = app
-                    .agents
-                    .wait(&parent_chat_id, agent_id, Duration::from_millis(timeout_ms)) => {
-                    settled.map_err(|error| map_registry_error(agent_id, error))?
-                }
-                report = waiting.refused() => return Err(report.to_string()),
-            };
-            let content = if record.status.is_terminal() {
-                format_agent_result(&record, false).await?
-            } else {
-                format!(
-                    "⏰ Timed out after {timeout_ms}ms — agent still running.\n\n{}",
-                    format_agent_status_block(&record)
-                )
-            };
-            return Ok(tool_message(tool_call_id, content));
-        }
-        // Every id is authorized before any wait starts, so a guessed id can
-        // neither leak a peer's status nor keep the caller waiting.
-        let mut already_terminal = None;
-        for agent_id in &targets {
-            let record = app
-                .agents
-                .get(&parent_chat_id, agent_id)
-                .await
-                .map_err(|error| map_registry_error(agent_id, error))?;
-            // Argument order is the tie-break, so several already-finished
-            // agents always settle on the same one.
-            if already_terminal.is_none() && record.status.is_terminal() {
-                already_terminal = Some((agent_id.clone(), record));
-            }
-        }
+    };
+    let interrupt = crate::tools::tools_description::WaitInterrupt::from_context(&ccx).await;
+    if targets.len() == 1 {
+        let agent_id = &targets[0];
+        app.agents
+            .get(&parent_chat_id, agent_id)
+            .await
+            .map_err(|error| map_registry_error(agent_id, error))?;
         let waiting = crate::coordination::deadlock::declare_agent_wait(
             &app,
             &parent_chat_id,
             background_agent_id.as_deref(),
             &targets,
         );
-        let waits = targets.iter().map(|agent_id| {
-            let app = app.clone();
-            let parent_chat_id = parent_chat_id.clone();
-            let agent_id = agent_id.clone();
-            Box::pin(async move {
-                let record = app
-                    .agents
-                    .wait(
-                        &parent_chat_id,
-                        &agent_id,
-                        Duration::from_millis(timeout_ms),
-                    )
-                    .await
-                    .map_err(|error| map_registry_error(&agent_id, error));
-                (agent_id, record)
-            })
-        });
-        let mut first_terminal = already_terminal;
-        if first_terminal.is_none() {
-            let mut pending: Vec<_> = waits.collect();
-            let refused = waiting.refused();
-            tokio::pin!(refused);
-            while !pending.is_empty() {
-                let ((agent_id, result), _, rest) = tokio::select! {
-                    settled = futures::future::select_all(pending) => settled,
-                    report = &mut refused => return Err(report.to_string()),
-                };
-                pending = rest;
-                match result {
-                    Ok(record) if record.status.is_terminal() => {
-                        first_terminal = Some((agent_id, record));
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(error) => return Err(error),
+        let record = tokio::select! {
+            settled = app
+                .agents
+                .wait(&parent_chat_id, agent_id, Duration::from_millis(timeout_ms)) => {
+                settled.map_err(|error| map_registry_error(agent_id, error))?
+            }
+            report = waiting.refused() => return Err(report.to_string()),
+            _ = interrupt.wait() => {
+                let mut statuses = Vec::new();
+                for agent_id in &targets {
+                    let record = app.agents.get(&parent_chat_id, agent_id).await.map_err(|e| map_registry_error(agent_id, e))?;
+                    statuses.push(json!({"agent_id": agent_id, "status": record.status.as_str()}));
                 }
-            }
+                return Ok(tool_message(tool_call_id, json!({"target":"agents", "outcome":"interrupted", "statuses":statuses, "evidence":"Wait interrupted; no child was cancelled."}).to_string()));
+            },
+        };
+        let content = if record.status.is_terminal() {
+            format_agent_result(&record, false).await?
+        } else {
+            format!(
+                "⏰ Timed out after {timeout_ms}ms — agent still running.\n\n{}",
+                format_agent_status_block(&record)
+            )
+        };
+        return Ok(tool_message(tool_call_id, json!({"target": "agents", "outcome": if record.status.is_terminal() { "completed" } else { "timed_out" }, "evidence": content}).to_string()));
+    }
+    // Every id is authorized before any wait starts, so a guessed id can
+    // neither leak a peer's status nor keep the caller waiting.
+    let mut already_terminal = None;
+    for agent_id in &targets {
+        let record = app
+            .agents
+            .get(&parent_chat_id, agent_id)
+            .await
+            .map_err(|error| map_registry_error(agent_id, error))?;
+        // Argument order is the tie-break, so several already-finished
+        // agents always settle on the same one.
+        if already_terminal.is_none() && record.status.is_terminal() {
+            already_terminal = Some((agent_id.clone(), record));
         }
-        let mut lines = Vec::new();
-        match &first_terminal {
-            Some((agent_id, record)) => {
-                lines.push(format!("First terminal agent: {agent_id}"));
-                lines.push(String::new());
-                lines.push(format_agent_result(record, false).await?);
-            }
-            None => {
-                lines.push(format!(
-                    "⏰ Timed out after {timeout_ms}ms — none of {} agents finished.",
-                    targets.len()
-                ));
-            }
-        }
-        lines.push(String::new());
-        lines.push("## Other waited agents".to_string());
-        for agent_id in &targets {
-            if first_terminal
-                .as_ref()
-                .is_some_and(|(done, _)| done == agent_id)
-            {
-                continue;
-            }
+    }
+    let waiting = crate::coordination::deadlock::declare_agent_wait(
+        &app,
+        &parent_chat_id,
+        background_agent_id.as_deref(),
+        &targets,
+    );
+    let waits = targets.iter().map(|agent_id| {
+        let app = app.clone();
+        let parent_chat_id = parent_chat_id.clone();
+        let agent_id = agent_id.clone();
+        Box::pin(async move {
             let record = app
                 .agents
-                .get(&parent_chat_id, agent_id)
+                .wait(
+                    &parent_chat_id,
+                    &agent_id,
+                    Duration::from_millis(timeout_ms),
+                )
                 .await
-                .map_err(|error| map_registry_error(agent_id, error))?;
-            lines.push(format!("- {agent_id}: {}", record.status.as_str()));
+                .map_err(|error| map_registry_error(&agent_id, error));
+            (agent_id, record)
+        })
+    });
+    let mut first_terminal = already_terminal;
+    if first_terminal.is_none() {
+        let mut pending: Vec<_> = waits.collect();
+        let refused = waiting.refused();
+        tokio::pin!(refused);
+        while !pending.is_empty() {
+            let ((agent_id, result), _, rest) = tokio::select! {
+                settled = futures::future::select_all(pending) => settled,
+                report = &mut refused => return Err(report.to_string()),
+            _ = interrupt.wait() => {
+                let mut statuses = Vec::new();
+                for agent_id in &targets {
+                    let record = app.agents.get(&parent_chat_id, agent_id).await.map_err(|e| map_registry_error(agent_id, e))?;
+                    statuses.push(json!({"agent_id": agent_id, "status": record.status.as_str()}));
+                }
+                return Ok(tool_message(tool_call_id, json!({"target":"agents", "outcome":"interrupted", "statuses":statuses, "evidence":"Wait interrupted; no child was cancelled."}).to_string()));
+            },
+            };
+            pending = rest;
+            match result {
+                Ok(record) if record.status.is_terminal() => {
+                    first_terminal = Some((agent_id, record));
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => return Err(error),
+            }
         }
-        Ok(tool_message(tool_call_id, lines.join("\n")))
     }
-
-    fn tool_depends_on(&self) -> Vec<String> {
-        vec![]
+    let mut lines = Vec::new();
+    match &first_terminal {
+        Some((agent_id, record)) => {
+            lines.push(format!("First terminal agent: {agent_id}"));
+            lines.push(String::new());
+            lines.push(format_agent_result(record, false).await?);
+        }
+        None => {
+            lines.push(format!(
+                "⏰ Timed out after {timeout_ms}ms — none of {} agents finished.",
+                targets.len()
+            ));
+        }
     }
+    lines.push(String::new());
+    lines.push("## Other waited agents".to_string());
+    for agent_id in &targets {
+        if first_terminal
+            .as_ref()
+            .is_some_and(|(done, _)| done == agent_id)
+        {
+            continue;
+        }
+        let record = app
+            .agents
+            .get(&parent_chat_id, agent_id)
+            .await
+            .map_err(|error| map_registry_error(agent_id, error))?;
+        lines.push(format!("- {agent_id}: {}", record.status.as_str()));
+    }
+    Ok(tool_message(tool_call_id, json!({"target": "agents", "outcome": if first_terminal.is_some() { "completed" } else { "timed_out" }, "evidence": lines.join("\n")}).to_string()))
 }
 
 #[async_trait]
@@ -1806,7 +1717,14 @@ mod tests {
     fn output_text(result: (bool, Vec<ContextEnum>)) -> String {
         match result.1.into_iter().next().unwrap() {
             ContextEnum::ChatMessage(message) => match message.content {
-                ChatContent::SimpleText(text) => text,
+                ChatContent::SimpleText(text) => serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("evidence")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .unwrap_or(text),
                 _ => panic!("expected text output"),
             },
             _ => panic!("expected chat message"),
@@ -2090,14 +2008,11 @@ mod tests {
         .unwrap_err();
         assert_eq!(status_err, not_found_error(&record.agent_id));
 
-        let wait_err = ToolAgentWait {
-            config_path: String::new(),
-        }
-        .tool_execute(
+        let wait_err = execute_agents_wait(
             ccx.clone(),
             &"call".to_string(),
             &args(&[
-                ("agent_id", json!(record.agent_id.clone())),
+                ("agent_ids", json!([record.agent_id.clone()])),
                 ("timeout_ms", json!(1000)),
             ]),
         )
@@ -2216,14 +2131,11 @@ mod tests {
             .unwrap();
 
         let output = output_text(
-            ToolAgentWait {
-                config_path: String::new(),
-            }
-            .tool_execute(
+            execute_agents_wait(
                 ccx,
                 &"call".to_string(),
                 &args(&[
-                    ("agent_id", json!(record.agent_id)),
+                    ("agent_ids", json!([record.agent_id])),
                     ("timeout_ms", json!(1000)),
                 ]),
             )
@@ -2255,14 +2167,11 @@ mod tests {
         });
 
         let output = output_text(
-            ToolAgentWait {
-                config_path: String::new(),
-            }
-            .tool_execute(
+            execute_agents_wait(
                 ccx,
                 &"call".to_string(),
                 &args(&[
-                    ("agent_id", json!(record.agent_id)),
+                    ("agent_ids", json!([record.agent_id])),
                     ("timeout_ms", json!(1000)),
                 ]),
             )
@@ -2286,10 +2195,7 @@ mod tests {
                 .unwrap();
         }
         let foreign = create_agent(&app, "other-parent", BgAgentKind::Subagent, "Foreign").await;
-        let denied = ToolAgentWait {
-            config_path: String::new(),
-        }
-        .tool_execute(
+        let denied = execute_agents_wait(
             ccx.clone(),
             &"denied".to_string(),
             &args(&[
@@ -2315,10 +2221,7 @@ mod tests {
                 .unwrap();
         });
         let output = output_text(
-            ToolAgentWait {
-                config_path: String::new(),
-            }
-            .tool_execute(
+            execute_agents_wait(
                 ccx.clone(),
                 &"any".to_string(),
                 &args(&[
@@ -2336,15 +2239,11 @@ mod tests {
         assert!(output.contains("fast finished"));
         assert!(output.contains(&format!("- {}: running", slow.agent_id)));
         let timed_out = output_text(
-            ToolAgentWait {
-                config_path: String::new(),
-            }
-            .tool_execute(
+            execute_agents_wait(
                 ccx,
                 &"timeout".to_string(),
                 &args(&[
                     ("agent_ids", json!([slow.agent_id.clone()])),
-                    ("agent_id", json!(slow.agent_id.clone())),
                     ("timeout_ms", json!(1)),
                 ]),
             )
@@ -2359,15 +2258,8 @@ mod tests {
     fn agent_wait_targets_dedupe_and_respect_the_settings_bound() {
         let max = 3;
         assert_eq!(
-            parse_wait_targets(
-                &args(&[
-                    ("agent_ids", json!(["a", "b", "a", " b ", "c"])),
-                    ("agent_id", json!("b")),
-                ]),
-                max
-            )
-            .unwrap(),
-            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            parse_wait_targets(&args(&[("agent_ids", json!(["a", " a ", "b"])),]), max).unwrap(),
+            vec!["a".to_string(), "b".to_string()],
         );
         assert!(parse_wait_targets(&args(&[("agent_ids", json!([]))]), max).is_err());
         assert!(parse_wait_targets(&args(&[]), max).is_err());
@@ -2403,7 +2295,7 @@ mod tests {
 
     #[test]
     fn agent_wait_is_a_recognized_runner_wait_so_no_permit_is_held() {
-        let desc = ToolAgentWait {
+        let desc = crate::tools::tool_wait::ToolWait {
             config_path: String::new(),
         }
         .tool_description();
@@ -2432,10 +2324,7 @@ mod tests {
             json!([mine.agent_id.clone(), foreign.agent_id.clone()]),
             json!([mine.agent_id.clone(), "bgagent-guessed".to_string()]),
         ] {
-            let error = ToolAgentWait {
-                config_path: String::new(),
-            }
-            .tool_execute(
+            let error = execute_agents_wait(
                 ccx.clone(),
                 &"denied".to_string(),
                 &args(&[("agent_ids", ids.clone()), ("timeout_ms", json!(1000))]),
@@ -2461,10 +2350,7 @@ mod tests {
 
         for _ in 0..5 {
             let output = output_text(
-                ToolAgentWait {
-                    config_path: String::new(),
-                }
-                .tool_execute(
+                execute_agents_wait(
                     ccx.clone(),
                     &"any".to_string(),
                     &args(&[
@@ -2501,10 +2387,7 @@ mod tests {
             .unwrap();
 
         let output = output_text(
-            ToolAgentWait {
-                config_path: String::new(),
-            }
-            .tool_execute(
+            execute_agents_wait(
                 ccx,
                 &"timeout".to_string(),
                 &args(&[
@@ -2548,10 +2431,7 @@ mod tests {
             });
 
             let output = output_text(
-                ToolAgentWait {
-                    config_path: String::new(),
-                }
-                .tool_execute(
+                execute_agents_wait(
                     ccx,
                     &"race".to_string(),
                     &args(&[
@@ -2784,24 +2664,24 @@ mod tests {
     }
 
     #[test]
-    fn agent_resume_parser_requires_exact_actions_and_positive_integers() {
+    fn agent_lifecycle_parser_requires_exact_actions_and_positive_integers() {
         let inspect = args(&[
             ("agent_id", json!("bgagent-test")),
             ("action", json!("inspect")),
         ]);
         assert_eq!(
-            parse_agent_resume_args(&inspect).unwrap().1,
-            AgentResumeAction::Inspect
+            parse_agent_lifecycle_args(&inspect).unwrap().1,
+            AgentLifecycleAction::Inspect
         );
         let valid = args(&[
             ("agent_id", json!("bgagent-test")),
-            ("action", json!("raise_and_resume")),
+            ("action", json!("raise_and_recover")),
             ("max_steps", json!(80)),
             ("expected_change_seq", json!(5)),
         ]);
         assert_eq!(
-            parse_agent_resume_args(&valid).unwrap().1,
-            AgentResumeAction::RaiseAndResume {
+            parse_agent_lifecycle_args(&valid).unwrap().1,
+            AgentLifecycleAction::RaiseAndResume {
                 max_steps: 80,
                 expected_change_seq: 5
             }
@@ -2819,63 +2699,34 @@ mod tests {
                 let mut invalid = valid.clone();
                 invalid.insert(key.to_string(), value);
                 assert!(
-                    parse_agent_resume_args(&invalid).is_err(),
+                    parse_agent_lifecycle_args(&invalid).is_err(),
                     "accepted {key}: {invalid:?}"
                 );
             }
             let mut missing = valid.clone();
             missing.remove(key);
-            assert!(parse_agent_resume_args(&missing).is_err());
+            assert!(parse_agent_lifecycle_args(&missing).is_err());
             let mut mutation_on_inspect = inspect.clone();
             mutation_on_inspect.insert(key.to_string(), json!(1));
-            assert!(parse_agent_resume_args(&mutation_on_inspect).is_err());
+            assert!(parse_agent_lifecycle_args(&mutation_on_inspect).is_err());
         }
         for key in ["action", "agent_id"] {
             let mut missing = valid.clone();
             missing.remove(key);
-            assert!(parse_agent_resume_args(&missing).is_err());
+            assert!(parse_agent_lifecycle_args(&missing).is_err());
             for value in [json!(""), Value::Null, json!(42)] {
                 let mut invalid = valid.clone();
                 invalid.insert(key.to_string(), value);
-                assert!(parse_agent_resume_args(&invalid).is_err());
+                assert!(parse_agent_lifecycle_args(&invalid).is_err());
             }
         }
         let mut unknown = valid;
         unknown.insert("scope".to_string(), json!("all"));
-        assert!(parse_agent_resume_args(&unknown).is_err());
-    }
-
-    #[test]
-    fn agent_resume_schema_is_scoped() {
-        let description = ToolAgentResume {
-            config_path: String::new(),
-        }
-        .tool_description();
-        assert_eq!(description.name, "agent_resume");
-        assert!(!description.allow_parallel);
-        let schema = description.input_schema;
-        assert_eq!(schema["required"], json!(["agent_id", "action"]));
-        assert_eq!(schema["additionalProperties"], false);
-        assert_eq!(
-            schema["properties"]["action"]["enum"],
-            json!([
-                "inspect",
-                "close",
-                "raise_and_resume",
-                "resume",
-                "continue",
-                "pause",
-                "release"
-            ])
-        );
-        for field in ["max_steps", "expected_change_seq"] {
-            assert_eq!(schema["properties"][field]["type"], "integer");
-            assert_eq!(schema["properties"][field]["minimum"], 1);
-        }
+        assert!(parse_agent_lifecycle_args(&unknown).is_err());
     }
 
     #[tokio::test]
-    async fn agent_resume_inspection_is_read_only_and_direct_parent_scoped() {
+    async fn agent_lifecycle_inspection_is_read_only_and_direct_parent_scoped() {
         let (_temp, app, ccx) = test_context(PARENT).await;
         let own = create_agent(&app, PARENT, BgAgentKind::Subagent, "Capped").await;
         let cap = crate::agents::types::CapStop {
@@ -2895,11 +2746,8 @@ mod tests {
             crate::agents::types::CapStop::from_error(failed.error.as_deref().unwrap()),
             Some(cap.clone())
         );
-        let mut tool = ToolAgentResume {
-            config_path: String::new(),
-        };
         let output = output_text(
-            tool.tool_execute(
+            agent_lifecycle_execute(
                 ccx.clone(),
                 &"inspect".to_string(),
                 &args(&[
@@ -2939,17 +2787,16 @@ mod tests {
             failed.error.as_deref()
         );
         let foreign = create_agent(&app, OTHER_PARENT, BgAgentKind::Subagent, "Hidden").await;
-        for action in ["inspect", "raise_and_resume"] {
+        for action in ["inspect", "raise_and_recover"] {
             let mut request = args(&[
                 ("agent_id", json!(foreign.agent_id)),
                 ("action", json!(action)),
             ]);
-            if action == "raise_and_resume" {
+            if action == "raise_and_recover" {
                 request.insert("max_steps".to_string(), json!(80));
                 request.insert("expected_change_seq".to_string(), json!(1));
             }
-            let error = tool
-                .tool_execute(ccx.clone(), &"foreign".to_string(), &request)
+            let error = agent_lifecycle_execute(ccx.clone(), &"foreign".to_string(), &request)
                 .await
                 .unwrap_err();
             assert_eq!(error, not_found_error(&foreign.agent_id));
@@ -2957,10 +2804,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_resume_raise_requires_confirmation_by_default() {
+    async fn agent_lifecycle_raise_requires_confirmation_by_default() {
         use crate::tools::tools_description::MatchConfirmDenyResult;
         let (_temp, _app, ccx) = test_context(PARENT).await;
-        let tool = ToolAgentResume {
+        let tool = ToolAgentLifecycle {
             config_path: String::new(),
         };
         let inspect = args(&[
@@ -2974,7 +2821,7 @@ mod tests {
         assert!(matches!(result.result, MatchConfirmDenyResult::PASS));
         let mutation = args(&[
             ("agent_id", json!("bgagent-test")),
-            ("action", json!("raise_and_resume")),
+            ("action", json!("raise_and_recover")),
             ("max_steps", json!(80)),
             ("expected_change_seq", json!(5)),
         ]);
@@ -3023,7 +2870,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_resume_parser_scopes_close_and_continue_fields() {
+    fn agent_lifecycle_parser_scopes_close_and_continue_fields() {
         let base = |action: &str| {
             args(&[
                 ("agent_id", json!("bgagent-test")),
@@ -3031,8 +2878,8 @@ mod tests {
             ])
         };
         assert_eq!(
-            parse_agent_resume_args(&base("close")).unwrap().1,
-            AgentResumeAction::Close {
+            parse_agent_lifecycle_args(&base("close")).unwrap().1,
+            AgentLifecycleAction::Close {
                 expected_run_generation: None,
                 reason: None
             }
@@ -3041,8 +2888,8 @@ mod tests {
         close.insert("reason".into(), json!("parked"));
         close.insert("expected_run_generation".into(), json!(3));
         assert_eq!(
-            parse_agent_resume_args(&close).unwrap().1,
-            AgentResumeAction::Close {
+            parse_agent_lifecycle_args(&close).unwrap().1,
+            AgentLifecycleAction::Close {
                 expected_run_generation: Some(3),
                 reason: Some("parked".into())
             }
@@ -3060,7 +2907,7 @@ mod tests {
             let mut invalid = base("close");
             invalid.insert(key.to_string(), value.clone());
             assert!(
-                parse_agent_resume_args(&invalid).is_err(),
+                parse_agent_lifecycle_args(&invalid).is_err(),
                 "close accepted {key}={value}"
             );
         }
@@ -3070,8 +2917,8 @@ mod tests {
         continued.insert("instruction".into(), json!("keep going"));
         continued.insert("reconcile_incomplete".into(), json!(true));
         assert_eq!(
-            parse_agent_resume_args(&continued).unwrap().1,
-            AgentResumeAction::ContinueTurn {
+            parse_agent_lifecycle_args(&continued).unwrap().1,
+            AgentLifecycleAction::ContinueTurn {
                 expected_change_seq: 9,
                 instruction: Some("keep going".into()),
                 reconcile_incomplete: true,
@@ -3079,15 +2926,15 @@ mod tests {
         );
         let mut without_revision = base("continue");
         without_revision.insert("instruction".into(), json!("keep going"));
-        assert!(parse_agent_resume_args(&without_revision).is_err());
+        assert!(parse_agent_lifecycle_args(&without_revision).is_err());
         let mut with_steps = continued.clone();
         with_steps.insert("max_steps".into(), json!(40));
-        assert!(parse_agent_resume_args(&with_steps).is_err());
+        assert!(parse_agent_lifecycle_args(&with_steps).is_err());
         let mut reason_on_inspect = base("inspect");
         reason_on_inspect.insert("reason".into(), json!("nope"));
-        assert!(parse_agent_resume_args(&reason_on_inspect).is_err());
+        assert!(parse_agent_lifecycle_args(&reason_on_inspect).is_err());
 
-        let schema = ToolAgentResume {
+        let schema = ToolAgentLifecycle {
             config_path: String::new(),
         }
         .tool_description()
@@ -3097,26 +2944,21 @@ mod tests {
             json!([
                 "inspect",
                 "close",
-                "raise_and_resume",
-                "resume",
-                "continue",
-                "pause",
-                "release"
+                "raise_and_recover",
+                "recover",
+                "continue"
             ])
         );
     }
 
     #[tokio::test]
-    async fn agent_resume_closes_a_live_child_and_settles_repeat_closes_once() {
+    async fn agent_lifecycle_closes_a_live_child_and_settles_repeat_closes_once() {
         let (_temp, app, ccx) = test_context(PARENT).await;
         let record = create_agent(&app, PARENT, BgAgentKind::Subagent, "Closable").await;
         app.agents
             .mark_running(&record.agent_id, "subchat-closable".to_string())
             .await
             .unwrap();
-        let mut tool = ToolAgentResume {
-            config_path: String::new(),
-        };
         let close = args(&[
             ("agent_id", json!(record.agent_id)),
             ("action", json!("close")),
@@ -3124,7 +2966,7 @@ mod tests {
         ]);
 
         let first: Value = serde_json::from_str(&output_text(
-            tool.tool_execute(ccx.clone(), &"close".to_string(), &close)
+            agent_lifecycle_execute(ccx.clone(), &"close".to_string(), &close)
                 .await
                 .unwrap(),
         ))
@@ -3136,7 +2978,7 @@ mod tests {
         assert_eq!(first["can_continue"], false);
 
         let second: Value = serde_json::from_str(&output_text(
-            tool.tool_execute(ccx.clone(), &"close-again".to_string(), &close)
+            agent_lifecycle_execute(ccx.clone(), &"close-again".to_string(), &close)
                 .await
                 .unwrap(),
         ))
@@ -3145,36 +2987,34 @@ mod tests {
         assert_eq!(second["accepted"], false);
         assert_eq!(second["change_seq"], first["change_seq"]);
 
-        let stale = tool
-            .tool_execute(
-                ccx.clone(),
-                &"stale".to_string(),
-                &args(&[
-                    ("agent_id", json!(record.agent_id)),
-                    ("action", json!("close")),
-                    ("expected_run_generation", json!(9)),
-                ]),
-            )
-            .await
-            .unwrap_err();
+        let stale = agent_lifecycle_execute(
+            ccx.clone(),
+            &"stale".to_string(),
+            &args(&[
+                ("agent_id", json!(record.agent_id)),
+                ("action", json!("close")),
+                ("expected_run_generation", json!(9)),
+            ]),
+        )
+        .await
+        .unwrap_err();
         assert!(stale.contains("another generation"), "{stale}");
 
-        let wrong_action = tool
-            .tool_execute(
-                ccx.clone(),
-                &"continue".to_string(),
-                &args(&[
-                    ("agent_id", json!(record.agent_id)),
-                    ("action", json!("continue")),
-                    ("expected_change_seq", json!(first["change_seq"].clone())),
-                ]),
-            )
-            .await
-            .unwrap_err();
+        let wrong_action = agent_lifecycle_execute(
+            ccx.clone(),
+            &"continue".to_string(),
+            &args(&[
+                ("agent_id", json!(record.agent_id)),
+                ("action", json!("continue")),
+                ("expected_change_seq", json!(first["change_seq"].clone())),
+            ]),
+        )
+        .await
+        .unwrap_err();
         assert!(wrong_action.contains("continue applies to a completed child"));
 
         let inspected: Value = serde_json::from_str(&output_text(
-            tool.tool_execute(
+            agent_lifecycle_execute(
                 ccx.clone(),
                 &"inspect".to_string(),
                 &args(&[
@@ -3213,7 +3053,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_resume_refuses_plain_resume_on_a_completed_child() {
+    async fn agent_lifecycle_refuses_plain_resume_on_a_completed_child() {
         let (_temp, app, ccx) = test_context(PARENT).await;
         let record = create_agent(&app, PARENT, BgAgentKind::Subagent, "Finished").await;
         let completed = app
@@ -3222,15 +3062,12 @@ mod tests {
             .await
             .unwrap();
 
-        let error = ToolAgentResume {
-            config_path: String::new(),
-        }
-        .tool_execute(
+        let error = agent_lifecycle_execute(
             ccx.clone(),
-            &"resume".to_string(),
+            &"recover".to_string(),
             &args(&[
                 ("agent_id", json!(record.agent_id)),
-                ("action", json!("resume")),
+                ("action", json!("recover")),
                 ("expected_change_seq", json!(completed.change_seq)),
             ]),
         )
@@ -3242,10 +3079,7 @@ mod tests {
             BgAgentStatus::Completed
         );
 
-        let closing = ToolAgentResume {
-            config_path: String::new(),
-        }
-        .tool_execute(
+        let closing = agent_lifecycle_execute(
             ccx,
             &"close".to_string(),
             &args(&[

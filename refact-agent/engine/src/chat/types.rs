@@ -300,6 +300,7 @@ pub struct ChatSession {
     pub(crate) planner_pause: Option<PlannerPause>,
     pub(crate) planner_pause_revision: u64,
     pub(crate) planner_pause_pending_tools: bool,
+    pub(crate) task_goal_messages: Option<Vec<ChatMessage>>,
     pub goal: Option<GoalSnapshot>,
     pub goal_active: bool,
     pub goal_status: Option<GoalStatus>,

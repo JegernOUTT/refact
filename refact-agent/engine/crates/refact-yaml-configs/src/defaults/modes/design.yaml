@@ -1,4 +1,4 @@
-schema_version: 27
+schema_version: 28
 id: design
 title: Design
 description: Evidence-driven UI implementation using the live design system and browser measurements
@@ -103,7 +103,7 @@ tools:
   - agent_peer_grant
   - agent_list
   - agent_status
-  - agent_wait
+  - wait
   - agent_result
   - agent_cancel
 

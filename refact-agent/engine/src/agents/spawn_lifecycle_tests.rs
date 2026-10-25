@@ -952,9 +952,16 @@ async fn capped_child_resumes_once_with_full_history_and_remaining_lifetime_budg
                     "only the remaining steps reach the runner"
                 );
                 assert_eq!(config.parent_id.as_deref(), Some(PARENT));
-                assert!(messages.iter().any(|message| {
-                    message.role == "plan" && message.content.content_text_only() == PLAN
-                }));
+                assert_eq!(
+                    refact_chat_api::goal_role::current_goal_plan(
+                        &messages,
+                        crate::runtime_settings::plan_projection_limits(),
+                        false,
+                    )
+                    .unwrap()
+                    .content,
+                    PLAN,
+                );
                 let session = app
                     .chat
                     .sessions
@@ -1073,6 +1080,11 @@ async fn capped_child_resumes_once_with_full_history_and_remaining_lifetime_budg
     let mut request = spawn_request(PARENT, BgAgentKind::Subagent);
     request.parent_worktree = Some(fixture.parent_worktree.clone());
     request.plan = Some(PLAN.into());
+    request.goal = Some(SpawnGoal {
+        content: "Preserve the first edit and complete the second edit".into(),
+        criteria: Vec::new(),
+        budget: None,
+    });
     request.target_files = vec!["before-cap.txt".into(), "after-cap.txt".into()];
     request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: false };
     request.notify_parent = NotifyParent::Auto;
@@ -1632,8 +1644,8 @@ async fn parent_parks_its_only_permit_during_agent_wait_and_reacquires_before_co
             fixture.app.clone(),
             &[call(
                 "wait-child",
-                "agent_wait",
-                serde_json::json!({"agent_id": handle.agent_id, "timeout_ms": 30000}),
+                "wait",
+                serde_json::json!({"target": {"kind": "agents", "agent_ids": [handle.agent_id]}, "timeout_ms": 30000}),
             )],
             &[],
             &thread,
@@ -2068,7 +2080,7 @@ async fn legacy_open_tool_authority_migrates_to_the_concrete_parent_ceiling_on_r
         )
         .await,
     ));
-    let mut inspect = crate::tools::tool_background_agents::ToolAgentResume {
+    let mut inspect = crate::tools::tool_background_agents::ToolAgentLifecycle {
         config_path: String::new(),
     };
     let (_, output) = crate::tools::tools_description::Tool::tool_execute(
@@ -2238,10 +2250,16 @@ async fn cold_restart_resumes_authoritative_child_without_replaying_unknown_effe
                 let goal = session.goal.as_ref().unwrap();
                 assert_eq!(goal.progress.tokens_used, 23);
                 assert!(!session.goal_ledger.is_empty());
-                assert!(messages
-                    .iter()
-                    .any(|m| m.role == "plan"
-                        && m.content.content_text_only() == "Preserve this plan"));
+                assert_eq!(
+                    refact_chat_api::goal_role::current_goal_plan(
+                        &messages,
+                        crate::runtime_settings::plan_projection_limits(),
+                        false,
+                    )
+                    .unwrap()
+                    .content,
+                    "Preserve this plan",
+                );
                 drop(session);
                 Ok(completed_result(messages, config))
             })
@@ -2391,7 +2409,7 @@ async fn cold_restart_resumes_authoritative_child_without_replaying_unknown_effe
         )
         .await,
     ));
-    let mut inspect = crate::tools::tool_background_agents::ToolAgentResume {
+    let mut inspect = crate::tools::tool_background_agents::ToolAgentLifecycle {
         config_path: String::new(),
     };
     let (_, output) = crate::tools::tools_description::Tool::tool_execute(

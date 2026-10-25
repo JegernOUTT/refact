@@ -1,4 +1,4 @@
-schema_version: 14
+schema_version: 15
 id: shell
 title: Shell
 description: Execute shell commands for system tasks
@@ -27,11 +27,11 @@ prompt: |
 
   ## Process Runtime
 
-  **Shell**: `description` is required. Use `run_in_background=true` or `process_start` for long-running commands; track with `process_read`/`process_wait`/`process_kill`. Use `tty=true` plus `process_write_stdin` for interactive programs.
+  **Shell**: `description` is required. Use `run_in_background=true` or `process_start` for long-running commands; track with `process_read`/`wait`/`process_kill`. Use `tty=true` plus `process_write_stdin` for interactive programs.
 
-  **Process runtime**: `process_start` launches background or service processes. `process_list`/`process_read`/`process_wait` monitor them. `process_kill` stops them. `sleep` waits without holding a shell process.
+  **Process runtime**: `process_start` launches background or service processes. `process_list`/`process_read`/`wait` monitor them. `process_kill` stops them. `wait` waits without holding a shell process.
 
-  **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable). `cron_list`/`cron_update`/`cron_delete` manage jobs.
+  **Scheduler**: `schedule(action="create", ...)` schedules recurring or one-shot work; use its list, update, or delete action to manage jobs.
 
   ## Safety
   - Avoid destructive commands without confirmation
@@ -73,14 +73,10 @@ tools:
   - process_start
   - process_list
   - process_read
-  - process_wait
+  - wait
   - process_kill
   - process_write_stdin
-  - sleep
-  - cron_create
-  - cron_list
-  - cron_delete
-  - cron_update
+  - schedule
 
 tool_confirm:
   rules:
@@ -104,5 +100,5 @@ tool_confirm:
       action: auto
     - match: "shell"
       action: ask
-    - match: "cron_update"
-      action: auto
+    - match: "schedule"
+      action: ask

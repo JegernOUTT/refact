@@ -152,8 +152,7 @@ impl std::fmt::Display for AutoSubGoalLaneRefusal {
     }
 }
 
-const GOAL_EVIDENCE_EXEMPT_TOOLS: &[&str] =
-    &["sleep", "get_goal", "get_plan", "pause_goal", "snooze_goal"];
+const GOAL_EVIDENCE_EXEMPT_TOOLS: &[&str] = &["wait", "get_goal", "pause", "resume"];
 
 fn tool_result_counts_as_goal_evidence(message: &ChatMessage, history: &[ChatMessage]) -> bool {
     if message.tool_failed == Some(true) {
@@ -202,10 +201,28 @@ fn apply_goal_runtime_projection(runtime: &mut RuntimeState, goal: Option<&GoalS
 }
 
 fn synthesized_goal_content(messages: &[ChatMessage], base: &ChatMessage) -> String {
+    let base_index = messages
+        .iter()
+        .position(|m| std::ptr::eq(m, base))
+        .unwrap_or(0);
+    let base_id = &base.message_id;
     let base = base.content.content_text_only();
     let notes = messages
         .iter()
-        .filter(|message| goal_event_subkind(message) == Some("goal_delta"))
+        .skip(base_index + 1)
+        .filter(|message| {
+            message
+                .extra
+                .get("event")
+                .and_then(|e| e.get("payload"))
+                .and_then(|p| p.get("goal_id"))
+                .and_then(serde_json::Value::as_str)
+                .map_or(true, |id| id == base_id)
+        })
+        .filter(|message| {
+            goal_event_subkind(message) == Some("goal_delta")
+                && !crate::chat::goal_role::is_plan_delta(message)
+        })
         .map(|message| message.content.content_text_only())
         .collect::<Vec<_>>();
     if notes.is_empty() {
@@ -219,7 +236,8 @@ fn goal_events_from_messages(messages: &[ChatMessage]) -> Vec<GoalEvent> {
     messages
         .iter()
         .filter_map(|message| {
-            if checkpoint_provenance(message).is_some()
+            if crate::chat::goal_role::is_plan_delta(message)
+                || checkpoint_provenance(message).is_some()
                 || message
                     .extra
                     .get("event")
@@ -287,7 +305,8 @@ pub(crate) fn goal_snapshot_from_messages(
         Ok(active) => active,
         Err(_) => return existing.cloned(),
     };
-    let messages = &active.messages;
+    let imported = crate::chat::goal_role::import_legacy_plan(&active.messages);
+    let messages = &imported;
     let (base_index, version, base) = messages
         .iter()
         .enumerate()
@@ -338,6 +357,21 @@ pub(crate) fn goal_snapshot_from_messages(
         });
     let events = merge_goal_events(derived_events, extra_events);
     let mut snapshot = GoalSnapshot {
+        owner: prior.and_then(|goal| goal.owner.clone()).or_else(|| {
+            meta.and_then(|m| m.get("owner"))
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+        }),
+        revision: prior
+            .filter(|g| matches!(g.owner, Some(refact_chat_api::GoalOwner::Task { .. })))
+            .map_or_else(
+                || crate::chat::goal_role::goal_revision_from_messages(messages),
+                |g| g.revision,
+            ),
+        plan: crate::chat::goal_role::current_goal_plan(
+            messages,
+            crate::runtime_settings::plan_projection_limits(),
+            false,
+        ),
         content: synthesized_goal_content(messages, base),
         version,
         active,
@@ -757,6 +791,7 @@ impl ChatSession {
             planner_pause: None,
             planner_pause_revision: 0,
             planner_pause_pending_tools: false,
+            task_goal_messages: None,
             goal: None,
             goal_active: false,
             goal_status: None,
@@ -897,6 +932,7 @@ impl ChatSession {
             planner_pause: None,
             planner_pause_revision: 0,
             planner_pause_pending_tools: false,
+            task_goal_messages: None,
             goal,
             goal_active,
             goal_status,
@@ -1628,7 +1664,26 @@ impl ChatSession {
 
     pub(crate) fn rebuild_goal_projection_from_messages(&mut self) {
         let existing = self.goal.clone();
-        self.goal = goal_snapshot_from_messages(&self.messages, existing.as_ref());
+        let messages = if self.task_goal_messages.is_some() {
+            self.try_accepted_control_projection()
+                .map(|p| p.messages)
+                .unwrap_or_else(|_| self.messages.clone())
+        } else {
+            self.messages.clone()
+        };
+        self.goal = goal_snapshot_from_messages(&messages, existing.as_ref());
+        if let Some(goal) = &mut self.goal {
+            if goal.owner.is_none() {
+                goal.owner = Some(refact_chat_api::GoalOwner::Chat {
+                    id: self.chat_id.clone(),
+                });
+            }
+            if matches!(goal.owner, Some(refact_chat_api::GoalOwner::Task { .. })) {
+                if let Some(existing) = &existing {
+                    goal.revision = existing.revision;
+                }
+            }
+        }
         self.refresh_goal_runtime_mirror();
         self.ensure_goal_ledger_installed();
     }
@@ -1644,6 +1699,13 @@ impl ChatSession {
         if already_installed {
             return;
         }
+        let initial_status = if goal.active {
+            GoalStatus::Active
+        } else {
+            GoalStatus::Paused
+        };
+        let status = goal.status;
+        let reason = goal.stop_reason.clone().unwrap_or_default();
         let (active, budget, criteria) = (goal.active, goal.budget.clone(), goal.criteria.clone());
         self.goal_ledger_append(GoalLedgerOp::Installed {
             version,
@@ -1651,6 +1713,13 @@ impl ChatSession {
             budget,
             criteria,
         });
+        if status != initial_status {
+            self.goal_ledger_append(GoalLedgerOp::StatusChanged {
+                from: initial_status,
+                to: status,
+                reason,
+            });
+        }
     }
 
     pub(crate) fn runtime_update_event(
@@ -2259,6 +2328,13 @@ impl ChatSession {
             message.message_id = Uuid::new_v4().to_string();
         }
         let affects_goal = message_affects_goal_projection(&message);
+        if affects_goal {
+            if let Some(controls) = &mut self.task_goal_messages {
+                if !controls.iter().any(|m| m.message_id == message.message_id) {
+                    controls.push(message.clone());
+                }
+            }
+        }
         if message.role == "tool"
             && self.goal.is_some()
             && tool_result_counts_as_goal_evidence(&message, &self.messages)
@@ -2978,6 +3054,17 @@ impl ChatSession {
         projection.messages = refact_core::active_context::active_context(&self.messages)
             .map_err(|error| error.to_string())?
             .messages;
+        if let Some(controls) = &self.task_goal_messages {
+            projection.messages.retain(|m| {
+                !matches!(m.role.as_str(), "goal" | "plan")
+                    && !matches!(
+                        m.extra.get("event").unwrap_or(&serde_json::Value::Null)["subkind"]
+                            .as_str(),
+                        Some("goal_delta" | "plan_delta" | "goal_pursuit")
+                    )
+            });
+            projection.messages.extend(controls.iter().cloned());
+        }
         projection
             .messages
             .extend(self.post_tool_side_effects.iter().cloned());
@@ -2991,6 +3078,7 @@ impl ChatSession {
             Self::control_kind(message).is_some()
                 && (message.message_id.is_empty() || seen.insert(message.message_id.clone()))
         });
+        projection.messages = crate::chat::goal_role::import_legacy_plan(&projection.messages);
         Ok(projection)
     }
 
@@ -5128,7 +5216,7 @@ mod tests {
             session.turn_depth = 1;
             session.start_stream().unwrap();
             session.emit_stream_delta(vec![DeltaOp::SetToolCalls {
-                tool_calls: vec![json!({"id":"sleep","type":"function","function":{"name":"sleep","arguments":"{}"}})],
+                tool_calls: vec![json!({"id":"sleep","type":"function","function":{"name":"wait","arguments":"{\"target\":{\"kind\":\"duration\",\"duration_ms\":30000},\"description\":\"Wait briefly\"}"}})],
             }]);
             session.finish_stream_with_next_state(
                 Some("tool_calls".into()),
@@ -5177,7 +5265,7 @@ mod tests {
                 session.start_stream().unwrap();
                 session.emit_stream_delta(vec![DeltaOp::SetToolCalls {
                     tool_calls: vec![
-                        json!({"id":"wait","type":"function","function":{"name":"sleep","arguments":"{}"}}),
+                        json!({"id":"wait","type":"function","function":{"name":"wait","arguments":"{\"target\":{\"kind\":\"duration\",\"duration_ms\":30000},\"description\":\"Wait briefly\"}"}}),
                         json!({"id":"work","type":"function","function":{"name":"shell","arguments":"{}"}}),
                     ],
                 }]);
@@ -6023,6 +6111,9 @@ mod tests {
 
         fn snapshot() -> GoalSnapshot {
             GoalSnapshot {
+                owner: None,
+                revision: 0,
+                plan: None,
                 content: "ship it".to_string(),
                 version: 1,
                 active: true,
@@ -6930,7 +7021,7 @@ mod tests {
                 role: "assistant".to_string(),
                 content: ChatContent::SimpleText(String::new()),
                 tool_calls: Some(vec![
-                    tool_call("call-sleep", "sleep"),
+                    tool_call("call-sleep", "wait"),
                     tool_call("call-edit", "patch"),
                 ]),
                 ..Default::default()
@@ -7325,6 +7416,9 @@ mod tests {
             GoalBudget::default(),
         );
         let persisted_goal = GoalSnapshot {
+            owner: None,
+            revision: 0,
+            plan: None,
             content: "persisted content".to_string(),
             version: 1,
             active: true,
@@ -7876,7 +7970,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_abort_clears_running_sleep_tool_card() {
+    fn direct_abort_clears_running_wait_tool_card() {
         let mut session = make_session();
         session.set_runtime_state(SessionState::ExecutingTools, None);
         session.messages.push(ChatMessage {
@@ -7887,8 +7981,8 @@ mod tests {
                 index: Some(0),
                 tool_type: "function".to_string(),
                 function: ChatToolFunction {
-                    name: "sleep".to_string(),
-                    arguments: r#"{"duration_ms":30000,"description":"Wait briefly"}"#.to_string(),
+                    name: "wait".to_string(),
+                    arguments: r#"{"target":{"kind":"duration","duration_ms":30000},"description":"Wait briefly"}"#.to_string(),
                 },
                 extra_content: None,
                 started_at_ms: None,
@@ -8821,7 +8915,10 @@ mod tests {
                     .contains("accepted the changes")
         }));
         assert_eq!(
-            session.messages[1].extra["event"]["subkind"],
+            session.messages[1]
+                .extra
+                .get("event")
+                .unwrap_or(&serde_json::Value::Null)["subkind"],
             json!("ide_callback")
         );
         assert_eq!(
@@ -9781,7 +9878,10 @@ mod tests {
         assert_eq!(role_sequence(&session), vec!["assistant", "tool", "event"]);
         assert_eq!(session.messages[1].tool_call_id, "tc1");
         assert_eq!(
-            session.messages[2].extra["event"]["subkind"],
+            session.messages[2]
+                .extra
+                .get("event")
+                .unwrap_or(&serde_json::Value::Null)["subkind"],
             json!("tool_decision")
         );
         assert_eq!(
@@ -9854,11 +9954,17 @@ mod tests {
         assert_eq!(session.runtime.state, SessionState::WaitingIde);
         assert!(session.post_tool_side_effects.is_empty());
         assert_eq!(
-            session.messages[3].extra["event"]["subkind"],
+            session.messages[3]
+                .extra
+                .get("event")
+                .unwrap_or(&serde_json::Value::Null)["subkind"],
             json!("ide_callback")
         );
         assert_eq!(
-            session.messages[4].extra["event"]["subkind"],
+            session.messages[4]
+                .extra
+                .get("event")
+                .unwrap_or(&serde_json::Value::Null)["subkind"],
             json!("ide_callback")
         );
     }
@@ -10086,7 +10192,21 @@ mod accepted_control_tests {
         assert_eq!(session.drain_pending_deliveries().0.len(), 2);
         session.queue_post_tool_side_effect(delta);
         session.queue_post_tool_side_effect(ChatMessage::new("user".into(), "not control".into()));
-        assert_eq!(session.accepted_control_messages().count(), 2);
+        assert_eq!(
+            session
+                .accepted_control_messages()
+                .filter(|message| {
+                    message.role == "plan"
+                        || message
+                            .extra
+                            .get("event")
+                            .and_then(|event| event.get("subkind"))
+                            .and_then(serde_json::Value::as_str)
+                            == Some("plan_delta")
+                })
+                .count(),
+            2,
+        );
         assert_eq!(session.messages[0].content.content_text_only(), "base");
         assert_eq!(session.messages[1].content.content_text_only(), "update");
     }
@@ -10265,7 +10385,26 @@ mod archival_mutation_tests {
             ));
             let before = serde_json::to_value(&session.messages).unwrap();
             let projection = session.try_accepted_control_projection().unwrap();
-            assert_eq!(projection.messages.len(), 3);
+            assert_eq!(
+                projection
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        message.role == kind
+                            || message
+                                .extra
+                                .get("event")
+                                .and_then(|event| event.get("subkind"))
+                                .and_then(serde_json::Value::as_str)
+                                == Some(if kind == "goal" {
+                                    "goal_delta"
+                                } else {
+                                    "plan_delta"
+                                })
+                    })
+                    .count(),
+                3,
+            );
             let content = if kind == "goal" {
                 assert_eq!(
                     goal_role::current_base_goal(&session).unwrap().message_id,

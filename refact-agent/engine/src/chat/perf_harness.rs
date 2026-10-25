@@ -2682,6 +2682,7 @@ async fn run_full_soak_sample(
                 client_request_id: format!("full-soak-goal-{chat_index}"),
                 priority: false,
                 command: crate::chat::types::ChatCommand::SetGoal {
+                    plan: None,
                     content: format!("full soak chat {chat_index}"),
                     criteria: None,
                     budget: None,

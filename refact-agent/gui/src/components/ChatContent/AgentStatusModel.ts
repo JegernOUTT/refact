@@ -8,7 +8,13 @@ export type AgentStatusState =
 export type AgentStatusTab = AgentStatusState | "all";
 export type PriorityFilter = "all" | "P0" | "P1" | "P2";
 export type AgeFilter = "all" | "15" | "60" | "240";
-export type AgentAction = "pulse" | "diff" | "steer" | "pause" | "cancel";
+export type AgentAction =
+  | "pulse"
+  | "diff"
+  | "steer"
+  | "pause"
+  | "resume"
+  | "cancel";
 
 export type AgentAlerts = {
   stuck: number;
@@ -366,9 +372,13 @@ export function formatAgentActionCommand(
         value ?? "",
       )})`;
     case "pause":
-      return `pause_agent(card_id=${card}, reason=${JSON.stringify(
+      return `pause(target={"kind":"card","card_id":${card}}, reason=${JSON.stringify(
         value ?? DEFAULT_PAUSE_REASON,
       )})`;
+    case "resume":
+      return `resume(target={"kind":"card","card_id":${card}}${
+        value === undefined ? "" : `, note=${JSON.stringify(value)}`
+      })`;
     case "cancel":
       return `cancel_agent(card_id=${card}, reason=${JSON.stringify(
         value ?? DEFAULT_CANCEL_REASON,

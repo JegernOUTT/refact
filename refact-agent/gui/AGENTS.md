@@ -234,7 +234,7 @@ EventLog renders hidden `event` messages without polluting the main transcript.
 
 ### PlanBanner component pattern (src/components/ChatContent/PlanBanner/)
 
-PlanBanner renders synthesized plan text from the latest hidden base `plan` role plus hidden `event(plan_delta)` notes as sticky context above the virtualized transcript.
+PlanBanner is a read-only fallback for legacy plan roles when no nested goal plan is available. Current plans render inside TaskProgressWidget through GoalPlanSection and the goal snapshot; targeted goal deltas supply append-only plan history. Task workspaces read the canonical task goal through the task-goal query, including history on request. Never introduce a second authoritative plan editor.
 
 - Read plan data with `selectCurrentPlan`, `selectSynthesizedPlanText`, and `selectPlanHistory`; do not scan messages directly.
 - Header format: `📋 Plan — {mode} · v{version} · {humanizedAge}`.
@@ -249,13 +249,13 @@ TaskProgressWidget is the GUI owner for goal display and controls. It reads `thr
 
 Pause/resume/stop stay reachable while collapsed: compact icon controls (`IconButton`, labels `Pause goal` / `Resume goal` / `Stop goal`) render on the right side of the collapsed widget header and the collapsed goal header as siblings of the collapse trigger — never nested inside the trigger button. Exactly one control set is visible at a time (collapsed widget header, collapsed goal header, or the labeled buttons in the expanded goal body), and all share one availability rule (`goalControlAvailability`). Verifier attempts, goal events, and the expanded widget body are bounded scroll regions (`scrollbarThin` + `max-height`) so long histories scroll instead of clipping inside the dock's `overflow: hidden`.
 
-Goal controls dispatch chat commands through `useChatActions`: `setGoal(content, budget?)` sends `set_goal` with optional user-set hard limits, `setGoalBudget(budget)` sends `set_goal_budget` to set or clear limits on an existing goal, `updateGoal(note)` sends `update_goal`, and `controlGoal(action)` sends `goal_control` with `pause`, `resume`, or `stop`. Blank budget editor inputs are unlimited and must omit hard-limit keys. The reducer updates `thread.goal` from `Snapshot.goal`; `runtime_updated` mirrors only mutate the runtime fields on an existing projection (`goal_active`, `goal_status`, `goal_turns_used`, `goal_tokens_used`, `goal_no_progress_turns`). Hidden `event(goal_delta)` and `event(goal_pursuit)` remain out of EventLog and the normal transcript.
+Goal controls dispatch chat commands through `useChatActions`: `setGoal(content, budget?)` sends `set_goal` with optional user-set hard limits, `setGoalBudget(budget)` sends `set_goal_budget` to set or clear limits on an existing goal, `updateGoal(note?, plan?)` sends `update_goal` with outcome and/or nested plan changes, and `controlGoal(action)` sends `goal_control` with `pause`, `resume`, or `stop`. Blank budget editor inputs are unlimited and must omit hard-limit keys. The reducer updates `thread.goal` from `Snapshot.goal`; `runtime_updated` mirrors only mutate the runtime fields on an existing projection (`goal_active`, `goal_status`, `goal_turns_used`, `goal_tokens_used`, `goal_no_progress_turns`). Hidden `event(goal_delta)` and `event(goal_pursuit)` remain out of EventLog and the normal transcript.
 
 Status semantics mirror the backend: `active=true` means this chat owns the goal; pursuit requires `active && status === "active"`. Terminal or held states include `verifying`, `paused`, `completed`, `stopped`, `budget_exhausted`, `no_progress`, and `transferred`. Transfer surfaces should show `transferred_from` / `transferred_to` from the snapshot rather than inferring ownership from chat mode.
 
 ### ToolsContent (src/components/ChatContent/ToolsContent.tsx)
 
-Largest component (~1900 lines). Dispatches a `ToolCall` list to the right specialized `ToolCard` via a `processToolCalls` switch on `normalizeToolName(toolCall.function.name)`. Covers file ops (`cat`, `tree`, `search_pattern`, `search_semantic`, `search_symbol_definition`, `mv`, `rm`, `add_workspace_folder`), shells (`shell`, `shell_service`, `process_*`), agentic tools (`subagent`, `code_review`, `tasks_set`, `task_done`, `sleep`, `agent_done`, `final_report`), knowledge (`knowledge`, `search_trajectories`, `get_trajectory_context`, `create_knowledge`), web (`web`, `web_search`), editing (`patch_*` raw-text-doc family, `text_edit`), Chrome/browser (`ask_questions`, `chrome_*`), and the OpenAI Responses tool family (`audio`, `web_search_call`, `file_search_call`, `code_interpreter_call`, `computer_call*`, `image_generation_call`, `mcp_call`, `mcp_list_tools`, `refusal`). Falls back to `GenericTool` for anything unhandled.
+Largest component (~1900 lines). Dispatches a `ToolCall` list to the right specialized `ToolCard` via a `processToolCalls` switch on `normalizeToolName(toolCall.function.name)`. Covers file ops (`cat`, `tree`, `search_pattern`, `search_semantic`, `search_symbol_definition`, `mv`, `rm`, `add_workspace_folder`), shells (`shell`, `shell_service`, `process_*`), agentic tools (`subagent`, `code_review`, `tasks_set`, `task_done`, `wait`, `schedule`, `pause`, `agent_lifecycle`, `agent_done`, `final_report`), knowledge (`knowledge`, `search_trajectories`, `get_trajectory_context`, `create_knowledge`), web (`web`, `web_search`), editing (`patch_*` raw-text-doc family, `text_edit`), Chrome/browser (`ask_questions`, `chrome_*`), and the OpenAI Responses tool family (`audio`, `web_search_call`, `file_search_call`, `code_interpreter_call`, `computer_call*`, `image_generation_call`, `mcp_call`, `mcp_list_tools`, `refusal`). Falls back to `GenericTool` for anything unhandled.
 
 - New background work is created with `subagent`. Its results are decorated with a `BackgroundAgentCard` built from `BackgroundAgentSummary`, showing status, selected model, current tool, goal/plan, worktree/merge state, questions, usage, and edit/result summaries. Legacy delegate calls and records are normalized into the same card only for compatibility.
 - Multimodal results (`MultiModalToolResult` with image content) are rendered by `MultiModalToolContent` and surface inline image previews via `DialogImage`.
@@ -480,11 +480,12 @@ The shell renders dock chrome only for web hosts with Files or Git capability, a
 
 ### Scheduler feature
 
-The scheduler UI is opened by the `scheduler` page (`openScheduler({ taskId? })`) and by EventLog clicks on `cron_fire` events. Keep the GUI model aligned with backend cron tools:
+The scheduler UI is opened by the `scheduler` page (`openScheduler({ taskId? })`) and by EventLog clicks on `cron_fire` events. Keep the GUI model aligned with the consolidated schedule and pause/resume operations:
 
-- `cron_create`: 5-field cron, prompt, description, recurring flag, durable flag.
-- `cron_list`: scope filter (`session`, `durable`, `all`), list rows with human schedule, next fire, fire count, and scope chips.
-- `cron_delete`: remove by id and update the visible list.
+- `schedule(action="create")`: 5-field cron, prompt, description, recurring flag, durable flag.
+- `schedule(action="list")`: scope filter (`session`, `durable`, `all`), list rows with human schedule, next fire, fire count, and scope chips.
+- `schedule(action="delete")`: remove by id and update the visible list.
+- `pause` / `resume` with a schedule target control future enabled state; existing scheduler feature HTTP routes share the same operations.
 
 Scheduler state should live in a feature slice or RTK Query service, not in ChatContent. Cron fire visibility comes from hidden `event(cron_fire)` messages and should route through EventLog first. Durable jobs are project-scoped; session jobs are engine-memory-scoped, so UI copy must make that distinction clear.
 
@@ -523,7 +524,7 @@ Chat can proceed when ALL true: `snapshot_received && !streaming && !waiting_for
 ## Special Features
 
 - **Checkpoints**: Workspace rollback via git commits. Preview → Restore. Per-message reset button.
-- **Hidden Roles**: `event` messages feed EventLog except `plan_delta`, `goal_delta`, and `goal_pursuit`; `plan` plus `plan_delta` messages feed PlanBanner; `goal` plus goal delta/pursuit projection feeds TaskProgressWidget through `thread.goal`. All hidden roles stay out of `selectVisibleMessages`.
+- **Hidden Roles**: `event` messages feed EventLog except `plan_delta`, `goal_delta`, and `goal_pursuit`; legacy `plan` plus `plan_delta` messages feed the history-only PlanBanner fallback; `goal` plus goal delta/pursuit projection feeds TaskProgressWidget through `thread.goal`. All hidden roles stay out of `selectVisibleMessages`.
 - **Thinking Blocks**: `thinking_blocks: [{thinking, signature}]` on assistant messages. Collapsible UI. Signatures are opaque — never mutate.
 - **Reasoning Content**: Separate `reasoning_content` field. Collapsible.
 - **Knowledge/Memory**: `remember_how_to_use_tools` → vecdb → `context_file` messages. Knowledge graph view.

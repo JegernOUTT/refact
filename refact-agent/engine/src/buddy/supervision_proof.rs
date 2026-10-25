@@ -1127,6 +1127,9 @@ pub(crate) mod tests {
         }];
         let goal = GoalSnapshot {
             content: "edit a".into(),
+            owner: None,
+            revision: 1,
+            plan: None,
             version: 2,
             active: false,
             status: GoalStatus::Completed,

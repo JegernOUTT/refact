@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: execution
 title: "Review: execution and reproduction"
 phase: parallel
@@ -16,7 +16,7 @@ preferred_tools:
   - create_textdoc
   - process_start
   - process_read
-  - process_wait
+  - wait
   - process_kill
 fallback: >-
   If writes or command execution are unavailable, run only the existing tests you can, and say in

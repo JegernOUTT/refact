@@ -301,7 +301,13 @@ impl App {
                     }
                 }
             }
-            SseEvent::RuntimeUpdated { runtime } => {
+            SseEvent::RuntimeUpdated { mut runtime } => {
+                if runtime.goal.projection.is_none() && raw.get("goal").is_none() {
+                    runtime.goal.projection = self
+                        .runtime_snapshot
+                        .as_ref()
+                        .and_then(|previous| previous.goal.projection.clone());
+                }
                 self.runtime_snapshot = Some(runtime);
                 return self.handle_runtime_updated(&raw);
             }
@@ -1036,6 +1042,15 @@ impl App {
 
 impl App {
     pub(super) fn handle_snapshot(&mut self, raw: &Value) -> AppAction {
+        let mut runtime = raw
+            .get("runtime")
+            .filter(|runtime| runtime.is_object())
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(goal) = raw.get("goal") {
+            runtime["goal"] = goal.clone();
+        }
+        self.runtime_snapshot = Some(crate::protocol::RuntimeUpdatedEvent::from_raw(&runtime));
         match AskQuestionsRequest::from_native_snapshot(raw) {
             Ok(Some(pending)) => self.native_pending_questions = Some(pending),
             Ok(None) if self.native_pending_questions.is_some() => {

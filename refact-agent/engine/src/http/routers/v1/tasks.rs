@@ -828,6 +828,13 @@ pub async fn handle_create_planner_chat(
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
 
+    let expected_owner = storage::load_board(gcx.clone(), &task_id)
+        .await
+        .map_err(|error| (StatusCode::CONFLICT, error))?
+        .owner_chat_id;
+    crate::tasks::goal::resolve_task_goal(gcx.clone(), &task_id)
+        .await
+        .map_err(|error| (StatusCode::CONFLICT, error))?;
     let chat_id = storage::next_planner_chat_id(gcx.clone(), &task_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -840,6 +847,20 @@ pub async fn handle_create_planner_chat(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    storage::update_board_atomic(gcx.clone(), &task_id, |board| {
+        if board.owner_chat_id != expected_owner {
+            return Err(
+                "Task planner owner changed during transfer; refresh before continuing".into(),
+            );
+        }
+        board.owner_chat_id = Some(chat_id.clone());
+        Ok(())
+    })
+    .await
+    .map_err(|error| (StatusCode::CONFLICT, error))?;
+    crate::tasks::goal::attach_planner_goal(gcx, &task_id, &chat_id, Vec::new(), Vec::new())
+        .await
+        .map_err(|error| (StatusCode::CONFLICT, error))?;
     Ok(Json(json!({"chat_id": chat_id, "mode": mode})))
 }
 
@@ -2795,4 +2816,29 @@ mod tests {
         .await;
         assert!(matches!(result, Err((StatusCode::NOT_FOUND, _))));
     }
+}
+
+#[derive(Deserialize, Default)]
+pub struct TaskGoalQuery {
+    #[serde(default)]
+    include_history: bool,
+}
+
+pub async fn handle_get_task_goal(
+    State(app): State<AppState>,
+    Path(task_id): Path<String>,
+    Query(query): Query<TaskGoalQuery>,
+) -> Result<Json<Option<refact_chat_api::GoalSnapshot>>, (StatusCode, String)> {
+    let record = crate::tasks::goal::resolve_task_goal(app.gcx.clone(), &task_id)
+        .await
+        .map_err(|error| (StatusCode::CONFLICT, error))?;
+    Ok(Json(record.and_then(|record| {
+        let mut snapshot = record.snapshot(&task_id)?;
+        snapshot.plan = crate::chat::goal_role::current_goal_plan(
+            &record.messages,
+            crate::runtime_settings::plan_projection_limits(),
+            query.include_history,
+        );
+        Some(snapshot)
+    })))
 }

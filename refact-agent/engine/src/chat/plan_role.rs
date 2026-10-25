@@ -31,15 +31,52 @@ pub fn install_plan(
             };
         }
     };
-    if let Some(message) = refact_chat_api::plan_role::current_base_plan(&projection) {
+    if refact_chat_api::goal_role::current_goal_plan(
+        &projection.messages,
+        crate::runtime_settings::plan_projection_limits(),
+        false,
+    )
+    .is_some()
+    {
         return PlanInstallReport {
-            version: message.extra["plan"]["version"].as_u64().unwrap_or(1) as u32,
-            supersedes: message.extra["plan"]["supersedes"]
-                .as_str()
-                .map(str::to_owned),
+            version: 1,
+            supersedes: None,
         };
     }
-    session.add_message(crate::chat::internal_roles::plan(mode, 1, body, None));
+    if crate::chat::goal_role::current_base_goal(&projection).is_none() {
+        let mut goal = crate::chat::internal_roles::goal(
+            mode,
+            1,
+            "Implement the approved plan.",
+            None,
+            true,
+            refact_chat_api::GoalBudget::default(),
+        );
+        goal.extra["goal"]["status"] = serde_json::json!("paused");
+        session.add_message(goal);
+    }
+    let mutation = refact_chat_api::GoalPlanMutation::Install(refact_chat_api::GoalPlanInstall {
+        content: body.into(),
+    });
+    match crate::chat::goal_role::prepare_goal_update(
+        session,
+        None,
+        Some(&mutation),
+        "goal.plan_install",
+    ) {
+        Ok(messages) => {
+            for message in messages {
+                session.add_message(message);
+            }
+        }
+        Err(error) => {
+            session.set_runtime_state(crate::chat::types::SessionState::Error, Some(error));
+            return PlanInstallReport {
+                version: 0,
+                supersedes: None,
+            };
+        }
+    }
     PlanInstallReport {
         version: 1,
         supersedes: None,

@@ -1460,6 +1460,43 @@ describe("TaskWorkspace layout and chat surfaces", () => {
     await screen.findByText(/memories shown/i);
     await user.click(screen.getByRole("tab", { name: "Documents" }));
     await screen.findByText(/No documents yet/);
+    expect(screen.getByText(/Reference documents only/)).toBeVisible();
+
+    let goalResponse: Record<string, unknown> | null = null;
+    server.use(
+      http.get("*/v1/tasks/:id/goal", () => HttpResponse.json(goalResponse)),
+    );
+    await user.click(screen.getByRole("button", { name: "Task goal" }));
+    await screen.findByText(/No task goal installed/);
+    goalResponse = {
+      content: "Canonical task objective",
+      version: 2,
+      revision: 3,
+      status: "active",
+      owner: { kind: "task", id: TASK_ID },
+      plan: {
+        content: "Canonical goal-owned plan",
+        version: 1,
+        delta_count: 0,
+        created_at_ms: 1,
+        checkpoint: null,
+      },
+    };
+    await user.click(screen.getByRole("button", { name: "Reload goal" }));
+    await screen.findByText("Canonical task objective");
+    await screen.findByText("Canonical goal-owned plan");
+    expect(screen.getByText(/revision 3/)).toBeVisible();
+    server.use(
+      http.get(
+        "*/v1/tasks/:id/goal",
+        () => new HttpResponse(null, { status: 409 }),
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "Reload goal" }));
+    await screen.findByRole("alert");
+    expect(
+      screen.queryByText("Canonical task objective"),
+    ).not.toBeInTheDocument();
   });
 });
 

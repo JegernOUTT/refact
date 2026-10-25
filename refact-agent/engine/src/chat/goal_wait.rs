@@ -76,7 +76,11 @@ pub fn settle_goal_wait_in_session(
     at_ms: u64,
 ) -> Option<GoalWait> {
     let settled = session.goal_settle_wait(subject, at_ms)?;
-    let wake = resume != GoalWaitResume::Cancelled;
+    let wake = resume != GoalWaitResume::Cancelled
+        && session
+            .goal
+            .as_ref()
+            .is_some_and(|goal| goal.active && goal.status == GoalStatus::Active);
     let delivery = PendingDelivery::new(
         vec![goal_wait_resume_event(&settled, resume, at_ms)],
         PushMode::Append,
@@ -109,12 +113,40 @@ pub async fn settle_goal_wait(
     let Some(session_arc) = session_arc else {
         return false;
     };
+    if let Err(error) =
+        crate::tasks::goal::hydrate_session_task_goal(app.gcx.clone(), &session_arc).await
+    {
+        tracing::warn!(%chat_id, %error, "goal wait owner unavailable");
+        return false;
+    }
     let settled = {
         let mut session = session_arc.lock().await;
         settle_goal_wait_in_session(&mut session, Some(subject), resume, epoch_ms_now()).is_some()
     };
     if settled {
-        resume_goal_wait_execution(&app, chat_id).await;
+        if let Err(error) =
+            crate::tasks::goal::commit_session_task_goal(app.gcx.clone(), &session_arc).await
+        {
+            tracing::warn!(%chat_id, %error, "goal wait commit rejected");
+            return false;
+        }
+        let should_resume = {
+            let session = session_arc.lock().await;
+            session
+                .goal
+                .as_ref()
+                .is_some_and(|goal| goal.active && goal.status == GoalStatus::Active)
+                && !session.closed
+                && !matches!(
+                    session.runtime.state,
+                    SessionState::Paused
+                        | SessionState::WaitingUserInput
+                        | SessionState::WaitingIde
+                )
+        };
+        if should_resume {
+            resume_goal_wait_execution(&app, chat_id).await;
+        }
         maybe_save_trajectory_background_with_intent(
             app,
             session_arc,

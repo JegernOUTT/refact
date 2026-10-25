@@ -17,13 +17,13 @@ use crate::ext::hooks_runner::{
 use super::hosts::{self, HostOperation};
 use super::session::AuthorizedCall;
 
-fn tool_call(index: usize, call: &AuthorizedCall) -> ChatToolCall {
+fn tool_call(index: usize, call: &AuthorizedCall, arguments: serde_json::Value) -> ChatToolCall {
     ChatToolCall {
         id: format!("codemode_{index}_{}", uuid::Uuid::new_v4()),
         index: Some(index),
         function: ChatToolFunction {
             name: call.tool.to_string(),
-            arguments: call.arguments.to_string(),
+            arguments: arguments.to_string(),
         },
         tool_type: "function".to_string(),
         extra_content: None,
@@ -70,14 +70,13 @@ pub(crate) async fn dispatch_authorized_calls(
         })?;
         let hook_authority = { ccx.lock().await.child_tool_ceiling.clone() };
 
-        let mut tc = tool_call(index, call);
-        let arguments = call.arguments.clone();
+        let mut arguments = call.arguments.clone();
         let project_dir = match &thread.worktree {
             Some(worktree) => worktree.root.to_string_lossy().into_owned(),
             None => get_project_dir_string(app.clone()).await,
         };
         let payload = HookPayload::new(&HookEvent::PreToolUse, session_id.to_string(), project_dir)
-            .with_tool(call.tool, Some(arguments));
+            .with_tool(call.tool, Some(arguments.clone()));
         match run_control_hooks(app.clone(), HookEvent::PreToolUse, payload).await {
             ControlVerdict::Allow => {}
             ControlVerdict::Deny(reason) => {
@@ -102,9 +101,20 @@ pub(crate) async fn dispatch_authorized_calls(
                         call.tool
                     )
                 })?;
-                tc.function.arguments = rewritten.to_string();
+                arguments = rewritten;
             }
         }
+
+        if host_operation.name == "wait" {
+            let mut translated = serde_json::json!({
+                "target": {"kind": "agents", "agent_ids": [arguments["agent_id"].clone()]}
+            });
+            if let Some(timeout) = arguments.get("timeout_ms") {
+                translated["timeout_ms"] = timeout.clone();
+            }
+            arguments = translated;
+        }
+        let tc = tool_call(index, call, arguments);
 
         let (confirmations, denials) = tools::check_tools_confirmation(
             app.clone(),

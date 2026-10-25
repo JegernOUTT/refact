@@ -182,49 +182,6 @@ async fn persist_live_source_goal_transfer(
     Ok(())
 }
 
-async fn create_initial_plan_document_for_transition(
-    gcx: Arc<GlobalContext>,
-    task_id: &str,
-    plan_text: Option<&str>,
-) -> (Option<String>, Option<String>) {
-    let Some(plan_text) = plan_text.map(str::trim).filter(|text| !text.is_empty()) else {
-        return (None, None);
-    };
-    let result = async {
-        let documents_dir =
-            crate::tools::tool_task_documents::documents_dir_for_task(gcx.clone(), task_id).await?;
-        let slug = crate::tools::tool_task_documents::next_available_slug_at(
-            &documents_dir,
-            "initial-plan",
-        )
-        .await?;
-        crate::tools::tool_task_documents::create_document_at(
-            &documents_dir,
-            &slug,
-            "Initial Plan",
-            "plan",
-            plan_text,
-            true,
-            Vec::new(),
-            "planner",
-        )
-        .await?;
-        Ok::<String, String>(slug)
-    }
-    .await;
-    match result {
-        Ok(slug) => (Some(slug), None),
-        Err(error) => {
-            tracing::warn!(
-                "failed to create initial-plan document for task {}: {}",
-                task_id,
-                error
-            );
-            (None, Some(error))
-        }
-    }
-}
-
 #[derive(Deserialize)]
 pub struct TransformRequest {
     pub options: CompressOptions,
@@ -407,10 +364,6 @@ pub struct ModeTransitionApplyResponse {
     pub messages_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub root_chat_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub initial_plan_document: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub initial_plan_error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -785,8 +738,6 @@ pub async fn handle_mode_transition_apply(
         new_chat_id,
         messages_count: new_messages.len(),
         root_chat_id,
-        initial_plan_document: None,
-        initial_plan_error: None,
     };
 
     let body = serde_json::to_vec(&response)
@@ -862,6 +813,15 @@ pub async fn handle_planner_from_transition(
     let reconstruction_input = refact_core::active_context::legacy_rebuild_input(&messages)
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    crate::tasks::goal::preflight_planner_transition(
+        gcx.clone(),
+        &task_id,
+        &req.source_chat_id,
+        source_goal.as_ref(),
+    )
+    .await
+    .map_err(|error| ScratchError::new(StatusCode::CONFLICT, error))?;
+
     let rebuilt = reconstruct_context(
         gcx.clone(),
         ReconstructionRequest {
@@ -881,7 +841,7 @@ pub async fn handle_planner_from_transition(
     .await
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let mut new_messages = rebuilt.messages;
-    let decisions = rebuilt.decisions;
+    let _decisions = rebuilt.decisions;
 
     let new_chat_id = crate::tasks::storage::next_planner_chat_id(gcx.clone(), &task_id)
         .await
@@ -992,24 +952,10 @@ pub async fn handle_planner_from_transition(
     .await
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let (initial_plan_document, initial_plan_error) =
-        if target_mode.eq_ignore_ascii_case("task_planner") {
-            create_initial_plan_document_for_transition(
-                gcx.clone(),
-                &task_id,
-                decisions.initial_plan.as_deref(),
-            )
-            .await
-        } else {
-            (None, None)
-        };
-
     let response = ModeTransitionApplyResponse {
         new_chat_id,
         messages_count: new_messages.len(),
         root_chat_id,
-        initial_plan_document,
-        initial_plan_error,
     };
 
     let body = serde_json::to_vec(&response)
@@ -1161,8 +1107,9 @@ mod tests {
             "invalid/source",
             1,
         );
+        insert_goal_messages_before_plan(&mut snapshot.messages, transfer.target_messages.clone());
         snapshot.messages = transition_report(
-            &transfer.target_messages,
+            &snapshot.messages,
             1,
             "model".into(),
             "agent".into(),
@@ -1260,8 +1207,9 @@ mod tests {
             "durable-source",
             1,
         );
+        insert_goal_messages_before_plan(&mut snapshot.messages, transfer.target_messages.clone());
         snapshot.messages = transition_report(
-            &transfer.target_messages,
+            &snapshot.messages,
             1,
             "model".into(),
             "agent".into(),
@@ -1483,9 +1431,20 @@ mod tests {
 
         let source_chat_id = "http-source-goal";
         let target_chat_id = "http-target-goal";
-        let (source_session, budget) = source_session_with_active_goal(source_chat_id);
+        let (mut source_session, budget) = source_session_with_active_goal(source_chat_id);
+        source_session.install_plan("plan", "Approved execution plan");
+        let original_goal = source_session.goal.clone().unwrap();
+        source_session.set_goal_ledger(refact_chat_api::seed_transferred_goal_ledger(
+            &original_goal,
+            "prior-owner",
+            100,
+        ));
+        source_session.goal_ledger_append(refact_chat_api::GoalLedgerOp::AttemptPushed {
+            attempt: original_goal.attempts[0].clone(),
+        });
+        source_session.goal_set_status_reason(GoalStatus::Paused, "awaiting user approval");
         let source_messages = source_session.messages.clone();
-        let source_goal = source_session.goal.clone();
+        let source_goal = transition_source_goal(&source_session);
         gcx.chat_sessions.write().await.insert(
             source_chat_id.to_string(),
             Arc::new(tokio::sync::Mutex::new(source_session)),
@@ -1499,7 +1458,7 @@ mod tests {
             &[],
             source_chat_id,
             target_chat_id,
-            "task_agent",
+            "task_planner",
             &mut target_messages,
             at_ms,
         );
@@ -1507,7 +1466,19 @@ mod tests {
         assert!(transferred_goal.transferred());
         let target_goal = transferred_goal.target_goal.as_ref().unwrap();
         assert!(target_goal.active);
-        assert_eq!(target_goal.status, GoalStatus::Active);
+        assert_eq!(target_goal.status, GoalStatus::Paused);
+        assert_eq!(
+            target_goal.plan.as_ref().unwrap().content,
+            "Approved execution plan"
+        );
+        let target_ledger =
+            refact_chat_api::seed_transferred_goal_ledger(target_goal, source_chat_id, at_ms);
+        assert_eq!(
+            refact_chat_api::reduce_goal_ledger(&target_ledger)
+                .unwrap()
+                .status,
+            GoalStatus::Paused
+        );
         assert_eq!(
             target_goal.transferred_from.as_deref(),
             Some(source_chat_id)
@@ -1522,7 +1493,8 @@ mod tests {
         assert_eq!(target_goal.attempts.len(), 1);
         assert_eq!(target_messages[0].role, "goal");
         assert_eq!(target_messages[1].role, "event");
-        assert_eq!(target_messages[2].role, "plan");
+        assert_eq!(target_messages[2].role, "event");
+        assert_eq!(target_messages[3].role, "plan");
 
         persist_live_source_goal_transfer(gcx.clone(), source_chat_id, &transferred_goal)
             .await
@@ -1685,16 +1657,12 @@ mod tests {
             new_chat_id: "planner-chat".to_string(),
             messages_count: 3,
             root_chat_id: Some("planner-chat".to_string()),
-            initial_plan_document: Some("initial-plan".to_string()),
-            initial_plan_error: None,
         };
 
         let raw = serde_json::to_value(response).unwrap();
         assert_eq!(raw["new_chat_id"], "planner-chat");
         assert_eq!(raw["messages_count"], 3);
         assert_eq!(raw["root_chat_id"], "planner-chat");
-        assert_eq!(raw["initial_plan_document"], "initial-plan");
-        assert!(raw.get("initial_plan_error").is_none());
     }
 
     #[tokio::test]
@@ -1823,21 +1791,5 @@ mod tests {
             raw["worktree"]["root"],
             dir.path().join("worktree").display().to_string()
         );
-    }
-
-    #[tokio::test]
-    async fn transition_initial_plan_document_failure_is_non_blocking() {
-        let dir = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
-            dir.path().join("cache"),
-            crate::test_tmp::scratch_dir("cfg"),
-        )
-        .await;
-        create_initial_plan_document_for_transition(
-            gcx,
-            "missing-task",
-            Some("Wave 0\n- Card T-1\n- Acceptance Criteria: tests pass"),
-        )
-        .await;
     }
 }

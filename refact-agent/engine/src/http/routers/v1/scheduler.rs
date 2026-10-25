@@ -211,27 +211,13 @@ pub async fn handle_v1_scheduler_cron_delete(
     State(app): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<CronDeleteResponse>, ScratchError> {
-    let mut removed = session_cron_store()
-        .remove(&id)
+    let durable = active_durable_cron_store(app.gcx.clone())
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    if !removed {
-        let durable = active_durable_cron_store(app.gcx.clone())
+    let removed =
+        crate::tools::tool_cron_delete::delete_schedule(&id, session_cron_store(), durable)
             .await
             .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        if let Some(store) = durable {
-            removed = store
-                .remove(&id)
-                .await
-                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        }
-    }
-
-    if removed {
-        crate::scheduler::runner_change_notify().notify_waiters();
-    }
-
     Ok(Json(CronDeleteResponse { removed }))
 }
 
@@ -416,52 +402,25 @@ async fn find_task_store(
 }
 
 fn apply_update(task: &mut Job, request: CronUpdateRequest, now_ms: u64) -> Result<(), String> {
-    let schedule_requested =
-        request.cron.is_some() || request.every.is_some() || request.at.is_some();
-    if schedule_requested {
-        let trigger = parse_schedule(
-            request.cron.as_deref(),
-            request.every.as_deref(),
-            request.at.as_deref(),
-            request.tz.as_deref(),
-            now_ms,
-        )?;
-        if matches!(trigger, Trigger::Once { .. }) {
-            task.recurring = false;
-            task.auto_expire_after_ms = 0;
-        }
-        task.set_trigger(trigger);
-        validate_next_fire(task, now_ms)?;
-    } else if request.tz.is_some() {
-        return Err("tz can only be changed with a cron schedule".to_string());
-    }
-    if let Some(prompt) = request.prompt {
-        set_job_prompt(task, prompt)?;
-    }
-    if let Some(description) = request.description {
-        task.description = description;
-    }
+    crate::tools::tool_cron_update::apply_update(
+        task,
+        crate::tools::tool_cron_update::CronUpdateInput {
+            id: task.id.clone(),
+            cron: request.cron,
+            every: request.every,
+            at: request.at,
+            tz: request.tz,
+            prompt: request.prompt,
+            description: request.description,
+            run_now: request.run_now.unwrap_or(false),
+            push: push_from_value(request.push.as_ref())?,
+        },
+        now_ms,
+    )?;
     if let Some(enabled) = request.enabled {
-        task.enabled = enabled;
-        task.paused_at_ms = if enabled { None } else { Some(now_ms) };
-    }
-    if let Some(push) = push_from_value(request.push.as_ref())? {
-        task.push = push;
-    }
-    if request.run_now.unwrap_or(false) {
-        task.trigger_at_ms = Some(now_ms);
+        crate::tools::tool_cron_update::set_job_enabled(task, enabled, now_ms);
     }
     Ok(())
-}
-
-fn set_job_prompt(task: &mut Job, value: String) -> Result<(), String> {
-    match &mut task.action {
-        Action::AgentTurn { prompt, .. } => {
-            *prompt = value;
-            Ok(())
-        }
-        Action::Command { .. } => Err("prompt can only be changed for agent-turn jobs".to_string()),
-    }
 }
 
 fn validate_next_fire(task: &Job, now_ms: u64) -> Result<(), String> {

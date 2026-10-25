@@ -502,8 +502,58 @@ impl GoalWaitResume {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GoalOwner {
+    Chat { id: String },
+    Task { id: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoalPlanInstall {
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum GoalPlanMutation {
+    Install(GoalPlanInstall),
+    Append(GoalPlanNote),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoalPlanNote {
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct GoalPlanSnapshot {
+    pub content: String,
+    pub mode: String,
+    pub version: u32,
+    pub created_at_ms: u64,
+    pub delta_count: usize,
+    pub checkpoint: Option<role_projection::CheckpointProvenance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<GoalPlanHistoryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalPlanHistoryEntry {
+    pub seq: u64,
+    pub content: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct GoalSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<GoalOwner>,
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<GoalPlanSnapshot>,
     pub content: String,
     pub version: u32,
     pub active: bool,
@@ -1179,6 +1229,8 @@ pub enum ChatCommand {
     SetGoal {
         content: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<GoalPlanInstall>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         criteria: Option<Vec<GoalCriterion>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         budget: Option<GoalBudget>,
@@ -1187,7 +1239,10 @@ pub enum ChatCommand {
         budget: GoalBudget,
     },
     UpdateGoal {
-        note: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<GoalPlanMutation>,
     },
     GoalControl {
         action: String,
@@ -1516,8 +1571,11 @@ impl CommandRequest {
             ChatCommand::SetGoalBudget { .. } => {
                 ("set_goal_budget".to_string(), String::new(), String::new())
             }
-            ChatCommand::UpdateGoal { note } => {
-                ("update_goal".to_string(), note.clone(), note.clone())
+            ChatCommand::UpdateGoal { note, plan } => {
+                let text = note
+                    .clone()
+                    .unwrap_or_else(|| serde_json::to_string(plan).unwrap_or_default());
+                ("update_goal".to_string(), text.clone(), text)
             }
             ChatCommand::GoalControl { action } => {
                 ("goal_control".to_string(), action.clone(), String::new())
@@ -1804,6 +1862,9 @@ mod tests {
 
     fn goal_snapshot() -> GoalSnapshot {
         GoalSnapshot {
+            owner: None,
+            revision: 0,
+            plan: None,
             content: "Ship the frog pond".to_string(),
             version: 2,
             active: true,
@@ -2911,6 +2972,7 @@ mod tests {
 
         let budget = finite_goal_budget();
         let cmd = ChatCommand::SetGoal {
+            plan: None,
             criteria: None,
             content: "ship".to_string(),
             budget: Some(budget.clone()),

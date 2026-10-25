@@ -32,7 +32,7 @@ const BUILTIN_SUBAGENT_TOOL_IDS: &[&str] = &[
     "subagent",
     "agent_list",
     "agent_status",
-    "agent_wait",
+    "wait",
     "agent_result",
     "agent_cancel",
 ];
@@ -1338,7 +1338,7 @@ mod tests {
             "subagent",
             "agent_list",
             "agent_status",
-            "agent_wait",
+            "wait",
             "agent_result",
             "agent_cancel",
         ] {

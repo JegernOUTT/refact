@@ -4,24 +4,31 @@ import { parseResumeReceipt as parse } from "./resumeReceipt";
 import styles from "./AgenticTool.module.css";
 
 export function ResumeToolView({
+  lifecycle = false,
   content,
   pending,
   failed,
   onOpenChildTrajectory,
 }: {
+  lifecycle?: boolean;
   content: string | null;
   pending: boolean;
   failed: boolean;
   onOpenChildTrajectory: (id: string) => void;
 }) {
   if (pending)
-    return <p role="status">Waiting for the child resume receipt.</p>;
-  const receipt = parse(content);
+    return (
+      <p role="status">
+        Waiting for the child {lifecycle ? "lifecycle" : "resume"} receipt.
+      </p>
+    );
+  const receipt = parse(content, lifecycle);
   if (failed || receipt === null)
     return (
       <p role="alert">
-        Resume details unavailable. This error or legacy response does not
-        confirm that the child resumed.
+        {lifecycle ? "Lifecycle" : "Resume"} details unavailable. This error or
+        legacy response does not confirm that the child{" "}
+        {lifecycle ? "changed state" : "resumed"}.
       </p>
     );
   const rows: [string, string | number][] = [
@@ -38,7 +45,10 @@ export function ResumeToolView({
   if (receipt.child_chat_id)
     rows.push(["Child trajectory", receipt.child_chat_id]);
   return (
-    <section aria-label="Child resume" className={styles.section}>
+    <section
+      aria-label={lifecycle ? "Child lifecycle" : "Child resume"}
+      className={styles.section}
+    >
       <div className={styles.metaRow}>
         <Badge tone="muted">{humanizeIdentifier(receipt.action)}</Badge>
         <Badge tone="muted">{humanizeIdentifier(receipt.status)}</Badge>
@@ -46,8 +56,23 @@ export function ResumeToolView({
       <p className={styles.note}>
         {receipt.action === "inspect"
           ? "Inspection only; no limits or execution state changed."
-          : "Resume request accepted for the same child. Queued is not running or completed."}
+          : receipt.accepted === false
+            ? receipt.summary ??
+              "No lifecycle change was accepted. Inspect the recorded state before retrying."
+            : receipt.summary
+              ? receipt.summary
+              : receipt.action === "close"
+                ? "Close receipt; this is not a pause hold. Saved child state may be recovered later."
+                : lifecycle
+                  ? "Lifecycle request accepted for the same child."
+                  : "Resume request accepted for the same child. Queued is not running or completed."}
       </p>
+      {lifecycle && (
+        <p className={styles.note}>
+          Queued is not running or completed. Recovery and continuation are not
+          pause-hold release.
+        </p>
+      )}
       <dl className={styles.detailGrid}>
         {rows.map(([label, value]) => (
           <div key={label} className={styles.detailItem}>
@@ -84,9 +109,11 @@ export function ResumeToolView({
         <p className={styles.note}>
           {receipt.can_raise_and_resume
             ? "The engine reported a parent-raiseable child step cap at this revision. Raising it still requires authorization."
-            : receipt.can_resume
-              ? "The engine reported resume eligibility at this revision. Authorization and current ownership are checked again on execution."
-              : "The engine did not report resume eligibility at this revision."}
+            : receipt.can_continue
+              ? "The engine reported continuation eligibility at this revision. Authorization and current ownership are checked again on execution."
+              : receipt.can_resume
+                ? "The engine reported resume eligibility at this revision. Authorization and current ownership are checked again on execution."
+                : "The engine did not report resume eligibility at this revision."}
         </p>
       )}
       <p className={styles.note}>

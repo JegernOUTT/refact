@@ -1,3 +1,4 @@
+use crate::history::cells::{GoalCellData, PlanCellData};
 use crate::ui::goal_dock::{self, GoalPresentation};
 
 use super::*;
@@ -6,7 +7,7 @@ impl App {
     fn show_current_goal(&mut self) -> AppAction {
         self.composer.clear();
         if !self.goal_surfaces_enabled() {
-            return match current_goal_cell_data(self.transcript_state.messages()) {
+            return match self.current_goal_data() {
                 Some(goal) => {
                     self.push_history_item(TranscriptItem::Goal(goal));
                     AppAction::None
@@ -20,13 +21,39 @@ impl App {
         match self.goal_presentation() {
             Some(goal) => {
                 self.goal_overlay_open = true;
-                if let Some(cell) = current_goal_cell_data(self.transcript_state.messages()) {
+                if let Some(cell) = self.current_goal_data() {
                     self.push_history_item(TranscriptItem::Goal(goal.to_goal_cell_data(cell)));
                 }
             }
             None => self.add_notice("No current goal is installed for this chat"),
         }
         AppAction::None
+    }
+
+    pub(super) fn current_goal_data(&self) -> Option<GoalCellData> {
+        if let Some(goal) = self
+            .runtime_snapshot
+            .as_ref()
+            .and_then(|runtime| runtime.goal.projection.as_ref())
+        {
+            if let Some(content) = goal.get("content").and_then(Value::as_str) {
+                let mut data = GoalCellData::new(
+                    content,
+                    goal.get("version").and_then(Value::as_u64).unwrap_or(1) as u32,
+                    goal.get("delta_count").and_then(Value::as_u64).unwrap_or(0) as usize,
+                );
+                data.plan = goal.get("plan").and_then(|plan| {
+                    Some(PlanCellData::new(
+                        plan.get("content")?.as_str()?,
+                        plan.get("mode").and_then(Value::as_str).unwrap_or("agent"),
+                        plan.get("version").and_then(Value::as_u64).unwrap_or(1) as u32,
+                        plan.get("delta_count").and_then(Value::as_u64).unwrap_or(0) as usize,
+                    ))
+                });
+                return Some(data);
+            }
+        }
+        current_goal_cell_data(self.transcript_state.messages())
     }
 
     pub(crate) fn goal_surfaces_enabled(&self) -> bool {

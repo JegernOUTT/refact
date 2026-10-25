@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
@@ -9,7 +8,6 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::internal_roles::{self, EventSubkind};
 use crate::chat::types::{ChatSession, GoalStatus, PendingDelivery, PushMode};
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
 const GOAL_CONTROL_SOURCE: &str = "tool.goal_pursuit";
 const MIN_SNOOZE_MINUTES: u64 = 1;
@@ -67,176 +65,76 @@ async fn session_for_chat(
         .ok_or_else(|| format!("chat session `{chat_id}` not found"))
 }
 
-pub struct ToolPauseGoal {
-    pub config_path: String,
-}
-
-#[async_trait]
-impl Tool for ToolPauseGoal {
-    fn tool_description(&self) -> ToolDesc {
-        ToolDesc {
-            name: "pause_goal".to_string(),
-            display_name: "Pause Goal".to_string(),
-            source: ToolSource {
-                source_type: ToolSourceType::Builtin,
-                config_path: self.config_path.clone(),
-            },
-            experimental: false,
-            allow_parallel: false,
-            description: "Pause autonomous pursuit of the active goal when you are blocked or waiting on the user. Pursuit stays paused until the user resumes it (goal_control) — use snooze_goal instead for a timed wait.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "push": PushMode::schema(),
-                    "reason": {
-                        "type": "string",
-                        "description": "Short reason why pursuit is paused."
-                    }
-                },
-                "required": [],
-            }),
-            output_schema: None,
-            annotations: None,
-        }
+pub(crate) async fn control_goal(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    tool_call_id: &String,
+    args: &HashMap<String, Value>,
+    resume: bool,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    let push = PushMode::from_args(args)?;
+    let now = epoch_ms_now();
+    let until_ms = args
+        .get("until_ms")
+        .map(|value| {
+            let until = value.as_u64().ok_or("until_ms must be an integer")?;
+            if until < now.saturating_add(MIN_SNOOZE_MINUTES * 60_000)
+                || until > now.saturating_add(MAX_SNOOZE_MINUTES * 60_000)
+            {
+                return Err("until_ms must be now + 1 through 1440 minutes");
+            }
+            Ok(until)
+        })
+        .transpose()?;
+    let gcx = ccx.lock().await.app.gcx.clone();
+    let session_arc = session_for_chat(ccx).await?;
+    crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), &session_arc).await?;
+    let mut session = session_arc.lock().await;
+    require_pursuable_goal(&session)?;
+    if resume
+        && !session
+            .goal
+            .as_ref()
+            .and_then(|goal| goal.snoozed_until_ms)
+            .is_some_and(|until| until > now)
+    {
+        return Err("only an active timed goal snooze can be resumed; manual and safety pauses require the user".into());
     }
-
-    async fn tool_execute(
-        &mut self,
-        ccx: Arc<AMutex<AtCommandsContext>>,
-        tool_call_id: &String,
-        args: &HashMap<String, Value>,
-    ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let push = PushMode::from_args(args)?;
-        let reason = args
-            .get("reason")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let session_arc = session_for_chat(ccx).await?;
-        let mut session = session_arc.lock().await;
-        require_pursuable_goal(&session)?;
-        let ledger_reason = if reason.is_empty() {
-            "pause_goal".to_string()
-        } else {
-            format!("pause_goal: {reason}")
-        };
-        let message = internal_roles::event(
-            EventSubkind::GoalPursuit,
-            GOAL_CONTROL_SOURCE,
-            json!({"kind": "paused", "trigger": "pause_goal", "at_ms": epoch_ms_now()}),
-            if reason.is_empty() {
-                "Goal pursuit paused by the agent.".to_string()
-            } else {
-                format!("Goal pursuit paused by the agent: {reason}")
-            },
-        );
-        let mut delivery = PendingDelivery::new(vec![message], push, GOAL_CONTROL_SOURCE, false);
-        delivery.after_tool_call_id = Some(tool_call_id.clone());
-        session.enqueue_delivery(delivery)?;
-        session.purge_goal_generated_wakes();
-        session.goal_set_status_reason(GoalStatus::Paused, &ledger_reason);
-        tool_message(
-            tool_call_id,
-            "Goal pursuit paused. The user can resume it with goal_control(resume).".to_string(),
-        )
+    let reason = args
+        .get(if resume { "note" } else { "reason" })
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let kind = if resume {
+        "resumed"
+    } else if until_ms.is_some() {
+        "snoozed"
+    } else {
+        "paused"
+    };
+    let message = internal_roles::event(
+        EventSubkind::GoalPursuit,
+        GOAL_CONTROL_SOURCE,
+        json!({"kind":kind,"trigger":if resume {"resume"} else {"pause"},"at_ms":now,"until_ms":until_ms}),
+        format!("Goal pursuit {kind}. {reason}"),
+    );
+    let mut delivery = PendingDelivery::new(vec![message], push, GOAL_CONTROL_SOURCE, false);
+    delivery.after_tool_call_id = Some(tool_call_id.clone());
+    session.enqueue_delivery(delivery)?;
+    session.purge_goal_generated_wakes();
+    if resume {
+        session.goal_set_snooze(None);
+    } else if let Some(until) = until_ms {
+        session.goal_set_snooze(Some(until));
+    } else {
+        session.goal_set_status_reason(GoalStatus::Paused, &format!("pause: {reason}"));
     }
-
-    fn tool_depends_on(&self) -> Vec<String> {
-        vec![]
-    }
-}
-
-pub struct ToolSnoozeGoal {
-    pub config_path: String,
-}
-
-#[async_trait]
-impl Tool for ToolSnoozeGoal {
-    fn tool_description(&self) -> ToolDesc {
-        ToolDesc {
-            name: "snooze_goal".to_string(),
-            display_name: "Snooze Goal".to_string(),
-            source: ToolSource {
-                source_type: ToolSourceType::Builtin,
-                config_path: self.config_path.clone(),
-            },
-            experimental: false,
-            allow_parallel: false,
-            description: "Suspend goal-pursuit nudges for a bounded time (e.g. while waiting for CI or a background process). The goal stays active; pursuit resumes automatically after the snooze or on the next user message.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "push": PushMode::schema(),
-                    "minutes": {
-                        "type": "integer",
-                        "description": "How long to snooze pursuit, in minutes (1-1440)."
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "Short reason for the snooze."
-                    }
-                },
-                "required": ["minutes"],
-            }),
-            output_schema: None,
-            annotations: None,
-        }
-    }
-
-    async fn tool_execute(
-        &mut self,
-        ccx: Arc<AMutex<AtCommandsContext>>,
-        tool_call_id: &String,
-        args: &HashMap<String, Value>,
-    ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let push = PushMode::from_args(args)?;
-        let minutes = args
-            .get("minutes")
-            .and_then(|value| value.as_u64())
-            .ok_or("argument `minutes` must be a positive integer")?
-            .clamp(MIN_SNOOZE_MINUTES, MAX_SNOOZE_MINUTES);
-        let reason = args
-            .get("reason")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let session_arc = session_for_chat(ccx).await?;
-        let mut session = session_arc.lock().await;
-        require_pursuable_goal(&session)?;
-        let until_ms = epoch_ms_now().saturating_add(minutes.saturating_mul(60_000));
-        let message = internal_roles::event(
-            EventSubkind::GoalPursuit,
-            GOAL_CONTROL_SOURCE,
-            json!({
-                "kind": "snoozed",
-                "trigger": "snooze_goal",
-                "at_ms": epoch_ms_now(),
-                "until_ms": until_ms,
-            }),
-            if reason.is_empty() {
-                format!("Goal pursuit snoozed for {minutes} minutes.")
-            } else {
-                format!("Goal pursuit snoozed for {minutes} minutes: {reason}")
-            },
-        );
-        let mut delivery = PendingDelivery::new(vec![message], push, GOAL_CONTROL_SOURCE, false);
-        delivery.after_tool_call_id = Some(tool_call_id.clone());
-        session.enqueue_delivery(delivery)?;
-        session.purge_goal_generated_wakes();
-        session.goal_set_snooze(Some(until_ms));
-        tool_message(
-            tool_call_id,
-            format!(
-                "Goal pursuit snoozed for {minutes} minutes; it resumes automatically afterwards or on the next user message."
-            ),
-        )
-    }
-
-    fn tool_depends_on(&self) -> Vec<String> {
-        vec![]
-    }
+    drop(session);
+    crate::tasks::goal::commit_session_task_goal(gcx, &session_arc).await?;
+    tool_message(
+        tool_call_id,
+        json!({"target":"goal","status":kind,"until_ms":until_ms,
+        "user_resume_required": !resume && until_ms.is_none()})
+        .to_string(),
+    )
 }
 
 #[cfg(test)]

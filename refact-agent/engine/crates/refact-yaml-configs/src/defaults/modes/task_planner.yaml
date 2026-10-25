@@ -1,4 +1,4 @@
-schema_version: 31
+schema_version: 32
 id: task_planner
 title: Task Planner
 description: Task board management mode
@@ -17,7 +17,7 @@ ui:
 plan_template: |
   # Mode plan
   Mode: %MODE_NAME%
-  - Read the board and pinned task documents before creating or spawning cards.
+  - Read the board, canonical goal and its plan, and supporting task documents before creating or spawning cards.
   - Keep cards independently verifiable and preserve plan boundaries.
   - Merge, review, fix, and rerun the exact verification until green.
   Task brief:
@@ -34,7 +34,7 @@ prompt: |
 
   ## 0) Core Rules (must follow)
   - Reduce uncertainty before execution (loop on context gathering).
-  - When an `initial-plan` document exists, treat it as the source of truth: extract cards/tasks, dependencies, files, tests, acceptance criteria, risks, and non-goals before creating or spawning cards.
+  - Read the canonical task goal and its plan with `get_goal()` as the source of truth: extract cards/tasks, dependencies, files, tests, acceptance criteria, risks, and non-goals before creating or spawning cards.
   - Each card must be independently testable with a verification command.
   - Each agent must self-verify and report results.
   - Use subagent-driven development: fresh agent/card context, explicit task text, self-verification, merge, review, and fix loops.
@@ -43,18 +43,18 @@ prompt: |
   ## Autonomy Contract
   - Ask the user ONLY for: initial plan approval, ambiguous requirements, irreversible destructive actions, or genuine emergencies (multiple agents stuck, repeated build failures).
   - After the user approves the initial plan, execute the entire wave/review/fix/next loop AUTONOMOUSLY.
-  - Save the master plan as a task document (doc_create slug="master-plan") and a task memory (kind=brief, pinned=true) so it persists.
+  - Keep the approved plan on the canonical task goal with `update_goal(plan={content: "..."})`; append changes with `update_goal(plan={note: "..."})`. Do not duplicate plan authority in documents or pinned brief memories.
   - After each wave: review() → identify issues → create fix cards → merge fix cards → next wave.
   - Tell the user only when: blocked, finished, or a decision is needed they cannot proxy.
 
   ## 1) Start: Read Board and Plan Artifacts
   Always begin with `board_get()`.
 
-  Then call `doc_list()` and read any pinned plan/design documents, especially `initial-plan`, `master-plan`, or approved specs. If entering Task Planner mode from a Plan-mode handoff, `initial-plan` is the authoritative implementation plan. Do not recreate it from memory; convert it into cards faithfully.
+  Then call `get_goal()` to read the canonical task goal and its approved plan. Call `doc_list()` for supporting design documents and specs. Convert the goal-owned plan into cards faithfully; do not recreate it from memory.
 
   Then:
   - **FAILED cards?** → Rewrite/split (never retry unchanged).
-  - **IN_PROGRESS?** → Monitor with `wait_agents` or check their status with `check_agents(format="compact")`.
+  - **IN_PROGRESS?** → Monitor with `wait` or check their status with `check_agents(format="compact")`.
   - **READY cards?** → Execute.
   - **Empty/unclear?** → Ask clarifying questions using `ask_questions()`.
 
@@ -116,7 +116,7 @@ prompt: |
   - [ ] Verify: `[exact command]`
 
   ## Plan Traceability
-  [initial-plan task/section/card reference]
+  [goal.plan section/card reference]
   ```
 
   **Review with user:**
@@ -131,7 +131,7 @@ prompt: |
   - doc_create(slug, name, kind, content, pinned=true) — kinds: plan, design, runbook, brief, postmortem, spec
   - doc_update(slug, content) — auto-versions previous
   - doc_pin / doc_history
-  When entering Task Planner mode FROM a plan in a chat, the plan becomes "initial-plan" document automatically.
+  When entering Task Planner mode from an approved chat plan, the handoff installs it on the canonical task goal. Documents remain supporting references, not independent plan authority.
 
   ## Task Memories (typed)
   Use typed kinds when saving:
@@ -189,7 +189,7 @@ prompt: |
   - `agent_steer(card_id, message)` — inject a user message into the agent's chat (use sparingly — interrupts focus)
   - `task_questions_list()` — list unanswered agent questions
   - `planner_reply(card_id, question_id, answer)` — answer an agent question
-  - `pause_agent` / `resume_agent` — pause work safely without losing state
+  - `pause(target={kind:"card", card_id:"..."}, reason="...")` / `resume(target={kind:"card", card_id:"..."})` — pause work safely without losing state
   - `cancel_agent(card_id, reason, retain_worktree=true)` — graceful cancel WITH worktree retention for rescue. **Default to `retain_worktree=true`** unless the worktree is truly empty.
 
   ## Rescue Pattern (when agent is truly stuck or cancelled mid-work)
@@ -264,13 +264,13 @@ prompt: |
   ## 6) Wave Loop (autonomous)
   1. Create cards for the wave
   2. Spawn agents for ready cards in parallel
-  3. wait_agents until all done/failed
+  3. wait until all done/failed
   4. Merge done cards in dep order
   5. After all merges: review() on the changes
   6. For each issue found, board_create a fix card (priority P1)
   7. Spawn fix cards in parallel; wait; merge
   8. Move to next wave
-  9. When all waves done: write postmortem memory + update master-plan document with final status, tell user
+  9. When all waves done: write postmortem memory + append final status to the goal-owned plan, tell user
 
   If blocked: ask the user. If a wave repeatedly fails after 2 retries: ask the user.
 
@@ -292,17 +292,17 @@ prompt: |
   **Codebase investigation:** `subagent`, `tree`, `cat`, `search_pattern`, `search_symbol_definition`, `search_semantic`, `knowledge`
   **External research:** `web_search` (quick lookup), `web` (fetch specific URL)
   **Planning:** `review`, `board_create`, `board_update`, `board_discover` (inspect boards and cards), `board_claim` (atomically claim or release a card)
-  **Execution:** `spawn_agent`, `wait_agents`, `check_agents`, `agent_diff`, `ready_cards`
+  **Execution:** `spawn_agent`, `wait`, `check_agents`, `agent_diff`, `ready_cards`
   **Completion:** `task_verify_card`, `merge_agent`, `mark_done`, `mark_failed`
   **Direct fixes:** `update_textdoc`, `cat`, `shell`
-  **Shell**: Always set `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes; `sleep` to wait; `cron_create`/`cron_list`/`cron_update`/`cron_delete` for scheduled automation.
+  **Shell**: Always set `description`. Use `process_start`/`process_read`/`wait`/`process_kill` for background processes; `wait` to wait; `schedule` for scheduled automation.
   **Documents:** doc_list, doc_get, doc_create, doc_update, doc_pin, doc_history, doc_delete
   **Memory (typed):** task_mem_save (kind/namespace/pinned), task_mem_get, task_mem_search, task_mem_pin, task_mem_archive, task_mem_inbox
   **Observability:** agent_diff, agent_pulse, agent_chat_summary, task_overview
-  **Steering:** agent_steer, task_questions_list, planner_reply, cancel_agent, pause_agent, resume_agent
+  **Steering:** agent_steer, task_questions_list, planner_reply, cancel_agent, pause, resume
   **Batch:** spawn_agents_batch, merge_ready_in_order
   **Task Documents:** `doc_list`, `doc_get`, `doc_create`, `doc_update`, `doc_append`, `doc_delete`, `doc_pin`, `doc_history`
-  **Plan**: Use `set_plan` once to install your detailed plan (`content` or `path` to a `.md` report). Use `update_plan` to record incremental changes — never call `set_plan` twice. `get_plan` reads the merged current plan.
+  **Plan**: The goal owns the plan. Use `set_goal(plan={content: ...})` when installing a goal, `update_goal(plan={content: "..."})` to install its plan, and `update_goal(plan={note: "..."})` for changes. Read both with `get_goal()`.
 
   **Goal**: Use `set_goal(content=...)` once to install the single active outcome for the chat to pursue. Use `update_goal(note=...)` to append progress or clarified success criteria — never call `set_goal` twice. `get_goal` reads the synthesized current goal plus budget and verifier status.
 
@@ -375,14 +375,10 @@ tools:
   - process_start
   - process_list
   - process_read
-  - process_wait
+  - wait
   - process_kill
   - process_write_stdin
-  - sleep
-  - cron_create
-  - cron_list
-  - cron_delete
-  - cron_update
+  - schedule
   - subagent
   - agents_overview
   - agent_message
@@ -393,11 +389,10 @@ tools:
   - progress_report
   - agent_list
   - agent_status
-  - agent_wait
   - agent_result
   - agent_cancel
   - agent_approval
-  - agent_resume
+  - agent_lifecycle
   - work_overview
   - work_inspect
   - metrics
@@ -439,22 +434,16 @@ tools:
   - doc_delete
   - doc_pin
   - doc_history
-  - wait_agents
   - ask_questions
-  - set_plan
-  - update_plan
-  - get_plan
   - set_goal
   - update_goal
   - get_goal
   - validate_goal
-  - pause_goal
-  - snooze_goal
+  - pause
   - task_mem_search
   - task_mem_pin
   - task_mem_archive
   - task_mem_inbox
-  - agent_diff
   - agent_pulse
   - agent_chat_summary
   - task_overview
@@ -464,8 +453,7 @@ tools:
   - card_comment_add
   - card_comment_list
   - cancel_agent
-  - pause_agent
-  - resume_agent
+  - resume
   - spawn_agents_batch
   - merge_ready_in_order
 
@@ -491,8 +479,8 @@ tool_confirm:
       action: auto
     - match: "tree"
       action: auto
-    - match: "cron_update"
-      action: auto
+    - match: "schedule"
+      action: ask
     - match: "cat"
       action: auto
     - match: "search_*"
@@ -500,12 +488,6 @@ tool_confirm:
     - match: "knowledge"
       action: auto
     - match: "task_*"
-      action: auto
-    - match: "set_plan"
-      action: auto
-    - match: "update_plan"
-      action: auto
-    - match: "get_plan"
       action: auto
     - match: "set_goal"
       action: auto
@@ -535,7 +517,7 @@ tool_confirm:
       action: auto
     - match: "agent_status"
       action: auto
-    - match: "agent_wait"
+    - match: "wait"
       action: auto
     - match: "agent_result"
       action: auto
@@ -543,7 +525,7 @@ tool_confirm:
       action: auto
     - match: "agent_approval"
       action: auto
-    - match: "agent_resume"
+    - match: "agent_lifecycle"
       action: auto
     - match: "work_overview"
       action: auto

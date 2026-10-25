@@ -1,4 +1,4 @@
-schema_version: 27
+schema_version: 28
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -52,7 +52,7 @@ prompt: |
   Before spawning, call `agents_overview()` to see the full agent tree, active targets, and pending questions. While agents are running you can:
   - `agent_list()` — see all your background agents.
   - `agent_status(agent_id)` — check progress on one.
-  - `agent_wait(agent_id, timeout_ms)` — block until a specific agent finishes.
+  - `wait(target={kind:"agents", agent_ids:[agent_id]}, timeout_ms=...)` — block until a specific agent finishes.
   - `agent_result(agent_id)` — fetch the final report.
   - `agent_cancel(agent_id)` — abort a stuck agent.
   - `agent_message(to=agent_id, text=...)` — steer a child or descendant; use `reply_to` to answer its question.
@@ -199,15 +199,15 @@ prompt: |
 
   ## Runtime & Process Tools
 
-  **Plan**: Use `set_plan` once to install your detailed plan (`content` or `path` to a `.md` report). Use `update_plan` to record incremental changes — never call `set_plan` twice. `get_plan` reads the merged current plan.
+  **Plan**: The goal owns the plan. Use `set_goal(plan={content: ...})` when installing a goal, `update_goal(plan={content: "..."})` to install its plan, and `update_goal(plan={note: "..."})` for changes. Read both with `get_goal()`.
 
   **Goal**: Use `set_goal(content=...)` once to install the single active outcome for the chat to pursue. Use `update_goal(note=...)` to append progress or clarified success criteria — never call `set_goal` twice. `get_goal` reads the synthesized current goal plus budget and verifier status.
 
-  **Shell**: `description` is required. Use `run_in_background=true` or `process_start` for long-running commands, then track with `process_read`/`process_wait`/`process_kill`. Use `tty=true` plus `process_write_stdin` for interactive programs.
+  **Shell**: `description` is required. Use `run_in_background=true` or `process_start` for long-running commands, then track with `process_read`/`wait`/`process_kill`. Use `tty=true` plus `process_write_stdin` for interactive programs.
 
-  **Process runtime**: `process_start` launches background or service processes. `process_list`/`process_read`/`process_wait` monitor them. `process_kill` stops them. Background completions are surfaced in the Event Log.
+  **Process runtime**: `process_start` launches background or service processes. `process_list`/`process_read`/`wait` monitor them. `process_kill` stops them. Background completions are surfaced in the Event Log.
 
-  **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable across restarts). `cron_list`/`cron_update`/`cron_delete` manage jobs. `sleep` waits without holding a shell process.
+  **Scheduler**: `schedule(action="create", ...)` schedules recurring or one-shot work; `schedule(action="list"|"update"|"delete", ...)` manages jobs. `wait(target={kind:"duration", duration_ms:...}, description="...")` waits without holding a shell process.
 
   %HANDOFF_INSTRUCTIONS%
 
@@ -287,11 +287,11 @@ tools:
   - progress_report
   - agent_list
   - agent_status
-  - agent_wait
+  - wait
   - agent_result
   - agent_cancel
   - agent_approval
-  - agent_resume
+  - agent_lifecycle
   - work_overview
   - work_inspect
   - board_discover
@@ -307,28 +307,20 @@ tools:
   - task_done
   - worktree_merge
   - ask_questions
-  - set_plan
-  - update_plan
-  - get_plan
   - set_goal
   - update_goal
   - get_goal
   - validate_goal
-  - pause_goal
-  - snooze_goal
+  - pause
+  - resume
   - process_start
   - process_list
   - process_read
-  - process_wait
   - process_kill
   - process_write_stdin
   - process_subscribe
   - clean_background_processes
-  - sleep
-  - cron_create
-  - cron_list
-  - cron_delete
-  - cron_update
+  - schedule
   - handoff_to_mode
 
 tool_confirm:
@@ -385,7 +377,7 @@ tool_confirm:
       action: auto
     - match: "agent_status"
       action: auto
-    - match: "agent_wait"
+    - match: "wait"
       action: auto
     - match: "agent_result"
       action: auto
@@ -393,7 +385,7 @@ tool_confirm:
       action: auto
     - match: "agent_approval"
       action: auto
-    - match: "agent_resume"
+    - match: "agent_lifecycle"
       action: auto
     - match: "work_overview"
       action: auto
@@ -409,12 +401,6 @@ tool_confirm:
       action: auto
     - match: "handoff_to_mode"
       action: auto
-    - match: "set_plan"
-      action: auto
-    - match: "update_plan"
-      action: auto
-    - match: "get_plan"
-      action: auto
     - match: "set_goal"
       action: auto
     - match: "update_goal"
@@ -427,15 +413,9 @@ tool_confirm:
       action: auto
     - match: "process_read"
       action: auto
-    - match: "process_wait"
-      action: auto
     - match: "process_subscribe"
       action: auto
     - match: "process_write_stdin"
       action: auto
-    - match: "sleep"
-      action: auto
-    - match: "cron_list"
-      action: auto
-    - match: "cron_update"
-      action: auto
+    - match: "schedule"
+      action: ask

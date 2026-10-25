@@ -216,11 +216,34 @@ describe("TaskProgressWidget goal projection", () => {
     expect(screen.getByText("Active")).toBeInTheDocument();
   });
 
-  test("expanded goal block renders verifier attempts, events, and finite budget ratios", () => {
+  test("expanded goal block renders nested plan, verifier attempts, events, and finite budget ratios", () => {
     renderWidget(
-      makeRuntime({ goal: makeGoal(), expanded: true, goalExpanded: true }),
+      makeRuntime({
+        goal: makeGoal({
+          owner: { kind: "task", id: "task-1" },
+          revision: 4,
+          plan: {
+            content: "Implement the approved nested plan",
+            mode: "agent",
+            version: 1,
+            created_at_ms: 1,
+            delta_count: 1,
+            checkpoint: null,
+            history: [{ seq: 1, content: "Retain plan history" }],
+          },
+        }),
+        expanded: true,
+        goalExpanded: true,
+      }),
     );
 
+    expect(
+      screen.getByRole("region", { name: "Goal plan" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Implement the approved nested plan"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Retain plan history")).toBeInTheDocument();
     expect(screen.getByText("2/5 turns")).toBeInTheDocument();
     expect(screen.getByText("1200/5000 tokens")).toBeInTheDocument();
     expect(screen.queryByText("No budget limits")).not.toBeInTheDocument();

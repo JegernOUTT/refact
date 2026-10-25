@@ -1,27 +1,23 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::scheduler::{active_durable_cron_store, session_cron_store, CronStore};
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
-pub struct ToolCronDelete {
-    pub config_path: String,
+pub struct CronDeleteRuntime {
     #[cfg(test)]
     test_session_store: Option<Arc<dyn CronStore>>,
     #[cfg(test)]
     test_durable_store: Option<Arc<dyn CronStore>>,
 }
 
-impl ToolCronDelete {
-    pub fn new(config_path: String) -> Self {
+impl CronDeleteRuntime {
+    pub fn new(_config_path: String) -> Self {
         Self {
-            config_path,
             #[cfg(test)]
             test_session_store: None,
             #[cfg(test)]
@@ -31,12 +27,11 @@ impl ToolCronDelete {
 
     #[cfg(test)]
     fn with_stores(
-        config_path: String,
+        _config_path: String,
         session_store: Arc<dyn CronStore>,
         durable_store: Option<Arc<dyn CronStore>>,
     ) -> Self {
         Self {
-            config_path,
             test_session_store: Some(session_store),
             test_durable_store: durable_store,
         }
@@ -63,31 +58,7 @@ impl ToolCronDelete {
     }
 }
 
-#[async_trait]
-impl Tool for ToolCronDelete {
-    fn tool_description(&self) -> ToolDesc {
-        ToolDesc {
-            name: "cron_delete".to_string(),
-            display_name: "Delete Scheduled Task".to_string(),
-            source: ToolSource {
-                source_type: ToolSourceType::Builtin,
-                config_path: self.config_path.clone(),
-            },
-            experimental: false,
-            allow_parallel: false,
-            description: "Cancel a scheduled task by ID.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string" }
-                },
-                "required": ["id"]
-            }),
-            output_schema: None,
-            annotations: None,
-        }
-    }
-
+impl CronDeleteRuntime {
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
@@ -100,17 +71,8 @@ impl Tool for ToolCronDelete {
             None => return Err("argument `id` is missing".to_string()),
         };
 
-        let mut removed = self.session_store().remove(&id).await?;
-
-        if !removed {
-            if let Some(durable) = self.durable_store(ccx).await? {
-                removed = durable.remove(&id).await?;
-            }
-        }
-
-        if removed {
-            crate::scheduler::runner::notify_runner_change();
-        }
+        let removed =
+            delete_schedule(&id, self.session_store(), self.durable_store(ccx).await?).await?;
 
         Ok((
             false,
@@ -123,6 +85,33 @@ impl Tool for ToolCronDelete {
             })],
         ))
     }
+}
+
+pub(crate) async fn execute_delete(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    tool_call_id: &String,
+    args: &HashMap<String, Value>,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    CronDeleteRuntime::new(String::new())
+        .tool_execute(ccx, tool_call_id, args)
+        .await
+}
+
+pub(crate) async fn delete_schedule(
+    id: &str,
+    session: Arc<dyn CronStore>,
+    durable: Option<Arc<dyn CronStore>>,
+) -> Result<bool, String> {
+    let mut removed = session.remove(id).await?;
+    if !removed {
+        if let Some(store) = durable {
+            removed = store.remove(id).await?;
+        }
+    }
+    if removed {
+        crate::scheduler::runner_change_notify().notify_waiters();
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -169,7 +158,7 @@ mod tests {
     }
 
     async fn run_tool(
-        tool: &mut ToolCronDelete,
+        tool: &mut CronDeleteRuntime,
         ccx: Arc<AMutex<AtCommandsContext>>,
         id: &str,
     ) -> Value {
@@ -195,7 +184,7 @@ mod tests {
             .add(test_task("cron_del_sess", false))
             .await
             .unwrap();
-        let mut tool = ToolCronDelete::with_stores(String::new(), session_store.clone(), None);
+        let mut tool = CronDeleteRuntime::with_stores(String::new(), session_store.clone(), None);
         let ccx = test_ccx().await;
 
         let result = run_tool(&mut tool, ccx, "cron_del_sess").await;
@@ -214,8 +203,11 @@ mod tests {
             .await
             .unwrap();
         let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
-        let mut tool =
-            ToolCronDelete::with_stores(String::new(), session_store, Some(durable_store.clone()));
+        let mut tool = CronDeleteRuntime::with_stores(
+            String::new(),
+            session_store,
+            Some(durable_store.clone()),
+        );
         let ccx = test_ccx().await;
 
         let result = run_tool(&mut tool, ccx, "cron_del_dur").await;
@@ -226,7 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn cron_delete_uses_same_durable_path_as_list() {
-        use crate::tools::tool_cron_list::ToolCronList;
+        use crate::tools::tool_cron_list::CronListRuntime;
 
         let temp = tempfile::tempdir().unwrap();
         let durable_store: Arc<dyn CronStore> =
@@ -237,13 +229,13 @@ mod tests {
             .unwrap();
 
         let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
-        let mut delete_tool = ToolCronDelete::with_stores(
+        let mut delete_tool = CronDeleteRuntime::with_stores(
             String::new(),
             session_store.clone(),
             Some(durable_store.clone()),
         );
         let mut list_tool =
-            ToolCronList::with_stores(String::new(), session_store, Some(durable_store));
+            CronListRuntime::with_stores(String::new(), session_store, Some(durable_store));
 
         let ccx = test_ccx().await;
 

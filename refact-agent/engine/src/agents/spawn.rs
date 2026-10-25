@@ -1242,6 +1242,34 @@ async fn prepare_launch(
         req.goal.as_ref(),
     )
     .await?;
+    let parent = app
+        .chat
+        .sessions
+        .read()
+        .await
+        .get(&req.parent_chat_id)
+        .cloned();
+    if let Some(parent) = parent {
+        let parent = parent.lock().await;
+        if let Some(source) = parent
+            .goal
+            .as_ref()
+            .filter(|goal| matches!(goal.owner, Some(refact_chat_api::GoalOwner::Task { .. })))
+        {
+            for message in messages.iter_mut().filter(|message| message.role == "goal") {
+                if let Some(meta) = message
+                    .extra
+                    .get_mut("goal")
+                    .and_then(|value| value.as_object_mut())
+                {
+                    meta.insert(
+                        "assigned_from".into(),
+                        serde_json::json!({"owner":source.owner,"revision":source.revision}),
+                    );
+                }
+            }
+        }
+    }
     let mut context = req.initial_context_messages.clone();
     if let Some(instructions) = req.profile.as_ref().and_then(|p| p.instructions.as_ref()) {
         context.push(ChatMessage::new("user".to_string(), instructions.clone()));
@@ -1645,14 +1673,14 @@ mod accepted_launch_tests {
 }
 
 async fn narrow_parent_approval(app: &AppState, req: &SpawnRequest, config: &mut SubchatConfig) {
-    if let Some(parent) = app
+    let parent = app
         .chat
         .sessions
         .read()
         .await
         .get(&req.parent_chat_id)
-        .cloned()
-    {
+        .cloned();
+    if let Some(parent) = parent {
         let parent = parent.lock().await;
         config.autonomous_no_confirm &= parent.thread.autonomous_no_confirm;
         config.auto_approve_editing_tools &=
@@ -3021,9 +3049,6 @@ fn append_goal_and_plan_messages(
     plan: Option<&str>,
     goal: Option<&SpawnGoal>,
 ) {
-    if let Some(plan) = plan {
-        messages.push(crate::chat::internal_roles::plan("agent", 1, plan, None));
-    }
     if let Some(goal) = goal {
         let mut goal_message = crate::chat::internal_roles::goal(
             "agent",
@@ -3033,6 +3058,19 @@ fn append_goal_and_plan_messages(
             true,
             goal.budget.clone().unwrap_or_default(),
         );
+        if let Some(plan) = plan {
+            let plan_message = crate::chat::internal_roles::plan("agent", 1, plan, None);
+            if let Some(meta) = goal_message
+                .extra
+                .get_mut("goal")
+                .and_then(|value| value.as_object_mut())
+            {
+                let mut plan_meta = plan_message.extra["plan"].clone();
+                plan_meta["content"] = serde_json::json!(plan_message.content.content_text_only());
+                plan_meta["message_id"] = serde_json::json!(plan_message.message_id);
+                meta.insert("plan".into(), plan_meta);
+            }
+        }
         if !goal.criteria.is_empty() {
             if let Some(meta) = goal_message
                 .extra

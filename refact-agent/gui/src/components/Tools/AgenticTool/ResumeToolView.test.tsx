@@ -30,9 +30,10 @@ describe("ResumeToolView", () => {
   test("distinguishes a queued resume receipt from execution success", () => {
     render(
       <ResumeToolView
+        lifecycle
         content={JSON.stringify(
           resumeReceipt({
-            action: "resume",
+            action: "recover",
             status: "queued",
             cap_stop: null,
             can_raise_and_resume: false,

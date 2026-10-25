@@ -36,7 +36,7 @@ impl Tool for ToolTaskInit {
         let meta = storage::create_task(gcx, name).await?;
 
         let result = format!(
-            "Created task workspace:\n- ID: {}\n- Name: {}\n- Path: .refact/tasks/{}/\n\nThe task is ready for planning. Use board_create to add cards.",
+            "Created task workspace:\n- ID: {}\n- Name: {}\n- Path: .refact/tasks/{}/\n\nThe task is ready for planning. Install the actual task outcome with set_goal and goal.plan; pursuit stays paused until explicit user approval. Use board_create for cards.",
             meta.id, meta.name, meta.id
         );
 

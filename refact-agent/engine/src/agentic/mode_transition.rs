@@ -5,7 +5,7 @@ pub use refact_agentic::mode_transition::{
     count_images_in_messages, current_base_goal_message, extract_conversation_metadata,
     extract_initial_plan_text, format_annotated_messages, format_budget_summary, format_file_list,
     format_memory_list, insert_goal_messages_before_plan, is_goal_delta_event,
-    is_live_agents_snapshot, make_pinned_plan_message, message_symbols, normalize_control_metadata,
+    is_live_agents_snapshot, message_symbols, normalize_control_metadata,
     normalize_goal_message_content, parse_llm_response, push_context_file_with_budget,
     text_symbols, transfer_goal_ownership, GoalTransferResult, truncate_utf8,
 };

@@ -334,6 +334,7 @@ pub(crate) async fn create_document_at(
     Ok(document)
 }
 
+#[cfg(test)]
 pub(crate) async fn next_available_slug_at(
     documents_dir: &Path,
     base_slug: &str,

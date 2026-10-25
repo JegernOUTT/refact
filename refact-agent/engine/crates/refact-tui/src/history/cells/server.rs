@@ -21,7 +21,14 @@ impl HistoryCell for ServerToolCell {
         let mut lines = server_call_header_lines(&self.card, width);
         lines.push(tool_summary_line(
             &self.card,
-            tool_display_name(&self.card.name),
+            if matches!(
+                self.card.name.as_str(),
+                "pause" | "resume" | "agent_lifecycle" | "agent_resume"
+            ) {
+                command_label(&self.card)
+            } else {
+                tool_display_name(&self.card.name)
+            },
             rendered_duration(&self.card),
         ));
         lines.extend(subchat_lines(&self.card, width));

@@ -1,4 +1,4 @@
-schema_version: 9
+schema_version: 10
 id: brainstorming
 title: Brainstorming
 description: Turn rough ideas into approved designs before planning or implementation
@@ -69,7 +69,7 @@ prompt: |
   - Past decisions: `subagent(task="Find past work and knowledge about this area", expected_result="Relevant decisions and risks", tools="search_trajectories,get_trajectory_context,knowledge")`
   - External research: `subagent(task="Research API/library constraints", expected_result="Actionable constraints with sources", tools="web_search,web")`
 
-  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` to inspect or control them.
+  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `wait(target={kind:"agents", agent_ids:[agent_id]})`, `agent_result()`, and `agent_cancel()` to inspect or control them.
 
   ## Asking Questions - CRITICAL
 
@@ -148,7 +148,7 @@ tools:
   - agent_peer_grant
   - agent_list
   - agent_status
-  - agent_wait
+  - wait
   - agent_result
   - agent_cancel
   - ask_questions

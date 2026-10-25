@@ -2845,7 +2845,7 @@ async fn run_subchat_loop(
             if is_goal_cap {
                 "Explicit goal turn budget reached; a step-cap override cannot widen the goal budget."
             } else {
-                "Step limit reached. Parent may inspect agent_resume and raise this child's step limit to resume the same task."
+                "Step limit reached. Parent may use agent_lifecycle action inspect, then raise_and_recover with the current change sequence to continue this child's task."
             },
         ));
         persist_subchat_progress(&ccx, config, progress, &messages).await;
@@ -4242,8 +4242,8 @@ mod subchat_tests {
 
         let assistant: ChatMessage = serde_json::from_value(serde_json::json!({
             "role": "assistant", "content": "", "tool_calls": [
-                {"id":"sleep", "type":"function", "function":{"name":"sleep", "arguments":"{}"}},
-                {"id":"other", "type":"function", "function":{"name":"sleep", "arguments":"{}"}}
+                {"id":"sleep", "type":"function", "function":{"name":"wait", "arguments":"{\"target\":{\"kind\":\"duration\",\"duration_ms\":30000},\"description\":\"Wait briefly\"}"}},
+                {"id":"other", "type":"function", "function":{"name":"wait", "arguments":"{\"target\":{\"kind\":\"duration\",\"duration_ms\":30000},\"description\":\"Wait briefly\"}"}}
             ]
         }))
         .unwrap();
@@ -4341,7 +4341,7 @@ mod subchat_tests {
         let chat_id = ccx.lock().await.chat_id.clone();
         let assistant: ChatMessage = serde_json::from_value(serde_json::json!({
             "role": "assistant", "content": "", "tool_calls": [
-                {"id":"sleep", "type":"function", "function":{"name":"sleep", "arguments":"{}"}}
+                {"id":"sleep", "type":"function", "function":{"name":"wait", "arguments":"{\"target\":{\"kind\":\"duration\",\"duration_ms\":30000},\"description\":\"Wait briefly\"}"}}
             ]
         }))
         .unwrap();

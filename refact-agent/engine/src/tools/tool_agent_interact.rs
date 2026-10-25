@@ -636,7 +636,7 @@ impl Tool for ToolAgentMessage {
         let saved = receipt.finished_status.is_some();
         let mut text = match receipt.finished_status {
             Some(status) => format!(
-                "Agent {to} finished (status {}); message saved as a follow-up and will be delivered when you continue it with agent_resume action=continue.",
+                "Agent {to} finished (status {}); message saved as a follow-up and will be delivered when you continue it with agent_lifecycle action=continue.",
                 status.as_str(),
             ),
             None => delivery_outcome_text(&to, outcome),

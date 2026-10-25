@@ -68,7 +68,7 @@ async fn fixture(
         )
         .await,
     ));
-    ccx.lock().await.child_tool_ceiling = Some(ToolsPolicy::Only(vec!["agent_wait".into()]));
+    ccx.lock().await.child_tool_ceiling = Some(ToolsPolicy::Only(vec!["wait".into()]));
     (app, ccx, session)
 }
 
@@ -91,17 +91,17 @@ fn authorized_calls() -> Vec<AuthorizedCall> {
     vec![
         AuthorizedCall {
             op: "wait",
-            tool: "agent_wait",
+            tool: "wait",
             arguments: json!({"agent_id": "a"}),
         },
         AuthorizedCall {
             op: "wait",
-            tool: "agent_wait",
+            tool: "wait",
             arguments: json!({"agent_id": "b"}),
         },
         AuthorizedCall {
             op: "wait",
-            tool: "agent_wait",
+            tool: "wait",
             arguments: json!({"agent_id": "c"}),
         },
     ]
@@ -230,7 +230,7 @@ async fn enabled_with_sandbox_dispatches_wait_call() {
         panic!("expected text")
     };
     assert!(
-        summary.contains("agent_wait") && summary.contains("err"),
+        summary.contains("wait") && summary.contains("err"),
         "{summary}"
     );
     assert!(summary.contains("not found in this chat"), "{summary}");
@@ -289,10 +289,10 @@ fn summarize_dispatch_never_reports_unknown_or_failed_calls_as_ok() {
 
     let indexed_error = crate::tools::tool_code_mode::summarize_dispatch(
         &calls,
-        &Err("code mode call 1 (agent_wait) failed: x".to_string()),
+        &Err("code mode call 1 (wait) failed: x".to_string()),
     );
     assert!(indexed_error[0].contains("ran (output not returned after a later failure)"));
-    assert!(indexed_error[1].contains("err: code mode call 1 (agent_wait) failed: x"));
+    assert!(indexed_error[1].contains("err: code mode call 1 (wait) failed: x"));
     assert!(indexed_error[2].contains("not run"));
     assert!(indexed_error.iter().all(|line| !line.contains("— ok")));
 

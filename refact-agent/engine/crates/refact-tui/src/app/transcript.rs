@@ -1188,7 +1188,7 @@ impl App {
     }
 
     pub(super) fn upsert_current_goal_item(&mut self, key: String) {
-        let Some(goal) = current_goal_cell_data(self.transcript_state.messages()) else {
+        let Some(goal) = self.current_goal_data() else {
             return;
         };
         if !self.record_state_history_key(key) {

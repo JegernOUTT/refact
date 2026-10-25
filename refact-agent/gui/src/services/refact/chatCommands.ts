@@ -52,6 +52,7 @@ export type ChatCommandBase =
   | {
       type: "set_goal";
       content: string;
+      plan?: { content: string };
       budget?: GoalBudgetCommand;
     }
   | {
@@ -60,7 +61,8 @@ export type ChatCommandBase =
     }
   | {
       type: "update_goal";
-      note: string;
+      note?: string;
+      plan?: { content: string } | { note: string };
     }
   | {
       type: "goal_control";
@@ -423,11 +425,13 @@ export async function setGoal(
   connection: PortOrConnection,
   apiKey?: string,
   budget?: GoalBudgetCommand,
+  plan?: { content: string },
 ): Promise<void> {
   const command: ChatCommandBase = {
     type: "set_goal",
     content,
     ...(budget === undefined ? {} : { budget }),
+    ...(plan === undefined ? {} : { plan }),
   };
   await sendChatCommand(chatId, connection, apiKey, command);
 }
@@ -446,13 +450,15 @@ export async function setGoalBudget(
 
 export async function updateGoal(
   chatId: string,
-  note: string,
+  note: string | undefined,
   connection: PortOrConnection,
   apiKey?: string,
+  plan?: { content: string } | { note: string },
 ): Promise<void> {
   await sendChatCommand(chatId, connection, apiKey, {
     type: "update_goal",
-    note,
+    ...(note === undefined ? {} : { note }),
+    ...(plan === undefined ? {} : { plan }),
   });
 }
 

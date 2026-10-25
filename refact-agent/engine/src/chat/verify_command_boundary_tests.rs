@@ -382,12 +382,14 @@ async fn http_update_goal_with_an_unverifiable_criterion_is_not_a_bad_request() 
     );
     for command in [
         ChatCommand::SetGoal {
+            plan: None,
             content: "Ship".into(),
             budget: None,
             criteria: Some(vec![criterion("git log -1 | grep x")]),
         },
         ChatCommand::UpdateGoal {
-            note: "Update".into(),
+            plan: None,
+            note: Some("Update".into()),
         },
     ] {
         let update = matches!(command, ChatCommand::UpdateGoal { .. });

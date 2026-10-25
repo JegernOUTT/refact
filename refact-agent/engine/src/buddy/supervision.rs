@@ -462,6 +462,7 @@ pub(crate) async fn intake(
         .push_supervised_command(
             &chat_id,
             ChatCommand::SetGoal {
+                plan: None,
                 content: input.content,
                 criteria: Some(input.criteria),
                 budget: Some(native_budget(&record)?),
@@ -2894,6 +2895,7 @@ mod tests {
                 .push_supervised_command(
                     &child,
                     ChatCommand::SetGoal {
+                        plan: None,
                         content: "Inspect the native control boundary.".into(),
                         criteria: Some(vec![GoalCriterion {
                             id: "C1".into(),

@@ -8,7 +8,16 @@ type CapStop = {
 };
 
 type ResumeReceipt = {
-  action: "inspect" | "resume" | "raise_and_resume";
+  summary?: string;
+  accepted?: boolean;
+  action:
+    | "inspect"
+    | "resume"
+    | "raise_and_resume"
+    | "close"
+    | "recover"
+    | "continue"
+    | "raise_and_recover";
   agent_id: string;
   child_chat_id: string | null;
   status: string;
@@ -17,6 +26,7 @@ type ResumeReceipt = {
   step_count: number;
   cap_stop: CapStop | null;
   can_resume: boolean;
+  can_continue?: boolean;
   can_raise_and_resume: boolean;
   max_steps: number | null;
   settings_subagent_max_steps_ceiling: number | null;
@@ -57,6 +67,7 @@ function capStop(value: unknown): value is CapStop {
 
 export function parseResumeReceipt(
   content: string | null,
+  lifecycle = false,
 ): ResumeReceipt | null {
   let value: unknown;
   try {
@@ -68,7 +79,13 @@ export function parseResumeReceipt(
   const row = value as Record<string, unknown>;
   if (
     typeof row.action !== "string" ||
-    !["inspect", "resume", "raise_and_resume"].includes(row.action) ||
+    !(
+      lifecycle
+        ? ["inspect", "close", "recover", "continue", "raise_and_recover"]
+        : ["inspect", "resume", "raise_and_resume", "close"]
+    ).includes(row.action) ||
+    !(row.summary === undefined || typeof row.summary === "string") ||
+    !(row.accepted === undefined || typeof row.accepted === "boolean") ||
     typeof row.agent_id !== "string" ||
     !row.agent_id ||
     !(
@@ -84,12 +101,17 @@ export function parseResumeReceipt(
       "failed",
       "cancelled",
       "interrupted",
+      "closed",
+      "paused",
     ].includes(row.status) ||
     !natural(row.change_seq) ||
     !natural(row.run_generation) ||
     !natural(row.step_count) ||
     !(row.cap_stop === null || capStop(row.cap_stop)) ||
     typeof row.can_resume !== "boolean" ||
+    !(
+      row.can_continue === undefined || typeof row.can_continue === "boolean"
+    ) ||
     typeof row.can_raise_and_resume !== "boolean" ||
     !(row.max_steps === null || natural(row.max_steps)) ||
     !(

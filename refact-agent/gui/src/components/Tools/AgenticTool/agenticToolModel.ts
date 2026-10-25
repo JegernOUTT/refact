@@ -281,6 +281,35 @@ function headlineFor(
       return label;
     case "inspect":
     case "control": {
+      const target = args.target;
+      if (
+        typeof target === "object" &&
+        target !== null &&
+        !Array.isArray(target)
+      ) {
+        const typedTarget = target as ArgRecord;
+        const kind = readString(typedTarget, "kind", "type");
+        const id = readString(
+          typedTarget,
+          "agent_id",
+          "process_id",
+          "task_id",
+          "id",
+        );
+        const action = readString(args, "action");
+        const description = [action, kind, id].filter(Boolean).join(" · ");
+        if (description) return `${label}: ${truncate(description, 80)}`;
+      }
+      if (
+        ["Wait", "Schedule", "Pause", "Resume", "Agent lifecycle"].includes(
+          label,
+        )
+      ) {
+        const action = readString(args, "action");
+        const targetName = readString(args, "target");
+        const description = [action, targetName].filter(Boolean).join(" · ");
+        if (description) return `${label}: ${truncate(description, 80)}`;
+      }
       const agentId = readString(args, "agent_id", "id", "agent");
       return agentId ? `${label}: ${shortenAgentId(agentId)}` : label;
     }

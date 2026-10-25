@@ -367,10 +367,10 @@ mod tests {
     #[test]
     fn process_registry_reuses_tool_family_and_activity_uses_timestamp_duration() {
         let sleep = ToolCard::from_tool_call(&json!({
-            "function": {"name": "t_sleep", "arguments": "{}"}
+            "function": {"name": "t_wait", "arguments": "{}"}
         }));
         let cron = ToolCard::from_tool_call(&json!({
-            "function": {"name": "t_cron_create", "arguments": "{}"}
+            "function": {"name": "t_schedule", "arguments": "{}"}
         }));
         let process = ToolCard::from_tool_call(&json!({
             "function": {"name": "t_process_start", "arguments": "{}"}
@@ -379,7 +379,7 @@ mod tests {
             "function": {"name": "shell", "arguments": "{}"}
         }));
         let timestamped = ToolCard::from_tool_call(&json!({
-            "function": {"name": "process_wait", "arguments": "{}"},
+            "function": {"name": "wait", "arguments": "{}"},
             "started_at_ms": 10,
             "completed_at_ms": 16
         }));

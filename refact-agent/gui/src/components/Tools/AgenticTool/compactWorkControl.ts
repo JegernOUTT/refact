@@ -37,6 +37,11 @@ const OPERATIONS: Partial<Record<string, string>> = {
   task_questions_list: "Check planner questions",
   agent_cancel: "Request child cancellation",
   agent_resume: "Request child continuation",
+  agent_lifecycle: "Manage child lifecycle",
+  wait: "Wait for execution",
+  schedule: "Manage scheduled work",
+  pause: "Request an execution hold",
+  resume: "Release an execution hold",
   agent_approval: "Review child command permission",
   pause_agent: "Request a pause",
   resume_agent: "Request continuation",
@@ -225,12 +230,15 @@ export function buildCompactWorkControlPresentation(
   const result = readCompactRecord(input.result);
   const content = contentText(input.result);
   let verb = operation;
-  if (name === "agent_resume") {
+  if (name === "agent_resume" || name === "agent_lifecycle") {
     const actions: Partial<Record<string, string>> = {
       inspect: "Check child continuation options",
       pause: "Request a child pause",
       release: "Release the parent pause",
       close: "Close child execution",
+      recover: "Recover child execution",
+      continue: "Continue completed child work",
+      raise_and_recover: "Raise the child limit and request recovery",
       raise_and_resume: "Raise the child limit and request continuation",
     };
     const action = readCompactText(args, "action");
@@ -361,8 +369,8 @@ export function buildCompactWorkControlPresentation(
     } else if (name === "agent_approval") {
       const approval = approvalState(content, args?.action === "list");
       if (approval !== null) ({ state, facts } = approval);
-    } else if (name === "agent_resume") {
-      const receipt = parseResumeReceipt(content);
+    } else if (name === "agent_resume" || name === "agent_lifecycle") {
+      const receipt = parseResumeReceipt(content, name === "agent_lifecycle");
       if (receipt !== null) {
         state = targetState(receipt.status) ?? state;
         const approval = receipt.status === "waiting_for_approval";
@@ -398,7 +406,11 @@ export function buildCompactWorkControlPresentation(
             value:
               receipt.action === "inspect"
                 ? "Inspection only; execution unchanged"
-                : "Request accepted; queued does not mean running",
+                : receipt.accepted === false
+                  ? receipt.summary ?? "No lifecycle change accepted"
+                  : receipt.action === "close"
+                    ? "Child closed; not a pause hold"
+                    : "Request accepted; queued does not mean running",
           },
           {
             label: "Limits",
@@ -415,6 +427,169 @@ export function buildCompactWorkControlPresentation(
           },
         ];
       }
+    } else if (name === "wait") {
+      const outcome = readCompactText(result, "outcome");
+      const labels: Partial<Record<string, State>> = {
+        completed: {
+          stateLabel: "Wait completed · target success unconfirmed",
+          tone: "neutral",
+        },
+        timed_out: {
+          stateLabel: "Wait timed out · target unchanged",
+          tone: "warning",
+        },
+        interrupted: {
+          stateLabel: "Wait interrupted · target unchanged",
+          tone: "warning",
+        },
+        parked: {
+          stateLabel: "Planner parked · agents nonterminal",
+          tone: "warning",
+        },
+        no_matching_agents: {
+          stateLabel: "No matching agents",
+          tone: "neutral",
+        },
+      };
+      if (
+        outcome !== null &&
+        Object.prototype.hasOwnProperty.call(labels, outcome)
+      ) {
+        state = labels[outcome] ?? state;
+        facts = [
+          {
+            label: "Wait",
+            value:
+              "Historical wait receipt; returning does not verify worker success or cancel the target",
+          },
+        ];
+      }
+    } else if (name === "schedule") {
+      const action = readCompactText(args, "action");
+      if (action === "delete" && typeof result?.removed === "boolean") {
+        state = {
+          stateLabel: result.removed
+            ? "Schedule removed"
+            : "Schedule not found",
+          tone: "neutral",
+        };
+      } else if (
+        action === "update" &&
+        result?.updated === true &&
+        readCompactText(result, "id") !== null
+      ) {
+        state = {
+          stateLabel: "Schedule updated · execution unconfirmed",
+          tone: "neutral",
+        };
+      } else if (
+        action === "create" &&
+        readCompactText(result, "id") !== null &&
+        readCompactText(result, "human_schedule") !== null
+      ) {
+        state = {
+          stateLabel: "Schedule created · execution unconfirmed",
+          tone: "neutral",
+        };
+      } else if (action === "list" && content !== null) {
+        try {
+          const rows: unknown = JSON.parse(content);
+          if (
+            Array.isArray(rows) &&
+            rows.every(
+              (row) => readCompactText(readCompactRecord(row), "id") !== null,
+            )
+          ) {
+            state = {
+              stateLabel: "Schedule snapshot received",
+              tone: "neutral",
+            };
+            facts.push({
+              label: "Snapshot",
+              value: `${rows.length} schedules shown`,
+            });
+          }
+        } catch {
+          state = requestState(input);
+        }
+      }
+      facts.push({
+        label: "Schedule",
+        value:
+          "A schedule receipt does not prove scheduled work ran or succeeded",
+      });
+    } else if (name === "pause" || name === "resume") {
+      const target = readCompactRecord(args?.target);
+      if (
+        target?.kind === "child" &&
+        result?.accepted === true &&
+        readCompactText(result, "agent_id") !== null
+      ) {
+        state = {
+          stateLabel:
+            name === "pause"
+              ? "Child pause requested · parks at next boundary"
+              : result.status === "paused"
+                ? "Parent hold released · other holds remain"
+                : "Parent hold released · execution unconfirmed",
+          tone: name === "pause" ? "warning" : "neutral",
+        };
+      } else if (
+        target?.kind === "goal" &&
+        result?.target === "goal" &&
+        ["paused", "snoozed", "resumed"].includes(String(result.status))
+      ) {
+        state = {
+          stateLabel:
+            result.status === "resumed"
+              ? "Timed goal hold released"
+              : result.status === "snoozed"
+                ? "Goal snoozed"
+                : "Goal paused",
+          tone: result.status === "resumed" ? "neutral" : "warning",
+        };
+      } else if (
+        target?.kind === "schedule" &&
+        result?.updated === true &&
+        typeof result.enabled === "boolean" &&
+        readCompactText(result, "id") !== null
+      ) {
+        state = {
+          stateLabel: result.enabled
+            ? "Schedule enabled · execution unconfirmed"
+            : "Schedule paused",
+          tone: result.enabled ? "neutral" : "warning",
+        };
+      } else if (
+        target?.kind === "card" &&
+        typeof target.card_id === "string" &&
+        content !== null
+      ) {
+        if (
+          name === "pause" &&
+          (content.startsWith(`⏸️ Paused ${target.card_id};`) ||
+            content.startsWith(
+              `⏸️ Recorded the pause on card ${target.card_id};`,
+            ))
+        )
+          state = { stateLabel: "Card pause recorded", tone: "warning" };
+        if (
+          name === "resume" &&
+          (content.startsWith(`▶️ Resumed ${target.card_id}.`) ||
+            content.startsWith(
+              `⚠️ Recorded the resume on card ${target.card_id},`,
+            ))
+        )
+          state = {
+            stateLabel: "Card hold released · execution unconfirmed",
+            tone: "neutral",
+          };
+      }
+      facts.push({
+        label: "Hold",
+        value:
+          "Historical pause-hold receipt; release is not lifecycle recovery or proof of execution",
+      });
     } else {
       const model = buildAgenticToolViewModel({
         toolName: name,

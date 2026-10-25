@@ -17,7 +17,8 @@ use crate::chat::goal_monitor::{
 use crate::chat::types::{ChatSession, GoalBudget};
 use crate::subchat::{SubchatConfig, ToolsPolicy, TraceParent};
 use crate::tools::tool_agent_interact::ToolAgentsOverview;
-use crate::tools::tool_background_agents::{ToolAgentList, ToolAgentResume, ToolAgentStatus};
+use crate::tools::tool_background_agents::{ToolAgentList, ToolAgentStatus};
+use crate::tools::tool_pause::{ToolPause, ToolResume};
 use crate::tools::tools_description::{MatchConfirmDenyResult, Tool};
 
 fn request(parent: &str) -> CreateAgentRequest {
@@ -80,10 +81,10 @@ async fn fixture() -> (
     (workspace, config, app, record)
 }
 
-fn args(agent: &str, action: &str) -> HashMap<String, Value> {
+fn args(agent: &str, generation: u64) -> HashMap<String, Value> {
     HashMap::from([
-        ("agent_id".into(), json!(agent)),
-        ("action".into(), json!(action)),
+        ("target".into(), json!({"kind": "child", "agent_id": agent})),
+        ("expected_run_generation".into(), json!(generation)),
     ])
 }
 
@@ -95,15 +96,24 @@ fn output(result: (bool, Vec<ContextEnum>)) -> String {
 }
 
 async fn control(app: &AppState, caller: &str, agent: &str, action: &str) -> Result<Value, String> {
-    let result = ToolAgentResume {
-        config_path: String::new(),
-    }
-    .tool_execute(
-        context(app, caller).await,
-        &"control".into(),
-        &args(agent, action),
-    )
-    .await?;
+    let mut tool: Box<dyn Tool + Send> = if action == "pause" {
+        Box::new(ToolPause {
+            config_path: String::new(),
+        })
+    } else {
+        assert_eq!(action, "release");
+        Box::new(ToolResume {
+            config_path: String::new(),
+        })
+    };
+    let generation = app.agents.get_any(agent).await.unwrap().run_generation;
+    let result = tool
+        .tool_execute(
+            context(app, caller).await,
+            &"control".into(),
+            &args(agent, generation),
+        )
+        .await?;
     Ok(serde_json::from_str(&output(result)).unwrap())
 }
 
@@ -501,11 +511,17 @@ async fn parent_and_native_pause_owners_do_not_release_each_other() {
 #[tokio::test]
 async fn pause_and_release_reject_mutation_fields_and_require_confirmation() {
     let (_workspace, _config, app, record) = fixture().await;
-    let tool = ToolAgentResume {
-        config_path: String::new(),
-    };
     for action in ["pause", "release"] {
-        let request = args(&record.agent_id, action);
+        let mut tool: Box<dyn Tool + Send> = if action == "pause" {
+            Box::new(ToolPause {
+                config_path: String::new(),
+            })
+        } else {
+            Box::new(ToolResume {
+                config_path: String::new(),
+            })
+        };
+        let request = args(&record.agent_id, record.run_generation);
         let confirmation = tool
             .match_against_confirm_deny(context(&app, "root").await, &request)
             .await
@@ -519,19 +535,17 @@ async fn pause_and_release_reject_mutation_fields_and_require_confirmation() {
             "expected_change_seq",
             "instruction",
             "reconcile_incomplete",
-            "reason",
-            "expected_run_generation",
+            "action",
+            "until_ms",
         ] {
             let mut invalid = request.clone();
             invalid.insert(key.into(), json!(1));
-            let error = ToolAgentResume {
-                config_path: String::new(),
-            }
-            .tool_execute(context(&app, "root").await, &"invalid".into(), &invalid)
-            .await
-            .unwrap_err();
+            let error = tool
+                .tool_execute(context(&app, "root").await, &"invalid".into(), &invalid)
+                .await
+                .unwrap_err();
             assert!(
-                error.contains("only accepts agent_id and action"),
+                error.contains(&format!("field {key} is inapplicable to child")),
                 "{error}"
             );
         }

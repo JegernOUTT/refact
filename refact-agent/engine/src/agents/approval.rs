@@ -1653,7 +1653,7 @@ pub(crate) mod tests {
             for name in [
                 "subagent",
                 "agent_approval",
-                "agent_resume",
+                "agent_lifecycle",
                 "work_overview",
                 "work_inspect",
             ] {
@@ -1668,7 +1668,7 @@ pub(crate) mod tests {
             .tool_registry
             .acquire_tool_catalog("buddy", Some("test/model"), None)
             .await;
-        for name in ["subagent", "agent_approval", "agent_resume"] {
+        for name in ["subagent", "agent_approval", "agent_lifecycle"] {
             assert!(
                 !catalog.index.tools.iter().any(|tool| tool.name == name),
                 "unexpected {name} authority in buddy"

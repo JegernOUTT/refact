@@ -1223,7 +1223,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abort_command_clears_and_persists_running_sleep_tool_call() {
+    async fn abort_command_clears_and_persists_running_wait_tool_call() {
         let workspace = tempfile::tempdir().unwrap();
         let app = test_app_with_workspace(workspace.path()).await;
         let chat_id = "abort-running-sleep";
@@ -1246,9 +1246,9 @@ mod tests {
                     index: Some(0),
                     tool_type: "function".to_string(),
                     function: ChatToolFunction {
-                        name: "sleep".to_string(),
+                        name: "wait".to_string(),
                         arguments: json!({
-                            "duration_ms": 30_000,
+                            "target": {"kind": "duration", "duration_ms": 30_000},
                             "description": "Wait briefly",
                         })
                         .to_string(),

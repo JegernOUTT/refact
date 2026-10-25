@@ -7,7 +7,7 @@ use crate::agents::types::BgAgentKind;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::chat::types::ChatSession;
 use crate::subchat::SubchatResult;
-use crate::tools::tool_background_agents::ToolAgentWait;
+use crate::tools::tool_wait::ToolWait;
 use crate::tools::tools_description::Tool;
 use refact_chat_api::{AskQuestion, QuestionKind};
 use refact_work_core::{
@@ -209,14 +209,17 @@ async fn background_agent_waiting_on_its_own_child_is_tracked() {
                     .await,
                 ));
                 wait_invoked.notify_one();
-                ToolAgentWait {
+                ToolWait {
                     config_path: String::new(),
                 }
                 .tool_execute(
                     ccx,
                     &"wait-y".to_string(),
                     &HashMap::from([
-                        ("agent_id".to_string(), serde_json::json!(child.agent_id)),
+                        (
+                            "target".to_string(),
+                            serde_json::json!({"kind": "agents", "agent_ids": [child.agent_id]}),
+                        ),
                         ("timeout_ms".to_string(), serde_json::json!(30_000)),
                     ]),
                 )
@@ -331,14 +334,17 @@ async fn background_agent_cycle_is_detected_and_refused() {
         ));
         let waited_agent_id = y_id.clone();
         let tool = tokio::spawn(async move {
-            ToolAgentWait {
+            ToolWait {
                 config_path: String::new(),
             }
             .tool_execute(
                 ccx,
                 &"cycle-wait".to_string(),
                 &HashMap::from([
-                    ("agent_id".to_string(), serde_json::json!(waited_agent_id)),
+                    (
+                        "target".to_string(),
+                        serde_json::json!({"kind": "agents", "agent_ids": [waited_agent_id]}),
+                    ),
                     ("timeout_ms".to_string(), serde_json::json!(30_000)),
                 ]),
             )
@@ -414,7 +420,7 @@ async fn await_any_with_unauthorized_id_declares_no_edge() {
         .await,
     ));
 
-    let error = ToolAgentWait {
+    let error = ToolWait {
         config_path: String::new(),
     }
     .tool_execute(
@@ -422,8 +428,8 @@ async fn await_any_with_unauthorized_id_declares_no_edge() {
         &"unauthorized-wait".to_string(),
         &HashMap::from([
             (
-                "agent_ids".to_string(),
-                serde_json::json!([own_id, foreign_id]),
+                "target".to_string(),
+                serde_json::json!({"kind": "agents", "agent_ids": [own_id, foreign_id]}),
             ),
             ("timeout_ms".to_string(), serde_json::json!(1000)),
         ]),

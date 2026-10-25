@@ -103,6 +103,26 @@ pub fn render_event_message(msg: &ChatMessage) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     let content = msg.content.content_text_only();
+    let payload = meta.and_then(|m| m.get("payload"));
+    if subkind == "goal_delta"
+        && payload
+            .and_then(|p| p.get("target"))
+            .and_then(|v| v.as_str())
+            == Some("plan")
+    {
+        if let Some(plan) = payload.and_then(|p| p.get("plan")) {
+            return render_goal_plan(plan);
+        }
+        let seq = payload
+            .and_then(|p| p.get("seq"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        return format!(
+            "<goal-plan-update seq=\"{}\">{}</goal-plan-update>",
+            seq,
+            escape_xml_text(&content)
+        );
+    }
     if subkind == "plan_delta" || subkind == "goal_delta" {
         let seq = meta
             .and_then(|m| m.get("payload"))
@@ -197,12 +217,35 @@ pub fn render_goal_message(msg: &ChatMessage) -> Option<String> {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
+    let plan = meta.and_then(|m| m.get("plan")).filter(|p| p.is_object());
+    let plan_frame = plan
+        .map(|p| format!("\n{}", render_goal_plan(p)))
+        .unwrap_or_default();
     Some(format!(
-        "<goal mode=\"{}\" version=\"{}\">\n{}\n</goal>",
+        "<goal mode=\"{}\" version=\"{}\">\n{}{}\n</goal>",
         escape_xml_attr(mode),
         version,
-        render_block_content(&msg.content.content_text_only())
+        render_block_content(&msg.content.content_text_only()),
+        plan_frame
     ))
+}
+
+fn render_goal_plan(plan: &serde_json::Value) -> String {
+    let mode = plan
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let version = plan.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+    let content = plan
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    format!(
+        "<goal-plan mode=\"{}\" version=\"{}\">\n{}\n</goal-plan>",
+        escape_xml_attr(mode),
+        version,
+        render_block_content(content)
+    )
 }
 
 fn render_block_content(content: &str) -> String {
@@ -275,21 +318,27 @@ mod tests {
 
     #[test]
     fn render_goal_message_emits_goal_block_with_escaped_attrs_and_cdata() {
-        let msg = goal("agent <mode>", 3, "ship <goal> & split ]]> safely");
+        let mut msg = goal("agent <mode>", 3, "ship <goal> & split ]]> safely");
+        msg.extra.get_mut(GOAL_META_KEY).unwrap()["plan"] =
+            json!({"content":"build <plan>","mode":"agent","version":1});
 
         assert_eq!(
             render_goal_message(&msg).unwrap(),
-            "<goal mode=\"agent &lt;mode&gt;\" version=\"3\">\n<![CDATA[ship <goal> & split ]]]]><![CDATA[> safely]]>\n</goal>"
+            "<goal mode=\"agent &lt;mode&gt;\" version=\"3\">\n<![CDATA[ship <goal> & split ]]]]><![CDATA[> safely]]>\n<goal-plan mode=\"agent\" version=\"1\">\n<![CDATA[build <plan>]]>\n</goal-plan>\n</goal>"
         );
     }
 
     #[test]
     fn render_goal_update_event_emits_goal_update_block() {
-        let msg = event("goal_delta", json!({"seq": 7}), "use <new> & better goal");
+        let msg = event(
+            "goal_delta",
+            json!({"seq": 7, "target":"plan"}),
+            "use <new> & better goal",
+        );
 
         assert_eq!(
             render_event_message(&msg),
-            "<goal-update seq=\"7\">use &lt;new&gt; &amp; better goal</goal-update>"
+            "<goal-plan-update seq=\"7\">use &lt;new&gt; &amp; better goal</goal-plan-update>"
         );
     }
 

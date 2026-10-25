@@ -19,6 +19,7 @@ import {
   EventMessage,
   GoalSnapshot,
   getEventMetadata,
+  getGoalMetadata,
   getPlanMetadata,
   normalizeEventMessageMetadata,
   PlanMessage,
@@ -1423,6 +1424,48 @@ export const selectGoalById = (
   state: RootState,
   chatId: string,
 ): GoalSnapshot | null => state.chat.threads[chatId]?.thread.goal ?? null;
+
+export const selectGoalWithPlanHistoryById = createSelector(
+  [selectGoalById, selectActiveContextMessagesById],
+  (goal, messages): GoalSnapshot | null => {
+    if (!goal?.plan || goal.plan.history?.length) return goal;
+    const bases = messages.filter(isGoalMessage);
+    const base = bases.reduce<(typeof bases)[number] | undefined>(
+      (latest, message) =>
+        !latest ||
+        (getGoalMetadata(message).version ?? 0) >=
+          (getGoalMetadata(latest).version ?? 0)
+          ? message
+          : latest,
+      undefined,
+    );
+    if (!base) return goal;
+    const history: { seq: number; content: string }[] = [];
+    for (const message of messages) {
+      if (!isEventMessage(message)) continue;
+      const metadata = getEventMetadata(message);
+      const payload = metadata?.payload;
+      if (!payload || typeof payload !== "object") continue;
+      const fields = payload as Record<string, unknown>;
+      if (
+        metadata.subkind !== "goal_delta" ||
+        fields.target !== "plan" ||
+        fields.plan
+      )
+        continue;
+      if (
+        typeof fields.goal_id === "string" &&
+        fields.goal_id !== base.message_id
+      )
+        continue;
+      history.push({
+        seq: typeof fields.seq === "number" ? fields.seq : history.length + 1,
+        content: message.content,
+      });
+    }
+    return history.length ? { ...goal, plan: { ...goal.plan, history } } : goal;
+  },
+);
 
 export const selectGoal = (state: RootState): GoalSnapshot | null =>
   selectGoalById(state, state.chat.current_thread_id);

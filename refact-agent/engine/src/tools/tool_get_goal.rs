@@ -48,6 +48,9 @@ fn goal_value(
 
     let mut value = json!({
         "content": content,
+        "owner": goal.owner.clone().unwrap_or(refact_chat_api::GoalOwner::Chat {id: session.chat_id.clone()}),
+        "revision": goal.revision,
+        "plan": goal_role::current_goal_plan(&session.messages, crate::runtime_settings::plan_projection_limits(), include_history),
         "checkpoint": projection.checkpoint,
         "status": goal.status,
         "active": goal.active,
@@ -64,10 +67,48 @@ fn goal_value(
         "gaps": latest.map(|attempt| attempt.gaps.as_slice()).unwrap_or_default(),
     });
     if include_history {
+        if !value["plan"].is_null() {
+            let legacy_base = session
+                .messages
+                .iter()
+                .filter(|m| m.role == "plan")
+                .max_by_key(|m| m.extra["plan"]["version"].as_u64().unwrap_or(0));
+            if let Some(base) = legacy_base {
+                let history = super::role_history::archived_delta_history(
+                    archive,
+                    &session.messages,
+                    &base.message_id,
+                    "plan_delta",
+                );
+                if message.extra["goal"].get("plan").is_none() {
+                    let mut entries = history
+                        .into_iter()
+                        .map(|(seq, content)| json!({"seq":seq,"content":content}))
+                        .collect::<Vec<_>>();
+                    if let Some(nested) = value["plan"]["history"].as_array() {
+                        for entry in nested {
+                            if !entries.contains(entry) {
+                                entries.push(entry.clone());
+                            }
+                        }
+                    }
+                    value["plan"]["history"] = json!(entries);
+                }
+            }
+        }
         value["history"] = Value::Array(
             super::role_history::archived_delta_history(
-                archive,
-                &session.messages,
+                &archive
+                    .iter()
+                    .filter(|m| !goal_role::is_plan_delta(m))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                &session
+                    .messages
+                    .iter()
+                    .filter(|m| !goal_role::is_plan_delta(m))
+                    .cloned()
+                    .collect::<Vec<_>>(),
                 &message.message_id,
                 "goal_delta",
             )
@@ -129,9 +170,13 @@ impl Tool for ToolGetGoal {
             .get("include_history")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let (sessions, chat_id) = {
+        let (sessions, chat_id, gcx) = {
             let ccx = ccx.lock().await;
-            (ccx.app.chat.sessions.clone(), ccx.chat_id.clone())
+            (
+                ccx.app.chat.sessions.clone(),
+                ccx.chat_id.clone(),
+                ccx.app.gcx.clone(),
+            )
         };
 
         let session_arc = sessions
@@ -140,6 +185,7 @@ impl Tool for ToolGetGoal {
             .get(&chat_id)
             .cloned()
             .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
+        crate::tasks::goal::hydrate_session_task_goal(gcx, &session_arc).await?;
         let live = session_arc.lock().await;
         let session = live.try_accepted_control_projection()?;
         let goal = match goal_role::current_base_goal(&session) {
@@ -456,7 +502,10 @@ mod tests {
                 .tool_execute(
                     ccx(app.clone(), chat_id).await,
                     &"set-goal".to_string(),
-                    &HashMap::from([("content".to_string(), json!("Ship the pond"))]),
+                    &HashMap::from([
+                        ("content".to_string(), json!("Ship the pond")),
+                        ("plan".into(), json!({"content":"Inspect then ship"})),
+                    ]),
                 )
                 .await
                 .unwrap(),
@@ -482,12 +531,18 @@ mod tests {
                 .tool_execute(
                     ccx(app.clone(), chat_id).await,
                     &"update-goal".to_string(),
-                    &HashMap::from([("note".to_string(), json!("Add tests"))]),
+                    &HashMap::from([
+                        ("note".to_string(), json!("Add tests")),
+                        ("plan".into(), json!({"note":"Run preserved tests"})),
+                    ]),
                 )
                 .await
                 .unwrap(),
         );
-        assert_eq!(update_result, json!({"seq": 1, "truncated": false}));
+        assert_eq!(
+            update_result,
+            json!({"seq": 1, "truncated": false, "plan":{"seq":1,"truncated":false}})
+        );
         drain_goal_side_effects(&app, chat_id).await;
 
         let mut get_tool = ToolGetGoal::new(String::new());
@@ -501,6 +556,12 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        assert_eq!(
+            get_result["goal"]["plan"]["content"],
+            "Inspect then ship\n\n---\n\n## Plan updates\n\nRun preserved tests"
+        );
+        assert_eq!(get_result["goal"]["plan"]["delta_count"], 1);
+        assert_eq!(get_result["goal"]["revision"], 3);
         assert_eq!(get_result["goal"]["version"], json!(1));
         assert_eq!(get_result["goal"]["delta_count"], json!(1));
         assert_eq!(get_result["goal"]["status"], json!("active"));

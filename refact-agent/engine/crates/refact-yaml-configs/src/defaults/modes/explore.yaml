@@ -1,4 +1,4 @@
-schema_version: 21
+schema_version: 22
 id: explore
 title: Explore
 description: Read-only exploration for context gathering without editing
@@ -42,7 +42,7 @@ prompt: |
 
   Subagents work independently and return summarized results. Use them for focused investigation tasks.
 
-  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` to inspect or control them.
+  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `wait(target={kind:"agents", agent_ids:[agent_id]})`, `agent_result()`, and `agent_cancel()` to inspect or control them.
 
   ## Asking Questions - CRITICAL
   **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
@@ -116,7 +116,7 @@ tools:
   - agent_peer_grant
   - agent_list
   - agent_status
-  - agent_wait
+  - wait
   - agent_result
   - agent_cancel
   - ask_questions

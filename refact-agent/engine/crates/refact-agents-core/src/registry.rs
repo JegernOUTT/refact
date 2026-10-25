@@ -2050,6 +2050,33 @@ impl BackgroundAgentRegistry {
         caller_chat_id: &str,
         paused: bool,
     ) -> Result<BackgroundAgent, String> {
+        self.set_parent_pause_inner(agent_id, caller_chat_id, paused, None)
+            .await
+    }
+
+    pub async fn set_parent_pause_checked(
+        &self,
+        agent_id: &str,
+        caller_chat_id: &str,
+        paused: bool,
+        expected_run_generation: u64,
+    ) -> Result<BackgroundAgent, String> {
+        self.set_parent_pause_inner(
+            agent_id,
+            caller_chat_id,
+            paused,
+            Some(expected_run_generation),
+        )
+        .await
+    }
+
+    async fn set_parent_pause_inner(
+        &self,
+        agent_id: &str,
+        caller_chat_id: &str,
+        paused: bool,
+        expected_run_generation: Option<u64>,
+    ) -> Result<BackgroundAgent, String> {
         let updated = {
             let mut records = self.records.write().await;
             let record = records
@@ -2059,6 +2086,9 @@ impl BackgroundAgentRegistry {
                 && record.parent_root_chat_id.as_deref() != Some(caller_chat_id)
             {
                 return Err("agent not found".to_string());
+            }
+            if expected_run_generation.is_some_and(|expected| expected != record.run_generation) {
+                return Err("child moved to another generation".to_string());
             }
             if record.status.is_terminal() {
                 return Err(refact_chat_api::SealReason::AgentTerminal {

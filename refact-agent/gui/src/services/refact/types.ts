@@ -1215,7 +1215,27 @@ export type GoalEvent = {
   text: string;
 };
 
+export type GoalPlanSnapshot = {
+  content: string;
+  mode: string;
+  version: number;
+  created_at_ms: number;
+  delta_count: number;
+  checkpoint: {
+    revision: number;
+    folded_deltas: number;
+    approved_message_id: string;
+    approved_version: number;
+    approved_by: string;
+    approved_at_ms: number;
+  } | null;
+  history?: { seq: number; content: string }[];
+};
+
 export type GoalSnapshot = {
+  owner?: { kind: "chat" | "task"; id: string };
+  revision?: number;
+  plan?: GoalPlanSnapshot | null;
   content: string;
   version: number;
   active: boolean;

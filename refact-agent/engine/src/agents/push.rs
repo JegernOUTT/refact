@@ -452,7 +452,7 @@ fn build_push_message(record: &BackgroundAgent) -> String {
                 .and_then(crate::agents::types::CapStop::from_error)
                 .is_some_and(|stop| stop.parent_can_raise_steps())
             {
-                lines.push("Use agent_resume with action inspect to check this child's limits, then raise_and_resume with the returned change_seq. This preserves the same child task and trajectory.".into());
+                lines.push("Use agent_lifecycle with action inspect to check this child's limits, then raise_and_recover with the returned change_seq. This preserves the same child task and trajectory.".into());
             }
         }
         BgAgentStatus::Cancelled => {
@@ -475,7 +475,7 @@ fn build_push_message(record: &BackgroundAgent) -> String {
                     .to_string(),
             );
             lines.push(
-                "This child is closed, not finished. Its history, goal and plan are preserved; use agent_resume with action inspect, then resume with the returned change_seq to continue the same child."
+                "This child is closed, not finished. Its history, goal and plan are preserved; use agent_lifecycle with action inspect, then recover with the returned change_seq to continue the same child."
                     .to_string(),
             );
         }

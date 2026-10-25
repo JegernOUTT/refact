@@ -351,7 +351,7 @@ pub fn seed_transferred_goal_ledger(
     source_chat_id: &str,
     at_ms: u64,
 ) -> Vec<GoalLedgerEntry> {
-    vec![
+    let mut entries = vec![
         GoalLedgerEntry {
             seq: 1,
             at_ms,
@@ -370,7 +370,19 @@ pub fn seed_transferred_goal_ledger(
                 progress: target_goal.progress.clone(),
             },
         },
-    ]
+    ];
+    if target_goal.status != GoalStatus::Active {
+        entries.push(GoalLedgerEntry {
+            seq: 3,
+            at_ms,
+            op: GoalLedgerOp::StatusChanged {
+                from: GoalStatus::Active,
+                to: target_goal.status,
+                reason: target_goal.stop_reason.clone().unwrap_or_default(),
+            },
+        });
+    }
+    entries
 }
 
 pub fn status_changed_since(entries: &[GoalLedgerEntry], seq: u64) -> bool {

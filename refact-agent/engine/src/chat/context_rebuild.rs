@@ -531,6 +531,7 @@ async fn finish_held_deliveries(
 pub(crate) struct RebuildSource {
     messages: Vec<u8>,
     thread: Vec<u8>,
+    task_goal: Vec<u8>,
 }
 
 impl RebuildSource {
@@ -538,6 +539,14 @@ impl RebuildSource {
         Ok(Self {
             messages: serde_json::to_vec(&session.messages).map_err(|e| e.to_string())?,
             thread: serde_json::to_vec(&session.thread).map_err(|e| e.to_string())?,
+            task_goal: serde_json::to_vec(&(
+                &session.task_goal_messages,
+                session
+                    .goal
+                    .as_ref()
+                    .map(|goal| (&goal.owner, goal.revision)),
+            ))
+            .map_err(|e| e.to_string())?,
         })
     }
 
@@ -1030,6 +1039,7 @@ async fn rebuild_session_reserved(
     explicit: bool,
     guard: &mut Option<AttemptGuard>,
 ) -> Result<(), String> {
+    crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), session_arc).await?;
     let (hook_messages, hook_thread, source, attempt, abort) = {
         let mut session = session_arc.lock().await;
         if expected_version.is_some_and(|v| v != session.trajectory_version) {
@@ -1047,7 +1057,21 @@ async fn rebuild_session_reserved(
         if !explicit && requires_explicit_rebuild(&session.messages) {
             return Err("Legacy context requires an explicit rebuild".into());
         }
-        let messages = raw_rebuild_input(&session.messages, explicit)?;
+        let mut messages = raw_rebuild_input(&session.messages, explicit)?;
+        if session.task_goal_messages.is_some() {
+            messages.retain(|message| {
+                !matches!(message.role.as_str(), "goal" | "plan")
+                    && !matches!(
+                        message
+                            .extra
+                            .get("event")
+                            .and_then(|event| event.get("subkind"))
+                            .and_then(serde_json::Value::as_str),
+                        Some("goal_delta" | "plan_delta" | "goal_pursuit")
+                    )
+            });
+            messages.extend(session.try_accepted_control_projection()?.messages);
+        }
         let (normalized, _) = normalize_rebuild_input(&messages, &live_tool_call_ids(&session));
         if messages.is_empty() || pending_tools(&normalized) {
             return Err(SKIP_PENDING_TOOLS.into());
@@ -1290,6 +1314,7 @@ async fn rebuild_session_reserved(
     let session_arc = session_arc.clone();
     tokio::spawn(async move {
         let writer = save_mutex.lock_owned().await;
+        crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), &session_arc).await?;
         match report {
             Ok(report) => {
                 let persist_gcx = gcx.clone();

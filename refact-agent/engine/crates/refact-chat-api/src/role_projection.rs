@@ -228,7 +228,7 @@ fn checkpoint_header(
     format!(
         "{} (checkpoint at revision {} of {})\n\n[checkpoint: {} earlier {} updates folded; \
 approved base v{} installed by {} at {}; the full delta history stays on disk and is available \
-from get_{}(include_history=true)]",
+from get_goal(include_history=true)]",
         role.updates_heading(),
         revision,
         total,
@@ -237,7 +237,6 @@ from get_{}(include_history=true)]",
         base.version,
         base.mode,
         base.created_at_ms,
-        role.noun(),
     )
 }
 
@@ -320,6 +319,7 @@ pub fn fold_role_messages(
             *index > base_index
                 && checkpoint_index.map_or(true, |checkpoint_index| *index > checkpoint_index)
                 && is_delta_kind(message, role.delta_subkind())
+                && (role != ProjectedRole::Goal || !crate::goal_role::is_plan_delta(message))
                 && checkpoint_provenance(message).is_none()
         })
         .map(|(index, _)| index)
@@ -444,14 +444,13 @@ fn make_checkpoint_message(
             "last_folded_message_id": last_folded_message_id,
         }),
         format!(
-            "[checkpoint: {} earlier {} updates folded at revision {}; approved base v{} installed by {} at {}; full history: get_{}(include_history=true)]",
+            "[checkpoint: {} earlier {} updates folded at revision {}; approved base v{} installed by {} at {}; full history: get_goal(include_history=true)]",
             provenance.folded_deltas,
             role.noun(),
             provenance.revision,
             base.version,
             base.mode,
             base.created_at_ms,
-            role.noun(),
         ),
     );
     message.message_id = format!(

@@ -643,6 +643,7 @@ impl App {
 
     fn reset_session_surfaces(&mut self) {
         // Keep every per-session surface and overlay reset here when adding a new surface.
+        self.runtime_snapshot = None;
         self.server_queue_size = 0;
         self.server_queue_previews.clear();
         self.inbound_event_state = InboundEventState::default();

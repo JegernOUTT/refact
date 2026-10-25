@@ -3,6 +3,7 @@ pub mod assignment;
 pub mod board_lock;
 pub mod comments;
 pub mod events;
+pub mod goal;
 pub mod index;
 pub mod overlap;
 pub mod overlap_order;

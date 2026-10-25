@@ -77,6 +77,7 @@ pub enum GoalNudgeSkip {
     QueueRejected,
     Quiescent,
     Sealed,
+    OwnerUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,13 +178,22 @@ pub async fn handle_goal_turn_end(app: AppState, session_arc: Arc<AMutex<ChatSes
         GoalNudgeTrigger::InlineTurnEnd,
     )
     .await;
-    if outcome == GoalNudgeOutcome::Skipped(GoalNudgeSkip::Sealed) {
+    if matches!(
+        outcome,
+        GoalNudgeOutcome::Skipped(GoalNudgeSkip::Sealed | GoalNudgeSkip::OwnerUnavailable)
+    ) {
         return true;
     }
     if goal_turn_end_blocks_completion(outcome) {
         return true;
     }
 
+    if let Err(error) =
+        crate::tasks::goal::hydrate_session_task_goal(app.gcx.clone(), &session_arc).await
+    {
+        tracing::warn!(%error, "goal turn end owner unavailable");
+        return true;
+    }
     let now_ms = epoch_ms_now();
     let (terminal, changed) = {
         let mut session = session_arc.lock().await;
@@ -197,6 +207,12 @@ pub async fn handle_goal_turn_end(app: AppState, session_arc: Arc<AMutex<ChatSes
         }
     };
     if changed {
+        if let Err(error) =
+            crate::tasks::goal::commit_session_task_goal(app.gcx.clone(), &session_arc).await
+        {
+            tracing::warn!(%error, "goal turn end commit rejected");
+            return true;
+        }
         maybe_save_trajectory_background_with_intent(
             app,
             session_arc,
@@ -222,6 +238,12 @@ pub async fn dispatch_goal_nudge(
     if app.agents.child_chat_paused(&chat_id).await {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::IntentionallyWaiting);
     }
+    if let Err(error) =
+        crate::tasks::goal::hydrate_session_task_goal(app.gcx.clone(), &session_arc).await
+    {
+        tracing::warn!(%chat_id, %error, "goal nudge owner unavailable");
+        return GoalNudgeOutcome::Skipped(GoalNudgeSkip::OwnerUnavailable);
+    }
     let now_ms = epoch_ms_now();
     let (outcome, processor_flag) = {
         let mut session = session_arc.lock().await;
@@ -244,6 +266,12 @@ pub async fn dispatch_goal_nudge(
     };
 
     if outcome.should_persist() {
+        if let Err(error) =
+            crate::tasks::goal::commit_session_task_goal(app.gcx.clone(), &session_arc).await
+        {
+            tracing::warn!(%chat_id, %error, "goal nudge commit rejected");
+            return GoalNudgeOutcome::Skipped(GoalNudgeSkip::OwnerUnavailable);
+        }
         maybe_save_trajectory_background_with_intent(
             app.clone(),
             session_arc.clone(),
@@ -524,7 +552,7 @@ fn nudge_context(goal: &GoalSnapshot) -> String {
         None => goal.progress.turns_used.to_string(),
     };
     lines.push(format!(
-        "Progress: turns {}, no-progress turns {}. If nothing remains, call validate_goal or finish; to wait, call snooze_goal or pause_goal.",
+        "Progress: turns {}, no-progress turns {}. If nothing remains, call validate_goal or finish; use wait for running work, or pause with target {{kind: \"goal\"}} and an optional until_ms deadline to suspend pursuit.",
         turns, goal.progress.no_progress_turns
     ));
     lines.join("\n")
@@ -1712,7 +1740,7 @@ mod tests {
         let content = session.messages.last().unwrap().content.content_text_only();
         assert!(content.contains("Goal: ship the thing"));
         assert!(content.contains("Remaining gaps: docs missing"));
-        assert!(content.contains("snooze_goal"));
+        assert!(content.contains("pause with target"));
     }
 
     #[test]

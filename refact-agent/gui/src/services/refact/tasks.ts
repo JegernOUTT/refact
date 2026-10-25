@@ -1,6 +1,7 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
 import { buildApiUrlFromState } from "./apiUrl";
+import type { GoalSnapshot } from "./types";
 
 export interface TaskMeta {
   id: string;
@@ -269,7 +270,7 @@ export const tasksApi = createApi({
       return headers;
     },
   }),
-  tagTypes: ["Tasks", "Board", "TaskTrajectories"],
+  tagTypes: ["Tasks", "Board", "TaskTrajectories", "TaskGoal"],
   endpoints: (builder) => ({
     listTasks: builder.query<TaskMeta[], undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
@@ -312,6 +313,23 @@ export const tasksApi = createApi({
       ],
     }),
 
+    getTaskGoal: builder.query<GoalSnapshot | null, string>({
+      queryFn: async (taskId, api, _opts, baseQuery) => {
+        const result = await baseQuery({
+          url: buildApiUrlFromState(
+            api.getState() as RootState,
+            `/v1/tasks/${encodeURIComponent(taskId)}/goal`,
+            { include_history: "true" },
+          ),
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as GoalSnapshot | null };
+      },
+      providesTags: (_result, _error, taskId) => [
+        { type: "TaskGoal", id: taskId },
+      ],
+    }),
+
     deleteTask: builder.mutation<{ deleted: boolean }, string>({
       queryFn: async (taskId, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
@@ -326,6 +344,7 @@ export const tasksApi = createApi({
         "Tasks",
         { type: "Tasks", id: taskId },
         { type: "Board", id: taskId },
+        { type: "TaskGoal", id: taskId },
         { type: "TaskTrajectories", id: `${taskId}/planner` },
         { type: "TaskTrajectories", id: `${taskId}/agents` },
       ],
@@ -480,6 +499,7 @@ export const tasksApi = createApi({
       },
       invalidatesTags: (_result, _error, { taskId }) => [
         { type: "TaskTrajectories", id: `${taskId}/planner` },
+        { type: "TaskGoal", id: taskId },
       ],
     }),
 
@@ -642,6 +662,7 @@ export const {
   useListTasksQuery,
   useCreateTaskMutation,
   useGetTaskQuery,
+  useGetTaskGoalQuery,
   useDeleteTaskMutation,
   useUpdateTaskStatusMutation,
   useUpdateTaskMetaMutation,

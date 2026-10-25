@@ -10,9 +10,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::goal_role;
 use crate::chat::internal_roles;
 use crate::chat::types::{ChatSession, PendingDelivery, PushMode};
-use crate::tools::tools_description::{
-    json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
-};
+use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
 pub struct ToolUpdateGoal {
     pub config_path: String,
@@ -30,11 +28,13 @@ impl Tool for ToolUpdateGoal {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Append an incremental update to the current goal. Use when the goal evolves; it does not rewrite the original goal.".to_string(),
-            input_schema: { let mut schema = json_schema_from_params(
-                &[("note", "string", "Goal update note. Required.")],
-                &["note"],
-            ); schema["properties"]["push"] = PushMode::schema(); schema },
+            description: "Update the goal outcome, its execution plan, or both atomically. Provide note, plan.content to install an absent plan, or plan.note to append a plan update. Existing approved bases are not rewritten.".to_string(),
+            input_schema: json!({"type":"object", "properties": {
+                "note":{"type":"string"}, "push":PushMode::schema(),
+                "plan":{"oneOf":[
+                    {"type":"object","properties":{"content":{"type":"string"}},"required":["content"],"additionalProperties":false},
+                    {"type":"object","properties":{"note":{"type":"string"}},"required":["note"],"additionalProperties":false}
+                ]}},"additionalProperties":false}),
             output_schema: None,
             annotations: None,
         }
@@ -47,9 +47,22 @@ impl Tool for ToolUpdateGoal {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let push = PushMode::from_args(args)?;
-        let note = string_arg(args, "note")?;
-        if note.trim().is_empty() {
-            return Err("argument `note` must be non-empty".to_string());
+        let note = args
+            .get("note")
+            .map(|_| string_arg(args, "note"))
+            .transpose()?;
+        let plan: Option<refact_chat_api::GoalPlanMutation> = args
+            .get("plan")
+            .map(|v| {
+                serde_json::from_value(v.clone())
+                    .map_err(|e| format!("argument `plan` is malformed: {e}"))
+            })
+            .transpose()?;
+        if note.is_none() && plan.is_none() {
+            return Err("provide at least one of note or plan".into());
+        }
+        if note.as_ref().is_some_and(|n| n.trim().is_empty()) {
+            return Err("argument `note` must be non-empty".into());
         }
 
         let (gcx, chat_id) = {
@@ -63,25 +76,57 @@ impl Tool for ToolUpdateGoal {
         }
         .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
 
+        crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), &session_arc).await?;
         let (seq, result_truncation, advisory) = {
             let mut session = session_arc.lock().await;
-            if !has_base_goal_including_queued(&session)? {
-                return Err("no goal to update; call set_goal first".to_string());
-            }
-            let seq = goal_delta_count_including_queued(&session)? + 1;
-            let (delta, result_truncation) = internal_roles::goal_delta_with_truncation(
+            let messages = goal_role::prepare_goal_update(
+                &session,
+                note.as_deref(),
+                plan.as_ref(),
                 "tool.update_goal",
-                json!({"seq": seq}),
-                note,
-            );
-            let messages = vec![delta];
+            )?;
+            let seq = goal_delta_count_including_queued(&session)? + usize::from(note.is_some());
+            let result_truncation = messages.iter().find_map(|m| {
+                let payload = m.extra.get("event")?.get("payload")?;
+                payload["truncated"].as_bool().filter(|v| *v).map(|_| {
+                    internal_roles::PlanDeltaTruncation {
+                        original_chars: payload["original_chars"].as_u64().unwrap_or_default()
+                            as usize,
+                        kept_chars: payload["kept_chars"].as_u64().unwrap_or_default() as usize,
+                    }
+                })
+            });
             let mut delivery = PendingDelivery::new(messages, push, "tool.update_goal", false);
             delivery.after_tool_call_id = Some(tool_call_id.clone());
             session.enqueue_delivery(delivery)?;
             let advisory = crate::chat::evidence::unverifiable_goal_criteria(&session, &policy);
             (seq, result_truncation, advisory)
         };
-        let mut result = update_goal_tool_result(seq, result_truncation).to_string();
+        if let Err(error) =
+            crate::tasks::goal::commit_session_task_goal(gcx.clone(), &session_arc).await
+        {
+            let mut session = session_arc.lock().await;
+            session
+                .pending_deliveries
+                .retain(|d| d.after_tool_call_id.as_deref() != Some(tool_call_id.as_str()));
+            drop(session);
+            let _ = crate::tasks::goal::hydrate_session_task_goal(gcx, &session_arc).await;
+            return Err(error);
+        }
+        let mut result = update_goal_tool_result(seq, result_truncation);
+        if plan.is_some() {
+            let session = session_arc.lock().await;
+            let projection = session.try_accepted_control_projection()?;
+            if let Some(plan) = goal_role::current_goal_plan(
+                &projection.messages,
+                crate::runtime_settings::plan_projection_limits(),
+                false,
+            ) {
+                result["plan"] =
+                    json!({"seq":plan.delta_count,"truncated":result_truncation.is_some()});
+            }
+        }
+        let mut result = result.to_string();
         if !advisory.is_empty() {
             result.push_str(&format!("\n\nAdvisory:\n- {}", advisory.join("\n- ")));
         }
@@ -113,6 +158,7 @@ fn update_goal_tool_result(
     })
 }
 
+#[cfg(test)]
 fn has_base_goal_including_queued(session: &ChatSession) -> Result<bool, String> {
     Ok(goal_role::current_base_goal(&session.try_accepted_control_projection()?).is_some())
 }
@@ -319,13 +365,13 @@ mod tests {
         assert_eq!(delivery_messages(&session).len(), 1);
         assert_eq!(delivery_messages(&session)[0].role, EVENT_ROLE);
         assert_eq!(content_text(&delivery_messages(&session)[0]), "second note");
+        let event = delivery_messages(&session)[0].extra["event"].clone();
+        assert_eq!(event["subkind"], "goal_delta");
+        assert_eq!(event["source"], "tool.update_goal");
+        assert_eq!(event["payload"]["seq"], 2);
         assert_eq!(
-            delivery_messages(&session)[0].extra["event"],
-            json!({
-                "subkind": "goal_delta",
-                "source": "tool.update_goal",
-                "payload": {"seq": 2}
-            })
+            event["payload"]["goal_id"],
+            goal_role::current_base_goal(&session).unwrap().message_id
         );
     }
 
@@ -404,7 +450,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err, "argument `note` is missing");
+        assert_eq!(err, "provide at least one of note or plan");
     }
 
     #[tokio::test]

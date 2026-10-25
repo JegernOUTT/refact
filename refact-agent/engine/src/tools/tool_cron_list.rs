@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
@@ -12,20 +11,17 @@ use crate::scheduler::{
     active_durable_cron_store, cron_task_response, next_run_ms, scheduler_timezone,
     session_cron_store, CronStore, Job,
 };
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
-pub struct ToolCronList {
-    pub config_path: String,
+pub struct CronListRuntime {
     #[cfg(test)]
     test_session_store: Option<Arc<dyn CronStore>>,
     #[cfg(test)]
     test_durable_store: Option<Arc<dyn CronStore>>,
 }
 
-impl ToolCronList {
-    pub fn new(config_path: String) -> Self {
+impl CronListRuntime {
+    pub fn new(_config_path: String) -> Self {
         Self {
-            config_path,
             #[cfg(test)]
             test_session_store: None,
             #[cfg(test)]
@@ -35,12 +31,11 @@ impl ToolCronList {
 
     #[cfg(test)]
     pub(crate) fn with_stores(
-        config_path: String,
+        _config_path: String,
         session_store: Arc<dyn CronStore>,
         durable_store: Option<Arc<dyn CronStore>>,
     ) -> Self {
         Self {
-            config_path,
             test_session_store: Some(session_store),
             test_durable_store: durable_store,
         }
@@ -74,9 +69,8 @@ enum CronListScope {
     All,
 }
 
-#[async_trait]
-impl Tool for ToolCronList {
-    async fn tool_execute(
+impl CronListRuntime {
+    pub(crate) async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
         tool_call_id: &String,
@@ -135,42 +129,16 @@ impl Tool for ToolCronList {
             })],
         ))
     }
+}
 
-    fn tool_description(&self) -> ToolDesc {
-        ToolDesc {
-            name: "cron_list".to_string(),
-            display_name: "Cron List".to_string(),
-            source: ToolSource {
-                source_type: ToolSourceType::Builtin,
-                config_path: self.config_path.clone(),
-            },
-            experimental: false,
-            allow_parallel: true,
-            description: "List scheduled tasks with target chat and mode, optionally filtering by session-only or durable scope."
-                .to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "scope": {
-                        "type": "string",
-                        "enum": ["session", "durable", "all"],
-                        "default": "all"
-                    }
-                },
-                "required": []
-            }),
-            output_schema: None,
-            annotations: None,
-        }
-    }
-
-    fn tool_depends_on(&self) -> Vec<String> {
-        vec![]
-    }
-
-    fn has_config_path(&self) -> Option<String> {
-        Some(self.config_path.clone())
-    }
+pub(crate) async fn execute_list(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    tool_call_id: &String,
+    args: &HashMap<String, Value>,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    CronListRuntime::new(String::new())
+        .tool_execute(ccx, tool_call_id, args)
+        .await
 }
 
 fn parse_scope(args: &HashMap<String, Value>) -> Result<CronListScope, String> {
@@ -202,6 +170,7 @@ fn set_job_isolated(task: &mut Job) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use crate::app_state::AppState;
     use crate::scheduler::{
         Action, AgentTarget, Delivery, InMemoryCronStore, JsonFileCronStore, Trigger,
@@ -291,7 +260,7 @@ mod tests {
     }
 
     async fn run_tool(
-        tool: &mut ToolCronList,
+        tool: &mut CronListRuntime,
         ccx: Arc<AMutex<AtCommandsContext>>,
         scope: Option<&str>,
     ) -> Vec<Value> {
@@ -321,7 +290,7 @@ mod tests {
             .add(session_task("cron_list_sess_a"))
             .await
             .unwrap();
-        let mut tool = ToolCronList::with_stores(String::new(), session_store, None);
+        let mut tool = CronListRuntime::with_stores(String::new(), session_store, None);
         let ccx = test_ccx().await;
 
         let session_only = run_tool(&mut tool, ccx.clone(), Some("session")).await;
@@ -353,7 +322,8 @@ mod tests {
             .await
             .unwrap();
 
-        let mut tool = ToolCronList::with_stores(String::new(), session_store, Some(durable_store));
+        let mut tool =
+            CronListRuntime::with_stores(String::new(), session_store, Some(durable_store));
         let ccx = test_ccx().await;
 
         let all = run_tool(&mut tool, ccx.clone(), None).await;
@@ -378,7 +348,7 @@ mod tests {
             .add(session_task("cron_list_target_fields"))
             .await
             .unwrap();
-        let mut tool = ToolCronList::with_stores(String::new(), session_store, None);
+        let mut tool = CronListRuntime::with_stores(String::new(), session_store, None);
         let ccx = test_ccx().await;
 
         let items = run_tool(&mut tool, ccx, Some("session")).await;
@@ -397,7 +367,7 @@ mod tests {
             .add(command_task("cron_list_command_action"))
             .await
             .unwrap();
-        let mut tool = ToolCronList::with_stores(String::new(), session_store, None);
+        let mut tool = CronListRuntime::with_stores(String::new(), session_store, None);
         let ccx = test_ccx().await;
 
         let items = run_tool(&mut tool, ccx, Some("session")).await;
@@ -417,7 +387,7 @@ mod tests {
             .add(webhook_task("cron_list_webhook"))
             .await
             .unwrap();
-        let mut tool = ToolCronList::with_stores(String::new(), session_store, None);
+        let mut tool = CronListRuntime::with_stores(String::new(), session_store, None);
         let ccx = test_ccx().await;
 
         let items = run_tool(&mut tool, ccx, Some("session")).await;
@@ -452,7 +422,7 @@ mod tests {
         let mut task = session_task("cron_list_isolated_target");
         set_job_isolated(&mut task);
         session_store.add(task).await.unwrap();
-        let mut tool = ToolCronList::with_stores(String::new(), session_store, None);
+        let mut tool = CronListRuntime::with_stores(String::new(), session_store, None);
         let ccx = test_ccx().await;
 
         let items = run_tool(&mut tool, ccx, Some("session")).await;
@@ -469,7 +439,7 @@ mod tests {
             .add(session_task("cron_list_tz_check"))
             .await
             .unwrap();
-        let mut tool = ToolCronList::with_stores(String::new(), session_store, None);
+        let mut tool = CronListRuntime::with_stores(String::new(), session_store, None);
         let ccx = test_ccx().await;
 
         let items = run_tool(&mut tool, ccx, Some("session")).await;

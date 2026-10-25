@@ -6,6 +6,7 @@ import {
   selectCurrentPlan,
   selectGoalAttemptsById,
   selectGoalById,
+  selectGoalWithPlanHistoryById,
   selectGoalContentById,
   selectGoalEventsById,
   selectGoalStatusById,
@@ -356,6 +357,46 @@ describe("hidden chat roles", () => {
       projectedGoal.attempts,
     );
     expect(selectGoalEventsById(state, threadId)).toEqual(projectedGoal.events);
+    const goalBase: GoalMessage = {
+      role: "goal",
+      content: "Goal",
+      message_id: "goal-current",
+      goal: { version: 2 },
+    };
+    const planGoal: GoalSnapshot = {
+      ...projectedGoal,
+      plan: {
+        content: "Plan with update",
+        mode: "agent",
+        version: 1,
+        created_at_ms: 1,
+        checkpoint: null,
+        delta_count: 1,
+      },
+    };
+    const historyState = {
+      chat: makeState(
+        [
+          goalBase,
+          makeBackendEventMessage(
+            "goal_delta",
+            "Accepted plan note",
+            { target: "plan", goal_id: "goal-current", seq: 3 },
+            "plan-note",
+          ),
+          makeBackendEventMessage(
+            "goal_delta",
+            "Other goal note",
+            { target: "plan", goal_id: "other-goal", seq: 4 },
+            "other-note",
+          ),
+        ],
+        planGoal,
+      ),
+    } as SelectorRootState;
+    expect(
+      selectGoalWithPlanHistoryById(historyState, threadId)?.plan?.history,
+    ).toEqual([{ seq: 3, content: "Accepted plan note" }]);
   });
 
   it("selectCurrentPlan returns highest-version plan", () => {

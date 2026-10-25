@@ -1615,6 +1615,13 @@ async fn start_generation_iteration(
     if crate::agents::seal::is_sealed(app, &chat_id).await {
         return GenerationAttemptStart::Stop;
     }
+    if let Err(error) =
+        crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), session_arc).await
+    {
+        let mut session = session_arc.lock().await;
+        session.set_runtime_state(SessionState::Error, Some(error));
+        return GenerationAttemptStart::Stop;
+    }
     if session_arc.lock().await.planner_pause_at_boundary() {
         return GenerationAttemptStart::Stop;
     }
@@ -1931,9 +1938,19 @@ async fn handle_generation_error(
             return GenerationLoopControl::Continue;
         }
         error.message = context_limit_final_error_message(&original_error);
+        if crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), session_arc)
+            .await
+            .is_ok()
         {
-            let mut session = session_arc.lock().await;
-            crate::chat::goal_monitor::mark_goal_blocked_on_context_limit(&mut session);
+            {
+                let mut session = session_arc.lock().await;
+                crate::chat::goal_monitor::mark_goal_blocked_on_context_limit(&mut session);
+            }
+            if let Err(error) =
+                crate::tasks::goal::commit_session_task_goal(gcx.clone(), session_arc).await
+            {
+                tracing::warn!(%error, "context limit goal commit rejected");
+            }
         }
     }
 
@@ -2196,7 +2213,16 @@ async fn handle_tool_step_outcome(
             if should_continue {
                 return GenerationLoopControl::Continue;
             }
-            if maybe_record_goal_pursuit_progress(session_arc.clone()).await {
+            if match maybe_record_goal_pursuit_progress(app, session_arc.clone()).await {
+                Ok(changed) => changed,
+                Err(error) => {
+                    session_arc
+                        .lock()
+                        .await
+                        .set_runtime_state(SessionState::Error, Some(error));
+                    return GenerationLoopControl::Stop;
+                }
+            } {
                 maybe_save_trajectory_with_intent(
                     app.clone(),
                     session_arc.clone(),
@@ -2533,6 +2559,7 @@ pub async fn run_llm_generation(
     stream_prepare_started_at: Option<Instant>,
 ) -> Result<GenerationResult, LlmStreamError> {
     let gcx = app.gcx.clone();
+    crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), &session_arc).await?;
     check_aborted_before_stream(&abort_flag)?;
     let execution = app.agent_executions.get(&chat_id);
     let _operation = if let Some(execution) = &execution {
@@ -2601,12 +2628,34 @@ pub async fn run_llm_generation(
 
     let (messages, existing_frozen_prefix) = {
         let session = session_arc.lock().await;
-        (
-            refact_core::active_context::active_context(&session.messages)
-                .map_err(|error| error.to_string())?
-                .messages,
-            session.thread.frozen_request_prefix.clone(),
-        )
+        let mut messages = refact_core::active_context::active_context(&session.messages)
+            .map_err(|error| error.to_string())?
+            .messages;
+        if session.task_goal_messages.is_some() {
+            let mut controls = session.try_accepted_control_projection()?.messages;
+            messages.retain(|message| {
+                !matches!(message.role.as_str(), "goal" | "plan")
+                    && !matches!(
+                        message
+                            .extra
+                            .get("event")
+                            .and_then(|event| event.get("subkind"))
+                            .and_then(|kind| kind.as_str()),
+                        Some("goal_delta" | "plan_delta")
+                    )
+            });
+            controls.retain(|control| {
+                !messages.iter().any(|message| {
+                    !control.message_id.is_empty() && message.message_id == control.message_id
+                })
+            });
+            let at = messages
+                .iter()
+                .take_while(|message| message.role == "system")
+                .count();
+            messages.splice(at..at, controls);
+        }
+        (messages, session.thread.frozen_request_prefix.clone())
     };
     let canonical_tools = build_canonical_openai_tools_from_aliases(
         &tools,
@@ -3730,12 +3779,22 @@ fn latest_goal_pursuit_usage(session: &ChatSession) -> Option<ChatUsage> {
     }
 }
 
-async fn maybe_record_goal_pursuit_progress(session_arc: Arc<AMutex<ChatSession>>) -> bool {
-    let mut session = session_arc.lock().await;
-    let Some(usage) = latest_goal_pursuit_usage(&session) else {
-        return false;
+async fn maybe_record_goal_pursuit_progress(
+    app: &AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+) -> Result<bool, String> {
+    crate::tasks::goal::hydrate_session_task_goal(app.gcx.clone(), &session_arc).await?;
+    let changed = {
+        let mut session = session_arc.lock().await;
+        let Some(usage) = latest_goal_pursuit_usage(&session) else {
+            return Ok(false);
+        };
+        session.goal_record_progress_from_usage(&usage)
     };
-    session.goal_record_progress_from_usage(&usage)
+    if changed {
+        crate::tasks::goal::commit_session_task_goal(app.gcx.clone(), &session_arc).await?;
+    }
+    Ok(changed)
 }
 
 fn maybe_downgrade_bogus_tool_calls_finish_reason(result: &mut ChoiceFinal, stage: &str) {

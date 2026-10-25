@@ -1,4 +1,4 @@
-schema_version: 14
+schema_version: 15
 id: ask
 title: Ask
 description: Quick Q&A with web research capability
@@ -32,7 +32,7 @@ prompt: |
   - "Compare options" → `subagent(task="Research and compare X vs Y", expected_result="Comparison table with pros/cons", tools="web_search,web")`
   - "Gather documentation" → `subagent(task="Find official docs for API X", expected_result="Summary with links", tools="web_search,web")`
 
-  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` to inspect or control them.
+  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `wait(target={kind:"agents", agent_ids:[agent_id]})`, `agent_result()`, and `agent_cancel()` to inspect or control them.
 
   ## Asking Questions - CRITICAL
   **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
@@ -78,7 +78,7 @@ tools:
   - agent_peer_grant
   - agent_list
   - agent_status
-  - agent_wait
+  - wait
   - agent_result
   - agent_cancel
   - ask_questions

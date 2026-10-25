@@ -374,6 +374,10 @@ export const DocumentsPanel: React.FC<DocumentsPanelProps> = ({ taskId }) => {
 
   return (
     <div className={`${styles.root} rf-enter`}>
+      <Text size="2" className={styles.mutedText}>
+        Reference documents only. The task goal and its attached plan are the
+        authority; editing a document does not update them.
+      </Text>
       <Flex justify="between" align="center" gap="2" className={styles.header}>
         <Text weight="bold" size="3">
           {data?.documents.length ?? 0} documents

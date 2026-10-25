@@ -92,10 +92,6 @@ pub struct ToolProcessKill {
     pub config_path: String,
 }
 
-pub struct ToolProcessWait {
-    pub config_path: String,
-}
-
 pub struct ToolShellServiceAlias {
     pub config_path: String,
 }
@@ -721,140 +717,139 @@ impl Tool for ToolProcessKill {
     }
 }
 
-#[async_trait]
-impl Tool for ToolProcessWait {
-    async fn tool_execute(
-        &mut self,
-        ccx: Arc<AMutex<AtCommandsContext>>,
-        tool_call_id: &String,
-        args: &HashMap<String, Value>,
-    ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, exec_registry, execution_scope, chat_id, current_model, derived_privacy_zones) = {
-            let ccx_lock = ccx.lock().await;
-            (
-                ccx_lock.app.gcx.clone(),
-                ccx_lock.app.runtime.exec_registry.clone(),
-                ccx_lock.execution_scope.clone(),
-                ccx_lock.chat_id.clone(),
-                ccx_lock.current_model.clone(),
-                ccx_lock.derived_privacy_zones.clone(),
-            )
-        };
-        crate::privacy::load_privacy_if_needed(gcx.clone()).await;
-        let destination = crate::privacy::records::provider_destination(&current_model);
-        let process_id = parse_process_id(args)?;
-        authorize_process_access(
-            gcx.clone(),
-            exec_registry.as_ref(),
-            execution_scope.as_ref(),
-            &chat_id,
-            &process_id,
+pub(crate) async fn execute_process_wait(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    tool_call_id: &String,
+    args: &HashMap<String, Value>,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    let (gcx, exec_registry, execution_scope, chat_id, current_model, derived_privacy_zones) = {
+        let ccx_lock = ccx.lock().await;
+        (
+            ccx_lock.app.gcx.clone(),
+            ccx_lock.app.runtime.exec_registry.clone(),
+            ccx_lock.execution_scope.clone(),
+            ccx_lock.chat_id.clone(),
+            ccx_lock.current_model.clone(),
+            ccx_lock.derived_privacy_zones.clone(),
         )
-        .await?;
-        let timeout_ms = parse_optional_u64(args, "timeout_ms")?;
-        let (snapshot, timed_out) = if let Some(timeout_ms) = timeout_ms {
+    };
+    crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+    let destination = crate::privacy::records::provider_destination(&current_model);
+    let process_id = parse_process_id(args)?;
+    authorize_process_access(
+        gcx.clone(),
+        exec_registry.as_ref(),
+        execution_scope.as_ref(),
+        &chat_id,
+        &process_id,
+    )
+    .await?;
+    let timeout_ms = parse_optional_u64(args, "timeout_ms")?;
+    let interrupt = crate::tools::tools_description::WaitInterrupt::from_context(&ccx).await;
+    let wait = async {
+        if let Some(timeout_ms) = timeout_ms {
             match tokio::time::timeout(
                 Duration::from_millis(timeout_ms),
                 exec_registry.wait(&process_id),
             )
             .await
             {
-                Ok(result) => (result?, false),
-                Err(_) => (
-                    authorize_process_access(
-                        gcx.clone(),
-                        exec_registry.as_ref(),
-                        execution_scope.as_ref(),
-                        &chat_id,
-                        &process_id,
-                    )
-                    .await?,
-                    true,
-                ),
+                Ok(result) => result.map(|snapshot| (snapshot, false)),
+                Err(_) => authorize_process_access(
+                    gcx.clone(),
+                    exec_registry.as_ref(),
+                    execution_scope.as_ref(),
+                    &chat_id,
+                    &process_id,
+                )
+                .await
+                .map(|snapshot| (snapshot, true)),
             }
         } else {
-            (exec_registry.wait(&process_id).await?, false)
-        };
-        let read = exec_registry.read(&process_id, 0, None).await;
-        let (title, timed_out) = process_wait_outcome(&snapshot.status, timed_out);
-        let mut content = format_process_snapshot(title, &snapshot);
-        content.push_str(&format!(
-            "\nnext_seq: {}\nlatest_seq: {}\n",
-            read.next_seq, read.latest_seq
-        ));
-        content.push_str(&format_read_sections(
-            &read,
-            ProcessStreamSelection::All,
-            &OutputFilter::no_limits(),
-        ));
-        let mut extra = exec_extra(&snapshot, Some(&read), None, None);
-        if let Some(exec) = extra.get_mut("exec").and_then(Value::as_object_mut) {
-            exec.insert("wait_timed_out".to_string(), Value::Bool(timed_out));
+            exec_registry
+                .wait(&process_id)
+                .await
+                .map(|snapshot| (snapshot, false))
         }
-        attach_exec_path_references(
-            &mut extra,
-            gcx.clone(),
-            &destination,
-            &derived_privacy_zones,
+    };
+    let (snapshot, timed_out, interrupted) = tokio::select! {
+        result = wait => { let (snapshot, timed_out) = result?; (snapshot, timed_out, false) },
+        _ = interrupt.wait() => {
+            let snapshot = authorize_process_access(gcx.clone(), exec_registry.as_ref(), execution_scope.as_ref(), &chat_id, &process_id).await?;
+            (snapshot, false, true)
+        }
+    };
+    let read = exec_registry.read(&process_id, 0, None).await;
+    let (title, timed_out) = process_wait_outcome(&snapshot.status, timed_out);
+    let outcome = if interrupted {
+        "interrupted"
+    } else if timed_out {
+        "timed_out"
+    } else {
+        "completed"
+    };
+    let mut content = format!(
+        "outcome: {outcome}\ntarget: process\n{}",
+        format_process_snapshot(title, &snapshot)
+    );
+    content.push_str(&format!(
+        "\nnext_seq: {}\nlatest_seq: {}\n",
+        read.next_seq, read.latest_seq
+    ));
+    content.push_str(&format_read_sections(
+        &read,
+        ProcessStreamSelection::All,
+        &OutputFilter::no_limits(),
+    ));
+    let mut extra = exec_extra(&snapshot, Some(&read), None, None);
+    if let Some(exec) = extra.get_mut("exec").and_then(Value::as_object_mut) {
+        exec.insert("wait_timed_out".to_string(), Value::Bool(timed_out));
+    }
+    attach_exec_path_references(
+        &mut extra,
+        gcx.clone(),
+        &destination,
+        &derived_privacy_zones,
+        &snapshot,
+        &snapshot.meta.command,
+        &collect_combined(&read.chunks),
+        read.latest_seq,
+    )
+    .await;
+    let mut result_message = tool_message(
+        tool_call_id,
+        content,
+        Some(extra),
+        tool_failed_for_status(&snapshot.status),
+    );
+    if let Some(observation) = process_observation_status(
+        exec_registry.as_ref(),
+        &process_id,
+        snapshot.status.is_terminal(),
+    )
+    .await
+    {
+        apply_process_privacy(
+            &gcx,
             &snapshot,
-            &snapshot.meta.command,
-            &collect_combined(&read.chunks),
-            read.latest_seq,
+            &destination,
+            observation,
+            &derived_privacy_zones,
+            &mut result_message,
         )
-        .await;
-        let mut result_message = tool_message(
-            tool_call_id,
-            content,
-            Some(extra),
-            tool_failed_for_status(&snapshot.status),
-        );
-        if let Some(observation) = process_observation_status(
-            exec_registry.as_ref(),
-            &process_id,
-            snapshot.status.is_terminal(),
-        )
-        .await
-        {
-            apply_process_privacy(
-                &gcx,
-                &snapshot,
-                &destination,
-                observation,
-                &derived_privacy_zones,
-                &mut result_message,
-            )
-            .await?;
-        }
-        Ok((false, vec![ContextEnum::ChatMessage(result_message)]))
+        .await?;
     }
-
-    fn tool_description(&self) -> ToolDesc {
-        ToolDesc {
-            name: "process_wait".to_string(),
-            display_name: "Process Wait".to_string(),
-            source: source(&self.config_path),
-            experimental: false,
-            allow_parallel: true,
-            description: "Wait for a runtime-owned process to complete, or return the current snapshot when timeout_ms expires. Incoming messages interrupt only the wait, not the underlying work.".to_string(),
-            input_schema: json_schema_from_params(
-                &[
-                    ("process_id", "string", "Runtime-owned process ID returned by process_start."),
-                    ("timeout_ms", "integer", "Optional timeout in milliseconds."),
-                ],
-                &["process_id"],
-            ),
-            output_schema: None,
-            annotations: None,
-        }
-    }
-
-    fn tool_depends_on(&self) -> Vec<String> {
-        vec![]
-    }
-
-    fn has_config_path(&self) -> Option<String> {
-        Some(self.config_path.clone())
-    }
+    let evidence = result_message.content.content_text_only();
+    result_message.content = ChatContent::SimpleText(
+        json!({
+            "outcome": outcome,
+            "target": "process",
+            "process_id": process_id,
+            "evidence": evidence,
+        })
+        .to_string(),
+    );
+    Ok((false, vec![ContextEnum::ChatMessage(result_message)]))
 }
 
 fn process_wait_outcome(status: &ExecStatus, caller_timed_out: bool) -> (&'static str, bool) {
@@ -2048,6 +2043,14 @@ mod tests {
         Ok(only_message(messages))
     }
 
+    async fn run_process_wait(
+        ccx: Arc<AMutex<AtCommandsContext>>,
+        args: HashMap<String, Value>,
+    ) -> Result<ChatMessage, String> {
+        let (_, messages) = execute_process_wait(ccx, &"tool_call".to_string(), &args).await?;
+        Ok(only_message(messages))
+    }
+
     fn only_message(messages: Vec<ContextEnum>) -> ChatMessage {
         match messages.into_iter().next().unwrap() {
             ContextEnum::ChatMessage(message) => message,
@@ -2197,10 +2200,6 @@ mod tests {
                 config_path: String::new(),
             }
             .tool_description(),
-            ToolProcessWait {
-                config_path: String::new(),
-            }
-            .tool_description(),
         ] {
             assert_eq!(required_names(desc), vec!["process_id".to_string()]);
         }
@@ -2233,7 +2232,7 @@ mod tests {
             "process_list",
             "process_read",
             "process_kill",
-            "process_wait",
+            "wait",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
@@ -3018,11 +3017,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut wait = ToolProcessWait {
-            config_path: String::new(),
-        };
-        let err = run_tool(
-            &mut wait,
+        let err = run_process_wait(
             other_ccx,
             make_args_map(vec![("process_id", json!(process_id.as_str()))]),
         )
@@ -3030,8 +3025,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, format!("process access denied: {process_id}"));
 
-        let completed = run_tool(
-            &mut wait,
+        let completed = run_process_wait(
             owner_ccx,
             make_args_map(vec![("process_id", json!(process_id.as_str()))]),
         )
@@ -3145,11 +3139,7 @@ mod tests {
         .unwrap();
         let slow_process_id = process_id(&slow);
 
-        let mut wait = ToolProcessWait {
-            config_path: String::new(),
-        };
-        let timed_out = run_tool(
-            &mut wait,
+        let timed_out = run_process_wait(
             ccx.clone(),
             make_args_map(vec![
                 ("process_id", json!(slow_process_id.as_str())),
@@ -3187,8 +3177,7 @@ mod tests {
         .await
         .unwrap();
         let done_process_id = process_id(&done);
-        let completed = run_tool(
-            &mut wait,
+        let completed = run_process_wait(
             ccx,
             make_args_map(vec![
                 ("process_id", json!(done_process_id.as_str())),
@@ -3398,11 +3387,7 @@ mod tests {
         .await
         .unwrap();
         let process_id = process_id(&started);
-        let mut wait = ToolProcessWait {
-            config_path: String::new(),
-        };
-        let completed = run_tool(
-            &mut wait,
+        let completed = run_process_wait(
             ccx,
             make_args_map(vec![
                 ("process_id", json!(process_id.as_str())),
@@ -3433,11 +3418,7 @@ mod tests {
         .await
         .unwrap();
         let process_id = process_id(&started);
-        let mut wait = ToolProcessWait {
-            config_path: String::new(),
-        };
-        let completed = run_tool(
-            &mut wait,
+        let completed = run_process_wait(
             ccx,
             make_args_map(vec![
                 ("process_id", json!(process_id.as_str())),

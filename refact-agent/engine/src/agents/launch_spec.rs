@@ -172,7 +172,6 @@ fn parse_launch_spec_object(
                 | "token_budget"
                 | "context"
                 | "include_parent_goal"
-                | "include_parent_plan"
                 | "deliverable"
         ) {
             return Err(format!("unsupported launch_spec field: {key}"));
@@ -186,7 +185,7 @@ fn parse_launch_spec_object(
         }
     };
     let include_parent_goal = flag("include_parent_goal")?;
-    let include_parent_plan = flag("include_parent_plan")?;
+    let include_parent_plan = false;
     let deliverable = match object.get("deliverable") {
         None | Some(Value::Null) => None,
         Some(value @ Value::Object(_)) => {
@@ -932,7 +931,7 @@ pub async fn resolve_scoped_launch_spec(
                     .join("\n");
                 let text = format!(
                     "# Parent goal (historical snapshot, version {}, status {:?})\nThis is the parent's goal for reference only. It is not the child's goal and does not activate pursuit.\n\n{}\n{}",
-                    goal.version, goal.status, goal.content, criteria
+                    goal.version, goal.status, goal.content, format!("{}\n{}", criteria, goal.plan.as_ref().map(|plan| plan.content.as_str()).unwrap_or(""))
                 );
                 admit_context(
                     &gcx,
@@ -951,48 +950,6 @@ pub async fn resolve_scoped_launch_spec(
             None => resolved.skipped.push(SkippedContextEntry {
                 description: "parent goal".into(),
                 reason: "the parent has no installed goal".into(),
-            }),
-        }
-    }
-    if spec.include_parent_plan {
-        struct PlanMessages<'a>(&'a [ChatMessage]);
-        impl refact_chat_api::plan_role::PlanRoleSession for PlanMessages<'_> {
-            fn plan_role_messages(&self) -> &[ChatMessage] {
-                self.0
-            }
-            fn add_plan_role_message(&mut self, _message: ChatMessage) {}
-        }
-        let plan = PlanMessages(parent_messages);
-        match (
-            refact_chat_api::plan_role::current_base_plan(&plan),
-            refact_chat_api::plan_role::synthesize_current_plan(&plan),
-        ) {
-            (Some(base), Some(content)) => {
-                let version = base
-                    .extra
-                    .get("plan")
-                    .and_then(|plan| plan.get("version"))
-                    .cloned();
-                let text = format!(
-                    "# Parent plan (historical snapshot)\nThis is the parent's current plan for reference only. It is not installed as the child's plan.\n\n{content}"
-                );
-                admit_context(
-                    &gcx,
-                    scope,
-                    parent_messages,
-                    &mut resolved,
-                    budget,
-                    &count,
-                    "parent plan".into(),
-                    vec![with_source(
-                        ChatMessage::new("context_file".into(), text),
-                        serde_json::json!({"type":"parent_plan","version":version,"historical":true,"trusted_as_instructions":false}),
-                    )],
-                );
-            }
-            _ => resolved.skipped.push(SkippedContextEntry {
-                description: "parent plan".into(),
-                reason: "the parent has no installed plan".into(),
             }),
         }
     }

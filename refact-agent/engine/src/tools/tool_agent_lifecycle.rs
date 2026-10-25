@@ -82,22 +82,8 @@ struct PushReport {
 }
 
 pub struct ToolCancelAgent;
-pub struct ToolPauseAgent;
-pub struct ToolResumeAgent;
 
 impl ToolCancelAgent {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl ToolPauseAgent {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl ToolResumeAgent {
     pub fn new() -> Self {
         Self
     }
@@ -892,70 +878,6 @@ fn cancel_description() -> ToolDesc {
     }
 }
 
-fn pause_description() -> ToolDesc {
-    ToolDesc {
-        name: "pause_agent".to_string(),
-        display_name: "Pause Agent".to_string(),
-        source: lifecycle_source(),
-        experimental: false,
-        allow_parallel: false,
-        description: "Planner-only tool that pauses a doing task agent at its next runtime boundary and persists the pause until resume_agent.".to_string(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "card_id": {
-                    "type": "string",
-                    "description": "Card ID whose agent should pause"
-                },
-                "reason": {
-                    "type": "string",
-                    "description": "Why the agent should pause"
-                },
-                "push": planner_delivery::push_mode_schema(),
-                "task_id": {
-                    "type": "string",
-                    "description": "Task ID (optional if chat is bound to a task)"
-                }
-            },
-            "required": ["card_id", "reason"]
-        }),
-        output_schema: None,
-        annotations: None,
-    }
-}
-
-fn resume_description() -> ToolDesc {
-    ToolDesc {
-        name: "resume_agent".to_string(),
-        display_name: "Resume Agent".to_string(),
-        source: lifecycle_source(),
-        experimental: false,
-        allow_parallel: false,
-        description: "Planner-only tool that clears a task agent's runtime and persisted planner pause, then resumes with an optional note.".to_string(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "card_id": {
-                    "type": "string",
-                    "description": "Card ID whose agent should resume"
-                },
-                "note": {
-                    "type": "string",
-                    "description": "Optional resume note. Defaults to continuing from where the agent paused."
-                },
-                "push": planner_delivery::push_mode_schema(),
-                "task_id": {
-                    "type": "string",
-                    "description": "Task ID (optional if chat is bound to a task)"
-                }
-            },
-            "required": ["card_id"]
-        }),
-        output_schema: None,
-        annotations: None,
-    }
-}
-
 #[async_trait]
 impl Tool for ToolCancelAgent {
     fn tool_description(&self) -> ToolDesc {
@@ -1220,222 +1142,194 @@ impl Tool for ToolCancelAgent {
     }
 }
 
-#[async_trait]
-impl Tool for ToolPauseAgent {
-    fn tool_description(&self) -> ToolDesc {
-        pause_description()
-    }
-
-    async fn tool_execute(
-        &mut self,
-        ccx: Arc<AMutex<AtCommandsContext>>,
-        tool_call_id: &String,
-        args: &HashMap<String, Value>,
-    ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let planner = planner_context(&ccx, args, "pause_agent").await?;
-        let card_id = required_string(args, "card_id")?;
-        let reason = required_string(args, "reason")?;
-        let push = planner_delivery::parse_push_mode(args)?;
-        let snapshot =
-            load_doing_card_snapshot(planner.gcx.clone(), &planner.task_id, &card_id, "pause")
-                .await?;
-        let agent_chat_id = snapshot.agent_chat_id.clone().ok_or_else(|| {
-            format!(
-                "Cannot pause card {}: it has no active agent chat id.",
-                card_id
-            )
-        })?;
-
-        let card_id_for_update = card_id.clone();
-        let reason_for_update = reason.clone();
-        let agent_chat_id_for_update = agent_chat_id.clone();
-        let paused_by = planner.chat_id.clone();
-        let (_, paused_at) =
-            storage::update_board_atomic(planner.gcx.clone(), &planner.task_id, move |board| {
-                let card = board
-                    .get_card_mut(&card_id_for_update)
-                    .ok_or_else(|| format!("Card {} not found", card_id_for_update))?;
-                validate_current_doing_card(card, "pause", &agent_chat_id_for_update)?;
-                let now = Utc::now().to_rfc3339();
-                card.paused_at = Some(now.clone());
-                card.paused_by = Some(paused_by.clone());
-                card.last_heartbeat_at = Some(now.clone());
-                card.status_updates.push(StatusUpdate {
-                    timestamp: now.clone(),
-                    message: format!("Paused by planner: {}", reason_for_update),
-                });
-                Ok(now)
-            })
-            .await?;
-        let paused_sessions = update_live_card_pause(
-            &planner,
-            &card_id,
-            Some((paused_at, Some(planner.chat_id.clone()))),
+pub(crate) async fn pause_card(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    tool_call_id: &String,
+    args: &HashMap<String, Value>,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    let planner = planner_context(&ccx, args, "pause").await?;
+    let card_id = required_string(args, "card_id")?;
+    let reason = required_string(args, "reason")?;
+    let push = planner_delivery::parse_push_mode(args)?;
+    let snapshot =
+        load_doing_card_snapshot(planner.gcx.clone(), &planner.task_id, &card_id, "pause").await?;
+    let agent_chat_id = snapshot.agent_chat_id.clone().ok_or_else(|| {
+        format!(
+            "Cannot pause card {}: it has no active agent chat id.",
+            card_id
         )
-        .await;
+    })?;
 
-        let pause_message = format!("[Planner PAUSE] {}\n\nWait for resume signal.", reason);
-        let target = CardTarget {
-            card_id: card_id.clone(),
-            title: snapshot.title.clone(),
-            chat_id: agent_chat_id.clone(),
-        };
-        let report = planner_delivery::deliver_to_card(
-            planner.gcx.clone(),
-            planner.chat_facade.clone(),
-            &planner.task_id,
-            &target,
-            CardGuard::doing_with_live_session(),
-            planner_delivery::single_message_delivery(
-                pause_message,
-                push,
-                "tools.pause_agent",
-                false,
-            ),
-        )
-        .await;
-
-        let headline = if !paused_sessions.is_empty() || report.reached_agent() {
-            format!("⏸️ Paused {}; use resume_agent to continue.", card_id)
-        } else {
-            format!(
-                "⏸️ Recorded the pause on card {}; it will apply when its agent session loads.",
-                card_id
-            )
-        };
-        let output = format!(
-            "{}\n\n{} (push={})",
-            headline,
-            report.describe("Pause"),
-            planner_delivery::push_mode_label(push)
-        );
-
-        Ok((false, vec![tool_message(tool_call_id, output)]))
-    }
-
-    fn tool_depends_on(&self) -> Vec<String> {
-        vec![]
-    }
-}
-
-#[async_trait]
-impl Tool for ToolResumeAgent {
-    fn tool_description(&self) -> ToolDesc {
-        resume_description()
-    }
-
-    async fn tool_execute(
-        &mut self,
-        ccx: Arc<AMutex<AtCommandsContext>>,
-        tool_call_id: &String,
-        args: &HashMap<String, Value>,
-    ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let planner = planner_context(&ccx, args, "resume_agent").await?;
-        let card_id = required_string(args, "card_id")?;
-        let note = optional_string(args, "note")
-            .unwrap_or_else(|| "Continue from where you paused.".to_string());
-        let push = planner_delivery::parse_push_mode(args)?;
-        let snapshot =
-            load_doing_card_snapshot(planner.gcx.clone(), &planner.task_id, &card_id, "resume")
-                .await?;
-        let agent_chat_id = snapshot.agent_chat_id.clone().ok_or_else(|| {
-            format!(
-                "Cannot resume card {}: it has no active agent chat id.",
-                card_id
-            )
-        })?;
-
-        let card_id_for_update = card_id.clone();
-        let agent_chat_id_for_update = agent_chat_id.clone();
+    let card_id_for_update = card_id.clone();
+    let reason_for_update = reason.clone();
+    let agent_chat_id_for_update = agent_chat_id.clone();
+    let paused_by = planner.chat_id.clone();
+    let (_, paused_at) =
         storage::update_board_atomic(planner.gcx.clone(), &planner.task_id, move |board| {
             let card = board
                 .get_card_mut(&card_id_for_update)
                 .ok_or_else(|| format!("Card {} not found", card_id_for_update))?;
-            validate_current_doing_card(card, "resume", &agent_chat_id_for_update)?;
+            validate_current_doing_card(card, "pause", &agent_chat_id_for_update)?;
             let now = Utc::now().to_rfc3339();
-            card.paused_at = None;
-            card.paused_by = None;
+            card.paused_at = Some(now.clone());
+            card.paused_by = Some(paused_by.clone());
             card.last_heartbeat_at = Some(now.clone());
             card.status_updates.push(StatusUpdate {
-                timestamp: now,
-                message: "Resumed by planner".to_string(),
+                timestamp: now.clone(),
+                message: format!("Paused by planner: {}", reason_for_update),
             });
-            Ok(())
+            Ok(now)
         })
         .await?;
-        let resumed_sessions = update_live_card_pause(&planner, &card_id, None).await;
-        let mut resume_tools = Vec::new();
-        let mut resume_others = Vec::new();
-        for chat_id in &resumed_sessions {
-            let session = planner.gcx.chat_sessions.read().await.get(chat_id).cloned();
-            if let Some(session) = session {
-                let session = session.lock().await;
-                if session.planner_pause_pending_tools {
-                    resume_tools.push(chat_id.clone());
-                } else if chat_id != &agent_chat_id
-                    && (!session.pending_deliveries.is_empty() || !session.command_queue.is_empty())
-                {
-                    resume_others.push(chat_id.clone());
-                }
+    let paused_sessions = update_live_card_pause(
+        &planner,
+        &card_id,
+        Some((paused_at, Some(planner.chat_id.clone()))),
+    )
+    .await;
+
+    let pause_message = format!("[Planner PAUSE] {}\n\nWait for resume signal.", reason);
+    let target = CardTarget {
+        card_id: card_id.clone(),
+        title: snapshot.title.clone(),
+        chat_id: agent_chat_id.clone(),
+    };
+    let report = planner_delivery::deliver_to_card(
+        planner.gcx.clone(),
+        planner.chat_facade.clone(),
+        &planner.task_id,
+        &target,
+        CardGuard::doing_with_live_session(),
+        planner_delivery::single_message_delivery(pause_message, push, "tools.pause_agent", false),
+    )
+    .await;
+
+    let headline = if !paused_sessions.is_empty() || report.reached_agent() {
+        format!(
+            "⏸️ Paused {}; use resume with a card target to continue.",
+            card_id
+        )
+    } else {
+        format!(
+            "⏸️ Recorded the pause on card {}; it will apply when its agent session loads.",
+            card_id
+        )
+    };
+    let output = format!(
+        "{}\n\n{} (push={})",
+        headline,
+        report.describe("Pause"),
+        planner_delivery::push_mode_label(push)
+    );
+
+    Ok((false, vec![tool_message(tool_call_id, output)]))
+}
+
+pub(crate) async fn resume_card(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    tool_call_id: &String,
+    args: &HashMap<String, Value>,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    let planner = planner_context(&ccx, args, "resume").await?;
+    let card_id = required_string(args, "card_id")?;
+    let note = optional_string(args, "note")
+        .unwrap_or_else(|| "Continue from where you paused.".to_string());
+    let push = planner_delivery::parse_push_mode(args)?;
+    let snapshot =
+        load_doing_card_snapshot(planner.gcx.clone(), &planner.task_id, &card_id, "resume").await?;
+    let agent_chat_id = snapshot.agent_chat_id.clone().ok_or_else(|| {
+        format!(
+            "Cannot resume card {}: it has no active agent chat id.",
+            card_id
+        )
+    })?;
+
+    let card_id_for_update = card_id.clone();
+    let agent_chat_id_for_update = agent_chat_id.clone();
+    storage::update_board_atomic(planner.gcx.clone(), &planner.task_id, move |board| {
+        let card = board
+            .get_card_mut(&card_id_for_update)
+            .ok_or_else(|| format!("Card {} not found", card_id_for_update))?;
+        validate_current_doing_card(card, "resume", &agent_chat_id_for_update)?;
+        let now = Utc::now().to_rfc3339();
+        card.paused_at = None;
+        card.paused_by = None;
+        card.last_heartbeat_at = Some(now.clone());
+        card.status_updates.push(StatusUpdate {
+            timestamp: now,
+            message: "Resumed by planner".to_string(),
+        });
+        Ok(())
+    })
+    .await?;
+    let resumed_sessions = update_live_card_pause(&planner, &card_id, None).await;
+    let mut resume_tools = Vec::new();
+    let mut resume_others = Vec::new();
+    for chat_id in &resumed_sessions {
+        let session = planner.gcx.chat_sessions.read().await.get(chat_id).cloned();
+        if let Some(session) = session {
+            let session = session.lock().await;
+            if session.planner_pause_pending_tools {
+                resume_tools.push(chat_id.clone());
+            } else if chat_id != &agent_chat_id
+                && (!session.pending_deliveries.is_empty() || !session.command_queue.is_empty())
+            {
+                resume_others.push(chat_id.clone());
             }
         }
+    }
 
-        let resume_message = format!("[Planner RESUME]\n\n{}", note);
-        let target = CardTarget {
-            card_id: card_id.clone(),
-            title: snapshot.title.clone(),
-            chat_id: agent_chat_id.clone(),
-        };
-        let report = planner_delivery::deliver_to_card(
-            planner.gcx.clone(),
-            planner.chat_facade.clone(),
-            &planner.task_id,
-            &target,
-            CardGuard::doing_with_live_session(),
-            planner_delivery::single_message_delivery(
-                resume_message,
-                push,
-                "tools.resume_agent",
-                !resume_tools.contains(&agent_chat_id),
-            ),
+    let resume_message = format!("[Planner RESUME]\n\n{}", note);
+    let target = CardTarget {
+        card_id: card_id.clone(),
+        title: snapshot.title.clone(),
+        chat_id: agent_chat_id.clone(),
+    };
+    let report = planner_delivery::deliver_to_card(
+        planner.gcx.clone(),
+        planner.chat_facade.clone(),
+        &planner.task_id,
+        &target,
+        CardGuard::doing_with_live_session(),
+        planner_delivery::single_message_delivery(
+            resume_message,
+            push,
+            "tools.resume_agent",
+            !resume_tools.contains(&agent_chat_id),
+        ),
+    )
+    .await;
+    for chat_id in resume_tools {
+        planner
+            .chat_facade
+            .push_command(&chat_id, ChatCommand::Regenerate {})
+            .await?;
+    }
+    for chat_id in resume_others {
+        planner
+            .chat_facade
+            .push_command(&chat_id, ChatCommand::Regenerate {})
+            .await?;
+    }
+
+    let agent_state = state_after(planner.chat_facade.clone(), Some(&agent_chat_id)).await;
+    let headline = if report.reached_agent() {
+        format!("▶️ Resumed {}.", card_id)
+    } else {
+        format!(
+            "⚠️ Recorded the resume on card {}, but the agent was not told to resume.",
+            card_id
         )
-        .await;
-        for chat_id in resume_tools {
-            planner
-                .chat_facade
-                .push_command(&chat_id, ChatCommand::Regenerate {})
-                .await?;
-        }
-        for chat_id in resume_others {
-            planner
-                .chat_facade
-                .push_command(&chat_id, ChatCommand::Regenerate {})
-                .await?;
-        }
+    };
+    let output = format!(
+        "{}\n\n{} (push={})\nAgent state: {}",
+        headline,
+        report.describe("Resume"),
+        planner_delivery::push_mode_label(push),
+        agent_state
+    );
 
-        let agent_state = state_after(planner.chat_facade.clone(), Some(&agent_chat_id)).await;
-        let headline = if report.reached_agent() {
-            format!("▶️ Resumed {}.", card_id)
-        } else {
-            format!(
-                "⚠️ Recorded the resume on card {}, but the agent was not told to resume.",
-                card_id
-            )
-        };
-        let output = format!(
-            "{}\n\n{} (push={})\nAgent state: {}",
-            headline,
-            report.describe("Resume"),
-            planner_delivery::push_mode_label(push),
-            agent_state
-        );
-
-        Ok((false, vec![tool_message(tool_call_id, output)]))
-    }
-
-    fn tool_depends_on(&self) -> Vec<String> {
-        vec![]
-    }
+    Ok((false, vec![tool_message(tool_call_id, output)]))
 }
 
 #[cfg(test)]
@@ -1725,18 +1619,9 @@ pub(crate) mod tests {
     #[test]
     fn tool_agent_lifecycle_descriptions_are_planner_only() {
         let cancel = ToolCancelAgent::new().tool_description();
-        let pause = ToolPauseAgent::new().tool_description();
-        let resume = ToolResumeAgent::new().tool_description();
-
         assert_eq!(cancel.name, "cancel_agent");
-        assert_eq!(pause.name, "pause_agent");
-        assert_eq!(resume.name, "resume_agent");
         assert!(cancel.description.contains("Planner-only"));
-        assert!(pause.description.contains("Planner-only"));
-        assert!(resume.description.contains("Planner-only"));
         assert_eq!(cancel.input_schema["required"], json!(["card_id"]));
-        assert_eq!(pause.input_schema["required"], json!(["card_id", "reason"]));
-        assert_eq!(resume.input_schema["required"], json!(["card_id"]));
         assert!(cancel.input_schema["properties"]
             .get("retain_worktree")
             .is_some());
@@ -1764,18 +1649,16 @@ pub(crate) mod tests {
             .unwrap_err();
         assert!(err.contains("can only be called by the task planner"));
 
-        let err = ToolPauseAgent::new()
-            .tool_execute(
-                ccx.clone(),
-                &call_id,
-                &args(&[("card_id", json!("T-39")), ("reason", json!("wait"))]),
-            )
-            .await
-            .unwrap_err();
+        let err = pause_card(
+            ccx.clone(),
+            &call_id,
+            &args(&[("card_id", json!("T-39")), ("reason", json!("wait"))]),
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("can only be called by the task planner"));
 
-        let err = ToolResumeAgent::new()
-            .tool_execute(ccx, &call_id, &args(&[("card_id", json!("T-39"))]))
+        let err = resume_card(ccx, &call_id, &args(&[("card_id", json!("T-39"))]))
             .await
             .unwrap_err();
         assert!(err.contains("can only be called by the task planner"));
@@ -1805,18 +1688,16 @@ pub(crate) mod tests {
                 .unwrap_err();
             assert!(err.to_ascii_lowercase().contains(column), "{err}");
 
-            let err = ToolPauseAgent::new()
-                .tool_execute(
-                    ccx.clone(),
-                    &call_id,
-                    &args(&[("card_id", json!("T-39")), ("reason", json!("wait"))]),
-                )
-                .await
-                .unwrap_err();
+            let err = pause_card(
+                ccx.clone(),
+                &call_id,
+                &args(&[("card_id", json!("T-39")), ("reason", json!("wait"))]),
+            )
+            .await
+            .unwrap_err();
             assert!(err.to_ascii_lowercase().contains(column), "{err}");
 
-            let err = ToolResumeAgent::new()
-                .tool_execute(ccx, &call_id, &args(&[("card_id", json!("T-39"))]))
+            let err = resume_card(ccx, &call_id, &args(&[("card_id", json!("T-39"))]))
                 .await
                 .unwrap_err();
             assert!(err.to_ascii_lowercase().contains(column), "{err}");
@@ -2159,12 +2040,10 @@ pub(crate) mod tests {
                 ("reason", json!("review")),
                 ("push", json!(raw)),
             ]);
-            ToolPauseAgent::new()
-                .tool_execute(ccx.clone(), &"pause".to_string(), &call_args)
+            pause_card(ccx.clone(), &"pause".to_string(), &call_args)
                 .await
                 .unwrap();
-            ToolResumeAgent::new()
-                .tool_execute(ccx, &"resume".to_string(), &call_args)
+            resume_card(ccx, &"resume".to_string(), &call_args)
                 .await
                 .unwrap();
             let deliveries = mock.deliveries();
@@ -2193,14 +2072,13 @@ pub(crate) mod tests {
         let ccx = planner_ccx(gcx.clone(), mock.clone(), "planner").await;
 
         let output = output_text(
-            ToolPauseAgent::new()
-                .tool_execute(
-                    ccx,
-                    &"call".to_string(),
-                    &args(&[("card_id", json!("T-39")), ("reason", json!("need review"))]),
-                )
-                .await
-                .unwrap(),
+            pause_card(
+                ccx,
+                &"call".to_string(),
+                &args(&[("card_id", json!("T-39")), ("reason", json!("need review"))]),
+            )
+            .await
+            .unwrap(),
         );
 
         let deliveries = mock.deliveries();
@@ -2213,7 +2091,7 @@ pub(crate) mod tests {
             "[Planner PAUSE] need review\n\nWait for resume signal."
         );
         assert!(mock.pushed_commands().is_empty());
-        assert!(output.contains("use resume_agent to continue"));
+        assert!(output.contains("use resume with a card target to continue"));
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         let card = board.get_card("T-39").unwrap();
         assert!(card
@@ -2234,17 +2112,16 @@ pub(crate) mod tests {
         let ccx = planner_ccx(gcx.clone(), mock.clone(), "planner").await;
 
         let output = output_text(
-            ToolResumeAgent::new()
-                .tool_execute(
-                    ccx,
-                    &"call".to_string(),
-                    &args(&[
-                        ("card_id", json!("T-39")),
-                        ("note", json!("Continue with tests")),
-                    ]),
-                )
-                .await
-                .unwrap(),
+            resume_card(
+                ccx,
+                &"call".to_string(),
+                &args(&[
+                    ("card_id", json!("T-39")),
+                    ("note", json!("Continue with tests")),
+                ]),
+            )
+            .await
+            .unwrap(),
         );
 
         let deliveries = mock.deliveries();

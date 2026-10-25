@@ -274,7 +274,7 @@ async fn archive_stays_unchanged_and_update_plan_appends_after_rebuild() {
         )
         .await,
     ));
-    let mut tool = crate::tools::tool_update_plan::ToolUpdatePlan {
+    let mut tool = crate::tools::tool_update_goal::ToolUpdateGoal {
         config_path: String::new(),
     };
     for index in 0..3 {
@@ -282,16 +282,19 @@ async fn archive_stays_unchanged_and_update_plan_appends_after_rebuild() {
             .tool_execute(
                 ccx.clone(),
                 &format!("call-{index}"),
-                &HashMap::from([("note".into(), json!(format!("another change {index}")))]),
+                &HashMap::from([(
+                    "plan".into(),
+                    json!({"note":format!("another change {index}")}),
+                )]),
             )
             .await
             .unwrap();
         let ContextEnum::ChatMessage(result) = &result[0] else {
-            panic!("expected update_plan tool result");
+            panic!("expected update_goal tool result");
         };
         let result_text = result.content.content_text_only();
         let result: Value = serde_json::from_str(&result_text).unwrap();
-        assert_eq!(result["seq"], json!(101 + index));
+        assert_eq!(result["plan"]["seq"], json!(101 + index));
     }
 
     let pending_messages: Vec<_> = {

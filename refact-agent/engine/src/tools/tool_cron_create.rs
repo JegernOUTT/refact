@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use chrono_tz::Tz;
 use serde_json::{json, Value};
@@ -20,20 +19,10 @@ use crate::scheduler::{
     CronStore, Delivery, Job, JsonFileCronStore, Trigger, delivery_from_value,
 };
 use refact_core::chat_types::PushMode;
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
+use crate::tools::tools_description::{ToolDesc, ToolSource, ToolSourceType};
 
 pub const MAX_CRON_JOBS: usize = 50;
 const ONE_YEAR_MS: u64 = 365 * 24 * 60 * 60 * 1000;
-
-pub struct ToolCronCreate {
-    pub config_path: String,
-}
-
-impl ToolCronCreate {
-    pub fn new(config_path: String) -> Self {
-        Self { config_path }
-    }
-}
 
 #[derive(Clone, Debug)]
 pub(crate) struct CronCreateInput {
@@ -74,15 +63,13 @@ pub(crate) struct CronCreateOutcome {
     pub(crate) summary: String,
 }
 
-#[async_trait]
-impl Tool for ToolCronCreate {
-    fn tool_description(&self) -> ToolDesc {
-        ToolDesc {
-            name: "cron_create".to_string(),
+pub(crate) fn create_description(config_path: String) -> ToolDesc {
+    ToolDesc {
+            name: "schedule".to_string(),
             display_name: "Create Scheduled Prompt".to_string(),
             source: ToolSource {
                 source_type: ToolSourceType::Builtin,
-                config_path: self.config_path.clone(),
+                config_path,
             },
             experimental: false,
             allow_parallel: false,
@@ -137,62 +124,56 @@ impl Tool for ToolCronCreate {
                     "recurring": { "type": "boolean", "default": true },
                     "durable": { "type": "boolean", "description": "Persist in the current project when true; stay session-only when false. Omitted defaults to durable when a project store exists." },
                     "isolated": { "type": "boolean", "default": false, "description": "Create a fresh isolated chat session for each fire instead of enqueueing into the current chat." },
-                    "description": { "type": "string", "description": "Short description (≤80 chars) shown in cron_list UI." }
+                    "description": { "type": "string", "description": "Short description (≤80 chars) shown in the scheduler UI." }
                 },
                 "required": ["description"]
             }),
             output_schema: None,
             annotations: None,
         }
-    }
+}
 
-    async fn tool_execute(
-        &mut self,
-        ccx: Arc<AMutex<AtCommandsContext>>,
-        tool_call_id: &String,
-        args: &HashMap<String, Value>,
-    ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let input = input_from_args(args)?;
-        let (app, chat_id, project_root, mode, model) = cron_tool_context(ccx).await;
-        let runtime = runtime_for_project(
-            project_root,
-            Some(chat_id.clone()),
-            mode,
-            model,
-            unix_now_ms(),
-            scheduler_timezone(),
-        )?;
-        let outcome = create_cron_job(input, runtime).await?;
+pub(crate) async fn execute_create(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    tool_call_id: &String,
+    args: &HashMap<String, Value>,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    let input = input_from_args(args)?;
+    let (app, chat_id, project_root, mode, model) = cron_tool_context(ccx).await;
+    let runtime = runtime_for_project(
+        project_root,
+        Some(chat_id.clone()),
+        mode,
+        model,
+        unix_now_ms(),
+        scheduler_timezone(),
+    )?;
+    let outcome = create_cron_job(input, runtime).await?;
 
-        emit_created_notice(app, &chat_id, &outcome.task, &outcome.summary).await;
+    emit_created_notice(app, &chat_id, &outcome.task, &outcome.summary).await;
 
-        let output = json!({
-            "id": outcome.task.id,
-            "human_schedule": outcome.human_schedule,
-            "recurring": outcome.task.recurring,
-            "durable": outcome.task.durable,
-            "action_kind": outcome.task.action_kind(),
-            "delivery_kind": delivery_kind(&outcome.task.delivery),
-            "delivery": delivery_output(&outcome.task.delivery),
-            "push": outcome.task.push,
-            "isolated": outcome.task.is_isolated(),
-        });
+    let output = json!({
+        "id": outcome.task.id,
+        "human_schedule": outcome.human_schedule,
+        "recurring": outcome.task.recurring,
+        "durable": outcome.task.durable,
+        "action_kind": outcome.task.action_kind(),
+        "delivery_kind": delivery_kind(&outcome.task.delivery),
+        "delivery": delivery_output(&outcome.task.delivery),
+        "push": outcome.task.push,
+        "isolated": outcome.task.is_isolated(),
+    });
 
-        Ok((
-            false,
-            vec![ContextEnum::ChatMessage(ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText(output.to_string()),
-                tool_calls: None,
-                tool_call_id: tool_call_id.clone(),
-                ..Default::default()
-            })],
-        ))
-    }
-
-    fn tool_depends_on(&self) -> Vec<String> {
-        vec![]
-    }
+    Ok((
+        false,
+        vec![ContextEnum::ChatMessage(ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(output.to_string()),
+            tool_calls: None,
+            tool_call_id: tool_call_id.clone(),
+            ..Default::default()
+        })],
+    ))
 }
 
 fn delivery_output(delivery: &Delivery) -> Value {
@@ -602,7 +583,7 @@ fn parse_create_schedule(input: &CronCreateInput, now_ms: u64) -> Result<Trigger
     })
 }
 
-fn validate_next_run(task: &Job, now_ms: u64, timezone: Tz) -> Result<(), String> {
+pub(crate) fn validate_next_run(task: &Job, now_ms: u64, timezone: Tz) -> Result<(), String> {
     if matches!(
         task.trigger,
         Trigger::Webhook { .. } | Trigger::Manual | Trigger::OnProcessExit { .. }
@@ -787,11 +768,8 @@ mod tests {
         let before = session_cron_store().list().await.len();
         let change_notify = crate::scheduler::runner_change_notify();
         let notified = change_notify.notified();
-        let mut tool = ToolCronCreate {
-            config_path: String::new(),
-        };
         let output = tool_output_text(
-            tool.tool_execute(
+            execute_create(
                 ccx,
                 &"call".to_string(),
                 &args(&[

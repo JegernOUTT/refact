@@ -57,6 +57,7 @@ pub struct GoalCellData {
     pub version: u32,
     pub delta_count: usize,
     pub detail_lines: Vec<String>,
+    pub plan: Option<PlanCellData>,
 }
 
 impl GoalCellData {
@@ -66,6 +67,7 @@ impl GoalCellData {
             version,
             delta_count,
             detail_lines: Vec::new(),
+            plan: None,
         }
     }
 
@@ -188,6 +190,22 @@ impl HistoryCell for GoalCell {
             Span::raw("  "),
             Span::raw("  "),
         ));
+        if let Some(plan) = &self.data.plan {
+            card.push(HyperlinkLine::new(Line::from(" ")));
+            card.push(HyperlinkLine::new(Line::from(Span::styled(
+                format!(
+                    "  Implementation plan · v{} · {}",
+                    plan.version,
+                    update_label(plan.delta_count)
+                ),
+                default_theme_style(ThemeRole::Muted),
+            ))));
+            card.extend(prefix_hyperlink_lines(
+                renderer.render_with_links(&plan.content),
+                Span::raw("    "),
+                Span::raw("    "),
+            ));
+        }
         if !self.data.detail_lines.is_empty() {
             card.push(HyperlinkLine::new(Line::from(" ")));
             card.extend(self.data.detail_lines.iter().cloned().map(|detail| {
@@ -345,15 +363,17 @@ mod tests {
 
     #[test]
     fn goal_cell_renders_goal_details() {
-        let cell = GoalCell::new(GoalCellData::new("Ship the dock", 1, 0).with_details(vec![
+        let mut data = GoalCellData::new("Ship the dock", 1, 0).with_details(vec![
             "Status: ACTIVE".to_string(),
             "Progress: 2 turns · 1.2K tok".to_string(),
             "Latest verifier: UNMET".to_string(),
-        ]));
+        ]);
+        data.plan = Some(PlanCellData::new("Run checks", "agent", 1, 0));
+        let cell = GoalCell::new(data);
 
         assert_eq!(
             text(&cell.render(80)),
-            "• Current Goal\n \ngoal · v1 · 0 updates\n \n  Ship the dock\n \n  Status: ACTIVE\n  Progress: 2 turns · 1.2K tok\n  Latest verifier: UNMET\n \n"
+            "• Current Goal\n \ngoal · v1 · 0 updates\n \n  Ship the dock\n \n  Implementation plan · v1 · 0 updates\n    Run checks\n \n  Status: ACTIVE\n  Progress: 2 turns · 1.2K tok\n  Latest verifier: UNMET\n \n"
         );
     }
 }

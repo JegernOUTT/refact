@@ -14,7 +14,8 @@ use crate::call_validation::{ChatMessage, ChatToolCall, ChatToolFunction};
 use crate::chat::task_agent_monitor::{check_for_stuck_agents, tests::setup_monitor_case};
 use crate::chat::types::{ChatSession, SessionState};
 use crate::tasks::{storage, types::TaskBoard};
-use crate::tools::tool_agent_lifecycle::{ToolCancelAgent, ToolPauseAgent, ToolResumeAgent};
+use crate::tools::tool_agent_lifecycle::ToolCancelAgent;
+use crate::tools::tool_pause::{ToolPause, ToolResume};
 use crate::tools::tools_description::Tool;
 use refact_chat_api::ChatCommand;
 use refact_core::chat_types::{DeliveryOutcome, PendingDelivery, PushMode};
@@ -64,23 +65,37 @@ pub(crate) async fn fixture(state: SessionState) -> Fixture {
 
 fn args() -> HashMap<String, Value> {
     HashMap::from([
-        ("card_id".to_string(), json!("T-1")),
+        (
+            "target".to_string(),
+            json!({"kind": "card", "card_id": "T-1"}),
+        ),
         ("reason".to_string(), json!("review checkpoint")),
     ])
 }
 
 pub(crate) async fn pause(f: &Fixture) {
-    ToolPauseAgent::new()
-        .tool_execute(f.ccx.clone(), &"pause-call".to_string(), &args())
-        .await
-        .unwrap();
+    ToolPause {
+        config_path: String::new(),
+    }
+    .tool_execute(f.ccx.clone(), &"pause-call".to_string(), &args())
+    .await
+    .unwrap();
 }
 
 pub(crate) async fn resume(f: &Fixture) {
-    ToolResumeAgent::new()
-        .tool_execute(f.ccx.clone(), &"resume-call".to_string(), &args())
-        .await
-        .unwrap();
+    ToolResume {
+        config_path: String::new(),
+    }
+    .tool_execute(
+        f.ccx.clone(),
+        &"resume-call".to_string(),
+        &HashMap::from([(
+            "target".to_string(),
+            json!({"kind": "card", "card_id": "T-1"}),
+        )]),
+    )
+    .await
+    .unwrap();
 }
 
 fn pending_tool_message() -> ChatMessage {
@@ -324,7 +339,14 @@ async fn priority_abort_and_cancel_still_stop_paused_agents_and_leave_them_seale
         assert!(session.planner_paused());
     }
     ToolCancelAgent::new()
-        .tool_execute(f.ccx.clone(), &"cancel".to_string(), &args())
+        .tool_execute(
+            f.ccx.clone(),
+            &"cancel".to_string(),
+            &HashMap::from([
+                ("card_id".to_string(), json!("T-1")),
+                ("reason".to_string(), json!("review checkpoint")),
+            ]),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -335,10 +357,19 @@ async fn priority_abort_and_cancel_still_stop_paused_agents_and_leave_them_seale
             column: "failed".to_string(),
         })
     );
-    assert!(ToolResumeAgent::new()
-        .tool_execute(f.ccx.clone(), &"late-resume".to_string(), &args())
-        .await
-        .is_err());
+    assert!(ToolResume {
+        config_path: String::new()
+    }
+    .tool_execute(
+        f.ccx.clone(),
+        &"late-resume".to_string(),
+        &HashMap::from([(
+            "target".to_string(),
+            json!({"kind": "card", "card_id": "T-1"})
+        )])
+    )
+    .await
+    .is_err());
     crate::chat::start_generation(f.app.clone(), f.agent.clone()).await;
     assert!(f.agent.lock().await.draft_message.is_none());
 }
@@ -418,10 +449,12 @@ async fn pause_refuses_every_card_outside_doing_without_runtime_mutation() {
         })
         .await
         .unwrap();
-        let error = ToolPauseAgent::new()
-            .tool_execute(f.ccx.clone(), &"pause".to_string(), &args())
-            .await
-            .unwrap_err();
+        let error = ToolPause {
+            config_path: String::new(),
+        }
+        .tool_execute(f.ccx.clone(), &"pause".to_string(), &args())
+        .await
+        .unwrap_err();
         assert!(error.contains("Cannot pause card T-1"), "{error}");
         assert!(!f.agent.lock().await.planner_paused());
         assert!(storage::load_board(f.app.gcx.clone(), &f.task_id)

@@ -8,7 +8,7 @@ import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import {
   selectCurrentTasksById,
-  selectGoalById,
+  selectGoalWithPlanHistoryById,
   selectHasTasksById,
   selectTaskGoalExpandedById,
   selectTaskProgressById,
@@ -25,6 +25,7 @@ import type {
   GoalAttempt,
   GoalEvent,
   GoalSnapshot,
+  GoalPlanSnapshot,
   GoalStatus,
 } from "../../services/refact/types";
 import type { GoalBudgetCommand } from "../../services/refact/chatCommands";
@@ -567,6 +568,7 @@ const GoalSection: React.FC<GoalSectionProps> = ({
 
             {goal ? (
               <>
+                {goal.plan ? <GoalPlanSection plan={goal.plan} /> : null}
                 <GoalControls goal={goal} onControl={onControl} />
                 <GoalAttempts attempts={goal.attempts} />
                 <GoalEvents events={goal.events} />
@@ -578,6 +580,38 @@ const GoalSection: React.FC<GoalSectionProps> = ({
     </Collapsible.Root>
   );
 };
+
+export function GoalPlanSection({ plan }: { plan: GoalPlanSnapshot }) {
+  return (
+    <section aria-label="Goal plan">
+      <Text size="1" weight="medium">
+        Plan · v{plan.version}
+      </Text>
+      <Markdown>{plan.content}</Markdown>
+      {plan.checkpoint ? (
+        <Text size="1" color="gray">
+          Checkpoint {plan.checkpoint.revision} ·{" "}
+          {plan.checkpoint.folded_deltas} folded updates
+        </Text>
+      ) : null}
+      <details>
+        <summary>Plan history · {plan.delta_count} updates</summary>
+        {plan.history?.length ? (
+          plan.history.map((entry) => (
+            <section key={entry.seq} aria-label={`Plan revision ${entry.seq}`}>
+              <Text size="1">Revision {entry.seq}</Text>
+              <Markdown>{entry.content}</Markdown>
+            </section>
+          ))
+        ) : (
+          <Text size="1" color="gray">
+            Earlier updates are retained in conversation history.
+          </Text>
+        )}
+      </details>
+    </section>
+  );
+}
 
 type GoalBudgetEditorProps = {
   draft: GoalBudgetDraft;
@@ -770,7 +804,9 @@ export const TaskProgressWidget: React.FC = () => {
   const tasks = useAppSelector((state) =>
     selectCurrentTasksById(state, chatId),
   );
-  const goal = useAppSelector((state) => selectGoalById(state, chatId));
+  const goal = useAppSelector((state) =>
+    selectGoalWithPlanHistoryById(state, chatId),
+  );
   const isExpanded = useAppSelector((state) =>
     selectTaskWidgetExpandedById(state, chatId),
   );

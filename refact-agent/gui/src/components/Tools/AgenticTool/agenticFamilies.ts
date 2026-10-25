@@ -112,6 +112,15 @@ const FAMILY_TABLE: Partial<Record<string, AgenticFamilyDescriptor>> = {
     label: "Agent approval",
   },
   agent_resume: { family: "control", icon: "control", label: "Agent resume" },
+  agent_lifecycle: {
+    family: "control",
+    icon: "control",
+    label: "Agent lifecycle",
+  },
+  wait: { family: "inspect", icon: "inspect", label: "Wait" },
+  schedule: { family: "control", icon: "control", label: "Schedule" },
+  pause: { family: "control", icon: "control", label: "Pause" },
+  resume: { family: "control", icon: "control", label: "Resume" },
   pause_goal: { family: "control", icon: "control", label: "Pause goal" },
   snooze_goal: { family: "control", icon: "control", label: "Snooze goal" },
   set_goal: { family: "goal", icon: "goal", label: "Set goal" },
@@ -294,7 +303,32 @@ export const BOARD_RUNTIME_TOOL_NAMES: readonly string[] = [
   "task_mem_triage_done",
 ];
 
-export const AGENTIC_TOOL_NAMES: readonly string[] = Object.keys(FAMILY_TABLE);
+const HISTORICAL_TOOL_NAMES = new Set([
+  "set_plan",
+  "update_plan",
+  "get_plan",
+  "sleep",
+  "process_wait",
+  "agent_wait",
+  "wait_agents",
+  "cron_create",
+  "cron_list",
+  "cron_update",
+  "cron_delete",
+  "pause_goal",
+  "snooze_goal",
+  "pause_agent",
+  "resume_agent",
+  "agent_resume",
+  "compress_chat_probe",
+  "compress_chat_apply",
+  "ctx_probe",
+  "ctx_apply",
+]);
+
+export const AGENTIC_TOOL_NAMES: readonly string[] = Object.keys(
+  FAMILY_TABLE,
+).filter((name) => !HISTORICAL_TOOL_NAMES.has(name));
 
 /// Tool names that ToolsContent routes to their own purpose-built card before
 /// the agentic family lookup runs.
@@ -333,6 +367,11 @@ const TOOL_CARD_LABELS: Partial<Record<string, string>> = {
   work_inspect: "Work snapshot",
   agent_approval: "Child command approval",
   agent_resume: "Child resume",
+  agent_lifecycle: "Child lifecycle",
+  wait: "Execution receipt",
+  schedule: "Execution receipt",
+  pause: "Execution receipt",
+  resume: "Execution receipt",
   pause_goal: "Goal receipt",
   snooze_goal: "Goal receipt",
 };

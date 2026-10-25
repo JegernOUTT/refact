@@ -2403,6 +2403,7 @@ function invalidateDeletedTaskCaches(
       "Tasks",
       { type: "Tasks", id: taskId },
       { type: "Board", id: taskId },
+      { type: "TaskGoal", id: taskId },
       { type: "TaskTrajectories", id: `${taskId}/planner` },
       { type: "TaskTrajectories", id: `${taskId}/agents` },
     ]),

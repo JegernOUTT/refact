@@ -415,9 +415,6 @@ pub(crate) fn builtin_system_tools(config_path: String) -> Vec<Box<dyn Tool + Se
                 config_path: config_path.clone(),
             },
         ),
-        Box::new(crate::tools::tool_process::ToolProcessWait {
-            config_path: config_path.clone(),
-        }),
         Box::new(crate::tools::tool_process_subscribe::ToolProcessSubscribe {
             config_path: config_path.clone(),
         }),
@@ -429,21 +426,18 @@ pub(crate) fn builtin_system_tools(config_path: String) -> Vec<Box<dyn Tool + Se
         Box::new(crate::tools::tool_process::ToolShellServiceAlias {
             config_path: config_path.clone(),
         }),
-        Box::new(crate::tools::tool_sleep::ToolSleep {
+        Box::new(crate::tools::tool_wait::ToolWait {
             config_path: config_path.clone(),
         }),
-        Box::new(crate::tools::tool_cron_create::ToolCronCreate::new(
+        Box::new(crate::tools::tool_schedule::ToolSchedule::new(
             config_path.clone(),
         )),
-        Box::new(crate::tools::tool_cron_list::ToolCronList::new(
-            config_path.clone(),
-        )),
-        Box::new(crate::tools::tool_cron_delete::ToolCronDelete::new(
-            config_path.clone(),
-        )),
-        Box::new(crate::tools::tool_cron_update::ToolCronUpdate::new(
-            config_path.clone(),
-        )),
+        Box::new(crate::tools::tool_pause::ToolPause {
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_pause::ToolResume {
+            config_path: config_path.clone(),
+        }),
         Box::new(
             crate::tools::tool_add_workspace_folder::ToolAddWorkspaceFolder {
                 config_path: config_path.clone(),
@@ -715,15 +709,6 @@ async fn get_builtin_tools(
                 config_path: config_path.clone(),
             },
         ),
-        Box::new(crate::tools::tool_get_plan::ToolGetPlan::new(
-            config_path.clone(),
-        )),
-        Box::new(crate::tools::tool_set_plan::ToolSetPlan {
-            config_path: config_path.clone(),
-        }),
-        Box::new(crate::tools::tool_update_plan::ToolUpdatePlan {
-            config_path: config_path.clone(),
-        }),
         Box::new(crate::tools::tool_get_goal::ToolGetGoal::new(
             config_path.clone(),
         )),
@@ -734,12 +719,6 @@ async fn get_builtin_tools(
             config_path: config_path.clone(),
         }),
         Box::new(crate::tools::tool_validate_goal::ToolValidateGoal {
-            config_path: config_path.clone(),
-        }),
-        Box::new(crate::tools::tool_goal_pursuit_controls::ToolPauseGoal {
-            config_path: config_path.clone(),
-        }),
-        Box::new(crate::tools::tool_goal_pursuit_controls::ToolSnoozeGoal {
             config_path: config_path.clone(),
         }),
         Box::new(crate::tools::tool_handoff_to_mode::ToolHandoffToMode {
@@ -780,9 +759,6 @@ async fn get_builtin_tools(
         Box::new(crate::tools::tool_card_comment::ToolCardCommentList::new()),
         Box::new(crate::tools::tool_task_broadcast::ToolTaskBroadcast::new()),
         Box::new(crate::tools::tool_agent_lifecycle::ToolCancelAgent::new()),
-        Box::new(crate::tools::tool_agent_lifecycle::ToolPauseAgent::new()),
-        Box::new(crate::tools::tool_agent_lifecycle::ToolResumeAgent::new()),
-        Box::new(crate::tools::tool_task_wait_for_agents::ToolTaskWaitForAgents::new()),
         Box::new(crate::tools::tool_task_agent_finish::ToolTaskAgentFinish::new()),
         Box::new(crate::tools::tool_task_mark_card::ToolTaskMarkCardDone::new()),
         Box::new(crate::tools::tool_task_mark_card::ToolTaskMarkCardFailed::new()),
@@ -874,13 +850,10 @@ async fn get_builtin_tools(
         Box::new(crate::tools::tool_background_agents::ToolAgentStatus {
             config_path: config_path.clone(),
         }),
-        Box::new(crate::tools::tool_background_agents::ToolAgentWait {
-            config_path: config_path.clone(),
-        }),
         Box::new(crate::tools::tool_background_agents::ToolAgentResult {
             config_path: config_path.clone(),
         }),
-        Box::new(crate::tools::tool_background_agents::ToolAgentResume {
+        Box::new(crate::tools::tool_background_agents::ToolAgentLifecycle {
             config_path: config_path.clone(),
         }),
         Box::new(crate::tools::tool_background_agents::ToolAgentCancel {
@@ -1188,7 +1161,16 @@ mod tests {
             .flat_map(|group| group.tools)
             .map(|tool| tool.tool_description().name)
             .collect::<HashSet<_>>();
-        assert!(names.contains("set_trajectory_label"));
+        for name in [
+            "set_trajectory_label",
+            "wait",
+            "schedule",
+            "pause",
+            "resume",
+            "agent_lifecycle",
+        ] {
+            assert!(names.contains(name), "missing builtin {name}");
+        }
     }
 
     #[tokio::test]
@@ -1973,10 +1955,10 @@ mod tests {
             "agents_overview",
             "agent_list",
             "agent_status",
-            "agent_wait",
+            "wait",
             "agent_result",
             "agent_cancel",
-            "agent_resume",
+            "agent_lifecycle",
             "agent_message",
             "agent_mailbox",
             "agent_peer_grant",

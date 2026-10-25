@@ -5239,6 +5239,25 @@ pub async fn try_save_trajectory_with_intent(
     if !intent.persists() {
         return Ok(true);
     }
+    let planner = {
+        let session = session_arc.lock().await;
+        session
+            .thread
+            .task_meta
+            .as_ref()
+            .filter(|m| m.role == "planner")
+            .map(|m| (m.task_id.clone(), session.chat_id.clone()))
+    };
+    let owns_task = match planner {
+        Some((task_id, chat_id)) => crate::tasks::storage::load_board(app.gcx.clone(), &task_id)
+            .await?
+            .require_owner(&chat_id)
+            .is_ok(),
+        None => false,
+    };
+    if owns_task {
+        crate::tasks::goal::commit_session_task_goal(app.gcx.clone(), &session_arc).await?;
+    }
     if !trajectory_writer_rollout_enabled() {
         return try_save_trajectory_legacy_with_intent(app, session_arc, intent).await;
     }
@@ -5908,6 +5927,14 @@ pub async fn refresh_session_from_trajectory_if_stale(
         loaded.messages.len()
     );
     apply_loaded_external_update_to_session(&mut session, loaded, transition_identity_repaired);
+    session.task_goal_messages = None;
+    drop(session);
+    if let Err(error) =
+        crate::tasks::goal::hydrate_session_task_goal(app.gcx.clone(), &session_arc).await
+    {
+        tracing::warn!(%error, "Canonical task goal refresh unavailable");
+        return false;
+    }
     true
 }
 
@@ -20013,6 +20040,7 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let session = ChatSession {
+            task_goal_messages: None,
             planner_pause: None,
             planner_pause_revision: 0,
             planner_pause_pending_tools: false,
@@ -20180,6 +20208,7 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let mut session = ChatSession {
+            task_goal_messages: None,
             planner_pause: None,
             planner_pause_revision: 0,
             planner_pause_pending_tools: false,
@@ -20489,6 +20518,9 @@ mod tests {
     #[test]
     fn clamp_goal_snapshot_for_load_migrates_implicit_legacy_budget() {
         let goal = GoalSnapshot {
+            owner: None,
+            revision: 0,
+            plan: None,
             content: "ship legacy".to_string(),
             version: 1,
             active: true,
@@ -20518,6 +20550,9 @@ mod tests {
     #[test]
     fn clamp_goal_snapshot_for_load_heals_stale_verifying() {
         let goal = GoalSnapshot {
+            owner: None,
+            revision: 0,
+            plan: None,
             content: "ship it".to_string(),
             version: 1,
             active: true,
@@ -20540,6 +20575,9 @@ mod tests {
         );
 
         let inactive = GoalSnapshot {
+            owner: None,
+            revision: 0,
+            plan: None,
             content: "ship it".to_string(),
             version: 1,
             active: false,
@@ -20565,6 +20603,9 @@ mod tests {
     #[test]
     fn clamp_goal_snapshot_for_load_keeps_stopped_goals_stopped() {
         let goal = GoalSnapshot {
+            owner: None,
+            revision: 0,
+            plan: None,
             content: "ship it".to_string(),
             version: 1,
             active: true,
@@ -20594,6 +20635,9 @@ mod tests {
             ..GoalBudget::legacy_default_hard_limits()
         };
         let goal = GoalSnapshot {
+            owner: None,
+            revision: 0,
+            plan: None,
             content: "ship explicit".to_string(),
             version: 1,
             active: true,

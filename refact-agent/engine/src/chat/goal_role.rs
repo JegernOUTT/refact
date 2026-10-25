@@ -96,3 +96,106 @@ pub fn install_goal(
     }
     report
 }
+
+pub fn prepare_goal_update(
+    session: &crate::chat::types::ChatSession,
+    note: Option<&str>,
+    plan: Option<&refact_chat_api::GoalPlanMutation>,
+    source: &str,
+) -> Result<Vec<crate::call_validation::ChatMessage>, String> {
+    use refact_chat_api::GoalPlanMutation;
+    use serde_json::json;
+    if note.is_none() && plan.is_none() {
+        return Err("provide at least one of note or plan".into());
+    }
+    let projection = session.try_accepted_control_projection()?;
+    let base = refact_chat_api::goal_role::current_base_goal(&projection)
+        .ok_or("no goal to update; call set_goal first")?;
+    let known = session
+        .messages
+        .iter()
+        .chain(session.post_tool_side_effects.iter())
+        .chain(
+            session
+                .pending_deliveries
+                .iter()
+                .flat_map(|d| d.messages.iter()),
+        )
+        .map(|m| m.message_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut messages = projection
+        .messages
+        .iter()
+        .filter(|m| {
+            m.message_id.starts_with("legacy-plan-") && !known.contains(m.message_id.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(note) = note {
+        if note.trim().is_empty() {
+            return Err("argument `note` must be non-empty".into());
+        }
+        messages.push(crate::chat::internal_roles::goal_delta(
+            source,
+            json!({
+                "seq": effective_goal_delta_count(&projection) + 1,
+                "goal_id": base.message_id,
+            }),
+            note,
+        ));
+    }
+    if let Some(plan) = plan {
+        let existing = current_goal_plan(
+            &projection.messages,
+            crate::runtime_settings::plan_projection_limits(),
+            true,
+        );
+        let seq = existing.as_ref().map_or(0, |p| p.delta_count) + 1;
+        let message = match plan {
+            GoalPlanMutation::Install(plan) => {
+                if existing.is_some() {
+                    return Err("goal plan already exists; append a plan note instead".into());
+                }
+                let meta = goal_plan_metadata(&plan.content, &session.thread.mode)?;
+                crate::chat::internal_roles::goal_delta(
+                    source,
+                    json!({"target":"plan", "goal_id":base.message_id,"seq":0,"plan":meta}),
+                    &plan.content,
+                )
+            }
+            GoalPlanMutation::Append(plan) => {
+                if existing.is_none() {
+                    return Err("no goal plan to update; install plan content first".into());
+                }
+                if plan.note.trim().is_empty() {
+                    return Err("argument `plan.note` must be non-empty".into());
+                }
+                crate::chat::internal_roles::goal_delta(
+                    source,
+                    json!({"target":"plan","goal_id":base.message_id,"seq":seq}),
+                    &plan.note,
+                )
+            }
+        };
+        messages.push(message);
+    }
+    Ok(messages)
+}
+
+pub fn goal_plan_metadata(content: &str, mode: &str) -> Result<serde_json::Value, String> {
+    if content.trim().is_empty() {
+        return Err("argument `plan.content` must be non-empty".into());
+    }
+    let message = crate::chat::internal_roles::plan(mode, 1, content, None);
+    let mut meta = message.extra["plan"].clone();
+    meta["content"] = serde_json::json!(message.content.content_text_only());
+    meta["message_id"] = serde_json::json!(message.message_id);
+    Ok(meta)
+}
+
+pub fn goal_revision(session: &crate::chat::types::ChatSession) -> u64 {
+    session
+        .try_accepted_control_projection()
+        .map(|p| goal_revision_from_messages(&p.messages))
+        .unwrap_or_default()
+}

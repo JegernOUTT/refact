@@ -224,11 +224,13 @@ describe("FinalReportView", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders agent_finish reports inside a ToolCard wrapper", () => {
-    renderFinalReportTool(structuredPayload);
+  it("renders agent_finish reports inside a ToolCard wrapper", async () => {
+    const { user } = renderFinalReportTool(structuredPayload);
 
     expect(screen.getByTestId("final-report-tool")).toBeInTheDocument();
-    expect(screen.getByText("Task agent final report")).toBeInTheDocument();
+    const toggle = screen.getByRole("button", { expanded: false });
+    await user.click(toggle);
+    await user.click(screen.getByRole("button", { name: "More details" }));
     expect(screen.getByTestId("final-report-view")).toBeInTheDocument();
     expect(screen.getByText("Final Report")).toBeInTheDocument();
   });

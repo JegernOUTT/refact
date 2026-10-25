@@ -226,12 +226,9 @@ plan, provide `target_files` collision hints, or request an isolated worktree wi
 Use the registered agent interaction and lifecycle tools documented in the engine guide; new work must not
 use the retired `delegate` tool. Legacy delegate records remain displayable for trajectory compatibility.
 
-### Hidden Plan Roles
+### Goal-owned plans
 
-- `set_plan` installs one hidden base `plan` only, using exactly one of inline `content` or an absolute `.md` `path`; never call it twice in one chat.
-- `update_plan` records append-only hidden `event(plan_delta)` notes. `get_plan` reads the synthesized current plan from the base plan plus deltas.
-- Hidden `plan` and `plan_delta` are `Never` compression-exempt. Provider wire adapters lower the base as `<plan>` and deltas as `<plan-update>` user-context blocks so the base plan remains cache-safe.
-- Plan bodies are capped at 96KB chars, and transitions into Task Planner auto-create a pinned `initial-plan` task document when an initial plan is provided.
+Plans belong to the owning chat or task goal. Install one with `set_goal(content, criteria?, plan: { content })`; evolve it with `update_goal(note?, plan: { content } | { note })`; read the goal and nested plan projection/history with `get_goal`. There are no standalone plan tools. Legacy `plan` and `plan_delta` roles remain readable as historical context.
 
 ### Hidden Goal Budgets
 

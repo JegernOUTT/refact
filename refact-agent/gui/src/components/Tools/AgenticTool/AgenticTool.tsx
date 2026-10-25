@@ -40,6 +40,7 @@ import { ControlToolView } from "./ControlToolView";
 import { BoardToolView } from "./BoardToolView";
 import { DocToolView } from "./DocToolView";
 import { MemoryToolView } from "./MemoryToolView";
+import { ExecutionToolView } from "./ExecutionToolView";
 import { FamilyChildLink } from "./FamilyToolCard";
 import { CompactToolDetails } from "./CompactToolDetails";
 import { PagedText } from "./PagedText";
@@ -75,9 +76,12 @@ function familyBody({
     return (
       <ApprovalToolView content={content} pending={pending} failed={failed} />
     );
-  if (name === "agent_resume")
+  if (["wait", "schedule", "pause", "resume"].includes(name))
+    return <ExecutionToolView model={model} content={content} />;
+  if (name === "agent_resume" || name === "agent_lifecycle")
     return (
       <ResumeToolView
+        lifecycle={name === "agent_lifecycle"}
         content={content}
         pending={pending}
         failed={failed}

@@ -20,7 +20,7 @@ pub const BASE_STAGE_TOOLS: &[&str] = &[
     "knowledge",
     "process_start",
     "process_read",
-    "process_wait",
+    "wait",
     "process_kill",
 ];
 

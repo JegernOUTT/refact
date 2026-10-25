@@ -11,7 +11,10 @@ import classNames from "classnames";
 import { Check, ClipboardList, Copy } from "lucide-react";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
-import { selectPlanBannerState } from "../../../features/Chat/Thread/selectors";
+import {
+  selectGoalById,
+  selectPlanBannerState,
+} from "../../../features/Chat/Thread/selectors";
 import { Markdown } from "../../Markdown";
 import { Icon } from "../../ui";
 import styles from "./PlanBanner.module.css";
@@ -65,6 +68,9 @@ function writeCollapsed(threadId: string, collapsed: boolean): void {
 
 export const PlanBanner: React.FC<PlanBannerProps> = ({ threadId }) => {
   const copyToClipboard = useCopyToClipboard();
+  const goalPlan = useAppSelector(
+    (state) => selectGoalById(state, threadId)?.plan,
+  );
   const {
     base: plan,
     synthesizedText,
@@ -143,6 +149,7 @@ export const PlanBanner: React.FC<PlanBannerProps> = ({ threadId }) => {
     [copyToClipboard, planText],
   );
 
+  if (goalPlan) return null;
   if (!plan) return null;
 
   return (

@@ -9,7 +9,6 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::ContextEnum;
 use crate::chat::types::ChatSession;
 use crate::tools::tool_get_goal::ToolGetGoal;
-use crate::tools::tool_get_plan::ToolGetPlan;
 use crate::tools::tools_description::Tool;
 use refact_chat_api::role_projection::{fold_role_messages, ProjectedRole};
 
@@ -104,7 +103,7 @@ async fn get_plan(session: ChatSession, include_history: bool) -> Value {
     let chat_id = session.chat_id.clone();
     insert_session(&app, session).await;
     result_json(
-        ToolGetPlan::new(String::new())
+        ToolGetGoal::new(String::new())
             .tool_execute(
                 ccx(app, &chat_id).await,
                 &"read-plan".to_string(),
@@ -112,7 +111,7 @@ async fn get_plan(session: ChatSession, include_history: bool) -> Value {
             )
             .await
             .unwrap(),
-    )["plan"]
+    )["goal"]["plan"]
         .clone()
 }
 

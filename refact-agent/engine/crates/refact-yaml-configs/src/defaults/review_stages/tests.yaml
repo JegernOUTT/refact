@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: tests
 title: "Review: test adequacy"
 phase: parallel
@@ -14,7 +14,7 @@ preferred_tools:
   - search_pattern
   - process_start
   - process_read
-  - process_wait
+  - wait
 fallback: >-
   If tests cannot be executed, review the test sources statically and say in the summary that no
   test was actually run.

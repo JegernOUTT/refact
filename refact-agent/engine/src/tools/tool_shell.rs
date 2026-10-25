@@ -59,7 +59,7 @@ const SHELL_TRANSCRIPT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const TOOL_PTY_ROWS: u16 = 32;
 const TOOL_PTY_COLS: u16 = 120;
 const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-terminal (PTY). Enables interactive stdin via process_write_stdin and merges stdout+stderr into a single combined stream. Defeats some pipe-only output buffering. Defaults to false for foreground commands and true for background commands, except on Windows, where a pty cannot currently deliver output and pipes are used instead.";
-const RUN_IN_BACKGROUND_DESCRIPTION: &str = "Set to true to run this command in the background. Returns immediately with a process_id. Use process_read or process_wait to retrieve output later. You will receive a process_completed event when the process exits. Do not use '&' at the end of the command.";
+const RUN_IN_BACKGROUND_DESCRIPTION: &str = "Set to true to run this command in the background. Returns immediately with a process_id. Use process_read or wait with a process target to retrieve output later. You will receive a process_completed event when the process exits. Do not use '&' at the end of the command.";
 const SHELL_PROGRESS_MAX_CHARS_PER_STREAM: usize = 4 * 1024;
 const SHELL_PROGRESS_MIN_INTERVAL_MS: u64 = 250;
 
@@ -430,7 +430,7 @@ impl Tool for ToolShell {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Execute a single command, using the \"sh\" on unix-like systems and \"powershell.exe\" on windows. Use it for one-time tasks like dependencies installation. Don't call this unless you have to. Not suitable for regular work because it requires a confirmation at each step. Output is compressed by default - use output_filter and output_limit parameters to see specific parts if needed. Set run_in_background=true for long-running commands you will inspect later with process_read or process_wait. Foreground commands default to pipe streams, while background commands default to a pseudo-terminal (PTY) with interactive stdin and a combined stdout/stderr stream, except on Windows, which uses pipes for both; explicit tty overrides either default. The timeout parameter only applies to foreground commands (run_in_background=false); supplying timeout with run_in_background=true is an error — use process_wait or process_kill instead. In worktree-scoped chats, the default cwd and explicit workdir are enforced to the active worktree or privacy-permitted outside paths; OS confinement follows the terminal security mode. Note: sudo commands cannot be run - if you need elevated privileges, ask the user to run them directly.".to_string(),
+            description: "Execute a single command, using the \"sh\" on unix-like systems and \"powershell.exe\" on windows. Use it for one-time tasks like dependencies installation. Don't call this unless you have to. Not suitable for regular work because it requires a confirmation at each step. Output is compressed by default - use output_filter and output_limit parameters to see specific parts if needed. Set run_in_background=true for long-running commands you will inspect later with process_read or wait with a process target. Foreground commands default to pipe streams, while background commands default to a pseudo-terminal (PTY) with interactive stdin and a combined stdout/stderr stream, except on Windows, which uses pipes for both; explicit tty overrides either default. The timeout parameter only applies to foreground commands (run_in_background=false); supplying timeout with run_in_background=true is an error — use wait with a process target or process_kill instead. In worktree-scoped chats, the default cwd and explicit workdir are enforced to the active worktree or privacy-permitted outside paths; OS confinement follows the terminal security mode. Note: sudo commands cannot be run - if you need elevated privileges, ask the user to run them directly.".to_string(),
             input_schema: shell_input_schema(),
             output_schema: None,
             annotations: None,
@@ -748,7 +748,7 @@ fn append_sandbox_denial_hint(out: &mut String, status: &ExecStatus, sandbox_act
 
 fn background_started_output(snapshot: &ExecProcessSnapshot) -> String {
     format!(
-        "Process started in background\nprocess_id: {}\nshort_description: {}\nstatus: {}\nmode: {}\nUse process_read or process_wait to retrieve output later.\n",
+        "Process started in background\nprocess_id: {}\nshort_description: {}\nstatus: {}\nmode: {}\nUse process_read or wait with a process target to retrieve output later.\n",
         snapshot.meta.process_id,
         snapshot.meta.short_description,
         exec_status_label(&snapshot.status),
@@ -954,7 +954,7 @@ async fn parse_args_with_filter(
 
     if run_in_background && timeout.is_some() {
         return Err(
-            "timeout is not supported with run_in_background=true; use process_kill or process_wait instead"
+            "timeout is not supported with run_in_background=true; use process_kill or wait with a process target instead"
                 .to_string(),
         );
     }
@@ -1804,7 +1804,7 @@ mod tests {
 
         assert_eq!(
             err,
-            "timeout is not supported with run_in_background=true; use process_kill or process_wait instead"
+            "timeout is not supported with run_in_background=true; use process_kill or wait with a process target instead"
         );
     }
 

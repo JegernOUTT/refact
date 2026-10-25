@@ -11,7 +11,6 @@ const MAX_FILE_SIZE: usize = 1024 * 1024;
 const MODE_TRANSITION_CONTEXT_BUDGET_PERCENT: usize = 30;
 const MODE_TRANSITION_FILES_BUDGET_PERCENT: usize = 70;
 const MODE_TRANSITION_MAX_IMAGES: usize = 8;
-const MODE_TRANSITION_INITIAL_PLAN_SYMBOL_CAP: usize = 120_000;
 
 pub const RECONSTRUCTION_PROVENANCE_KEY: &str = "reconstruction";
 
@@ -535,15 +534,7 @@ pub async fn assemble_reconstruction_with_mandatory(
         controls.extend(messages.iter().filter(|m| is_plan_delta_event(m)).cloned());
         controls
     } else {
-        resolve_pinned_plan_text(messages, decisions)
-            .map(|text| {
-                vec![make_pinned_plan_message(
-                    &text,
-                    text_symbols(&text),
-                    target_mode,
-                )]
-            })
-            .unwrap_or_default()
+        Vec::new()
     };
     if preserve_goal_messages {
         if let Some(base) = current_base_goal_message(messages) {
@@ -995,13 +986,6 @@ fn goal_event_subkind(message: &ChatMessage) -> Option<&str> {
         .and_then(|subkind| subkind.as_str())
 }
 
-/// Tools whose result message is a self-contained plan/spec artifact worth pinning
-/// as the new chat's plan banner. `finish` is intentionally excluded: its report is
-/// already carried as a "Task Completion Report" user message by `find_finish_report`.
-fn is_plan_report_tool(name: &str) -> bool {
-    matches!(name, "task_done")
-}
-
 fn string_list_from_value(value: Option<&serde_json::Value>) -> Vec<String> {
     match value {
         Some(serde_json::Value::Array(items)) => items
@@ -1205,6 +1189,9 @@ fn goal_snapshot_for_transfer(
         .filter(|events| !events.is_empty())
         .unwrap_or_else(|| goal_events_from_messages(messages));
     Some(GoalSnapshot {
+        owner: existing.and_then(|goal| goal.owner.clone()),
+        revision: existing.map(|goal| goal.revision).unwrap_or(0),
+        plan: refact_chat_api::goal_role::current_goal_plan(messages, Default::default(), false),
         content: synthesized_goal_content(messages, base),
         version,
         active,
@@ -1254,6 +1241,7 @@ fn set_goal_message_metadata(
     meta.insert("supersedes".to_string(), serde_json::json!(supersedes));
     meta.insert("active".to_string(), serde_json::json!(goal.active));
     meta.insert("status".to_string(), serde_json::json!(goal.status));
+    meta.insert("owner".to_string(), serde_json::json!(goal.owner));
     meta.insert("budget".to_string(), serde_json::json!(goal.budget));
     meta.insert("progress".to_string(), serde_json::json!(goal.progress));
     meta.insert("attempts".to_string(), serde_json::json!(goal.attempts));
@@ -1358,7 +1346,12 @@ pub fn transfer_goal_ownership(
             ..Default::default()
         };
     };
-    if !source_snapshot.active || source_snapshot.status != GoalStatus::Active {
+    let paused_planning = source_snapshot.status == GoalStatus::Paused
+        && source_snapshot.plan.is_some()
+        && (target_mode == "task_planner"
+            || goal_meta_string(goal_meta(source_base), "mode").as_deref() == Some("plan"));
+    if !source_snapshot.active || (source_snapshot.status != GoalStatus::Active && !paused_planning)
+    {
         return GoalTransferResult {
             source_messages: source_messages.to_vec(),
             ..Default::default()
@@ -1373,11 +1366,13 @@ pub fn transfer_goal_ownership(
     let (transfer_message, transfer_goal_event) =
         transfer_event(source_chat_id, target_chat_id, at_ms);
     let mut target_goal = source_snapshot.clone();
+    target_goal.owner = Some(refact_chat_api::GoalOwner::Chat {
+        id: target_chat_id.to_string(),
+    });
     target_goal.version = target_goal_version(source_snapshot.version, target_existing_messages);
     target_goal.active = true;
-    target_goal.status = GoalStatus::Active;
     target_goal.progress = source_snapshot.progress.clone();
-    if target_goal.progress.started_at_ms == 0 {
+    if target_goal.status == GoalStatus::Active && target_goal.progress.started_at_ms == 0 {
         target_goal.progress.started_at_ms = at_ms;
     }
     target_goal.transferred_from = Some(source_chat_id.to_string());
@@ -1423,6 +1418,7 @@ pub fn transfer_goal_ownership(
     }
 }
 
+#[cfg(test)]
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1430,95 +1426,9 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Map `tool_call_id` -> tool name from every assistant `tool_calls` entry so we can
-/// label and classify the matching `tool` result messages.
-fn collect_tool_call_names(messages: &[ChatMessage]) -> std::collections::HashMap<String, String> {
-    let mut names = std::collections::HashMap::new();
-    for message in messages {
-        if let Some(tool_calls) = &message.tool_calls {
-            for tool_call in tool_calls {
-                names.insert(tool_call.id.clone(), tool_call.function.name.clone());
-            }
-        }
-    }
-    names
-}
-
-/// When the conversation has exactly one plan-like tool report, pin it deterministically
-/// even if the analysis model selected nothing (covers tool/handoff paths that have no
-/// model step, and acts as a safety net for the mode-transition path).
-fn deterministic_plan_report_text(messages: &[ChatMessage]) -> Option<String> {
-    let tool_names = collect_tool_call_names(messages);
-    let mut candidate: Option<&ChatMessage> = None;
-    for message in messages {
-        if message.role != "tool" {
-            continue;
-        }
-        let Some(tool_name) = tool_names.get(&message.tool_call_id).map(String::as_str) else {
-            continue;
-        };
-        if !is_plan_report_tool(tool_name) {
-            continue;
-        }
-        if candidate.is_some() {
-            // Ambiguous (more than one plan-like report); defer to the model instead.
-            return None;
-        }
-        candidate = Some(message);
-    }
-    let text = candidate?.content.content_text_only();
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(normalize_plan_report_text(trimmed))
-    }
-}
-
-/// Resolve a `MSG_ID:N` reference (as emitted by the analysis model in `<plan_source>`)
-/// to that message's verbatim text content.
-fn plan_text_from_source_reference(messages: &[ChatMessage], reference: &str) -> Option<String> {
-    let idx = reference
-        .trim()
-        .trim_start_matches("MSG_ID:")
-        .trim()
-        .parse::<usize>()
-        .ok()?;
-    let message = messages.get(idx)?;
-    let text = message.content.content_text_only();
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(normalize_plan_report_text(trimmed))
-    }
-}
-
-/// Choose the plan text to pin into the new chat when there is no existing `plan`-role
-/// message to carry. Priority: explicit `<plan_source>` MSG_ID -> model-authored
-/// `<plan>`/substantive handoff -> single deterministic plan-like report.
-fn resolve_pinned_plan_text(
-    messages: &[ChatMessage],
-    decisions: &ParsedDecisions,
-) -> Option<String> {
-    if let Some(reference) = decisions.plan_source.as_deref() {
-        if let Some(text) = plan_text_from_source_reference(messages, reference) {
-            return Some(text);
-        }
-    }
-    if let Some(plan) = decisions
-        .initial_plan
-        .as_deref()
-        .map(str::trim)
-        .filter(|plan| !plan.is_empty())
-    {
-        return Some(plan.to_string());
-    }
-    deterministic_plan_report_text(messages)
-}
-
 /// Build a fresh `plan`-role message (the PlanBanner artifact) from pinned plan text,
 /// capping its size to keep new-chat context bounded.
+#[cfg(test)]
 pub fn make_pinned_plan_message(text: &str, symbol_cap: usize, mode: &str) -> ChatMessage {
     let normalized_text = normalize_plan_report_text(text);
     let text = normalized_text.as_str();
@@ -1611,13 +1521,6 @@ pub fn carried_plan_messages(messages: &[ChatMessage], mode: &str) -> Vec<ChatMe
                 .cloned(),
         );
         return carried;
-    }
-    if let Some(text) = deterministic_plan_report_text(messages) {
-        return vec![make_pinned_plan_message(
-            &text,
-            MODE_TRANSITION_INITIAL_PLAN_SYMBOL_CAP,
-            mode,
-        )];
     }
     Vec::new()
 }
@@ -1890,18 +1793,6 @@ async fn assemble_with_budget(
                     .filter(|message| is_plan_delta_event(message))
                     .cloned(),
             );
-        } else if let Some(pinned_plan_text) =
-            resolve_pinned_plan_text(original_messages, decisions)
-        {
-            let initial_plan = pinned_plan_text.trim();
-            if !initial_plan.is_empty() {
-                let plan_budget = remaining_messages_symbols
-                    .max(MODE_TRANSITION_INITIAL_PLAN_SYMBOL_CAP.min(text_symbols(initial_plan)));
-                let plan_message = make_pinned_plan_message(initial_plan, plan_budget, target_mode);
-                let used = text_symbols(&plan_message.content.content_text_only());
-                new_messages.push(plan_message);
-                remaining_messages_symbols = remaining_messages_symbols.saturating_sub(used);
-            }
         }
     }
     let finish_report = find_finish_report(original_messages);
@@ -2746,50 +2637,6 @@ MSG_ID:2
     }
 
     #[tokio::test]
-    async fn assemble_new_chat_emits_plan_role_not_user_message() {
-        let plan = "# Feature Implementation Plan\n\n## Tasks\n\n### Task 1: Build\n- [ ] Verify: `cargo test`";
-        let messages = vec![ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::SimpleText("prepare handoff".to_string()),
-            ..Default::default()
-        }];
-        let decisions = ParsedDecisions {
-            initial_plan: Some(plan.to_string()),
-            ..Default::default()
-        };
-
-        let new_messages = assemble_new_chat(&messages, &decisions, "agent", &[])
-            .await
-            .unwrap();
-        let plan_messages: Vec<_> = new_messages
-            .iter()
-            .filter(|msg| msg.role == "plan")
-            .collect();
-
-        assert_eq!(plan_messages.len(), 1);
-        assert_eq!(plan_messages[0].content.content_text_only(), plan);
-        assert_eq!(plan_messages[0].preserve, Some(true));
-        assert_eq!(
-            plan_messages[0].extra["plan"]["mode"],
-            serde_json::json!("agent")
-        );
-        assert_eq!(
-            plan_messages[0].extra["plan"]["version"],
-            serde_json::json!(1)
-        );
-        assert!(plan_messages[0].extra["plan"]["supersedes"].is_null());
-        assert!(
-            plan_messages[0].extra["plan"]["created_at_ms"]
-                .as_u64()
-                .unwrap_or(0)
-                > 0
-        );
-        assert!(!new_messages.iter().any(|msg| {
-            msg.role == "user" && msg.content.content_text_only().contains("## Initial Plan")
-        }));
-    }
-
-    #[tokio::test]
     async fn assemble_new_chat_preserves_existing_plan_and_deltas() {
         let mut older_plan_extra = serde_json::Map::new();
         older_plan_extra.insert(
@@ -3109,71 +2956,6 @@ MSG_ID:2
     }
 
     #[tokio::test]
-    async fn assemble_new_chat_pins_plan_from_plan_source_reference() {
-        let plan_body = "# Strategic Plan\n\n## Tasks\n- Build the thing\n- Verify: `cargo test`";
-        let messages = vec![
-            ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::SimpleText("plan this".to_string()),
-                ..Default::default()
-            },
-            assistant_tool_call("call_plan", "task_done"),
-            tool_result("call_plan", plan_body),
-        ];
-        let decisions = ParsedDecisions {
-            plan_source: Some("MSG_ID:2".to_string()),
-            ..Default::default()
-        };
-
-        let new_messages = assemble_new_chat(&messages, &decisions, "agent", &[])
-            .await
-            .unwrap();
-        let plan_messages: Vec<_> = new_messages
-            .iter()
-            .filter(|msg| msg.role == "plan")
-            .collect();
-
-        assert_eq!(plan_messages.len(), 1);
-        assert_eq!(plan_messages[0].content.content_text_only(), plan_body);
-        assert_eq!(plan_messages[0].preserve, Some(true));
-    }
-
-    #[tokio::test]
-    async fn assemble_new_chat_normalizes_task_done_plan_source_reference() {
-        let task_done_payload = serde_json::json!({
-            "type": "task_done",
-            "summary": "Completed task",
-            "report": "## Report\n\nAll done.",
-            "files_changed": ["src/main.rs"],
-        })
-        .to_string();
-        let messages = vec![
-            assistant_tool_call("call_task_done", "task_done"),
-            tool_result("call_task_done", &task_done_payload),
-        ];
-        let decisions = ParsedDecisions {
-            plan_source: Some("MSG_ID:1".to_string()),
-            ..Default::default()
-        };
-
-        let new_messages = assemble_new_chat(&messages, &decisions, "agent", &[])
-            .await
-            .unwrap();
-        let plan_messages: Vec<_> = new_messages
-            .iter()
-            .filter(|msg| msg.role == "plan")
-            .collect();
-
-        assert_eq!(plan_messages.len(), 1);
-        let plan_text = plan_messages[0].content.content_text_only();
-        assert!(plan_text.contains("**Completed task**"));
-        assert!(plan_text.contains("## Report"));
-        assert!(plan_text.contains("All done."));
-        assert!(plan_text.contains("- `src/main.rs`"));
-        assert!(!plan_text.contains("task_done"));
-    }
-
-    #[tokio::test]
     async fn assemble_new_chat_existing_plan_wins_over_plan_source() {
         let messages = vec![
             plan_role_message(1, "EXISTING_BASE_PLAN"),
@@ -3230,32 +3012,6 @@ MSG_ID:2
             serde_json::json!(1)
         );
         assert!(!plan_text.contains("task_done"));
-    }
-
-    #[tokio::test]
-    async fn assemble_new_chat_auto_pins_single_plan_report() {
-        let plan_body = "# Auto Plan\n- step one\n- step two";
-        let messages = vec![
-            ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::SimpleText("go".to_string()),
-                ..Default::default()
-            },
-            assistant_tool_call("call_plan", "task_done"),
-            tool_result("call_plan", plan_body),
-        ];
-        let decisions = ParsedDecisions::default();
-
-        let new_messages = assemble_new_chat(&messages, &decisions, "agent", &[])
-            .await
-            .unwrap();
-        let plan_messages: Vec<_> = new_messages
-            .iter()
-            .filter(|msg| msg.role == "plan")
-            .collect();
-
-        assert_eq!(plan_messages.len(), 1);
-        assert_eq!(plan_messages[0].content.content_text_only(), plan_body);
     }
 
     #[tokio::test]
@@ -3322,45 +3078,6 @@ MSG_ID:2
         assert!(plan_text.contains("- `src/existing.rs`"));
         assert_eq!(carried[0].message_id, "plan-2");
         assert_eq!(carried[0].extra["plan"]["version"], serde_json::json!(2));
-        assert!(!plan_text.contains("task_done"));
-    }
-
-    #[test]
-    fn carried_plan_messages_pins_single_report_when_no_plan_role() {
-        let messages = vec![
-            assistant_tool_call("call_plan", "task_done"),
-            tool_result("call_plan", "REPORT BODY"),
-        ];
-
-        let carried = carried_plan_messages(&messages, "agent");
-        assert_eq!(carried.len(), 1);
-        assert_eq!(carried[0].role, "plan");
-        assert_eq!(carried[0].content.content_text_only(), "REPORT BODY");
-        assert_eq!(carried[0].preserve, Some(true));
-    }
-
-    #[test]
-    fn carried_plan_messages_normalizes_single_task_done_report() {
-        let task_done_payload = serde_json::json!({
-            "type": "task_done",
-            "summary": "Completed task",
-            "report": "Done body",
-            "files_changed": "src/lib.rs, src/main.rs",
-        })
-        .to_string();
-        let messages = vec![
-            assistant_tool_call("call_task_done", "task_done"),
-            tool_result("call_task_done", &task_done_payload),
-        ];
-
-        let carried = carried_plan_messages(&messages, "agent");
-        assert_eq!(carried.len(), 1);
-        assert_eq!(carried[0].role, "plan");
-        let plan_text = carried[0].content.content_text_only();
-        assert!(plan_text.contains("**Completed task**"));
-        assert!(plan_text.contains("Done body"));
-        assert!(plan_text.contains("- `src/lib.rs`"));
-        assert!(plan_text.contains("- `src/main.rs`"));
         assert!(!plan_text.contains("task_done"));
     }
 

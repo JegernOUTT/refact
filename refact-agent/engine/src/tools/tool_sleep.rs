@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use refact_core::chat_types::{PendingDelivery, PushMode};
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
@@ -18,14 +17,11 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::postprocessing::pp_command_output::OutputFilter;
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType, WaitInterrupt};
+use crate::tools::tools_description::{WaitInterrupt};
 
 const MIN_DURATION_MS: u64 = 100;
 const MAX_DURATION_MS: u64 = 3_600_000;
 const MIN_TICK_INTERVAL_MS: u64 = 5_000;
-pub struct ToolSleep {
-    pub config_path: String,
-}
 
 #[derive(Clone)]
 struct SleepRequest {
@@ -41,105 +37,65 @@ struct SleepOutcome {
     ticks: Vec<ChatMessage>,
 }
 
-#[async_trait]
-impl Tool for ToolSleep {
-    fn tool_description(&self) -> ToolDesc {
-        ToolDesc {
-            name: "sleep".to_string(),
-            display_name: "Sleep".to_string(),
-            source: ToolSource {
-                source_type: ToolSourceType::Builtin,
-                config_path: self.config_path.clone(),
-            },
-            experimental: false,
-            allow_parallel: true,
-            description: "Wait for the specified duration. Interruptible by user or incoming messages at any time. Use when you have nothing to do, when waiting for something, or when the user asks you to pause. Prefer this over Bash(sleep ...) — it doesn't hold a shell process. You can call this concurrently with other tools.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "push": PushMode::schema(),
-                    "duration_ms": {
-                        "type": "integer",
-                        "minimum": 100,
-                        "maximum": 3600000,
-                        "description": "Sleep duration in ms (max 1h)."
-                    },
-                    "tick_interval_ms": {
-                        "type": "integer",
-                        "minimum": 5000,
-                        "description": "Optional. If set, tick markers are collected during sleep and enqueued after the sleep tool result to preserve provider tool-result ordering. Sleep remains user-interruptible at any time."
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Short description (≤80 chars)."
-                    }
-                },
-                "required": ["duration_ms", "description"]
-            }),
-            output_schema: None,
-            annotations: None,
-        }
-    }
+pub(crate) async fn execute_duration_wait(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    tool_call_id: &String,
+    args: &HashMap<String, Value>,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    let request = parse_sleep_request(args)?;
+    let (app, chat_id) = {
+        let ccx = ccx.lock().await;
+        (ccx.app.clone(), ccx.chat_id.clone())
+    };
+    let interrupt = WaitInterrupt::from_context(&ccx).await;
+    let outcome = sleep_with_ticks_interruptible(
+        request.duration_ms,
+        request.tick_interval_ms,
+        interrupt.clone(),
+    )
+    .await;
+    let SleepOutcome {
+        slept_ms,
+        interrupted,
+        ticks,
+    } = outcome;
+    queue_ticks(
+        app.clone(),
+        chat_id.clone(),
+        ticks,
+        request.push,
+        tool_call_id,
+    )
+    .await?;
 
-    async fn tool_execute(
-        &mut self,
-        ccx: Arc<AMutex<AtCommandsContext>>,
-        tool_call_id: &String,
-        args: &HashMap<String, Value>,
-    ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let request = parse_sleep_request(args)?;
-        let (app, chat_id) = {
-            let ccx = ccx.lock().await;
-            (ccx.app.clone(), ccx.chat_id.clone())
-        };
-        let interrupt = WaitInterrupt::from_context(&ccx).await;
-        let outcome = sleep_with_ticks_interruptible(
-            request.duration_ms,
-            request.tick_interval_ms,
-            interrupt.clone(),
-        )
-        .await;
-        let SleepOutcome {
-            slept_ms,
-            interrupted,
-            ticks,
-        } = outcome;
-        queue_ticks(
-            app.clone(),
-            chat_id.clone(),
-            ticks,
-            request.push,
-            tool_call_id,
-        )
-        .await?;
-
-        let mut body = json!({
-            "slept_ms": slept_ms,
-            "interrupted": interrupted,
-        });
-        if interrupted {
-            body["reason"] = json!(interrupt.reason(slept_ms as f64 / 1000.0));
-        }
-        let mut extra = serde_json::Map::new();
-        extra.insert("sleep".to_string(), body.clone());
-        let messages = vec![ContextEnum::ChatMessage(ChatMessage {
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText(body.to_string()),
-            tool_calls: None,
-            tool_call_id: tool_call_id.clone(),
-            tool_failed: Some(false),
-            output_filter: Some(OutputFilter::no_limits()),
-            extra,
-            ..Default::default()
-        })];
-        tracing::info!(
-            slept_ms = slept_ms,
-            interrupted = interrupted,
-            description = %request.description,
-            "sleep tool completed"
-        );
-        Ok((false, messages))
+    let mut body = json!({
+        "outcome": if interrupted { "interrupted" } else { "completed" },
+        "target": "duration",
+        "slept_ms": slept_ms,
+        "interrupted": interrupted,
+    });
+    if interrupted {
+        body["reason"] = json!(interrupt.reason(slept_ms as f64 / 1000.0));
     }
+    let mut extra = serde_json::Map::new();
+    extra.insert("wait".to_string(), body.clone());
+    let messages = vec![ContextEnum::ChatMessage(ChatMessage {
+        role: "tool".to_string(),
+        content: ChatContent::SimpleText(body.to_string()),
+        tool_calls: None,
+        tool_call_id: tool_call_id.clone(),
+        tool_failed: Some(false),
+        output_filter: Some(OutputFilter::no_limits()),
+        extra,
+        ..Default::default()
+    })];
+    tracing::info!(
+        slept_ms = slept_ms,
+        interrupted = interrupted,
+        description = %request.description,
+        "sleep tool completed"
+    );
+    Ok((false, messages))
 }
 
 fn parse_sleep_request(args: &HashMap<String, Value>) -> Result<SleepRequest, String> {
@@ -288,7 +244,7 @@ fn elapsed_ms(started: TokioInstant) -> u64 {
 fn tick_event(elapsed_ms: u64, remaining_ms: u64) -> ChatMessage {
     event(
         EventSubkind::Tick,
-        "tool.sleep",
+        "tool.wait",
         json!({
             "elapsed_ms": elapsed_ms,
             "remaining_ms": remaining_ms,
@@ -314,10 +270,10 @@ async fn queue_ticks(
     if let Some(session) = session {
         let mut session = session.lock().await;
         session.queue_post_tool_delivery(PendingDelivery::with_id(
-            format!("sleep-ticks-{tool_call_id}"),
+            format!("wait-ticks-{tool_call_id}"),
             ticks,
             push,
-            "tool.sleep",
+            "tool.wait",
             false,
         ))?;
         Ok(())
@@ -508,8 +464,8 @@ mod tests {
                 id: tool_call_id.to_string(),
                 index: Some(0),
                 function: ChatToolFunction {
-                    name: "sleep".to_string(),
-                    arguments: r#"{"duration_ms":100,"tick_interval_ms":50,"description":"wait"}"#
+                    name: "wait".to_string(),
+                    arguments: r#"{"target":{"kind":"duration","duration_ms":100,"tick_interval_ms":5000},"description":"wait"}"#
                         .to_string(),
                 },
                 tool_type: "function".to_string(),
@@ -652,25 +608,6 @@ mod tests {
         assert_eq!(outcome.ticks[0].extra["event"]["subkind"], json!("tick"));
     }
 
-    #[test]
-    fn sleep_schema_documents_post_result_ticks() {
-        let tool = ToolSleep {
-            config_path: String::new(),
-        };
-        let desc = tool.tool_description();
-        let tick_desc = desc.input_schema["properties"]["tick_interval_ms"]["description"]
-            .as_str()
-            .expect("tick_interval_ms description must be a string");
-        assert!(
-            tick_desc.contains("enqueued after the sleep tool result"),
-            "tick_interval_ms description should mention post-result enqueueing, got: {tick_desc}"
-        );
-        assert!(
-            !tick_desc.contains("react mid-sleep"),
-            "tick_interval_ms description must not promise mid-sleep reaction, got: {tick_desc}"
-        );
-    }
-
     #[tokio::test(start_paused = true)]
     async fn sleep_tick_side_effects_are_after_tool_result() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -685,16 +622,13 @@ mod tests {
             .add_message(assistant_tool_call("call-sleep"));
 
         let ccx = make_ccx(gcx).await;
-        let mut tool = ToolSleep {
-            config_path: String::new(),
-        };
         let args = HashMap::from([
             ("duration_ms".to_string(), json!(5_100)),
             ("tick_interval_ms".to_string(), json!(5_000)),
             ("description".to_string(), json!("wait")),
         ]);
         let run = tokio::spawn(async move {
-            tool.tool_execute(ccx, &"call-sleep".to_string(), &args)
+            execute_duration_wait(ccx, &"call-sleep".to_string(), &args)
                 .await
                 .unwrap()
         });

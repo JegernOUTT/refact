@@ -1603,6 +1603,7 @@ mod tests {
         ));
         let mut locked = session.lock().await;
         let command = refact_chat_api::ChatCommand::SetGoal {
+            plan: None,
             content: "must not install".into(),
             budget: None,
             criteria: None,

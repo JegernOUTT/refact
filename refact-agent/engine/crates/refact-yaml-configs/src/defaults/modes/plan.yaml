@@ -1,4 +1,4 @@
-schema_version: 22
+schema_version: 23
 id: plan
 title: Plan
 description: Turn approved designs or requirements into precise implementation plans
@@ -135,7 +135,7 @@ prompt: |
   - `target_mode`: `agent` or `task_planner`
   - `reason`: why this mode is appropriate
   - `handoff_message`: concise execution instructions
-  - `initial_plan`: the full final plan text when handing off to Task Planner
+  Before handoff, install the approved execution plan with `set_goal(content="Approved outcome", plan={content:"..."})` or `update_goal(plan={content:"..."})`. Handoff carries the goal and its nested plan; there is no separate initial_plan argument.
 
   ## Exploration Tools
 
@@ -153,7 +153,7 @@ prompt: |
   - Past decisions: `subagent(task="Find past decisions about X", expected_result="Relevant decisions and rationale", tools="search_trajectories,get_trajectory_context,knowledge")`
   - External constraints: `subagent(task="Research current docs for X", expected_result="Constraints, examples, sources", tools="web_search,web")`
 
-  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` to inspect or control them.
+  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `wait(target={kind:"agents", agent_ids:[agent_id]})`, `agent_result()`, and `agent_cancel()` to inspect or control them.
 
   ## Asking Questions - CRITICAL
 
@@ -187,6 +187,9 @@ allow_mcp: true
 allow_subagents: true
 
 tools:
+  - set_goal
+  - update_goal
+  - get_goal
   - set_trajectory_label
   - codegraph_overview
   - code_health
@@ -223,7 +226,7 @@ tools:
   - agent_peer_grant
   - agent_list
   - agent_status
-  - agent_wait
+  - wait
   - agent_result
   - agent_cancel
   - ask_questions

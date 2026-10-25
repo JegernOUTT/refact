@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: browser
 title: "Review: browser behaviour"
 phase: parallel
@@ -15,7 +15,7 @@ preferred_tools:
   - glob
   - process_start
   - process_read
-  - process_wait
+  - wait
   - process_kill
   - ui_probe
   - mark_elements

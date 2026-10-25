@@ -14,7 +14,7 @@ use super::dispatch::dispatch_authorized_calls;
 fn wait_call(arguments: Value) -> AuthorizedCall {
     AuthorizedCall {
         op: "wait",
-        tool: "agent_wait",
+        tool: "wait",
         arguments,
     }
 }
@@ -65,7 +65,7 @@ async fn fixture() -> (
         )
         .await,
     ));
-    ccx.lock().await.child_tool_ceiling = Some(ToolsPolicy::Only(vec!["agent_wait".into()]));
+    ccx.lock().await.child_tool_ceiling = Some(ToolsPolicy::Only(vec!["wait".into()]));
     (app, ccx, thread, workspace)
 }
 
@@ -104,13 +104,13 @@ async fn write_pretool_hook(app: &crate::app_state::AppState, command: &str) {
 }
 
 #[tokio::test]
-async fn authorized_wait_call_reaches_the_real_agent_wait_tool() {
+async fn authorized_wait_call_reaches_the_real_wait_tool() {
     let (app, ccx, thread, _workspace) = fixture().await;
 
     let result = dispatch(app, ccx, &thread, &[wait_call(json!({"agent_id": "nope"}))]).await;
 
     let failure = result.unwrap_err();
-    assert!(failure.contains("agent_wait"), "{failure}");
+    assert!(failure.contains("wait"), "{failure}");
     assert!(
         failure.contains("Background agent 'nope' not found in this chat."),
         "{failure}"
@@ -167,13 +167,13 @@ async fn rewrite_adding_undeclared_argument_is_refused() {
 #[tokio::test]
 async fn call_outside_ceiling_is_refused_by_the_dispatcher() {
     let (app, ccx, thread, _workspace) = fixture().await;
-    ccx.lock().await.child_tool_ceiling = Some(ToolsPolicy::None);
+    ccx.lock().await.child_tool_ceiling = Some(ToolsPolicy::Only(vec!["agent_wait".into()]));
 
     let error = dispatch(app, ccx, &thread, &[wait_call(json!({"agent_id": "nope"}))])
         .await
         .unwrap_err();
 
-    assert!(error.contains("code mode call 0 (agent_wait) is outside the caller's authority"));
+    assert!(error.contains("code mode call 0 (wait) is outside the caller's authority"));
     assert!(!error.contains("Tool is outside accepted child authority"));
 }
 
@@ -189,7 +189,7 @@ async fn confirmation_required_call_fails_closed() {
     tokio::fs::create_dir_all(&mode_dir).await.unwrap();
     tokio::fs::write(
         mode_dir.join("agent.yaml"),
-        "schema_version: 1\nid: agent\ntitle: Confirmation test\ndescription: test\nspecific: false\nprompt: ''\nplan_template: ''\ntools:\n  - agent_wait\nallow_integrations: false\nallow_mcp: false\nallow_subagents: false\ntool_confirm:\n  rules:\n    - match: agent_wait\n      action: ask\n",
+        "schema_version: 1\nid: agent\ntitle: Confirmation test\ndescription: test\nspecific: false\nprompt: ''\nplan_template: ''\ntools:\n  - wait\nallow_integrations: false\nallow_mcp: false\nallow_subagents: false\ntool_confirm:\n  rules:\n    - match: wait\n      action: ask\n",
     )
     .await
     .unwrap();
@@ -200,7 +200,7 @@ async fn confirmation_required_call_fails_closed() {
         .await
         .unwrap_err();
 
-    assert!(error.contains("code mode call 0 (agent_wait) requires confirmation"));
+    assert!(error.contains("code mode call 0 (wait) requires confirmation"));
     assert!(error.contains("code mode cannot pause for approval"));
 }
 
@@ -208,7 +208,7 @@ async fn confirmation_required_call_fails_closed() {
 fn rewritten_arguments_reject_host_operation_extras() {
     let operation = crate::code_mode::hosts::operation("wait").unwrap();
     assert!(operation
-        .validate(&json!({"agent_id": "nope", "extra": true}))
+        .validate(&json!({"agent_id": "nope", "target": {"kind": "process", "process_id": "p"}}))
         .unwrap_err()
-        .contains("has no argument `extra`"));
+        .contains("has no argument `target`"));
 }

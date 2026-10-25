@@ -56,6 +56,8 @@ pub struct GoalVerificationFork {
     pub epoch: Option<u64>,
     pub trajectory_version: u64,
     pub generation: u64,
+    pub goal_revision: u64,
+    pub owner_revision: u64,
 }
 
 impl GoalVerificationFork {
@@ -64,6 +66,8 @@ impl GoalVerificationFork {
             epoch: Some(session.goal_ledger_last_seq()),
             trajectory_version: session.trajectory_version,
             generation: session.goal_verification_generation(),
+            goal_revision: crate::chat::goal_role::goal_revision(session),
+            owner_revision: session.goal.as_ref().map_or(0, |g| g.revision),
         }
     }
 
@@ -169,6 +173,12 @@ pub async fn verify_goal_before_completion(
     session_arc: Arc<AMutex<ChatSession>>,
     trigger: &str,
 ) -> GoalCompletionGateOutcome {
+    if let Err(error) =
+        crate::tasks::goal::hydrate_session_task_goal(app.gcx.clone(), &session_arc).await
+    {
+        tracing::warn!(%error, "Task goal verification hydration refused");
+        return GoalCompletionGateOutcome::VerificationUnavailable;
+    }
     let chat_id = session_arc.lock().await.chat_id.clone();
     if crate::agents::seal::is_sealed(&app, &chat_id).await {
         return GoalCompletionGateOutcome::Passthrough;
@@ -1206,8 +1216,36 @@ pub async fn apply_goal_verdict_for_chat(
         crate::buddy::supervision_proof::discard_pending(&chat_id, &reply.verifier_reply);
         return GoalVerificationApplyOutcome::Sealed;
     }
-    let mut session = session_arc.lock().await;
-    apply_goal_verdict_guarded_with_delivery(&mut session, trigger, reply, fork, push, tool_call_id)
+    if crate::tasks::goal::hydrate_session_task_goal(app.gcx.clone(), session_arc)
+        .await
+        .is_err()
+    {
+        crate::buddy::supervision_proof::discard_pending(&chat_id, &reply.verifier_reply);
+        let mut session = session_arc.lock().await;
+        if session.goal_status == Some(GoalStatus::Verifying) {
+            session.goal_set_status_reason(GoalStatus::Paused, "goal owner unavailable");
+            session.purge_goal_generated_wakes();
+        }
+        return GoalVerificationApplyOutcome::Superseded;
+    }
+    let outcome = {
+        let mut session = session_arc.lock().await;
+        apply_goal_verdict_guarded_with_delivery(
+            &mut session,
+            trigger,
+            reply,
+            fork,
+            push,
+            tool_call_id,
+        )
+    };
+    if crate::tasks::goal::commit_session_task_goal(app.gcx.clone(), session_arc)
+        .await
+        .is_err()
+    {
+        return GoalVerificationApplyOutcome::Superseded;
+    }
+    outcome
 }
 
 #[cfg(test)]
@@ -1230,7 +1268,9 @@ pub fn apply_goal_verdict_guarded_with_delivery(
 ) -> GoalVerificationApplyOutcome {
     let superseded = session.goal.is_some()
         && (session.trajectory_version != fork.trajectory_version
-            || session.goal_verification_generation() != fork.generation);
+            || session.goal_verification_generation() != fork.generation
+            || crate::chat::goal_role::goal_revision(session) != fork.goal_revision
+            || session.goal.as_ref().map_or(0, |g| g.revision) != fork.owner_revision);
     if superseded {
         crate::buddy::supervision_proof::discard_pending(&session.chat_id, &reply.verifier_reply);
         if session.goal_status == Some(GoalStatus::Verifying) {

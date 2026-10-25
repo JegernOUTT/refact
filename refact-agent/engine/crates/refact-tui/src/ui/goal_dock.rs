@@ -39,6 +39,9 @@ pub(crate) struct GoalPresentation {
     status: String,
     active: bool,
     version: u64,
+    owner: Option<String>,
+    revision: Option<u64>,
+    plan: Option<String>,
     budget: GoalBudget,
     progress: GoalProgress,
     latest_verdict: Option<String>,
@@ -56,12 +59,30 @@ impl GoalPresentation {
         let goal = messages
             .iter()
             .filter(|message| message.role == TranscriptRole::Goal)
-            .max_by_key(|message| goal_version(message))?;
-        let metadata = goal.extra.get("goal").unwrap_or(&Value::Null);
+            .max_by_key(|message| goal_version(message));
+        let metadata = runtime
+            .and_then(|runtime| runtime.goal.projection.as_ref())
+            .or_else(|| goal.and_then(|goal| goal.extra.get("goal")))?;
         let mut presentation = Self {
             status: string_field(metadata, "status").unwrap_or_else(|| "active".to_string()),
             active: bool_field(metadata, "active").unwrap_or(true),
-            version: goal_version(goal).max(1),
+            version: metadata.get("version").and_then(Value::as_u64).unwrap_or(1),
+            owner: metadata.get("owner").and_then(|owner| {
+                Some(format!(
+                    "{} {}",
+                    owner.get("kind")?.as_str()?,
+                    owner.get("id")?.as_str()?
+                ))
+            }),
+            revision: metadata.get("revision").and_then(Value::as_u64),
+            plan: metadata.get("plan").and_then(|plan| {
+                Some(format!(
+                    "Implementation plan · v{} · {} updates\n{}",
+                    plan.get("version").and_then(Value::as_u64).unwrap_or(1),
+                    plan.get("delta_count").and_then(Value::as_u64).unwrap_or(0),
+                    plan.get("content")?.as_str()?
+                ))
+            }),
             budget: GoalBudget::from_value(metadata.get("budget")),
             progress: GoalProgress::from_value(metadata.get("progress")),
             latest_verdict: None,
@@ -137,6 +158,15 @@ impl GoalPresentation {
                     .unwrap_or("PENDING")
             ),
         ];
+        if let Some(owner) = &self.owner {
+            lines.push(format!("Owner: {owner}"));
+        }
+        if let Some(revision) = self.revision {
+            lines.push(format!("Revision: {revision}"));
+        }
+        if let Some(plan) = &self.plan {
+            lines.extend(plan.lines().map(str::to_string));
+        }
         if self.gaps.is_empty() {
             lines.push("Verifier gaps: none reported".to_string());
         } else {
@@ -636,6 +666,9 @@ mod tests {
     fn details_show_verifier_gaps_transfers_and_human_pursuit_labels() {
         let goal = json!({
             "version": 3,
+            "owner": {"kind": "task", "id": "task-1"},
+            "revision": 7,
+            "plan": {"content": "Run checks", "version": 2, "delta_count": 1},
             "status": "transferred",
             "active": false,
             "progress": {"turns_used": 2, "tokens_used": 100},
@@ -653,6 +686,9 @@ mod tests {
         let details = presentation.detail_lines().join("\n");
 
         assert!(details.contains("Status: TRANSFERRED"));
+        assert!(details.contains("Owner: task task-1"));
+        assert!(details.contains("Revision: 7"));
+        assert!(details.contains("Implementation plan · v2 · 1 updates\nRun checks"));
         assert!(details.contains("- run tests"));
         assert!(details.contains("Transferred from: chat-a"));
         assert!(details.contains("Transferred to: chat-b"));

@@ -72,10 +72,122 @@ async fn unbaselined_known_shipped_checksum_upgrades_without_backup() {
         .find(|(filename, _)| filename == "ask.yaml")
         .unwrap()
         .1;
-    let old = embedded
-        .replace("schema_version: 14\n", "schema_version: 13\n")
-        .replace("  - agent_mailbox\n  - agent_peer_grant\n", "")
-        .replace("    - match: \"agent_peer_grant\"\n      action: ask\n", "");
+    let old = r###"schema_version: 14
+id: ask
+title: Ask
+description: Quick Q&A with web research capability
+specific: false
+
+thread_defaults:
+  include_project_info: false
+  checkpoints_enabled: false
+  auto_approve_editing_tools: false
+  auto_approve_dangerous_commands: false
+
+ui:
+  order: 5
+  tags: [chat, research]
+
+prompt: |
+  You are Buddy, a persistent coding companion for this project. Today your job is to answer questions directly and concisely.
+
+  %BUDDY_PERSONALITY%
+
+  For factual questions, use your knowledge. For current information, APIs, or technical accuracy, use web tools.
+
+  Guidelines:
+  - Be direct and helpful
+  - Use `web_search` for quick lookups
+  - Use `web` to fetch specific URLs
+  - If the question requires codebase access, suggest switching to Explore or Agent mode
+
+  ## Background Subagents
+  Use `subagent()` for complex research that needs multiple web searches:
+  - "Compare options" → `subagent(task="Research and compare X vs Y", expected_result="Comparison table with pros/cons", tools="web_search,web")`
+  - "Gather documentation" → `subagent(task="Find official docs for API X", expected_result="Summary with links", tools="web_search,web")`
+
+  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` to inspect or control them.
+
+  ## Asking Questions - CRITICAL
+  **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
+
+  Use `ask_questions()` whenever you:
+  - Need clarification on the question
+  - Want to narrow down the scope
+  - Have follow-up questions
+  - Need user preferences
+
+  Example: `ask_questions(questions='[{"id":"q1","type":"free_text","text":"Can you be more specific about what you need?"}]')`
+
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
+
+  %RICH_CONTENT_INSTRUCTIONS%
+
+  %SYSTEM_INFO%
+
+  %MODELS_INFO%
+
+allow_integrations: false
+allow_mcp: true
+allow_subagents: false
+
+tools:
+  - set_trajectory_label
+  - codegraph_overview
+  - code_health
+  - git_risk
+  - code_why
+  - code_duplication
+  - dead_code
+  - security_scan
+  - pr_blast
+  - code_map
+  - add_workspace_folder
+  - web
+  - web_search
+  - subagent
+  - agents_overview
+  - agent_message
+  - agent_mailbox
+  - agent_peer_grant
+  - agent_list
+  - agent_status
+  - agent_wait
+  - agent_result
+  - agent_cancel
+  - ask_questions
+
+tool_confirm:
+  rules:
+    - match: "codegraph_overview"
+      action: auto
+    - match: "code_health"
+      action: auto
+    - match: "git_risk"
+      action: auto
+    - match: "code_why"
+      action: auto
+    - match: "code_duplication"
+      action: auto
+    - match: "dead_code"
+      action: auto
+    - match: "security_scan"
+      action: auto
+    - match: "pr_blast"
+      action: auto
+    - match: "code_map"
+      action: auto
+    - match: "subagent"
+      action: auto
+    - match: "agents_overview"
+      action: auto
+    - match: "agent_message"
+      action: auto
+    - match: "agent_peer_grant"
+      action: ask
+    - match: "*"
+      action: auto
+"###.to_string();
     assert!(extract_schema_version(&old) < extract_schema_version(&embedded));
     assert!(is_known_shipped_checksum(
         "modes/ask.yaml",

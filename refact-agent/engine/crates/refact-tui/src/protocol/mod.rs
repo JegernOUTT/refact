@@ -457,6 +457,7 @@ pub struct RuntimeGoalBudgetSnapshot {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeGoalSnapshot {
+    pub projection: Option<Value>,
     pub active: Option<bool>,
     pub status: Option<String>,
     pub turn_count: Option<u64>,
@@ -481,7 +482,7 @@ pub struct RuntimeUpdatedEvent {
 }
 
 impl RuntimeUpdatedEvent {
-    fn from_raw(raw: &Value) -> Self {
+    pub(crate) fn from_raw(raw: &Value) -> Self {
         let goal = raw.get("goal").unwrap_or(raw);
         let budget = goal
             .get("budget")
@@ -497,6 +498,7 @@ impl RuntimeUpdatedEvent {
         Self {
             runtime_state: optional_value_string(raw, &["state", "runtime_state"]),
             goal: RuntimeGoalSnapshot {
+                projection: raw.get("goal").filter(|goal| goal.is_object()).cloned(),
                 active: first_value(goal, &["active", "goal_active"])
                     .or_else(|| raw.get("goal_active"))
                     .and_then(Value::as_bool),

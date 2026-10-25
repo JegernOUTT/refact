@@ -86,7 +86,7 @@ const INVENTORY = Array.from(
 
 describe("AgenticTool card inventory", () => {
   test("every agentic family and tool name owns a dedicated card", () => {
-    const families = AGENTIC_TOOL_NAMES.map(
+    const families = [...AGENTIC_TOOL_NAMES, "get_plan"].map(
       (name) => lookupAgenticFamily(name)?.family,
     );
     for (const family of Object.keys(AGENTIC_CARD_LABELS)) {
@@ -267,7 +267,10 @@ describe("AgenticTool registry wiring", () => {
   });
 
   test("shows pending state when no result arrived", () => {
-    renderTools([], [toolCall("agent_wait", { agent_id: "abc" })]);
+    renderTools(
+      [],
+      [toolCall("wait", { target: { kind: "agent", agent_id: "abc" } })],
+    );
 
     openFullFamily();
     expect(screen.getByTestId("agentic-tool-pending")).toBeInTheDocument();
@@ -301,16 +304,16 @@ describe("AgenticTool registry wiring", () => {
 
   test("routes resume receipts to the typed cap and continuation card", () => {
     renderTools(
-      [toolResult("agent_resume", JSON.stringify(resumeReceipt()))],
+      [toolResult("agent_lifecycle", JSON.stringify(resumeReceipt()))],
       [
-        toolCall("agent_resume", {
+        toolCall("agent_lifecycle", {
           action: "inspect",
           agent_id: "stopped-child",
         }),
       ],
     );
     openFullFamily();
-    expect(screen.getByLabelText("Child resume")).toHaveTextContent(
+    expect(screen.getByLabelText("Child lifecycle")).toHaveTextContent(
       "Execution cap reached",
     );
     expect(screen.queryByTestId("agentic-tool-body")).toBeNull();

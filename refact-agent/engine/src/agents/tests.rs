@@ -1899,12 +1899,15 @@ async fn spawn_seed_installs_hidden_plan_goal_and_caps_steps() {
     assert_eq!(completed.goal_summary.as_deref(), Some("Goal body"));
     assert!(completed.plan_present);
     assert_eq!(max_steps, 2);
-    let plan = messages
-        .iter()
-        .find(|message| message.role == "plan")
-        .unwrap();
-    assert_eq!(plan.extra["plan"]["mode"], "agent");
-    assert_eq!(plan.extra["plan"]["version"], 1);
+    let plan = refact_chat_api::goal_role::current_goal_plan(
+        &messages,
+        crate::runtime_settings::plan_projection_limits(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(plan.mode, "agent");
+    assert_eq!(plan.version, 1);
+    assert_eq!(plan.content, "Plan body");
     let goal = messages
         .iter()
         .find(|message| message.role == "goal")

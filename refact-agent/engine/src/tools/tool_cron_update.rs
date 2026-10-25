@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
@@ -10,15 +9,12 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::scheduler::schedule::parse_schedule;
 use crate::scheduler::{
-    active_durable_cron_store, push_from_value, push_schema, session_cron_store, CronStore, Job,
-    Trigger,
+    active_durable_cron_store, push_from_value, session_cron_store, CronStore, Job, Trigger,
 };
 use refact_core::chat_types::PushMode;
 use crate::tools::tool_cron_create::human_schedule_for_trigger;
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
-pub struct ToolCronUpdate {
-    pub config_path: String,
+pub struct CronUpdateRuntime {
     #[cfg(test)]
     test_session_store: Option<Arc<dyn CronStore>>,
     #[cfg(test)]
@@ -27,10 +23,9 @@ pub struct ToolCronUpdate {
     test_now_ms: Option<u64>,
 }
 
-impl ToolCronUpdate {
-    pub fn new(config_path: String) -> Self {
+impl CronUpdateRuntime {
+    pub fn new(_config_path: String) -> Self {
         Self {
-            config_path,
             #[cfg(test)]
             test_session_store: None,
             #[cfg(test)]
@@ -42,13 +37,12 @@ impl ToolCronUpdate {
 
     #[cfg(test)]
     fn with_stores(
-        config_path: String,
+        _config_path: String,
         session_store: Arc<dyn CronStore>,
         durable_store: Option<Arc<dyn CronStore>>,
         now_ms: u64,
     ) -> Self {
         Self {
-            config_path,
             test_session_store: Some(session_store),
             test_durable_store: durable_store,
             test_now_ms: Some(now_ms),
@@ -84,40 +78,7 @@ impl ToolCronUpdate {
     }
 }
 
-#[async_trait]
-impl Tool for ToolCronUpdate {
-    fn tool_description(&self) -> ToolDesc {
-        ToolDesc {
-            name: "cron_update".to_string(),
-            display_name: "Update Scheduled Task".to_string(),
-            source: ToolSource {
-                source_type: ToolSourceType::Builtin,
-                config_path: self.config_path.clone(),
-            },
-            experimental: false,
-            allow_parallel: false,
-            description: "Update, pause, resume, or run a scheduled task by ID.".to_string(),
-            input_schema: json!({
-                "type":"object",
-                "properties": {
-                    "id": {"type":"string"},
-                    "cron": {"type":"string"},
-                    "every": {"type":"string"},
-                    "at": {"type":"string"},
-                    "tz": {"type":"string"},
-                    "prompt": {"type":"string"},
-                    "description": {"type":"string"},
-                    "enabled": {"type":"boolean"},
-                    "run_now": {"type":"boolean"},
-                    "push": push_schema()
-                },
-                "required": ["id"]
-            }),
-            output_schema: None,
-            annotations: None,
-        }
-    }
-
+impl CronUpdateRuntime {
     async fn tool_execute(
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
@@ -157,33 +118,27 @@ impl Tool for ToolCronUpdate {
             })],
         ))
     }
-
-    fn tool_depends_on(&self) -> Vec<String> {
-        vec![]
-    }
-
-    fn has_config_path(&self) -> Option<String> {
-        Some(self.config_path.clone())
-    }
 }
 
 #[derive(Debug)]
-struct CronUpdateInput {
-    id: String,
-    cron: Option<String>,
-    every: Option<String>,
-    at: Option<String>,
-    tz: Option<String>,
-    prompt: Option<String>,
-    description: Option<String>,
-    enabled: Option<bool>,
-    run_now: bool,
+pub(crate) struct CronUpdateInput {
+    pub(crate) id: String,
+    pub(crate) cron: Option<String>,
+    pub(crate) every: Option<String>,
+    pub(crate) at: Option<String>,
+    pub(crate) tz: Option<String>,
+    pub(crate) prompt: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) run_now: bool,
     /// `None` keeps the saved policy; omission must never reset it to append.
-    push: Option<PushMode>,
+    pub(crate) push: Option<PushMode>,
 }
 
 impl CronUpdateInput {
     fn from_args(args: &HashMap<String, Value>) -> Result<Self, String> {
+        if args.contains_key("enabled") {
+            return Err("schedule update does not accept enabled; use pause or resume".to_string());
+        }
         let id = required_string_arg(args, "id")?;
         let description = optional_string_arg(args, "description")?;
         if let Some(description) = &description {
@@ -199,7 +154,6 @@ impl CronUpdateInput {
             tz: optional_string_arg(args, "tz")?,
             prompt: optional_string_arg(args, "prompt")?,
             description,
-            enabled: optional_bool_arg(args, "enabled")?,
             run_now: optional_bool_arg(args, "run_now")?.unwrap_or(false),
             push: push_from_value(args.get("push"))?,
         })
@@ -226,23 +180,29 @@ async fn load_job_store(
     Err(format!("Scheduled task `{id}` not found"))
 }
 
-fn apply_update(job: &mut Job, input: CronUpdateInput, now_ms: u64) -> Result<(), String> {
+pub(crate) fn apply_update(
+    job: &mut Job,
+    input: CronUpdateInput,
+    now_ms: u64,
+) -> Result<(), String> {
     if input.has_schedule_update() {
         let trigger = parse_schedule_update(&input, now_ms)?;
         if matches!(trigger, Trigger::Once { .. }) {
             job.recurring = false;
+            job.auto_expire_after_ms = 0;
         }
         job.set_trigger(trigger);
+        super::tool_cron_create::validate_next_run(
+            job,
+            now_ms,
+            crate::scheduler::scheduler_timezone(),
+        )?;
     }
     if let Some(prompt) = input.prompt {
-        set_prompt(job, prompt);
+        set_prompt(job, prompt)?;
     }
     if let Some(description) = input.description {
         job.description = description;
-    }
-    if let Some(enabled) = input.enabled {
-        job.enabled = enabled;
-        job.paused_at_ms = if enabled { None } else { Some(now_ms) };
     }
     if let Some(push) = input.push {
         job.push = push;
@@ -264,9 +224,12 @@ fn parse_schedule_update(input: &CronUpdateInput, now_ms: u64) -> Result<Trigger
     .map_err(|error| format!("Invalid schedule: {error}"))
 }
 
-fn set_prompt(job: &mut Job, prompt: String) {
+fn set_prompt(job: &mut Job, prompt: String) -> Result<(), String> {
     if let crate::scheduler::Action::AgentTurn { prompt: target, .. } = &mut job.action {
         *target = prompt;
+        Ok(())
+    } else {
+        Err("prompt can only be changed for agent-turn jobs".to_string())
     }
 }
 
@@ -300,6 +263,41 @@ fn optional_bool_arg(args: &HashMap<String, Value>, name: &str) -> Result<Option
             .map(Some)
             .ok_or_else(|| format!("argument `{name}` is not a boolean: {value:?}")),
     }
+}
+
+pub(crate) async fn execute_update(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    tool_call_id: &String,
+    args: &HashMap<String, Value>,
+) -> Result<(bool, Vec<ContextEnum>), String> {
+    CronUpdateRuntime::new(String::new())
+        .tool_execute(ccx, tool_call_id, args)
+        .await
+}
+
+pub(crate) async fn set_schedule_enabled(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    id: &str,
+    enabled: bool,
+) -> Result<Value, String> {
+    let runtime = CronUpdateRuntime::new(String::new());
+    let (mut job, store) = load_job_store(
+        id,
+        runtime.session_store(),
+        runtime.durable_store(ccx).await?,
+    )
+    .await?;
+    set_job_enabled(&mut job, enabled, unix_now_ms());
+    if !store.replace(job.clone()).await? {
+        return Err(format!("Scheduled task `{id}` not found"));
+    }
+    crate::scheduler::runner_change_notify().notify_waiters();
+    Ok(json!({"id": job.id, "enabled": job.enabled, "paused": !job.enabled, "updated": true}))
+}
+
+pub(crate) fn set_job_enabled(job: &mut Job, enabled: bool, now_ms: u64) {
+    job.enabled = enabled;
+    job.paused_at_ms = if enabled { None } else { Some(now_ms) };
 }
 
 fn unix_now_ms() -> u64 {
@@ -359,12 +357,25 @@ mod tests {
     }
 
     async fn run_tool(
-        tool: &mut ToolCronUpdate,
+        tool: &mut CronUpdateRuntime,
         ccx: Arc<AMutex<AtCommandsContext>>,
         items: &[(&str, Value)],
     ) -> Value {
+        let mut arguments = args(items);
+        if let Some(enabled) = arguments.remove("enabled") {
+            let id = arguments["id"].as_str().unwrap();
+            let (mut job, store) = load_job_store(
+                id,
+                tool.session_store(),
+                tool.durable_store(ccx.clone()).await.unwrap(),
+            )
+            .await
+            .unwrap();
+            set_job_enabled(&mut job, enabled.as_bool().unwrap(), tool.now_ms());
+            store.replace(job).await.unwrap();
+        }
         let (_, contexts) = tool
-            .tool_execute(ccx, &"call".to_string(), &args(items))
+            .tool_execute(ccx, &"call".to_string(), &arguments)
             .await
             .unwrap();
         let ContextEnum::ChatMessage(message) = contexts.into_iter().next().unwrap() else {
@@ -408,7 +419,7 @@ mod tests {
             .await
             .unwrap();
         let mut tool =
-            ToolCronUpdate::with_stores(String::new(), session_store.clone(), None, 2_000);
+            CronUpdateRuntime::with_stores(String::new(), session_store.clone(), None, 2_000);
         let ccx = test_ccx().await;
 
         let result = run_tool(
@@ -439,7 +450,7 @@ mod tests {
         task.auto_expire_after_ms = DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS;
         session_store.add(task).await.unwrap();
         let mut tool =
-            ToolCronUpdate::with_stores(String::new(), session_store.clone(), None, 2_000);
+            CronUpdateRuntime::with_stores(String::new(), session_store.clone(), None, 2_000);
         let ccx = test_ccx().await;
 
         run_tool(
@@ -462,7 +473,7 @@ mod tests {
             .await
             .unwrap();
         let mut tool =
-            ToolCronUpdate::with_stores(String::new(), session_store.clone(), None, 5_000);
+            CronUpdateRuntime::with_stores(String::new(), session_store.clone(), None, 5_000);
         let ccx = test_ccx().await;
 
         run_tool(
@@ -490,7 +501,7 @@ mod tests {
         task.paused_at_ms = Some(1_000);
         session_store.add(task).await.unwrap();
         let mut tool =
-            ToolCronUpdate::with_stores(String::new(), session_store.clone(), None, 5_000);
+            CronUpdateRuntime::with_stores(String::new(), session_store.clone(), None, 5_000);
         let ccx = test_ccx().await;
 
         run_tool(
@@ -518,7 +529,7 @@ mod tests {
             .await
             .unwrap();
         let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
-        let mut tool = ToolCronUpdate::with_stores(
+        let mut tool = CronUpdateRuntime::with_stores(
             String::new(),
             session_store,
             Some(durable_store.clone()),
@@ -543,7 +554,7 @@ mod tests {
     #[tokio::test]
     async fn cron_update_unknown_id_errors() {
         let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
-        let mut tool = ToolCronUpdate::with_stores(String::new(), session_store, None, 5_000);
+        let mut tool = CronUpdateRuntime::with_stores(String::new(), session_store, None, 5_000);
         let ccx = test_ccx().await;
 
         let err = tool

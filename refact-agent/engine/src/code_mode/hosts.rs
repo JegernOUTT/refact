@@ -110,7 +110,7 @@ pub static HOST_OPERATIONS: &[HostOperation] = &[
     },
     HostOperation {
         name: "wait",
-        tool: "agent_wait",
+        tool: "wait",
         summary: "Wait for one child to reach a terminal state.",
         arguments: WAIT_ARGUMENTS,
     },
@@ -232,7 +232,7 @@ mod tests {
             vec![
                 ("spawn", "subagent"),
                 ("claim", "board_claim"),
-                ("wait", "agent_wait"),
+                ("wait", "wait"),
                 ("report", "progress_report"),
             ]
         );

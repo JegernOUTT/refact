@@ -82,7 +82,7 @@ impl Tool for ToolSubagent {
             "required": ["type"]
         });
         let goal_schema = json!({
-            "description": "Optional installed goal: null, a nonempty string, or an object requiring nonempty content. Content must contain non-whitespace text. A budget-only object is invalid; use goal.budget.max_turns for a step limit.",
+            "description": format!("Optional installed goal: null, a nonempty string, or an object requiring nonempty content. Content must contain non-whitespace text. A budget-only object is invalid; use goal.budget.max_turns for a step limit. For criteria[].verify_command: {}", crate::chat::verify_cmd::VERIFY_COMMAND_DESCRIPTION),
             "oneOf": [
                 {"type": "null"},
                 {"type": "string", "minLength": 1},
@@ -90,6 +90,7 @@ impl Tool for ToolSubagent {
                     "type": "object",
                     "properties": {
                         "content": {"type": "string", "minLength": 1, "description": "Full goal body, required and nonempty after trimming whitespace."},
+                        "plan": {"type":"object", "properties":{"content":{"type":"string", "minLength":1}}, "required":["content"], "additionalProperties":false},
                         "criteria": {
                             "description": "Optional structured success criteria the verifier checks one by one; omitted or null means no criteria.",
                             "oneOf": [
@@ -141,7 +142,7 @@ impl Tool for ToolSubagent {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Spawn a background-only, stateful child trajectory for research or implementation. The child inherits all parent-chat tools by default; task wording such as 'read-only' does not restrict capabilities. Use tools and sandbox explicitly for capability boundaries. The child can select a configured model or named model, and may receive a goal with a step budget, plan, target files, and an isolated worktree that auto-merges by default. A trajectory link is returned immediately and completion is auto-pushed. Use `agents_overview` and `agent_message` to coordinate with peers.".to_string(),
+            description: "Spawn a background-only, stateful child trajectory for research or implementation. The child inherits all parent-chat tools by default; task wording such as 'read-only' does not restrict capabilities. Use tools and sandbox explicitly for capability boundaries. The child can select a configured model or named model, and may receive a goal with a step budget and optional goal.plan, target files, and an isolated worktree that auto-merges by default. A trajectory link is returned immediately and completion is auto-pushed. Use `agents_overview` and `agent_message` to coordinate with peers.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -153,7 +154,6 @@ impl Tool for ToolSubagent {
                     "model_type": {"type": "string", "enum": MODEL_TYPES, "description": "Configured model slot. Ignored when model_name is supplied."},
                     "model_name": {"type": "string", "description": "Concrete chat model id. Takes precedence over model_type."},
                     "goal": goal_schema,
-                    "plan": {"type": "string", "description": "Optional installed plan; it is ground truth for the child."},
                     "worktree": {"type": "string", "enum": ["inherit", "isolated"], "default": "inherit", "description": "Use the parent worktree or create an isolated worktree."},
                     "push": PushMode::schema(),
                     "auto_merge": {"type": "boolean", "default": true, "description": "Only for worktree=isolated. Squash-merge completion automatically."},
@@ -181,7 +181,6 @@ impl Tool for ToolSubagent {
                             "history_mode": {"type": "string", "enum": ["fresh", "fork_completed_prefix"], "description": "fresh uses only explicit context; fork_completed_prefix also copies parent history up to its last complete tool boundary. Parent system policy is excluded; copied goals/plans are historical context, not child control state."},
                             "token_budget": {"type": "integer", "minimum": 1, "description": "Cap on estimated tokens for resolved context entries."},
                             "include_parent_goal": {"type": "boolean", "default": false, "description": "Copy the parent's current goal as historical reference context; it never becomes the child's goal."},
-                            "include_parent_plan": {"type": "boolean", "default": false, "description": "Copy the parent's current plan as historical reference context; it is not installed as the child's plan."},
                             "deliverable": {
                                 "type": "object",
                                 "description": "Deliverable contract checked structurally on the child's final message: required Markdown sections, one ```json block validated against a JSON-schema subset, and an Evidence section. An unmet contract is reported to the parent; it is never proof of success.",
@@ -666,7 +665,19 @@ fn parse_subagent_args_with_limits(
     }
     let model_name = parse_optional_string(args, "model_name")?;
     let goal = parse_goal(args)?;
-    let plan = parse_optional_string(args, "plan")?;
+    if args.contains_key("plan") {
+        return Err("subagent.plan was removed; use goal.plan.content".into());
+    }
+    let plan = args
+        .get("goal")
+        .and_then(Value::as_object)
+        .and_then(|goal| goal.get("plan"))
+        .map(|value| {
+            serde_json::from_value::<refact_chat_api::GoalPlanInstall>(value.clone())
+                .map(|plan| plan.content)
+                .map_err(|error| format!("invalid goal.plan: {error}"))
+        })
+        .transpose()?;
     let worktree =
         parse_optional_string(args, "worktree")?.unwrap_or_else(|| "inherit".to_string());
     let auto_merge_present =
@@ -2209,7 +2220,7 @@ mod tests {
             assert!(schema.get(union).is_none());
         }
         let properties = schema["properties"].as_object().unwrap();
-        for absent in ["wait", "max_steps", "notify_parent"] {
+        for absent in ["wait", "max_steps", "notify_parent", "plan"] {
             assert!(
                 !properties.contains_key(absent),
                 "{absent} must not be exposed"
@@ -2223,7 +2234,6 @@ mod tests {
             "model_type",
             "model_name",
             "goal",
-            "plan",
             "worktree",
             "auto_merge",
             "push",
@@ -2501,7 +2511,7 @@ mod tests {
             let mut request = args();
             request.insert(
                 "launch_spec".into(),
-                json!({"include_parent_goal": true, "include_parent_plan": true, "deliverable": contract}),
+                json!({"include_parent_goal": true, "deliverable": contract}),
             );
             let mut preview = request.clone();
             preview.insert("action".into(), json!("preview"));
@@ -2526,7 +2536,7 @@ mod tests {
                 && source["trusted_as_instructions"] == false));
             assert!(sources
                 .iter()
-                .any(|source| source["type"] == "parent_plan" && source["historical"] == true));
+                .any(|source| source["type"] == "parent_goal" && source["historical"] == true));
             assert!(app.agents.list_all().await.is_empty());
             let result = app
                 .tool_registry

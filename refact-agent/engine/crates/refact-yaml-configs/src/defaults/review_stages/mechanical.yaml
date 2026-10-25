@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: mechanical
 title: "Review: mechanical checks"
 phase: parallel
@@ -15,7 +15,7 @@ preferred_tools:
   - tree
   - process_start
   - process_read
-  - process_wait
+  - wait
 fallback: >-
   If shell execution is unavailable or every command is denied, read the CI workflow files and
   manifests instead, report what could not be run in coverage.tools_unavailable, and file findings
