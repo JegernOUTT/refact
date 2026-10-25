@@ -9,6 +9,14 @@ import {
 import { useThreadId } from "../../features/Chat/Thread";
 import type { ToolCall } from "../../services/refact/types";
 import { Markdown } from "../Markdown";
+import { CompactToolDetails } from "../Tools/AgenticTool/CompactToolDetails";
+import {
+  COMPACT_HEADLINE_CHARS,
+  compactFacts,
+  compactText,
+  compactTransportPresentation,
+  readCompactRecord,
+} from "../Tools/AgenticTool/compactPresentation";
 import { Badge, Icon } from "../ui";
 import { ToolCard, type ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "./useStoredOpen";
@@ -275,7 +283,7 @@ export const TaskDocumentsView: React.FC<TaskDocumentsToolProps> = ({
   toolType,
 }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
+  const [isOpen, handleToggle] = useStoredOpen(storeKey);
   const threadId = useThreadId();
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, threadId),
@@ -290,7 +298,63 @@ export const TaskDocumentsView: React.FC<TaskDocumentsToolProps> = ({
     maybeResult && typeof maybeResult.content === "string"
       ? maybeResult.content
       : null;
-  const rows = useMemo(() => (content ? parseRows(content) : []), [content]);
+  const failed = maybeResult?.tool_failed === true;
+  const rows = useMemo(
+    () =>
+      toolType === "doc_list" && content && !failed ? parseRows(content) : [],
+    [toolType, content, failed],
+  );
+  const document = useMemo(
+    () =>
+      toolType === "doc_get" && content && !failed
+        ? parseDocument(content)
+        : null,
+    [toolType, content, failed],
+  );
+  const args = readCompactRecord(toolCall.function.arguments);
+  const requestedSlug =
+    typeof args?.slug === "string" ? compactText(args.slug) : null;
+  const name =
+    compactText(document?.meta.name) ?? compactText(document?.meta.slug);
+  const facts =
+    toolType === "doc_list"
+      ? compactFacts(
+          rows.length > 0
+            ? [
+                { label: "Documents shown", value: rows.length },
+                { label: "Coverage", value: "Parsed rows in this response" },
+              ]
+            : [],
+        )
+      : compactFacts([
+          name
+            ? { label: "Name", value: name }
+            : { label: "Requested document", value: requestedSlug },
+          { label: "Version", value: document?.meta.version },
+          { label: "Kind", value: document?.meta.kind },
+        ]);
+  const hasParsedDetails =
+    rows.length > 0 ||
+    Object.values(document?.meta ?? {}).some(
+      (value) => value.trim().length > 0,
+    );
+  const { stateLabel } = compactTransportPresentation(
+    failed
+      ? "failed"
+      : !maybeResult
+        ? isStreaming || isWaiting
+          ? "running"
+          : "pending"
+        : hasParsedDetails
+          ? "succeeded"
+          : "unknown",
+  );
+  const headline =
+    toolType === "doc_list"
+      ? rows.length > 0
+        ? `${rows.length} document${rows.length === 1 ? "" : "s"} shown`
+        : "List task documents"
+      : `Read ${name ?? requestedSlug ?? "document"}`;
   const status: ToolStatus = useMemo(() => {
     if (!maybeResult && (isStreaming || isWaiting)) return "running";
     if (!maybeResult) return "running";
@@ -302,20 +366,26 @@ export const TaskDocumentsView: React.FC<TaskDocumentsToolProps> = ({
       <span data-testid="task-documents-view" hidden />
       <ToolCard
         icon={<Icon icon={FileText} size="sm" />}
-        summary={toolType === "doc_list" ? "Task documents" : "Task document"}
-        meta={
-          toolType === "doc_list" && content && rows.length > 0
-            ? `${rows.length} documents`
-            : undefined
-        }
+        density="compact"
+        summary={compactText(headline, COMPACT_HEADLINE_CHARS)}
+        meta={stateLabel}
         status={status}
         isOpen={isOpen}
         onToggle={handleToggle}
         toolCall={toolCall}
       >
-        {content && (
-          <TaskDocumentsContent toolType={toolType} content={content} />
-        )}
+        <CompactToolDetails facts={facts}>
+          {content !== null ? (
+            failed ? (
+              <RawMarkdownFallback
+                content={content}
+                notice="Request failed; raw output below"
+              />
+            ) : (
+              <TaskDocumentsContent toolType={toolType} content={content} />
+            )
+          ) : null}
+        </CompactToolDetails>
       </ToolCard>
     </>
   );
