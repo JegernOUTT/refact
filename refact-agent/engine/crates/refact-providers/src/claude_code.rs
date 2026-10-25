@@ -6,13 +6,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tokio::sync::{Mutex as AMutex, MutexGuard};
 
+use refact_core::claude_backend::{ClaudeBackend, ClaudeTransportConfig, CLAUDE_TRANSPORT_HEADER};
 use refact_core::provider_types::{available_model_from_catalog_and_live, LiveModelFields};
 use refact_core::model_caps::ModelCapabilities;
 use refact_core::llm_types::WireFormat;
 use crate::claude_code_oauth::OAuthTokens;
 use crate::traits::{
     AvailableModel, CustomModelConfig, ModelSource, ProviderRuntime, ProviderTrait,
-    merge_custom_models, parse_custom_models, parse_enabled_models, set_model_enabled_impl,
+    merge_custom_models, set_model_enabled_impl,
 };
 
 const SUPPORTS_CACHE_CONTROL: bool = true;
@@ -23,8 +24,10 @@ lazy_static::lazy_static! {
     static ref CLAUDE_CODE_REFRESH_GUARD: AMutex<()> = AMutex::new(());
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ClaudeCodeProvider {
+    #[serde(flatten)]
+    pub transport: ClaudeTransportConfig,
     pub enabled: bool,
     #[serde(default)]
     pub enabled_models: Vec<String>,
@@ -32,6 +35,15 @@ pub struct ClaudeCodeProvider {
     pub custom_models: HashMap<String, CustomModelConfig>,
     #[serde(default)]
     pub oauth_tokens: OAuthTokens,
+}
+
+impl std::fmt::Debug for ClaudeCodeProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaudeCodeProvider")
+            .field("backend", &self.transport.backend)
+            .field("enabled", &self.enabled)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ClaudeCodeProvider {
@@ -95,6 +107,14 @@ impl ClaudeCodeProvider {
     }
 
     fn diagnose_auth_status(&self) -> String {
+        if !self.is_subscription() {
+            return if self.has_credentials() {
+                "Configured — credentials are checked when a request is made"
+            } else {
+                "Not configured — supply backend credentials"
+            }
+            .to_string();
+        }
         if self.oauth_tokens.access_token.is_empty() {
             return "Not configured — log in via OAuth".to_string();
         }
@@ -107,6 +127,9 @@ impl ClaudeCodeProvider {
     /// Subscription-only auth: returns the in-app OAuth access token for this
     /// provider instance, or an actionable error if not logged in / expired.
     pub fn resolve_auth(&self) -> Result<String, String> {
+        if !self.is_subscription() {
+            return Err("OAuth is only available for the subscription backend".into());
+        }
         if self.oauth_tokens.access_token.is_empty() {
             return Err("Claude Code: not logged in for this provider instance. \
                 Click 'Login with Anthropic' in provider settings."
@@ -135,7 +158,8 @@ impl ClaudeCodeProvider {
         &self,
         rejected_access_token: &str,
     ) -> Option<String> {
-        (!self.oauth_tokens.access_token.is_empty()
+        (self.is_subscription()
+            && !self.oauth_tokens.access_token.is_empty()
             && self.oauth_tokens.access_token != rejected_access_token)
             .then(|| self.oauth_tokens.access_token.clone())
     }
@@ -149,7 +173,11 @@ impl ClaudeCodeProvider {
         source: &ClaudeCodeProvider,
         previous_tokens: &OAuthTokens,
     ) -> bool {
-        if source.auth_state_matches(previous_tokens) || !self.auth_state_matches(previous_tokens) {
+        if !self.is_subscription()
+            || !source.is_subscription()
+            || source.auth_state_matches(previous_tokens)
+            || !self.auth_state_matches(previous_tokens)
+        {
             return false;
         }
         self.oauth_tokens = source.oauth_tokens.clone();
@@ -952,68 +980,71 @@ impl ProviderTrait for ClaudeCodeProvider {
     }
 
     fn provider_schema(&self) -> &'static str {
-        r#"
-fields: {}
-oauth:
-  supported: true
-  methods:
-    - id: max
-      label: "Claude Pro/Max"
-      description: "Login with your Claude Pro or Max subscription"
-description: |
-  Use your Claude Code subscription to access Claude models.
-
-  **Setup:** Click **Login with Anthropic** below. Each provider instance can be logged in to a separate Claude account.
-available:
-  on_your_laptop_possible: true
-  when_isolated_possible: true
-"#
+        crate::claude_backend::SCHEMA
     }
 
     fn provider_settings_apply(&mut self, yaml: serde_yaml::Value) -> Result<(), String> {
-        if let Some(enabled) = yaml.get("enabled").and_then(|v| v.as_bool()) {
-            self.enabled = enabled;
-        }
-        if let Some(oauth_tokens) = yaml.get("oauth_tokens") {
-            self.oauth_tokens = serde_yaml::from_value(oauth_tokens.clone()).unwrap_or_default();
-        }
-        parse_enabled_models(&yaml, &mut self.enabled_models);
-        parse_custom_models(&yaml, &mut self.custom_models);
-        Ok(())
+        self.apply_shared_settings(yaml)
     }
 
     fn provider_settings_as_json(&self) -> serde_json::Value {
         let auth_status = self.diagnose_auth_status();
-        let oauth_connected =
-            !self.oauth_tokens.access_token.is_empty() && !self.oauth_tokens.is_expired();
+        let oauth_connected = self.is_subscription()
+            && !self.oauth_tokens.access_token.is_empty()
+            && !self.oauth_tokens.is_expired();
 
-        json!({
-            "enabled": self.enabled,
-            "auth_status": auth_status,
-            "oauth_connected": oauth_connected,
-            "enabled_models": self.enabled_models,
-            "custom_models": self.custom_models
-        })
+        let mut settings = serde_json::to_value(&self.transport).unwrap_or_else(|_| json!({}));
+        for field in crate::claude_backend::SECRET_FIELDS {
+            let mask = settings
+                .get(*field)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(|_| "***")
+                .unwrap_or("");
+            settings[*field] = json!(mask);
+        }
+        settings["enabled"] = json!(self.enabled);
+        settings["auth_status"] = json!(auth_status);
+        settings["oauth_connected"] = json!(oauth_connected);
+        settings["enabled_models"] = json!(self.enabled_models);
+        settings["custom_models"] = json!(self.custom_models);
+        settings
     }
 
     fn build_runtime(&self) -> Result<ProviderRuntime, String> {
-        let auth_token = match self.resolve_auth() {
-            Ok(token) => token,
-            Err(e) => {
-                if self.enabled {
-                    tracing::warn!("Claude Code auth failed: {}", e);
+        self.validate_settings()?;
+        let auth_token = if !self.is_subscription() {
+            String::new()
+        } else {
+            match self.resolve_auth() {
+                Ok(token) => token,
+                Err(e) => {
+                    if self.enabled {
+                        tracing::warn!("Claude Code auth failed: {}", e);
+                    }
+                    String::new()
                 }
-                String::new()
             }
         };
-
-        let has_auth = !auth_token.is_empty();
+        let has_auth = if self.is_subscription() {
+            !auth_token.is_empty()
+        } else {
+            self.has_credentials()
+        };
 
         let mut extra_headers = HashMap::new();
-        extra_headers.insert(
-            CLAUDE_CODE_OAUTH_EXPIRES_AT_HEADER.to_string(),
-            self.oauth_tokens.expires_at.to_string(),
-        );
+        if self.is_subscription() {
+            extra_headers.insert(
+                CLAUDE_CODE_OAUTH_EXPIRES_AT_HEADER.to_string(),
+                self.oauth_tokens.expires_at.to_string(),
+            );
+        } else {
+            extra_headers.insert(
+                CLAUDE_TRANSPORT_HEADER.to_string(),
+                serde_json::to_string(&self.resolved_transport())
+                    .map_err(|_| "Invalid Claude transport")?,
+            );
+        }
 
         Ok(ProviderRuntime {
             name: self.name().to_string(),
@@ -1036,12 +1067,28 @@ available:
     }
 
     fn has_credentials(&self) -> bool {
-        // Subscription-only: only the per-instance OAuth tokens count.
-        !self.oauth_tokens.access_token.is_empty()
+        use refact_core::claude_backend::ClaudeAuthType;
+        let t = self.resolved_transport();
+        let present = |v: &Option<String>| v.as_ref().is_some_and(|s| !s.is_empty());
+        match t.backend {
+            ClaudeBackend::Oauth => !self.oauth_tokens.access_token.is_empty(),
+            ClaudeBackend::Anthropic => present(&t.api_key),
+            ClaudeBackend::Bedrock | ClaudeBackend::Vertex | ClaudeBackend::Foundry => true,
+            ClaudeBackend::Custom => {
+                present(&t.base_url)
+                    && match t.auth_type {
+                        ClaudeAuthType::ApiKey => present(&t.api_key),
+                        ClaudeAuthType::Bearer => present(&t.auth_token),
+                        ClaudeAuthType::None => true,
+                    }
+            }
+        }
     }
 
     fn model_source(&self) -> ModelSource {
-        if self.resolve_auth().is_ok() {
+        if (self.is_subscription() && self.resolve_auth().is_ok())
+            || (self.transport.backend == ClaudeBackend::Anthropic && self.has_credentials())
+        {
             ModelSource::Api
         } else {
             ModelSource::ModelCaps
@@ -1078,19 +1125,33 @@ available:
         // No catalog fallback: when the Anthropic API cannot be reached the only
         // models we can honestly offer are the user's own custom entries.
         let custom_models_only = || self.get_custom_models_only();
-        let auth_token = match self.resolve_auth() {
-            Ok(token) => token,
-            Err(e) => {
-                tracing::warn!(
-                    "Claude Code: model discovery skipped, not authenticated ({}); \
-                     serving custom models only",
-                    e
-                );
-                return custom_models_only();
+        if !self.supports_live_discovery() {
+            return custom_models_only();
+        }
+        let transport = self.resolved_transport();
+        let result = if self.is_subscription() {
+            match self.resolve_auth() {
+                Ok(token) => fetch_claude_code_models(http_client, &token).await,
+                Err(_) => return custom_models_only(),
             }
+        } else {
+            let Some(key) = transport.api_key.as_deref().filter(|s| !s.is_empty()) else {
+                return custom_models_only();
+            };
+            let url = format!(
+                "{}/models",
+                transport
+                    .base_url
+                    .as_deref()
+                    .unwrap_or("https://api.anthropic.com")
+                    .trim_end_matches('/')
+                    .trim_end_matches("/v1")
+                    .to_string()
+                    + "/v1"
+            );
+            fetch_claude_models(http_client, key, &url, false).await
         };
-
-        let api_models = match fetch_claude_code_models(http_client, &auth_token).await {
+        let api_models = match result {
             Ok(models) => models,
             Err(e) => {
                 match &e {
@@ -1118,6 +1179,12 @@ available:
         claude_available_models_from_live(self, &api_models, model_caps)
     }
 
+    fn custom_model_pricing(&self, model_id: &str) -> Option<crate::traits::ModelPricing> {
+        self.custom_models
+            .get(model_id)
+            .and_then(|config| config.pricing.clone())
+    }
+
     fn set_model_enabled(&mut self, model_id: &str, enabled: bool) {
         set_model_enabled_impl(&mut self.enabled_models, model_id, enabled);
     }
@@ -1136,6 +1203,9 @@ available:
         refresh_token: &str,
         expires_at: i64,
     ) {
+        if !self.is_subscription() {
+            return;
+        }
         self.oauth_tokens.access_token = access_token.to_string();
         self.oauth_tokens.refresh_token = refresh_token.to_string();
         self.oauth_tokens.expires_at = expires_at;
@@ -1147,7 +1217,10 @@ available:
         config_dir: &std::path::Path,
         instance_id: &str,
     ) -> Result<(), String> {
-        if self.oauth_tokens.is_empty() || self.oauth_tokens.refresh_token.is_empty() {
+        if !self.is_subscription()
+            || self.oauth_tokens.is_empty()
+            || self.oauth_tokens.refresh_token.is_empty()
+        {
             return Ok(());
         }
 
@@ -1416,6 +1489,15 @@ pub async fn fetch_claude_code_models(
     http_client: &reqwest::Client,
     auth_token: &str,
 ) -> Result<Vec<Value>, ClaudeCodeModelsError> {
+    fetch_claude_models(http_client, auth_token, ANTHROPIC_MODELS_URL, true).await
+}
+
+async fn fetch_claude_models(
+    http_client: &reqwest::Client,
+    auth_token: &str,
+    endpoint: &str,
+    subscription: bool,
+) -> Result<Vec<Value>, ClaudeCodeModelsError> {
     if auth_token.is_empty() {
         return Err(ClaudeCodeModelsError::Http("empty auth token".to_string()));
     }
@@ -1424,7 +1506,7 @@ pub async fn fetch_claude_code_models(
     let mut models = Vec::new();
     let mut after_id: Option<String> = None;
     for _ in 0..ANTHROPIC_MODELS_MAX_PAGES {
-        let mut url = reqwest::Url::parse(ANTHROPIC_MODELS_URL).map_err(|error| {
+        let mut url = reqwest::Url::parse(endpoint).map_err(|error| {
             ClaudeCodeModelsError::Http(format!("Failed to build Claude Code models URL: {error}"))
         })?;
         url.query_pairs_mut().append_pair("limit", "1000");
@@ -1435,13 +1517,18 @@ pub async fn fetch_claude_code_models(
             .get(url)
             .timeout(std::time::Duration::from_secs(8))
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .header("Authorization", format!("Bearer {}", auth_token))
-            .header("anthropic-beta", betas.as_str())
-            .header(
-                "user-agent",
-                refact_llm::adapters::claude_code_compat::USER_AGENT,
-            );
+            .header("content-type", "application/json");
+        let request = if subscription {
+            request
+                .header("Authorization", format!("Bearer {}", auth_token))
+                .header("anthropic-beta", betas.as_str())
+                .header(
+                    "user-agent",
+                    refact_llm::adapters::claude_code_compat::USER_AGENT,
+                )
+        } else {
+            request.header("x-api-key", auth_token)
+        };
         let response = request.send().await.map_err(|e| {
             ClaudeCodeModelsError::Http(format!("Failed to fetch Claude Code models: {}", e))
         })?;

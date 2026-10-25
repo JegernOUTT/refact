@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "claude_cloud_tests.rs"]
+mod claude_cloud_tests;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -384,6 +388,12 @@ fn openai_codex_instance_id(model_rec: &BaseModelRecord) -> Option<&str> {
 }
 
 fn claude_code_instance_id(model_rec: &BaseModelRecord) -> Option<&str> {
+    if model_rec
+        .extra_headers
+        .contains_key(refact_core::claude_backend::CLAUDE_TRANSPORT_HEADER)
+    {
+        return None;
+    }
     let (provider_name, _) = model_rec.id.split_once('/')?;
     (model_rec.wire_format == crate::llm::WireFormat::AnthropicMessages
         && (provider_name == "claude_code"
@@ -2258,9 +2268,14 @@ async fn run_llm_ndjson_request<C: StreamCollector>(
     collector: &mut C,
     request_sent_at: Option<Instant>,
     chat_id: Option<&str>,
+    bedrock: bool,
 ) -> Result<Vec<ChoiceFinal>, String> {
+    if abort_requested(abort_flag.as_ref()) {
+        return Err(ABORT_ERROR_MESSAGE.to_string());
+    }
     let mut stream = response.bytes_stream();
     let mut pending = Vec::new();
+    let mut decoder = refact_claude_cloud::BedrockEventStreamDecoder::new();
     let mut accumulators: Vec<ChoiceAccumulator> = vec![ChoiceAccumulator::default()];
     let mut stream_done = false;
     let mut provider_ttft_recorded = false;
@@ -2298,6 +2313,10 @@ async fn run_llm_ndjson_request<C: StreamCollector>(
                         return Err(format!("Stream error: {}", e));
                     }
                     None => {
+                        if bedrock {
+                            decoder.finish()?;
+                            return Err("LLM stream ended unexpectedly without completion signal".to_string());
+                        }
                         if process_ndjson_eof(
                             adapter,
                             auth_token,
@@ -2313,7 +2332,7 @@ async fn run_llm_ndjson_request<C: StreamCollector>(
             }
         };
         last_event_at = Instant::now();
-        let has_complete_event = request_sent_at.is_some() && !provider_ttft_recorded && {
+        let mut has_complete_event = request_sent_at.is_some() && !provider_ttft_recorded && {
             let mut line_has_content = false;
             pending.iter().chain(bytes.iter()).any(|byte| {
                 if *byte == b'\n' {
@@ -2326,14 +2345,31 @@ async fn run_llm_ndjson_request<C: StreamCollector>(
                 }
             })
         };
-        stream_done = process_ndjson_bytes(
-            adapter,
-            auth_token,
-            &mut pending,
-            &bytes,
-            &mut accumulators,
-            collector,
-        )?;
+        stream_done = if bedrock {
+            let mut done = false;
+            let events = decoder.push(&bytes)?;
+            has_complete_event = !events.is_empty();
+            for data in events {
+                done |= process_stream_event_data(
+                    adapter,
+                    auth_token,
+                    &data,
+                    &mut accumulators,
+                    collector,
+                    true,
+                )?;
+            }
+            done
+        } else {
+            process_ndjson_bytes(
+                adapter,
+                auth_token,
+                &mut pending,
+                &bytes,
+                &mut accumulators,
+                collector,
+            )?
+        };
         if !provider_ttft_recorded && has_complete_event {
             if let Some(started_at) = request_sent_at {
                 perf_diagnostics::record(
@@ -2354,6 +2390,9 @@ async fn run_llm_ndjson_request<C: StreamCollector>(
         }
     }
 
+    if bedrock {
+        decoder.finish()?;
+    }
     Ok(finalize_accumulators(accumulators, collector))
 }
 
@@ -2404,6 +2443,7 @@ async fn prepare_llm_stream_request(
     let adapter = get_adapter(wire_format);
 
     let mut adapter_extra_headers = params.model_rec.extra_headers.clone();
+    adapter_extra_headers.remove(refact_core::claude_backend::CLAUDE_TRANSPORT_HEADER);
     if is_litellm_model(&params.model_rec) {
         adapter_extra_headers.insert(
             crate::caps::caps::MODEL_BASE_PROVIDER_HEADER.to_string(),
@@ -2679,6 +2719,80 @@ async fn try_openai_codex_websocket<C: StreamCollector>(
     Ok(None)
 }
 
+#[derive(Clone)]
+struct ClaudeAwsFraming;
+
+async fn send_claude_cloud_request(
+    app: &AppState,
+    params: &StreamRunParams,
+    prepared: &PreparedLlmStreamRequest,
+    config: &refact_core::claude_backend::ClaudeTransportConfig,
+) -> Result<reqwest::Response, String> {
+    let (header_timeout, max_attempts) = prepared
+        .header_retry_config
+        .unwrap_or((stream_idle_timeout(), 1));
+    for attempt in 0..max_attempts.max(1) {
+        let send = async {
+            let parts = build_http_for_attempt(
+                app,
+                &params.llm_request,
+                &params.model_rec,
+                prepared.adapter,
+                &prepared.adapter_settings,
+            )?;
+            let request = refact_claude_cloud::prepare_attempt(
+                parts.url,
+                parts.headers,
+                parts.body,
+                &params.model_rec.name,
+                true,
+                config,
+            )
+            .await?;
+            let aws = matches!(
+                request.framing,
+                refact_claude_cloud::ResponseFraming::AwsEventStream
+            );
+            let mut response = prepared
+                .client
+                .post(request.url)
+                .headers(request.headers)
+                .body(request.body_bytes)
+                .send()
+                .await
+                .map_err(|error| format!("LLM request failed: {error}"))?;
+            if aws {
+                response.extensions_mut().insert(ClaudeAwsFraming);
+            }
+            Ok::<_, String>(response)
+        };
+        let result = tokio::select! {
+            result = tokio::time::timeout(header_timeout, send) =>
+                result.unwrap_or_else(|_| Err(llm_http_response_header_timeout_message(header_timeout))),
+            _ = wait_for_abort_signal(params.abort_flag.clone(), params.abort_notify.clone()) =>
+                return Err(ABORT_ERROR_MESSAGE.to_string()),
+        };
+        match result {
+            Ok(response) => return Ok(response),
+            Err(error)
+                if attempt + 1 >= max_attempts.max(1)
+                    || !classify_llm_error_for_retry(&error).is_retryable_transient() =>
+            {
+                return Err(error)
+            }
+            Err(_) => {
+                wait_before_llm_transport_retry(
+                    attempt,
+                    params.abort_flag.clone(),
+                    params.abort_notify.clone(),
+                )
+                .await?
+            }
+        }
+    }
+    unreachable!()
+}
+
 async fn send_http_stream_request(
     app: &AppState,
     params: &StreamRunParams,
@@ -2694,7 +2808,20 @@ async fn send_http_stream_request(
     let mut rejected_command_credential: Option<String> = None;
     let partial_output_emitted = false;
     let request_sent_at = perf_diagnostics::is_enabled().then(Instant::now);
-    let mut response = if let Some((response_header_timeout, max_attempts)) = header_retry_config {
+    let cloud_config = params
+        .model_rec
+        .extra_headers
+        .get(refact_core::claude_backend::CLAUDE_TRANSPORT_HEADER)
+        .map(|value| {
+            serde_json::from_str::<refact_core::claude_backend::ClaudeTransportConfig>(value)
+                .map_err(|_| {
+                    LlmStreamError::new("Invalid internal Claude transport configuration", false)
+                })
+        })
+        .transpose()?;
+    let mut response = if let Some(config) = cloud_config.as_ref() {
+        send_claude_cloud_request(app, params, prepared, config).await
+    } else if let Some((response_header_timeout, max_attempts)) = header_retry_config {
         send_llm_http_request_with_header_timeout(
             &client,
             &http_parts,
@@ -2955,7 +3082,8 @@ async fn consume_llm_stream_response<C: StreamCollector>(
         progress_events: progress_events.clone(),
     };
 
-    if wire_format == WireFormat::OllamaNative {
+    let bedrock = response.extensions().get::<ClaudeAwsFraming>().is_some();
+    if wire_format == WireFormat::OllamaNative || bedrock {
         let result = run_llm_ndjson_request(
             response,
             adapter,
@@ -2965,6 +3093,7 @@ async fn consume_llm_stream_response<C: StreamCollector>(
             &mut tracking_collector,
             provider_ttft_started_at,
             params.chat_id.as_deref(),
+            bedrock,
         )
         .await
         .map_err(|e| LlmStreamError::new(e, *tracking_collector.partial_output_emitted))
@@ -3448,7 +3577,7 @@ mod tests {
         }
     }
 
-    fn request_with_secret() -> LlmRequest {
+    pub(super) fn request_with_secret() -> LlmRequest {
         let mut message = ChatMessage::new("user".to_string(), "guarded".to_string());
         message.extra.insert(
             "privacy".to_string(),
@@ -3474,7 +3603,7 @@ mod tests {
         }
     }
 
-    fn adapter_settings(model: &BaseModelRecord) -> AdapterSettings {
+    pub(super) fn adapter_settings(model: &BaseModelRecord) -> AdapterSettings {
         AdapterSettings {
             api_key: String::new(),
             auth_token: String::new(),

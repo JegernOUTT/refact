@@ -114,6 +114,56 @@ const privacyResponse: PrivacyPolicyResponse = {
 };
 
 describe("Providers provider instances", () => {
+  test("duplicating legacy Anthropic creates canonical Claude Code with an explicit Anthropic backend", async () => {
+    let requestBody: unknown;
+    const legacy = {
+      ...openAiProvider,
+      name: "anthropic_work",
+      base_provider: "anthropic",
+      display_name: "Legacy Work",
+    };
+    server.use(
+      http.get("*/v1/privacy/policy", () => HttpResponse.json(privacyResponse)),
+      http.post("*/v1/providers/claude_code_2", async ({ request }) => {
+        requestBody = await request.json();
+        return HttpResponse.json({ success: true });
+      }),
+      http.post("*/v1/privacy/policy", () =>
+        HttpResponse.json(privacyResponse),
+      ),
+    );
+    const onCreated = vi.fn();
+    const { user } = render(
+      <AddProviderInstanceModal
+        isOpen
+        configuredProviders={[legacy]}
+        initialBaseProvider="anthropic"
+        onOpenChange={vi.fn()}
+        onCreated={onCreated}
+      />,
+      { preloadedState },
+    );
+    await screen.findByRole("checkbox", { name: "normal" });
+    await user.click(screen.getByRole("button", { name: "Create instance" }));
+    await waitFor(() =>
+      expect(requestBody).toEqual({
+        base_provider: "claude_code",
+        display_name: "Claude Code 2",
+        enabled: false,
+        backend: "anthropic",
+      }),
+    );
+    await waitFor(() =>
+      expect(onCreated).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "claude_code_2",
+          base_provider: "claude_code",
+        }),
+      ),
+    );
+    expect(legacy.name).toBe("anthropic_work");
+  });
+
   test("nextInstanceId chooses the first unused suffix", () => {
     expect(nextInstanceId("openai", ["openai", "openai_2"])).toBe("openai_3");
   });

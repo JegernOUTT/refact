@@ -161,6 +161,12 @@ fn cloud_count_http_parts(
     req: &LlmRequest,
     model_rec: &BaseModelRecord,
 ) -> Result<Option<(HttpParts, usize)>, String> {
+    if model_rec
+        .extra_headers
+        .contains_key(refact_core::claude_backend::CLAUDE_TRANSPORT_HEADER)
+    {
+        return Err("Cloud token counting is unsupported for the selected Claude backend; using local estimation".to_string());
+    }
     let Some(kind) = cloud_tokenizer_kind(&model_rec.tokenizer) else {
         return Ok(None);
     };
@@ -313,6 +319,25 @@ mod tests {
             "openai/gpt-4.1".to_string(),
             vec![ChatMessage::new("user".to_string(), "hello".to_string())],
         )
+    }
+
+    #[tokio::test]
+    async fn native_claude_count_never_derives_anthropic_endpoint() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        for backend in ["bedrock", "vertex", "custom", "foundry", "anthropic"] {
+            let mut model = base_model(
+                ANTHROPIC_CLOUD_TOKENIZER,
+                WireFormat::AnthropicMessages,
+                "https://api.anthropic.com/v1/messages",
+            );
+            model.auth_token = "stale-subscription-token".into();
+            model.extra_headers.insert(
+                refact_core::claude_backend::CLAUDE_TRANSPORT_HEADER.into(),
+                format!("{{\"backend\":\"{backend}\"}}"),
+            );
+            let error = cloud_count_http_parts(&gcx, &req(), &model).err().unwrap();
+            assert!(error.contains("unsupported for the selected Claude backend"));
+        }
     }
 
     fn base_model(tokenizer: &str, wire_format: WireFormat, endpoint: &str) -> BaseModelRecord {

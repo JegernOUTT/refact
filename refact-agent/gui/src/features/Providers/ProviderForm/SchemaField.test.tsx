@@ -11,6 +11,70 @@ function textInput() {
 }
 
 describe("SchemaField", () => {
+  it.each([false, true])(
+    "saves select changes and surfaces failure: %s",
+    async (fails) => {
+      const onSave = fails
+        ? vi.fn().mockRejectedValue(new Error("failed"))
+        : vi.fn().mockResolvedValue(undefined);
+      const { user } = render(
+        <SchemaField
+          field={{
+            key: "backend",
+            f_type: "string",
+            f_default: "oauth",
+            f_options: [
+              { value: "oauth", label: "Subscription" },
+              { value: "bedrock", label: "Amazon Bedrock" },
+            ],
+          }}
+          value={undefined}
+          onSave={onSave}
+        />,
+      );
+      await user.keyboard("{Tab}{Enter}");
+      await user.click(screen.getByRole("option", { name: "Amazon Bedrock" }));
+      await waitFor(() =>
+        expect(onSave).toHaveBeenCalledWith("backend", "bedrock"),
+      );
+      expect(
+        await screen.findByText(fails ? "Error" : "Saved"),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it("leaves masked secrets unchanged on blur and supports replace and explicit clear", async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const { user } = render(
+      <SchemaField
+        field={{
+          key: "aws_secret_access_key",
+          f_type: "string",
+          f_label: "AWS secret",
+        }}
+        value="***"
+        onSave={onSave}
+      />,
+    );
+    const input = screen.getByLabelText("AWS secret");
+    fireEvent.focus(input);
+    fireEvent.blur(input);
+    expect(onSave).not.toHaveBeenCalled();
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "replacement" } });
+    fireEvent.blur(input);
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith(
+        "aws_secret_access_key",
+        "replacement",
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "Clear saved value" }));
+    await waitFor(() =>
+      expect(onSave).toHaveBeenLastCalledWith("aws_secret_access_key", ""),
+    );
+  });
+
   it("commits string values on blur, not on each keystroke", async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     const { user } = render(

@@ -1,3 +1,7 @@
+mod claude_backend;
+pub use claude_backend::SECRET_FIELDS as CLAUDE_SECRET_FIELDS;
+#[cfg(test)]
+mod claude_backend_tests;
 pub mod config;
 pub mod config_store;
 pub mod credential;

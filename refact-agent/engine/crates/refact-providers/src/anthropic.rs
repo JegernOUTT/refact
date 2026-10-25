@@ -3,20 +3,19 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use refact_core::model_caps::ModelCapabilities;
 use refact_core::llm_types::WireFormat;
-use crate::config::resolve_env_var;
+use crate::claude_code::ClaudeCodeProvider;
+use refact_core::claude_backend::ClaudeBackend;
 use crate::traits::{
     AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
-    available_models_from_caps_for_provider, merge_custom_models, parse_custom_models,
-    parse_enabled_models, set_model_enabled_impl,
+    available_models_from_caps_for_provider, merge_custom_models, set_model_enabled_impl,
 };
 
 const SUPPORTS_CACHE_CONTROL: bool = true;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct AnthropicProvider {
     pub api_key: String,
     pub enabled: bool,
@@ -24,6 +23,31 @@ pub struct AnthropicProvider {
     pub enabled_models: Vec<String>,
     #[serde(default)]
     pub custom_models: HashMap<String, CustomModelConfig>,
+}
+
+impl std::fmt::Debug for AnthropicProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnthropicProvider")
+            .field("enabled", &self.enabled)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AnthropicProvider {
+    fn shared(&self) -> ClaudeCodeProvider {
+        ClaudeCodeProvider {
+            enabled: self.enabled,
+            enabled_models: self.enabled_models.clone(),
+            custom_models: self.custom_models.clone(),
+            transport: refact_core::claude_backend::ClaudeTransportConfig {
+                backend: ClaudeBackend::Anthropic,
+                api_key: Some(self.api_key.clone()),
+                base_url: Some("https://api.anthropic.com".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
 }
 
 #[async_trait]
@@ -61,14 +85,12 @@ impl ProviderTrait for AnthropicProvider {
 fields:
   api_key:
     f_type: string_long
-    f_desc: "Anthropic API key from console.anthropic.com"
-    f_placeholder: "sk-ant-..."
     f_label: "API Key"
-    smartlinks:
-      - sl_label: "Get API Key"
-        sl_goto: "https://console.anthropic.com/settings/keys"
+    f_secret: true
+    f_desc: "Anthropic API key from console.anthropic.com. Accepts $ENV; empty uses ANTHROPIC_API_KEY."
+    f_placeholder: "sk-ant-..."
 description: |
-  Direct access to Anthropic's Claude models.
+  Direct access to Anthropic Claude models. Existing Anthropic model and privacy identities are preserved.
 available:
   on_your_laptop_possible: true
   when_isolated_possible: true
@@ -76,55 +98,33 @@ available:
     }
 
     fn provider_settings_apply(&mut self, yaml: serde_yaml::Value) -> Result<(), String> {
-        if let Some(api_key) = yaml.get("api_key").and_then(|v| v.as_str()) {
-            if api_key != "***" {
-                self.api_key = api_key.to_string();
+        if let Some(backend) = yaml.get("backend") {
+            if backend.as_str() != Some("anthropic") {
+                return Err("Legacy Anthropic instances use the anthropic backend; create a Claude Code instance for other backends".into());
             }
         }
-        if let Some(enabled) = yaml.get("enabled").and_then(|v| v.as_bool()) {
-            self.enabled = enabled;
-        }
-        // Use helpers that clear before populating (fixes stale entry bug)
-        parse_enabled_models(&yaml, &mut self.enabled_models);
-        parse_custom_models(&yaml, &mut self.custom_models);
+        let mut shared = self.shared();
+        shared.provider_settings_apply(yaml)?;
+        self.api_key = shared.transport.api_key.unwrap_or_default();
+        self.enabled = shared.enabled;
+        self.enabled_models = shared.enabled_models;
+        self.custom_models = shared.custom_models;
         Ok(())
     }
 
     fn provider_settings_as_json(&self) -> serde_json::Value {
-        json!({
-            "api_key": if self.api_key.is_empty() { "" } else { "***" },
-            "enabled": self.enabled,
-            "enabled_models": self.enabled_models,
-            "custom_models": self.custom_models
-        })
+        self.shared().provider_settings_as_json()
     }
 
     fn build_runtime(&self) -> Result<ProviderRuntime, String> {
-        let api_key = resolve_env_var(&self.api_key, "", "anthropic api_key");
-
-        Ok(ProviderRuntime {
-            name: self.name().to_string(),
-            display_name: self.display_name().to_string(),
-            enabled: self.enabled && !api_key.is_empty() && !self.enabled_models.is_empty(),
-            readonly: false,
-            wire_format: self.default_wire_format(),
-            chat_endpoint: "https://api.anthropic.com/v1/messages".to_string(),
-            completion_endpoint: String::new(),
-            embedding_endpoint: String::new(),
-            api_key,
-            auth_token: String::new(),
-            tokenizer_api_key: String::new(),
-            extra_headers: HashMap::new(),
-            supports_cache_control: SUPPORTS_CACHE_CONTROL,
-            chat_models: Vec::new(),
-            completion_models: Vec::new(),
-            embedding_model: None,
-        })
+        let mut runtime = self.shared().build_runtime()?;
+        runtime.name = self.name().into();
+        runtime.display_name = self.display_name().into();
+        Ok(runtime)
     }
 
     fn has_credentials(&self) -> bool {
-        let key = resolve_env_var(&self.api_key, "", "anthropic api_key");
-        !key.is_empty()
+        self.shared().has_credentials()
     }
 
     fn model_source(&self) -> ModelSource {

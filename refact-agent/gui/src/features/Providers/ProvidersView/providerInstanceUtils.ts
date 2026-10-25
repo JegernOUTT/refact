@@ -55,6 +55,10 @@ export function providerBaseOptions(
   for (const provider of providers) {
     const baseProvider = provider.base_provider.trim();
     if (!baseProvider || hiddenBaseIds.has(baseProvider)) continue;
+    if (baseProvider === "anthropic") {
+      baseIds.add("claude_code");
+      continue;
+    }
     baseIds.add(baseProvider);
   }
 

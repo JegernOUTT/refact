@@ -2,6 +2,7 @@
 members = [
     ".",
     "crates/refact-core",
+    "crates/refact-claude-cloud",
     "crates/refact-chat-api",
     "crates/refact-vecdb",
     "crates/refact-codegraph-parsers",
@@ -282,6 +283,7 @@ clap.workspace = true
 aws-lc-sys = "=0.38.0"
 
 refact-core = { path = "crates/refact-core" }
+refact-claude-cloud = { path = "crates/refact-claude-cloud" }
 refact-chat-api = { path = "crates/refact-chat-api" }
 refact-vecdb = { path = "crates/refact-vecdb" }
 refact-codegraph = { path = "crates/refact-codegraph" }

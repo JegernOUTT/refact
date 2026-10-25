@@ -354,6 +354,9 @@ async fn ensure_provider_for_model_management(
 
 fn settings_with_identity(provider: &dyn ProviderTrait) -> serde_json::Value {
     let mut settings = provider.provider_settings_as_json();
+    if matches!(provider.base_provider_name(), "claude_code" | "anthropic") {
+        mask_claude_secrets(&mut settings);
+    }
     if let serde_json::Value::Object(map) = &mut settings {
         map.insert(
             "base_provider".to_string(),
@@ -365,6 +368,72 @@ fn settings_with_identity(provider: &dyn ProviderTrait) -> serde_json::Value {
         );
     }
     settings
+}
+
+fn mask_claude_secrets(value: &mut Value) {
+    if let Value::Object(map) = value {
+        for (key, value) in map {
+            if refact_providers::CLAUDE_SECRET_FIELDS.contains(&key.as_str()) {
+                if value.as_str().is_some_and(|text| !text.is_empty()) {
+                    *value = json!("***");
+                }
+            } else {
+                mask_claude_secrets(value);
+            }
+        }
+    }
+}
+
+fn validate_claude_http_settings(
+    base_provider: &str,
+    settings: &serde_yaml::Value,
+) -> Result<(), ScratchError> {
+    if matches!(base_provider, "claude_code" | "anthropic") {
+        // Never echo serde's invalid value: it may itself contain a credential.
+        serde_yaml::from_value::<refact_core::claude_backend::ClaudeTransportConfig>(
+            settings.clone(),
+        )
+        .map_err(|_| {
+            ScratchError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Invalid Claude backend, authentication type, or transport settings".to_string(),
+            )
+        })?;
+    }
+    if let Some(headers) = settings.get("extra_headers") {
+        let headers = parse_extra_headers_value(headers).map_err(|_| {
+            ScratchError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Invalid extra headers".to_string(),
+            )
+        })?;
+        if headers.keys().any(|key| {
+            key.as_str()
+                .is_some_and(|name| name.to_ascii_lowercase().starts_with("x-refact-internal-"))
+        }) {
+            return Err(ScratchError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Reserved internal transport headers cannot be configured".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_claude_subscription(
+    gcx: &Arc<GlobalContext>,
+    provider_name: &str,
+) -> Result<(), ScratchError> {
+    let (provider, _) = resolve_provider_for_base(gcx, provider_name, "claude_code").await?;
+    let claude = downcast_provider::<ClaudeCodeProvider>(provider.as_ref(), "Claude Code")?;
+    if !claude.is_subscription() {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "OAuth, subscription usage and resets are unsupported for the selected Claude backend"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn provider_list_item(provider: &dyn ProviderTrait) -> ProviderListItem {
@@ -542,7 +611,11 @@ fn provider_from_yaml(
     provider.provider_settings_apply(yaml).map_err(|e| {
         ScratchError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to apply settings: {e}"),
+            if matches!(identity.base_provider.as_str(), "claude_code" | "anthropic") {
+                e
+            } else {
+                format!("Failed to apply settings: {e}")
+            },
         )
     })?;
     if identity.wrap_instance {
@@ -662,9 +735,13 @@ pub async fn handle_v1_provider_get(
     validate_instance_id_for_http(&params.name)?;
     let is_claude_code = {
         let registry = gcx.providers.read().await;
-        registry
-            .get(&params.name)
-            .is_some_and(|provider| provider.base_provider_name() == "claude_code")
+        registry.get(&params.name).is_some_and(|provider| {
+            provider.base_provider_name() == "claude_code"
+                && provider
+                    .as_any()
+                    .downcast_ref::<ClaudeCodeProvider>()
+                    .is_some_and(ClaudeCodeProvider::is_subscription)
+        })
     };
     if is_claude_code {
         if let Err(error) = crate::providers::oauth_refresh::refresh_claude_code_instance_if_needed(
@@ -781,7 +858,10 @@ pub async fn handle_v1_provider_update(
             serde_yaml::from_slice(&body_bytes).map_err(|e| {
                 ScratchError::new(
                     StatusCode::UNPROCESSABLE_ENTITY,
-                    format!("Invalid JSON/YAML: {}", e),
+                    format!(
+                        "Invalid JSON/YAML at line {}",
+                        e.location().map_or(0, |location| location.line())
+                    ),
                 )
             })?
         };
@@ -842,7 +922,16 @@ pub async fn handle_v1_provider_update(
                     existing,
                     settings,
                 )
-                .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?
+                .map_err(|e| {
+                    ScratchError::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        if matches!(identity.base_provider.as_str(), "claude_code" | "anthropic") {
+                            "Invalid Claude provider settings".to_string()
+                        } else {
+                            e
+                        },
+                    )
+                })?
             } else {
                 strip_masked_secrets(settings)
             };
@@ -854,6 +943,7 @@ pub async fn handle_v1_provider_update(
                     model_config_fields,
                 )?;
             }
+            validate_claude_http_settings(&identity.base_provider, &merged_settings)?;
             provider_from_yaml(&identity.instance_id, merged_settings.clone()).map_err(
                 |error| {
                     ScratchError::new(
@@ -2394,6 +2484,24 @@ fn ensure_oauth_identity_for_instance_sync(
             ),
         ));
     }
+    if base_provider == "claude_code" {
+        let settings = serde_yaml::Value::Mapping(yaml_map.clone());
+        validate_claude_http_settings(base_provider, &settings)?;
+        let transport: refact_core::claude_backend::ClaudeTransportConfig =
+            serde_yaml::from_value(settings).map_err(|_| {
+                ScratchError::new(
+                    StatusCode::CONFLICT,
+                    "Invalid Claude transport settings".to_string(),
+                )
+            })?;
+        if transport.backend != refact_core::claude_backend::ClaudeBackend::Oauth {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                "Claude backend changed during OAuth login; restart login for the selected backend"
+                    .to_string(),
+            ));
+        }
+    }
     ensure_yaml_identity_fields(yaml_map, &identity);
     Ok(identity)
 }
@@ -2416,6 +2524,9 @@ async fn oauth_base_provider_for_instance(
             StatusCode::BAD_REQUEST,
             format!("OAuth not supported for provider '{}'", provider_name),
         ));
+    }
+    if identity.base_provider == "claude_code" {
+        ensure_claude_subscription(gcx, provider_name).await?;
     }
     Ok(identity.base_provider)
 }
@@ -3206,6 +3317,11 @@ async fn fetch_claude_code_usage_with_refresh(
             .map_err(|error| error.message)?
             .clone();
 
+    if !request_provider.is_subscription() {
+        return Err(
+            "Subscription usage is unsupported for the selected Claude backend".to_string(),
+        );
+    }
     let mut refresh_attempted = false;
     let access_token = match request_provider.resolve_auth() {
         Ok(access_token) => access_token,
@@ -3286,6 +3402,11 @@ where
             .map_err(|error| error.message)?
             .clone();
 
+    if !request_provider.is_subscription() {
+        return Err(
+            "Subscription resets are unsupported for the selected Claude backend".to_string(),
+        );
+    }
     let mut refresh_attempted = false;
     let access_token = match request_provider.resolve_auth() {
         Ok(access_token) => access_token,
@@ -3939,6 +4060,14 @@ async fn provider_quota_cached(
     base_provider: &str,
     refresh: bool,
 ) -> ProviderQuotaSnapshot {
+    if base_provider == "claude_code"
+        && ensure_claude_subscription(&gcx, provider_name)
+            .await
+            .is_err()
+    {
+        invalidate_provider_quota(&gcx, provider_name).await;
+        return ProviderQuotaSnapshot::unavailable(provider_name, base_provider);
+    }
     let (cached, prior) = {
         let cache = gcx.quota_cache.lock().await;
         (
@@ -4132,6 +4261,7 @@ pub async fn handle_v1_provider_usage_redeem(
             openai_codex_redeem_response(gcx, &params.name, &redeem_request_id).await
         }
         "claude_code" => {
+            ensure_claude_subscription(&gcx, &params.name).await?;
             let reset_request = crate::providers::claude_code::ClaudeCodeResetRequest::parse(
                 request.program.as_deref().unwrap_or_default(),
                 request.grant_id.as_deref(),
@@ -4569,6 +4699,10 @@ async fn save_provider_oauth_tokens(
     invalidate_caps(gcx.clone()).await;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "claude_backend_tests.rs"]
+mod claude_backend_tests;
 
 #[cfg(test)]
 mod tests {

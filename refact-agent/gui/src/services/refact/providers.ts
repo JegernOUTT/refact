@@ -618,6 +618,7 @@ export type CreateProviderInstanceRequest = {
   base_provider: string;
   display_name: string;
   enabled?: false;
+  backend?: string;
 };
 
 function providerBaseName(provider: { name: string; base_provider?: string }) {

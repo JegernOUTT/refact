@@ -7,6 +7,7 @@ import { ProviderOAuth } from "./ProviderOAuth";
 import { Spinner } from "../../../components/Spinner";
 
 import { useProviderForm } from "./useProviderForm";
+import { effectiveClaudeBackend } from "./schemaConditions";
 import type {
   ClaudeCodeResetClaimData,
   ClaudeCodeResetGrant,
@@ -527,6 +528,23 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
   currentProvider,
 }) => {
   const baseProvider = currentProvider.base_provider;
+  const {
+    areShowingExtraFields,
+    formValues,
+    parsedSchema,
+    importantFields,
+    extraFields,
+    isProviderLoadedSuccessfully,
+    setAreShowingExtraFields,
+    handleFieldSave,
+    detailedProvider,
+  } = useProviderForm({ providerName: currentProvider.name });
+  const claudeBackend = formValues
+    ? effectiveClaudeBackend(baseProvider, formValues)
+    : undefined;
+  const skipQuota =
+    (baseProvider === "claude_code" || baseProvider === "anthropic") &&
+    (!formValues || claudeBackend !== "oauth");
   const [forceQuotaRefresh, setForceQuotaRefresh] = React.useState(false);
   const { data: openRouterHealth } = useGetOpenRouterHealthQuery(
     { providerName: currentProvider.name, useInstanceRoute: true },
@@ -539,25 +557,17 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
     isLoading: quotaLoading,
   } = useGetProviderQuotaQuery(
     { providerName: currentProvider.name, refresh: forceQuotaRefresh },
-    { pollingInterval: 60_000 },
+    { pollingInterval: 60_000, skip: skipQuota },
   );
-  const {
-    areShowingExtraFields,
-    formValues,
-    parsedSchema,
-    importantFields,
-    extraFields,
-    isProviderLoadedSuccessfully,
-    setAreShowingExtraFields,
-    handleFieldSave,
-    detailedProvider,
-  } = useProviderForm({ providerName: currentProvider.name });
 
   if (!isProviderLoadedSuccessfully || !formValues || !parsedSchema) {
     return <Spinner spinning />;
   }
 
-  const hasOAuth = parsedSchema.oauth?.supported === true;
+  const hasOAuth =
+    parsedSchema.oauth?.supported === true &&
+    (claudeBackend === undefined ||
+      (baseProvider === "claude_code" && claudeBackend === "oauth"));
   const status: ProviderStatus =
     detailedProvider?.status ?? currentProvider.status;
   const hasCredentials =
@@ -580,35 +590,48 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
           ) : null}
         </div>
 
-        <ProviderQuotaPanel
-          snapshot={quotaResponse?.quota}
-          loading={quotaLoading}
-          fetching={quotaFetching}
-          error={quotaError}
-          action={
-            baseProvider === "claude_code" && quotaResponse?.quota ? (
-              <ClaudeCodeResetAction
-                providerName={currentProvider.name}
-                onClaimed={() => setForceQuotaRefresh(true)}
-              />
-            ) : baseProvider === "openai_codex" && quotaResponse?.quota ? (
-              (() => {
-                const availableResets = findResetCredits(
-                  quotaResponse.quota.facts,
-                );
-                return availableResets === null ? null : (
-                  <CodexResetCreditAction
-                    availableResets={availableResets}
-                    providerName={currentProvider.name}
-                    onRedeemed={() => setForceQuotaRefresh(true)}
-                  />
-                );
-              })()
-            ) : null
-          }
-        />
+        {!skipQuota ? (
+          <ProviderQuotaPanel
+            snapshot={quotaResponse?.quota}
+            loading={quotaLoading}
+            fetching={quotaFetching}
+            error={quotaError}
+            action={
+              baseProvider === "claude_code" &&
+              claudeBackend === "oauth" &&
+              quotaResponse?.quota ? (
+                <ClaudeCodeResetAction
+                  providerName={currentProvider.name}
+                  onClaimed={() => setForceQuotaRefresh(true)}
+                />
+              ) : baseProvider === "openai_codex" && quotaResponse?.quota ? (
+                (() => {
+                  const availableResets = findResetCredits(
+                    quotaResponse.quota.facts,
+                  );
+                  return availableResets === null ? null : (
+                    <CodexResetCreditAction
+                      availableResets={availableResets}
+                      providerName={currentProvider.name}
+                      onRedeemed={() => setForceQuotaRefresh(true)}
+                    />
+                  );
+                })()
+              ) : null
+            }
+          />
+        ) : null}
 
         <div className={styles.formSection}>
+          {claudeBackend && claudeBackend !== "oauth" ? (
+            <div className={styles.providerDescription}>
+              Credentials are resolved by the engine, not the browser. Saved
+              settings override engine environment variables; native cloud
+              backends can use the engine host&apos;s AWS credential chain,
+              Google Application Default Credentials, or Azure identity chain.
+              Leave credential fields blank to use those sources.
+            </div>
+          ) : null}
           {hasOAuth ? (
             <>
               {parsedSchema.oauth?.warning ? (
@@ -680,7 +703,8 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
           ) : null}
         </div>
 
-        {hasCredentials ? (
+        {hasCredentials ||
+        (claudeBackend !== undefined && claudeBackend !== "oauth") ? (
           <ProviderModelsList provider={currentProvider} />
         ) : null}
       </div>

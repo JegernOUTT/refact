@@ -100,11 +100,46 @@ function useProviderHandlers(...extra: Parameters<typeof server.use>) {
     http.get("*/v1/providers/claude_code/quota", () =>
       HttpResponse.json(quota),
     ),
-    ...extra,
+    http.get("*/v1/providers/claude_code/available-models", () =>
+      HttpResponse.json({ models: [], source: "model_caps" }),
+    ),
   );
+  server.use(...extra);
 }
 
 describe("Claude Code usage resets", () => {
+  it.each(["anthropic", "bedrock", "vertex", "foundry", "custom"])(
+    "does not request subscription quota or resets for %s",
+    async (backend) => {
+      let requests = 0;
+      useProviderHandlers(
+        http.get("*/v1/providers/claude_code", () =>
+          HttpResponse.json({
+            ...provider,
+            settings: { backend },
+            runtime: null,
+          }),
+        ),
+        http.get("*/v1/providers/claude_code/quota", () => {
+          requests++;
+          return HttpResponse.json(quota);
+        }),
+        http.get("*/v1/providers/claude_code/usage/resets", () => {
+          requests++;
+          return HttpResponse.json({ data: null });
+        }),
+      );
+      render(<ProviderForm currentProvider={provider} />, { preloadedState });
+      expect(
+        await screen.findByText(/Credentials are resolved by the engine/),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByTestId("claude-code-resets"),
+      ).not.toBeInTheDocument();
+      expect(requests).toBe(0);
+    },
+  );
+
   it("offers a usable saved reset and a session reset, then claims the saved one", async () => {
     const claims: unknown[] = [];
     useProviderHandlers(

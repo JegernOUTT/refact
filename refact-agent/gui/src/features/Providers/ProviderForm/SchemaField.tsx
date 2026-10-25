@@ -3,6 +3,7 @@ import { ExternalLink, Eye, EyeOff, X } from "lucide-react";
 import { dump, load } from "js-yaml";
 
 import {
+  FieldSelect,
   FieldText,
   FieldTextarea,
   Icon,
@@ -21,6 +22,9 @@ export type SchemaFieldDef = {
   f_label?: string;
   f_placeholder?: string;
   f_default?: string;
+  f_options?: { value: string; label: string }[];
+  f_visible_when?: Record<string, string[]>;
+  f_visible_when_any?: Record<string, string[]>[];
   f_extra?: boolean;
   f_secret?: boolean;
   f_object?: boolean;
@@ -48,6 +52,17 @@ export const SchemaField: React.FC<SchemaFieldProps> = ({
     field.key.toLowerCase().includes("key") ||
     field.key.toLowerCase().includes("token") ||
     field.key.toLowerCase().includes("secret");
+
+  if (field.f_options?.length) {
+    return (
+      <SelectField
+        field={field}
+        value={value}
+        disabled={disabled}
+        onSave={onSave}
+      />
+    );
+  }
 
   if (field.f_type === "boolean") {
     return (
@@ -130,6 +145,51 @@ function confirmFieldSave(field: SchemaFieldDef): boolean {
     window.confirm(`Save changes to ${field.f_label ?? field.key}?`)
   );
 }
+
+const SelectField: React.FC<SchemaFieldProps> = ({
+  field,
+  value,
+  disabled,
+  onSave,
+}) => {
+  const [saveState, setSaveState] = useState<FieldSaveState>("idle");
+  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => () => clearTimeout(timerRef.current), []);
+  const handleChange = async (nextValue: string) => {
+    if (
+      disabled === true ||
+      nextValue === String(value ?? field.f_default ?? "")
+    )
+      return;
+    if (!confirmFieldSave(field)) return;
+    setSaveState("saving");
+    try {
+      await onSave(field.key, nextValue);
+      setSaveState("saved");
+      resetStatusLater(timerRef, setSaveState, "saved");
+    } catch {
+      setSaveState("error");
+      resetStatusLater(timerRef, setSaveState, "error");
+    }
+  };
+  return (
+    <SettingItem
+      title={field.f_label ?? field.key}
+      description={field.f_desc}
+      layout="stack"
+      saveStatus={saveState}
+      control={
+        <FieldSelect
+          aria-label={field.f_label ?? field.key}
+          value={String(value ?? field.f_default ?? "")}
+          options={field.f_options ?? []}
+          disabled={disabled === true || saveState === "saving"}
+          onChange={(nextValue) => void handleChange(nextValue)}
+        />
+      }
+    />
+  );
+};
 
 const NumberField: React.FC<SchemaFieldProps> = ({
   field,

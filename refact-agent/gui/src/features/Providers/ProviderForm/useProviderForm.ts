@@ -11,6 +11,7 @@ import {
 } from "../../../services/refact";
 import { useAppDispatch } from "../../../hooks";
 import type { SchemaFieldDef } from "./SchemaField";
+import { effectiveClaudeBackend, isFieldVisible } from "./schemaConditions";
 
 export type ProviderFormValues = {
   enabled: boolean;
@@ -32,7 +33,7 @@ type ParsedSchema = {
 
 const jsYamlPromise = import("js-yaml");
 
-async function parseSchema(yamlStr: string): Promise<ParsedSchema> {
+export async function parseSchema(yamlStr: string): Promise<ParsedSchema> {
   const jsYaml = await jsYamlPromise;
   const parsed = jsYaml.load(yamlStr) as Record<string, unknown> | null;
   if (!parsed || typeof parsed !== "object") {
@@ -57,7 +58,44 @@ async function parseSchema(yamlStr: string): Promise<ParsedSchema> {
           def.f_default !== undefined && def.f_default !== null
             ? String(def.f_default)
             : undefined,
+        f_options: Array.isArray(def.f_options)
+          ? def.f_options.filter(
+              (option: unknown): option is { value: string; label: string } =>
+                typeof option === "object" &&
+                option !== null &&
+                "value" in option &&
+                typeof option.value === "string" &&
+                "label" in option &&
+                typeof option.label === "string",
+            )
+          : undefined,
+        f_visible_when:
+          def.f_visible_when && typeof def.f_visible_when === "object"
+            ? Object.fromEntries(
+                Object.entries(def.f_visible_when).filter(
+                  (entry): entry is [string, string[]] =>
+                    Array.isArray(entry[1]) &&
+                    entry[1].every(
+                      (value: unknown) => typeof value === "string",
+                    ),
+                ),
+              )
+            : undefined,
         f_extra: Boolean(def.f_extra),
+        f_visible_when_any: Array.isArray(def.f_visible_when_any)
+          ? def.f_visible_when_any.filter(
+              (condition: unknown): condition is Record<string, string[]> =>
+                typeof condition === "object" &&
+                condition !== null &&
+                Object.values(condition).every(
+                  (allowed: unknown) =>
+                    Array.isArray(allowed) &&
+                    allowed.every(
+                      (value: unknown) => typeof value === "string",
+                    ),
+                ),
+            )
+          : undefined,
         f_secret: Boolean(def.f_secret),
         f_object: Boolean(def.f_object),
         f_confirmation: Boolean(def.f_confirmation),
@@ -103,6 +141,17 @@ export function useProviderForm({ providerName }: { providerName: string }) {
       base_provider: providerDetail.base_provider,
       display_name: providerDetail.display_name,
       ...providerDetail.settings,
+      ...(effectiveClaudeBackend(
+        providerDetail.base_provider,
+        providerDetail.settings,
+      )
+        ? {
+            backend: effectiveClaudeBackend(
+              providerDetail.base_provider,
+              providerDetail.settings,
+            ),
+          }
+        : {}),
     };
   }, [providerDetail]);
 
@@ -111,6 +160,8 @@ export function useProviderForm({ providerName }: { providerName: string }) {
     const important: SchemaFieldDef[] = [];
     const extra: SchemaFieldDef[] = [];
     for (const field of parsedSchema.fields) {
+      if (!isFieldVisible(field, parsedSchema.fields, formValues ?? {}))
+        continue;
       if (field.f_extra) {
         extra.push(field);
       } else {
@@ -118,7 +169,7 @@ export function useProviderForm({ providerName }: { providerName: string }) {
       }
     }
     return { importantFields: important, extraFields: extra };
-  }, [parsedSchema]);
+  }, [parsedSchema, formValues]);
 
   const [updateProvider] = providersApi.useUpdateProviderMutation();
 

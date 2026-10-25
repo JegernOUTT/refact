@@ -292,7 +292,7 @@ async fn send_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn chat_client_builds_with_bounded_setup_timeouts() {
@@ -336,6 +336,11 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+                assert!(request.len() <= 16 * 1024);
+            }
             socket
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",

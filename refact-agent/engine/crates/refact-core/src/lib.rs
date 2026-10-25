@@ -5,6 +5,7 @@ pub mod at_commands_preview_cache;
 pub mod buddy_meta;
 pub mod chat_types;
 pub mod chunk_utils;
+pub mod claude_backend;
 pub mod custom_error;
 pub mod image_policy;
 pub mod knowledge_frontmatter;

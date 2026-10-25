@@ -112,6 +112,7 @@ export const AddProviderInstanceModal: React.FC<
     [configuredProviders],
   );
   const defaultBaseProvider = useMemo(() => {
+    if (initialBaseProvider === "anthropic") return "claude_code";
     if (
       initialBaseProvider &&
       baseOptions.some((option) => option.id === initialBaseProvider)
@@ -231,6 +232,10 @@ export const AddProviderInstanceModal: React.FC<
         base_provider: baseProvider,
         display_name: trimmedDisplayName,
         enabled: false,
+        ...(initialBaseProvider === "anthropic" &&
+        baseProvider === "claude_code"
+          ? { backend: "anthropic" }
+          : {}),
       };
       await updateProvider({
         providerName: trimmedInstanceId,
@@ -277,6 +282,7 @@ export const AddProviderInstanceModal: React.FC<
     dispatch,
     displayName,
     instanceId,
+    initialBaseProvider,
     onCreated,
     onOpenChange,
     privacyPolicyQuery.data,
