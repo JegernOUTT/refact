@@ -307,6 +307,8 @@ describe("AgenticTool registry wiring", () => {
 
   test("routes subagent previews through the dedicated context card", () => {
     renderTools([launchPreviewReceipt()], [launchPreviewCall]);
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    fireEvent.click(screen.getByRole("button", { name: "More details" }));
     expect(screen.getByLabelText("Child launch preview")).toHaveTextContent(
       "Preview only",
     );

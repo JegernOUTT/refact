@@ -41,6 +41,8 @@ import {
   saveAskQuestionsDraft,
   type AskQuestionsDraftValue,
 } from "../../../utils/chatUiPersistence";
+import { CompactToolDetails } from "../../Tools/AgenticTool/CompactToolDetails";
+import { compactText } from "../../Tools/AgenticTool/compactPresentation";
 import styles from "./AskQuestionsTool.module.css";
 import { NativeQuestionResponse } from "./NativeQuestionResponse";
 
@@ -54,6 +56,51 @@ interface AskQuestionsResult {
 
 interface AskQuestionsToolProps {
   toolCall: ToolCall;
+  compact?: boolean;
+}
+
+function compactQuestionState(status: string): string {
+  switch (status) {
+    case "pending":
+      return "Needs answer";
+    case "answered":
+      return "Answered";
+    case "cancelled":
+      return "Withdrawn";
+    default:
+      return "State unknown";
+  }
+}
+
+function QuestionHistory({
+  compact,
+  questions,
+  children,
+}: {
+  compact: boolean;
+  questions: QuestionItem[];
+  children: React.ReactNode;
+}) {
+  if (!compact) return <>{children}</>;
+  return (
+    <CompactToolDetails
+      facts={[{ label: "Questions", value: String(questions.length) }]}
+    >
+      {children}
+      {questions.map((question) =>
+        question.options?.length ? (
+          <Box key={question.id}>
+            <Text size="2">{question.text}</Text>
+            <ul>
+              {question.options.map((option) => (
+                <li key={option}>{option}</li>
+              ))}
+            </ul>
+          </Box>
+        ) : null,
+      )}
+    </CompactToolDetails>
+  );
 }
 
 function formatAnswers(
@@ -250,9 +297,10 @@ const QuestionWidget: React.FC<{
 
 export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
   toolCall,
+  compact = false,
 }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle, setIsOpen] = useStoredOpen(storeKey, true);
+  const [isOpen, handleToggle, setIsOpen] = useStoredOpen(storeKey, !compact);
   const [answers, setAnswers] = useState<
     Record<string, AskQuestionsDraftValue>
   >(() => loadAskQuestionsDraft(toolCall.id)?.answers ?? {});
@@ -358,11 +406,12 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
   }, [maybeResult, nextUserMessage]);
 
   useEffect(() => {
+    if (compact) return;
     if (nextUserMessage && !answeredViaForm && !hasCollapsedManualRef.current) {
       hasCollapsedManualRef.current = true;
       setIsOpen(false);
     }
-  }, [nextUserMessage, answeredViaForm, setIsOpen]);
+  }, [compact, nextUserMessage, answeredViaForm, setIsOpen]);
 
   const hasNextMessage = !!nextUserMessage;
 
@@ -491,9 +540,45 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         toolCall={toolCall}
         isOpen={isOpen}
         onToggle={handleToggle}
+        compact={compact}
       />
     );
   }
+
+  const questions = nativeQuestionSet?.questions ?? data?.questions ?? [];
+  const questionText = compactText(questions[0]?.text, 120);
+  const stateLabel = nativeQuestionSet
+    ? compactQuestionState(nativeQuestionSet.status)
+    : maybeResult?.tool_failed
+      ? "Questions unavailable"
+      : !hasNativeQuestionCapability && !hasNextMessage && data
+        ? "Needs answer"
+        : answeredViaForm && parsedAnswers
+          ? "Answered"
+          : hasNativeQuestionCapability && data && !hasNextMessage
+            ? "Syncing state"
+            : "State unknown";
+  const compactProps = compact
+    ? {
+        icon: stateLabel === "Answered" ? <CircleCheck /> : <CircleHelp />,
+        density: "compact" as const,
+        status: (maybeResult?.tool_failed
+          ? "error"
+          : stateLabel === "Answered"
+            ? "success"
+            : stateLabel === "Needs answer"
+              ? "running"
+              : "idle") as ToolStatus,
+        summary: questionText
+          ? `${questionText}${
+              questions.length > 1
+                ? ` (+${questions.length - 1} questions)`
+                : ""
+            }`
+          : "Question history",
+        meta: stateLabel,
+      }
+    : {};
 
   if (nativeQuestionSet) {
     const isPending = nativeQuestionSet.status === "pending";
@@ -521,66 +606,69 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         isOpen={isOpen}
         onToggle={handleToggle}
         toolCall={toolCall}
+        {...compactProps}
       >
-        <Box className={`${styles.content} rf-enter-rise`}>
-          <Flex direction="column" gap="2">
-            {nativeQuestionSet.questions.map((question) => {
-              if (!isPending) {
-                const answer = submittedAnswers.get(question.id);
+        <QuestionHistory compact={compact && !isPending} questions={questions}>
+          <Box className={`${styles.content} rf-enter-rise`}>
+            <Flex direction="column" gap="2">
+              {nativeQuestionSet.questions.map((question) => {
+                if (!isPending) {
+                  const answer = submittedAnswers.get(question.id);
+                  return (
+                    <Box key={question.id}>
+                      <Markdown>{question.text}</Markdown>
+                      <Text color="gray" size="2" ml="2">
+                        →{" "}
+                        {Array.isArray(answer)
+                          ? answer.join(", ")
+                          : String(answer ?? "(no answer)")}
+                      </Text>
+                    </Box>
+                  );
+                }
                 return (
-                  <Box key={question.id}>
-                    <Markdown>{question.text}</Markdown>
-                    <Text color="gray" size="2" ml="2">
-                      →{" "}
-                      {Array.isArray(answer)
-                        ? answer.join(", ")
-                        : String(answer ?? "(no answer)")}
-                    </Text>
-                  </Box>
+                  <QuestionWidget
+                    key={question.id}
+                    question={question}
+                    value={
+                      answers[question.id] ||
+                      (question.type === "multi_select" ? [] : "")
+                    }
+                    onChange={(value) =>
+                      setAnswers((previous) => ({
+                        ...previous,
+                        [question.id]: value,
+                      }))
+                    }
+                    disabled={isSubmitting || submissionSent}
+                  />
                 );
-              }
-              return (
-                <QuestionWidget
-                  key={question.id}
-                  question={question}
-                  value={
-                    answers[question.id] ||
-                    (question.type === "multi_select" ? [] : "")
-                  }
-                  onChange={(value) =>
-                    setAnswers((previous) => ({
-                      ...previous,
-                      [question.id]: value,
-                    }))
-                  }
-                  disabled={isSubmitting || submissionSent}
-                />
-              );
-            })}
-            {isPending && (
-              <>
-                {submitError && (
-                  <Text color="red" size="2">
-                    {submitError}
-                  </Text>
-                )}
-                {submissionSent && (
-                  <Text color="gray" size="2">
-                    Answers sent, awaiting confirmation.
-                  </Text>
-                )}
-                <Button
-                  onClick={() => void handleNativeSubmit()}
-                  disabled={
-                    isSubmitting || submissionSent || !hasCompleteAnswers
-                  }
-                >
-                  {isSubmitting ? "Submitting…" : "Submit Answers"}
-                </Button>
-              </>
-            )}
-          </Flex>
-        </Box>
+              })}
+              {isPending && (
+                <>
+                  {submitError && (
+                    <Text color="red" size="2">
+                      {submitError}
+                    </Text>
+                  )}
+                  {submissionSent && (
+                    <Text color="gray" size="2">
+                      Answers sent, awaiting confirmation.
+                    </Text>
+                  )}
+                  <Button
+                    onClick={() => void handleNativeSubmit()}
+                    disabled={
+                      isSubmitting || submissionSent || !hasCompleteAnswers
+                    }
+                  >
+                    {isSubmitting ? "Submitting…" : "Submit Answers"}
+                  </Button>
+                </>
+              )}
+            </Flex>
+          </Box>
+        </QuestionHistory>
       </ToolCard>
     );
   }
@@ -594,6 +682,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         isOpen={isOpen}
         onToggle={handleToggle}
         toolCall={toolCall}
+        {...compactProps}
       >
         <Box className={`${styles.content} rf-enter-rise`}>
           <Flex direction="column" gap="2">
@@ -626,7 +715,7 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
     );
   }
 
-  if (hasNativeQuestionCapability && data) {
+  if (hasNativeQuestionCapability && data && (!compact || !hasNextMessage)) {
     return (
       <ToolCard
         icon={<CircleHelp />}
@@ -635,12 +724,19 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         isOpen={isOpen}
         onToggle={handleToggle}
         toolCall={toolCall}
+        {...compactProps}
       >
-        <Box className={`${styles.content} rf-enter-rise`}>
-          <Text color="gray" size="2">
-            Waiting for the current question state.
-          </Text>
-        </Box>
+        <QuestionHistory compact={compact} questions={questions}>
+          <Box className={`${styles.content} rf-enter-rise`}>
+            <Text color="gray" size="2">
+              Waiting for the current question state.
+            </Text>
+            {compact &&
+              questions.map((question) => (
+                <Markdown key={question.id}>{question.text}</Markdown>
+              ))}
+          </Box>
+        </QuestionHistory>
       </ToolCard>
     );
   }
@@ -654,26 +750,33 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
         isOpen={isOpen}
         onToggle={handleToggle}
         toolCall={toolCall}
+        {...compactProps}
       >
-        <Box className={`${styles.content} rf-enter-rise`}>
-          <Flex direction="column" gap="2">
-            {data.questions.map((q) => (
-              <Box key={q.id}>
-                <Markdown>{q.text}</Markdown>
-                <Text color="gray" size="2" ml="2">
-                  → {parsedAnswers[q.id] || "(no answer)"}
-                </Text>
-              </Box>
-            ))}
-            {parsedAnswers.__additional__ && (
-              <Box mt="2">
-                <Text className={styles.additionalAnswer} size="2" color="gray">
-                  {parsedAnswers.__additional__}
-                </Text>
-              </Box>
-            )}
-          </Flex>
-        </Box>
+        <QuestionHistory compact={compact} questions={questions}>
+          <Box className={`${styles.content} rf-enter-rise`}>
+            <Flex direction="column" gap="2">
+              {data.questions.map((q) => (
+                <Box key={q.id}>
+                  <Markdown>{q.text}</Markdown>
+                  <Text color="gray" size="2" ml="2">
+                    → {parsedAnswers[q.id] || "(no answer)"}
+                  </Text>
+                </Box>
+              ))}
+              {parsedAnswers.__additional__ && (
+                <Box mt="2">
+                  <Text
+                    className={styles.additionalAnswer}
+                    size="2"
+                    color="gray"
+                  >
+                    {parsedAnswers.__additional__}
+                  </Text>
+                </Box>
+              )}
+            </Flex>
+          </Box>
+        </QuestionHistory>
       </ToolCard>
     );
   }
@@ -686,18 +789,21 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
       isOpen={isOpen}
       onToggle={handleToggle}
       toolCall={toolCall}
+      {...compactProps}
     >
-      {data && (
-        <Box className={`${styles.content} rf-enter-rise`}>
-          <Flex direction="column" gap="1">
-            {data.questions.map((q) => (
-              <Box key={q.id}>
-                <Markdown>{`• ${q.text}`}</Markdown>
-              </Box>
-            ))}
-          </Flex>
-        </Box>
-      )}
+      <QuestionHistory compact={compact} questions={questions}>
+        {data && (
+          <Box className={`${styles.content} rf-enter-rise`}>
+            <Flex direction="column" gap="1">
+              {data.questions.map((q) => (
+                <Box key={q.id}>
+                  <Markdown>{`• ${q.text}`}</Markdown>
+                </Box>
+              ))}
+            </Flex>
+          </Box>
+        )}
+      </QuestionHistory>
     </ToolCard>
   );
 };

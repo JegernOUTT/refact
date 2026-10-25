@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { v4 as uuidv4 } from "uuid";
 import { CircleCheck, CircleHelp, CircleMinus } from "lucide-react";
 import { ToolCard } from "./ToolCard";
@@ -31,6 +37,26 @@ import {
 } from "../../../utils/questionResponses";
 import styles from "./AskQuestionsTool.module.css";
 import { QuestionArtifactContext } from "../../Markdown/questionArtifactContext";
+import { CompactToolDetails } from "../../Tools/AgenticTool/CompactToolDetails";
+import { compactText } from "../../Tools/AgenticTool/compactPresentation";
+
+function ResponseHistory({
+  compact,
+  count,
+  children,
+}: {
+  compact: boolean;
+  count: number;
+  children: ReactNode;
+}) {
+  return compact ? (
+    <CompactToolDetails facts={[{ label: "Questions", value: String(count) }]}>
+      {children}
+    </CompactToolDetails>
+  ) : (
+    <>{children}</>
+  );
+}
 
 export function NativeQuestionResponse({
   set,
@@ -38,12 +64,14 @@ export function NativeQuestionResponse({
   toolCall,
   isOpen,
   onToggle,
+  compact = false,
 }: {
   set: PendingQuestionSet;
   threadId: string;
   toolCall: ToolCall;
   isOpen: boolean;
   onToggle: () => void;
+  compact?: boolean;
 }) {
   const config = useAppSelector(selectConfig);
   const identity = getEngineEndpointIdentity(config);
@@ -56,7 +84,7 @@ export function NativeQuestionResponse({
   return (
     <ResponseInstance
       key={instance}
-      {...{ set, threadId, toolCall, isOpen, onToggle, instance }}
+      {...{ set, threadId, toolCall, isOpen, onToggle, instance, compact }}
     />
   );
 }
@@ -68,6 +96,7 @@ function ResponseInstance({
   isOpen,
   onToggle,
   instance,
+  compact,
 }: {
   set: PendingQuestionSet;
   threadId: string;
@@ -75,6 +104,7 @@ function ResponseInstance({
   isOpen: boolean;
   onToggle: () => void;
   instance: string;
+  compact: boolean;
 }) {
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
@@ -166,6 +196,38 @@ function ResponseInstance({
       ...answer,
       disposition: "answered" as const,
     }));
+  const questionText = compactText(set.questions[0]?.text, 120);
+  const stateLabel = pending
+    ? error
+      ? "Needs answer · Send failed"
+      : sent
+        ? "Needs answer · Awaiting confirmation"
+        : "Needs answer"
+    : set.status === "answered"
+      ? "Answered"
+      : set.status === "cancelled"
+        ? "Withdrawn"
+        : "State unknown";
+  const compactProps = compact
+    ? {
+        density: "compact" as const,
+        summary: questionText
+          ? `${questionText}${
+              set.questions.length > 1
+                ? ` (+${set.questions.length - 1} questions)`
+                : ""
+            }`
+          : "Question history",
+        meta: stateLabel,
+        status: error
+          ? ("error" as const)
+          : pending
+            ? ("running" as const)
+            : set.status === "answered"
+              ? ("success" as const)
+              : ("idle" as const),
+      }
+    : {};
   return (
     <ToolCard
       icon={
@@ -173,6 +235,8 @@ function ResponseInstance({
           <CircleHelp />
         ) : set.status === "cancelled" ? (
           <CircleMinus />
+        ) : compact && set.status !== "answered" ? (
+          <CircleHelp />
         ) : (
           <CircleCheck />
         )
@@ -188,6 +252,7 @@ function ResponseInstance({
       isOpen={isOpen}
       onToggle={onToggle}
       toolCall={toolCall}
+      {...compactProps}
     >
       <div className={styles.responseForm}>
         {pending ? (
@@ -203,7 +268,7 @@ function ResponseInstance({
             onSubmit={(r) => void submit(r)}
           />
         ) : (
-          <>
+          <ResponseHistory compact={compact} count={set.questions.length}>
             {set.questions.map((q) => {
               const answer = submitted?.find((a) => a.id === q.id);
               return (
@@ -217,6 +282,13 @@ function ResponseInstance({
                   >
                     <Markdown>{q.text}</Markdown>
                   </QuestionArtifactContext.Provider>
+                  {compact && q.options?.length ? (
+                    <ul>
+                      {q.options.map((option) => (
+                        <li key={option}>{option}</li>
+                      ))}
+                    </ul>
+                  ) : null}
                   <p className={styles.answerText}>
                     {set.status === "cancelled"
                       ? "No response submitted"
@@ -244,7 +316,7 @@ function ResponseInstance({
                 </p>
               </div>
             )}
-          </>
+          </ResponseHistory>
         )}
         {error && <p role="alert">{error}</p>}
         {sending && <p role="status">Submitting response…</p>}

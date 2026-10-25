@@ -1,5 +1,5 @@
 import { describe, expect, test, vi, afterEach, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Provider } from "react-redux";
 import { Theme } from "@radix-ui/themes";
@@ -14,6 +14,8 @@ import type {
   ToolMessage,
 } from "../../../services/refact/types";
 import { createDefaultChatState } from "../../../utils/test-utils";
+import { backUpMessages } from "../../../features/Chat/Thread/actions";
+import { CollapsibleStoreProvider } from "../useStoredOpen";
 
 const chatId = "sleep-chat";
 type FetchMock = ReturnType<typeof vi.fn<typeof fetch>>;
@@ -67,7 +69,11 @@ function toolResult(result: {
   };
 }
 
-function renderSleepCard(messages: ChatMessage[] = [], args = {}) {
+function renderSleepCard(
+  messages: ChatMessage[] = [],
+  args = {},
+  storedOpen?: boolean,
+) {
   const chat = createDefaultChatState();
   const runtime = chat.threads[chat.current_thread_id];
   runtime.thread.id = chatId;
@@ -90,13 +96,18 @@ function renderSleepCard(messages: ChatMessage[] = [], args = {}) {
     },
   });
 
-  return render(
+  const view = render(
     <Provider store={store}>
       <Theme>
-        <SleepToolCard toolCall={toolCall(args)} />
+        <CollapsibleStoreProvider
+          value={{ get: () => storedOpen, set: vi.fn() }}
+        >
+          <SleepToolCard toolCall={toolCall(args)} />
+        </CollapsibleStoreProvider>
       </Theme>
     </Provider>,
   );
+  return { ...view, store };
 }
 
 function renderSleepCardForThread(
@@ -163,18 +174,16 @@ describe("SleepToolCard", () => {
   test("renders countdown for in-progress sleep", () => {
     renderSleepCard([], { description: "Let the gremlin nap" });
 
-    expect(
-      screen.getAllByText(/Sleeping… 30s remaining/u).length,
-    ).toBeGreaterThan(0);
+    expect(screen.getAllByText(/30s remaining/u).length).toBeGreaterThan(0);
     expect(screen.getByText("Let the gremlin nap")).toBeInTheDocument();
+    expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /wake up/i })).toBeNull();
 
     act(() => {
       vi.advanceTimersByTime(1_000);
     });
 
-    expect(
-      screen.getAllByText(/Sleeping… 29s remaining/u).length,
-    ).toBeGreaterThan(0);
+    expect(screen.getAllByText(/29s remaining/u).length).toBeGreaterThan(0);
   });
 
   test("Wake-up button dispatches abort", async () => {
@@ -184,6 +193,7 @@ describe("SleepToolCard", () => {
 
     renderSleepCard();
 
+    await user.click(screen.getByRole("button", { expanded: false }));
     await user.click(screen.getByRole("button", { name: /wake up/i }));
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -204,6 +214,7 @@ describe("SleepToolCard", () => {
 
     renderSleepCardForThread();
 
+    await user.click(screen.getByRole("button", { expanded: false }));
     await user.click(screen.getByRole("button", { name: /wake up/i }));
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -218,16 +229,12 @@ describe("SleepToolCard", () => {
     act(() => {
       vi.advanceTimersByTime(5_000);
     });
-    expect(
-      screen.getAllByText(/Sleeping… 25s remaining/u).length,
-    ).toBeGreaterThan(0);
+    expect(screen.getAllByText(/25s remaining/u).length).toBeGreaterThan(0);
 
     unmount();
     renderSleepCard();
 
-    expect(
-      screen.getAllByText(/Sleeping… 25s remaining/u).length,
-    ).toBeGreaterThan(0);
+    expect(screen.getAllByText(/25s remaining/u).length).toBeGreaterThan(0);
   });
 
   test("uses ticks from rendered thread", () => {
@@ -238,19 +245,23 @@ describe("SleepToolCard", () => {
       [eventTick("active-tick", 25_000, 5_000)],
     );
 
-    expect(
-      screen.getAllByText(/Sleeping… 20s remaining/u).length,
-    ).toBeGreaterThan(0);
-    expect(screen.queryByText(/Sleeping… 5s remaining/u)).toBeNull();
+    expect(screen.getAllByText(/20s remaining/u).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/5s remaining/u)).toBeNull();
   });
 
-  test("tick events animate", () => {
+  test("tick events remain behind explicit details", () => {
     renderSleepCard([
       eventTick("tick-1", 5_000, 25_000),
       eventTick("tick-2", 10_000, 20_000),
       eventTick("tick-3", 15_000, 15_000),
     ]);
 
+    expect(screen.queryByTestId("sleep-tick-dot")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    expect(
+      screen.getByTestId("sleep-tick-stream").closest("[inert]"),
+    ).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "More details" }));
     const dots = screen.getAllByTestId("sleep-tick-dot");
     expect(dots).toHaveLength(3);
     expect(dots[0]?.className).toMatch(/tickDot/u);
@@ -269,6 +280,11 @@ describe("SleepToolCard", () => {
       toolResult({ sleptMs: 30_000 }),
     ]);
 
+    expect(screen.getByRole("button", { expanded: false })).toHaveTextContent(
+      "Wait ended",
+    );
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    fireEvent.click(screen.getByRole("button", { name: "More details" }));
     expect(screen.getByText("Slept 30s · 5 ticks")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /wake up/i })).toBeNull();
   });
@@ -280,7 +296,61 @@ describe("SleepToolCard", () => {
       toolResult({ sleptMs: 12_000, interrupted: true }),
     ]);
 
+    const row = screen.getByRole("button", { expanded: false });
+    expect(row).toHaveTextContent("Interrupted");
+    expect(row.closest("[data-status]")).toHaveAttribute(
+      "data-status",
+      "success",
+    );
+    expect(screen.queryByRole("button", { name: /wake up/i })).toBeNull();
+    fireEvent.click(row);
+    fireEvent.click(screen.getByRole("button", { name: "More details" }));
     expect(screen.getByText("Interrupted after 12s")).toBeInTheDocument();
+  });
+
+  test("does not declare completion from a local countdown timeout or reopen on result", () => {
+    const { store, container } = renderSleepCard();
+    const row = screen.getByRole("button", { expanded: false });
+    expect(container.querySelector('[data-density="compact"]')).not.toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(row).toHaveTextContent("0s remaining");
+    expect(row).not.toHaveTextContent("Wait ended");
+    act(() => {
+      store.dispatch(
+        backUpMessages({
+          id: chatId,
+          messages: [toolResult({ sleptMs: 30_000 })],
+        }),
+      );
+    });
+    expect(row).toHaveTextContent("Wait ended");
+    expect(row).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("honors stored choice without opening tick details and cleans up its interval", () => {
+    const { unmount } = renderSleepCard([], {}, true);
+    const timerCount = vi.getTimerCount();
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /wake up/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "More details" }),
+    ).toHaveAttribute("aria-expanded", "false");
+    unmount();
+    expect(vi.getTimerCount()).toBeLessThan(timerCount);
+  });
+
+  test("does not turn an unrecognized result into a completed wait", () => {
+    renderSleepCard([
+      { role: "tool", tool_call_id: "call-sleep", content: "{}" },
+    ]);
+    expect(screen.getByRole("button", { expanded: false })).toHaveTextContent(
+      "Outcome unknown",
+    );
+    expect(screen.queryByRole("button", { name: /wake up/i })).toBeNull();
   });
 });
 

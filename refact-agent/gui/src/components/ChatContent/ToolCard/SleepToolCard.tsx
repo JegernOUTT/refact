@@ -19,6 +19,8 @@ import type {
   ToolResult,
 } from "../../../services/refact/types";
 import { normalizeEventMessageMetadata } from "../../../services/refact/types";
+import { CompactToolDetails } from "../../Tools/AgenticTool/CompactToolDetails";
+import { compactText } from "../../Tools/AgenticTool/compactPresentation";
 import styles from "./SleepToolCard.module.css";
 
 type SleepArgs = {
@@ -62,10 +64,17 @@ function parseSleepResult(result: ToolResult | undefined): SleepResult | null {
   if (!result) return null;
   const extraSleep = isRecord(result.extra?.sleep) ? result.extra.sleep : null;
   const parsed = extraSleep ?? parseJsonRecord(result.content);
-  if (!parsed) return null;
+  if (
+    !parsed ||
+    typeof parsed.slept_ms !== "number" ||
+    !Number.isFinite(parsed.slept_ms) ||
+    parsed.slept_ms < 0 ||
+    typeof parsed.interrupted !== "boolean"
+  )
+    return null;
   return {
-    sleptMs: numberField(parsed.slept_ms),
-    interrupted: parsed.interrupted === true,
+    sleptMs: parsed.slept_ms,
+    interrupted: parsed.interrupted,
   };
 }
 
@@ -117,11 +126,6 @@ function remainingFromTick(
   if (!latest) return null;
   if (latest.remainingMs > 0) return latest.remainingMs;
   return Math.max(0, durationMs - latest.elapsedMs);
-}
-
-function statusFromResult(result: SleepResult | null): ToolStatus {
-  if (!result) return "running";
-  return result.interrupted ? "error" : "success";
 }
 
 function sleepStorageKey(
@@ -209,7 +213,7 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
   threadId,
 }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
+  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const contextThreadId = useThreadId();
   const resolvedThreadId = threadId ?? contextThreadId;
@@ -226,8 +230,14 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
     () => parseSleepResult(resultMessage),
     [resultMessage],
   );
-  const status = statusFromResult(sleepResult);
-  const isRunning = status === "running";
+  const isRunning = !resultMessage;
+  const status: ToolStatus = isRunning
+    ? "running"
+    : resultMessage.tool_failed
+      ? "error"
+      : sleepResult
+        ? "success"
+        : "idle";
   const ticks = useMemo(
     () =>
       messages.flatMap((message, index) => {
@@ -263,24 +273,27 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
   const remainingMs =
     remainingFromTick(sleepArgs.durationMs, ticks) ?? fallbackRemainingMs;
 
-  const summary = useMemo(() => {
-    if (!sleepResult) {
-      return `Sleeping… ${formatSeconds(remainingMs)} remaining`;
-    }
-    if (sleepResult.interrupted) {
-      return (
-        <span className={styles.summaryInterrupted}>
-          Interrupted after {formatCompletedSeconds(sleepResult.sleptMs)}
-        </span>
-      );
-    }
-    return (
-      <span className={styles.summarySuccess}>
-        Slept {formatCompletedSeconds(sleepResult.sleptMs)} · {ticks.length}{" "}
-        ticks
-      </span>
-    );
-  }, [remainingMs, sleepResult, ticks.length]);
+  const stateLabel = isRunning
+    ? `${formatSeconds(remainingMs)} remaining`
+    : resultMessage.tool_failed
+      ? "Wait request failed"
+      : sleepResult?.interrupted
+        ? "Interrupted"
+        : sleepResult
+          ? "Wait ended"
+          : "Outcome unknown";
+  const facts = [
+    { label: "Requested wait", value: formatSeconds(sleepArgs.durationMs) },
+    ...(sleepResult
+      ? [
+          {
+            label: sleepResult.interrupted ? "Interrupted after" : "Slept",
+            value: formatCompletedSeconds(sleepResult.sleptMs),
+          },
+        ]
+      : []),
+    { label: "Recorded ticks", value: String(ticks.length) },
+  ];
 
   const handleWakeUp = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -290,22 +303,26 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
     [abort, resolvedThreadId],
   );
 
-  const icon = sleepResult?.interrupted ? (
-    <span className={styles.summaryInterrupted}>
-      <TriangleAlert />
-    </span>
-  ) : (
-    <span className={styles.summarySuccess}>
-      <CircleCheck />
-    </span>
-  );
+  const icon =
+    sleepResult?.interrupted === true || resultMessage?.tool_failed === true ? (
+      <span className={styles.summaryInterrupted}>
+        <TriangleAlert />
+      </span>
+    ) : sleepResult ? (
+      <span className={styles.summarySuccess}>
+        <CircleCheck />
+      </span>
+    ) : (
+      <Timer />
+    );
 
   return (
     <div data-testid="sleep-tool-card">
       <ToolCard
         icon={icon}
-        summary={summary}
-        meta={!sleepResult ? `${ticks.length} ticks` : undefined}
+        summary={compactText(sleepArgs.description, 160) ?? "Wait briefly"}
+        meta={stateLabel}
+        density="compact"
         status={status}
         isOpen={isOpen}
         onToggle={handleToggle}
@@ -313,11 +330,27 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
         className={styles.sleepCard}
       >
         {isRunning && (
+          <Button type="button" variant="soft" onClick={handleWakeUp}>
+            <Timer />
+            Wake up
+          </Button>
+        )}
+        <CompactToolDetails facts={facts}>
           <Flex direction="column" gap="2" className={styles.countdown}>
             <Flex align="center" justify="between" gap="2" wrap="wrap">
               <Flex direction="column" gap="1">
                 <Text weight="bold" className={styles.countdownText}>
-                  Sleeping… {formatSeconds(remainingMs)} remaining
+                  {isRunning
+                    ? `Sleeping… ${formatSeconds(remainingMs)} remaining`
+                    : sleepResult?.interrupted
+                      ? `Interrupted after ${formatCompletedSeconds(
+                          sleepResult.sleptMs,
+                        )}`
+                      : sleepResult
+                        ? `Slept ${formatCompletedSeconds(
+                            sleepResult.sleptMs,
+                          )} · ${ticks.length} ticks`
+                        : stateLabel}
                 </Text>
                 {sleepArgs.description && (
                   <Text size="1" className={styles.description}>
@@ -325,14 +358,10 @@ export const SleepToolCard: React.FC<SleepToolCardProps> = ({
                   </Text>
                 )}
               </Flex>
-              <Button type="button" variant="soft" onClick={handleWakeUp}>
-                <Timer />
-                Wake up
-              </Button>
             </Flex>
             <TickDots ticks={ticks} />
           </Flex>
-        )}
+        </CompactToolDetails>
       </ToolCard>
     </div>
   );

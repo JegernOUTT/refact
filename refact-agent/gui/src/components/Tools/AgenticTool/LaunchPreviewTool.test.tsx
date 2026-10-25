@@ -1,10 +1,99 @@
 import { describe, expect, test } from "vitest";
-import { fireEvent } from "@testing-library/react";
-import { render, screen } from "../../../utils/test-utils";
+import { fireEvent, within } from "@testing-library/react";
+import { render as renderComponent, screen } from "../../../utils/test-utils";
+import { CollapsibleStoreProvider } from "../../ChatContent/useStoredOpen";
 import { LaunchPreviewTool } from "./LaunchPreviewTool";
 import { launchPreviewCall, launchPreviewReceipt } from "./launchFixtures";
 
+function render(...args: Parameters<typeof renderComponent>) {
+  const view = renderComponent(...args);
+  fireEvent.click(screen.getByRole("button", { expanded: false }));
+  fireEvent.click(screen.getByRole("button", { name: "More details" }));
+  return view;
+}
+
 describe("LaunchPreviewTool", () => {
+  test("starts closed with requested task and explicit preview or blocked state", () => {
+    const props = {
+      toolCall: launchPreviewCall,
+      hasResult: true,
+      failed: false,
+    };
+    const { container, rerender } = renderComponent(
+      <LaunchPreviewTool
+        {...props}
+        extra={{ ...launchPreviewReceipt().extra, skipped_count: 0 }}
+      />,
+    );
+    const row = screen.getByRole("button", { expanded: false });
+    expect(row).toHaveTextContent("Inspect accepted context");
+    expect(row).toHaveTextContent("Preview only");
+    expect(container.querySelector('[data-density="compact"]')).not.toBeNull();
+    expect(screen.queryByText("src/accepted-context.rs")).toBeNull();
+    fireEvent.click(row);
+    expect(screen.getByText("No child started")).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("term").filter((term) => !term.closest("[inert]")),
+    ).toHaveLength(3);
+    expect(
+      screen.getByRole("button", { name: "More details" }),
+    ).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(row);
+    rerender(
+      <LaunchPreviewTool {...props} extra={launchPreviewReceipt().extra} />,
+    );
+    expect(row).toHaveAttribute("aria-expanded", "false");
+    expect(row).toHaveTextContent("Launch blocked");
+  });
+
+  test("keeps malformed and failed states visible while closed", () => {
+    const props = { toolCall: launchPreviewCall, extra: {}, hasResult: true };
+    const { rerender } = renderComponent(
+      <LaunchPreviewTool {...props} failed={false} />,
+    );
+    const row = screen.getByRole("button", { expanded: false });
+    expect(row).toHaveTextContent("Preview unavailable");
+    rerender(<LaunchPreviewTool {...props} failed />);
+    expect(row).toHaveTextContent("Preview unavailable");
+    expect(row).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("preserves stored open choice and escapes requested task text", () => {
+    const values = new Map([[`tc:${launchPreviewCall.id}`, true]]);
+    const { container } = renderComponent(
+      <CollapsibleStoreProvider
+        value={{
+          get: (key) => values.get(key),
+          set: (key, open) => values.set(key, open),
+        }}
+      >
+        <LaunchPreviewTool
+          toolCall={{
+            ...launchPreviewCall,
+            function: {
+              ...launchPreviewCall.function,
+              arguments: JSON.stringify({
+                task: "<script>unsafe</script>" + "x".repeat(10000),
+              }),
+            },
+          }}
+          extra={launchPreviewReceipt().extra}
+          hasResult
+          failed={false}
+        />
+      </CollapsibleStoreProvider>,
+    );
+    const row = screen.getByRole("button", { expanded: true });
+    expect(
+      within(row).getByText(/<script>unsafe/).textContent?.length,
+    ).toBeLessThanOrEqual(160);
+    expect(container.querySelector("script")).toBeNull();
+    expect(screen.getByText("No child started")).toBeInTheDocument();
+    expect(
+      screen.getByText("src/accepted-context.rs").closest("[inert]"),
+    ).not.toBeNull();
+  });
+
   test("pages concrete authority independently of context sources", () => {
     render(
       <LaunchPreviewTool
