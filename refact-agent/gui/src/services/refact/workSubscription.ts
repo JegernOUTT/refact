@@ -3,7 +3,6 @@ import { parseWorkFrame } from "./workSse";
 import { subscribeToSnapshots } from "./snapshotStream";
 
 export type WorkStreamOptions = {
-  maxBytes: number;
   timeoutMs: number;
   onSnapshot: (page: WorkPage) => void;
   onError: (reason: string) => void;
@@ -15,7 +14,6 @@ export function subscribeToWork(
   options: WorkStreamOptions,
 ): () => void {
   return subscribeToSnapshots<WorkPage>(url, token, {
-    maxBytes: options.maxBytes,
     timeoutMs: options.timeoutMs,
     parse: parseWorkFrame,
     sequence: workSequence,

@@ -154,7 +154,6 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("max_work_provenance_bytes", 1024, 268_435_456),
     coordination_integer("work_cursor_ttl_secs", 1, 86_400),
     coordination_integer("work_subscription_interval_ms", 100, 60_000),
-    coordination_integer("work_stream_max_bytes", 1024, 268_435_456),
     coordination_integer("work_stream_timeout_ms", 30_000, 3_600_000),
     coordination_integer("work_reconnect_max_ms", 100, 60_000),
     coordination_integer("inspect_max_paths", 1, 10_000),
@@ -293,6 +292,8 @@ pub fn coordination_field_bounds() -> &'static [CoordinationFieldBound] {
 /// Dotted names the GUI addresses coordination leaves by, e.g.
 /// `coordination.max_active_engine`.
 pub const COORDINATION_SETTINGS_KEY: &str = "coordination";
+
+const RETIRED_COORDINATION_SETTINGS: &[&str] = &["work_stream_max_bytes"];
 
 pub fn coordination_field_path(name: &str) -> String {
     format!("{COORDINATION_SETTINGS_KEY}.{name}")
@@ -482,6 +483,15 @@ pub fn parse_persisted(bytes: &[u8]) -> Result<TrajectoryRuntimeSettings, String
         return Err("versioned trajectory settings are unsupported".into());
     }
     map.retain(|key, _| known.contains_key(key));
+    if let Some(coordination) = map
+        .get_mut(serde_yaml::Value::String(COORDINATION_SETTINGS_KEY.into()))
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    {
+        coordination.retain(|key, _| {
+            !key.as_str()
+                .is_some_and(|key| RETIRED_COORDINATION_SETTINGS.contains(&key))
+        });
+    }
     let settings = serde_yaml::from_value(value).map_err(|_| "invalid trajectory settings")?;
     validate(&settings)?;
     Ok(settings)
@@ -1149,6 +1159,9 @@ pub fn normalize_coordination_override(
 ) -> Result<CoordinationOverride, String> {
     let mut normalized = CoordinationOverride::new();
     for (name, value) in raw {
+        if RETIRED_COORDINATION_SETTINGS.contains(&name.as_str()) {
+            continue;
+        }
         let bound = coordination_field_bounds()
             .iter()
             .find(|bound| bound.name == name)

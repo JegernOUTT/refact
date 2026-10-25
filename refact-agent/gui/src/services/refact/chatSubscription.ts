@@ -485,14 +485,10 @@ export type ChatSubscriptionCallbacks = {
 export type SubscriptionOptions = {
   connectTimeoutMs?: number;
   idleTimeoutMs?: number;
-  maxBufferChars?: number;
-  maxEventChars?: number;
 };
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 45_000;
-const DEFAULT_MAX_SSE_EVENT_CHARS = 128 * 1024 * 1024;
-const DEFAULT_MAX_SSE_BUFFER_CHARS = DEFAULT_MAX_SSE_EVENT_CHARS + 256 * 1024;
 
 export function subscribeToChatEvents(
   chatId: string,
@@ -509,8 +505,6 @@ export function subscribeToChatEvents(
   const connectTimeoutMs =
     options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
-  const maxBufferChars = options.maxBufferChars ?? DEFAULT_MAX_SSE_BUFFER_CHARS;
-  const maxEventChars = options.maxEventChars ?? DEFAULT_MAX_SSE_EVENT_CHARS;
 
   const abortController = new AbortController();
   const state = { connected: false };
@@ -616,12 +610,6 @@ export function subscribeToChatEvents(
           .replace(/\r/g, "\n");
         buffer += chunk;
 
-        if (buffer.length > maxBufferChars) {
-          abortWithTerminalError(
-            `SSE buffer exceeded ${maxBufferChars} chars; reconnecting`,
-          );
-        }
-
         const blocks = buffer.split("\n\n");
         buffer = blocks.pop() ?? "";
 
@@ -640,11 +628,6 @@ export function subscribeToChatEvents(
 
           const dataStr = dataLines.join("\n");
           if (dataStr === "[DONE]") continue;
-          if (dataStr.length > maxEventChars) {
-            abortWithTerminalError(
-              `SSE event exceeded ${maxEventChars} chars; reconnecting`,
-            );
-          }
 
           try {
             const parsed = JSON.parse(dataStr) as unknown;

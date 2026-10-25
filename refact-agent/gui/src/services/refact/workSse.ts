@@ -2,11 +2,8 @@ import { parseWorkPage, type WorkPage } from "./workTypes";
 
 export class WorkFrameDecoder {
   private readonly decoder = new TextDecoder();
-  private readonly encoder = new TextEncoder();
   private buffer = "";
   private pendingCR = false;
-
-  constructor(private readonly maxBytes: number) {}
 
   *push(bytes: Uint8Array): Generator<string> {
     let chunk = this.decoder.decode(bytes, { stream: true });
@@ -17,17 +14,10 @@ export class WorkFrameDecoder {
     let boundary = this.buffer.indexOf("\n\n");
     while (boundary >= 0) {
       const block = this.buffer.slice(0, boundary);
-      this.checkSize(block);
       this.buffer = this.buffer.slice(boundary + 2);
       yield block;
       boundary = this.buffer.indexOf("\n\n");
     }
-    this.checkSize(this.buffer);
-  }
-
-  private checkSize(text: string) {
-    if (this.encoder.encode(text).length > this.maxBytes)
-      throw new Error("Work snapshot exceeded configured stream limit");
   }
 }
 

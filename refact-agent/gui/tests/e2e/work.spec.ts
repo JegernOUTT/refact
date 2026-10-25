@@ -86,7 +86,6 @@ for (const manualRetry of [false, true]) {
       route.fulfill({
         json: {
           effective: {
-            work_stream_max_bytes: 1_000_000,
             work_stream_timeout_ms: 60_000,
             work_reconnect_max_ms: manualRetry ? 60_000 : 100,
           },

@@ -1,7 +1,6 @@
 import { WorkFrameDecoder } from "./workSse";
 
 export type SnapshotStreamOptions<T> = {
-  maxBytes: number;
   timeoutMs: number;
   /** Parses one SSE block. Throws when the stream must be abandoned. */
   parse: (block: string) => T | null;
@@ -53,7 +52,7 @@ export function subscribeToSnapshots<T>(
       const response = await fetch(url, { headers, signal: abort.signal });
       if (!response.ok || !response.body) throw new Error(options.unavailable);
       const reader = response.body.getReader();
-      const decoder = new WorkFrameDecoder(options.maxBytes);
+      const decoder = new WorkFrameDecoder();
       try {
         for (;;) {
           const { done, value } = await reader.read();

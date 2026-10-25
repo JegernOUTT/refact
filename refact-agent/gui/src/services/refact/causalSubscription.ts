@@ -6,7 +6,6 @@ import {
 import { subscribeToSnapshots } from "./snapshotStream";
 
 export type CausalStreamOptions = {
-  maxBytes: number;
   timeoutMs: number;
   onSnapshot: (page: CausalPage) => void;
   onError: (reason: string) => void;
@@ -18,7 +17,6 @@ export function subscribeToCausalTrace(
   options: CausalStreamOptions,
 ): () => void {
   return subscribeToSnapshots<CausalPage>(url, token, {
-    maxBytes: options.maxBytes,
     timeoutMs: options.timeoutMs,
     parse: parseCausalFrame,
     sequence: causalSequence,

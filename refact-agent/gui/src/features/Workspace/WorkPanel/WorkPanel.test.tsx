@@ -302,7 +302,6 @@ describe("Work panel", () => {
       http.get("*/v1/coordination-settings", () =>
         HttpResponse.json({
           effective: {
-            work_stream_max_bytes: 1_000_000,
             work_stream_timeout_ms: 60_000,
             work_reconnect_max_ms: 10_000,
           },
@@ -345,7 +344,6 @@ describe("Work panel", () => {
       http.get("*/v1/coordination-settings", () =>
         HttpResponse.json({
           effective: {
-            work_stream_max_bytes: 1_000_000,
             work_stream_timeout_ms: 60_000,
             work_reconnect_max_ms: 60_000,
           },

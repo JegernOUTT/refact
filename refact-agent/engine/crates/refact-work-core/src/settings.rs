@@ -52,7 +52,6 @@ pub struct CoordinationSettings {
     pub max_work_provenance_bytes: usize,
     pub work_cursor_ttl_secs: u64,
     pub work_subscription_interval_ms: u64,
-    pub work_stream_max_bytes: usize,
     pub work_stream_timeout_ms: u64,
     pub work_reconnect_max_ms: u64,
     pub inspect_max_paths: usize,
@@ -332,7 +331,6 @@ impl Default for CoordinationSettings {
             max_work_provenance_bytes: 4 * 1024 * 1024,
             work_cursor_ttl_secs: 300,
             work_subscription_interval_ms: 1000,
-            work_stream_max_bytes: 16 * 1024 * 1024,
             work_stream_timeout_ms: 60_000,
             work_reconnect_max_ms: 10_000,
             inspect_max_paths: 200,
@@ -545,12 +543,6 @@ impl CoordinationSettings {
         );
         at_least(&mut v, "max_undo_bytes", self.max_undo_bytes as u64, 1);
 
-        at_least(
-            &mut v,
-            "work_stream_max_bytes",
-            self.work_stream_max_bytes as u64,
-            1,
-        );
         at_least(
             &mut v,
             "work_stream_timeout_ms",

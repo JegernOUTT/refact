@@ -113,7 +113,6 @@ export type SidebarSubscriptionCallbacks = {
 
 const IDLE_TIMEOUT_MS = 30_000;
 const CONNECT_TIMEOUT_MS = 10_000;
-const MAX_SSE_BLOCK_BYTES = 4 * 1024 * 1024;
 
 function hasArrayProperty(obj: Record<string, unknown>, key: string): boolean {
   return Array.isArray(obj[key]);
@@ -385,12 +384,6 @@ function debugIgnoredSidebarEvent(type: string): void {
   debugRefact("[sidebar] ignored event type:", type);
 }
 
-function errorSidebarBlockTooLarge(): void {
-  debugRefact(
-    `[sidebar] SSE block exceeded ${MAX_SSE_BLOCK_BYTES} bytes; reconnecting`,
-  );
-}
-
 function parseSseBlock(block: string): string | null {
   if (!block.trim()) return null;
   if (block.startsWith(":")) return null;
@@ -512,12 +505,6 @@ export function subscribeToSidebarEvents(
           let idx = buffer.indexOf("\n\n");
           while (idx !== -1) {
             const block = buffer.slice(0, idx);
-            if (block.length > MAX_SSE_BLOCK_BYTES) {
-              errorSidebarBlockTooLarge();
-              const blockTooLarge = new Error("sse_block_too_large");
-              reportStreamError(blockTooLarge);
-              throw blockTooLarge;
-            }
             buffer = buffer.slice(idx + 2);
             const dataStr = parseSseBlock(block);
             if (dataStr !== null) {
@@ -545,13 +532,6 @@ export function subscribeToSidebarEvents(
               }
             }
             idx = buffer.indexOf("\n\n");
-          }
-
-          if (buffer.length > MAX_SSE_BLOCK_BYTES) {
-            errorSidebarBlockTooLarge();
-            const blockTooLarge = new Error("sse_block_too_large");
-            reportStreamError(blockTooLarge);
-            throw blockTooLarge;
           }
         }
       } finally {

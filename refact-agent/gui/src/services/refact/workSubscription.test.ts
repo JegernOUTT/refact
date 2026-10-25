@@ -29,7 +29,6 @@ describe("Work subscription", () => {
     });
     const errors = vi.fn(() => finish());
     const stop = subscribeToWork("/v1/work/subscribe", "test-token", {
-      maxBytes: 1_000_000,
       timeoutMs: 30_000,
       onSnapshot: snapshots,
       onError: errors,
@@ -54,38 +53,6 @@ describe("Work subscription", () => {
     stop();
   });
 
-  it("caps buffered data and never reports malformed events as empty success", async () => {
-    let stream!: ReadableStreamDefaultController<Uint8Array>;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: true,
-        body: new ReadableStream<Uint8Array>({
-          start(controller) {
-            stream = controller;
-          },
-        }),
-      }),
-    );
-    let finish!: () => void;
-    const completed = new Promise<void>((resolve) => {
-      finish = resolve;
-    });
-    const snapshots = vi.fn();
-    const errors = vi.fn(() => finish());
-    const stop = subscribeToWork("/v1/work/subscribe", null, {
-      maxBytes: 32,
-      timeoutMs: 30_000,
-      onSnapshot: snapshots,
-      onError: errors,
-    });
-    stream.enqueue(new TextEncoder().encode("data:" + "a".repeat(64)));
-    await completed;
-    expect(snapshots).not.toHaveBeenCalled();
-    expect(errors).toHaveBeenCalledOnce();
-    stop();
-  });
-
   it("aborts cleanly on unmount without invoking callbacks", async () => {
     let resolve!: (value: { ok: boolean; body: null }) => void;
     const response = new Promise<{ ok: boolean; body: null }>((done) => {
@@ -96,7 +63,6 @@ describe("Work subscription", () => {
     const errors = vi.fn();
     const snapshots = vi.fn();
     const stop = subscribeToWork("/v1/work/subscribe", null, {
-      maxBytes: 1000,
       timeoutMs: 30_000,
       onSnapshot: snapshots,
       onError: errors,
@@ -132,7 +98,6 @@ describe("Work subscription", () => {
       finish();
     });
     const stop = subscribeToWork("/v1/work/subscribe", null, {
-      maxBytes: 1_000_000,
       timeoutMs: 30_000,
       onSnapshot: snapshots,
       onError: errors,
@@ -161,7 +126,6 @@ describe("Work subscription", () => {
     const errors = vi.fn();
     const snapshots = vi.fn();
     const stop = subscribeToWork("/v1/work/subscribe", null, {
-      maxBytes: 1_000_000,
       timeoutMs: 100,
       onSnapshot: snapshots,
       onError: errors,

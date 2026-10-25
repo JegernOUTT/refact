@@ -13,7 +13,6 @@ export function useWorkStream(query: WorkQuery, enabled: boolean) {
   const [epoch, setEpoch] = useState(0);
   const retry = useCallback(() => setEpoch((current) => current + 1), []);
   const { currentData: settings } = useGetCoordinationSettingsQuery("global");
-  const maxBytes = settings?.effective.work_stream_max_bytes;
   const timeoutMs = settings?.effective.work_stream_timeout_ms;
   const retryMs = settings?.effective.work_reconnect_max_ms;
   const url = buildApiUrl(config, "/v1/work/subscribe", {
@@ -28,14 +27,12 @@ export function useWorkStream(query: WorkQuery, enabled: boolean) {
   useEffect(() => {
     if (
       !enabled ||
-      typeof maxBytes !== "number" ||
       typeof timeoutMs !== "number" ||
       typeof retryMs !== "number"
     )
       return;
     let reconnect: ReturnType<typeof setTimeout> | undefined;
     const stop = subscribeToWork(url, token ?? null, {
-      maxBytes,
       timeoutMs,
       onSnapshot: (page) => {
         setError(null);
@@ -65,7 +62,6 @@ export function useWorkStream(query: WorkQuery, enabled: boolean) {
     };
   }, [
     enabled,
-    maxBytes,
     timeoutMs,
     retryMs,
     url,

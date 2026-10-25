@@ -423,18 +423,6 @@ describe("useSidebarSubscription", () => {
     disconnect();
   });
 
-  it("sse_block_exceeding_4mib_triggers_reconnect", async () => {
-    server.use(sidebarRawHandler([`data: ${"x".repeat(4 * 1024 * 1024 + 1)}`]));
-    const { errors, disconnect } = subscribeForTest();
-
-    await waitFor(() => {
-      expect(errors.map((error) => error.message)).toContain(
-        "sse_block_too_large",
-      );
-    });
-    disconnect();
-  });
-
   it("allows one read chunk with multiple valid blocks over 1mib total", async () => {
     const first = sectionSnapshot(0, "chats", {
       trajectories: [{ id: "a", title: "A".repeat(600 * 1024) }],
