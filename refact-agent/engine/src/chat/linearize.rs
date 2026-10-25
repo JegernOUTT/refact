@@ -46,6 +46,8 @@ pub fn apply_summarization_linearize(
                     "summarization" | "compression_report" | "error"
                 )
                 && !is_wire_suppressed_goal_pursuit(message)
+                && !(message.role == "cd_instruction"
+                    && message.tool_call_id == "token_budget_info")
         })
         .collect();
     detach_orphaned_context_files(&mut result);
@@ -82,6 +84,50 @@ mod tests {
             content: ChatContent::SimpleText(text.into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn legacy_budget_notices_are_suppressed_without_mutating_restored_history() {
+        let mut notice = message("cd_instruction", "LEGACY_BUDGET_SENTINEL");
+        notice.tool_call_id = "token_budget_info".into();
+        let mut mcp = message("cd_instruction", "MCP_HINT_SENTINEL");
+        mcp.tool_call_id = "mcp_lazy_index".into();
+        let mut recovery = message("cd_instruction", "RECOVERY_SENTINEL");
+        recovery.tool_call_id = "length_stop_continue".into();
+        let mut user = message("user", "user mentions token_budget_info");
+        user.tool_call_id = "token_budget_info".into();
+        let mut trailing_notice = notice.clone();
+        trailing_notice.message_id = uuid::Uuid::new_v4().to_string();
+        let stored = vec![user, notice, mcp, recovery, trailing_notice];
+        let encoded = serde_json::to_vec(&stored).unwrap();
+        let restored = serde_json::from_slice::<Vec<ChatMessage>>(&encoded).unwrap();
+        let wire = apply_summarization_linearize(restored.clone()).unwrap();
+        let text = serde_json::to_string(&wire).unwrap();
+        assert!(!text.contains("LEGACY_BUDGET_SENTINEL"));
+        assert!(text.contains("MCP_HINT_SENTINEL"));
+        assert!(text.contains("RECOVERY_SENTINEL"));
+        assert!(text.contains("user mentions token_budget_info"));
+        assert_eq!(wire.len(), 3);
+        assert_eq!(serde_json::to_vec(&restored).unwrap(), encoded);
+    }
+
+    #[test]
+    fn legacy_budget_notices_in_reconstructed_payload_and_suffix_are_suppressed() {
+        use refact_core::active_context::{make_reconstruction_report, ReconstructionMetadata};
+        let mut notice = message("cd_instruction", "REBUILT_BUDGET_SENTINEL");
+        notice.tool_call_id = "token_budget_info".into();
+        let boundary = make_reconstruction_report(
+            vec![message("user", "active question"), notice.clone()],
+            ReconstructionMetadata::default(),
+        )
+        .unwrap();
+        notice.message_id = uuid::Uuid::new_v4().to_string();
+        let stored = vec![message("user", "archived question"), boundary, notice];
+        let before = serde_json::to_value(&stored).unwrap();
+        let wire = apply_summarization_linearize(stored.clone()).unwrap();
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0].content.content_text_only(), "active question");
+        assert_eq!(serde_json::to_value(&stored).unwrap(), before);
     }
 
     #[test]

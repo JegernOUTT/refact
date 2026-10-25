@@ -10,7 +10,6 @@ pub enum WorkflowCommand {
     AgentMode,
     GitDiff,
     ReviewPrompt,
-    CompactPrompt,
 }
 
 pub const PLAN_COMMAND: CommandDef = CommandDef {
@@ -68,32 +67,16 @@ pub const REVIEW_COMMAND: CommandDef = CommandDef {
     },
 };
 
-pub const COMPACT_COMMAND: CommandDef = CommandDef {
-    name: "compact",
-    aliases: &[],
-    description: "structured prompt: trigger chat compaction fallback",
-    args_hint: "",
-    availability: CommandAvailability::IdleOnly,
-    action: CommandAction::Workflow {
-        command: WorkflowCommand::CompactPrompt,
-    },
-};
-
 pub const WORKFLOW_COMMANDS: &[CommandDef] = &[
     REVIEW_COMMAND,
     PLAN_COMMAND,
     GOAL_COMMAND,
     AGENT_COMMAND,
     DIFF_COMMAND,
-    COMPACT_COMMAND,
 ];
 
 pub fn review_prompt() -> &'static str {
     "Review the current project changes. Inspect the git diff and relevant files, then report correctness, regression, safety, and test coverage findings by severity. Do not edit files unless I explicitly ask."
-}
-
-pub fn compact_prompt() -> &'static str {
-    "Please compact this chat if needed. First use ctx_probe() or compress_chat_probe(); if compression is useful, apply the available ctx_apply()/compress_chat_apply() path while preserving the current goal, files, tests, decisions, and open blockers."
 }
 
 pub fn agent_mode_patch() -> Value {

@@ -33,9 +33,7 @@ mod planner_pause_load_race_tests;
 #[cfg(test)]
 pub(crate) use generation::prepare_project_work_context;
 #[cfg(test)]
-pub(crate) use generation::{
-    inject_token_budget_for_chat, maybe_recover_after_length_stop, start_generation,
-};
+pub(crate) use generation::{maybe_recover_after_length_stop, start_generation};
 pub(crate) mod evidence;
 pub(crate) mod evidence_cache;
 pub(crate) mod evidence_revision;

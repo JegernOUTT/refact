@@ -2259,23 +2259,6 @@ source:
         );
     }
 
-    #[test]
-    fn test_always_ask_tools_override_auto() {
-        assert_eq!(
-            compute_final_action(
-                &MatchConfirmDenyResult::PASS,
-                Some("auto"),
-                true,
-                "compress_chat_probe"
-            ),
-            "ask"
-        );
-        assert_eq!(
-            compute_final_action(&MatchConfirmDenyResult::PASS, None, true, "handoff_to_mode"),
-            "auto"
-        );
-    }
-
     #[tokio::test]
     async fn tool_approved_pushed_on_decision() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -2976,7 +2959,6 @@ fn compute_final_action(
     is_auto_approved: bool,
     tool_name: &str,
 ) -> &'static str {
-    const ALWAYS_ASK_TOOLS: &[&str] = &["compress_chat_probe", "compress_chat_apply"];
     if *tool_result == MatchConfirmDenyResult::DENY {
         return "deny";
     }
@@ -2990,9 +2972,6 @@ fn compute_final_action(
     }
     if tool_name == "handoff_to_mode" {
         return "auto";
-    }
-    if ALWAYS_ASK_TOOLS.iter().any(|name| *name == tool_name) {
-        return "ask";
     }
     match mode_action {
         Some("deny") => "deny",

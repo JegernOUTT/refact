@@ -1,4 +1,4 @@
-schema_version: 20
+schema_version: 21
 id: explore
 title: Explore
 description: Read-only exploration for context gathering without editing
@@ -57,7 +57,7 @@ prompt: |
 
   %CD_INSTRUCTIONS%
 
-  %COMPRESS_HANDOFF_INSTRUCTIONS%
+  %HANDOFF_INSTRUCTIONS%
 
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 

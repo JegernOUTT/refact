@@ -467,9 +467,6 @@ impl App {
             workflow::WorkflowCommand::ReviewPrompt => {
                 self.submit_structured_prompt(workflow::review_prompt())
             }
-            workflow::WorkflowCommand::CompactPrompt => {
-                self.submit_structured_prompt(workflow::compact_prompt())
-            }
         }
     }
 
@@ -5435,17 +5432,11 @@ new-chat = "ctrl-x"
     }
 
     #[test]
-    fn review_and_compact_insert_structured_prompts() {
+    fn review_inserts_structured_prompt() {
         let mut app = App::new(project());
         assert!(matches!(
             app.execute_command_name("review"),
             AppAction::SendMessage { prompt, .. } if prompt.contains("Review the current project changes")
-        ));
-
-        let mut app = App::new(project());
-        assert!(matches!(
-            app.execute_command_name("compact"),
-            AppAction::SendMessage { prompt, .. } if prompt.contains("ctx_probe")
         ));
     }
 

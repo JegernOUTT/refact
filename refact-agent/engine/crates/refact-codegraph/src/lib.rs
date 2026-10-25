@@ -1271,7 +1271,6 @@ mod tests {
         ("src/chat/task_agent_monitor.rs", "rust"),
         ("src/daemon/cli.rs", "rust"),
         ("src/http/routers/v1/tasks.rs", "rust"),
-        ("src/tools/tool_compress_chat.rs", "rust"),
         ("src/memories.rs", "rust"),
         ("src/http/routers/v1/mcp_marketplace.rs", "rust"),
     ];

@@ -1,4 +1,4 @@
-schema_version: 23
+schema_version: 24
 id: setup_skills
 title: Setup Skills
 description: Guided setup for project-specific skills
@@ -168,7 +168,7 @@ prompt: |
   - **Hidden knowledge is allowed**: consider `user-invocable: false` for background-only skills
   - **Never overwrite existing skills without explicit confirmation**
 
-  %COMPRESS_HANDOFF_INSTRUCTIONS%
+  %HANDOFF_INSTRUCTIONS%
 
 tools:
   - set_trajectory_label
@@ -221,8 +221,6 @@ tools:
   - tasks_set
   - task_done
   - ask_questions
-  - compress_chat_probe
-  - compress_chat_apply
   - handoff_to_mode
 
 tool_confirm:
@@ -288,6 +286,4 @@ tool_confirm:
     - match: "update_textdoc*"
       action: ask
     - match: "create_knowledge"
-      action: ask
-    - match: "compress_chat_*"
       action: ask

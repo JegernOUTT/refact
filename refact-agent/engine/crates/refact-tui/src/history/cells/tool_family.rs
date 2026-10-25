@@ -96,8 +96,6 @@ const TUI_TOOL_FAMILY_REGISTRY: &[(&str, ToolFamily)] = &[
     ("validate_goal", ToolFamily::Server),
     ("pause_goal", ToolFamily::Server),
     ("snooze_goal", ToolFamily::Server),
-    ("compress_chat_probe", ToolFamily::Server),
-    ("compress_chat_apply", ToolFamily::Server),
     ("handoff_to_mode", ToolFamily::Server),
     ("task_start", ToolFamily::Server),
     ("board_get", ToolFamily::Server),
@@ -347,8 +345,6 @@ mod tests {
         "validate_goal",
         "pause_goal",
         "snooze_goal",
-        "compress_chat_probe",
-        "compress_chat_apply",
         "handoff_to_mode",
         "task_start",
         "board_get",
@@ -438,8 +434,8 @@ mod tests {
             .iter()
             .copied()
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(current_static_builtin_constructor_count(), 162);
-        assert_eq!(CURRENT_STATIC_BUILTIN_TOOL_NAMES.len(), 162);
+        assert_eq!(current_static_builtin_constructor_count(), 160);
+        assert_eq!(CURRENT_STATIC_BUILTIN_TOOL_NAMES.len(), 160);
         assert_eq!(
             CURRENT_STATIC_BUILTIN_TOOL_NAMES.len(),
             current_static_builtin_constructor_count(),
@@ -476,6 +472,16 @@ mod tests {
                 "retired alias remains registered: {alias}"
             );
             assert_eq!(tool_family(alias), ToolFamily::Unknown, "{alias}");
+        }
+    }
+
+    #[test]
+    fn retired_compression_tools_are_not_current_builtins() {
+        for name in ["compress_chat_probe", "compress_chat_apply"] {
+            assert!(!CURRENT_STATIC_BUILTIN_TOOL_NAMES.contains(&name));
+            assert!(!TUI_TOOL_FAMILY_REGISTRY
+                .iter()
+                .any(|(registered, _)| *registered == name));
         }
     }
 

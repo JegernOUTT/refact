@@ -1,4 +1,4 @@
-schema_version: 26
+schema_version: 27
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -209,7 +209,7 @@ prompt: |
 
   **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable across restarts). `cron_list`/`cron_update`/`cron_delete` manage jobs. `sleep` waits without holding a shell process.
 
-  %COMPRESS_HANDOFF_INSTRUCTIONS%
+  %HANDOFF_INSTRUCTIONS%
 
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 
@@ -329,8 +329,6 @@ tools:
   - cron_list
   - cron_delete
   - cron_update
-  - compress_chat_probe
-  - compress_chat_apply
   - handoff_to_mode
 
 tool_confirm:
@@ -409,8 +407,6 @@ tool_confirm:
       action: auto
     - match: "ask_questions"
       action: auto
-    - match: "compress_chat_*"
-      action: ask
     - match: "handoff_to_mode"
       action: auto
     - match: "set_plan"

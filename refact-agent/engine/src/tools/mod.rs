@@ -57,7 +57,6 @@ mod tool_code_mode;
 #[cfg(test)]
 mod tool_code_mode_tests;
 pub(crate) mod tool_codegraph;
-pub(crate) mod tool_compress_chat;
 pub mod tool_config_subagent;
 mod tool_contrast_audit;
 pub(crate) mod tool_cron_create;

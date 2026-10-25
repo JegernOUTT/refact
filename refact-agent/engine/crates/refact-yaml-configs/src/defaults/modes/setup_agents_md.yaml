@@ -1,4 +1,4 @@
-schema_version: 23
+schema_version: 24
 id: setup_agents_md
 title: Setup AGENTS.md
 description: Guided creation or update of AGENTS.md project instructions
@@ -173,7 +173,7 @@ prompt: |
   - **No schema dumps**: do not paste raw config schemas or long vendor docs into AGENTS
   - **Scope-aware splitting**: create nested AGENTS only when the subtree meaningfully differs
 
-  %COMPRESS_HANDOFF_INSTRUCTIONS%
+  %HANDOFF_INSTRUCTIONS%
 
 tools:
   - set_trajectory_label
@@ -226,8 +226,6 @@ tools:
   - tasks_set
   - task_done
   - ask_questions
-  - compress_chat_probe
-  - compress_chat_apply
   - handoff_to_mode
 
 tool_confirm:
@@ -293,6 +291,4 @@ tool_confirm:
     - match: "update_textdoc*"
       action: ask
     - match: "create_knowledge"
-      action: ask
-    - match: "compress_chat_*"
       action: ask

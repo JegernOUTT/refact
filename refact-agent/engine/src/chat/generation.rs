@@ -54,8 +54,6 @@ use crate::chat::history_limit::ContextPressure;
 use refact_core::llm_types::BaseModelRecord;
 use refact_core::provider_types::{ModelTypeDefaults, ProviderDefaults};
 
-const TOKEN_BUDGET_CADENCE: usize = 6;
-const TOKEN_BUDGET_MARKER: &str = "token_budget_info";
 const MCP_LAZY_INDEX_MARKER: &str = "mcp_lazy_index";
 const LENGTH_STOP_NEAR_EMPTY_VISIBLE_CHARS: usize = 32;
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
@@ -441,114 +439,6 @@ async fn announce_generation_retry(
         max_attempts,
         reason,
     );
-}
-
-pub(crate) async fn inject_token_budget_for_chat(
-    app: &AppState,
-    session_arc: &Arc<AMutex<ChatSession>>,
-    effective_n_ctx: usize,
-    cadence: usize,
-    image_token_mode: refact_core::provider_types::ImageTokenMode,
-) -> bool {
-    let chat_id = session_arc.lock().await.chat_id.clone();
-    if crate::agents::seal::is_sealed(app, &chat_id).await {
-        return false;
-    }
-    let mut session = session_arc.lock().await;
-    maybe_inject_token_budget_instruction(&mut session, effective_n_ctx, cadence, image_token_mode)
-}
-
-fn maybe_inject_token_budget_instruction(
-    session: &mut ChatSession,
-    effective_n_ctx: usize,
-    cadence: usize,
-    image_token_mode: refact_core::provider_types::ImageTokenMode,
-) -> bool {
-    let Ok(active) = refact_core::active_context::active_context(&session.messages) else {
-        return false;
-    };
-    let messages = &active.messages;
-    let used_tokens = refact_chat_history::trajectory_ops::approx_token_count_for_image_mode(
-        messages,
-        image_token_mode,
-    );
-    let remaining = effective_n_ctx.saturating_sub(used_tokens);
-    let last_has_tool_calls = messages
-        .last()
-        .map(|msg| {
-            msg.role == "assistant"
-                && msg
-                    .tool_calls
-                    .as_ref()
-                    .map(|tcs| !tcs.is_empty())
-                    .unwrap_or(false)
-        })
-        .unwrap_or(false);
-    if last_has_tool_calls {
-        return false;
-    }
-
-    if messages
-        .last()
-        .is_some_and(|message| length_stop_kind(message).is_some())
-    {
-        return false;
-    }
-
-    let mut last_marker_idx = None;
-    let mut user_or_assistant_since = 0usize;
-
-    for (idx, msg) in messages.iter().enumerate().rev() {
-        if msg.role == "cd_instruction" && msg.tool_call_id == TOKEN_BUDGET_MARKER {
-            last_marker_idx = Some(idx);
-            break;
-        }
-    }
-
-    for (idx, msg) in messages.iter().enumerate().rev() {
-        if let Some(marker_idx) = last_marker_idx {
-            if idx <= marker_idx {
-                break;
-            }
-        }
-        if msg.role == "user" || msg.role == "assistant" {
-            user_or_assistant_since += 1;
-        }
-    }
-
-    if user_or_assistant_since < cadence {
-        return false;
-    }
-
-    if messages
-        .iter()
-        .rev()
-        .take(cadence)
-        .any(|msg| msg.role == "cd_instruction" && msg.tool_call_id == TOKEN_BUDGET_MARKER)
-    {
-        return false;
-    }
-
-    let pct_used = if effective_n_ctx > 0 {
-        used_tokens.saturating_mul(100) / effective_n_ctx
-    } else {
-        0
-    };
-
-    let message = ChatMessage {
-        role: "cd_instruction".to_string(),
-        tool_call_id: TOKEN_BUDGET_MARKER.to_string(),
-        content: ChatContent::SimpleText(format!(
-            "💿 Token budget: ~{} used / ~{} available (~{}% used). ~{} tokens remaining. Consider using compress_chat_probe() if running low.",
-            used_tokens,
-            effective_n_ctx,
-            pct_used,
-            remaining
-        )),
-        ..Default::default()
-    };
-    session.add_message(message);
-    true
 }
 
 fn build_mcp_lazy_hint(total: usize) -> String {
@@ -1336,6 +1226,12 @@ fn is_length_stop_compression_candidate(message: &ChatMessage) -> bool {
         && has_empty_or_near_empty_visible_output(message)
 }
 
+fn last_length_stop_message(messages: &[ChatMessage]) -> Option<&ChatMessage> {
+    messages.iter().rev().find(|message| {
+        !(message.role == "cd_instruction" && message.tool_call_id == "token_budget_info")
+    })
+}
+
 async fn maybe_compact_after_high_pressure_length_stop(
     gcx: Arc<crate::global_context::GlobalContext>,
     session_arc: &Arc<AMutex<ChatSession>>,
@@ -1348,9 +1244,7 @@ async fn maybe_compact_after_high_pressure_length_stop(
         if matches!(
             session.runtime.state,
             SessionState::Idle | SessionState::Completed
-        ) && session
-            .messages
-            .last()
+        ) && last_length_stop_message(&session.messages)
             .is_some_and(is_length_stop_compression_candidate)
         {
             crate::chat::context_rebuild::emit_compression_skipped_status(
@@ -1368,7 +1262,7 @@ async fn maybe_compact_after_high_pressure_length_stop(
         ) {
             return false;
         }
-        let Some(message) = session.messages.last() else {
+        let Some(message) = last_length_stop_message(&session.messages) else {
             return false;
         };
         if !is_high_pressure_length_stop(
@@ -1444,15 +1338,6 @@ fn length_stop_recovery_attempts(messages: &[ChatMessage]) -> usize {
         .count()
 }
 
-fn trailing_token_budget_marker_index(messages: &[ChatMessage]) -> Option<usize> {
-    messages
-        .last()
-        .is_some_and(|message| {
-            message.role == "cd_instruction" && message.tool_call_id == TOKEN_BUDGET_MARKER
-        })
-        .then_some(messages.len().saturating_sub(1))
-}
-
 fn length_stop_continue_instruction(kind: LengthStopKind) -> ChatMessage {
     let text = match kind {
         LengthStopKind::EmptyOutput => {
@@ -1482,7 +1367,7 @@ pub(crate) async fn maybe_recover_after_length_stop(
     if crate::agents::seal::is_sealed(&app, &chat_id).await {
         return false;
     }
-    let (kind, dead_end_message_id, attempts, trailing_budget_marker_id) = {
+    let (kind, dead_end_message_id, attempts) = {
         let session = session_arc.lock().await;
         if !matches!(
             session.runtime.state,
@@ -1490,10 +1375,7 @@ pub(crate) async fn maybe_recover_after_length_stop(
         ) {
             return false;
         }
-        let last_idx = trailing_token_budget_marker_index(&session.messages)
-            .unwrap_or(session.messages.len())
-            .saturating_sub(1);
-        let Some(last) = session.messages.get(last_idx) else {
+        let Some(last) = last_length_stop_message(&session.messages) else {
             return false;
         };
         let Some(kind) = length_stop_kind(last) else {
@@ -1503,9 +1385,6 @@ pub(crate) async fn maybe_recover_after_length_stop(
             kind,
             last.message_id.clone(),
             length_stop_recovery_attempts(&session.messages),
-            trailing_token_budget_marker_index(&session.messages)
-                .and_then(|idx| session.messages.get(idx))
-                .map(|message| message.message_id.clone()),
         )
     };
 
@@ -1545,18 +1424,19 @@ pub(crate) async fn maybe_recover_after_length_stop(
     }
 
     let mut session = session_arc.lock().await;
-    if let Some(marker_id) = trailing_budget_marker_id.as_deref() {
-        session.remove_message(marker_id);
-    }
     if kind == LengthStopKind::EmptyOutput {
         if !dead_end_message_id.is_empty() {
             session.remove_message(&dead_end_message_id);
-        } else if session
-            .messages
-            .last()
-            .is_some_and(|message| length_stop_kind(message) == Some(LengthStopKind::EmptyOutput))
+        } else if let Some(index) = last_length_stop_message(&session.messages)
+            .filter(|message| length_stop_kind(message) == Some(LengthStopKind::EmptyOutput))
+            .and_then(|last| {
+                session
+                    .messages
+                    .iter()
+                    .rposition(|message| std::ptr::eq(message, last))
+            })
         {
-            session.messages.pop();
+            session.messages.remove(index);
             session.increment_version();
             session.touch();
         }
@@ -2242,17 +2122,6 @@ async fn process_successful_generation(
 
     let (effective_n_ctx, image_token_mode) =
         generation_context_budget(gcx, &model_id, context_tokens_cap).await;
-
-    if let Some(effective_n_ctx) = effective_n_ctx {
-        inject_token_budget_for_chat(
-            app,
-            session_arc,
-            effective_n_ctx,
-            TOKEN_BUDGET_CADENCE,
-            image_token_mode,
-        )
-        .await;
-    }
 
     maybe_save_trajectory_background_with_intent(
         app.clone(),
@@ -4117,14 +3986,6 @@ mod tests {
         }
     }
 
-    fn make_long_user_msg(token_estimate: usize) -> ChatMessage {
-        ChatMessage {
-            role: "user".to_string(),
-            content: ChatContent::SimpleText("x".repeat(token_estimate.saturating_mul(4))),
-            ..Default::default()
-        }
-    }
-
     fn make_context_file_msg() -> ChatMessage {
         ChatMessage {
             role: "context_file".to_string(),
@@ -4408,51 +4269,6 @@ mod tests {
         assert_eq!(session.trajectory_version, 0);
     }
 
-    #[test]
-    fn token_budget_instruction_uses_only_latest_payload_and_suffix() {
-        use refact_core::active_context::{make_reconstruction_report, ReconstructionMetadata};
-        let mut active = make_user_msg("short active request");
-        active.message_id = "payload-budget".into();
-        let report =
-            make_reconstruction_report(vec![active], ReconstructionMetadata::default()).unwrap();
-        let mut session = ChatSession::new("budget-archive".into());
-        session.add_message(make_user_msg(&"archived".repeat(20_000)));
-        let mut old_marker = ChatMessage::new("cd_instruction".into(), "old budget".into());
-        old_marker.tool_call_id = TOKEN_BUDGET_MARKER.into();
-        session.add_message(old_marker);
-        session.add_message(report);
-        let before = serde_json::to_value(&session.messages).unwrap();
-        let image_mode = refact_core::provider_types::ImageTokenMode::Provider;
-        assert!(!maybe_inject_token_budget_instruction(
-            &mut session,
-            10000,
-            2,
-            image_mode
-        ));
-        let active = refact_core::active_context::active_context(&session.messages).unwrap();
-        let used = refact_chat_history::trajectory_ops::approx_token_count_for_image_mode(
-            &active.messages,
-            image_mode,
-        );
-        assert!(maybe_inject_token_budget_instruction(
-            &mut session,
-            10000,
-            1,
-            image_mode
-        ));
-        assert_eq!(
-            serde_json::to_value(&session.messages[..3]).unwrap(),
-            before
-        );
-        assert!(session
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .content_text_only()
-            .contains(&format!("~{} tokens remaining", 10000 - used)));
-    }
-
     fn identified(id: &str, mut message: ChatMessage) -> ChatMessage {
         message.message_id = id.to_string();
         message
@@ -4625,51 +4441,6 @@ mod tests {
     }
 
     #[test]
-    fn test_token_budget_skips_after_tool_call_when_not_low() {
-        let mut session = ChatSession::new("test".to_string());
-        for idx in 0..TOKEN_BUDGET_CADENCE {
-            session.messages.push(make_user_msg(&format!("user {idx}")));
-        }
-        session
-            .messages
-            .push(make_assistant_with_tool_call("call_123", "cat"));
-
-        assert!(!maybe_inject_token_budget_instruction(
-            &mut session,
-            10_000,
-            TOKEN_BUDGET_CADENCE,
-            refact_core::provider_types::ImageTokenMode::Provider,
-        ));
-        assert!(!session
-            .messages
-            .iter()
-            .any(|msg| msg.role == "cd_instruction" && msg.tool_call_id == TOKEN_BUDGET_MARKER));
-    }
-
-    #[test]
-    fn test_token_budget_skips_after_tool_call_even_when_below_ten_percent_left() {
-        let mut session = ChatSession::new("test".to_string());
-        session.messages.push(make_long_user_msg(920));
-        for idx in 0..TOKEN_BUDGET_CADENCE {
-            session.messages.push(make_user_msg(&format!("user {idx}")));
-        }
-        session
-            .messages
-            .push(make_assistant_with_tool_call("call_123", "cat"));
-
-        assert!(!maybe_inject_token_budget_instruction(
-            &mut session,
-            1_000,
-            TOKEN_BUDGET_CADENCE,
-            refact_core::provider_types::ImageTokenMode::Provider,
-        ));
-        assert!(!session
-            .messages
-            .iter()
-            .any(|msg| msg.role == "cd_instruction" && msg.tool_call_id == TOKEN_BUDGET_MARKER));
-    }
-
-    #[test]
     fn test_tail_needs_assistant_ends_with_assistant_no_tools() {
         let messages = vec![make_user_msg("hello"), make_assistant_msg("response")];
         assert!(!tail_needs_assistant(&messages));
@@ -4754,20 +4525,6 @@ mod tests {
             false,
             refact_core::provider_types::ImageTokenMode::Provider
         ));
-    }
-
-    #[test]
-    fn token_budget_marker_not_injected_after_length_stop() {
-        let mut session = ChatSession::new("length-stop-budget-marker".to_string());
-        session.messages = vec![make_user_msg("continue"), make_low_pressure_length_stop()];
-
-        assert!(!maybe_inject_token_budget_instruction(
-            &mut session,
-            100_000,
-            1,
-            refact_core::provider_types::ImageTokenMode::Provider,
-        ));
-        assert_eq!(session.messages.len(), 2);
     }
 
     #[test]
@@ -5473,16 +5230,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn length_stop_recovery_ignores_trailing_token_budget_marker() {
+    async fn length_stop_recovery_preserves_legacy_budget_history_but_suppresses_it_on_wire() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let mut session = ChatSession::new("length-stop-trailing-budget".to_string());
         session.messages = vec![make_user_msg("continue"), make_low_pressure_length_stop()];
         session.add_message(ChatMessage {
             role: "cd_instruction".to_string(),
-            tool_call_id: TOKEN_BUDGET_MARKER.to_string(),
+            tool_call_id: "token_budget_info".to_string(),
             content: ChatContent::SimpleText("budget".to_string()),
             ..Default::default()
         });
+        let stored_notice = serde_json::to_value(&session.messages[2]).unwrap();
         let thread = session.thread.clone();
         let session_arc = Arc::new(AMutex::new(session));
 
@@ -5498,10 +5256,20 @@ mod tests {
         );
 
         let session = session_arc.lock().await;
-        assert!(!session
-            .messages
+        assert_eq!(
+            serde_json::to_value(&session.messages[1]).unwrap(),
+            stored_notice
+        );
+        assert_eq!(
+            session.pending_max_new_tokens_boost,
+            Some(LENGTH_STOP_BOOSTED_MAX_NEW_TOKENS)
+        );
+        let wire = crate::chat::linearize::apply_summarization_linearize(session.messages.clone())
+            .unwrap();
+        assert!(!wire
             .iter()
-            .any(|message| message.tool_call_id == TOKEN_BUDGET_MARKER));
+            .any(|message| message.tool_call_id == "token_budget_info"));
+        assert_eq!(wire.len(), 2);
         assert_eq!(
             session
                 .messages

@@ -1,4 +1,4 @@
-schema_version: 22
+schema_version: 23
 id: setup_knowledge
 title: Seed Knowledge
 description: Guided seeding of durable project knowledge and memory
@@ -95,7 +95,7 @@ prompt: |
   - **No secrets**: never store credentials, tokens, or private data in knowledge.
   - **Right home**: must-follow rules -> AGENTS.md; reusable workflow -> skill; recall -> knowledge.
 
-  %COMPRESS_HANDOFF_INSTRUCTIONS%
+  %HANDOFF_INSTRUCTIONS%
 
 tools:
   - set_trajectory_label
@@ -124,8 +124,6 @@ tools:
   - tasks_set
   - task_done
   - ask_questions
-  - compress_chat_probe
-  - compress_chat_apply
   - handoff_to_mode
 tool_confirm:
   rules:
@@ -168,6 +166,4 @@ tool_confirm:
     - match: "ask_questions"
       action: auto
     - match: "create_knowledge"
-      action: ask
-    - match: "compress_chat_*"
       action: ask

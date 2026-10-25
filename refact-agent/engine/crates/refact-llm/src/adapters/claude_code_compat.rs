@@ -183,9 +183,7 @@ pub const CC_TOOL_RENAMES: &[(&str, &str)] = &[
     ("buddy_say", "say"),
     // Worktree / project operations
     ("worktree_merge", "merge_worktree"),
-    // Context / compression
-    ("compress_chat_probe", "ctx_probe"),
-    ("compress_chat_apply", "ctx_apply"),
+    // Mode transitions
     ("handoff_to_mode", "switch_mode"),
     // Knowledge / memory
     ("create_knowledge", "save_knowledge"),
@@ -276,9 +274,7 @@ const CC_SYSTEM_REPLACEMENTS: &[(&str, &str)] = &[
     ("tasks_set",                "set_tasks"),
     ("task_done",                "finish"),
     ("ask_questions",            "ask"),
-    // Context / compression
-    ("compress_chat_probe",      "ctx_probe"),
-    ("compress_chat_apply",      "ctx_apply"),
+    // Mode transitions
     ("handoff_to_mode",          "switch_mode"),
     // Knowledge / memory
     ("create_knowledge",         "save_knowledge"),
@@ -710,7 +706,6 @@ mod tests {
             "update_textdoc_by_lines"
         );
         assert_eq!(cc_resolve_tool_name("t_subagent"), "subagent");
-        assert_eq!(cc_resolve_tool_name("t_ctx_probe"), "compress_chat_probe");
         // Non-renamed builtins: just strip t_ prefix
         assert_eq!(cc_resolve_tool_name("t_cat"), "cat");
         assert_eq!(cc_resolve_tool_name("t_tree"), "tree");
@@ -966,6 +961,20 @@ mod tests {
     }
 
     #[test]
+    fn retired_compression_tool_names_are_not_renamed() {
+        assert_eq!(
+            cc_rename_base_tool("compress_chat_probe"),
+            "compress_chat_probe"
+        );
+        assert_eq!(
+            cc_rename_base_tool("compress_chat_apply"),
+            "compress_chat_apply"
+        );
+        assert_eq!(cc_resolve_tool_name("t_ctx_probe"), "ctx_probe");
+        assert_eq!(cc_resolve_tool_name("t_ctx_apply"), "ctx_apply");
+    }
+
+    #[test]
     fn test_cc_resolve_tool_name_full_rename_table() {
         assert_eq!(cc_resolve_tool_name("t_tree"), "tree");
         assert_eq!(cc_resolve_tool_name("t_cat"), "cat");
@@ -993,8 +1002,6 @@ mod tests {
         assert_eq!(cc_resolve_tool_name("t_hist_search"), "search_trajectories");
         assert_eq!(cc_resolve_tool_name("t_hist_get"), "get_trajectory_context");
         assert_eq!(cc_resolve_tool_name("t_load_skill"), "activate_skill");
-        assert_eq!(cc_resolve_tool_name("t_ctx_probe"), "compress_chat_probe");
-        assert_eq!(cc_resolve_tool_name("t_ctx_apply"), "compress_chat_apply");
         assert_eq!(cc_resolve_tool_name("t_switch_mode"), "handoff_to_mode");
     }
 

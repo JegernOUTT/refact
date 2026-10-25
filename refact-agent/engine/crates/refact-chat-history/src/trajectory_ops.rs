@@ -361,8 +361,8 @@ pub fn insert_compression_report_at_boundary(
 
 /// Like `insert_compression_report_at_boundary`, but equivalent-report removal is
 /// confined to `messages[..modifiable_end]`. Callers with a preserved tail
-/// (ctx_apply `preserve_last_turns`, deterministic sweeps) pass the modifiable
-/// prefix length so tail bytes are never mutated by report deduplication.
+/// pass the modifiable prefix length so tail bytes are never mutated by report
+/// deduplication.
 pub fn insert_compression_report_at_boundary_scoped(
     messages: &mut Vec<ChatMessage>,
     report: ChatMessage,

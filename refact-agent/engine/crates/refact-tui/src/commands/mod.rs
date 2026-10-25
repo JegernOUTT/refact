@@ -149,6 +149,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retired_compact_command_is_not_registered() {
+        assert!(command_by_name("compact").is_none());
+        for active_turn in [false, true] {
+            assert!(!command_picker_items(CommandContext { active_turn })
+                .iter()
+                .any(|item| item.id == "compact"));
+        }
+    }
+
+    #[test]
     fn command_registry_resolves_aliases() {
         let command = command_by_name("/exit").unwrap();
         assert_eq!(command.name, "quit");
@@ -297,9 +307,7 @@ mod tests {
 
     #[test]
     fn workflow_commands_document_mechanism() {
-        for name in [
-            "plan", "goal", "agent", "diff", "review", "mention", "compact", "init",
-        ] {
+        for name in ["plan", "goal", "agent", "diff", "review", "mention", "init"] {
             let command = command_by_name(name).unwrap();
             assert!(
                 command.description.contains(':') || command.description.contains("Insert"),

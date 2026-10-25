@@ -1,4 +1,4 @@
-schema_version: 22
+schema_version: 23
 id: setup_mcp
 title: Setup MCP
 description: Discover and configure suitable MCP servers for the project
@@ -170,7 +170,7 @@ prompt: |
   - **Execution is a last resort**: prefer README/docs/package metadata first; only run a discovered server package when the user has approved that validation step
   - **Pair connectivity with guidance when needed**: if the server exposes a complex system, suggest a follow-on skill rather than assuming the model will infer best practices
 
-  %COMPRESS_HANDOFF_INSTRUCTIONS%
+  %HANDOFF_INSTRUCTIONS%
 
 tools:
   - set_trajectory_label
@@ -218,8 +218,6 @@ tools:
   - tasks_set
   - task_done
   - ask_questions
-  - compress_chat_probe
-  - compress_chat_apply
   - handoff_to_mode
 
 tool_confirm:
@@ -277,6 +275,4 @@ tool_confirm:
     - match: "update_textdoc*"
       action: ask
     - match: "create_knowledge"
-      action: ask
-    - match: "compress_chat_*"
       action: ask

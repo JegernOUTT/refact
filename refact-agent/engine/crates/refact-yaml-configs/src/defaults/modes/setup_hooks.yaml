@@ -1,4 +1,4 @@
-schema_version: 22
+schema_version: 23
 id: setup_hooks
 title: Setup Hooks
 description: Guided setup for lifecycle hooks that run shell commands on agent events
@@ -145,7 +145,7 @@ prompt: |
   - **Validated commands only**: never document a hook command you have not run.
   - **Use the real format**: `type: command`, the exact event names above, and a regex `matcher` only for tool events.
 
-  %COMPRESS_HANDOFF_INSTRUCTIONS%
+  %HANDOFF_INSTRUCTIONS%
 
 tools:
   - set_trajectory_label
@@ -182,8 +182,6 @@ tools:
   - tasks_set
   - task_done
   - ask_questions
-  - compress_chat_probe
-  - compress_chat_apply
   - handoff_to_mode
 tool_confirm:
   rules:
@@ -232,6 +230,4 @@ tool_confirm:
     - match: "update_textdoc*"
       action: ask
     - match: "create_knowledge"
-      action: ask
-    - match: "compress_chat_*"
       action: ask

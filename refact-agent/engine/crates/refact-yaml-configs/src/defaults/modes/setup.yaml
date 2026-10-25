@@ -1,4 +1,4 @@
-schema_version: 22
+schema_version: 23
 id: setup
 title: Setup Project
 description: Analyze the project and configure Refact artifacts (AGENTS, commands, skills, subagents, integrations, knowledge)
@@ -233,7 +233,7 @@ prompt: |
   - State trigger conditions, output shape, and success criteria
   - Do not create them if AGENTS or a command surface is the better fit
 
-  %COMPRESS_HANDOFF_INSTRUCTIONS%
+  %HANDOFF_INSTRUCTIONS%
 
 tools:
   - set_trajectory_label
@@ -281,8 +281,6 @@ tools:
   - tasks_set
   - task_done
   - ask_questions
-  - compress_chat_probe
-  - compress_chat_apply
   - handoff_to_mode
 
 tool_confirm:
@@ -340,6 +338,4 @@ tool_confirm:
     - match: "update_textdoc*"
       action: ask
     - match: "create_knowledge"
-      action: ask
-    - match: "compress_chat_*"
       action: ask

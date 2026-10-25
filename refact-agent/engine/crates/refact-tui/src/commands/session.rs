@@ -353,18 +353,13 @@ pub fn permission_picker_items() -> Vec<PickerItem> {
             description: "Read-only here; file-edit tools return built-in CONFIRMATION. Change requires the tool implementation.".to_string(),
         },
         PickerItem {
-            id: "always_ask_tools".to_string(),
-            title: "7. ALWAYS_ASK_TOOLS".to_string(),
-            description: "Read-only here; ctx_probe and ctx_apply always ask through built-in policy.".to_string(),
-        },
-        PickerItem {
             id: "switch_mode".to_string(),
-            title: "8. switch_mode".to_string(),
+            title: "7. switch_mode".to_string(),
             description: "Read-only here; switch_mode (handoff_to_mode) is always auto-approved by built-in policy.".to_string(),
         },
         PickerItem {
             id: "shell_privacy".to_string(),
-            title: "9. Privacy-based shell approval".to_string(),
+            title: "8. Privacy-based shell approval".to_string(),
             description: "Read-only here; guarded shell reads can ask after execution. Configure global ~/.config/refact/privacy.yaml or project .refact/privacy.yaml.".to_string(),
         },
     ]
@@ -638,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn permission_picker_lists_nine_gates_with_only_auto_approval_editable() {
+    fn permission_picker_lists_eight_gates_with_only_auto_approval_editable() {
         let items = permission_picker_items();
         let ids = items
             .iter()
@@ -649,8 +644,8 @@ mod tests {
             .filter_map(|item| item.title.split_once('.').map(|(number, _)| number))
             .collect::<std::collections::BTreeSet<_>>();
 
-        assert_eq!(items.len(), 10);
-        assert_eq!(gate_numbers.len(), 9);
+        assert_eq!(items.len(), 9);
+        assert_eq!(gate_numbers.len(), 8);
         assert_eq!(
             permission_picker_editable_ids(),
             ["editing_tools", "dangerous_commands"]
@@ -683,7 +678,6 @@ mod tests {
         assert!(ids.contains(&"sandbox_escalation"));
         assert!(ids.contains(&"tool_confirmation_policy"));
         assert!(ids.contains(&"edit_tool_confirmation"));
-        assert!(ids.contains(&"always_ask_tools"));
         assert!(ids.contains(&"switch_mode"));
         assert!(ids.contains(&"shell_privacy"));
     }

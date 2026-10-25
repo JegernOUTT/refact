@@ -1,4 +1,4 @@
-schema_version: 23
+schema_version: 24
 id: setup_commands
 title: Setup Commands
 description: Create project-specific slash commands, toolbox prompts, and cmdline/service configs
@@ -138,7 +138,7 @@ prompt: |
   - **Descriptive names**: `cmdline_test_changed_files` is better than `cmdline_tc`
   - **Secret hygiene**: use `$VARIABLE` placeholders, never hardcode tokens or passwords
 
-  %COMPRESS_HANDOFF_INSTRUCTIONS%
+  %HANDOFF_INSTRUCTIONS%
 
 tools:
   - set_trajectory_label
@@ -191,8 +191,6 @@ tools:
   - tasks_set
   - task_done
   - ask_questions
-  - compress_chat_probe
-  - compress_chat_apply
   - handoff_to_mode
 
 tool_confirm:
@@ -258,6 +256,4 @@ tool_confirm:
     - match: "update_textdoc*"
       action: ask
     - match: "create_knowledge"
-      action: ask
-    - match: "compress_chat_*"
       action: ask

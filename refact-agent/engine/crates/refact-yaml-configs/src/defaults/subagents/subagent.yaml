@@ -1,4 +1,4 @@
-schema_version: 7
+schema_version: 8
 id: subagent
 title: Subagent
 description: General-purpose background subagent for focused research and implementation work
@@ -62,8 +62,6 @@ tools:
   - web
   - web_search
   - shell
-  - compress_chat_probe
-  - compress_chat_apply
   - apply_patch
   - create_textdoc
   - update_textdoc

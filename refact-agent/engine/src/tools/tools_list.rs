@@ -742,12 +742,6 @@ async fn get_builtin_tools(
         Box::new(crate::tools::tool_goal_pursuit_controls::ToolSnoozeGoal {
             config_path: config_path.clone(),
         }),
-        Box::new(crate::tools::tool_compress_chat::ToolCompressChatProbe {
-            config_path: config_path.clone(),
-        }),
-        Box::new(crate::tools::tool_compress_chat::ToolCompressChatApply {
-            config_path: config_path.clone(),
-        }),
         Box::new(crate::tools::tool_handoff_to_mode::ToolHandoffToMode {
             config_path: config_path.clone(),
         }),
@@ -1195,6 +1189,33 @@ mod tests {
             .map(|tool| tool.tool_description().name)
             .collect::<HashSet<_>>();
         assert!(names.contains("set_trajectory_label"));
+    }
+
+    #[tokio::test]
+    async fn builtin_catalog_excludes_retired_compression_tools() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let availability = ToolAvailability::from_gcx(gcx.clone()).await;
+        let descriptions = get_builtin_tools(gcx, &availability, None)
+            .await
+            .into_iter()
+            .flat_map(|group| group.tools)
+            .map(|tool| tool.tool_description())
+            .collect::<Vec<_>>();
+        assert!(!descriptions.is_empty());
+        let subagent_config =
+            include_str!("../../crates/refact-yaml-configs/src/defaults/subagents/subagent.yaml");
+        for name in [
+            "compress_chat_probe",
+            "compress_chat_apply",
+            "ctx_probe",
+            "ctx_apply",
+        ] {
+            assert!(!descriptions.iter().any(|desc| desc.name == name));
+            assert!(!subagent_config.contains(name));
+        }
+        assert!(descriptions
+            .iter()
+            .any(|desc| desc.name == "handoff_to_mode"));
     }
 
     #[tokio::test]
@@ -2401,6 +2422,16 @@ mod tests {
                 .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
             let value: serde_yaml::Value = serde_yaml::from_str(&raw)
                 .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
+            for retired in [
+                "compress_chat_*",
+                "compress_chat_probe",
+                "compress_chat_apply",
+                "ctx_probe",
+                "ctx_apply",
+                "%COMPRESS_HANDOFF_INSTRUCTIONS%",
+            ] {
+                assert!(!raw.contains(retired), "{file_name} references {retired}");
+            }
             checked_modes += 1;
             if !value
                 .get("prompt")

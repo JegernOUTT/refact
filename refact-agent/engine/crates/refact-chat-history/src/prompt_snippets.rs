@@ -83,14 +83,6 @@ pub const RICH_CONTENT_INSTRUCTIONS: &str = r#"The chat window renders rich visu
 
 Prefer these over plain text descriptions when visual representation would be clearer: architecture diagrams, flowcharts, data visualizations, interactive demos, UI prototypes."#;
 
-pub const COMPRESS_HANDOFF_INSTRUCTIONS: &str = r#"## Chat Management Tools
-
-**compress_chat_probe()** — Analyze token usage when the chat grows large or token budget warnings appear.
-
-**compress_chat_apply(...)** — Apply selective compression using explicit lists from the probe. Requires user approval.
-
-**handoff_to_mode(target_mode, reason, ...)** — Transition to a different mode when the workflow changes (e.g., brainstorming/design, implementation planning, task-board execution, explore-only, or quick Q&A). When handing a complete plan to Task Planner, pass the full plan in `initial_plan`."#;
-
 pub const HANDOFF_ONLY_INSTRUCTIONS: &str = r#"## Chat Management Tools
 
 **handoff_to_mode(target_mode, reason, ...)** — Transition to a different mode when the workflow changes (e.g., brainstorming/design, implementation planning, task-board execution, explore-only, or quick Q&A). When handing a complete plan to Task Planner, pass the full plan in `initial_plan`."#;

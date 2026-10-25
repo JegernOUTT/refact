@@ -1,4 +1,4 @@
-schema_version: 21
+schema_version: 22
 id: setup_subagents
 title: Setup Subagents
 description: Guided setup for project-specific subagents
@@ -186,7 +186,7 @@ prompt: |
   - **Prefer read-only tools**: editing, shell, or network-side-effect tools need explicit justification
   - **Use the real schema**: do not invent `prompt:` or `allowed_tools:` fields
 
-  %COMPRESS_HANDOFF_INSTRUCTIONS%
+  %HANDOFF_INSTRUCTIONS%
 
 tools:
   - set_trajectory_label
@@ -227,8 +227,6 @@ tools:
   - tasks_set
   - task_done
   - ask_questions
-  - compress_chat_probe
-  - compress_chat_apply
   - handoff_to_mode
 
 tool_confirm:
@@ -284,6 +282,4 @@ tool_confirm:
     - match: "update_textdoc*"
       action: ask
     - match: "create_knowledge"
-      action: ask
-    - match: "compress_chat_*"
       action: ask

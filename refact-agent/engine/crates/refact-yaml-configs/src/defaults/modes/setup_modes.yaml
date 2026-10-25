@@ -1,4 +1,4 @@
-schema_version: 23
+schema_version: 24
 id: setup_modes
 title: Setup Modes
 description: Guided setup for project-specific chat modes
@@ -83,7 +83,7 @@ prompt: |
 
   the Buddy personality marker, `%RICH_CONTENT_INSTRUCTIONS%`, `%CODEGRAPH_INSTRUCTIONS%`, `%SYSTEM_INFO%`,
   `%WORKSPACE_INFO%`, `%GIT_INFO%`, `%PROJECT_TREE%`, `%MODE_NAME%`, `%TASK_BRIEF%`,
-  `%SKILLS_INSTRUCTIONS%`, `%COMPRESS_HANDOFF_INSTRUCTIONS%`, `%TRAJECTORY_LABEL_INSTRUCTIONS%`.
+  `%SKILLS_INSTRUCTIONS%`, `%HANDOFF_INSTRUCTIONS%`, `%TRAJECTORY_LABEL_INSTRUCTIONS%`.
   Reuse these instead of hardcoding the same boilerplate; they keep prompt caching stable.
 
   ## When to create a mode vs something else
@@ -189,7 +189,7 @@ prompt: |
   - **Unique, descriptive id and order**: avoid id collisions; pick a `ui.order` that slots sensibly in the picker.
   - **Use the real schema**: never invent fields such as `allowed_tools:` or `system_prompt:` at mode top level.
 
-  %COMPRESS_HANDOFF_INSTRUCTIONS%
+  %HANDOFF_INSTRUCTIONS%
 
 tools:
   - set_trajectory_label
@@ -225,8 +225,6 @@ tools:
   - tasks_set
   - task_done
   - ask_questions
-  - compress_chat_probe
-  - compress_chat_apply
   - handoff_to_mode
 tool_confirm:
   rules:
@@ -273,6 +271,4 @@ tool_confirm:
     - match: "update_textdoc*"
       action: ask
     - match: "create_knowledge"
-      action: ask
-    - match: "compress_chat_*"
       action: ask

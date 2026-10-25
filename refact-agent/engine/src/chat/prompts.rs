@@ -627,18 +627,13 @@ pub async fn system_prompt_add_extra_instructions(
         );
     }
 
-    if system_prompt.contains("%COMPRESS_HANDOFF_INSTRUCTIONS%") {
-        let has_compress = tool_names.contains("compress_chat_probe")
-            || tool_names.contains("compress_chat_apply");
-        let has_handoff = tool_names.contains("handoff_to_mode");
-        let replacement = if has_compress {
-            super::prompt_snippets::COMPRESS_HANDOFF_INSTRUCTIONS
-        } else if has_handoff {
+    for placeholder in ["%HANDOFF_INSTRUCTIONS%", "%COMPRESS_HANDOFF_INSTRUCTIONS%"] {
+        let replacement = if tool_names.contains("handoff_to_mode") {
             super::prompt_snippets::HANDOFF_ONLY_INSTRUCTIONS
         } else {
             ""
         };
-        system_prompt = system_prompt.replace("%COMPRESS_HANDOFF_INSTRUCTIONS%", replacement);
+        system_prompt = system_prompt.replace(placeholder, replacement);
     }
 
     if system_prompt.contains("%RICH_CONTENT_INSTRUCTIONS%") {
@@ -1708,6 +1703,42 @@ mod tests {
 
             assert!(rendered.contains("You are Pixel, a Helper Sprite"));
             assert!(!rendered.contains(BUDDY_PERSONALITY_MARKER));
+        }
+    }
+
+    #[tokio::test]
+    async fn handoff_instructions_exclude_retired_compression_tools() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        for tool_names in [
+            HashSet::new(),
+            HashSet::from(["handoff_to_mode".to_string()]),
+        ] {
+            let has_handoff = tool_names.contains("handoff_to_mode");
+            let rendered = system_prompt_add_extra_instructions(
+                app.clone(),
+                "%HANDOFF_INSTRUCTIONS%\n%COMPRESS_HANDOFF_INSTRUCTIONS%".to_string(),
+                tool_names,
+                &ChatMeta::default(),
+                &None,
+                "agent",
+            )
+            .await;
+            assert_eq!(rendered.contains("handoff_to_mode"), has_handoff);
+            assert!(!rendered.contains("%HANDOFF_INSTRUCTIONS%"));
+            assert!(!rendered.contains("%COMPRESS_HANDOFF_INSTRUCTIONS%"));
+            assert_eq!(
+                rendered.matches("handoff_to_mode").count(),
+                if has_handoff { 2 } else { 0 }
+            );
+            for retired in [
+                "compress_chat_probe",
+                "compress_chat_apply",
+                "ctx_probe",
+                "ctx_apply",
+            ] {
+                assert!(!rendered.contains(retired));
+            }
         }
     }
 

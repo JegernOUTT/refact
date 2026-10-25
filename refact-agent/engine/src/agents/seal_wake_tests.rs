@@ -456,10 +456,6 @@ async fn sibling_notice_not_delivered_to_sealed_chat() {
     no_wake(&fixture.session, before).await;
 }
 
-async fn budget(app: &AppState, session: &Arc<Mutex<ChatSession>>) -> bool {
-    crate::chat::inject_token_budget_for_chat(app, session, 100_000, 1, Default::default()).await
-}
-
 async fn cutoff(app: &AppState, session: &Arc<Mutex<ChatSession>>) -> bool {
     let thread = session.lock().await.thread.clone();
     crate::chat::maybe_recover_after_length_stop(
@@ -488,12 +484,9 @@ async fn length_stop(session: &Arc<Mutex<ChatSession>>) {
 
 #[serial(test_runner, permission_decision_hooks, runtime_settings)]
 #[tokio::test]
-async fn budget_continuation_skips_sealed_chat() {
+async fn length_stop_continuation_skips_sealed_chat() {
     let fixture = fixture().await;
     complete(&fixture).await;
-    let before = snapshot(&fixture.session).await;
-    assert!(!budget(&fixture.app, &fixture.session).await);
-    no_wake(&fixture.session, before).await;
     length_stop(&fixture.session).await;
     let before = snapshot(&fixture.session).await;
     assert!(!cutoff(&fixture.app, &fixture.session).await);
@@ -565,7 +558,6 @@ async fn unsealed_sources_request_continuation() {
     assert!(deliveries[0].wake);
 
     let continuation = fixture().await;
-    assert!(budget(&continuation.app, &continuation.session).await);
     length_stop(&continuation.session).await;
     assert!(cutoff(&continuation.app, &continuation.session).await);
     assert!(continuation
