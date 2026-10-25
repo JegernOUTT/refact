@@ -11,6 +11,58 @@
   padding: var(--rf-panel-pad-compact);
 }
 
+.inlineRow {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.inlineRow > svg {
+  flex: 0 0 auto;
+}
+
+.inlineTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inlineState,
+.inlineAttention {
+  flex: 0 0 auto;
+  color: var(--rf-color-muted);
+}
+
+.inlineAttention {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+}
+
+.inlineState[data-tone="danger"] {
+  color: var(--rf-color-danger);
+}
+
+.inlineState[data-tone="accent"] {
+  color: var(--rf-color-accent);
+}
+
+.inlineState[data-tone="warning"],
+.inlineAttention {
+  color: var(--rf-color-warning);
+}
+
+.inlineDetailMeta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .expandTrigger {
   display: block;
   width: 100%;

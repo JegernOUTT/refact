@@ -2,23 +2,14 @@ import { User } from "lucide-react";
 import React, { useMemo } from "react";
 import { ToolCall } from "../../../services/refact/types";
 import { ReportToolCard, type ReportData } from "./ReportToolCard";
-
-interface SubagentArgs {
-  task?: string;
-  expected_result?: string;
-  tools?: string;
-  max_steps?: string;
-  model_type?: string;
-  model_name?: string;
-  goal?: string;
-  plan?: string;
-  worktree?: string | boolean;
-  auto_merge?: boolean;
-  target_files?: string[];
-}
+import {
+  readCompactRecord,
+  readCompactText,
+} from "../../Tools/AgenticTool/compactPresentation";
 
 interface SubagentToolProps {
   toolCall: ToolCall;
+  presentation?: "panel" | "inline";
 }
 
 function extractSubagentReport(content: string): ReportData | null {
@@ -33,31 +24,43 @@ function extractSubagentReport(content: string): ReportData | null {
   const response = content.slice(responseStart).trim();
 
   return {
-    summary: taskMatch ? `Subagent: ${taskMatch[1].trim()}` : "Subagent report",
+    summary:
+      readCompactText({ task: taskMatch?.[1] }, "task") ??
+      "Background work report",
     markdown: response || content,
   };
 }
 
-export const SubagentTool: React.FC<SubagentToolProps> = ({ toolCall }) => {
-  const args = useMemo<SubagentArgs>(() => {
-    try {
-      return JSON.parse(toolCall.function.arguments) as SubagentArgs;
-    } catch {
-      return {};
-    }
-  }, [toolCall.function.arguments]);
+export const SubagentTool: React.FC<SubagentToolProps> = ({
+  toolCall,
+  presentation = "panel",
+}) => {
+  const args = useMemo(
+    () => readCompactRecord(toolCall.function.arguments),
+    [toolCall.function.arguments],
+  );
+  const task = readCompactText(args, "task");
+  const tools = readCompactText(args, "tools");
+  const maxSteps = readCompactText(args, "max_steps");
+  const modelType = readCompactText(args, "model_type");
+  const modelName = readCompactText(args, "model_name");
 
-  const summary = `Analyze "${args.task ?? "task"}"`;
+  const summary =
+    presentation === "inline"
+      ? task ?? "Background work"
+      : `Analyze "${task ?? "task"}"`;
 
   const meta =
     [
-      args.tools && `tools: ${args.tools}`,
-      args.max_steps && `max: ${args.max_steps}`,
-      args.model_type && `model type: ${args.model_type}`,
-      args.model_name && `model: ${args.model_name}`,
-      args.worktree && "worktree",
-      args.auto_merge && "auto merge",
-      args.target_files?.length && `files: ${args.target_files.length}`,
+      tools && `tools: ${tools}`,
+      maxSteps && `max: ${maxSteps}`,
+      modelType && `model type: ${modelType}`,
+      modelName && `model: ${modelName}`,
+      args?.worktree && "worktree",
+      args?.auto_merge === true && "auto merge",
+      Array.isArray(args?.target_files) &&
+        args.target_files.length > 0 &&
+        `files: ${args.target_files.length}`,
     ]
       .filter(Boolean)
       .join(" · ") || null;
@@ -69,6 +72,7 @@ export const SubagentTool: React.FC<SubagentToolProps> = ({ toolCall }) => {
       defaultSummary={summary}
       meta={meta}
       extractReport={extractSubagentReport}
+      compact={presentation === "inline"}
       unboundedContent
     />
   );

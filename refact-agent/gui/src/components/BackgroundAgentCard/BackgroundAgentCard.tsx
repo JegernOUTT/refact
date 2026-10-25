@@ -1,7 +1,7 @@
 import React, { useCallback, useId, useMemo, useState } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import classNames from "classnames";
-import { Bot, Telescope } from "lucide-react";
+import { Bot, MessageCircleQuestion, Telescope } from "lucide-react";
 import { Badge, Button, Icon } from "../ui";
 import { Chevron } from "../Collapsible";
 import { humanizeIdentifier } from "../../utils/displayNames";
@@ -13,15 +13,30 @@ import type {
   BackgroundAgentSummary,
   DeliverableStatus,
   HandoffGap,
+  ToolCall,
 } from "../../services/refact/types";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import { selectBackgroundAgent } from "../../features/Chat/Thread/selectors";
+import { ToolCard } from "../ui/ToolCard/ToolCard";
+import { useStoredOpen } from "../ChatContent/useStoredOpen";
+import {
+  useChatScrollAnchor,
+  usePrepareChatScrollAnchor,
+} from "../ChatContent/useChatScrollAnchor";
+import { CompactToolDetails } from "../Tools/AgenticTool/CompactToolDetails";
+import { compactText } from "../Tools/AgenticTool/compactPresentation";
+import { ToolCallTooltip } from "../ChatContent/ToolCard/ToolCallTooltip";
 
 export interface BackgroundAgentCardProps {
   agent: BackgroundAgentSummary;
   threadId?: string;
   agentId?: string;
   compactDefault?: boolean;
+  presentation?: "panel" | "inline";
+  statusKnown?: boolean;
+  toolCallId?: string;
+  toolCall?: ToolCall;
+  children?: React.ReactNode;
   onOpenTrajectory?: (childChatId: string) => void;
   onOpenAgentTrajectory?: (
     agent: BackgroundAgentSummary,
@@ -578,11 +593,140 @@ const ExpandedDetail: React.FC<{
   );
 };
 
+const InlineBackgroundAgent: React.FC<{
+  agent: BackgroundAgentSummary;
+  statusKnown: boolean;
+  toolCallId?: string;
+  onOpenTrajectory?: (childChatId: string) => void;
+  children?: React.ReactNode;
+}> = ({ agent, statusKnown, toolCallId, onOpenTrajectory, children }) => {
+  const storeKey = toolCallId
+    ? `tc:${toolCallId}`
+    : `background-agent:${agent.agent_id}`;
+  const [expanded, , setExpanded] = useStoredOpen(storeKey, false);
+  const [filesOpen, toggleFiles] = useStoredOpen(`${storeKey}:files`, false);
+  const filesPanelId = useId();
+  const preserveScrollAnchor = useChatScrollAnchor();
+  const prepareScrollAnchor = usePrepareChatScrollAnchor();
+  const status =
+    statusKnown &&
+    (TERMINAL_STATUSES.has(agent.status) ||
+      agent.status === "running" ||
+      agent.status === "queued" ||
+      agent.status === "waiting_for_approval")
+      ? agent.status
+      : null;
+  const stateLabel =
+    status === "waiting_for_approval"
+      ? "Approval needed"
+      : status
+        ? humanizeIdentifier(status)
+        : "Status unknown";
+  const questions = pendingQuestions(agent);
+  const tone =
+    questions > 0 ? "warning" : status ? statusTone(status) : "muted";
+  const headline =
+    compactText(
+      agent.title.replace(/^\s*(?:subagent|delegate)\s*(?::\s*|$)/iu, ""),
+      160,
+    ) ?? "Background work";
+  const facts = [
+    { label: "Error", value: compactText(agent.error) },
+    { label: "Reported result", value: compactText(agent.result_summary) },
+    {
+      label: "Activity",
+      value: compactText(agent.progress ?? agent.current_tool),
+    },
+    { label: "Goal", value: compactText(agent.goal_summary) },
+  ].flatMap(({ label, value }) => (value === null ? [] : [{ label, value }]));
+
+  return (
+    <ToolCard
+      data-testid="background-agent-inline"
+      density="compact"
+      open={expanded}
+      onOpenChange={(open) => preserveScrollAnchor(() => setExpanded(open))}
+      onPointerDownCapture={prepareScrollAnchor}
+      onMouseDownCapture={prepareScrollAnchor}
+      onKeyDownCapture={prepareScrollAnchor}
+      title={
+        <span className={styles.inlineRow}>
+          <Icon icon={Telescope} tone={tone} />
+          <span className={styles.inlineTitle} title={agent.title}>
+            {headline}
+          </span>
+          <span
+            className={styles.inlineState}
+            data-tone={status ? statusTone(status) : "muted"}
+            data-testid="background-agent-inline-status"
+          >
+            {stateLabel}
+          </span>
+          {questions > 0 && (
+            <span
+              className={styles.inlineAttention}
+              aria-label={`${questions} pending ${
+                questions === 1 ? "question" : "questions"
+              }`}
+              title={`${questions} pending ${
+                questions === 1 ? "question" : "questions"
+              }`}
+            >
+              <Icon icon={MessageCircleQuestion} size="sm" tone="warning" />
+              {questions}
+            </span>
+          )}
+        </span>
+      }
+    >
+      <CompactToolDetails
+        facts={facts}
+        navigation={
+          agent.child_chat_id && onOpenTrajectory ? (
+            <Button
+              size="sm"
+              variant="soft"
+              onClick={() => {
+                if (agent.child_chat_id) onOpenTrajectory(agent.child_chat_id);
+              }}
+            >
+              Open trajectory
+            </Button>
+          ) : undefined
+        }
+      >
+        <div className={styles.inlineDetailMeta}>
+          <span>{agent.title}</span>
+          <span>{humanizeIdentifier(agent.kind)}</span>
+          <span>{stateLabel}</span>
+          {agent.model_type && <span>{agent.model_type}</span>}
+          {agent.model && <span>{agent.model}</span>}
+          {agent.merge_status && (
+            <span>Local merge: {humanizeIdentifier(agent.merge_status)}</span>
+          )}
+        </div>
+        <ExpandedDetail
+          agent={agent}
+          filesOpen={filesOpen}
+          filesPanelId={filesPanelId}
+          onToggleFiles={toggleFiles}
+        />
+        {children}
+      </CompactToolDetails>
+    </ToolCard>
+  );
+};
+
 const _BackgroundAgentCard: React.FC<BackgroundAgentCardProps> = ({
   agent,
   threadId,
   agentId,
   compactDefault = true,
+  presentation = "panel",
+  statusKnown = true,
+  toolCallId,
+  toolCall,
+  children,
   onOpenTrajectory,
   onOpenAgentTrajectory,
 }) => {
@@ -607,6 +751,28 @@ const _BackgroundAgentCard: React.FC<BackgroundAgentCardProps> = ({
     },
     [displayedAgent, onOpenAgentTrajectory, onOpenTrajectory],
   );
+
+  if (presentation === "inline") {
+    const inline = (
+      <InlineBackgroundAgent
+        agent={displayedAgent}
+        statusKnown={Boolean(subscribedAgent) || statusKnown}
+        toolCallId={toolCallId ?? toolCall?.id}
+        onOpenTrajectory={
+          onOpenTrajectory ?? onOpenAgentTrajectory
+            ? handleOpenTrajectory
+            : undefined
+        }
+      >
+        {children}
+      </InlineBackgroundAgent>
+    );
+    return toolCall ? (
+      <ToolCallTooltip toolCall={toolCall}>{inline}</ToolCallTooltip>
+    ) : (
+      inline
+    );
+  }
 
   return (
     <Collapsible.Root open={expanded} onOpenChange={setExpanded}>
