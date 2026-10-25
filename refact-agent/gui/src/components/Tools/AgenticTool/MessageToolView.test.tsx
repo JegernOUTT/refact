@@ -1,6 +1,8 @@
 import { describe, expect, test } from "vitest";
 import { fireEvent, render, screen } from "../../../utils/test-utils";
 import { MessageToolView } from "./MessageToolView";
+import { buildCompactLaunchMessagePresentation } from "./compactLaunchMessage";
+import { boardReceipt, receiptState } from "./messageReceipt";
 
 function view(
   name: string,
@@ -21,6 +23,51 @@ function view(
 }
 
 describe("Interaction receipts", () => {
+  test.each([
+    ["queued", "Queued"],
+    ["delivered", "Delivered"],
+    ["consumed", "Consumed"],
+    ["duplicate", "Duplicate"],
+    ["expired", "Expired"],
+    ["superseded", "Superseded"],
+    ["failed", "Delivery failed"],
+  ])("compact and detailed mail share the %s receipt", (outcome, compact) => {
+    const args = { to: "child", text: "Review parser" };
+    const extra = {
+      delivery_receipt: {
+        kind: "agent_message",
+        delivery_id: "d-1",
+        outcome,
+        ttl_secs: 30,
+      },
+    };
+    const receipt = receiptState(
+      "agent_message",
+      args,
+      null,
+      boardReceipt("agent_message", extra),
+    );
+    render(
+      <MessageToolView
+        toolName="agent_message"
+        argumentsRaw={JSON.stringify(args)}
+        content={null}
+        extra={extra}
+        pending={false}
+        failed={false}
+      />,
+    );
+    expect(screen.getByText(receipt.label)).toBeInTheDocument();
+    expect(
+      buildCompactLaunchMessagePresentation({
+        toolName: "agent_message",
+        arguments: args,
+        extra,
+        transportState: "succeeded",
+      })?.stateLabel,
+    ).toBe(compact);
+  });
+
   test.each([
     [
       "agent_message",
