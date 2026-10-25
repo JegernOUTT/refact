@@ -22,6 +22,8 @@ import { selectApiKey, selectConfig } from "../../features/Config/configSlice";
 import { sendChatCommand } from "../../services/refact/chatCommands";
 import type { ToolCall } from "../../services/refact/types";
 import { ShikiCodeBlock } from "../Markdown";
+import { CompactToolDetails } from "../Tools/AgenticTool/CompactToolDetails";
+import { readCompactRecord } from "../Tools/AgenticTool/compactPresentation";
 import {
   Badge,
   Button,
@@ -620,7 +622,7 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
   toolCall,
 }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
+  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
   const chatId = useThreadId();
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
@@ -643,20 +645,66 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
     [content],
   );
 
-  const status: ToolStatus = useMemo(() => {
-    if (!maybeResult && (isStreaming || isWaiting)) return "running";
-    if (!maybeResult) return "running";
-    return maybeResult.tool_failed ? "error" : "success";
-  }, [isStreaming, isWaiting, maybeResult]);
-
   const alerts = report
     ? mergeAgentAlerts(report.alerts, countAgentAlerts(report.rows))
     : EMPTY_ALERTS;
-  const alertCount = alerts.stuck + alerts.failed + alerts.paused;
-  const summary = report
-    ? `Check agents: ${report.rows.length} agents`
-    : "Check agents";
-  const meta = report && alertCount > 0 ? `${alertCount} alerts` : undefined;
+  const resultRecord = readCompactRecord(content);
+  const resultRows =
+    resultRecord?.agents ?? resultRecord?.statuses ?? resultRecord?.rows;
+  const emptyRows = Array.isArray(resultRows) && resultRows.length === 0;
+  const hasSnapshot = report !== null || emptyRows;
+  const rowCount =
+    report && report.rows.length > 0
+      ? report.rows.length
+      : emptyRows ||
+          /^No agents have been spawned yet for this task\.$/mu.test(
+            content ?? "",
+          )
+        ? 0
+        : null;
+  const isRequestRunning = !maybeResult && (isStreaming || isWaiting);
+  const status: ToolStatus = maybeResult?.tool_failed
+    ? "error"
+    : isRequestRunning
+      ? "running"
+      : "idle";
+  const summary =
+    rowCount !== null ? `${rowCount} agent rows shown` : "Check agent status";
+  const meta = maybeResult?.tool_failed
+    ? "Request failed"
+    : isRequestRunning
+      ? "Checking"
+      : !hasSnapshot
+        ? "Status unknown"
+        : alerts.failed > 0 && alerts.paused > 0
+          ? "Failed / approval"
+          : alerts.failed > 0
+            ? "Agents failed"
+            : alerts.paused > 0
+              ? "Approval needed"
+              : alerts.stuck > 0
+                ? "Agents stuck"
+                : "Snapshot received";
+  const facts = hasSnapshot
+    ? [
+        {
+          label: "Observed",
+          value:
+            rowCount === null
+              ? "Agent count unknown"
+              : `${rowCount} agent rows in this response`,
+        },
+        { label: "Coverage", value: "Returned rows only; total unknown" },
+        ...(report
+          ? [
+              {
+                label: "Reported alerts",
+                value: `${alerts.stuck} stuck, ${alerts.failed} failed, ${alerts.paused} needing approval`,
+              },
+            ]
+          : []),
+      ]
+    : [{ label: "Result", value: "Agent status unavailable" }];
 
   const handleSubmitCommand = useCallback(
     async (command: string) => {
@@ -675,6 +723,7 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
     <>
       <span data-testid="agent-status-view" hidden />
       <ToolCard
+        density="compact"
         icon={<Icon icon={Settings} size="sm" />}
         summary={summary}
         meta={meta}
@@ -683,15 +732,17 @@ export const AgentStatusView: React.FC<AgentStatusViewProps> = ({
         onToggle={handleToggle}
         toolCall={toolCall}
       >
-        {report ? (
-          <AgentStatusContent
-            report={report}
-            onSubmitCommand={handleSubmitCommand}
-            actionsDisabled={!chatId}
-          />
-        ) : content ? (
-          <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-        ) : null}
+        <CompactToolDetails facts={facts}>
+          {report ? (
+            <AgentStatusContent
+              report={report}
+              onSubmitCommand={handleSubmitCommand}
+              actionsDisabled={!chatId}
+            />
+          ) : content ? (
+            <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
+          ) : null}
+        </CompactToolDetails>
       </ToolCard>
     </>
   );

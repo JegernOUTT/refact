@@ -1,7 +1,52 @@
 import { describe, expect, it } from "vitest";
-import { fireEvent, render, screen } from "../../utils/test-utils";
+import { act as rtlAct } from "@testing-library/react";
+import {
+  createDefaultChatState,
+  fireEvent,
+  render,
+  screen,
+} from "../../utils/test-utils";
+import type { ToolCall, ToolMessage } from "../../services/refact/types";
+import { applyChatEvent } from "../../features/Chat/Thread";
+import { CollapsibleStoreProvider } from "./useStoredOpen";
 import { parseAgentDiffOutput } from "./AgentDiffModel";
-import { AgentDiffContent } from "./AgentDiffView";
+import { AgentDiffContent, AgentDiffView } from "./AgentDiffView";
+
+const act = rtlAct as unknown as (callback: () => void) => void;
+
+const TOOL_CALL: ToolCall = {
+  id: "diff-call",
+  index: 0,
+  function: { name: "agent_diff", arguments: '{"card_id":"T-29"}' },
+};
+
+function diffMessage(content: string, tool_failed = false): ToolMessage {
+  return {
+    role: "tool",
+    message_id: "diff-result",
+    tool_call_id: "diff-call",
+    content,
+    tool_failed,
+  };
+}
+
+function renderDiff(
+  content: string | null,
+  toolFailed = false,
+  waiting = false,
+) {
+  const chat = createDefaultChatState();
+  const threadId = chat.current_thread_id;
+  chat.threads[threadId].thread.messages =
+    content === null ? [] : [diffMessage(content, toolFailed)];
+  chat.threads[threadId].waiting_for_response = waiting;
+  return {
+    ...render(<AgentDiffView toolCall={TOOL_CALL} />, {
+      preloadedState: { chat },
+    }),
+    threadId,
+  };
+}
 
 const FENCE = "```";
 const DIFF_OUTPUT = [
@@ -134,10 +179,13 @@ describe("AgentDiffContent", () => {
   });
 
   it("filters rendered unified diff by selected file", () => {
-    const report = parseAgentDiffOutput(DIFF_OUTPUT);
-    if (!report) throw new Error("expected diff report");
-
-    render(<AgentDiffContent report={report} />);
+    renderDiff(DIFF_OUTPUT);
+    const outer = screen.getByRole("button", {
+      name: "2 changed files shown · check-agents redesign Partial diff",
+    });
+    fireEvent.click(outer);
+    const details = screen.getByRole("button", { name: "More details" });
+    fireEvent.click(details);
 
     fireEvent.click(
       screen.getAllByText("src/components/ChatContent/AgentPulseView.tsx")[0],
@@ -147,6 +195,8 @@ describe("AgentDiffContent", () => {
       screen.getByText("export const AgentPulseView = true;"),
     ).toBeInTheDocument();
     expect(screen.queryByText("new line")).not.toBeInTheDocument();
+    expect(outer).toHaveAttribute("aria-expanded", "true");
+    expect(details).toHaveAttribute("aria-expanded", "true");
   });
 
   it("renders a selected file with no hunks without throwing and shows empty diff message", () => {
@@ -161,5 +211,137 @@ describe("AgentDiffContent", () => {
       screen.getByText("No diff hunks for this file."),
     ).toBeInTheDocument();
     expect(screen.queryByText("old value")).not.toBeInTheDocument();
+  });
+});
+
+describe("AgentDiffView compact route", () => {
+  it("starts closed with observed changed files and partial coverage, preserving hidden file controls", async () => {
+    const { container, user } = renderDiff(DIFF_OUTPUT);
+    const outer = screen.getByRole("button", {
+      name: "2 changed files shown · check-agents redesign Partial diff",
+    });
+    expect(outer).toHaveAttribute("aria-expanded", "false");
+    expect(outer.closest("section")).toHaveAttribute("data-density", "compact");
+    expect(outer).not.toHaveTextContent("T-29");
+    expect(screen.queryByText("All files")).not.toBeInTheDocument();
+    await user.click(outer);
+    expect(container.querySelectorAll("dt")).toHaveLength(3);
+    expect(container.querySelector("dd")?.textContent).toBe("2");
+    const details = screen.getByRole("button", { name: "More details" });
+    const files = screen.getByRole("button", { name: "All files" });
+    expect(details).toHaveAttribute("aria-expanded", "false");
+    expect(files.closest("[inert]")).not.toBeNull();
+    await user.click(details);
+    expect(files.closest("[inert]")).toBeNull();
+    expect(screen.getByText("refact/task/T-29-agent")).toBeInTheDocument();
+    await user.click(outer);
+    expect(files.closest("[inert]")).not.toBeNull();
+    outer.focus();
+    await user.tab();
+    expect(files).not.toHaveFocus();
+  });
+
+  it.each([
+    [null, false, false, "Inspect changed files Diff unknown", "idle"],
+    [null, false, true, "Inspect changed files Reading diff", "running"],
+    ["not a diff", false, false, "Inspect changed files Diff unknown", "idle"],
+    [
+      'agent_diff(card_id="T-29")',
+      true,
+      false,
+      "Inspect changed files Request failed",
+      "error",
+    ],
+    [
+      `# Agent Diff for T-29\n${FENCE}diff\n${FENCE}`,
+      false,
+      false,
+      "Inspect changed files Diff unknown",
+      "idle",
+    ],
+    [
+      `# Agent Diff for T-29\n${FENCE}\n(no changes detected)\n${FENCE}`,
+      false,
+      false,
+      "0 changed files shown Diff received",
+      "idle",
+    ],
+  ])(
+    "does not invent changes or request success: %s",
+    (content, failed, waiting, name, status) => {
+      renderDiff(content, failed, waiting);
+      const outer = screen.getByRole("button", { name });
+      expect(outer).toHaveAttribute("aria-expanded", "false");
+      expect(outer.closest("section")).toHaveAttribute("data-status", status);
+    },
+  );
+
+  it("honors stored open and closed choices across state changes and remounts", () => {
+    const preferences = new Map([["tc:diff-call", true]]);
+    const collapseStore = {
+      get: (key: string) => preferences.get(key),
+      set: (key: string, value: boolean) => {
+        preferences.set(key, value);
+      },
+    };
+    const chat = createDefaultChatState();
+    const threadId = chat.current_thread_id;
+    chat.threads[threadId].thread.messages = [diffMessage(DIFF_OUTPUT)];
+    const view = () => (
+      <CollapsibleStoreProvider value={collapseStore}>
+        <AgentDiffView toolCall={TOOL_CALL} />
+        <AgentDiffView toolCall={{ ...TOOL_CALL, id: "second-diff-call" }} />
+      </CollapsibleStoreProvider>
+    );
+    const { store, unmount } = render(view(), { preloadedState: { chat } });
+    const outer = screen.getByRole("button", {
+      name: "2 changed files shown · check-agents redesign Partial diff",
+    });
+    const sibling = screen.getByRole("button", {
+      name: "Inspect changed files Diff unknown",
+    });
+    const details = screen.getByRole("button", { name: "More details" });
+    fireEvent.click(details);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "src/components/ChatContent/AgentPulseView.tsx",
+      }),
+    );
+    expect(sibling).toHaveAttribute("aria-expanded", "false");
+    act(() => {
+      store.dispatch(
+        applyChatEvent({
+          chat_id: threadId,
+          seq: "1",
+          type: "message_added",
+          index: 0,
+          message: diffMessage(DIFF_OUTPUT.replace("new line", "changed line")),
+        }),
+      );
+    });
+    expect(outer).toHaveAttribute("aria-expanded", "true");
+    expect(details).toHaveAttribute("aria-expanded", "true");
+    expect(screen.queryByText("changed line")).not.toBeInTheDocument();
+    fireEvent.click(outer);
+    act(() => {
+      store.dispatch(
+        applyChatEvent({
+          chat_id: threadId,
+          seq: "2",
+          type: "message_added",
+          index: 0,
+          message: diffMessage("request failed", true),
+        }),
+      );
+    });
+    expect(outer).toHaveAttribute("aria-expanded", "false");
+    expect(sibling).toHaveAttribute("aria-expanded", "false");
+    unmount();
+    render(view(), { store });
+    expect(
+      screen.getByRole("button", {
+        name: "Inspect changed files Request failed",
+      }),
+    ).toHaveAttribute("aria-expanded", "false");
   });
 });

@@ -15,7 +15,7 @@ import {
 import { ToolCall } from "../../../services/refact/types";
 import styles from "./ToolCard.module.css";
 
-export type ToolStatus = "running" | "success" | "error";
+export type ToolStatus = "idle" | "running" | "success" | "error";
 
 export interface ToolCardProps {
   icon: React.ReactNode;

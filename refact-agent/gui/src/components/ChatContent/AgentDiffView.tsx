@@ -11,6 +11,11 @@ import {
 import { useThreadId } from "../../features/Chat/Thread";
 import type { DiffChunk, ToolCall } from "../../services/refact/types";
 import { ShikiCodeBlock } from "../Markdown";
+import { CompactToolDetails } from "../Tools/AgenticTool/CompactToolDetails";
+import {
+  COMPACT_HEADLINE_CHARS,
+  compactText,
+} from "../Tools/AgenticTool/compactPresentation";
 import { Button, Icon } from "../ui";
 import { ToolCard, type ToolStatus } from "./ToolCard";
 import { DiffBlock } from "./ToolCard/DiffBlock";
@@ -184,7 +189,7 @@ export const AgentDiffContent: React.FC<AgentDiffContentProps> = ({
 
 export const AgentDiffView: React.FC<AgentDiffViewProps> = ({ toolCall }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
+  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
   const threadId = useThreadId();
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, threadId),
@@ -205,37 +210,67 @@ export const AgentDiffView: React.FC<AgentDiffViewProps> = ({ toolCall }) => {
     [content],
   );
 
-  const status: ToolStatus = useMemo(() => {
-    if (!maybeResult && (isStreaming || isWaiting)) return "running";
-    if (!maybeResult) return "running";
-    return maybeResult.tool_failed ? "error" : "success";
-  }, [isStreaming, isWaiting, maybeResult]);
-
-  const meta = report
-    ? `${report.stats.files} files${
-        report.stats.added || report.stats.removed
-          ? ` +${report.stats.added} −${report.stats.removed}`
-          : ""
-      }`
-    : undefined;
+  const isRequestRunning = !maybeResult && (isStreaming || isWaiting);
+  const status: ToolStatus = maybeResult?.tool_failed
+    ? "error"
+    : isRequestRunning
+      ? "running"
+      : "idle";
+  const hasFileCount =
+    report !== null &&
+    (report.stats.files > 0 ||
+      report.body.trim() === "(no changes detected)" ||
+      report.body.trim() === "(no changes)");
+  const meta = maybeResult?.tool_failed
+    ? "Request failed"
+    : isRequestRunning
+      ? "Reading diff"
+      : hasFileCount
+        ? report.truncated
+          ? "Partial diff"
+          : "Diff received"
+        : "Diff unknown";
+  const title =
+    report && report.cardTitle !== report.cardId
+      ? compactText(report.cardTitle, COMPACT_HEADLINE_CHARS)
+      : null;
+  const summary = hasFileCount
+    ? `${report.stats.files} changed files shown${title ? ` · ${title}` : ""}`
+    : "Inspect changed files";
+  const facts = report
+    ? [
+        {
+          label: "Changed files shown",
+          value: hasFileCount ? String(report.stats.files) : "Unknown",
+        },
+        { label: "Files", value: report.files.slice(0, 3).join(", ") },
+        {
+          label: "Coverage",
+          value: report.truncated ?? "Returned diff snapshot; not verification",
+        },
+      ]
+    : [{ label: "Result", value: "Diff unavailable" }];
 
   return (
     <>
       <span data-testid="agent-diff-view" hidden />
       <ToolCard
+        density="compact"
         icon={<Icon icon={Github} size="sm" />}
-        summary={report ? `Agent diff: ${report.cardId}` : "Agent diff"}
+        summary={summary}
         meta={meta}
         status={status}
         isOpen={isOpen}
         onToggle={handleToggle}
         toolCall={toolCall}
       >
-        {report ? (
-          <AgentDiffContent report={report} />
-        ) : content ? (
-          <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-        ) : null}
+        <CompactToolDetails facts={facts}>
+          {report ? (
+            <AgentDiffContent report={report} />
+          ) : content ? (
+            <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
+          ) : null}
+        </CompactToolDetails>
       </ToolCard>
     </>
   );

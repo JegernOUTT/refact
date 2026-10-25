@@ -21,6 +21,11 @@ import { selectApiKey, selectConfig } from "../../features/Config/configSlice";
 import { sendChatCommand } from "../../services/refact/chatCommands";
 import type { ToolCall } from "../../services/refact/types";
 import { ShikiCodeBlock } from "../Markdown";
+import { CompactToolDetails } from "../Tools/AgenticTool/CompactToolDetails";
+import {
+  COMPACT_HEADLINE_CHARS,
+  compactText,
+} from "../Tools/AgenticTool/compactPresentation";
 import { Badge, Button, Dialog, FieldTextarea, Icon, StatusDot } from "../ui";
 import { ToolCard, type ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "./useStoredOpen";
@@ -92,6 +97,35 @@ function stateStatus(
 
 function maybeValue(value: string): string {
   return value && value !== "unknown" ? value : "—";
+}
+
+function compactPulseState(report: AgentPulseReport | null): string {
+  const state = report?.state
+    .replace(/^[^a-z]+/iu, "")
+    .trim()
+    .toLowerCase();
+  switch (state) {
+    case "generating response":
+    case "executing tools":
+    case "running":
+      return "Agent running";
+    case "paused":
+      return "Agent paused";
+    case "waiting":
+    case "waiting for ide":
+    case "waiting for user input":
+      return "Agent waiting";
+    case "completed":
+    case "done":
+      return "Done · unverified";
+    case "error":
+    case "failed":
+      return "Agent failed";
+    case "idle":
+      return "Agent idle";
+    default:
+      return "State unknown";
+  }
 }
 
 export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
@@ -356,7 +390,7 @@ export const AgentPulseContent: React.FC<AgentPulseContentProps> = ({
 
 export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
+  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
   const chatId = useThreadId();
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
@@ -379,11 +413,28 @@ export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
     [content],
   );
 
-  const status: ToolStatus = useMemo(() => {
-    if (!maybeResult && (isStreaming || isWaiting)) return "running";
-    if (!maybeResult) return "running";
-    return maybeResult.tool_failed ? "error" : "success";
-  }, [isStreaming, isWaiting, maybeResult]);
+  const isRequestRunning = !maybeResult && (isStreaming || isWaiting);
+  const status: ToolStatus = maybeResult?.tool_failed
+    ? "error"
+    : isRequestRunning
+      ? "running"
+      : "idle";
+  const meta = maybeResult?.tool_failed
+    ? "Request failed"
+    : isRequestRunning
+      ? "Checking pulse"
+      : compactPulseState(report);
+  const title =
+    report && report.cardTitle !== report.cardId
+      ? compactText(report.cardTitle, COMPACT_HEADLINE_CHARS)
+      : null;
+  const facts = report
+    ? [
+        { label: "Reported state", value: report.state },
+        { label: "Last activity", value: report.lastActivity },
+        { label: "Editing", value: report.currentlyEditing },
+      ]
+    : [{ label: "Result", value: "Agent pulse unavailable" }];
 
   const handleSubmitCommand = useCallback(
     async (command: string) => {
@@ -402,23 +453,26 @@ export const AgentPulseView: React.FC<AgentPulseViewProps> = ({ toolCall }) => {
     <>
       <span data-testid="agent-pulse-view" hidden />
       <ToolCard
+        density="compact"
         icon={<Icon icon={Timer} size="sm" />}
-        summary={report ? `Agent pulse: ${report.cardId}` : "Agent pulse"}
-        meta={report?.state}
+        summary={title ? `Inspect ${title}` : "Inspect agent activity"}
+        meta={meta}
         status={status}
         isOpen={isOpen}
         onToggle={handleToggle}
         toolCall={toolCall}
       >
-        {report ? (
-          <AgentPulseContent
-            report={report}
-            onSubmitCommand={handleSubmitCommand}
-            actionsDisabled={!chatId}
-          />
-        ) : content ? (
-          <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-        ) : null}
+        <CompactToolDetails facts={facts}>
+          {report ? (
+            <AgentPulseContent
+              report={report}
+              onSubmitCommand={handleSubmitCommand}
+              actionsDisabled={!chatId}
+            />
+          ) : content ? (
+            <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
+          ) : null}
+        </CompactToolDetails>
       </ToolCard>
     </>
   );
