@@ -1,5 +1,7 @@
-import { describe, expect, test } from "vitest";
-import { fireEvent } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { describe, expect, test, vi } from "vitest";
+import { fireEvent, within } from "@testing-library/react";
+import { act } from "react-dom/test-utils";
 import {
   createDefaultChatState,
   render,
@@ -10,12 +12,16 @@ import type {
   ToolCall,
   ToolMessage,
 } from "../../../services/refact/types";
+import { applyChatEvent } from "../../../features/Chat/Thread/actions";
 import { ToolContent } from "../../ChatContent/ToolsContent";
+import { CollapsibleStoreProvider } from "../../ChatContent/useStoredOpen";
+import { ChatScrollAnchorContext } from "../../ChatContent/useChatScrollAnchor";
 import {
   AGENTIC_CARD_LABELS,
   AGENTIC_TOOL_NAMES,
   BOARD_RUNTIME_TOOL_NAMES,
   DEDICATED_TOOL_CARD_NAMES,
+  LOCAL_COLLABORATION_TOOL_NAMES,
   agenticCardLabel,
   hasDedicatedToolCard,
   isAgenticToolName,
@@ -49,7 +55,11 @@ function toolResult(
   };
 }
 
-function renderTools(messages: ChatMessages, calls: ToolCall[]) {
+function renderTools(
+  messages: ChatMessages,
+  calls: ToolCall[],
+  wrap: (content: ReactElement) => ReactElement = (content) => content,
+) {
   const chat = createDefaultChatState();
   const runtime = chat.threads[chat.current_thread_id];
   runtime.thread.id = CHAT_ID;
@@ -60,7 +70,7 @@ function renderTools(messages: ChatMessages, calls: ToolCall[]) {
   chat.open_thread_ids = [CHAT_ID];
   chat.threads = { [CHAT_ID]: runtime };
 
-  return render(<ToolContent toolCalls={calls} threadId={CHAT_ID} />, {
+  return render(wrap(<ToolContent toolCalls={calls} threadId={CHAT_ID} />), {
     preloadedState: { chat },
   });
 }
@@ -341,5 +351,603 @@ describe("AgenticTool registry wiring", () => {
     expect(screen.getByLabelText("Plan receipt")).toBeInTheDocument();
     expect(screen.queryByTestId("agentic-tool-body")).toBeNull();
     expect(screen.queryByTestId("generic-tool")).toBeNull();
+  });
+});
+
+describe("AgenticTool collaboration receipts", () => {
+  test.each([0, 1])(
+    "metrics shows %i typed snapshot entries without claiming an agent roster",
+    (count) => {
+      const entries = Array.from({ length: count }, () => ({
+        kind: "series",
+        series: {
+          name: "evidence_verdicts",
+          labels: [{ name: "verdict", value: "blocked" }],
+          sample: { kind: "counter", value: 4 },
+        },
+      }));
+      const content = JSON.stringify({
+        snapshot_id: "snapshot-1",
+        seq: 0,
+        project: "project-1",
+        entries,
+        total: entries.length,
+        series_total: entries.length,
+        explanations_total: 0,
+        returned: entries.length,
+        truncated: false,
+        generated_at_ms: 1,
+      });
+      renderTools([toolResult("metrics", content)], [toolCall("metrics")]);
+      expect(screen.getByText("Project metrics checked")).toBeInTheDocument();
+      expect(screen.getByRole("status")).toHaveTextContent("Snapshot received");
+      fireEvent.click(
+        screen.getByRole("button", { name: "Project metrics checked" }),
+      );
+      expect(
+        screen.getByText("Entries shown").nextElementSibling,
+      ).toHaveTextContent(String(entries.length));
+      expect(
+        screen.getByText("Metric series").nextElementSibling,
+      ).toHaveTextContent(String(entries.length));
+      expect(
+        screen.getByText("Decision explanations").nextElementSibling,
+      ).toHaveTextContent("0");
+      expect(screen.queryByText("Roster snapshot")).toBeNull();
+      expect(
+        screen.queryByText("No agents were listed in this snapshot."),
+      ).toBeNull();
+    },
+  );
+
+  test.each([
+    [
+      "team_role_grant",
+      "Granted Mail authority through `ship-it` role `implementer`.",
+    ],
+    [
+      "code_mode",
+      "code_mode authorized 0 host calls\nIntermediate bytes: 0 / 1000",
+    ],
+    ["code_mode", "Arbitrary unknown short response"],
+  ])(
+    "%s keeps untyped %s unconfirmed without control acceptance",
+    (name, content) => {
+      renderTools([toolResult(name, content)], [toolCall(name)]);
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Outcome unconfirmed",
+      );
+      expect(screen.queryByText("Control request accepted")).toBeNull();
+    },
+  );
+
+  test.each(LOCAL_COLLABORATION_TOOL_NAMES)(
+    "%s routes only through the collaboration view, including aliases",
+    (name) => {
+      const pascal = name
+        .split("_")
+        .map((part) => part[0].toUpperCase() + part.slice(1))
+        .join("");
+      for (const alias of [
+        name,
+        `t_${name}`,
+        pascal,
+        `T_${pascal}`,
+        name.replace(/_/gu, "-"),
+      ]) {
+        const { container, unmount } = renderTools(
+          [toolResult(alias, "Authorized and verified!")],
+          [toolCall(alias)],
+        );
+        expect(
+          screen.getByLabelText("Collaboration receipt"),
+        ).toBeInTheDocument();
+        expect(screen.getByRole("status")).toHaveTextContent(
+          "Outcome unconfirmed",
+        );
+        const outer = within(
+          screen.getByLabelText("Collaboration receipt"),
+        ).getAllByRole("button")[0];
+        expect(outer).toHaveAttribute("aria-expanded", "false");
+        fireEvent.click(outer);
+        expect(
+          screen.getByRole("button", { name: "More details" }),
+        ).toHaveAttribute("aria-expanded", "false");
+        fireEvent.click(screen.getByRole("button", { name: "More details" }));
+        expect(screen.queryByText("Control request accepted")).toBeNull();
+        expect(screen.queryByText("Roster snapshot")).toBeNull();
+        expect(screen.queryByLabelText("Task memory receipt")).toBeNull();
+        expect(container.querySelectorAll("dl dd").length).toBeLessThanOrEqual(
+          3,
+        );
+        unmount();
+      }
+    },
+  );
+
+  test("team seat uses its structured receipt instead of a task board outcome", () => {
+    const args = { team: "ship-it", role: "implementer", action: "claim" };
+    const receipt = {
+      ...args,
+      member_chat_id: "chat-1",
+      result: "claimed",
+      outcome: null,
+      members: [],
+    };
+    renderTools(
+      [
+        {
+          ...toolResult(
+            "team_seat",
+            `Team \`ship-it\` role \`implementer\` claimed for this chat. 0 live team member(s).\n\n${JSON.stringify(
+              receipt,
+            )}`,
+          ),
+          extra: { team_seat: receipt },
+        },
+      ],
+      [toolCall("team_seat", args)],
+    );
+    expect(
+      screen.getByText("Team seat claim recorded: ship-it"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Seat receipt");
+    expect(screen.queryByLabelText("Task board receipt")).toBeNull();
+  });
+
+  test("role grants disclose historical receipt rather than current authority", () => {
+    const args = {
+      team: "ship-it",
+      role: "implementer",
+      authority: "mail",
+      member_agent_id: "agent-1",
+      recipient_chat_id: "chat-2",
+    };
+    const grant = { ...args, member_chat_id: null, recipient_agent_id: null };
+    renderTools(
+      [
+        {
+          ...toolResult(
+            "team_role_grant",
+            "Granted Mail authority through `ship-it` role `implementer`.",
+          ),
+          extra: { team_role_grant: grant },
+        },
+      ],
+      [toolCall("team_role_grant", args)],
+    );
+    expect(screen.getByText("Role grant receipt recorded")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Historical grant receipt",
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Role grant receipt recorded" }),
+    );
+    expect(
+      screen.getByText("Historical receipt; not current permission"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Control request accepted")).toBeNull();
+  });
+
+  test.each([
+    ["claim_record", "Claim recorded.\n\nClaim `c-1` [active]"],
+    ["claim_list", "Claim `c-1` [active]"],
+  ])(
+    "%s is an unconfirmed assertion, not a task memory note",
+    (name, content) => {
+      renderTools(
+        [toolResult(name, content)],
+        [
+          toolCall(name, {
+            subject: "work:T-1",
+            predicate: "is",
+            assertion: "done",
+          }),
+        ],
+      );
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Outcome unconfirmed",
+      );
+      expect(screen.queryByLabelText("Task memory receipt")).toBeNull();
+      expect(screen.queryByText("Memory notes")).toBeNull();
+    },
+  );
+
+  test.each([
+    ["metrics", "transport failed", "Request failed"],
+    [
+      "code_mode",
+      "code mode is unavailable: the `code_mode_enabled` setting is off",
+      "Unavailable",
+    ],
+    ["team_role_grant", "Everything authorized!", "Request failed"],
+  ])("%s keeps transport failure explicit", (name, content, label) => {
+    const { container } = renderTools(
+      [toolResult(name, content, true)],
+      [toolCall(name)],
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(label);
+    expect(container.querySelector("section")).toHaveAttribute(
+      "data-status",
+      "error",
+    );
+    expect(screen.queryByText("Control request accepted")).toBeNull();
+    expect(screen.queryByText("Roster snapshot")).toBeNull();
+  });
+
+  test("structured denial is explicit even when transport succeeded", () => {
+    renderTools(
+      [
+        toolResult(
+          "board_claim",
+          JSON.stringify({
+            code: "scope_denied",
+            message: "Request refused",
+            retryable: false,
+            request_id: "request-1",
+          }),
+        ),
+      ],
+      [toolCall("board_claim", { card_id: "T-1" })],
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("Request denied");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Claim requested: T-1" }),
+    );
+    expect(screen.getByText("Request refused")).toBeInTheDocument();
+    expect(screen.queryByText("Card claim recorded: T-1")).toBeNull();
+  });
+
+  test("missing collaboration responses stay awaiting without claiming success", () => {
+    renderTools([], [toolCall("metrics")]);
+    expect(screen.getByRole("status")).toHaveTextContent("Awaiting result");
+    expect(screen.queryByText("Project metrics checked")).toBeNull();
+    expect(screen.queryByText("Roster snapshot")).toBeNull();
+  });
+
+  test("oversized discovery stays unconfirmed while every raw page remains recoverable", () => {
+    const content = "projection_unavailable: false\ncards: []\n#".padEnd(
+      256_001,
+      "x",
+    );
+    const message = toolResult("board_discover", content);
+    renderTools([message], [toolCall("board_discover")]);
+    expect(screen.getByText("Board discovery requested")).toBeInTheDocument();
+    expect(screen.getByText("Outcome unconfirmed")).toHaveAttribute(
+      "role",
+      "status",
+    );
+    expect(screen.queryByText("Cards shown")).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Board discovery requested" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "More details" }));
+    const response = screen.getByRole("region", { name: "Full response" });
+    const pages = within(response);
+    let recovered =
+      pages.getByLabelText("Full response content").textContent ?? "";
+    const next = pages.getByRole("button", { name: "Next section" });
+    for (
+      let index = 1;
+      index < Math.ceil(content.length / PAGE_CHARS);
+      index++
+    ) {
+      fireEvent.click(next);
+      recovered +=
+        pages.getByLabelText("Full response content").textContent ?? "";
+    }
+    expect(recovered).toBe(content);
+    expect(message.content).toBe(content);
+    expect(next).toBeDisabled();
+  });
+
+  test("disclosure preserves complete original arguments, response and metadata without legacy views", () => {
+    const call = toolCall("code_mode", { script: "print('hello')" });
+    call.function.arguments = '{ "script" : "print(1)" }';
+    const content =
+      "first page\n" +
+      "x".repeat(PAGE_CHARS) +
+      "\nlast page <script>not executed</script>";
+    const extra = { diagnostic: "metadata kept", nested: { count: 2 } };
+    const message = { ...toolResult("code_mode", content), extra };
+    const { container } = renderTools([message], [call]);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Orchestration requested" }),
+    );
+    const disclosure = screen.getByRole("button", { name: "More details" });
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Control request accepted")).toBeNull();
+    fireEvent.click(disclosure);
+    expect(screen.getByLabelText("Raw arguments content").textContent).toBe(
+      call.function.arguments,
+    );
+    const response = screen.getByRole("region", { name: "Full response" });
+    const firstPage = within(response).getByLabelText(
+      "Full response content",
+    ).textContent;
+    fireEvent.click(
+      within(response).getByRole("button", { name: "Next section" }),
+    );
+    const secondPage = within(response).getByLabelText(
+      "Full response content",
+    ).textContent;
+    expect(`${firstPage}${secondPage}`).toBe(content);
+    expect(
+      JSON.parse(
+        screen.getByLabelText("Response metadata content").textContent ?? "",
+      ),
+    ).toEqual(extra);
+    expect(container.querySelector("script")).toBeNull();
+    expect(message.content).toBe(content);
+    expect(message.extra).toBe(extra);
+    expect(call.function.arguments).toBe('{ "script" : "print(1)" }');
+  });
+});
+
+describe("AgenticTool collaboration compact shell", () => {
+  test("defaults closed with an outline icon, then opens facts and full details independently by keyboard", async () => {
+    const call = toolCall("board_claim", { card_id: "T-1", task_id: "task-1" });
+    const { user, container } = renderTools(
+      [toolResult("board_claim", "Unconfirmed response")],
+      [call],
+    );
+    const card = screen.getByLabelText("Collaboration receipt");
+    const outer = screen.getByRole("button", { name: "Claim requested: T-1" });
+    const details = screen.getByRole("button", { name: "More details" });
+    const body = document.getElementById(
+      outer.getAttribute("aria-controls") ?? "",
+    );
+    const fullBody = document.getElementById(
+      details.getAttribute("aria-controls") ?? "",
+    );
+
+    expect(card).toHaveAttribute("data-density", "compact");
+    expect(card).toHaveAttribute("data-status", "idle");
+    expect(outer).toHaveAttribute("aria-expanded", "false");
+    expect(body).toHaveAttribute("inert");
+    expect(details).toHaveAttribute("aria-expanded", "false");
+    expect(details).toHaveAttribute("tabindex", "-1");
+    expect(fullBody).toHaveAttribute("inert");
+    expect(outer.querySelectorAll("svg")).toHaveLength(2);
+    expect(outer.querySelector("svg")).toHaveAttribute("fill", "none");
+    expect(outer.querySelector("svg")).toHaveAttribute("stroke-width", "1.5");
+    expect(
+      container.querySelectorAll('section[data-density="compact"]'),
+    ).toHaveLength(1);
+    expect(screen.getByRole("status")).toHaveTextContent("Outcome unconfirmed");
+
+    await user.tab();
+    expect(outer).toHaveFocus();
+    await user.keyboard("{Enter}");
+
+    expect(outer).toHaveAttribute("aria-expanded", "true");
+    expect(body).not.toHaveAttribute("inert");
+    expect(card.querySelectorAll("dl dd").length).toBeLessThanOrEqual(3);
+    expect(details).toHaveAttribute("aria-expanded", "false");
+    expect(fullBody).toHaveAttribute("inert");
+    await user.tab();
+    expect(details).toHaveFocus();
+    await user.keyboard(" ");
+
+    expect(details).toHaveAttribute("aria-expanded", "true");
+    expect(fullBody).not.toHaveAttribute("inert");
+    expect(screen.getByLabelText("Raw arguments content").textContent).toBe(
+      call.function.arguments,
+    );
+    expect(screen.getByLabelText("Full response content").textContent).toBe(
+      "Unconfirmed response",
+    );
+    outer.focus();
+    await user.keyboard(" ");
+    expect(outer).toHaveAttribute("aria-expanded", "false");
+    expect(details).toHaveAttribute("aria-expanded", "true");
+    expect(details).toHaveAttribute("tabindex", "-1");
+    await user.keyboard("{Enter}");
+    expect(details).toHaveAttribute("aria-expanded", "true");
+  });
+
+  test.each([true, false])(
+    "preserves explicit tc:id choice %s across rerenders, siblings and remounts",
+    (storedOpen) => {
+      const call = toolCall("metrics");
+      const sibling = toolCall("code_mode");
+      const key = `tc:${call.id}`;
+      const choices = new Map([[key, storedOpen]]);
+      const preferences = {
+        get: (storeKey: string) => choices.get(storeKey),
+        set: (storeKey: string, open: boolean) => {
+          choices.set(storeKey, open);
+        },
+      };
+      const wrap = (content: ReactElement) => (
+        <CollapsibleStoreProvider value={preferences}>
+          {content}
+        </CollapsibleStoreProvider>
+      );
+      const calls = [call, sibling];
+      const { rerender, unmount } = renderTools([], calls, wrap);
+      const first = screen.getByRole("button", {
+        name: "Project metrics requested",
+      });
+      const second = screen.getByRole("button", {
+        name: "Orchestration requested",
+      });
+      const bodyId = first.getAttribute("aria-controls");
+      expect(first).toHaveAttribute("aria-expanded", String(storedOpen));
+      expect(second).toHaveAttribute("aria-expanded", "false");
+      fireEvent.click(second);
+      expect(first).toHaveAttribute("aria-expanded", String(storedOpen));
+      expect(choices.get(`tc:${sibling.id}`)).toBe(true);
+      rerender(
+        wrap(
+          <ToolContent
+            toolCalls={[
+              { ...call, function: { ...call.function, name: "T_Metrics" } },
+              sibling,
+            ]}
+            threadId={CHAT_ID}
+          />,
+        ),
+      );
+      expect(first).toHaveAttribute("aria-expanded", String(storedOpen));
+      expect(first).toHaveAttribute("aria-controls", bodyId);
+      fireEvent.click(first);
+      expect(choices.get(key)).toBe(!storedOpen);
+      unmount();
+      renderTools([], calls, wrap);
+      expect(
+        screen.getByRole("button", { name: "Project metrics requested" }),
+      ).toHaveAttribute("aria-expanded", String(!storedOpen));
+      expect(
+        screen.getByRole("button", { name: "Orchestration requested" }),
+      ).toHaveAttribute("aria-expanded", "true");
+    },
+  );
+
+  test("streaming, failures and later results never open a closed collaboration row", () => {
+    const call = toolCall("metrics");
+    const { store } = renderTools([], [call]);
+    const outer = screen.getByRole("button", {
+      name: "Project metrics requested",
+    });
+    const card = screen.getByLabelText("Collaboration receipt");
+    act(() => {
+      store.dispatch(
+        applyChatEvent({
+          chat_id: CHAT_ID,
+          seq: "1",
+          type: "runtime_updated",
+          state: "generating",
+        }),
+      );
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("Running");
+    expect(card).toHaveAttribute("data-status", "running");
+    expect(outer).toHaveAttribute("aria-expanded", "false");
+    act(() => {
+      store.dispatch(
+        applyChatEvent({
+          chat_id: CHAT_ID,
+          seq: "2",
+          type: "message_added",
+          index: 0,
+          message: {
+            ...toolResult("metrics", "transport failed", true),
+            message_id: "metrics-result",
+          },
+        }),
+      );
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("Request failed");
+    expect(card).toHaveAttribute("data-status", "error");
+    expect(outer).toHaveAttribute("aria-expanded", "false");
+    act(() => {
+      store.dispatch(
+        applyChatEvent({
+          chat_id: CHAT_ID,
+          seq: "3",
+          type: "message_updated",
+          message_id: "metrics-result",
+          message: {
+            ...toolResult("metrics", "Unknown result"),
+            message_id: "metrics-result",
+          },
+        }),
+      );
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("Outcome unconfirmed");
+    expect(card).toHaveAttribute("data-status", "idle");
+    expect(outer).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("prepares pointer, mouse and keyboard anchors before preserving the toggle mutation", () => {
+    const order: string[] = [];
+    const { container } = renderTools([], [toolCall("metrics")], (content) => (
+      <ChatScrollAnchorContext.Provider
+        value={{
+          prepareScrollAnchor: () => {
+            order.push("prepare");
+          },
+          preserveScrollAnchor: (mutate) => {
+            order.push("preserve");
+            mutate();
+          },
+        }}
+      >
+        {content}
+      </ChatScrollAnchorContext.Provider>
+    ));
+    const outer = screen.getByRole("button", {
+      name: "Project metrics requested",
+    });
+    for (const prepare of [
+      fireEvent.pointerDown,
+      fireEvent.mouseDown,
+      fireEvent.keyDown,
+    ]) {
+      order.length = 0;
+      prepare(outer);
+      fireEvent.click(outer);
+      expect(order).toEqual(["prepare", "preserve"]);
+    }
+    expect(
+      container.querySelectorAll('section[data-density="compact"]'),
+    ).toHaveLength(1);
+  });
+
+  test("retains the real tool-call tooltip and untouched raw arguments", () => {
+    vi.useFakeTimers();
+    try {
+      const call = toolCall("T_CodeMode");
+      call.function.arguments = '{ "script" : "print(1)" }';
+      renderTools([], [call]);
+      const card = screen.getByLabelText("Collaboration receipt");
+      expect(card.parentElement).not.toBeNull();
+      if (card.parentElement) fireEvent.mouseEnter(card.parentElement);
+      act(() => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(screen.getByText("script")).toBeInTheDocument();
+      expect(screen.getByText("print(1)")).toBeInTheDocument();
+      expect(call.function.arguments).toBe('{ "script" : "print(1)" }');
+      expect(
+        screen.getByRole("button", { name: "Orchestration requested" }),
+      ).toHaveAttribute("aria-expanded", "false");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("keeps secondary disclosure and page state mounted across outer toggles", () => {
+    const content = "x".repeat(PAGE_CHARS) + "last page";
+    renderTools([toolResult("code_mode", content)], [toolCall("code_mode")]);
+    const outer = screen.getByRole("button", {
+      name: "Orchestration requested",
+    });
+    const details = screen.getByRole("button", { name: "More details" });
+    fireEvent.click(outer);
+    fireEvent.click(details);
+    const response = within(
+      screen.getByRole("region", { name: "Full response" }),
+    );
+    fireEvent.click(response.getByRole("button", { name: "Next section" }));
+    fireEvent.click(outer);
+    expect(outer).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(outer);
+    expect(details).toHaveAttribute("aria-expanded", "true");
+    expect(response.getByRole("status")).toHaveTextContent("Section 2 of 2");
+    expect(response.getByLabelText("Full response content")).toHaveTextContent(
+      "last page",
+    );
+  });
+
+  test("leaves the non-collaboration outer default unchanged", () => {
+    renderTools(
+      [toolResult("agent_cancel", "Cancel requested")],
+      [toolCall("agent_cancel")],
+    );
+    const outer = screen.getAllByRole("button")[0];
+    expect(outer).toHaveAttribute("aria-expanded", "true");
+    expect(outer.closest("section")).toHaveAttribute("data-density", "default");
   });
 });

@@ -14,9 +14,14 @@ import {
 import { push } from "../../../features/Pages/pagesSlice";
 import type { ToolCall } from "../../../services/refact/types";
 import { normalizeToolName } from "../../../utils/toolNameAliases";
-import { Icon } from "../../ui";
+import { Badge, Icon, ToolCard as CollaborationCard } from "../../ui";
 import { ToolCard, type ToolStatus } from "../../ChatContent/ToolCard";
+import { ToolCallTooltip } from "../../ChatContent/ToolCard/ToolCallTooltip";
 import { useStoredOpen } from "../../ChatContent/useStoredOpen";
+import {
+  useChatScrollAnchor,
+  usePrepareChatScrollAnchor,
+} from "../../ChatContent/useChatScrollAnchor";
 import {
   buildAgenticToolViewModel,
   type AgenticToolViewModel,
@@ -35,6 +40,13 @@ import { ControlToolView } from "./ControlToolView";
 import { BoardToolView } from "./BoardToolView";
 import { DocToolView } from "./DocToolView";
 import { MemoryToolView } from "./MemoryToolView";
+import { buildCompactCollaborationPresentation } from "./compactCollaboration";
+import { CompactToolDetails } from "./CompactToolDetails";
+import { PagedText } from "./PagedText";
+import {
+  LOCAL_COLLABORATION_TOOL_NAMES,
+  lookupAgenticFamily,
+} from "./agenticFamilies";
 
 export type AgenticToolProps = {
   toolCall: ToolCall;
@@ -150,7 +162,10 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
   const contextThreadId = useThreadId();
   const resolvedThreadId = threadId ?? contextThreadId;
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
+  const isCollaboration = LOCAL_COLLABORATION_TOOL_NAMES.includes(
+    normalizeToolName(toolCall.function.name) ?? "",
+  );
+  const [isOpen, handleToggle] = useStoredOpen(storeKey, !isCollaboration);
   const dispatch = useAppDispatch();
 
   const isStreaming = useAppSelector((state) =>
@@ -168,18 +183,45 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
       ? maybeResult.content
       : null;
 
-  const model = useMemo(
+  const collaboration = useMemo(
     () =>
-      buildAgenticToolViewModel({
-        toolName: toolCall.function.name,
-        argumentsRaw: toolCall.function.arguments,
-        content,
-        toolFailed: maybeResult?.tool_failed,
-        hasResult: Boolean(maybeResult),
-        isBusy: isStreaming || isWaiting,
-        historical: Boolean(maybeResult) && !isStreaming && !isWaiting,
+      buildCompactCollaborationPresentation({
+        toolName: toolCall.function.name ?? "",
+        arguments: toolCall.function.arguments,
+        result: maybeResult?.content,
+        extra: maybeResult?.extra,
+        transportState: maybeResult
+          ? maybeResult.tool_failed
+            ? "failed"
+            : "succeeded"
+          : isStreaming || isWaiting
+            ? "running"
+            : "pending",
       }),
     [
+      isStreaming,
+      isWaiting,
+      maybeResult,
+      toolCall.function.arguments,
+      toolCall.function.name,
+    ],
+  );
+
+  const model = useMemo(
+    () =>
+      collaboration
+        ? null
+        : buildAgenticToolViewModel({
+            toolName: toolCall.function.name,
+            argumentsRaw: toolCall.function.arguments,
+            content,
+            toolFailed: maybeResult?.tool_failed,
+            hasResult: Boolean(maybeResult),
+            isBusy: isStreaming || isWaiting,
+            historical: Boolean(maybeResult) && !isStreaming && !isWaiting,
+          }),
+    [
+      collaboration,
       content,
       isStreaming,
       isWaiting,
@@ -204,6 +246,72 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
     },
     [dispatch, model?.headline, resolvedThreadId],
   );
+
+  const preserveScrollAnchor = useChatScrollAnchor();
+  const prepareScrollAnchor = usePrepareChatScrollAnchor();
+  const handleCollaborationToggle = useCallback(() => {
+    preserveScrollAnchor(handleToggle);
+  }, [handleToggle, preserveScrollAnchor]);
+  const family = lookupAgenticFamily(toolCall.function.name);
+
+  if (collaboration && family)
+    return (
+      <>
+        <span data-testid="agentic-tool" hidden />
+        <ToolCallTooltip toolCall={toolCall}>
+          <CollaborationCard
+            aria-label="Collaboration receipt"
+            density="compact"
+            icon={agenticIcon(family.icon)}
+            title={collaboration.headline}
+            status={
+              collaboration.tone === "danger"
+                ? "error"
+                : collaboration.tone === "active"
+                  ? "running"
+                  : "idle"
+            }
+            open={isOpen}
+            onPointerDownCapture={prepareScrollAnchor}
+            onMouseDownCapture={prepareScrollAnchor}
+            onKeyDownCapture={prepareScrollAnchor}
+            onOpenChange={handleCollaborationToggle}
+            actions={
+              <Badge
+                role={collaboration.tone === "danger" ? "alert" : "status"}
+                tone={
+                  collaboration.tone === "danger" ||
+                  collaboration.tone === "warning"
+                    ? collaboration.tone
+                    : "muted"
+                }
+              >
+                {collaboration.stateLabel}
+              </Badge>
+            }
+          >
+            <CompactToolDetails facts={collaboration.facts}>
+              <PagedText
+                label="Raw arguments"
+                body={toolCall.function.arguments}
+              />
+              {maybeResult && (
+                <PagedText
+                  label="Full response"
+                  body={content ?? JSON.stringify(maybeResult.content, null, 2)}
+                />
+              )}
+              {maybeResult?.extra && (
+                <PagedText
+                  label="Response metadata"
+                  body={JSON.stringify(maybeResult.extra, null, 2)}
+                />
+              )}
+            </CompactToolDetails>
+          </CollaborationCard>
+        </ToolCallTooltip>
+      </>
+    );
 
   if (!model) return null;
 

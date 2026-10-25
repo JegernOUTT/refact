@@ -17,6 +17,8 @@ type Receipt = Pick<CompactAgenticPresentation, "headline" | "stateLabel"> & {
   tone?: CompactAgenticPresentation["tone"];
 };
 
+const MAX_DISCOVERY_RECEIPT_CHARS = 256_000;
+
 const INTENTS: Partial<Record<string, { headline: string; subject?: string }>> =
   {
     agent_mailbox: { headline: "Mailbox check requested" },
@@ -79,6 +81,7 @@ function sameText(a: RecordValue, b: RecordValue, key: string): boolean {
 
 function discoveryResult(value: unknown): RecordValue {
   if (typeof value !== "string") return readCompactRecord(value);
+  if (value.length > MAX_DISCOVERY_RECEIPT_CHARS) return null;
   try {
     return readCompactRecord(load(value, { schema: JSON_SCHEMA }));
   } catch {

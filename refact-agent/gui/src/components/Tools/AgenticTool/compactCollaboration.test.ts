@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
+import { JSON_SCHEMA, load } from "js-yaml";
 import { normalizeToolName } from "../../../utils/toolNameAliases";
 import {
   AGENTIC_TOOL_NAMES,
@@ -13,6 +14,15 @@ import {
 import { compactBoardNotesPresentation } from "./compactBoardNotes";
 import { buildCompactCollaborationPresentation as present } from "./compactCollaboration";
 import type { CompactAgenticInput } from "./compactPresentation";
+
+vi.hoisted(() => {
+  vi.resetModules();
+});
+
+vi.mock("js-yaml", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("js-yaml")>();
+  return { ...actual, load: vi.fn(actual.load) };
+});
 
 const INVENTORY = [
   ["agent_mailbox", "inspect", "Mailbox check requested"],
@@ -539,6 +549,51 @@ describe("evidence-limited collaboration receipts", () => {
       expect(present({ ...input, result })?.stateLabel).toBe(
         "Outcome unconfirmed",
       );
+  });
+
+  test("oversized board discovery skips YAML parsing and preserves the caller payload", () => {
+    const result = "projection_unavailable: false\ncards: []\n#".padEnd(
+      256_001,
+      "x",
+    );
+    const input = Object.freeze({
+      toolName: "board_discover",
+      result,
+      transportState: "succeeded" as const,
+    });
+    vi.mocked(load).mockClear();
+    expect(present(input)).toMatchObject({
+      headline: "Board discovery requested",
+      stateLabel: "Outcome unconfirmed",
+      tone: "neutral",
+      facts: [],
+    });
+    expect(load).not.toHaveBeenCalled();
+    expect(input.result).toBe(result);
+    expect(input.result.length).toBe(256_001);
+  });
+
+  test("board discovery accepts the exact size boundary with the same safe YAML schema", () => {
+    const result = "projection_unavailable: false\ncards: []\n#".padEnd(
+      256_000,
+      "x",
+    );
+    vi.mocked(load).mockClear();
+    expect(
+      present({
+        toolName: "board_discover",
+        result,
+        transportState: "succeeded",
+      }),
+    ).toMatchObject({
+      headline: "Board snapshot checked",
+      stateLabel: "Metadata only",
+      facts: [{ label: "Cards shown", value: "0" }],
+    });
+    expect(load).toHaveBeenCalledExactlyOnceWith(result, {
+      schema: JSON_SCHEMA,
+    });
+    expect(result.length).toBe(256_000);
   });
 
   test.each([
