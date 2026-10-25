@@ -32,6 +32,47 @@ export type AgenticFamilyDescriptor = {
   label: string;
 };
 
+const LOCAL_COLLABORATION_FAMILIES: Record<string, AgenticFamilyDescriptor> = {
+  agent_mailbox: { family: "inspect", icon: "inspect", label: "Check mailbox" },
+  board_claim: { family: "task", icon: "task", label: "Claim card" },
+  board_discover: { family: "task", icon: "task", label: "Discover board" },
+  team_seat: { family: "task", icon: "task", label: "Team seat" },
+  team_role_grant: {
+    family: "control",
+    icon: "control",
+    label: "Team role authority",
+  },
+  finalize_card: { family: "task", icon: "task", label: "Finalize card" },
+  claim_record: { family: "memory", icon: "memory", label: "Record claim" },
+  claim_list: { family: "memory", icon: "memory", label: "Read claims" },
+  disagreement_file: {
+    family: "task",
+    icon: "task",
+    label: "File disagreement",
+  },
+  disagreement_list: {
+    family: "task",
+    icon: "task",
+    label: "Read disagreements",
+  },
+  disagreement_adjudicate: {
+    family: "task",
+    icon: "task",
+    label: "Adjudicate disagreement",
+  },
+  causal_trace: { family: "inspect", icon: "inspect", label: "Trace causes" },
+  metrics: { family: "overview", icon: "overview", label: "Read metrics" },
+  code_mode: {
+    family: "control",
+    icon: "control",
+    label: "Run orchestration",
+  },
+};
+
+export const LOCAL_COLLABORATION_TOOL_NAMES: readonly string[] = Object.keys(
+  LOCAL_COLLABORATION_FAMILIES,
+);
+
 const FAMILY_TABLE: Partial<Record<string, AgenticFamilyDescriptor>> = {
   spawn_agent: { family: "spawn", icon: "spawn", label: "Spawn agent" },
   task_spawn_agent: { family: "spawn", icon: "spawn", label: "Spawn agent" },
@@ -191,6 +232,7 @@ const FAMILY_TABLE: Partial<Record<string, AgenticFamilyDescriptor>> = {
     icon: "memory",
     label: "Task memory triaged",
   },
+  ...LOCAL_COLLABORATION_FAMILIES,
 };
 
 /// Board-runtime tool names that must always resolve to a dedicated family
@@ -228,6 +270,9 @@ export const BOARD_RUNTIME_TOOL_NAMES: readonly string[] = [
   "board_move",
   "board_delete",
   "ready_cards",
+  "board_claim",
+  "board_discover",
+  "finalize_card",
   "task_board_authority",
   "mark_done",
   "mark_done_batch",
