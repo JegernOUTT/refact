@@ -50,6 +50,7 @@ pub enum SidebarSectionStatus {
 pub enum SidebarSectionSnapshot {
     Workspace {
         workspace_roots: Vec<String>,
+        project_root: Option<String>,
     },
     Chats {
         trajectories: Vec<TrajectoryMeta>,
@@ -112,6 +113,7 @@ pub struct SidebarEventEnvelope {
 enum InitialSidebarPart {
     Workspace {
         workspace_roots: Vec<String>,
+        project_root: Option<String>,
         status: SidebarSectionStatus,
         error: Option<String>,
     },
@@ -164,12 +166,40 @@ fn all_receivers_closed(
         && buddy_rx.is_none()
 }
 
-async fn fetch_workspace_roots(gcx: Arc<GlobalContext>) -> Vec<String> {
+async fn fetch_workspace_roots(gcx: Arc<GlobalContext>) -> (Vec<String>, Option<String>) {
+    let mappings = crate::files_correction::registered_worktree_path_mappings(&gcx.cache_dir);
     let folders = gcx.documents_state.workspace_folders.lock().unwrap();
-    folders
+    let source_roots = folders
+        .iter()
+        .filter_map(|root| {
+            crate::files_correction::normalize_path_for_unscoped_root_selection(root, &mappings)
+        })
+        .collect::<Vec<_>>();
+    let configured_root = (!gcx.cmdline.workspace_folder.is_empty())
+        .then(|| crate::files_correction::canonical_path(&gcx.cmdline.workspace_folder))
+        .and_then(|root| {
+            crate::files_correction::normalize_path_for_unscoped_root_selection(&root, &mappings)
+        });
+    let mut project_root = gcx.documents_state.workspace_project_root.lock().unwrap();
+    let selected_root = project_root
+        .as_ref()
+        .filter(|root| source_roots.contains(root))
+        .or_else(|| {
+            configured_root
+                .as_ref()
+                .filter(|root| source_roots.contains(root))
+        })
+        .or_else(|| source_roots.first())
+        .cloned();
+    *project_root = selected_root.clone();
+    let workspace_roots = folders
         .iter()
         .map(|path| path.to_string_lossy().to_string())
-        .collect()
+        .collect();
+    (
+        workspace_roots,
+        selected_root.map(|path| path.to_string_lossy().to_string()),
+    )
 }
 
 async fn fetch_buddy_snapshot(gcx: Arc<GlobalContext>) -> serde_json::Value {
@@ -237,12 +267,16 @@ impl InitialSidebarPart {
         match self {
             InitialSidebarPart::Workspace {
                 workspace_roots,
+                project_root,
                 status,
                 error,
             } => section_snapshot_event(
                 SidebarSection::Workspace,
                 status,
-                SidebarSectionSnapshot::Workspace { workspace_roots },
+                SidebarSectionSnapshot::Workspace {
+                    workspace_roots,
+                    project_root,
+                },
                 Some(elapsed_ms),
                 error,
             ),
@@ -289,13 +323,15 @@ impl InitialSidebarPart {
 
 async fn load_workspace_part(gcx: Arc<GlobalContext>) -> InitialSidebarPart {
     match timeout(SIDEBAR_BOOTSTRAP_TIMEOUT, fetch_workspace_roots(gcx)).await {
-        Ok(workspace_roots) => InitialSidebarPart::Workspace {
+        Ok((workspace_roots, project_root)) => InitialSidebarPart::Workspace {
             workspace_roots,
+            project_root,
             status: SidebarSectionStatus::Ready,
             error: None,
         },
         Err(_) => InitialSidebarPart::Workspace {
             workspace_roots: Vec::new(),
+            project_root: None,
             status: SidebarSectionStatus::Error,
             error: Some("Timed out loading workspace".to_string()),
         },
@@ -1007,6 +1043,7 @@ mod tests {
         match section {
             SidebarSection::Workspace => InitialSidebarPart::Workspace {
                 workspace_roots: Vec::new(),
+                project_root: None,
                 status,
                 error,
             },

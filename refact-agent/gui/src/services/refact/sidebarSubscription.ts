@@ -47,7 +47,7 @@ export type SidebarPagination = {
 };
 
 export type SidebarSectionSnapshot =
-  | { workspace_roots: string[] }
+  | { workspace_roots: string[]; project_root?: string | null }
   | { trajectories: TrajectoryMeta[]; pagination?: SidebarPagination }
   | { tasks: TaskMeta[] }
   | { buddy: BuddySnapshotPayload };
@@ -198,7 +198,14 @@ function isValidSectionSnapshot(
   if (typeof snapshot !== "object" || snapshot === null) return false;
   const obj = snapshot as Record<string, unknown>;
 
-  if (section === "workspace") return hasArrayProperty(obj, "workspace_roots");
+  if (section === "workspace") {
+    return (
+      hasArrayProperty(obj, "workspace_roots") &&
+      (obj.project_root === undefined ||
+        obj.project_root === null ||
+        typeof obj.project_root === "string")
+    );
+  }
   if (section === "chats") {
     return (
       hasArrayProperty(obj, "trajectories") &&

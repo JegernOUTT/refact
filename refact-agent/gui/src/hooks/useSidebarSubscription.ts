@@ -31,7 +31,10 @@ import {
   closeThread,
   updateChatRuntimeFromSessionState,
 } from "../features/Chat/Thread";
-import { setCurrentProjectInfo } from "../features/Chat/currentProject";
+import {
+  resolveProjectRoot,
+  setCurrentProjectInfo,
+} from "../features/Chat/currentProject";
 import { tasksApi, type TaskMeta } from "../services/refact/tasks";
 import { taskSseEventReceived } from "../features/Tasks/tasksSlice";
 import {
@@ -270,8 +273,13 @@ export function useSidebarSubscription() {
   const projectRoots = useAppSelector(
     (state) => state.current_project.workspaceRoots,
   );
+  const projectRoot = useAppSelector(
+    (state) => state.current_project.projectRoot,
+  );
   const projectRootsRef = useRef(projectRoots);
   projectRootsRef.current = projectRoots;
+  const projectRootRef = useRef(projectRoot);
+  projectRootRef.current = projectRoot;
   const historyChats = useAppSelector((state) => state.history.chats);
   const sidebarSections = useAppSelector((state) => state.sidebar.sections);
   const historyRef = useRef(historyChats);
@@ -279,6 +287,7 @@ export function useSidebarSubscription() {
   const sidebarSectionsRef = useRef(sidebarSections);
   sidebarSectionsRef.current = sidebarSections;
   const serverWorkspaceRootsRef = useRef<string[] | undefined>(undefined);
+  const serverProjectRootRef = useRef<string | null | undefined>(undefined);
   // Number of native decisions this host is still showing. Mirrors the shared
   // tracker so the resolution observer below can run only while something is
   // actually waiting.
@@ -553,11 +562,14 @@ export function useSidebarSubscription() {
   );
 
   const processWorkspaceSnapshot = useCallback(
-    (workspaceRoots: string[]) => {
+    (workspaceRoots: string[], projectRoot?: string | null) => {
       dispatch(
         setCurrentProjectInfo({
-          name: getWorkspaceDisplayName(workspaceRoots[0] ?? ""),
+          name: getWorkspaceDisplayName(
+            resolveProjectRoot(projectRoot, workspaceRoots),
+          ),
           workspaceRoots,
+          projectRoot,
         }),
       );
     },
@@ -628,8 +640,13 @@ export function useSidebarSubscription() {
         const workspaceRoots = canonicalWorkspaceRoots(
           snapshot.workspace_roots,
         );
-        processWorkspaceSnapshot(workspaceRoots);
+        const projectRoot =
+          snapshot.project_root == null
+            ? snapshot.project_root
+            : normalizeWorkspaceRoot(snapshot.project_root);
+        processWorkspaceSnapshot(workspaceRoots, projectRoot);
         serverWorkspaceRootsRef.current = workspaceRoots;
+        serverProjectRootRef.current = projectRoot;
       } else if (
         section === "chats" &&
         hasSnapshotKey(snapshot, "trajectories")
@@ -687,10 +704,19 @@ export function useSidebarSubscription() {
         const workspaceRoots = canonicalWorkspaceRoots(
           snapshot.workspace_roots,
         );
+        const projectRoot =
+          snapshot.project_root == null
+            ? snapshot.project_root
+            : normalizeWorkspaceRoot(snapshot.project_root);
         const workspaceChanged =
           status === "ready" &&
           serverWorkspaceRootsRef.current !== undefined &&
-          !workspaceRootsEqual(serverWorkspaceRootsRef.current, workspaceRoots);
+          (serverProjectRootRef.current != null && projectRoot != null
+            ? serverProjectRootRef.current !== projectRoot
+            : !workspaceRootsEqual(
+                serverWorkspaceRootsRef.current,
+                workspaceRoots,
+              ));
         if (workspaceChanged) {
           dispatch(sidebarWorkspaceChanged({ subscriptionId }));
           dispatch(resetBuddyForWorkspaceChange());
@@ -700,13 +726,14 @@ export function useSidebarSubscription() {
           dispatch(setHistoryLoading(true));
         }
         if (status === "ready") {
-          processWorkspaceSnapshot(workspaceRoots);
+          processWorkspaceSnapshot(workspaceRoots, projectRoot);
           serverWorkspaceRootsRef.current = workspaceRoots;
+          serverProjectRootRef.current = projectRoot;
           // A decision identity only means something inside one project, so a
           // different root drops the previous project's announcements instead
           // of leaving foreign notifications on screen.
           scopeHostDecisions({
-            projectRoot: workspaceRoots[0] ?? "",
+            projectRoot: resolveProjectRoot(projectRoot, workspaceRoots),
             endpointIdentity,
           });
         }
@@ -736,10 +763,10 @@ export function useSidebarSubscription() {
    */
   const decisionScope = useCallback((): DecisionScope => {
     return {
-      projectRoot:
-        serverWorkspaceRootsRef.current?.[0] ??
-        projectRootsRef.current?.[0] ??
-        "",
+      projectRoot: resolveProjectRoot(
+        serverProjectRootRef.current ?? projectRootRef.current,
+        serverWorkspaceRootsRef.current ?? projectRootsRef.current,
+      ),
       endpointIdentity,
     };
   }, [endpointIdentity]);
@@ -1009,10 +1036,14 @@ export function useSidebarSubscription() {
     if (!reconnectingSameEndpoint) {
       dispatch(resetSidebarState({ lspPort: config.lspPort }));
       serverWorkspaceRootsRef.current = undefined;
+      serverProjectRootRef.current = undefined;
       // Retain tombstones on same-endpoint reconnects, including React effect
       // restarts caused by credential/config refresh.
       scopeHostDecisions({
-        projectRoot: projectRootsRef.current?.[0] ?? "",
+        projectRoot: resolveProjectRoot(
+          projectRootRef.current,
+          projectRootsRef.current,
+        ),
         endpointIdentity,
       });
       void prepareInitialHistory(generation);

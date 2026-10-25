@@ -87,7 +87,10 @@ import {
   setThemeMode,
   updateConfig,
 } from "../features/Config/configSlice";
-import { setCurrentProjectInfo } from "../features/Chat/currentProject";
+import {
+  resolveProjectRoot,
+  setCurrentProjectInfo,
+} from "../features/Chat/currentProject";
 import { resetSidebarState } from "../features/Sidebar/sidebarSlice";
 import { nextTip } from "../features/TipOfTheDay";
 import { tasksApi } from "../services/refact/tasks";
@@ -96,6 +99,7 @@ import {
   openTask,
   addPlannerChat,
   setTaskActiveChat,
+  selectTaskActiveChat,
   taskSseEventReceived,
 } from "../features/Tasks/tasksSlice";
 import {
@@ -289,6 +293,7 @@ function syncProjectStorageNamespace(state: RootState): boolean {
   const workspaceRoots = state.current_project.workspaceRoots;
   setProjectStorageNamespaceFromProjectInfo({
     workspaceRoots,
+    projectRoot: state.current_project.projectRoot,
     projectName: workspaceRoots?.length
       ? state.current_project.name
       : undefined,
@@ -1626,7 +1631,10 @@ startListening({
     const state = listenerApi.getState();
     const event = action.payload;
     const scope = {
-      projectRoot: state.current_project.workspaceRoots?.[0] ?? "",
+      projectRoot: resolveProjectRoot(
+        state.current_project.projectRoot,
+        state.current_project.workspaceRoots,
+      ),
       endpointIdentity: getEngineEndpointIdentity(state.config),
     };
     scopeHostDecisions(scope);
@@ -1732,6 +1740,13 @@ startListening({
 
     const { new_chat_id } = content;
     const state = listenerApi.getState();
+    const currentPage = selectCurrentPage(state);
+    const isForeground =
+      currentPage?.name === "task workspace"
+        ? selectTaskActiveChat(state, currentPage.taskId)?.chatId ===
+          event.chat_id
+        : currentPage?.name === "chat" &&
+          selectFocusedWorkspaceChatId(state) === event.chat_id;
 
     const apiKey = state.config.apiKey;
 
@@ -1749,6 +1764,8 @@ startListening({
     listenerApi.dispatch(
       createChatWithId({
         id: new_chat_id,
+        openTab: isForeground,
+        activate: isForeground,
         isTaskChat,
         taskMeta,
         parentId,
@@ -1758,53 +1775,49 @@ startListening({
         mode: targetMode,
       }),
     );
-    // Ensure the tab is open and switched to (handles both new and cached threads)
-    listenerApi.dispatch(switchToThread({ id: new_chat_id }));
     // Optimistically mark as waiting so the UI shows a generating state
     // immediately before the first SSE event arrives
     listenerApi.dispatch(
       setIsWaitingForResponse({ id: new_chat_id, value: true }),
     );
-    listenerApi.dispatch(requestSseRefresh({ chatId: new_chat_id }));
+    if (isForeground) {
+      listenerApi.dispatch(requestSseRefresh({ chatId: new_chat_id }));
 
-    if (taskMeta?.role === "planner" && taskMeta.task_id) {
-      const taskId = taskMeta.task_id;
-      const now = new Date().toISOString();
-      // Ensure the task shell exists in tasksUI before registering the planner.
-      // openTask is a safe upsert: it only updates the name when a real name is
-      // provided and skips the update when the task already exists with a name.
-      const taskListResult =
-        tasksApi.endpoints.listTasks.select(undefined)(state);
-      const taskName =
-        taskListResult.data?.find((t) => t.id === taskId)?.name ?? "";
-      listenerApi.dispatch(openTask({ id: taskId, name: taskName }));
-      listenerApi.dispatch(
-        addPlannerChat({
-          taskId,
-          planner: {
-            id: new_chat_id,
-            title: "",
-            createdAt: now,
-            updatedAt: now,
-            mode: targetMode,
-          },
-        }),
-      );
-      listenerApi.dispatch(
-        setTaskActiveChat({
-          taskId,
-          activeChat: { type: "planner", chatId: new_chat_id },
-        }),
-      );
-      const currentPage = selectCurrentPage(listenerApi.getState());
-      if (
-        currentPage?.name !== "task workspace" ||
-        currentPage.taskId !== taskId
-      ) {
-        listenerApi.dispatch(push({ name: "task workspace", taskId }));
+      if (taskMeta?.role === "planner" && taskMeta.task_id) {
+        const taskId = taskMeta.task_id;
+        const now = new Date().toISOString();
+        const taskListResult =
+          tasksApi.endpoints.listTasks.select(undefined)(state);
+        const taskName =
+          taskListResult.data?.find((t) => t.id === taskId)?.name ?? "";
+        listenerApi.dispatch(openTask({ id: taskId, name: taskName }));
+        listenerApi.dispatch(
+          addPlannerChat({
+            taskId,
+            planner: {
+              id: new_chat_id,
+              title: "",
+              createdAt: now,
+              updatedAt: now,
+              mode: targetMode,
+            },
+          }),
+        );
+        listenerApi.dispatch(
+          setTaskActiveChat({
+            taskId,
+            activeChat: { type: "planner", chatId: new_chat_id },
+          }),
+        );
+        if (
+          currentPage?.name !== "task workspace" ||
+          currentPage.taskId !== taskId
+        ) {
+          listenerApi.dispatch(push({ name: "task workspace", taskId }));
+        }
+      } else {
+        listenerApi.dispatch(push({ name: "chat" }));
       }
-    } else {
-      listenerApi.dispatch(push({ name: "chat" }));
     }
 
     if (hasConfiguredEngineEndpoint(state)) {

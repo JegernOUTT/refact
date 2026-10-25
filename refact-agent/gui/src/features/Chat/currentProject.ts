@@ -4,11 +4,19 @@ import { RootState } from "../../app/store";
 export type CurrentProjectInfo = {
   name: string;
   workspaceRoots?: string[];
+  projectRoot?: string | null;
 };
 
 const initialState: CurrentProjectInfo = {
   name: "",
 };
+
+export function resolveProjectRoot(
+  projectRoot: string | null | undefined,
+  workspaceRoots: readonly string[] | undefined,
+): string {
+  return (projectRoot ?? workspaceRoots?.at(0) ?? "").replace(/\\/g, "/");
+}
 
 export const setCurrentProjectInfo = createAction<CurrentProjectInfo>(
   "currentProjectInfo/setCurrentProjectInfo",
@@ -45,6 +53,13 @@ export const currentProjectInfoReducer = createReducer(
         state.workspaceRoots = nextRoots;
       } else {
         delete state.workspaceRoots;
+      }
+      if ("projectRoot" in next) {
+        if (next.projectRoot) {
+          state.projectRoot = next.projectRoot;
+        } else {
+          delete state.projectRoot;
+        }
       }
     });
     builder.addCase(resetSidebarReadiness, () => undefined);

@@ -693,6 +693,7 @@ pub async fn get_document_text_or_read_from_disk(
 #[derive(Clone)]
 pub struct DocumentsState {
     pub workspace_folders: Arc<StdMutex<Vec<PathBuf>>>,
+    pub workspace_project_root: Arc<StdMutex<Option<PathBuf>>>,
     pub workspace_files: Arc<StdMutex<Vec<PathBuf>>>,
     pub workspace_vcs_roots: Arc<StdMutex<Vec<PathBuf>>>,
 
@@ -743,6 +744,7 @@ impl DocumentsState {
     pub async fn new(workspace_dirs: Vec<PathBuf>) -> Self {
         Self {
             workspace_folders: Arc::new(StdMutex::new(workspace_dirs)),
+            workspace_project_root: Arc::new(StdMutex::new(None)),
             workspace_files: Arc::new(StdMutex::new(Vec::new())),
             workspace_vcs_roots: Arc::new(StdMutex::new(Vec::new())),
 

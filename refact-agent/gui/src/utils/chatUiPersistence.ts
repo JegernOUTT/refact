@@ -202,8 +202,40 @@ function firstNonEmpty(values: (string | undefined)[]): string | undefined {
   return values.map((value) => value?.trim()).find(Boolean);
 }
 
+function migrateProjectStorageNamespace(
+  namespace: string,
+  legacyNamespaces: string[],
+): void {
+  const storage = getStorage();
+  if (!storage) return;
+  const prefix = `refact:project:${namespace}:`;
+
+  try {
+    const keys = Array.from({ length: storage.length }, (_, index) =>
+      storage.key(index),
+    ).filter((key): key is string => key !== null);
+    if (keys.some((key) => key.startsWith(prefix))) return;
+
+    for (const legacyNamespace of legacyNamespaces) {
+      const legacyPrefix = `refact:project:${legacyNamespace}:`;
+      const legacyKeys = keys.filter((key) => key.startsWith(legacyPrefix));
+      if (legacyKeys.length === 0) continue;
+      for (const key of legacyKeys) {
+        const value = storage.getItem(key);
+        if (value !== null) {
+          storage.setItem(`${prefix}${key.slice(legacyPrefix.length)}`, value);
+        }
+      }
+      return;
+    }
+  } catch {
+    return;
+  }
+}
+
 export function setProjectStorageNamespaceFromProjectInfo(input: {
   workspaceRoots?: string[];
+  projectRoot?: string | null;
   projectName?: string;
   workspaceName?: string;
 }): void {
@@ -212,10 +244,25 @@ export function setProjectStorageNamespaceFromProjectInfo(input: {
   ).sort();
   const fallback = firstNonEmpty([input.projectName, input.workspaceName]);
   const identityParts = roots.length > 0 ? roots : fallback ? [fallback] : [];
-  const identity = identityParts.join("\n");
-  setProjectStorageNamespace(
-    identity ? `v2:${hashStorageIdentity(identity)}` : undefined,
-  );
+  const legacyIdentity = identityParts.join("\n");
+  const identity = input.projectRoot
+    ? normalizeWorkspaceIdentityPart(input.projectRoot)
+    : legacyIdentity;
+  const version = input.projectRoot ? "v3" : "v2";
+  const namespace = identity
+    ? `${version}:${hashStorageIdentity(identity)}`
+    : undefined;
+  if (
+    namespace &&
+    input.projectRoot &&
+    (namespace !== projectStorageNamespace || !projectStorageNamespaceTrusted)
+  ) {
+    migrateProjectStorageNamespace(namespace, [
+      `v2:${hashStorageIdentity(legacyIdentity)}`,
+      `v2:${hashStorageIdentity(identity)}`,
+    ]);
+  }
+  setProjectStorageNamespace(namespace);
 }
 
 function isRecord(value: unknown): value is JsonRecord {

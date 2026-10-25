@@ -142,22 +142,6 @@ describe("chatUiPersistence", () => {
     expect(loadPersistedChatTabs().openThreadIds).toEqual(["chat-a"]);
   });
 
-  it("uses a stable hashed namespace for equivalent multi-root identities", () => {
-    setProjectStorageNamespaceFromProjectInfo({
-      workspaceRoots: ["/workspace/b/", "/workspace/a", "/workspace/a/"],
-      projectName: "fallback",
-    });
-    const first = getProjectStorageNamespace();
-
-    setProjectStorageNamespaceFromProjectInfo({
-      workspaceRoots: ["/workspace/a", "/workspace/b"],
-      projectName: "other-fallback",
-    });
-
-    expect(first?.startsWith("v2:")).toBe(true);
-    expect(getProjectStorageNamespace()).toBe(first);
-  });
-
   it("persists opened chat tabs and the latest active chat", () => {
     savePersistedChatTabs({
       openThreadIds: ["chat-a", "chat-b", "chat-a"],

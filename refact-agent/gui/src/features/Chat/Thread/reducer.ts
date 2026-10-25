@@ -756,6 +756,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
       title,
       isTaskChat,
       openTab,
+      activate,
       mode,
       taskMeta,
       model,
@@ -797,7 +798,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
       if (rootChatId !== undefined) {
         existingRt.thread.root_chat_id = rootChatId;
       }
-      state.current_thread_id = id;
+      if (activate !== false) {
+        state.current_thread_id = id;
+      }
       return;
     }
 
@@ -849,7 +852,9 @@ export const chatReducer = createReducer(initialState, (builder) => {
     if (openTab !== false) {
       state.open_thread_ids.push(id);
     }
-    state.current_thread_id = id;
+    if (activate !== false) {
+      state.current_thread_id = id;
+    }
   });
 
   builder.addCase(backUpMessages, (state, action) => {
