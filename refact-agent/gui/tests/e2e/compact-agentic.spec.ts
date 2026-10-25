@@ -381,9 +381,8 @@ test("complete receipts and mutation intents remain behind explicit production d
       expect.objectContaining({
         type: "user_message",
         priority: true,
-        content: expect.stringMatching(
-          /^pause_agent\(card_id="T-14", reason=/u,
-        ),
+        content:
+          'pause(target={"kind":"card","card_id":"T-14"}, reason="Paused from agent pulse view.")',
       }),
     ]);
   await page

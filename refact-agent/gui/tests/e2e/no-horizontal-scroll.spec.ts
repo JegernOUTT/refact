@@ -399,8 +399,16 @@ test.describe("overlay right-edge regressions", () => {
     await page.goto("/tests/e2e/route-showcase.html?route=overlay-regression");
     await page.locator("[data-element='app-root']").waitFor();
 
-    await page.getByLabel("Compress or rebuild context").click();
-    await page.getByRole("dialog").waitFor();
+    const trajectoryTrigger = page.getByLabel("Compress or rebuild context");
+    const compressionTab = page.getByRole("tab", {
+      name: "LLM compression",
+      exact: true,
+    });
+    const trajectoryPopover = page.getByRole("dialog").filter({
+      has: compressionTab,
+    });
+    await trajectoryTrigger.click();
+    await trajectoryPopover.waitFor();
 
     const trajectoryGutters = await page.evaluate<GutterMeasurement[]>(() => {
       const dialog = document.querySelector("[role='dialog']");
@@ -464,7 +472,7 @@ test.describe("overlay right-edge regressions", () => {
       expect(edge.delta, edge.details).toBeLessThanOrEqual(maxDelta);
     }
 
-    await page.getByRole("tab", { name: "LLM compression" }).click();
+    await compressionTab.click();
 
     const llmCompressEdges = await page.evaluate<EdgeMeasurement[]>(() => {
       const rect = (el: Element) => el.getBoundingClientRect();
@@ -496,11 +504,22 @@ test.describe("overlay right-edge regressions", () => {
       expect(edge.delta, edge.details).toBeLessThanOrEqual(1);
     }
 
-    await page.keyboard.press("Escape");
+    await compressionTab.focus();
+    await expect(compressionTab).toBeFocused();
+    await compressionTab.press("Escape");
+    await expect(trajectoryPopover).toHaveCount(0);
+    await expect(trajectoryTrigger).toHaveAttribute("aria-expanded", "false");
+    await expect(trajectoryTrigger).toBeFocused();
     await page.mouse.move(0, 0);
-    await page.getByLabel("Compress or rebuild context").blur();
-    await page.getByLabel("Select model").click();
-    await page.getByRole("listbox", { name: "Models" }).waitFor();
+    await trajectoryTrigger.blur();
+    const modelTrigger = page.getByRole("button", {
+      name: "Select model",
+      exact: true,
+    });
+    const models = page.getByRole("listbox", { name: "Models", exact: true });
+    const modelPopover = page.getByRole("dialog").filter({ has: models });
+    await modelTrigger.click();
+    await models.waitFor();
 
     const modelGutters = await page.evaluate<GutterMeasurement[]>(() => {
       const dialog = document.querySelector("[role='dialog']");
@@ -523,7 +542,14 @@ test.describe("overlay right-edge regressions", () => {
       expect(gutter.value, gutter.name).toBe("auto");
     }
 
-    await page.keyboard.press("Escape");
+    const modelSearch = modelPopover.getByRole("searchbox");
+    await modelSearch.focus();
+    await expect(modelSearch).toBeFocused();
+    await modelSearch.press("Escape");
+    await expect(models).toHaveCount(0);
+    await expect(modelPopover).toHaveCount(0);
+    await expect(modelTrigger).toHaveAttribute("aria-expanded", "false");
+    await expect(modelTrigger).toBeFocused();
     await page.mouse.move(0, 0);
     await page.getByRole("button", { name: /Agent/ }).click();
     await page.getByRole("dialog").waitFor();
