@@ -42,6 +42,7 @@ import {
   type AskQuestionsDraftValue,
 } from "../../../utils/chatUiPersistence";
 import styles from "./AskQuestionsTool.module.css";
+import { NativeQuestionResponse } from "./NativeQuestionResponse";
 
 type QuestionItem = PendingQuestion;
 
@@ -148,8 +149,8 @@ const QuestionWidget: React.FC<{
           <SegmentedControl
             name={question.id}
             options={[
-              { value: "Yes", label: "Yes" },
-              { value: "No", label: "No" },
+              { value: "Yes", label: "Yes", disabled },
+              { value: "No", label: "No", disabled },
             ]}
             value={typeof value === "string" ? value : ""}
             onValueChange={(nextValue) => {
@@ -481,6 +482,18 @@ export const AskQuestionsTool: React.FC<AskQuestionsToolProps> = ({
     nativeQuestionSet,
     threadId,
   ]);
+
+  if (nativeQuestionSet?.response_protocol_version === 2) {
+    return (
+      <NativeQuestionResponse
+        set={nativeQuestionSet}
+        threadId={threadId}
+        toolCall={toolCall}
+        isOpen={isOpen}
+        onToggle={handleToggle}
+      />
+    );
+  }
 
   if (nativeQuestionSet) {
     const isPending = nativeQuestionSet.status === "pending";

@@ -4,6 +4,7 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useContext,
 } from "react";
 import {
   Code,
@@ -31,6 +32,12 @@ import {
 import styles from "./ArtifactBlock.module.css";
 import markdownStyles from "./Markdown.module.css";
 import classNames from "classnames";
+import { QuestionArtifactContext } from "./questionArtifactContext";
+import {
+  questionArtifactHtml,
+  readQuestionArtifactAnswer,
+} from "./questionArtifact";
+import { v4 as uuidv4 } from "uuid";
 
 export interface ArtifactBlockProps {
   code: string;
@@ -70,6 +77,14 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
   onCopyClick,
 }) => {
   const codeKey = useMemo(() => hashArtifactCode(code), [code]);
+  const question = useContext(QuestionArtifactContext);
+  const bindingRef = useRef(question);
+  bindingRef.current = question;
+  const questionInstance = question?.instance;
+  const channel = useMemo(
+    () => `${codeKey}:${questionInstance ? "question" : "preview"}:${uuidv4()}`,
+    [codeKey, questionInstance],
+  );
 
   const [showSource, setShowSource] = useState(false);
   const [isOpen, setIsOpen] = useState(true);
@@ -100,13 +115,25 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
     prevStreaming.current = isStreaming;
   }, [isStreaming]);
 
-  const wrappedHtml = useMemo(() => wrapArtifactHtml(code), [code]);
+  const wrappedHtml = useMemo(
+    () =>
+      questionInstance
+        ? questionArtifactHtml(code, channel)
+        : wrapArtifactHtml(code),
+    [code, channel, questionInstance],
+  );
 
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       if (event.source !== iframeRef.current?.contentWindow) return;
+      if (questionInstance) event.stopImmediatePropagation();
       const data = event.data as Record<string, unknown> | null;
       if (!data || typeof data.type !== "string") return;
+      const answer = readQuestionArtifactAnswer(data, channel);
+      if (answer !== null && bindingRef.current?.enabled) {
+        bindingRef.current.onAnswer(answer);
+        return;
+      }
 
       if (data.type === "refact-artifact-resize") {
         const h = Number(data.height);
@@ -149,12 +176,12 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
         }
       }
     };
-    window.addEventListener("message", handler);
+    window.addEventListener("message", handler, true);
     return () => {
-      window.removeEventListener("message", handler);
+      window.removeEventListener("message", handler, true);
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     };
-  }, []);
+  }, [channel, questionInstance]);
 
   useEffect(() => {
     setError(null);
@@ -178,6 +205,23 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
       "*",
     );
   }, [themeValue]);
+
+  const questionEnabled = question?.enabled;
+  const postQuestionState = useCallback(() => {
+    if (questionEnabled === undefined) return;
+    iframeRef.current?.contentWindow?.postMessage(
+      {
+        type: "refact-question-state",
+        channel,
+        enabled: questionEnabled,
+      },
+      "*",
+    );
+  }, [channel, questionEnabled]);
+
+  useEffect(() => {
+    postQuestionState();
+  }, [postQuestionState]);
 
   useEffect(() => {
     postThemeToIframe();
@@ -370,7 +414,10 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
             referrerPolicy="no-referrer"
             title="HTML Preview"
             style={{ height: `${height}px` }}
-            onLoad={postThemeToIframe}
+            onLoad={() => {
+              postThemeToIframe();
+              postQuestionState();
+            }}
           />
         )}
 

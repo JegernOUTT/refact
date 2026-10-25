@@ -46,7 +46,7 @@ impl Tool for ToolAskQuestions {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Present questions to the user and wait for answers. Stops generation until user responds. Question types: yes_no, single_select, multi_select, free_text.".to_string(),
+            description: "Present inline questions and stop generation until the user responds. Types: yes_no, single_select, multi_select, free_text. Users may write an arbitrary answer, explain a choice, skip any question, and add overall comments. A skip is not consent or a default: decide how to proceed without repeating the same question. Question text supports Markdown, tables, images, fenced mermaid/svg diagrams, and fenced html interfaces. In question HTML, call window.refactQuestion.setAnswer('a concise answer') to update the user's draft; it never submits. HTML must be self-contained (inline JS/CSS). CSP blocks scripted resource/network requests, not iframe self-navigation. The frame never receives text typed in the native controls. Always include a readable prompt; normal answer controls remain available.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -67,7 +67,7 @@ impl Tool for ToolAskQuestions {
                                 },
                                 "text": {
                                     "type": "string",
-                                    "description": "The question text to display to the user."
+                                    "description": "Readable Markdown prompt. May include fenced mermaid, svg, or self-contained html. HTML can call window.refactQuestion.setAnswer(text) to populate a custom draft; the user reviews and submits it."
                                 },
                                 "options": {
                                     "type": "array",
@@ -169,6 +169,8 @@ impl Tool for ToolAskQuestions {
             status: PendingQuestionStatus::Pending,
             answers: Vec::new(),
             resolution_id: None,
+            response_protocol_version: refact_chat_api::QUESTION_RESPONSE_PROTOCOL_VERSION,
+            response: None,
         };
         let asked_at = chrono::Utc::now();
         let scope = crate::attention::scope_for_chat(&app, &chat_id).await;

@@ -133,6 +133,8 @@ async fn serve() -> TestResult {
             status: refact_chat_api::PendingQuestionStatus::Pending,
             answers: vec![],
             resolution_id: None,
+            response_protocol_version: refact_chat_api::QUESTION_RESPONSE_PROTOCOL_VERSION,
+            response: None,
         })?;
         let session = Arc::new(tokio::sync::Mutex::new(session));
         app.chat

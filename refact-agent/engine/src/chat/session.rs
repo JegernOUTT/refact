@@ -453,6 +453,32 @@ fn background_process_cleanup_notice(killed_count: usize) -> ChatMessage {
     )
 }
 
+fn typed_question_answer_valid(
+    question: &PendingQuestion,
+    answer: &serde_json::Value,
+    nonblank: bool,
+) -> bool {
+    let option_valid = |value: &str| {
+        question
+            .options
+            .as_ref()
+            .is_some_and(|options| options.iter().any(|option| option == value))
+    };
+    match question.question_type.as_str() {
+        "yes_no" => answer.is_boolean(),
+        "free_text" => answer
+            .as_str()
+            .is_some_and(|value| !nonblank || !value.trim().is_empty()),
+        "single_select" => answer.as_str().is_some_and(option_valid),
+        "multi_select" => answer.as_array().is_some_and(|values| {
+            values
+                .iter()
+                .all(|value| value.as_str().is_some_and(option_valid))
+        }),
+        _ => false,
+    }
+}
+
 impl ChatSession {
     pub fn register_pending_questions(&mut self, set: PendingQuestionSet) -> Result<(), String> {
         if set.tool_call_id.trim().is_empty() || set.questions.is_empty() {
@@ -524,6 +550,9 @@ impl ChatSession {
             .iter_mut()
             .find(|set| set.tool_call_id == tool_call_id)
             .ok_or_else(|| "unknown question tool_call_id".to_string())?;
+        if set.response.is_some() {
+            return Err("question set already has a structured response".into());
+        }
         if asked_at_ms.is_some_and(|timestamp| timestamp != set.asked_at_ms) {
             return Err("question instance changed; refresh before answering".to_string());
         }
@@ -560,32 +589,81 @@ impl ChatSession {
             if !seen.insert(&answer.id) {
                 return Err(format!("duplicate answer id: {}", answer.id));
             }
-            let valid = match question.question_type.as_str() {
-                "yes_no" => answer.answer.as_bool().is_some(),
-                "free_text" => answer.answer.as_str().is_some(),
-                "single_select" => answer.answer.as_str().is_some_and(|value| {
-                    question
-                        .options
-                        .as_ref()
-                        .is_some_and(|options| options.iter().any(|option| option == value))
-                }),
-                "multi_select" => answer.answer.as_array().is_some_and(|values| {
-                    values.iter().all(|value| {
-                        value.as_str().is_some_and(|value| {
-                            question
-                                .options
-                                .as_ref()
-                                .is_some_and(|options| options.iter().any(|option| option == value))
-                        })
-                    })
-                }),
-                _ => false,
-            };
+            let valid = typed_question_answer_valid(question, &answer.answer, false);
             if !valid {
                 return Err(format!("invalid answer for question id: {}", answer.id));
             }
         }
         set.answers = answers;
+        set.status = PendingQuestionStatus::Answered;
+        set.resolution_id = Some(resolution_id);
+        self.increment_version();
+        Ok(true)
+    }
+
+    pub fn submit_question_response(
+        &mut self,
+        tool_call_id: &str,
+        asked_at_ms: u64,
+        mut response: refact_chat_api::QuestionResponse,
+        resolution_id: String,
+    ) -> Result<bool, String> {
+        use refact_chat_api::QuestionResponseValue;
+        let set = self
+            .pending_questions
+            .iter_mut()
+            .find(|set| set.tool_call_id == tool_call_id)
+            .ok_or("unknown question tool_call_id")?;
+        if set.asked_at_ms != asked_at_ms {
+            return Err("question instance changed; refresh before responding".into());
+        }
+        if response.overall_comments.len() > 32_768 || response.answers.len() != set.questions.len()
+        {
+            return Err(
+                "response must include every question exactly once and bounded comments".into(),
+            );
+        }
+        let mut seen = HashSet::new();
+        for item in &mut response.answers {
+            let question = set
+                .questions
+                .iter()
+                .find(|q| q.id == item.id)
+                .ok_or_else(|| format!("unknown question id: {}", item.id))?;
+            if !seen.insert(item.id.clone()) || item.explanation.len() > 32_768 {
+                return Err("duplicate question id or explanation too long".into());
+            }
+            let valid = match &mut item.value {
+                QuestionResponseValue::Skipped => true,
+                QuestionResponseValue::Custom { answer } => {
+                    !answer.trim().is_empty() && answer.len() <= 32_768
+                }
+                QuestionResponseValue::Answered { answer } => {
+                    if let Some(values) = answer.as_array_mut() {
+                        values.sort_by_cached_key(|value| value.to_string());
+                        values.dedup();
+                    }
+                    answer.to_string().len() <= 32_768
+                        && typed_question_answer_valid(question, answer, true)
+                }
+            };
+            if !valid {
+                return Err(format!("invalid response for question id: {}", item.id));
+            }
+        }
+        response.answers.sort_by(|a, b| a.id.cmp(&b.id));
+        if set.status == PendingQuestionStatus::Answered {
+            return if set.response.as_ref() == Some(&response) {
+                Ok(false)
+            } else {
+                Err("conflicting response for an already resolved question set".into())
+            };
+        }
+        if set.status != PendingQuestionStatus::Pending {
+            return Err("question set is no longer pending".into());
+        }
+        set.answers = response.legacy_answers();
+        set.response = Some(response);
         set.status = PendingQuestionStatus::Answered;
         set.resolution_id = Some(resolution_id);
         self.increment_version();
@@ -621,6 +699,7 @@ impl ChatSession {
         };
         set.status = PendingQuestionStatus::Pending;
         set.answers.clear();
+        set.response = None;
         set.resolution_id = None;
         if let Some(message_id) = staged_message_id {
             self.remove_message(message_id);
@@ -654,6 +733,8 @@ impl ChatSession {
             status: PendingQuestionStatus::Pending,
             answers: Vec::new(),
             resolution_id: None,
+            response_protocol_version: refact_chat_api::QUESTION_RESPONSE_PROTOCOL_VERSION,
+            response: None,
         }
     }
     pub fn add_background_process_cleanup_notice(&mut self, killed_count: usize) {
@@ -4245,6 +4326,8 @@ mod tests {
             status: PendingQuestionStatus::Pending,
             answers: Vec::new(),
             resolution_id: None,
+            response_protocol_version: refact_chat_api::QUESTION_RESPONSE_PROTOCOL_VERSION,
+            response: None,
         }
     }
 
@@ -4290,6 +4373,133 @@ mod tests {
         );
         assert!(!session
             .answer_pending_questions("ask-types", valid_question_answers(), "r1".into())
+            .unwrap());
+    }
+
+    #[test]
+    fn question_responses_preserve_dispositions_comments_and_retry_identity() {
+        use refact_chat_api::{QuestionResponse, QuestionResponseItem, QuestionResponseValue};
+        let mut session = make_session();
+        session
+            .register_pending_questions(question_set("response"))
+            .unwrap();
+        let mut response = QuestionResponse {
+            answers: vec![
+                QuestionResponseItem {
+                    id: "one".into(),
+                    value: QuestionResponseValue::Custom {
+                        answer: "neither".into(),
+                    },
+                    explanation: "context".into(),
+                },
+                QuestionResponseItem {
+                    id: "many".into(),
+                    value: QuestionResponseValue::Answered { answer: json!([]) },
+                    explanation: String::new(),
+                },
+                QuestionResponseItem {
+                    id: "yes".into(),
+                    value: QuestionResponseValue::Skipped,
+                    explanation: String::new(),
+                },
+                QuestionResponseItem {
+                    id: "text".into(),
+                    value: QuestionResponseValue::Answered {
+                        answer: json!("verbatim\ntext"),
+                    },
+                    explanation: String::new(),
+                },
+            ],
+            overall_comments: "overall context".into(),
+        };
+        let encoded = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            serde_json::from_value::<QuestionResponse>(encoded).unwrap(),
+            response
+        );
+        assert!(session
+            .submit_question_response("response", 2, response.clone(), "r".into())
+            .is_err());
+        assert_eq!(
+            session.pending_questions[0].status,
+            PendingQuestionStatus::Pending
+        );
+        assert!(session
+            .submit_question_response("response", 1, response.clone(), "r".into())
+            .unwrap());
+        response.answers.reverse();
+        assert!(!session
+            .submit_question_response("response", 1, response.clone(), "retry".into())
+            .unwrap());
+        response.overall_comments.push('!');
+        assert!(session
+            .submit_question_response("response", 1, response, "other".into())
+            .is_err());
+        assert!(session
+            .answer_pending_questions("response", valid_question_answers(), "old-client".into())
+            .is_err());
+        let saved = serde_json::to_string(&session.pending_questions[0]).unwrap();
+        let restored: PendingQuestionSet = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.response, session.pending_questions[0].response);
+        assert!(session.rollback_answered_questions("response", "r", None));
+        assert!(session.pending_questions[0].response.is_none());
+    }
+
+    #[test]
+    fn question_responses_reject_missing_duplicate_and_invalid_typed_values_atomically() {
+        use refact_chat_api::{QuestionResponse, QuestionResponseItem, QuestionResponseValue};
+        let mut session = make_session();
+        session
+            .register_pending_questions(question_set("invalid-response"))
+            .unwrap();
+        let base = QuestionResponse {
+            answers: valid_question_answers()
+                .into_iter()
+                .map(|item| QuestionResponseItem {
+                    id: item.id,
+                    value: QuestionResponseValue::Answered {
+                        answer: item.answer,
+                    },
+                    explanation: String::new(),
+                })
+                .collect(),
+            overall_comments: String::new(),
+        };
+        let mut missing = base.clone();
+        missing.answers.pop();
+        let mut duplicate = base.clone();
+        duplicate.answers[0].id = duplicate.answers[1].id.clone();
+        let mut invalid = base.clone();
+        invalid.answers[2].value = QuestionResponseValue::Answered {
+            answer: json!("not-an-option"),
+        };
+        let mut empty = base.clone();
+        empty.answers[0].value = QuestionResponseValue::Custom {
+            answer: "  ".into(),
+        };
+        for response in [missing, duplicate, invalid, empty] {
+            assert!(session
+                .submit_question_response("invalid-response", 1, response, "r".into())
+                .is_err());
+            assert_eq!(
+                session.pending_questions[0].status,
+                PendingQuestionStatus::Pending
+            );
+            assert!(session.pending_questions[0].answers.is_empty());
+        }
+        let all_skipped = QuestionResponse {
+            answers: base
+                .answers
+                .into_iter()
+                .map(|mut item| {
+                    item.value = QuestionResponseValue::Skipped;
+                    item
+                })
+                .collect(),
+            overall_comments: "decide for me".into(),
+        };
+        assert!(session
+            .submit_question_response("invalid-response", 1, all_skipped, "r".into())
             .unwrap());
     }
 

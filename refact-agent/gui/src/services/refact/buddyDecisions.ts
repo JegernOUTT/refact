@@ -1,6 +1,10 @@
 import { buddyApi } from "./buddy";
 import { buildApiUrlFromState, type EngineApiConfig } from "./apiUrl";
-import type { PendingQuestionSet, PendingQuestionAnswer } from "./types";
+import type {
+  PendingQuestionSet,
+  PendingQuestionAnswer,
+  QuestionResponse,
+} from "./types";
 import { buddyOperatorIdentity } from "./buddyOperator";
 
 export interface NativeQuestionView {
@@ -73,6 +77,8 @@ export function parseNativeQuestion(value: unknown): NativeQuestionView {
       asked_at_ms: q.asked_at_ms,
       status: q.status as PendingQuestionSet["status"],
       questions,
+      response_protocol_version:
+        q.response_protocol_version === 2 ? 2 : undefined,
     },
   };
 }
@@ -134,7 +140,8 @@ export const buddyDecisionsApi = buddyApi.injectEndpoints({
         asked_at_ms: number;
         client_request_id: string;
         endpoint_identity: string;
-        answers: PendingQuestionAnswer[];
+        answers?: PendingQuestionAnswer[];
+        response?: QuestionResponse;
       }
     >({
       queryFn: async (args, api, _options, baseQuery) => {
@@ -154,6 +161,7 @@ export const buddyDecisionsApi = buddyApi.injectEndpoints({
             asked_at_ms: args.asked_at_ms,
             client_request_id: args.client_request_id,
             answers: args.answers,
+            response: args.response,
           },
         });
         if (

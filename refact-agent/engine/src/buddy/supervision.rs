@@ -1855,7 +1855,9 @@ fn observe_question(delivery: &mut QuestionDelivery, sets: &[refact_chat_api::Pe
     delivery.state = match set.status {
         refact_chat_api::PendingQuestionStatus::Pending => "awaiting_native_resolution",
         refact_chat_api::PendingQuestionStatus::Answered
-            if set.answers == delivery.answers && set.resolution_id.is_some() =>
+            if set.response.is_none()
+                && set.answers == delivery.answers
+                && set.resolution_id.is_some() =>
         {
             "resolved"
         }
@@ -3837,6 +3839,8 @@ mod tests {
             answers: answers.clone(),
             status: refact_chat_api::PendingQuestionStatus::Answered,
             resolution_id: Some("r".into()),
+            response_protocol_version: refact_chat_api::QUESTION_RESPONSE_PROTOCOL_VERSION,
+            response: None,
         };
         observe_question(&mut delivery, &[set.clone()]);
         assert_eq!(delivery.state, "source_unavailable");

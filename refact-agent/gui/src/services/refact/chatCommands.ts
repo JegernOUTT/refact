@@ -4,7 +4,7 @@ import {
   getEngineEndpointIdentity,
   type EngineApiConfig,
 } from "./apiUrl";
-import type { PendingQuestionAnswer } from "./types";
+import type { PendingQuestionAnswer, QuestionResponse } from "./types";
 import type { PushMode } from "./chatSubscription";
 
 export type EngineApiConnection = EngineApiConfig;
@@ -83,6 +83,12 @@ export type ChatCommandBase =
       tool_call_id: string;
       answers: PendingQuestionAnswer[];
       asked_at_ms?: number;
+    }
+  | {
+      type: "submit_question_response";
+      tool_call_id: string;
+      asked_at_ms: number;
+      response: QuestionResponse;
     }
   | {
       type: "ide_tool_result";
@@ -254,10 +260,11 @@ async function sendRawChatCommand(
   apiKey: string | undefined,
   command: ChatCommandBase,
   priority?: boolean,
+  clientRequestId = uuidv4(),
 ): Promise<string> {
   const commandWithId: ChatCommand = {
     ...command,
-    client_request_id: uuidv4(),
+    client_request_id: clientRequestId,
     priority,
   };
 
@@ -515,6 +522,30 @@ export async function answerQuestions(
     throw new Error("Answer command was not sent");
   }
   return clientRequestId;
+}
+
+export async function submitQuestionResponse(
+  chatId: string,
+  toolCallId: string,
+  askedAtMs: number,
+  response: QuestionResponse,
+  clientRequestId: string,
+  connection: PortOrConnection,
+  apiKey?: string,
+): Promise<void> {
+  await sendRawChatCommand(
+    chatId,
+    connection,
+    apiKey,
+    {
+      type: "submit_question_response",
+      tool_call_id: toolCallId,
+      asked_at_ms: askedAtMs,
+      response,
+    },
+    undefined,
+    clientRequestId,
+  );
 }
 
 export async function updateMessage(

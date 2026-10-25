@@ -193,6 +193,67 @@ async fn approval_for_parent_without_agent_approval_escalates_to_user_immediatel
     assert!(!fixture.dir.path().join("approval.txt").exists());
 }
 
+#[tokio::test]
+async fn custom_approve_text_and_skips_never_grant_command_permission() {
+    for disposition in ["custom", "skipped"] {
+        let fixture = fixture().await;
+        let parent = parent(&fixture, false).await;
+        let call = fixture.call("shell");
+        let mut future = Box::pin(request(&fixture.app, &fixture.ccx, &call, "needs approval"));
+        let pending = ready(&fixture, &mut future, &parent).await;
+        let set = parent.lock().await.pending_questions[0].clone();
+        let mut item = serde_json::json!({"id":pending.id,"disposition":disposition});
+        if disposition == "custom" {
+            item["answer"] = serde_json::json!("approve");
+        }
+        let response = crate::chat::handle_v1_chat_command(
+            axum::extract::State(fixture.app.clone()),
+            axum::extract::Path("parent".into()),
+            hyper::body::Bytes::from(serde_json::json!({
+                "type":"submit_question_response", "client_request_id":format!("nonconsent-{disposition}"),
+                "tool_call_id":set.tool_call_id, "asked_at_ms":set.asked_at_ms,
+                "response":{"answers":[item],"overall_comments":"not granting permission"}
+            }).to_string()),
+        ).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(!future.await.unwrap());
+        let target = crate::agents::approval_target::ApprovalTarget::resolve(
+            &fixture.app,
+            &pending.child_work_id,
+        )
+        .await
+        .unwrap();
+        let child = fixture
+            .app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get(&target.chat_id)
+            .cloned()
+            .unwrap();
+        assert!(child.lock().await.messages.iter().any(|message| {
+            message
+                .content
+                .content_text_only()
+                .contains("not granting permission")
+                && message.content.content_text_only().contains(disposition)
+        }));
+        assert!(fixture.ccx.lock().await.approved_executions.is_empty());
+        assert!(!fixture.dir.path().join("approval.txt").exists());
+        assert!(matches!(
+            fixture.app.agent_approvals.consume_user_once(
+                "parent",
+                &pending.id,
+                pending.run_generation,
+                &set.tool_call_id,
+                now_ms(),
+            ),
+            Err(ApprovalError::NotApproved | ApprovalError::AlreadyDecided)
+        ));
+    }
+}
+
 async fn assert_stale_user_answer(
     fixture: &Fixture,
     parent: &Arc<Mutex<ChatSession>>,

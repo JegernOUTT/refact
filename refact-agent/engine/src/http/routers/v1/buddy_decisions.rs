@@ -92,7 +92,10 @@ pub struct DecisionAnswerRequest {
     project_root: String,
     asked_at_ms: u64,
     client_request_id: String,
+    #[serde(default)]
     answers: Vec<refact_chat_api::QuestionAnswer>,
+    #[serde(default)]
+    response: Option<refact_chat_api::QuestionResponse>,
 }
 
 pub async fn handle_question_answer(
@@ -100,6 +103,12 @@ pub async fn handle_question_answer(
     Path((chat_id, tool_call_id)): Path<(String, String)>,
     axum::Json(request): axum::Json<DecisionAnswerRequest>,
 ) -> Result<hyper::Response<hyper::Body>, ScratchError> {
+    if request.response.is_some() && !request.answers.is_empty() {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "provide either answers or a structured response, not both".into(),
+        ));
+    }
     if decision_root(&app).await? != request.project_root {
         return Err(ScratchError::new(
             StatusCode::CONFLICT,
@@ -135,11 +144,19 @@ pub async fn handle_question_answer(
             ));
         }
     }
-    let command = serde_json::json!({
-        "type": "answer_questions", "tool_call_id": tool_call_id,
-        "answers": request.answers, "client_request_id": request.client_request_id,
-        "asked_at_ms": request.asked_at_ms,
-    });
+    let command = if let Some(response) = request.response {
+        serde_json::json!({
+            "type": "submit_question_response", "tool_call_id": tool_call_id,
+            "response": response, "client_request_id": request.client_request_id,
+            "asked_at_ms": request.asked_at_ms,
+        })
+    } else {
+        serde_json::json!({
+            "type": "answer_questions", "tool_call_id": tool_call_id,
+            "answers": request.answers, "client_request_id": request.client_request_id,
+            "asked_at_ms": request.asked_at_ms,
+        })
+    };
     crate::chat::handle_v1_chat_command(
         State(app),
         Path(chat_id),
@@ -226,6 +243,8 @@ mod tests {
                 status: PendingQuestionStatus::Pending,
                 answers: vec![],
                 resolution_id: None,
+                response_protocol_version: refact_chat_api::QUESTION_RESPONSE_PROTOCOL_VERSION,
+                response: None,
             })
             .unwrap();
         let session = Arc::new(Mutex::new(session));
@@ -253,6 +272,7 @@ mod tests {
                 asked_at_ms: 7,
                 client_request_id: "request".into(),
                 answers: vec![],
+                response: None,
             }),
         )
         .await;
@@ -274,6 +294,7 @@ mod tests {
                     id: "ok".into(),
                     answer: serde_json::json!(true),
                 }],
+                response: None,
             }),
         )
         .await

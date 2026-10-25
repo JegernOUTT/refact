@@ -20,13 +20,31 @@ pub(crate) async fn apply_user_answer(
     answers: Vec<crate::chat::types::QuestionAnswer>,
     asked_at_ms: Option<u64>,
     resolution_id: &str,
+    response: Option<refact_chat_api::QuestionResponse>,
 ) -> Result<(), String> {
-    session.lock().await.answer_pending_questions_at(
-        tool_call_id,
-        answers,
-        resolution_id.into(),
-        asked_at_ms,
-    )?;
+    let changed = {
+        let mut session = session.lock().await;
+        match response {
+            Some(response) => session.submit_question_response(
+                tool_call_id,
+                asked_at_ms.ok_or("question timestamp required")?,
+                response,
+                resolution_id.into(),
+            )?,
+            None => session.answer_pending_questions_at(
+                tool_call_id,
+                answers,
+                resolution_id.into(),
+                asked_at_ms,
+            )?,
+        }
+    };
+    if !changed {
+        let mut session = session.lock().await;
+        let snapshot = session.snapshot();
+        session.emit(snapshot);
+        return Ok(());
+    }
     if let Err(error) = crate::chat::trajectories::try_save_trajectory_with_intent(
         app.clone(),
         session.clone(),
@@ -40,7 +58,13 @@ pub(crate) async fn apply_user_answer(
             .rollback_answered_questions(tool_call_id, resolution_id, None);
         return Err(format!("failed to persist user approval answer: {error}"));
     }
-    answer_from_user(app, session, tool_call_id, resolution_id).await?;
+    if let Err(error) = answer_from_user(app, session, tool_call_id, resolution_id).await {
+        session
+            .lock()
+            .await
+            .rollback_answered_questions(tool_call_id, resolution_id, None);
+        return Err(error);
+    }
     let mut session = session.lock().await;
     let snapshot = session.snapshot();
     session.emit(snapshot);
@@ -180,6 +204,8 @@ pub(super) async fn ask(
                 status: PendingQuestionStatus::Pending,
                 answers: vec![],
                 resolution_id: None,
+                response_protocol_version: refact_chat_api::QUESTION_RESPONSE_PROTOCOL_VERSION,
+                response: None,
             })?;
         if let Err(error) = crate::chat::trajectories::try_save_trajectory_with_intent(
             app.clone(),
@@ -219,7 +245,7 @@ pub(crate) async fn answer_from_user(
     let Some(id) = tool_call_id.strip_prefix(USER_APPROVAL_PREFIX) else {
         return Ok(false);
     };
-    let (chat_id, question, answer) = {
+    let (chat_id, question, answer, explicit_consent) = {
         let session = session.lock().await;
         let set = session
             .pending_questions
@@ -237,6 +263,12 @@ pub(crate) async fn answer_from_user(
             session.chat_id.clone(),
             set.questions[0].clone(),
             set.answers[0].answer.clone(),
+            set.response.as_ref().is_none_or(|response| {
+                matches!(
+                    response.answers.first().map(|item| &item.value),
+                    Some(refact_chat_api::QuestionResponseValue::Answered { .. })
+                )
+            }),
         )
     };
     let pending = app
@@ -254,6 +286,49 @@ pub(crate) async fn answer_from_user(
                 && contract.options == question.options
         })
         .ok_or("user approval question is no longer pending")?;
+    if !explicit_consent {
+        let response = {
+            let session = session.lock().await;
+            session
+                .pending_questions
+                .iter()
+                .find(|set| set.tool_call_id == tool_call_id)
+                .and_then(|set| set.response.clone())
+                .ok_or("structured approval response unavailable")?
+        };
+        let notice = crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "agents.approval",
+            serde_json::json!({"request_id":id,"response":response,"permission_granted":false}),
+            format!("User responded without granting command permission. Their response follows; decide how to proceed without running the unapproved command: {}", serde_json::to_string(&response).map_err(|error| error.to_string())?),
+        );
+        let target =
+            super::super::approval_target::ApprovalTarget::resolve(app, &pending.child_work_id)
+                .await?;
+        let child = app.chat.sessions.read().await.get(&target.chat_id).cloned();
+        if let Some(child) = child {
+            child.lock().await.add_message(notice.clone());
+            crate::chat::trajectories::try_save_trajectory_with_intent(
+                app.clone(),
+                child,
+                crate::chat::types::TrajectoryCommitIntent::Required,
+            )
+            .await
+            .map_err(|error| format!("failed to persist non-consent context: {error}"))?;
+        }
+        session.lock().await.add_message(notice);
+        crate::chat::trajectories::try_save_trajectory_with_intent(
+            app.clone(),
+            session.clone(),
+            crate::chat::types::TrajectoryCommitIntent::Required,
+        )
+        .await
+        .map_err(|error| format!("failed to persist non-consent notice: {error}"))?;
+        app.questions()
+            .withdraw(&contract.id, &contract.asker, chrono::Utc::now())
+            .map_err(|error| format!("user approval withdrawal: {error}"))?;
+        return Ok(true);
+    }
     let answer = answer
         .as_str()
         .filter(|answer| matches!(*answer, "approve" | "reject"))
@@ -280,6 +355,7 @@ pub(crate) async fn answer_from_user(
             }) {
                 set.status = PendingQuestionStatus::Cancelled;
                 set.answers.clear();
+                set.response = None;
                 set.resolution_id = None;
                 session.increment_version();
             }

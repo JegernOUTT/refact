@@ -1699,6 +1699,8 @@ mod tests {
                 }],
                 answers: vec![],
                 resolution_id: None,
+                response_protocol_version: refact_chat_api::QUESTION_RESPONSE_PROTOCOL_VERSION,
+                response: None,
             });
         let request = refact_chat_api::CommandRequest {
             client_request_id: "supervised-answer".into(),

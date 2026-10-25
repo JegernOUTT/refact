@@ -8,6 +8,7 @@ import { createSelector } from "@reduxjs/toolkit";
 import { filename } from "../../utils";
 import { ideAttachFileToChat } from "../../hooks/useEventBusForApp";
 import { useThreadId } from "../../features/Chat/Thread";
+import { isHostMessage } from "../../utils/isHostMessage";
 
 type CheckboxHelp = {
   text: string;
@@ -107,6 +108,7 @@ export function useAttachedFiles() {
     };
 
     const listener = (event: MessageEvent) => {
+      if (!isHostMessage(event)) return;
       if (ideAttachFileToChat.match(event.data)) {
         handleIdeAttachFile(event.data.payload);
       }

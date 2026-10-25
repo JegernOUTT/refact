@@ -195,6 +195,7 @@ pub(crate) fn prepare_guarded_command(
                 | ChatCommand::GoalControl { .. }
                 | ChatCommand::SetGoal { .. }
                 | ChatCommand::AnswerQuestions { .. }
+                | ChatCommand::SubmitQuestionResponse { .. }
                 | ChatCommand::UpdateMessage { .. }
                 | ChatCommand::RemoveMessage { .. }
         )
@@ -487,6 +488,7 @@ pub fn find_allowed_command_while_paused(queue: &VecDeque<CommandRequest>) -> Op
             ChatCommand::ToolDecision { .. }
             | ChatCommand::ToolDecisions { .. }
             | ChatCommand::AnswerQuestions { .. }
+            | ChatCommand::SubmitQuestionResponse { .. }
             | ChatCommand::Abort {} => {
                 return Some(i);
             }
@@ -4676,6 +4678,8 @@ mod tests {
             status: PendingQuestionStatus::Pending,
             answers: Vec::new(),
             resolution_id: None,
+            response_protocol_version: refact_chat_api::QUESTION_RESPONSE_PROTOCOL_VERSION,
+            response: None,
         }
     }
 

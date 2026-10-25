@@ -12,7 +12,17 @@ import {
   type NativeQuestionView,
 } from "../../services/refact/buddyDecisions";
 import { useGetBuddyNativeWorkQuery } from "../../services/refact/buddyNativeWork";
-import type { PendingQuestionAnswer } from "../../services/refact/types";
+import type {
+  PendingQuestionAnswer,
+  QuestionResponse,
+} from "../../services/refact/types";
+import { QuestionResponseForm } from "../../components/ChatContent/ToolCard/QuestionResponseForm";
+import type { QuestionDraft } from "../../utils/questionResponses";
+import {
+  clearAskQuestionsDraft,
+  loadAskQuestionsDraft,
+  saveAskQuestionsDraft,
+} from "../../utils/chatUiPersistence";
 import { BuddySectionHeader } from "./BuddySectionHeader";
 import styles from "./BuddyNativeDecisions.module.css";
 import { BuddyNativeWork } from "./BuddyNativeWork";
@@ -68,7 +78,15 @@ function QuestionForm({
   chatTitle?: string;
 }) {
   const [answerQuestion] = useAnswerBuddyNativeQuestionMutation();
+  const draftKey = JSON.stringify([identity, questionKey(initial)]);
   const [answers, setAnswers] = useState<Record<string, string | string[]>>({});
+  const [drafts, setDrafts] = useState<Partial<Record<string, QuestionDraft>>>(
+    () => loadAskQuestionsDraft(draftKey)?.responses ?? {},
+  );
+  const [comments, setComments] = useState(
+    () => loadAskQuestionsDraft(draftKey)?.additionalText ?? "",
+  );
+  const retry = useRef<{ id: string; payload: string } | null>(null);
   const [sent, setSent] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(false);
@@ -110,6 +128,18 @@ function QuestionForm({
   });
   const fieldsDisabled =
     !pending || !sameQuestions || sent || sending || Boolean(status.error);
+  useEffect(() => {
+    if (initial.question.response_protocol_version !== 2) return;
+    if (question && question.status !== "pending")
+      clearAskQuestionsDraft(draftKey);
+    else saveAskQuestionsDraft(draftKey, {}, comments, drafts);
+  }, [
+    comments,
+    draftKey,
+    drafts,
+    initial.question.response_protocol_version,
+    question,
+  ]);
   const submit = async () => {
     if (
       lock.current ||
@@ -156,6 +186,33 @@ function QuestionForm({
       setSending(false);
     }
   };
+  const submitResponse = async (response: QuestionResponse) => {
+    if (lock.current || fieldsDisabled || status.isFetching) return;
+    lock.current = true;
+    setSending(true);
+    setError(false);
+    const payload = JSON.stringify(response);
+    if (retry.current?.payload !== payload)
+      retry.current = { id: uuidv4(), payload };
+    try {
+      await answerQuestion({
+        chat_id: initial.chat_id,
+        tool_call_id: initial.question.tool_call_id,
+        project_root: initial.project_root,
+        asked_at_ms: initial.question.asked_at_ms,
+        endpoint_identity: identity,
+        client_request_id: retry.current.id,
+        response,
+      }).unwrap();
+      setSent(true);
+      void status.refetch();
+    } catch {
+      setError(true);
+    } finally {
+      lock.current = false;
+      setSending(false);
+    }
+  };
   return (
     <Surface
       as="article"
@@ -175,90 +232,106 @@ function QuestionForm({
       >
         {`Chat ${shortChatId(initial.chat_id)}`}
       </Text>
-      {initial.question.questions.map((q) => {
-        const group = `${initial.chat_id}:${initial.question.tool_call_id}:${q.id}`;
-        return (
-          <div
-            key={q.id}
-            role="group"
-            aria-labelledby={`${group}:label`}
-            className={styles.answerGroup}
-            data-disabled={fieldsDisabled ? "true" : undefined}
-          >
-            <Text
-              as="p"
-              size="1"
-              id={`${group}:label`}
-              className={styles.answerLabel}
+      {initial.question.response_protocol_version === 2 ? (
+        <QuestionResponseForm
+          questions={initial.question.questions}
+          instance={questionKey(initial)}
+          drafts={drafts}
+          comments={comments}
+          onDrafts={setDrafts}
+          onComments={setComments}
+          disabled={fieldsDisabled || status.isFetching}
+          approval={initial.question.tool_call_id.startsWith("agent-approval:")}
+          onSubmit={(response) => void submitResponse(response)}
+        />
+      ) : (
+        initial.question.questions.map((q) => {
+          const group = `${initial.chat_id}:${initial.question.tool_call_id}:${q.id}`;
+          return (
+            <div
+              key={q.id}
+              role="group"
+              aria-labelledby={`${group}:label`}
+              className={styles.answerGroup}
+              data-disabled={fieldsDisabled ? "true" : undefined}
             >
-              {q.text}
-            </Text>
-            {q.type === "free_text" ? (
-              <textarea
-                className={styles.answerInput}
-                aria-label={q.text}
-                disabled={fieldsDisabled}
-                value={typeof answers[q.id] === "string" ? answers[q.id] : ""}
-                onChange={(event) =>
-                  setAnswers((a) => ({ ...a, [q.id]: event.target.value }))
-                }
-              />
-            ) : (
-              (q.type === "yes_no" ? ["Yes", "No"] : q.options ?? []).map(
-                (option) => (
-                  <label key={option} className={styles.choice}>
-                    <input
-                      type={q.type === "multi_select" ? "checkbox" : "radio"}
-                      name={group}
-                      disabled={fieldsDisabled}
-                      checked={
-                        q.type === "multi_select"
-                          ? Array.isArray(answers[q.id]) &&
-                            answers[q.id].includes(option)
-                          : answers[q.id] === option
-                      }
-                      onChange={(event) =>
-                        setAnswers((a) => {
-                          const value = a[q.id];
-                          const selected = Array.isArray(value) ? value : [];
-                          return {
-                            ...a,
-                            [q.id]:
-                              q.type !== "multi_select"
-                                ? option
-                                : event.target.checked
-                                  ? [...selected, option]
-                                  : selected.filter(
-                                      (value) => value !== option,
-                                    ),
-                          };
-                        })
-                      }
-                    />
-                    {option}
-                  </label>
-                ),
-              )
-            )}
-          </div>
-        );
-      })}
+              <Text
+                as="p"
+                size="1"
+                id={`${group}:label`}
+                className={styles.answerLabel}
+              >
+                {q.text}
+              </Text>
+              {q.type === "free_text" ? (
+                <textarea
+                  className={styles.answerInput}
+                  aria-label={q.text}
+                  disabled={fieldsDisabled}
+                  value={typeof answers[q.id] === "string" ? answers[q.id] : ""}
+                  onChange={(event) =>
+                    setAnswers((a) => ({ ...a, [q.id]: event.target.value }))
+                  }
+                />
+              ) : (
+                (q.type === "yes_no" ? ["Yes", "No"] : q.options ?? []).map(
+                  (option) => (
+                    <label key={option} className={styles.choice}>
+                      <input
+                        type={q.type === "multi_select" ? "checkbox" : "radio"}
+                        name={group}
+                        disabled={fieldsDisabled}
+                        checked={
+                          q.type === "multi_select"
+                            ? Array.isArray(answers[q.id]) &&
+                              answers[q.id].includes(option)
+                            : answers[q.id] === option
+                        }
+                        onChange={(event) =>
+                          setAnswers((a) => {
+                            const value = a[q.id];
+                            const selected = Array.isArray(value) ? value : [];
+                            return {
+                              ...a,
+                              [q.id]:
+                                q.type !== "multi_select"
+                                  ? option
+                                  : event.target.checked
+                                    ? [...selected, option]
+                                    : selected.filter(
+                                        (value) => value !== option,
+                                      ),
+                            };
+                          })
+                        }
+                      />
+                      {option}
+                    </label>
+                  ),
+                )
+              )}
+            </div>
+          );
+        })
+      )}
       <div className={styles.actions}>
-        <Button
-          size="sm"
-          disabled={
-            !pending ||
-            !sameQuestions ||
-            !complete ||
-            sent ||
-            sending ||
-            Boolean(status.error) ||
-            status.isFetching
-          }
-          onClick={() => void submit()}
-        >
-          {sending ? "Submitting answer…" : "Submit answer"}
-        </Button>
+        {initial.question.response_protocol_version !== 2 && (
+          <Button
+            size="sm"
+            disabled={
+              !pending ||
+              !sameQuestions ||
+              !complete ||
+              sent ||
+              sending ||
+              Boolean(status.error) ||
+              status.isFetching
+            }
+            onClick={() => void submit()}
+          >
+            {sending ? "Submitting answer…" : "Submit answer"}
+          </Button>
+        )}
         {sent && pending && (
           <Button
             size="sm"

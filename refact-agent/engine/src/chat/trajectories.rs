@@ -20912,6 +20912,8 @@ mod tests {
                 status: refact_chat_api::PendingQuestionStatus::Pending,
                 answers: Vec::new(),
                 resolution_id: None,
+                response_protocol_version: refact_chat_api::QUESTION_RESPONSE_PROTOCOL_VERSION,
+                response: None,
             })
             .unwrap();
         save_trajectory_snapshot(gcx.clone(), trajectory_snapshot_from_session(&session))

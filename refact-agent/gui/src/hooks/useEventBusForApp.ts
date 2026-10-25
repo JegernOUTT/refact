@@ -19,6 +19,7 @@ import { ideToolCallResponse, ideSwitchToThread } from "./useEventBusForIDE";
 import { createAction } from "@reduxjs/toolkit";
 import { switchToThread } from "../features/Chat/Thread/actions";
 import { usePostUserAction } from "./usePostUserAction";
+import { isHostMessage } from "../utils/isHostMessage";
 import {
   ideLogLines,
   normalizeIdeLogLines,
@@ -37,6 +38,7 @@ export function useEventBusForApp() {
 
   useEffect(() => {
     const listener = (event: MessageEvent) => {
+      if (!isHostMessage(event)) return;
       if (updateConfig.match(event.data)) {
         dispatch(updateConfig(event.data.payload));
       }

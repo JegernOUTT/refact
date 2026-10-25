@@ -1199,6 +1199,11 @@ pub enum ChatCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         asked_at_ms: Option<u64>,
     },
+    SubmitQuestionResponse {
+        tool_call_id: String,
+        asked_at_ms: u64,
+        response: QuestionResponse,
+    },
     CleanBackgroundProcesses {
         #[serde(default)]
         include_services: bool,
@@ -1289,6 +1294,95 @@ pub struct QuestionAnswer {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "disposition", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuestionResponseValue {
+    Answered { answer: serde_json::Value },
+    Custom { answer: String },
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct QuestionResponseItem {
+    pub id: String,
+    #[serde(flatten)]
+    pub value: QuestionResponseValue,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub explanation: String,
+}
+
+impl<'de> Deserialize<'de> for QuestionResponseItem {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let mut fields = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let id = fields
+            .remove("id")
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .ok_or_else(|| D::Error::custom("response id must be a string"))?;
+        let explanation = match fields.remove("explanation") {
+            Some(serde_json::Value::String(value)) => value,
+            None => String::new(),
+            _ => return Err(D::Error::custom("explanation must be a string")),
+        };
+        let disposition = fields.remove("disposition");
+        let value = match disposition.as_ref().and_then(|v| v.as_str()) {
+            Some("answered") => QuestionResponseValue::Answered {
+                answer: fields
+                    .remove("answer")
+                    .ok_or_else(|| D::Error::custom("answer required"))?,
+            },
+            Some("custom") => QuestionResponseValue::Custom {
+                answer: fields
+                    .remove("answer")
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .ok_or_else(|| D::Error::custom("custom answer must be a string"))?,
+            },
+            Some("skipped") => QuestionResponseValue::Skipped,
+            _ => return Err(D::Error::custom("invalid response disposition")),
+        };
+        if !fields.is_empty() {
+            return Err(D::Error::custom("unexpected response fields"));
+        }
+        Ok(Self {
+            id,
+            value,
+            explanation,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionResponse {
+    pub answers: Vec<QuestionResponseItem>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub overall_comments: String,
+}
+
+impl QuestionResponse {
+    pub fn legacy_answers(&self) -> Vec<QuestionAnswer> {
+        self.answers
+            .iter()
+            .map(|item| QuestionAnswer {
+                id: item.id.clone(),
+                answer: match &item.value {
+                    QuestionResponseValue::Answered { answer } => answer.clone(),
+                    QuestionResponseValue::Custom { answer } => {
+                        format!("[Custom answer] {answer}").into()
+                    }
+                    QuestionResponseValue::Skipped => "[Skipped]".into(),
+                },
+            })
+            .collect()
+    }
+}
+
+pub const QUESTION_RESPONSE_PROTOCOL_VERSION: u8 = 2;
+
+fn question_response_protocol_version() -> u8 {
+    QUESTION_RESPONSE_PROTOCOL_VERSION
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PendingQuestionStatus {
     Pending,
@@ -1306,6 +1400,48 @@ pub struct PendingQuestionSet {
     pub answers: Vec<QuestionAnswer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution_id: Option<String>,
+    #[serde(default = "question_response_protocol_version")]
+    pub response_protocol_version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<QuestionResponse>,
+}
+
+#[cfg(test)]
+mod question_response_tests {
+    use super::*;
+
+    #[test]
+    fn structured_response_roundtrip_preserves_skips_and_explanations() {
+        let value = serde_json::json!({
+            "answers": [
+                {"id":"a","disposition":"custom","answer":"neither","explanation":"why"},
+                {"id":"b","disposition":"skipped"},
+                {"id":"c","disposition":"answered","answer":false}
+            ],
+            "overall_comments":"context"
+        });
+        let response: QuestionResponse = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(response).unwrap(), value);
+        assert!(
+            serde_json::from_value::<QuestionResponse>(serde_json::json!({
+                "answers":[{"id":"a","disposition":"skipped","answer":true}]
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn response_command_requires_instance_and_legacy_answers_are_unchanged() {
+        assert!(serde_json::from_value::<ChatCommand>(serde_json::json!({
+            "type":"submit_question_response","tool_call_id":"t","response":{"answers":[]}
+        }))
+        .is_err());
+        let legacy: ChatCommand = serde_json::from_value(serde_json::json!({
+            "type":"answer_questions","tool_call_id":"t","answers":[{"id":"a","answer":false}]
+        }))
+        .unwrap();
+        assert!(matches!(legacy, ChatCommand::AnswerQuestions { .. }));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1387,6 +1523,11 @@ impl CommandRequest {
                 ("goal_control".to_string(), action.clone(), String::new())
             }
             ChatCommand::Abort {} => ("abort".to_string(), String::new(), String::new()),
+            ChatCommand::SubmitQuestionResponse { tool_call_id, .. } => (
+                "submit_question_response".into(),
+                format!("Response to {tool_call_id}"),
+                String::new(),
+            ),
             ChatCommand::AnswerQuestions {
                 tool_call_id,
                 answers,

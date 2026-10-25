@@ -82,6 +82,20 @@ export type PendingQuestionAnswer = {
   answer: boolean | string | string[];
 };
 
+export type QuestionResponseItem = {
+  id: string;
+  explanation?: string;
+} & (
+  | { disposition: "answered"; answer: boolean | string | string[] }
+  | { disposition: "custom"; answer: string }
+  | { disposition: "skipped" }
+);
+
+export type QuestionResponse = {
+  answers: QuestionResponseItem[];
+  overall_comments: string;
+};
+
 export type PendingQuestionSet = {
   tool_call_id: string;
   questions: PendingQuestion[];
@@ -89,6 +103,8 @@ export type PendingQuestionSet = {
   status: "pending" | "answered" | "cancelled";
   answers?: PendingQuestionAnswer[];
   resolution_id?: string;
+  response_protocol_version?: number;
+  response?: QuestionResponse;
 };
 
 export type BackgroundAgentStatus =

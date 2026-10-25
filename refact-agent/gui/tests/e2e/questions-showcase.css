@@ -1,0 +1,12 @@
+.questions-showcase {
+  max-width: var(--rf-content-max, 640px);
+  min-width: 0;
+  margin-inline: auto;
+  padding: var(--rf-space-4);
+  color: var(--rf-color-fg);
+}
+
+.questions-showcase pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

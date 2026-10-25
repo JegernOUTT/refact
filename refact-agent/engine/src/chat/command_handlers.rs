@@ -93,6 +93,30 @@ pub(super) async fn handle_queue_command(
                 tool_call_id,
                 answers,
                 asked_at_ms,
+                None,
+            ))
+            .await
+        }
+        ChatCommand::SubmitQuestionResponse {
+            tool_call_id,
+            asked_at_ms,
+            response,
+        } => {
+            if context.supervision_guard.is_some() {
+                let mut session = context.session_arc.lock().await;
+                reject_question_answers(
+                    &mut session,
+                    &context.request_id,
+                    "structured question responses require an explicit user response".into(),
+                );
+                return QueueCommandOutcome::Continue;
+            }
+            Box::pin(handle_answer_questions(
+                &context,
+                tool_call_id,
+                Vec::new(),
+                Some(asked_at_ms),
+                Some(response),
             ))
             .await
         }
@@ -578,12 +602,21 @@ async fn handle_answer_questions(
     tool_call_id: String,
     answers: Vec<QuestionAnswer>,
     asked_at_ms: Option<u64>,
+    response: Option<refact_chat_api::QuestionResponse>,
 ) -> QueueCommandOutcome {
     let app = context.app.clone();
     let session_arc = context.session_arc.clone();
     let request_id = &context.request_id;
     let supervision_guard = context.supervision_guard.as_ref();
-    let content = answer_questions_content(&tool_call_id, &answers);
+    let content = match &response {
+        Some(response) => serde_json::json!({
+            "type": "ask_questions_answer", "tool_call_id": tool_call_id,
+            "response_protocol_version": 2, "answers": response.answers,
+            "overall_comments": response.overall_comments,
+            "skipped_meaning": "Skipped questions are not answered or approved. Decide how to proceed; do not silently apply a default or repeat the same question."
+        }).to_string(),
+        None => answer_questions_content(&tool_call_id, &answers),
+    };
     let resolution_id = request_id.clone();
     let timeout_default_notice = request_id
         .strip_prefix("attention-timeout:")
@@ -597,13 +630,19 @@ async fn handle_answer_questions(
         match crate::buddy::supervision_authority::with_command_guard(
             supervision_guard,
             &chat_id,
-            || {
-                session.answer_pending_questions_at(
+            || match response {
+                Some(response) => session.submit_question_response(
+                    &tool_call_id,
+                    asked_at_ms.ok_or("question instance timestamp required")?,
+                    response,
+                    resolution_id.clone(),
+                ),
+                None => session.answer_pending_questions_at(
                     &tool_call_id,
                     answers,
                     resolution_id.clone(),
                     asked_at_ms,
-                )
+                ),
             },
         ) {
             Ok(resolved) => {

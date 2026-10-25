@@ -1,5 +1,6 @@
 import { collectTabIds, type PaneNode } from "../features/ChatPanes/panesTree";
 import type { Config } from "../features/Config/configSlice";
+import type { QuestionDraft } from "./questionResponses";
 import {
   DEFAULT_WORKSPACE_DOCK,
   DEFAULT_WORKSPACE_DRAWER,
@@ -105,6 +106,7 @@ export type AskQuestionsDraft = {
   answers: Record<string, AskQuestionsDraftValue>;
   additionalText: string;
   updatedAt: number;
+  responses?: Partial<Record<string, QuestionDraft>>;
 };
 
 export type TaskWorkspaceTab = "board" | "chat" | "memories" | "documents";
@@ -868,10 +870,29 @@ function normalizeAskQuestionsAnswers(
 function normalizeAskQuestionsDraft(value: unknown): AskQuestionsDraft | null {
   if (!isRecord(value)) return null;
 
+  const responses: Record<string, QuestionDraft> = {};
+  if (isRecord(value.responses)) {
+    for (const [id, entry] of Object.entries(value.responses)) {
+      if (!isRecord(entry)) continue;
+      responses[id] = {
+        mode: entry.mode === "custom" ? "custom" : "standard",
+        value:
+          typeof entry.value === "string"
+            ? entry.value
+            : Array.isArray(entry.value)
+              ? stringArrayOrEmpty(entry.value)
+              : undefined,
+        custom: stringOrUndefined(entry.custom) ?? "",
+        explanation: stringOrUndefined(entry.explanation) ?? "",
+        skipped: entry.skipped === true,
+      };
+    }
+  }
   return {
     answers: normalizeAskQuestionsAnswers(value.answers),
     additionalText: stringOrUndefined(value.additionalText) ?? "",
     updatedAt: numberOrUndefined(value.updatedAt) ?? Date.now(),
+    responses,
   };
 }
 
@@ -919,6 +940,7 @@ export function saveAskQuestionsDraft(
   toolCallId: string | undefined,
   answers: Record<string, AskQuestionsDraftValue>,
   additionalText: string,
+  responses?: Partial<Record<string, QuestionDraft>>,
 ): void {
   if (!toolCallId) return;
   const drafts = loadAskQuestionsDrafts();
@@ -926,6 +948,7 @@ export function saveAskQuestionsDraft(
     answers,
     additionalText,
     updatedAt: Date.now(),
+    responses,
   };
   saveAskQuestionsDrafts(drafts);
 }

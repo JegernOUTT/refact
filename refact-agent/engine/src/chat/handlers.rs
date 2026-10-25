@@ -541,12 +541,25 @@ pub async fn handle_v1_chat_command(
         }
     }
 
-    if let ChatCommand::AnswerQuestions {
-        tool_call_id,
-        answers,
-        asked_at_ms,
-    } = &request.command
-    {
+    let approval_response = match &request.command {
+        ChatCommand::AnswerQuestions {
+            tool_call_id,
+            answers,
+            asked_at_ms,
+        } => Some((tool_call_id, answers.clone(), *asked_at_ms, None)),
+        ChatCommand::SubmitQuestionResponse {
+            tool_call_id,
+            asked_at_ms,
+            response,
+        } => Some((
+            tool_call_id,
+            Vec::new(),
+            Some(*asked_at_ms),
+            Some(response.clone()),
+        )),
+        _ => None,
+    };
+    if let Some((tool_call_id, answers, asked_at_ms, response)) = approval_response {
         if crate::agents::approval::is_user_approval(tool_call_id) {
             if request.supervision_guard.is_some() {
                 return Err(ScratchError::new(
@@ -559,9 +572,10 @@ pub async fn handle_v1_chat_command(
                 &app,
                 &session_arc,
                 tool_call_id,
-                answers.clone(),
-                *asked_at_ms,
+                answers,
+                asked_at_ms,
                 &request.client_request_id,
+                response,
             )
             .await;
             let mut session = session_arc.lock().await;

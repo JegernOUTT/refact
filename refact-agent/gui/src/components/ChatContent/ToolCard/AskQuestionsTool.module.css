@@ -102,3 +102,56 @@
 .additionalAnswer {
   font-style: italic;
 }
+
+.responseForm {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.muted,
+.progress {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.responseQuestion {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding-block: var(--rf-space-3);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+}
+
+.questionHeader,
+.formActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.multiSelect,
+.comments {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+}
+
+.answerText {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.responseQuestion > button,
+.multiSelect > button {
+  align-self: flex-start;
+}

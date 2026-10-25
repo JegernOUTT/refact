@@ -7,6 +7,7 @@ import { debugRefact } from "../../debugConfig";
 import { useDraftMessage } from "../../hooks/useDraftMessage";
 import { sendIdeMessagesToCurrentChat } from "../../features/Chat/Thread/actions";
 import { useThreadId } from "../../features/Chat/Thread";
+import { isHostMessage } from "../../utils/isHostMessage";
 
 export function useInputValue(
   uncheckCheckboxes: () => void,
@@ -42,6 +43,7 @@ export function useInputValue(
         return;
       }
 
+      if (!isHostMessage(event)) return;
       if (addInputValue.match(event.data) || setInputValue.match(event.data)) {
         const { payload } = event.data;
         if (payload.chatId !== undefined && payload.chatId !== chatId) return;
