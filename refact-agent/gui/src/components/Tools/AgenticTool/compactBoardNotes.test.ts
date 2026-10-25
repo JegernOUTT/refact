@@ -1,7 +1,11 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, test } from "vitest";
-import { AGENTIC_TOOL_NAMES, lookupAgenticFamily } from "./agenticFamilies";
+import {
+  AGENTIC_TOOL_NAMES,
+  LOCAL_COLLABORATION_TOOL_NAMES,
+  lookupAgenticFamily,
+} from "./agenticFamilies";
 import { compactBoardNotesPresentation } from "./compactBoardNotes";
 import {
   COMPACT_HEADLINE_CHARS,
@@ -84,11 +88,13 @@ const BATCH_RESULT = [
 ];
 
 describe("compactBoardNotesPresentation", () => {
-  test("covers exactly the current task, document and memory family inventory", () => {
-    const names = AGENTIC_TOOL_NAMES.filter((name) =>
-      ["task", "doc", "memory"].includes(
-        lookupAgenticFamily(name)?.family ?? "",
-      ),
+  test("covers exactly the non-collaboration task, document and memory inventory", () => {
+    const names = AGENTIC_TOOL_NAMES.filter(
+      (name) =>
+        !LOCAL_COLLABORATION_TOOL_NAMES.includes(name) &&
+        ["task", "doc", "memory"].includes(
+          lookupAgenticFamily(name)?.family ?? "",
+        ),
     );
     expect(INTENTS.map(([name]) => name).sort()).toEqual(names.sort());
   });

@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, test } from "vitest";
+import { normalizeToolName } from "../../../utils/toolNameAliases";
 import {
   AGENTIC_TOOL_NAMES,
   BOARD_RUNTIME_TOOL_NAMES,
@@ -9,6 +10,7 @@ import {
   hasDedicatedToolCard,
   lookupAgenticFamily,
 } from "./agenticFamilies";
+import { compactBoardNotesPresentation } from "./compactBoardNotes";
 import { buildCompactCollaborationPresentation as present } from "./compactCollaboration";
 import type { CompactAgenticInput } from "./compactPresentation";
 
@@ -136,6 +138,12 @@ describe("local collaboration presentation inventory", () => {
         expect(hasDedicatedToolCard(toolName)).toBe(true);
         expect(agenticCardLabel(toolName)).not.toBeNull();
         expect(
+          compactBoardNotesPresentation({
+            toolName,
+            transportState: "succeeded",
+          }),
+        ).toBeNull();
+        expect(
           present({
             toolName,
             transportState: "succeeded",
@@ -146,6 +154,47 @@ describe("local collaboration presentation inventory", () => {
           stateLabel: "Outcome unconfirmed",
           tone: "neutral",
           facts: [],
+        });
+      }
+    },
+  );
+
+  test.each(
+    AGENTIC_TOOL_NAMES.filter((name) =>
+      ["task", "doc", "memory"].includes(
+        lookupAgenticFamily(name)?.family ?? "",
+      ),
+    ),
+  )(
+    "%s has exactly one compact adapter owner across normalized aliases",
+    (name) => {
+      const pascal = name
+        .split("_")
+        .map((part) => part[0].toUpperCase() + part.slice(1))
+        .join("");
+      for (const toolName of [
+        name,
+        `t_${name}`,
+        pascal,
+        `T_${pascal}`,
+        name.replace(/_/gu, "-"),
+      ]) {
+        expect(normalizeToolName(toolName), toolName).toBe(name);
+        const input: CompactAgenticInput = {
+          toolName,
+          transportState: "pending",
+        };
+        const collaborationOwned =
+          LOCAL_COLLABORATION_TOOL_NAMES.includes(name);
+        expect(
+          {
+            boardNotes: compactBoardNotesPresentation(input) !== null,
+            collaboration: present(input) !== null,
+          },
+          toolName,
+        ).toEqual({
+          boardNotes: !collaborationOwned,
+          collaboration: collaborationOwned,
         });
       }
     },
@@ -203,8 +252,14 @@ describe("local collaboration presentation inventory", () => {
     "constructor",
     "__proto__",
     "",
-  ])("leaves %s outside this adapter", (toolName) => {
+  ])("leaves %s outside both adapters", (toolName) => {
     expect(present({ toolName, transportState: "succeeded" })).toBeNull();
+    expect(
+      compactBoardNotesPresentation({
+        toolName,
+        transportState: "succeeded",
+      }),
+    ).toBeNull();
   });
 });
 
