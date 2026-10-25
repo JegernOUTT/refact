@@ -226,7 +226,6 @@ const NETWORK_FAILURE_PATTERNS: &[&str] = &[
     "error trying to connect",
     "tcp connect",
     "dns",
-    "eof",
     "broken pipe",
     "socket",
     "tls",
@@ -514,6 +513,29 @@ fn contains_non_retryable_status(lower: &str) -> bool {
     contains_status(lower, NON_RETRYABLE_STATUS_CODES)
 }
 
+fn contains_tool_input_schema_rejection(lower: &str) -> bool {
+    lower.contains("input_schema")
+        && (contains_status(lower, &["400", "422"])
+            || contains_any(
+                lower,
+                &[
+                    "invalid_request_error",
+                    "invalid request",
+                    "bad request",
+                    "schema validation failed",
+                ],
+            )
+            || (contains_any(lower, &["oneof", "allof", "anyof"])
+                && contains_any(lower, &["top level", "top-level"])
+                && contains_any(lower, &["does not support", "not supported", "not allowed"])))
+}
+
+fn contains_eof(lower: &str) -> bool {
+    lower
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|token| matches!(token, "eof" | "unexpectedeof" | "unexpected_eof"))
+}
+
 fn classify_user_error_from_lower(lower: &str) -> UserErrorCategory {
     if contains_any(lower, TOOL_SCHEMA_INVALID_PATTERNS) {
         return UserErrorCategory::ToolSchemaInvalid;
@@ -549,7 +571,11 @@ fn classify_user_error_from_lower(lower: &str) -> UserErrorCategory {
         return UserErrorCategory::ProviderRateLimit;
     }
 
-    if contains_any(lower, NETWORK_FAILURE_PATTERNS) {
+    if contains_tool_input_schema_rejection(lower) {
+        return UserErrorCategory::ToolSchemaInvalid;
+    }
+
+    if contains_any(lower, NETWORK_FAILURE_PATTERNS) || contains_eof(lower) {
         return UserErrorCategory::NetworkFailure;
     }
 
@@ -870,6 +896,16 @@ mod tests {
                 category: UserErrorCategory::ToolSchemaInvalid,
             },
             ErrorCase {
+                error: "LLM error (400 Bad Request): \"tools.84.custom.input_schema: input_schema does not support oneOf, allOf, or anyOf at the top level\"",
+                decision: non_retryable(),
+                category: UserErrorCategory::ToolSchemaInvalid,
+            },
+            ErrorCase {
+                error: "tools.84.custom.input_schema: input_schema does not support oneOf, allOf, or anyOf at the top level",
+                decision: non_retryable(),
+                category: UserErrorCategory::ToolSchemaInvalid,
+            },
+            ErrorCase {
                 error: "Anthropic invalid_request_error: unknown variant `web_search_20250305`, expected one of `auto`, `any`, `tool`",
                 decision: non_retryable(),
                 category: UserErrorCategory::InvalidRequest,
@@ -1065,6 +1101,16 @@ mod tests {
                 category: UserErrorCategory::NetworkFailure,
             },
             ErrorCase {
+                error: "EOF",
+                decision: retry_transient(),
+                category: UserErrorCategory::NetworkFailure,
+            },
+            ErrorCase {
+                error: "read failed: UnexpectedEof",
+                decision: retry_transient(),
+                category: UserErrorCategory::NetworkFailure,
+            },
+            ErrorCase {
                 error: "write tcp 10.0.0.1: broken pipe",
                 decision: retry_transient(),
                 category: UserErrorCategory::NetworkFailure,
@@ -1175,6 +1221,11 @@ mod tests {
                 "unexpected user category for {}",
                 case.error
             );
+            let info = user_error_info(case.category);
+            assert_eq!(info.is_retryable, case.decision.is_retryable_transient());
+            if case.category == UserErrorCategory::ToolSchemaInvalid {
+                assert_eq!(info.suggested_action, "none");
+            }
         }
     }
 
@@ -1245,6 +1296,32 @@ mod tests {
             classify_user_error("operation failed after 500 attempts"),
             UserErrorCategory::Unknown
         );
+
+        for error in ["oneOf", "proof", "someof", "eof_marker", "eof123"] {
+            assert_eq!(classify_user_error(error), UserErrorCategory::Unknown);
+            assert_eq!(classify_llm_error_for_retry(error), unknown_error());
+        }
+
+        for (error, category) in [
+            (
+                "HTTP 401: unauthorized while sending tools.84.custom.input_schema",
+                UserErrorCategory::AuthenticationFailed,
+            ),
+            (
+                "HTTP 429: insufficient_quota while sending input_schema",
+                UserErrorCategory::BillingQuota,
+            ),
+            (
+                "HTTP 413: context length exceeded while sending input_schema",
+                UserErrorCategory::ContextTooLarge,
+            ),
+            (
+                "HTTP 503: temporarily unavailable while sending input_schema",
+                UserErrorCategory::ProviderTransient,
+            ),
+        ] {
+            assert_eq!(classify_user_error(error), category);
+        }
     }
 
     #[test]
