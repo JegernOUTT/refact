@@ -6,6 +6,7 @@ import {
   screen,
 } from "../../utils/test-utils";
 import { FinalReportView } from "./FinalReportView";
+import { finalReportPresentation } from "./finalReportJson";
 import { ToolContent } from "./ToolsContent";
 import type {
   ChatMessages,
@@ -94,7 +95,7 @@ describe("FinalReportView", () => {
   it("renders structured payload sections", () => {
     render(<FinalReportView content={structuredPayload} title="Card T-1" />);
     expect(screen.getByText("Card T-1")).toBeInTheDocument();
-    expect(screen.getByText(/Success/)).toBeInTheDocument();
+    expect(screen.getByText("Reported success")).toBeInTheDocument();
     expect(screen.getByText("structured")).toBeInTheDocument();
     expect(
       screen.getByText("src/components/ChatContent/FinalReportView.tsx"),
@@ -115,7 +116,8 @@ describe("FinalReportView", () => {
 
   it("shows verification pass and fail states", () => {
     render(<FinalReportView content={structuredPayload} />);
-    expect(screen.getByText(/Success/)).toBeInTheDocument();
+    expect(screen.getByText("Reported success")).toBeInTheDocument();
+    expect(screen.getByText("1/2 checks reported passed")).toBeInTheDocument();
     expect(
       screen.getByText("npm run test -- FinalReportView --run"),
     ).toBeInTheDocument();
@@ -136,7 +138,8 @@ describe("FinalReportView", () => {
     );
 
     expect(screen.getByText("Minimal report")).toBeInTheDocument();
-    expect(screen.getByText(/Success/)).toBeInTheDocument();
+    expect(screen.getByText("Reported success")).toBeInTheDocument();
+    expect(screen.getByText("No verification evidence")).toBeInTheDocument();
     expect(screen.getByText("Files changed")).toBeInTheDocument();
     expect(screen.getByText("Tests added or updated")).toBeInTheDocument();
     expect(screen.getByText("Verification")).toBeInTheDocument();
@@ -163,7 +166,7 @@ describe("FinalReportView", () => {
     );
 
     expect(screen.getByText("Null optional fields report")).toBeInTheDocument();
-    expect(screen.getByText(/Failed/)).toBeInTheDocument();
+    expect(screen.getByText("Reported failure")).toBeInTheDocument();
     expect(screen.getByText("Files changed")).toBeInTheDocument();
     expect(screen.getByText("Tests added or updated")).toBeInTheDocument();
     expect(screen.getByText("Verification")).toBeInTheDocument();
@@ -228,5 +231,89 @@ describe("FinalReportView", () => {
     expect(screen.getByText("Task agent final report")).toBeInTheDocument();
     expect(screen.getByTestId("final-report-view")).toBeInTheDocument();
     expect(screen.getByText("Final Report")).toBeInTheDocument();
+  });
+
+  it("compact view shows three facts and preserves full sections behind deeper disclosure", async () => {
+    const { container, user } = render(
+      <FinalReportView compact content={structuredPayload} />,
+    );
+    expect(container.querySelectorAll("dt")).toHaveLength(3);
+    expect(screen.getByText("Success (self-reported)")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("1/2 checks reported passed")[0],
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("final-report-view").closest("[inert]"),
+    ).not.toBeNull();
+    const toggle = screen.getByRole("button", { name: "More details" });
+    toggle.focus();
+    await user.keyboard("{Enter}");
+    expect(
+      screen.getByTestId("final-report-view").closest("[inert]"),
+    ).toBeNull();
+    expect(screen.getByText("Add create-card actions")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /npm run lint/ }));
+    expect(screen.getByText("lint failed")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Technical details" }));
+    expect(container.textContent).toContain('"success":true');
+    expect(container.textContent).toContain('"output_tail":"lint failed"');
+    expect(container.querySelector("button button")).toBeNull();
+  });
+
+  it("compact legacy markdown stays recoverable without outcome inference", () => {
+    render(<FinalReportView compact content="PASS! verified by prose only" />);
+    expect(
+      screen.getByText("No structured outcome or verification evidence"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("PASS! verified by prose only").closest("[inert]"),
+    ).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "More details" }));
+    expect(
+      screen.getByText("PASS! verified by prose only").closest("[inert]"),
+    ).toBeNull();
+  });
+
+  it.each([
+    [null, false, "Awaiting report"],
+    ["PASS!", false, "Outcome unconfirmed"],
+    ['{"summary":"failed","success":false}', false, "Reported failure"],
+    ['{"summary":"ok","success":true}', false, "Reported success"],
+    ['{"summary":"ok","success":true}', true, "Request failed"],
+    ['{"summary":"bad schema","success":"true"}', false, "Outcome unconfirmed"],
+  ] as const)(
+    "presentation separates outcome and transport for %s",
+    (content, failed, stateLabel) => {
+      const presentation = finalReportPresentation(content, failed);
+      expect(presentation.stateLabel).toBe(stateLabel);
+      expect(presentation.stateLabel).not.toMatch(/completed|verified/i);
+      expect(presentation.tone).not.toBe("positive");
+    },
+  );
+
+  it("contradictory or unrun checks are not counted as passed", () => {
+    const payload = JSON.stringify({
+      summary: "Attempted checks",
+      success: true,
+      verification: [
+        {
+          command: "npm test",
+          passed: true,
+          exit_code: 1,
+          output_tail: "failed",
+        },
+        {
+          command: "npm run lint",
+          passed: true,
+          exit_code: null,
+          output_tail: "not run",
+        },
+        { command: "", passed: true, exit_code: 0, output_tail: "" },
+      ],
+    });
+    expect(finalReportPresentation(payload).facts).toContainEqual({
+      label: "Verification",
+      value: "0/3 checks reported passed",
+    });
   });
 });

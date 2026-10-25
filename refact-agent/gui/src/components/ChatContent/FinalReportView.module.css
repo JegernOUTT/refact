@@ -4,6 +4,13 @@
   overflow: hidden;
 }
 
+.fullReport {
+  composes: scrollbarThin from "../shared/scrollbar.module.css";
+  min-width: 0;
+  max-height: var(--rf-overlay-popover-max);
+  overflow-y: auto;
+}
+
 .header,
 .verificationItem,
 .followupCard {

@@ -6,11 +6,13 @@ import { useAppSelector } from "../../../hooks/useAppSelector";
 import { useThreadId } from "../../../features/Chat/Thread";
 import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
-import { Icon } from "../../ui";
+import { Icon, ToolCard as DetailsCard } from "../../ui";
 import { useStoredOpen } from "../useStoredOpen";
 import { ToolCard, type ToolStatus } from "./ToolCard";
 import { ReviewReportView } from "./ReviewReportView";
 import { extractReviewReport, reviewReportFromExtra } from "./reviewReportJson";
+import { reviewPresentation } from "./reviewPresentation";
+import { CompactToolDetails } from "../../Tools/AgenticTool/CompactToolDetails";
 import styles from "./GenericTool.module.css";
 
 interface CodeReviewToolProps {
@@ -30,7 +32,7 @@ function looksLikeMarkdown(text: string): boolean {
 
 export const CodeReviewTool: React.FC<CodeReviewToolProps> = ({ toolCall }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
+  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
   const threadId = useThreadId();
   const maybeResult = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
@@ -49,9 +51,11 @@ export const CodeReviewTool: React.FC<CodeReviewToolProps> = ({ toolCall }) => {
       (content ? extractReviewReport(content) : null),
     [maybeResult, content],
   );
-  const summary = report
-    ? `Review: ${report.findings.length} findings (${report.depth})`
-    : "Review code";
+  const presentation = reviewPresentation(
+    report,
+    !!maybeResult,
+    !!maybeResult?.tool_failed,
+  );
   const shouldRenderMarkdown =
     content !== null && content.length <= 50_000 && looksLikeMarkdown(content);
 
@@ -67,25 +71,44 @@ export const CodeReviewTool: React.FC<CodeReviewToolProps> = ({ toolCall }) => {
       isOpen={isOpen}
       onToggle={handleToggle}
       status={status}
-      summary={summary}
+      density="compact"
+      summary={presentation.headline}
+      meta={presentation.stateLabel}
       toolCall={toolCall}
     >
-      {report ? (
-        <ReviewReportView report={report} />
-      ) : content ? (
-        <Box className={styles.section}>
-          <Box className={styles.sectionLabel}>Result</Box>
-          <Box className={styles.resultContent}>
-            {shouldRenderMarkdown ? (
-              <Box className={styles.markdownContent}>
-                <Markdown>{content}</Markdown>
-              </Box>
-            ) : (
-              <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-            )}
+      <CompactToolDetails facts={presentation.facts}>
+        {report ? (
+          <ReviewReportView report={report} />
+        ) : content ? (
+          <Box className={styles.section}>
+            <Box className={styles.sectionLabel}>Result</Box>
+            <Box className={styles.resultContent}>
+              {shouldRenderMarkdown ? (
+                <Box className={styles.markdownContent}>
+                  <Markdown>{content}</Markdown>
+                </Box>
+              ) : (
+                <ShikiCodeBlock showLineNumbers={false}>
+                  {content}
+                </ShikiCodeBlock>
+              )}
+            </Box>
           </Box>
-        </Box>
-      ) : null}
+        ) : null}
+        <DetailsCard title="Technical details" defaultOpen={false}>
+          {content !== null && (
+            <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
+          )}
+          {maybeResult?.extra?.review_report !== undefined && (
+            <ShikiCodeBlock showLineNumbers={false}>
+              {JSON.stringify(maybeResult.extra.review_report, null, 2)}
+            </ShikiCodeBlock>
+          )}
+          <ShikiCodeBlock showLineNumbers={false}>
+            {toolCall.function.arguments}
+          </ShikiCodeBlock>
+        </DetailsCard>
+      </CompactToolDetails>
     </ToolCard>
   );
 };

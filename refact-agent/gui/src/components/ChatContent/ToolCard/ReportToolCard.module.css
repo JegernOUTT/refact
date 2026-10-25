@@ -182,6 +182,35 @@
   text-decoration: underline;
 }
 
+.compactFileLink {
+  padding: 0;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  overflow-wrap: anywhere;
+  background: transparent;
+  border: 0;
+}
+
+.compactFileLink:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+}
+
+.compactBody {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.compactContent {
+  max-height: var(--rf-overlay-popover-max);
+  margin-left: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
 .fileLink:hover {
   color: var(--rf-color-accent);
 }

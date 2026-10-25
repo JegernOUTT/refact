@@ -1,31 +1,30 @@
-import { CircleCheck } from "lucide-react";
+import { FileText } from "lucide-react";
 import React from "react";
 import { ToolCall } from "../../../services/refact/types";
 import { ReportToolCard, type ReportData } from "./ReportToolCard";
+import { readCompactRecord } from "../../Tools/AgenticTool/compactPresentation";
+import { Icon } from "../../ui";
 
 interface TaskDoneToolProps {
   toolCall: ToolCall;
 }
 
 function extractTaskDoneReport(content: string): ReportData | null {
-  try {
-    const data = JSON.parse(content) as {
-      type?: string;
-      summary?: string;
-      report?: string;
-      files_changed?: string[];
-      knowledge_path?: string;
-    };
-    if (data.type !== "task_done") return null;
-    return {
-      summary: data.summary ?? "Task completed",
-      markdown: data.report ?? content,
-      filesChanged: data.files_changed,
-      knowledgePath: data.knowledge_path,
-    };
-  } catch {
-    return null;
-  }
+  const data = readCompactRecord(content);
+  if (data?.type !== "task_done") return null;
+  return {
+    summary:
+      typeof data.summary === "string" ? data.summary : "Task report received",
+    markdown: typeof data.report === "string" ? data.report : content,
+    filesChanged:
+      Array.isArray(data.files_changed) &&
+      data.files_changed.every((file) => typeof file === "string")
+        ? data.files_changed
+        : undefined,
+    knowledgePath:
+      typeof data.knowledge_path === "string" ? data.knowledge_path : undefined,
+    success: typeof data.success === "boolean" ? data.success : undefined,
+  };
 }
 
 export const TaskDoneTool: React.FC<TaskDoneToolProps> = ({ toolCall }) => {
@@ -34,12 +33,11 @@ export const TaskDoneTool: React.FC<TaskDoneToolProps> = ({ toolCall }) => {
       <span data-testid="task-done-tool" hidden />
       <ReportToolCard
         toolCall={toolCall}
-        icon={<CircleCheck />}
-        defaultSummary="Task completed"
+        icon={<Icon icon={FileText} tone="muted" />}
+        defaultSummary="Task report"
         variant="taskDone"
         extractReport={extractTaskDoneReport}
-        defaultOpen
-        unboundedContent
+        compact
       />
     </>
   );

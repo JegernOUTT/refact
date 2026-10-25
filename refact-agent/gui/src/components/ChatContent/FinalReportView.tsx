@@ -2,133 +2,24 @@ import React, { useMemo } from "react";
 import classNames from "classnames";
 import { CheckCircle2, CircleX } from "lucide-react";
 import { Markdown, ShikiCodeBlock } from "../Markdown";
-import { Badge, Icon } from "../ui";
+import { Badge, Icon, ToolCard } from "../ui";
 import { AnimatedCollapsible } from "./shared/AnimatedCollapsible";
 import styles from "./FinalReportView.module.css";
 
-type VerificationResult = {
-  command: string;
-  exit_code?: number | null;
-  passed: boolean;
-  output_tail: string;
+import { CompactToolDetails } from "../Tools/AgenticTool/CompactToolDetails";
+import {
+  finalReportPresentation,
+  parseFinalReport,
+  verificationPassed,
+  verificationSummary,
+  type VerificationResult,
+} from "./finalReportJson";
+
+type FinalReportViewProps = {
+  content: string;
+  title?: string;
+  compact?: boolean;
 };
-type SuggestedCard = { title: string; priority: string; instructions: string };
-type FinalReport = {
-  summary: string;
-  success: boolean;
-  files_changed: string[];
-  tests_added_or_updated: string[];
-  verification: VerificationResult[];
-  followup_cards: SuggestedCard[];
-  risks: string[];
-  assumptions: string[];
-};
-type FinalReportViewProps = { content: string; title?: string };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function optionalStringArray(value: unknown): string[] | null {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) return null;
-  return value.every((item) => typeof item === "string") ? value : null;
-}
-
-function parseVerification(value: unknown): VerificationResult[] | null {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) return null;
-  const out: VerificationResult[] = [];
-  for (const item of value) {
-    if (!isRecord(item)) return null;
-    const exitCode = item.exit_code;
-    if (
-      typeof item.command !== "string" ||
-      typeof item.passed !== "boolean" ||
-      typeof item.output_tail !== "string"
-    ) {
-      return null;
-    }
-    if (
-      exitCode !== undefined &&
-      exitCode !== null &&
-      typeof exitCode !== "number"
-    ) {
-      return null;
-    }
-    out.push({
-      command: item.command,
-      passed: item.passed,
-      output_tail: item.output_tail,
-      exit_code: exitCode,
-    });
-  }
-  return out;
-}
-
-function parseFollowups(value: unknown): SuggestedCard[] | null {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) return null;
-  const out: SuggestedCard[] = [];
-  for (const item of value) {
-    if (!isRecord(item)) return null;
-    if (
-      typeof item.title !== "string" ||
-      typeof item.priority !== "string" ||
-      typeof item.instructions !== "string"
-    ) {
-      return null;
-    }
-    out.push({
-      title: item.title,
-      priority: item.priority,
-      instructions: item.instructions,
-    });
-  }
-  return out;
-}
-
-function parseFinalReport(content: string): FinalReport | null {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(content);
-  } catch {
-    return null;
-  }
-  if (
-    !isRecord(raw) ||
-    typeof raw.summary !== "string" ||
-    typeof raw.success !== "boolean"
-  ) {
-    return null;
-  }
-  const files = optionalStringArray(raw.files_changed);
-  const tests = optionalStringArray(raw.tests_added_or_updated);
-  const verification = parseVerification(raw.verification);
-  const followups = parseFollowups(raw.followup_cards);
-  const risks = optionalStringArray(raw.risks);
-  const assumptions = optionalStringArray(raw.assumptions);
-  if (
-    !files ||
-    !tests ||
-    !verification ||
-    !followups ||
-    !risks ||
-    !assumptions
-  ) {
-    return null;
-  }
-  return {
-    summary: raw.summary,
-    success: raw.success,
-    files_changed: files,
-    tests_added_or_updated: tests,
-    verification,
-    followup_cards: followups,
-    risks,
-    assumptions,
-  };
-}
 
 function truncate(text: string): string {
   return text.length > 220 ? `${text.slice(0, 219)}…` : text;
@@ -180,9 +71,9 @@ const VerificationDetails: React.FC<{ item: VerificationResult }> = ({
     header={
       <span className={styles.verificationHeader}>
         <Icon
-          icon={item.passed ? CheckCircle2 : CircleX}
+          icon={verificationPassed(item) ? CheckCircle2 : CircleX}
           size="sm"
-          tone={item.passed ? "success" : "danger"}
+          tone={verificationPassed(item) ? "success" : "muted"}
         />
         <code>{item.command}</code>
         {item.exit_code !== undefined && item.exit_code !== null && (
@@ -203,8 +94,18 @@ const VerificationDetails: React.FC<{ item: VerificationResult }> = ({
 export const FinalReportView: React.FC<FinalReportViewProps> = ({
   content,
   title = "Final Report",
+  compact = false,
 }) => {
   const report = useMemo(() => parseFinalReport(content), [content]);
+  if (compact) {
+    return (
+      <CompactToolDetails facts={finalReportPresentation(content).facts}>
+        <div className={styles.fullReport}>
+          <FinalReportView content={content} title={title} />
+        </div>
+      </CompactToolDetails>
+    );
+  }
   if (!report) {
     return (
       <div className={styles.legacy}>
@@ -217,13 +118,13 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
     <div className={styles.root} data-testid="final-report-view">
       <header className={classNames(styles.header, "rf-enter")}>
         <span className={styles.title}>{title}</span>
-        <Badge tone={report.success ? "success" : "danger"}>
+        <Badge tone={report.success ? "muted" : "danger"}>
           <Icon
             icon={report.success ? CheckCircle2 : CircleX}
             size="sm"
-            tone={report.success ? "success" : "danger"}
+            tone={report.success ? "muted" : "danger"}
           />
-          {report.success ? "Success" : "Failed"}
+          {report.success ? "Reported success" : "Reported failure"}
         </Badge>
       </header>
       <Section title="Summary">
@@ -256,6 +157,7 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
         )}
       </Section>
       <Section title="Verification">
+        <p className={styles.none}>{verificationSummary(report)}</p>
         {report.verification.length > 0 ? (
           <div>
             {report.verification.map((item) => (
@@ -290,6 +192,9 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
       </Section>
       <TextDetails title="Risks" items={report.risks} />
       <TextDetails title="Assumptions" items={report.assumptions} />
+      <ToolCard title="Technical details" defaultOpen={false}>
+        <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
+      </ToolCard>
     </div>
   );
 };

@@ -1,4 +1,12 @@
-import { Copy, Check, FileText, BookOpen, LoaderCircle } from "lucide-react";
+import {
+  Copy,
+  Check,
+  FileText,
+  BookOpen,
+  LoaderCircle,
+  CircleCheck,
+  CircleX,
+} from "lucide-react";
 import React, {
   useCallback,
   useEffect,
@@ -7,7 +15,7 @@ import React, {
   useState,
 } from "react";
 import { Flex, Text, Box } from "@radix-ui/themes";
-import { Icon } from "../../ui";
+import { Icon, ToolCard as DetailsCard } from "../../ui";
 import classNames from "classnames";
 import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks/useAppSelector";
@@ -31,6 +39,10 @@ import {
   addBuddyCrashBreadcrumb,
   setBuddyCrashHotSlot,
 } from "../../../features/Buddy/reportBuddyFrontendError";
+import { ToolCard } from "./ToolCard";
+import { CompactToolDetails } from "../../Tools/AgenticTool/CompactToolDetails";
+import { compactText } from "../../Tools/AgenticTool/compactPresentation";
+import { finalReportPresentation, parseFinalReport } from "../finalReportJson";
 import styles from "./ReportToolCard.module.css";
 
 const MAX_MD_RENDER_CHARS = 50_000;
@@ -56,6 +68,7 @@ export interface ReportData {
   markdown: string;
   filesChanged?: string[];
   knowledgePath?: string;
+  success?: boolean;
 }
 
 const REPORT_VARIANT_CLASSES = {
@@ -73,6 +86,7 @@ interface ReportToolCardProps {
   extractReport?: (content: string) => ReportData | null;
   defaultOpen?: boolean;
   unboundedContent?: boolean;
+  compact?: boolean;
 }
 
 export const ReportToolCard: React.FC<ReportToolCardProps> = ({
@@ -82,7 +96,8 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   variant = "report",
   meta,
   extractReport,
-  defaultOpen = true,
+  compact = false,
+  defaultOpen = !compact,
   unboundedContent = false,
 }) => {
   const copyToClipboard = useCopyToClipboard();
@@ -267,7 +282,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   ]);
 
   const showActions =
-    status === "success" && isOpen && !!deferredReportMarkdown;
+    (compact || status === "success") && isOpen && !!deferredReportMarkdown;
   const showSaveButton = isIdeHost();
   const variantClass = REPORT_VARIANT_CLASSES[variant];
   const hasReportBody = !!deferredReportMarkdown && bodyReady;
@@ -332,33 +347,15 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
     </span>
   );
 
-  const card = (
-    <AnimatedCollapsible
-      animate={animateContent}
-      actions={actions}
-      className={classNames(
-        "rf-enter",
-        styles.card,
-        variantClass,
-        status === "running" && styles.running,
-        !hasReportBody && styles.withoutBody,
-      )}
-      data-status={status}
-      header={header}
-      onKeyDownCapture={prepareScrollAnchor}
-      onMouseDownCapture={prepareScrollAnchor}
-      onOpenChange={handleOpenChange}
-      onPointerDownCapture={prepareScrollAnchor}
-      open={isOpen}
-      status={status}
-      variant="compact"
-    >
+  const reportBody = (
+    <>
       {hasReportBody && reportData ? (
         <>
           <Box
             className={classNames(
               styles.content,
-              unboundedContent && styles.contentUnbounded,
+              !compact && unboundedContent && styles.contentUnbounded,
+              compact && styles.compactContent,
             )}
           >
             {deferredReportMarkdown.length <= MAX_MD_RENDER_CHARS &&
@@ -385,16 +382,30 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
               <Text size="1" color="gray">
                 Files:
               </Text>
-              {reportData.filesChanged.map((f) => (
-                <Text
-                  key={f}
-                  size="1"
-                  className={canOpen ? styles.fileLink : styles.fileLinkPlain}
-                  onClick={canOpen ? (e) => handleFileClick(e, f) : undefined}
-                >
-                  {basename(f)}
-                </Text>
-              ))}
+              {reportData.filesChanged.map((f) =>
+                compact && canOpen ? (
+                  <button
+                    key={f}
+                    type="button"
+                    className={classNames(
+                      styles.fileLink,
+                      styles.compactFileLink,
+                    )}
+                    onClick={(e) => handleFileClick(e, f)}
+                  >
+                    {basename(f)}
+                  </button>
+                ) : (
+                  <Text
+                    key={f}
+                    size="1"
+                    className={canOpen ? styles.fileLink : styles.fileLinkPlain}
+                    onClick={canOpen ? (e) => handleFileClick(e, f) : undefined}
+                  >
+                    {basename(f)}
+                  </Text>
+                ),
+              )}
             </Flex>
           )}
 
@@ -408,24 +419,146 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
           )}
         </>
       ) : null}
+    </>
+  );
+
+  const entertainment = deferredEntertainmentText ? (
+    <div
+      className={styles.entertainmentContent}
+      ref={entertainmentRef}
+      onScroll={handleEntertainmentScroll}
+    >
+      <Text size="1" color="gray" className={styles.entertainmentText}>
+        {deferredEntertainmentText}
+      </Text>
+    </div>
+  ) : null;
+
+  if (compact) {
+    const structured = content ? parseFinalReport(content) : null;
+    const presentation = finalReportPresentation(
+      content,
+      !!maybeResult?.tool_failed,
+    );
+    const reportedSuccess = structured?.success ?? reportData?.success;
+    const reportFailed =
+      Boolean(maybeResult?.tool_failed) || reportedSuccess === false;
+    const stateLabel = maybeResult?.tool_failed
+      ? "Request failed"
+      : !maybeResult
+        ? "Awaiting report"
+        : reportedSuccess === false
+          ? "Reported failure"
+          : reportedSuccess === true
+            ? "Reported success"
+            : "Report unverified";
+    const facts = structured
+      ? presentation.facts
+      : [
+          {
+            label: "Outcome",
+            value:
+              reportedSuccess === false
+                ? "Failure (self-reported)"
+                : reportedSuccess === true
+                  ? "Success (self-reported)"
+                  : "No structured outcome evidence",
+          },
+          { label: "Verification", value: "No verification evidence" },
+          ...(reportData?.filesChanged
+            ? [
+                {
+                  label: "Changes",
+                  value: `${reportData.filesChanged.length} files reported`,
+                },
+              ]
+            : []),
+        ];
+    return (
+      <ToolCard
+        density="compact"
+        icon={
+          variant === "taskDone" &&
+          (reportFailed || reportedSuccess === true) ? (
+            <Icon
+              icon={reportFailed ? CircleX : CircleCheck}
+              tone={reportFailed ? "danger" : "muted"}
+            />
+          ) : (
+            icon
+          )
+        }
+        summary={
+          compactText(
+            structured?.summary ?? reportData?.summary ?? defaultSummary,
+            160,
+          ) ?? "Task report"
+        }
+        meta={stateLabel}
+        status={reportFailed ? "error" : status}
+        isOpen={isOpen}
+        onToggle={() => setOpen(!isOpen)}
+        toolCall={toolCall}
+      >
+        <CompactToolDetails facts={facts}>
+          <div className={styles.compactBody}>
+            {actions && (
+              <Flex gap="1" aria-label="Report actions">
+                {actions}
+              </Flex>
+            )}
+            {meta && (
+              <Text size="1" color="gray">
+                {meta}
+              </Text>
+            )}
+            {reportBody}
+            {entertainment}
+            <DetailsCard title="Technical details" defaultOpen={false}>
+              {content !== null && (
+                <ShikiCodeBlock showLineNumbers={false}>
+                  {content}
+                </ShikiCodeBlock>
+              )}
+              <ShikiCodeBlock showLineNumbers={false}>
+                {toolCall.function.arguments}
+              </ShikiCodeBlock>
+            </DetailsCard>
+          </div>
+        </CompactToolDetails>
+      </ToolCard>
+    );
+  }
+
+  const card = (
+    <AnimatedCollapsible
+      animate={animateContent}
+      actions={actions}
+      className={classNames(
+        "rf-enter",
+        styles.card,
+        variantClass,
+        status === "running" && styles.running,
+        !hasReportBody && styles.withoutBody,
+      )}
+      data-status={status}
+      header={header}
+      onKeyDownCapture={prepareScrollAnchor}
+      onMouseDownCapture={prepareScrollAnchor}
+      onOpenChange={handleOpenChange}
+      onPointerDownCapture={prepareScrollAnchor}
+      open={isOpen}
+      status={status}
+      variant="compact"
+    >
+      {reportBody}
     </AnimatedCollapsible>
   );
 
   return (
     <div className={styles.stack}>
       <ToolCallTooltip toolCall={toolCall}>{card}</ToolCallTooltip>
-
-      {deferredEntertainmentText && (
-        <div
-          className={styles.entertainmentContent}
-          ref={entertainmentRef}
-          onScroll={handleEntertainmentScroll}
-        >
-          <Text size="1" color="gray" className={styles.entertainmentText}>
-            {deferredEntertainmentText}
-          </Text>
-        </div>
-      )}
+      {entertainment}
     </div>
   );
 };
