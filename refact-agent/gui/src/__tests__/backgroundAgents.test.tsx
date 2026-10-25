@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { screen } from "@testing-library/react";
+import { fireEvent, screen, within } from "@testing-library/react";
 import { BackgroundAgentCard } from "../components/BackgroundAgentCard";
 import { ToolContent } from "../components/ChatContent/ToolsContent";
 import {
@@ -709,14 +709,13 @@ describe("background agents", () => {
       }),
     ]);
 
-    expect(screen.getByTestId("background-agent-card")).toBeInTheDocument();
-    expect(screen.getByTestId("background-agent-status-dot")).toHaveAttribute(
-      "aria-label",
-      "Background agent status: Running",
-    );
+    expect(screen.getByTestId("background-agent-inline")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("background-agent-inline-status"),
+    ).toHaveTextContent("Running");
     expect(
       screen.queryByRole("button", { name: "Copy agent id" }),
-    ).not.toBeInTheDocument();
+    ).toHaveAttribute("tabindex", "-1");
   });
 
   test("ToolContent keeps rendering BackgroundAgentCard from nested extra fallback", () => {
@@ -732,9 +731,11 @@ describe("background agents", () => {
       }),
     ]);
 
-    expect(screen.getByTestId("background-agent-card")).toBeInTheDocument();
+    expect(screen.getByTestId("background-agent-inline")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Expand background agent details" }),
+      within(screen.getByTestId("background-agent-inline")).getAllByRole(
+        "button",
+      )[0],
     ).toBeInTheDocument();
   });
 
@@ -782,19 +783,15 @@ describe("background agents", () => {
       delegateToolCall,
     );
 
-    expect(screen.getByTestId("background-agent-kind-delegate")).toBeVisible();
-    expect(screen.getByTestId("background-agent-model")).toHaveTextContent(
-      "thinking",
-    );
-    expect(
-      screen.getByTestId("background-agent-current-tool"),
-    ).toHaveTextContent("shell: cargo test");
-    expect(screen.getByTestId("background-agent-questions")).toHaveTextContent(
-      "❓2",
-    );
-    expect(screen.getByTestId("background-agent-merge")).toHaveTextContent(
-      "Pending",
-    );
+    const row = screen.getByTestId("background-agent-inline");
+    expect(screen.getByLabelText("2 pending questions")).toHaveTextContent("2");
+    fireEvent.click(within(row).getAllByRole("button")[0]);
+    fireEvent.click(screen.getByRole("button", { name: "More details" }));
+    expect(within(row).getByText("Delegate")).toBeVisible();
+    expect(within(row).getByText("thinking")).toBeInTheDocument();
+    expect(within(row).getByText("openai/gpt-5.6-terra")).toBeInTheDocument();
+    expect(within(row).getByText("now: shell: cargo test")).toBeInTheDocument();
+    expect(within(row).getByText("Local merge: Pending")).toBeInTheDocument();
   });
 
   test("BackgroundAgentUpdated state overrides the flattened placeholder card", () => {
@@ -818,12 +815,15 @@ describe("background agents", () => {
       },
     );
 
-    expect(screen.getByTestId("background-agent-card")).toBeInTheDocument();
-    expect(screen.getByText("Updated frog report")).toBeInTheDocument();
-    expect(screen.getByTestId("background-agent-status-dot")).toHaveAttribute(
-      "aria-label",
-      "Background agent status: Completed",
-    );
+    expect(screen.getByTestId("background-agent-inline")).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("background-agent-inline")).getAllByRole(
+        "button",
+      )[0],
+    ).toHaveTextContent("Updated frog report");
+    expect(
+      screen.getByTestId("background-agent-inline-status"),
+    ).toHaveTextContent("Completed");
   });
 
   test("flattened message_added event keeps background agent fields on selected tool result", () => {

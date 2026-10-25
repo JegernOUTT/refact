@@ -357,8 +357,7 @@ export const TaskDocumentsView: React.FC<TaskDocumentsToolProps> = ({
       : `Read ${name ?? requestedSlug ?? "document"}`;
   const status: ToolStatus = useMemo(() => {
     if (!maybeResult && (isStreaming || isWaiting)) return "running";
-    if (!maybeResult) return "running";
-    return maybeResult.tool_failed ? "error" : "success";
+    return maybeResult?.tool_failed ? "error" : "idle";
   }, [isStreaming, isWaiting, maybeResult]);
 
   return (

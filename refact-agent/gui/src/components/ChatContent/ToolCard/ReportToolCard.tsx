@@ -19,7 +19,11 @@ import { Icon, ToolCard as DetailsCard } from "../../ui";
 import classNames from "classnames";
 import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks/useAppSelector";
-import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
+import {
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectToolResultByThreadAndId,
+} from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
 import { ToolCall } from "../../../services/refact/types";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
@@ -41,7 +45,10 @@ import {
 } from "../../../features/Buddy/reportBuddyFrontendError";
 import { ToolCard } from "./ToolCard";
 import { CompactToolDetails } from "../../Tools/AgenticTool/CompactToolDetails";
-import { compactText } from "../../Tools/AgenticTool/compactPresentation";
+import {
+  compactText,
+  type CompactTransportState,
+} from "../../Tools/AgenticTool/compactPresentation";
 import { finalReportPresentation, parseFinalReport } from "../finalReportJson";
 import styles from "./ReportToolCard.module.css";
 
@@ -87,6 +94,7 @@ interface ReportToolCardProps {
   defaultOpen?: boolean;
   unboundedContent?: boolean;
   compact?: boolean;
+  compactTransportState?: CompactTransportState;
 }
 
 export const ReportToolCard: React.FC<ReportToolCardProps> = ({
@@ -97,6 +105,7 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   meta,
   extractReport,
   compact = false,
+  compactTransportState,
   defaultOpen = !compact,
   unboundedContent = false,
 }) => {
@@ -109,6 +118,22 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
   const maybeResult = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
+
+  const streaming = useAppSelector((state) =>
+    selectIsStreamingById(state, threadId),
+  );
+  const waiting = useAppSelector((state) =>
+    selectIsWaitingById(state, threadId),
+  );
+  const transport =
+    compactTransportState ??
+    (maybeResult
+      ? maybeResult.tool_failed
+        ? "failed"
+        : "succeeded"
+      : streaming || waiting
+        ? "running"
+        : "pending");
 
   const status: ToolStatus = useMemo(() => {
     if (!maybeResult) return "running";
@@ -442,16 +467,19 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
     );
     const reportedSuccess = structured?.success ?? reportData?.success;
     const reportFailed =
-      Boolean(maybeResult?.tool_failed) || reportedSuccess === false;
-    const stateLabel = maybeResult?.tool_failed
-      ? "Request failed"
-      : !maybeResult
-        ? "Awaiting report"
-        : reportedSuccess === false
-          ? "Reported failure"
-          : reportedSuccess === true
-            ? "Reported success"
-            : "Report unverified";
+      transport === "failed" ||
+      Boolean(maybeResult?.tool_failed) ||
+      reportedSuccess === false;
+    const stateLabel =
+      transport === "failed" || maybeResult?.tool_failed
+        ? "Request failed"
+        : !maybeResult
+          ? "Awaiting report"
+          : reportedSuccess === false
+            ? "Reported failure"
+            : reportedSuccess === true
+              ? "Reported success"
+              : "Report unverified";
     const facts = structured
       ? presentation.facts
       : [
@@ -495,7 +523,9 @@ export const ReportToolCard: React.FC<ReportToolCardProps> = ({
           ) ?? "Task report"
         }
         meta={stateLabel}
-        status={reportFailed ? "error" : status}
+        status={
+          reportFailed ? "error" : transport === "running" ? "running" : "idle"
+        }
         isOpen={isOpen}
         onToggle={() => setOpen(!isOpen)}
         toolCall={toolCall}

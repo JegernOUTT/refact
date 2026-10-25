@@ -1,4 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { within } from "@testing-library/react";
+import { act } from "react-dom/test-utils";
+import { applyChatEvent } from "../../features/Chat/Thread/actions";
+import { selectCurrentThreadId } from "../../features/Chat/Thread/selectors";
+import { DEDICATED_TOOL_CARD_NAMES } from "../Tools/AgenticTool/agenticFamilies";
+import {
+  launchPreviewCall,
+  launchPreviewReceipt,
+} from "../Tools/AgenticTool/launchFixtures";
 import {
   createDefaultChatState,
   fireEvent,
@@ -6,6 +15,8 @@ import {
   screen,
 } from "../../utils/test-utils";
 import type {
+  BackgroundAgentSummary,
+  PendingQuestionSet,
   ChatMessages,
   ExecToolMetadata,
   ToolCall,
@@ -147,6 +158,12 @@ function renderToolContent(
     args?: Record<string, unknown>;
     extra?: ExecToolMetadata;
     enrichment?: ToolEnrichment;
+    resultExtra?: Record<string, unknown>;
+    failed?: boolean;
+    missing?: boolean;
+    busy?: boolean;
+    backgroundAgents?: Record<string, BackgroundAgentSummary>;
+    pendingQuestions?: PendingQuestionSet[];
   } = {},
 ) {
   const id = `call-${name.replace(/[^a-z0-9]+/gi, "-")}`;
@@ -154,9 +171,19 @@ function renderToolContent(
   const runtime = chat.threads[chat.current_thread_id];
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   if (!runtime) throw new Error("missing test thread");
-  runtime.thread.messages = [
-    makeToolMessage(id, content, options.extra, options.enrichment),
-  ] as ChatMessages;
+  runtime.streaming = options.busy === true;
+  runtime.waiting_for_response = false;
+  runtime.background_agents = options.backgroundAgents ?? {};
+  runtime.thread.pending_questions = options.pendingQuestions;
+  const message = makeToolMessage(
+    id,
+    content,
+    options.extra,
+    options.enrichment,
+  );
+  if (options.resultExtra) message.extra = options.resultExtra;
+  message.tool_failed = options.failed === true;
+  runtime.thread.messages = options.missing ? [] : [message];
 
   return render(
     <ToolContent toolCalls={[makeToolCall(name, id, options.args)]} />,
@@ -516,6 +543,8 @@ describe("ToolsContent routing", () => {
     expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
     expect(screen.queryByTestId("final-report-view")).not.toBeInTheDocument();
     expect(screen.getByTestId("final-report-tool")).toBeInTheDocument();
+    openToolCard();
+    fireEvent.click(screen.getByRole("button", { name: "More details" }));
     expect(screen.getByText("Plain legacy report")).toBeInTheDocument();
   });
 
@@ -631,6 +660,8 @@ describe("ToolsContent routing", () => {
       { preloadedState: { chat } },
     );
 
+    openToolCard();
+    fireEvent.click(screen.getByRole("button", { name: "More details" }));
     expect(screen.getByText("Right thread report")).toBeInTheDocument();
     expect(screen.queryByText("Wrong current report")).not.toBeInTheDocument();
   });
@@ -658,7 +689,7 @@ describe("ToolsContent routing", () => {
     expect(
       screen.queryByTestId("final-report-tool-success-icon"),
     ).not.toBeInTheDocument();
-    expect(screen.getAllByText("failed")).not.toHaveLength(0);
+    expect(screen.getAllByText("Reported failure")).not.toHaveLength(0);
   });
 
   it("final_report_tool_card_shows_success_when_success_true", () => {
@@ -670,6 +701,452 @@ describe("ToolsContent routing", () => {
     expect(
       screen.queryByTestId("final-report-tool-error-icon"),
     ).not.toBeInTheDocument();
-    expect(screen.getByText("success")).toBeInTheDocument();
+    expect(screen.getByText("Reported success")).toBeInTheDocument();
+  });
+});
+
+const DEDICATED_COMPACT_NAMES = [
+  ...DEDICATED_TOOL_CARD_NAMES,
+  "code_review",
+  "review",
+  "ask_questions",
+  "ask",
+  "sleep",
+];
+
+describe("compact dedicated transcript composition", () => {
+  it.each(DEDICATED_COMPACT_NAMES)(
+    "%s and aliases never fall through to generic and always begin closed",
+    (name) => {
+      const pascal = name
+        .split("_")
+        .map((part) => part[0].toUpperCase() + part.slice(1))
+        .join("");
+      for (const alias of [name, `t_${name}`, pascal]) {
+        for (const missing of [true, false]) {
+          const { container, unmount } = renderToolContent(
+            alias,
+            "RAW_TECHNICAL_SENTINEL: not recognized",
+            {
+              missing,
+              args: {
+                task: "Inspect the scoped change",
+                slug: "main-plan",
+                description: "Wait for evidence",
+                duration_ms: 1000,
+              },
+            },
+          );
+          expect(screen.queryByTestId("generic-tool"), alias).toBeNull();
+          const row = container.querySelector(
+            'section[data-density="compact"]',
+          );
+          expect(row, alias).not.toBeNull();
+          expect(row).toHaveAttribute("data-open", "false");
+          expect(row?.querySelector("button")).not.toHaveTextContent(
+            "RAW_TECHNICAL_SENTINEL",
+          );
+          expect(row?.querySelector("button")).toHaveAttribute(
+            "aria-expanded",
+            "false",
+          );
+          unmount();
+        }
+      }
+    },
+  );
+
+  it.each(["doc_get", "doc_list", "agent_finish", "subagent"])(
+    "%s missing historical output is idle, not success or running",
+    (name) => {
+      const { container } = renderToolContent(name, "", { missing: true });
+      expect(container.querySelector("section")).toHaveAttribute(
+        "data-status",
+        "idle",
+      );
+      expect(screen.queryByTestId("generic-tool")).toBeNull();
+      expect(container.querySelector(".lucide-loader-circle")).toBeNull();
+      expect(container.querySelector("button")).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
+    },
+  );
+
+  it("a genuinely busy legacy launch can show request activity without inventing child state", () => {
+    const { container } = renderToolContent("subagent", "", {
+      missing: true,
+      busy: true,
+      args: { task: "Inspect the scoped change" },
+    });
+    expect(container.querySelector("section")).toHaveAttribute(
+      "data-status",
+      "running",
+    );
+    expect(screen.getByRole("button")).toHaveTextContent("Awaiting report");
+    expect(screen.getByRole("button")).not.toHaveTextContent(
+      /queued|completed|verified/iu,
+    );
+  });
+
+  it.each([
+    undefined,
+    "future_state",
+    "queued",
+    "running",
+    "waiting_for_approval",
+    "completed",
+    "failed",
+  ])(
+    "launch status %s is evidence-limited and raw output is only deeper",
+    (status) => {
+      const { container } = renderToolContent(
+        "subagent",
+        "RAW_LAUNCH_ONLY_ONCE",
+        {
+          args: { task: "Inspect scoped files" },
+          resultExtra: {
+            background_agent_id: "bg-child",
+            child_chat_id: "child-chat",
+            ...(status ? { background_agent_status: status } : {}),
+          },
+        },
+      );
+      const row = screen.getByTestId("background-agent-inline");
+      const outer = within(row).getAllByRole("button")[0];
+      expect(outer).toHaveAttribute("aria-expanded", "false");
+      expect(outer).toHaveTextContent("Inspect scoped files");
+      expect(outer).toHaveTextContent(
+        !status || status === "future_state"
+          ? "Status unknown"
+          : status === "waiting_for_approval"
+            ? "Approval needed"
+            : status[0].toUpperCase() + status.slice(1),
+      );
+      expect(outer).not.toHaveTextContent("RAW_LAUNCH_ONLY_ONCE");
+      expect(
+        container.querySelectorAll('section[data-density="compact"]'),
+      ).toHaveLength(1);
+      const raw = screen.getByLabelText("Full response content");
+      expect(raw.closest("[inert]")).not.toBeNull();
+      fireEvent.click(outer);
+      expect(raw.closest("[inert]")).not.toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "More details" }));
+      expect(raw.closest("[inert]")).toBeNull();
+      expect(screen.getAllByText("RAW_LAUNCH_ONLY_ONCE")).toHaveLength(1);
+      expect(container.querySelector("button button")).toBeNull();
+    },
+  );
+
+  it.each([false, true])(
+    "failed launch keeps request failure separate from child state with subscribed=%s",
+    (subscribed) => {
+      const child = {
+        agent_id: "bg-child",
+        parent_chat_id: "parent",
+        child_chat_id: "child-chat",
+        kind: "subagent",
+        status: "running",
+        title: "Live work",
+        progress: "Reading files",
+        step_count: 1,
+        last_activity: null,
+        target_files: [],
+        edited_files: [],
+        diff_summary: null,
+        conflict_summary: null,
+        result_summary: null,
+        error: null,
+        started_at: null,
+        finished_at: null,
+        change_seq: 1,
+      } satisfies BackgroundAgentSummary;
+      const { store } = renderToolContent(
+        "subagent",
+        "Request transport failed",
+        {
+          failed: true,
+          resultExtra: {
+            background_agent_id: "bg-child",
+            child_chat_id: "child-chat",
+            background_agent_status: "running",
+          },
+          backgroundAgents: subscribed ? { "bg-child": child } : {},
+        },
+      );
+      const row = screen.getByTestId("background-agent-inline");
+      expect(row).toHaveAttribute("data-status", "error");
+      expect(screen.getByRole("alert")).toHaveTextContent("Request failed");
+      expect(within(row).getAllByRole("button")[0]).not.toHaveTextContent(
+        "Failed child",
+      );
+      fireEvent.click(within(row).getAllByRole("button")[0]);
+      fireEvent.click(screen.getByRole("button", { name: "More details" }));
+      expect(screen.getByText("Running")).toBeInTheDocument();
+      expect(screen.getByLabelText("Full response content")).toHaveTextContent(
+        "Request transport failed",
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Open trajectory" }));
+      expect(selectCurrentThreadId(store.getState())).toBe("child-chat");
+      expect(child.status).toBe("running");
+    },
+  );
+
+  it("preview remains a single preview row and cannot become a live launch card", () => {
+    const chat = createDefaultChatState();
+    chat.threads[chat.current_thread_id].thread.messages = [
+      launchPreviewReceipt(),
+    ];
+    render(<ToolContent toolCalls={[launchPreviewCall]} />, {
+      preloadedState: { chat },
+    });
+    expect(screen.getByText("Launch blocked")).toBeInTheDocument();
+    expect(screen.queryByTestId("background-agent-inline")).toBeNull();
+    openToolCard();
+    expect(screen.getByText("No child started")).toBeInTheDocument();
+  });
+
+  it("protocol-v2 decisions are exposed after one expansion, preserving endpoint, instance and explicit submit", async () => {
+    localStorage.clear();
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { user } = renderToolContent("ask_questions", "", {
+        missing: true,
+        pendingQuestions: [
+          {
+            tool_call_id: "call-ask-questions",
+            asked_at_ms: 42,
+            status: "pending",
+            response_protocol_version: 2,
+            questions: [
+              { id: "one", type: "yes_no", text: "Proceed with the change?" },
+            ],
+          },
+        ],
+      });
+      const outer = screen.getByRole("button", { expanded: false });
+      expect(outer).toHaveTextContent("Needs answer");
+      await user.click(outer);
+      expect(screen.queryByRole("button", { name: "More details" })).toBeNull();
+      await user.click(screen.getByRole("radio", { name: "No" }));
+      expect(fetchMock).not.toHaveBeenCalled();
+      await user.click(screen.getByRole("button", { name: "Submit response" }));
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const [url, request] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toMatch(/\/v1\/chats\/[^/]+\/commands$/u);
+      expect(JSON.parse(String(request.body))).toMatchObject({
+        type: "submit_question_response",
+        tool_call_id: "call-ask-questions",
+        asked_at_ms: 42,
+        response: {
+          answers: [{ id: "one", disposition: "answered", answer: false }],
+        },
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(["{broken", '{"success":true}', "Completed and verified!"])(
+    "unknown final report %s stays neutral",
+    (content) => {
+      const { container } = renderToolContent("agent_finish", content);
+      expect(
+        screen.getByTestId("final-report-tool-neutral-icon"),
+      ).toBeInTheDocument();
+      expect(screen.queryByTestId("final-report-tool-success-icon")).toBeNull();
+      expect(container.querySelector("section")).toHaveAttribute(
+        "data-status",
+        "idle",
+      );
+      expect(screen.getByText("Outcome unconfirmed")).toBeInTheDocument();
+    },
+  );
+
+  it("final report disclosure keeps three facts, original request, metadata and complete report", () => {
+    const { container } = renderToolContent(
+      "agent_finish",
+      STRUCTURED_FINAL_REPORT,
+      {
+        args: { success: true, report: "Original report argument" },
+        resultExtra: { diagnostic: "Receipt metadata" },
+      },
+    );
+    const outer = screen.getByRole("button", { expanded: false });
+    fireEvent.click(outer);
+    expect(container.querySelectorAll("dt")).toHaveLength(3);
+    const more = screen.getByRole("button", { name: "More details" });
+    expect(more).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(more);
+    expect(screen.getByTestId("final-report-view")).toHaveTextContent(
+      "npm run test -- ToolsContent --run",
+    );
+    const technical = screen.getAllByRole("button", {
+      name: "Technical details",
+    });
+    fireEvent.click(technical[technical.length - 1]);
+    expect(screen.getByLabelText("Raw arguments content")).toHaveTextContent(
+      "Original report argument",
+    );
+    expect(
+      screen.getByLabelText("Response metadata content"),
+    ).toHaveTextContent("Receipt metadata");
+  });
+
+  it("final report result updates never force its explicit closed choice open", () => {
+    const { store, container } = renderToolContent("agent_finish", "", {
+      missing: true,
+    });
+    const outer = screen.getByRole("button", { expanded: false });
+    const threadId = selectCurrentThreadId(store.getState());
+    act(() => {
+      store.dispatch(
+        applyChatEvent({
+          type: "message_added",
+          chat_id: threadId,
+          seq: "1",
+          index: 0,
+          message: {
+            ...makeToolMessage(
+              "call-agent-finish",
+              structuredFinalReport(false),
+            ),
+            message_id: "report-result",
+          },
+        }),
+      );
+    });
+    expect(outer).toHaveAttribute("aria-expanded", "false");
+    expect(container.querySelector("section")).toHaveAttribute(
+      "data-status",
+      "error",
+    );
+  });
+});
+
+describe("neutral dedicated outcome regressions", () => {
+  it.each(["code_review", "review", "task_done"])(
+    "%s unknown results and idle missing results never imply success",
+    (name) => {
+      for (const missing of [false, true]) {
+        const { container, unmount } = renderToolContent(
+          name,
+          "unverified prose",
+          { missing },
+        );
+        expect(container.querySelector("section")).toHaveAttribute(
+          "data-status",
+          "idle",
+        );
+        expect(container.querySelector(".lucide-circle-check")).toBeNull();
+        expect(container.querySelector(".lucide-loader-circle")).toBeNull();
+        unmount();
+      }
+    },
+  );
+
+  it.each(["code_review", "task_done"])(
+    "%s explicitly busy request may run but never promotes an outcome",
+    (name) => {
+      const { container } = renderToolContent(name, "", {
+        missing: true,
+        busy: true,
+      });
+      expect(container.querySelector("section")).toHaveAttribute(
+        "data-status",
+        "running",
+      );
+      expect(container.querySelector("button")).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
+    },
+  );
+
+  it("agent_finish retains non-string multimodal history under technical details, never generic", () => {
+    const content = [
+      { m_type: "text", m_content: "Original multimodal report" },
+      { m_type: "image/png", m_content: "abc123" },
+    ];
+    const id = "non-string-report";
+    const chat = createDefaultChatState();
+    chat.threads[chat.current_thread_id].thread.messages = [
+      { role: "tool", tool_call_id: id, content, tool_failed: false },
+    ];
+    render(<ToolContent toolCalls={[makeToolCall("agent_finish", id)]} />, {
+      preloadedState: { chat },
+    });
+    expect(screen.queryByTestId("generic-tool")).toBeNull();
+    expect(
+      screen.getByTestId("final-report-tool-neutral-icon"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Outcome unconfirmed")).toBeInTheDocument();
+    openToolCard();
+    fireEvent.click(screen.getByRole("button", { name: "Technical details" }));
+    expect(
+      JSON.parse(
+        screen.getByLabelText("Full response content").textContent ?? "",
+      ),
+    ).toEqual(content);
+  });
+});
+
+describe("typed unavailable review route", () => {
+  it("preserves unavailable stage evidence without a successful outer shell", () => {
+    const report = {
+      depth: "deep",
+      outcome: "inconclusive",
+      scope: {
+        mode: "strict",
+        requested_files: 2,
+        reviewed_files: 0,
+        files: [],
+        dropped_files: ["src/a.ts"],
+        focus: null,
+        expansion: null,
+        out_of_scope_findings: 0,
+      },
+      diff: { base: "abc", head: "HEAD", changed_files: 2, hunks: 1 },
+      stages: [
+        {
+          name: "diff",
+          model: null,
+          status: "timed_out",
+          reason: "stage budget exceeded",
+          duration_ms: 1,
+          findings: 0,
+          summary: null,
+          coverage: {
+            files_read: [],
+            commands_run: [],
+            tools_unavailable: [],
+            stopped_early: null,
+          },
+        },
+      ],
+      findings: [],
+      duration_ms: 1,
+      duplicates_merged: 0,
+      scratch_dir: ".refact/review/route",
+    };
+    const { container } = renderToolContent(
+      "review",
+      "Original review receipt",
+      { resultExtra: { review_report: report } },
+    );
+    expect(container.querySelector("section")).toHaveAttribute(
+      "data-status",
+      "idle",
+    );
+    expect(screen.getByText("Review unavailable")).toBeInTheDocument();
+    expect(screen.getByRole("button")).toHaveTextContent("2 files in scope");
+    openToolCard();
+    fireEvent.click(screen.getByRole("button", { name: "More details" }));
+    expect(
+      screen.getAllByText(/stage budget exceeded/u).length,
+    ).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "Technical details" }));
+    expect(container.textContent).toContain("Original review receipt");
   });
 });

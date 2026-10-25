@@ -4,7 +4,11 @@ import { Box } from "@radix-ui/themes";
 import type { ToolCall } from "../../../services/refact/types";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import { useThreadId } from "../../../features/Chat/Thread";
-import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
+import {
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectToolResultByThreadAndId,
+} from "../../../features/Chat/Thread/selectors";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";
 import { Icon, ToolCard as DetailsCard } from "../../ui";
 import { useStoredOpen } from "../useStoredOpen";
@@ -37,10 +41,17 @@ export const CodeReviewTool: React.FC<CodeReviewToolProps> = ({ toolCall }) => {
   const maybeResult = useAppSelector((state) =>
     selectToolResultByThreadAndId(state, threadId, toolCall.id),
   );
-  const status: ToolStatus = useMemo(() => {
-    if (!maybeResult) return "running";
-    return maybeResult.tool_failed ? "error" : "success";
-  }, [maybeResult]);
+  const streaming = useAppSelector((state) =>
+    selectIsStreamingById(state, threadId),
+  );
+  const waiting = useAppSelector((state) =>
+    selectIsWaitingById(state, threadId),
+  );
+  const status: ToolStatus = maybeResult?.tool_failed
+    ? "error"
+    : !maybeResult && (streaming || waiting)
+      ? "running"
+      : "idle";
   const content =
     maybeResult && typeof maybeResult.content === "string"
       ? maybeResult.content

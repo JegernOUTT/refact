@@ -160,7 +160,7 @@ describe("ReportToolCard", () => {
       );
       expect(container.querySelector("section")).toHaveAttribute(
         "data-status",
-        failed || !success ? "error" : "success",
+        failed || !success ? "error" : "idle",
       );
       fireEvent.click(screen.getByRole("button"));
       expect(screen.getByText("No verification evidence")).toBeInTheDocument();
@@ -266,7 +266,11 @@ describe("ReportToolCard", () => {
   });
 
   test("TaskDoneTool pending uses compact report language, never completed", () => {
-    render(<TaskDoneTool toolCall={toolCall()} />);
+    const chat = createDefaultChatState();
+    chat.threads[chat.current_thread_id].streaming = true;
+    render(<TaskDoneTool toolCall={toolCall()} />, {
+      preloadedState: { chat },
+    });
     expect(screen.getByRole("button")).toHaveTextContent("Task report");
     expect(screen.getByRole("button")).toHaveTextContent("Awaiting report");
     expect(screen.queryByText(/Task completed/)).not.toBeInTheDocument();
@@ -320,6 +324,7 @@ describe("ReportToolCard", () => {
     const chat = createDefaultChatState();
     chat.threads[chat.current_thread_id].thread.messages =
       content === null ? [] : [toolMessage(undefined, content, failed)];
+    chat.threads[chat.current_thread_id].streaming = content === null;
     render(<TaskDoneTool toolCall={toolCall()} />, {
       preloadedState: { chat },
     });
@@ -417,5 +422,50 @@ describe("ReportToolCard", () => {
     fireEvent.click(screen.getByRole("button"));
     fireEvent.click(screen.getByRole("button", { name: "More details" }));
     expect(screen.getByTitle("Copy report")).toBeInTheDocument();
+  });
+});
+
+describe("explicit compact report transport", () => {
+  test.each(["pending", "unknown", "running"] as const)(
+    "uses %s transport without inventing a result",
+    (compactTransportState) => {
+      const { container } = renderReportTool(undefined, {
+        compact: true,
+        compactTransportState,
+      });
+      expect(container.querySelector("section")).toHaveAttribute(
+        "data-status",
+        compactTransportState === "running" ? "running" : "idle",
+      );
+      expect(screen.getByRole("button")).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
+      expect(screen.getByRole("button")).toHaveTextContent("Awaiting report");
+    },
+  );
+
+  test("explicit failed transport dominates typed reported success only in compact mode", () => {
+    const message = toolMessage(
+      undefined,
+      JSON.stringify({ summary: "Attempted build", success: true }),
+    );
+    const first = renderReportTool(message, {
+      compact: true,
+      compactTransportState: "failed",
+    });
+    expect(screen.getByText("Request failed")).toBeInTheDocument();
+    expect(first.container.querySelector("section")).toHaveAttribute(
+      "data-status",
+      "error",
+    );
+    first.unmount();
+    const panel = renderReportTool(message, {
+      compactTransportState: "failed",
+    });
+    expect(panel.container.querySelector("section")).toHaveAttribute(
+      "data-status",
+      "success",
+    );
   });
 });

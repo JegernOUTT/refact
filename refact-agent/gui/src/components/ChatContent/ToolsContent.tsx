@@ -89,6 +89,10 @@ import { AgentPulseView } from "./AgentPulseView";
 import { AgentDiffView } from "./AgentDiffView";
 import { TaskDocumentsView } from "./TaskDocumentsView";
 import { FinalReportView } from "./FinalReportView";
+import { finalReportPresentation, parseFinalReport } from "./finalReportJson";
+import { CompactToolDetails } from "../Tools/AgenticTool/CompactToolDetails";
+import { PagedText } from "../Tools/AgenticTool/PagedText";
+import { ToolCard as DetailsCard } from "../ui";
 import { BackgroundAgentCard } from "../BackgroundAgentCard";
 import { AgenticTool, isAgenticToolName } from "../Tools/AgenticTool";
 import { LaunchPreviewTool } from "../Tools/AgenticTool/LaunchPreviewTool";
@@ -100,38 +104,36 @@ import {
   isPrivacyRefusalContent,
 } from "../../services/refact/privacy";
 
-function finalReportSuccess(content: string): boolean | null {
-  try {
-    const parsed = JSON.parse(content) as unknown;
-    if (typeof parsed !== "object" || parsed === null) return null;
-    if (!("success" in parsed)) return null;
-    return typeof parsed.success === "boolean" ? parsed.success : null;
-  } catch {
-    return null;
-  }
-}
-
 type FinalReportToolCardProps = {
   toolCall: ToolCall;
-  content: string;
+  content: string | null;
+  rawContent?: ToolResult["content"];
   toolFailed?: boolean;
+  extra?: Record<string, unknown>;
 };
 
 const FinalReportToolCard: React.FC<FinalReportToolCardProps> = ({
   toolCall,
   content,
+  rawContent,
   toolFailed,
+  extra,
 }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
-  const reportSuccess = finalReportSuccess(content);
-  const isError = Boolean(toolFailed) || reportSuccess === false;
-  const status = isError ? "error" : "success";
+  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
+  const presentation = finalReportPresentation(
+    content ?? (rawContent === undefined ? null : ""),
+    toolFailed,
+  );
+  const report = content ? parseFinalReport(content) : null;
+  const status = presentation.tone === "danger" ? "error" : "idle";
   const statusIcon =
     status === "error" ? (
       <CircleX data-testid="final-report-tool-error-icon" />
-    ) : (
+    ) : report?.success === true ? (
       <CircleCheck data-testid="final-report-tool-success-icon" />
+    ) : (
+      <File data-testid="final-report-tool-neutral-icon" />
     );
 
   return (
@@ -139,20 +141,34 @@ const FinalReportToolCard: React.FC<FinalReportToolCardProps> = ({
       <span data-testid="final-report-tool" hidden />
       <ToolCard
         icon={statusIcon}
-        summary="Task agent final report"
-        meta={
-          reportSuccess === false
-            ? "failed"
-            : reportSuccess === true
-              ? "success"
-              : undefined
-        }
+        density="compact"
+        summary={presentation.headline}
+        meta={presentation.stateLabel}
         status={status}
         isOpen={isOpen}
         onToggle={handleToggle}
         toolCall={toolCall}
       >
-        <FinalReportView content={content} />
+        {content === null ? (
+          <CompactToolDetails facts={presentation.facts} />
+        ) : (
+          <FinalReportView compact content={content} />
+        )}
+        <DetailsCard title="Technical details" defaultOpen={false}>
+          <PagedText label="Raw arguments" body={toolCall.function.arguments} />
+          {rawContent !== undefined && typeof rawContent !== "string" && (
+            <PagedText
+              label="Full response"
+              body={JSON.stringify(rawContent, null, 2)}
+            />
+          )}
+          {extra && (
+            <PagedText
+              label="Response metadata"
+              body={JSON.stringify(extra, null, 2)}
+            />
+          )}
+        </DetailsCard>
       </ToolCard>
     </>
   );
@@ -362,17 +378,23 @@ function readBackgroundAgentStatus(
 function backgroundAgentPlaceholder(
   result: ToolResult,
   toolName: "subagent" | "delegate",
+  toolCall: ToolCall,
 ): BackgroundAgentSummary | null {
   const agentId = getBackgroundAgentId(result);
   if (!agentId) return null;
   const kind = readBackgroundAgentKind(result, toolName);
+  const task = parseAgenticArgs(toolCall.function.arguments).args.task;
   return {
     agent_id: agentId,
     parent_chat_id: readStringField(result, "parent_chat_id") ?? "",
     child_chat_id: readStringField(result, "child_chat_id"),
     kind,
     status: readBackgroundAgentStatus(result),
-    title: readStringField(result, "title") ?? formatToolDisplayName(toolName),
+    title:
+      readStringField(result, "title") ??
+      (typeof task === "string" && task.trim() !== ""
+        ? task
+        : `Requested background work: ${agentId.slice(-8)}`),
     progress: readStringField(result, "progress"),
     step_count: readNumberField(result, "step_count") ?? 0,
     last_activity: readStringField(result, "last_activity"),
@@ -402,6 +424,7 @@ function backgroundAgentPlaceholder(
 
 function decorateBackgroundAgentTool(
   elem: React.ReactNode,
+  toolCall: ToolCall,
   toolName: string | undefined,
   result: ToolResult | undefined,
   threadId: string | undefined,
@@ -413,21 +436,39 @@ function decorateBackgroundAgentTool(
   if (!isBackgroundAgentTool(toolName)) return elem;
   const agentId = getBackgroundAgentId(result);
   if (!result || !agentId) return elem;
-  const agent = backgroundAgentPlaceholder(result, toolName);
+  const agent = backgroundAgentPlaceholder(result, toolName, toolCall);
   if (!agent) return elem;
-  // The card carries every fact the raw "✓ Started background delegate…" tool
-  // result spells out (id, target files, status, steps), so rendering both
-  // duplicated the same wall of text under the card. The card becomes the
-  // primary — and only — rendering for background agent tool calls.
   return (
     <BackgroundAgentCard
       key={`background-agent-${agent.agent_id}`}
       agent={agent}
       agentId={agentId}
       threadId={threadId}
-      compactDefault
+      presentation="inline"
+      toolCall={toolCall}
+      launchFailed={result.tool_failed === true}
+      statusKnown={isBackgroundAgentStatus(
+        readStringField(result, "background_agent_status") ??
+          readStringField(result, "status"),
+      )}
       onOpenAgentTrajectory={onOpenTrajectory}
-    />
+    >
+      <PagedText label="Raw arguments" body={toolCall.function.arguments} />
+      <PagedText
+        label="Full response"
+        body={
+          typeof result.content === "string"
+            ? result.content
+            : JSON.stringify(result.content, null, 2)
+        }
+      />
+      {result.extra && (
+        <PagedText
+          label="Response metadata"
+          body={JSON.stringify(result.extra, null, 2)}
+        />
+      )}
+    </BackgroundAgentCard>
   );
 }
 
@@ -960,12 +1001,14 @@ function processToolCalls(
       <NewSubagentTool
         key={`background-agent-tool-${headName}-${processed.length}`}
         toolCall={normalizedHead}
+        presentation="inline"
       />
     );
     const decoratedElem = isPreview
       ? elem
       : decorateBackgroundAgentTool(
           elem,
+          normalizedHead,
           headName,
           result,
           threadId,
@@ -1341,20 +1384,16 @@ function processToolCalls(
   }
 
   if (headName === "agent_finish") {
-    const elem =
-      result && typeof result.content === "string" ? (
-        <FinalReportToolCard
-          key={`final-report-tool-${head.id ?? processed.length}`}
-          toolCall={normalizedHead}
-          content={result.content}
-          toolFailed={result.tool_failed}
-        />
-      ) : (
-        <GenericTool
-          key={`final-report-tool-${head.id ?? processed.length}`}
-          toolCall={normalizedHead}
-        />
-      );
+    const elem = (
+      <FinalReportToolCard
+        key={`final-report-tool-${head.id ?? processed.length}`}
+        toolCall={normalizedHead}
+        content={typeof result?.content === "string" ? result.content : null}
+        toolFailed={result?.tool_failed}
+        rawContent={result?.content}
+        extra={result?.extra}
+      />
+    );
     return processToolCalls(
       tail,
       toolResults,
@@ -1393,6 +1432,7 @@ function processToolCalls(
       <AskQuestionsTool
         key={`ask-questions-tool-${processed.length}`}
         toolCall={normalizedHead}
+        compact
       />
     );
     return processToolCalls(

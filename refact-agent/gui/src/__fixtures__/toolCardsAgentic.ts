@@ -466,3 +466,102 @@ export const ENGINE_ANALYSIS_MESSAGES: ChatMessages = [
     }),
   },
 ];
+
+export const COMPACT_AGENTIC_MESSAGES: ChatMessages = [
+  {
+    role: "assistant",
+    content:
+      "The transcript keeps requested content and observed state separate. Full receipts remain available on demand.",
+    tool_calls: [
+      call("compact-message", "agent_message", {
+        to: "bg-agent",
+        text: "Keep the change scoped to the parser",
+      }),
+      call("compact-plan", "set_plan", {
+        content: "Preserve the parser and add focused coverage",
+      }),
+      call("compact-goal", "validate_goal", {}),
+      call("compact-claim", "board_claim", { card_id: "T-13" }),
+      call("compact-note", "task_mem_save", {
+        title: "Parser boundary",
+        content: "Unknown output stays unconfirmed",
+      }),
+      call("compact-inspect", "agent_status", { agent_id: "bg-agent" }),
+      call("compact-control", "merge_agent", { card_id: "T-13" }),
+      call("compact-final", "agent_finish", {
+        success: true,
+        report: "Focused implementation",
+      }),
+      call("compact-unknown", "task_board_authority", {
+        task_id: "task-local",
+      }),
+    ],
+  },
+  {
+    role: "tool",
+    tool_call_id: "compact-message",
+    tool_failed: false,
+    content: "Message queued.",
+    extra: {
+      delivery_receipt: {
+        kind: "agent_message",
+        delivery_id: "delivery-local",
+        outcome: "queued",
+        ttl_secs: 60,
+      },
+    },
+  },
+  {
+    role: "tool",
+    tool_call_id: "compact-plan",
+    tool_failed: false,
+    content: '{"version":1,"supersedes":null}',
+  },
+  {
+    role: "tool",
+    tool_call_id: "compact-goal",
+    tool_failed: false,
+    content: "Validation unavailable",
+    extra: { validate_goal: { verdict: "unavailable" } },
+  },
+  {
+    role: "tool",
+    tool_call_id: "compact-claim",
+    tool_failed: true,
+    content: "Claim refused by current scope",
+  },
+  {
+    role: "tool",
+    tool_call_id: "compact-note",
+    tool_failed: false,
+    content: "Historical note saved.",
+  },
+  {
+    role: "tool",
+    tool_call_id: "compact-inspect",
+    tool_failed: false,
+    content: JSON.stringify({
+      agent_id: "bg-agent",
+      title: "Inspect the parser boundary",
+      status: "waiting_for_approval",
+    }),
+  },
+  {
+    role: "tool",
+    tool_call_id: "compact-control",
+    tool_failed: false,
+    content: JSON.stringify({ card_id: "T-13", merged: true, conflict: false }),
+  },
+  {
+    role: "tool",
+    tool_call_id: "compact-final",
+    tool_failed: false,
+    content: JSON.stringify({
+      summary: "Added parser boundary coverage",
+      success: true,
+      files_changed: ["src/parser.ts"],
+      tests_added_or_updated: ["parser.test.ts"],
+      verification: [],
+    }),
+  },
+];

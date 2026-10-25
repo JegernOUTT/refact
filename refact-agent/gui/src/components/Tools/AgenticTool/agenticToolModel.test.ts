@@ -1,5 +1,13 @@
+import { buildCompactCollaborationPresentation } from "./compactCollaboration";
+import { buildCompactLaunchMessagePresentation } from "./compactLaunchMessage";
+import { buildCompactWorkControlPresentation } from "./compactWorkControl";
+import { compactGoalPlanPresentation } from "./compactGoalPlan";
+import { compactBoardNotesPresentation } from "./compactBoardNotes";
 import { describe, expect, test } from "vitest";
-import { buildAgenticToolViewModel } from "./agenticToolModel";
+import {
+  buildCompactAgenticPresentation,
+  buildAgenticToolViewModel,
+} from "./agenticToolModel";
 import {
   AGENTIC_TOOL_NAMES,
   BOARD_RUNTIME_TOOL_NAMES,
@@ -474,5 +482,108 @@ describe("buildAgenticToolViewModel", () => {
     });
     expect(control?.family).toBe("control");
     expect(control?.status).toBe("pending");
+  });
+});
+
+describe("compact agentic dispatch", () => {
+  test.each(AGENTIC_TOOL_NAMES)(
+    "%s composes its domain adapter across aliases",
+    (name) => {
+      const pascal = name
+        .split("_")
+        .map((part) => part[0].toUpperCase() + part.slice(1))
+        .join("");
+      for (const toolName of [
+        name,
+        `t_${name}`,
+        pascal,
+        `T_${pascal}`,
+        name.replace(/_/gu, "-"),
+      ]) {
+        const input = {
+          toolName,
+          arguments: {
+            title: "Requested scope",
+            text: "Keep the changes scoped",
+            status_line: "Collecting evidence",
+            content: "Ship the scoped fix",
+            card_id: "T-1",
+          },
+          result: "Arbitrary completed verified delivered merged prose",
+          transportState: "succeeded" as const,
+        };
+        const expected =
+          buildCompactCollaborationPresentation(input) ??
+          buildCompactLaunchMessagePresentation(input) ??
+          buildCompactWorkControlPresentation(input) ??
+          compactGoalPlanPresentation(input) ??
+          compactBoardNotesPresentation(input);
+        const view = buildCompactAgenticPresentation(input);
+        expect(view, toolName).not.toBeNull();
+        if (expected) expect(view).toEqual(expected);
+        else
+          expect(view).toMatchObject({
+            stateLabel: "Outcome unconfirmed",
+            tone: "neutral",
+          });
+        expect(view?.facts.length).toBeLessThanOrEqual(3);
+        expect(Array.from(view?.headline ?? "").length).toBeLessThanOrEqual(
+          160,
+        );
+        expect(view?.tone).not.toBe("positive");
+      }
+    },
+  );
+
+  test.each(["agent_peer_grant", "task_board_authority"])(
+    "%s has an explicitly neutral bounded fallback",
+    (toolName) => {
+      const input = {
+        toolName,
+        arguments: {
+          agent_id: "a".repeat(500),
+          title: "<script>inert</script>" + "🦊".repeat(500),
+        },
+        result: { success: true, verified: true },
+        transportState: "succeeded" as const,
+      };
+      expect(buildCompactAgenticPresentation(input)).toMatchObject({
+        stateLabel: "Outcome unconfirmed",
+        tone: "neutral",
+      });
+      expect(
+        Array.from(buildCompactAgenticPresentation(input)?.headline ?? "")
+          .length,
+      ).toBeLessThanOrEqual(160);
+      expect(
+        buildCompactAgenticPresentation({ ...input, transportState: "failed" }),
+      ).toMatchObject({ stateLabel: "Request failed", tone: "danger" });
+    },
+  );
+
+  test.each([
+    "cat",
+    "shell",
+    "unknown_tool",
+    "subagent",
+    "delegate",
+    "code_review",
+  ])("does not steal %s from its existing route", (toolName) => {
+    expect(
+      buildCompactAgenticPresentation({
+        toolName,
+        transportState: "succeeded",
+      }),
+    ).toBeNull();
+  });
+
+  test("a bare child ID describes the requested operation, never an invented title", () => {
+    const view = buildCompactAgenticPresentation({
+      toolName: "T_AgentCancel",
+      arguments: { agent_id: "12345678901234567890" },
+      transportState: "pending",
+    });
+    expect(view?.headline).toBe("Request child cancellation: …34567890");
+    expect(view?.tone).toBe("neutral");
   });
 });

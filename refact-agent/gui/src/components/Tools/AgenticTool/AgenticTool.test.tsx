@@ -75,6 +75,11 @@ function renderTools(
   });
 }
 
+function openFullFamily() {
+  fireEvent.click(screen.getAllByRole("button")[0]);
+  fireEvent.click(screen.getByRole("button", { name: "More details" }));
+}
+
 const INVENTORY = Array.from(
   new Set([...AGENTIC_TOOL_NAMES, ...BOARD_RUNTIME_TOOL_NAMES]),
 ).filter((name) => isAgenticToolName(name));
@@ -209,12 +214,14 @@ describe("AgenticTool registry wiring", () => {
       [toolResult("task_verify_card", body)],
       [toolCall("task_verify_card", { card_id: "T-1" })],
     );
+    openFullFamily();
+    const response = within(screen.getByRole("region", { name: "Response" }));
     const shown = screen.getByTestId("agentic-tool-body");
     expect(shown.textContent?.length).toBe(PAGE_CHARS);
-    expect(screen.getByRole("status")).toHaveTextContent("Section 1 of 3");
-    const next = screen.getByRole("button", { name: "Next section" });
+    expect(response.getByRole("status")).toHaveTextContent("Section 1 of 3");
+    const next = response.getByRole("button", { name: "Next section" });
     fireEvent.click(next);
-    expect(screen.getByRole("status")).toHaveTextContent("Section 2 of 3");
+    expect(response.getByRole("status")).toHaveTextContent("Section 2 of 3");
     fireEvent.click(next);
     expect(screen.getByTestId("agentic-tool-body").textContent?.length).toBe(
       10,
@@ -228,9 +235,18 @@ describe("AgenticTool registry wiring", () => {
       [toolCall("agent_message", { to: "peer-1", text: "Rebase please" })],
     );
 
+    openFullFamily();
     expect(screen.getByTestId("agentic-tool-message")).toBeInTheDocument();
-    expect(screen.getByText("Rebase please")).toBeInTheDocument();
-    expect(screen.getByText("peer-1")).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("agentic-tool-message")).getByText(
+        "Rebase please",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByLabelText("Agent message receipt")).getByText(
+        "peer-1",
+      ),
+    ).toBeInTheDocument();
   });
 
   test("renders agent rows for agents_overview", () => {
@@ -245,6 +261,7 @@ describe("AgenticTool registry wiring", () => {
       [toolCall("agents_overview")],
     );
 
+    openFullFamily();
     expect(screen.getByTestId("agentic-tool-agents")).toBeInTheDocument();
     expect(screen.getByText("Fix the pond")).toBeInTheDocument();
   });
@@ -252,6 +269,7 @@ describe("AgenticTool registry wiring", () => {
   test("shows pending state when no result arrived", () => {
     renderTools([], [toolCall("agent_wait", { agent_id: "abc" })]);
 
+    openFullFamily();
     expect(screen.getByTestId("agentic-tool-pending")).toBeInTheDocument();
   });
 
@@ -274,6 +292,7 @@ describe("AgenticTool registry wiring", () => {
         }),
       ],
     );
+    openFullFamily();
     expect(screen.getByLabelText("Child command approval")).toHaveTextContent(
       "Single execution only",
     );
@@ -290,6 +309,7 @@ describe("AgenticTool registry wiring", () => {
         }),
       ],
     );
+    openFullFamily();
     expect(screen.getByLabelText("Child resume")).toHaveTextContent(
       "Execution cap reached",
     );
@@ -302,6 +322,7 @@ describe("AgenticTool registry wiring", () => {
       [toolCall("agent_result", { agent_id: "abc" })],
     );
 
+    openFullFamily();
     expect(screen.getByTestId("agentic-tool-error")).toBeInTheDocument();
   });
 
@@ -330,6 +351,7 @@ describe("AgenticTool registry wiring", () => {
       [toolCall("agent_cancel", { agent_id: "abc", reason: "stale" })],
     );
 
+    openFullFamily();
     const raw = screen.getByTestId("agentic-tool-raw-args");
     expect(raw.closest("details")?.open).toBe(false);
   });
@@ -943,13 +965,204 @@ describe("AgenticTool collaboration compact shell", () => {
     );
   });
 
-  test("leaves the non-collaboration outer default unchanged", () => {
+  test("opts non-collaboration into the same closed compact default", () => {
     renderTools(
       [toolResult("agent_cancel", "Cancel requested")],
       [toolCall("agent_cancel")],
     );
     const outer = screen.getAllByRole("button")[0];
-    expect(outer).toHaveAttribute("aria-expanded", "true");
-    expect(outer.closest("section")).toHaveAttribute("data-density", "default");
+    expect(outer).toHaveAttribute("aria-expanded", "false");
+    expect(outer.closest("section")).toHaveAttribute("data-density", "compact");
+  });
+});
+
+describe("composed compact family inventory", () => {
+  test.each(INVENTORY)(
+    "%s stays compact, closed and evidence-limited for pending, malformed and failed history",
+    (name) => {
+      for (const phase of ["pending", "malformed", "failed"] as const) {
+        const call = toolCall(name);
+        call.function.arguments =
+          phase === "malformed"
+            ? "{broken"
+            : JSON.stringify({
+                title: "Requested work",
+                task: "Requested work",
+                text: "Keep scope",
+                agent_id: "raw-agent-id",
+                card_id: "T-1",
+              });
+        const { container, unmount } = renderTools(
+          phase === "pending"
+            ? []
+            : [
+                toolResult(
+                  name,
+                  "RAW_TECHNICAL_SENTINEL completed verified pushed delivered",
+                  phase === "failed",
+                ),
+              ],
+          [call],
+        );
+        const row = container.querySelector('section[data-density="compact"]');
+        expect(row, name).not.toBeNull();
+        expect(row).toHaveAttribute("data-open", "false");
+        expect(row?.querySelector("button")).not.toHaveTextContent(
+          /RAW_TECHNICAL_SENTINEL|subagent:|agent message →/iu,
+        );
+        expect(screen.queryByTestId("generic-tool")).toBeNull();
+        const details = screen.getByRole("button", { name: "More details" });
+        expect(details).toHaveAttribute("aria-expanded", "false");
+        expect(details.closest("[inert]")).not.toBeNull();
+        if (phase === "failed")
+          expect(row).toHaveAttribute("data-status", "error");
+        else expect(row).toHaveAttribute("data-status", "idle");
+        const outer = row?.querySelector("button");
+        if (!outer) throw new Error("Missing compact toggle");
+        fireEvent.click(outer);
+        expect(
+          Array.from(row?.querySelectorAll("dl dd") ?? []).filter(
+            (fact) => !fact.closest("[inert]"),
+          ).length,
+        ).toBeLessThanOrEqual(3);
+        expect(details).toHaveAttribute("aria-expanded", "false");
+        fireEvent.click(details);
+        expect(screen.getByLabelText("Raw arguments content").textContent).toBe(
+          call.function.arguments,
+        );
+        if (phase !== "pending")
+          expect(
+            screen.getByLabelText("Full response content"),
+          ).toHaveTextContent("RAW_TECHNICAL_SENTINEL");
+        unmount();
+      }
+    },
+  );
+
+  test.each(["agent_message", "set_plan", "agent_wait", "board_update"])(
+    "%s preserves independent stored choices, navigation focus and stream updates",
+    async (name) => {
+      const call = toolCall(name, {
+        text: "Requested content",
+        content: "Requested content",
+        agent_id: "abc",
+        card_id: "T-1",
+      });
+      const sibling = toolCall("code_mode");
+      const values = new Map([[`tc:${call.id}`, true]]);
+      const storage = {
+        get: (key: string) => values.get(key),
+        set: (key: string, value: boolean) => {
+          values.set(key, value);
+        },
+      };
+      const wrap = (content: ReactElement) => (
+        <CollapsibleStoreProvider value={storage}>
+          {content}
+        </CollapsibleStoreProvider>
+      );
+      const { container, user, store, unmount } = renderTools(
+        [],
+        [call, sibling],
+        wrap,
+      );
+      const rows = container.querySelectorAll(
+        'section[data-density="compact"]',
+      );
+      const outer = rows[0].querySelector("button");
+      const other = rows[1].querySelector("button");
+      if (!outer || !other) throw new Error("Missing sibling toggles");
+      expect(outer).toHaveAttribute("aria-expanded", "true");
+      expect(other).toHaveAttribute("aria-expanded", "false");
+      fireEvent.click(outer);
+      outer.focus();
+      await user.tab();
+      expect(other).toHaveFocus();
+      act(() => {
+        store.dispatch(
+          applyChatEvent({
+            type: "runtime_updated",
+            chat_id: CHAT_ID,
+            seq: "1",
+            state: "generating",
+          }),
+        );
+        store.dispatch(
+          applyChatEvent({
+            type: "message_added",
+            chat_id: CHAT_ID,
+            seq: "2",
+            index: 0,
+            message: {
+              ...toolResult(name, "failed transport", true),
+              message_id: "compact-result",
+            },
+          }),
+        );
+      });
+      expect(outer).toHaveAttribute("aria-expanded", "false");
+      expect(rows[0]).toHaveAttribute("data-status", "error");
+      expect(other).toHaveAttribute("aria-expanded", "false");
+      unmount();
+      const remounted = renderTools([], [call, sibling], wrap);
+      expect(
+        remounted.container.querySelector('section[data-density="compact"]'),
+      ).toHaveAttribute("data-open", "false");
+    },
+  );
+
+  test("typed mail metadata drives both compact receipt and retained full receipt", () => {
+    const message = {
+      ...toolResult("agent_message", "Misleading prose: delivered"),
+      extra: {
+        delivery_receipt: {
+          kind: "agent_message",
+          delivery_id: "delivery-1",
+          outcome: "queued",
+          ttl_secs: 15,
+        },
+      },
+    };
+    renderTools(
+      [message],
+      [toolCall("agent_message", { text: "Wait for the check", to: "abc" })],
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Queued");
+    openFullFamily();
+    expect(screen.getByLabelText("Agent message receipt")).toHaveTextContent(
+      "Message queued (expires after 15s unless landed)",
+    );
+    expect(
+      screen.getByLabelText("Response metadata content"),
+    ).toHaveTextContent('"outcome": "queued"');
+  });
+
+  test("hostile huge arguments stay inert and bounded with complete deep recovery", () => {
+    const task = "<script>attack()</script>" + "🦊".repeat(5000);
+    const call = toolCall("set_plan", { content: task });
+    const { container } = renderTools(
+      [toolResult("set_plan", '{"version":1,"supersedes":null}')],
+      [call],
+    );
+    const outer = container.querySelector("button");
+    expect(Array.from(outer?.textContent ?? "").length).toBeLessThanOrEqual(
+      180,
+    );
+    expect(container.querySelector("script")).toBeNull();
+    openFullFamily();
+    const raw = within(screen.getByRole("region", { name: "Raw arguments" }));
+    let recovered =
+      raw.getByLabelText("Raw arguments content").textContent ?? "";
+    const next = raw.getByRole("button", { name: "Next section" });
+    for (
+      let index = 1;
+      index < Math.ceil(call.function.arguments.length / PAGE_CHARS);
+      index++
+    ) {
+      fireEvent.click(next);
+      recovered +=
+        raw.getByLabelText("Raw arguments content").textContent ?? "";
+    }
+    expect(recovered).toBe(call.function.arguments);
   });
 });

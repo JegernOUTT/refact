@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react";
 import { userEvent, within } from "@storybook/testing-library";
 import { ChatStoryHarness } from "../../__stories__/ChatStoryHarness";
 import {
+  COMPACT_AGENTIC_MESSAGES,
   CHROME_MESSAGES,
   CONFLICT_MESSAGES,
   DELEGATE_MESSAGES,
@@ -56,8 +57,11 @@ export const Expanded: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await userEvent.click(
-      canvas.getByRole("button", { name: "Expand background agent details" }),
+      within(canvas.getByTestId("background-agent-inline")).getAllByRole(
+        "button",
+      )[0],
     );
+    await userEvent.click(canvas.getByRole("button", { name: "More details" }));
   },
 };
 
@@ -107,4 +111,8 @@ export const Chrome: Story = {
 
 export const EngineAnalysis: Story = {
   args: { messages: ENGINE_ANALYSIS_MESSAGES },
+};
+
+export const CompactDomainInventory: Story = {
+  args: { messages: COMPACT_AGENTIC_MESSAGES },
 };

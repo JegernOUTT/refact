@@ -877,3 +877,28 @@ describe("legacy SubagentTool inline fallback", () => {
     },
   );
 });
+
+describe("inline request failure presentation", () => {
+  it("keeps launch failure independent of a running child and leaves panel callers unchanged", () => {
+    const agent = makeAgent({ status: "running", pending_questions: 0 });
+    const { rerender, container } = render(
+      <BackgroundAgentCard presentation="inline" launchFailed agent={agent} />,
+    );
+    const row = screen.getByTestId("background-agent-inline");
+    expect(row).toHaveAttribute("data-status", "error");
+    expect(row).toHaveAttribute("data-open", "false");
+    expect(screen.getByRole("alert")).toHaveTextContent("Request failed");
+    const outer = container.querySelector("button");
+    if (!outer) throw new Error("Missing launch row");
+    fireEvent.click(outer);
+    fireEvent.click(screen.getByRole("button", { name: "More details" }));
+    expect(screen.getByText("Running")).toBeInTheDocument();
+    expect(agent.status).toBe("running");
+    rerender(<BackgroundAgentCard launchFailed agent={agent} />);
+    expect(screen.getByTestId("background-agent-status-dot")).toHaveAttribute(
+      "aria-label",
+      "Background agent status: Running",
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});

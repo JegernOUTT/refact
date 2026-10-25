@@ -34,6 +34,7 @@ export interface BackgroundAgentCardProps {
   compactDefault?: boolean;
   presentation?: "panel" | "inline";
   statusKnown?: boolean;
+  launchFailed?: boolean;
   toolCallId?: string;
   toolCall?: ToolCall;
   children?: React.ReactNode;
@@ -596,10 +597,18 @@ const ExpandedDetail: React.FC<{
 const InlineBackgroundAgent: React.FC<{
   agent: BackgroundAgentSummary;
   statusKnown: boolean;
+  launchFailed: boolean;
   toolCallId?: string;
   onOpenTrajectory?: (childChatId: string) => void;
   children?: React.ReactNode;
-}> = ({ agent, statusKnown, toolCallId, onOpenTrajectory, children }) => {
+}> = ({
+  agent,
+  statusKnown,
+  launchFailed,
+  toolCallId,
+  onOpenTrajectory,
+  children,
+}) => {
   const storeKey = toolCallId
     ? `tc:${toolCallId}`
     : `background-agent:${agent.agent_id}`;
@@ -623,8 +632,13 @@ const InlineBackgroundAgent: React.FC<{
         ? humanizeIdentifier(status)
         : "Status unknown";
   const questions = pendingQuestions(agent);
-  const tone =
-    questions > 0 ? "warning" : status ? statusTone(status) : "muted";
+  const tone = launchFailed
+    ? "danger"
+    : questions > 0
+      ? "warning"
+      : status
+        ? statusTone(status)
+        : "muted";
   const headline =
     compactText(
       agent.title.replace(/^\s*(?:subagent|delegate)\s*(?::\s*|$)/iu, ""),
@@ -644,6 +658,7 @@ const InlineBackgroundAgent: React.FC<{
     <ToolCard
       data-testid="background-agent-inline"
       density="compact"
+      status={launchFailed ? "error" : "idle"}
       open={expanded}
       onOpenChange={(open) => preserveScrollAnchor(() => setExpanded(open))}
       onPointerDownCapture={prepareScrollAnchor}
@@ -657,10 +672,13 @@ const InlineBackgroundAgent: React.FC<{
           </span>
           <span
             className={styles.inlineState}
-            data-tone={status ? statusTone(status) : "muted"}
+            data-tone={
+              launchFailed ? "danger" : status ? statusTone(status) : "muted"
+            }
             data-testid="background-agent-inline-status"
+            role={launchFailed ? "alert" : "status"}
           >
-            {stateLabel}
+            {launchFailed ? `Request failed · ${stateLabel}` : stateLabel}
           </span>
           {questions > 0 && (
             <span
@@ -724,6 +742,7 @@ const _BackgroundAgentCard: React.FC<BackgroundAgentCardProps> = ({
   compactDefault = true,
   presentation = "panel",
   statusKnown = true,
+  launchFailed = false,
   toolCallId,
   toolCall,
   children,
@@ -757,6 +776,7 @@ const _BackgroundAgentCard: React.FC<BackgroundAgentCardProps> = ({
       <InlineBackgroundAgent
         agent={displayedAgent}
         statusKnown={Boolean(subscribedAgent) || statusKnown}
+        launchFailed={launchFailed}
         toolCallId={toolCallId ?? toolCall?.id}
         onOpenTrajectory={
           onOpenTrajectory ?? onOpenAgentTrajectory

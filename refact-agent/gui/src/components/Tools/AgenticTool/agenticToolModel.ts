@@ -3,6 +3,71 @@ import {
   type AgenticFamily,
   type AgenticIconKey,
 } from "./agenticFamilies";
+import { normalizeToolName } from "../../../utils/toolNameAliases";
+import { buildCompactCollaborationPresentation } from "./compactCollaboration";
+import { buildCompactLaunchMessagePresentation } from "./compactLaunchMessage";
+import { buildCompactWorkControlPresentation } from "./compactWorkControl";
+import { compactGoalPlanPresentation } from "./compactGoalPlan";
+import { compactBoardNotesPresentation } from "./compactBoardNotes";
+import {
+  compactText,
+  compactTransportPresentation,
+  readCompactRecord,
+  readCompactText,
+  type CompactAgenticInput,
+  type CompactAgenticPresentation,
+} from "./compactPresentation";
+
+export function buildCompactAgenticPresentation(
+  input: CompactAgenticInput,
+): CompactAgenticPresentation | null {
+  const toolName = normalizeToolName(input.toolName) ?? input.toolName;
+  const family = lookupAgenticFamily(toolName);
+  if (!family) return null;
+  const normalized = { ...input, toolName };
+  const collaboration = buildCompactCollaborationPresentation(normalized);
+  const launch = collaboration
+    ? null
+    : buildCompactLaunchMessagePresentation(normalized);
+  const work =
+    collaboration ?? launch
+      ? null
+      : buildCompactWorkControlPresentation(normalized);
+  const presentation =
+    collaboration ??
+    launch ??
+    work ??
+    compactGoalPlanPresentation(normalized) ??
+    compactBoardNotesPresentation(normalized);
+  const args = readCompactRecord(input.arguments);
+  const title = readCompactText(args, "title", "card_title", "card_id");
+  const target = readCompactText(args, "to", "agent_id", "task_id");
+  const subject = title ?? (target ? shortenAgentId(target) : null);
+  if (presentation) {
+    if (!title && target && work !== null && !work.headline.includes(": ")) {
+      return {
+        ...presentation,
+        headline:
+          compactText(
+            `${presentation.headline}: ${shortenAgentId(target)}`,
+            160,
+          ) ?? presentation.headline,
+      };
+    }
+    return presentation;
+  }
+  const operation = `Request ${family.label.toLowerCase()}`;
+  return {
+    headline:
+      compactText(subject ? `${operation}: ${subject}` : operation, 160) ??
+      operation,
+    ...compactTransportPresentation(input.transportState),
+    ...(input.transportState === "succeeded"
+      ? { stateLabel: "Outcome unconfirmed" }
+      : {}),
+    facts: [{ label: "Evidence", value: "No recognized outcome evidence" }],
+  };
+}
 
 export type AgenticToolStatus = "pending" | "success" | "failed";
 

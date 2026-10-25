@@ -14,8 +14,7 @@ import {
 import { push } from "../../../features/Pages/pagesSlice";
 import type { ToolCall } from "../../../services/refact/types";
 import { normalizeToolName } from "../../../utils/toolNameAliases";
-import { Badge, Icon, ToolCard as CollaborationCard } from "../../ui";
-import { ToolCard, type ToolStatus } from "../../ChatContent/ToolCard";
+import { Badge, ToolCard as CompactCard } from "../../ui";
 import { ToolCallTooltip } from "../../ChatContent/ToolCard/ToolCallTooltip";
 import { useStoredOpen } from "../../ChatContent/useStoredOpen";
 import {
@@ -23,6 +22,7 @@ import {
   usePrepareChatScrollAnchor,
 } from "../../ChatContent/useChatScrollAnchor";
 import {
+  buildCompactAgenticPresentation,
   buildAgenticToolViewModel,
   type AgenticToolViewModel,
 } from "./agenticToolModel";
@@ -40,7 +40,7 @@ import { ControlToolView } from "./ControlToolView";
 import { BoardToolView } from "./BoardToolView";
 import { DocToolView } from "./DocToolView";
 import { MemoryToolView } from "./MemoryToolView";
-import { buildCompactCollaborationPresentation } from "./compactCollaboration";
+import { FamilyChildLink } from "./FamilyToolCard";
 import { CompactToolDetails } from "./CompactToolDetails";
 import { PagedText } from "./PagedText";
 import {
@@ -165,7 +165,7 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
   const isCollaboration = LOCAL_COLLABORATION_TOOL_NAMES.includes(
     normalizeToolName(toolCall.function.name) ?? "",
   );
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, !isCollaboration);
+  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
   const dispatch = useAppDispatch();
 
   const isStreaming = useAppSelector((state) =>
@@ -183,9 +183,9 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
       ? maybeResult.content
       : null;
 
-  const collaboration = useMemo(
+  const presentation = useMemo(
     () =>
-      buildCompactCollaborationPresentation({
+      buildCompactAgenticPresentation({
         toolName: toolCall.function.name ?? "",
         arguments: toolCall.function.arguments,
         result: maybeResult?.content,
@@ -209,7 +209,7 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
 
   const model = useMemo(
     () =>
-      collaboration
+      isCollaboration
         ? null
         : buildAgenticToolViewModel({
             toolName: toolCall.function.name,
@@ -221,7 +221,7 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
             historical: Boolean(maybeResult) && !isStreaming && !isWaiting,
           }),
     [
-      collaboration,
+      isCollaboration,
       content,
       isStreaming,
       isWaiting,
@@ -236,7 +236,7 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
       dispatch(
         createChatWithId({
           id: childChatId,
-          title: model?.headline ?? "Agent trajectory",
+          title: presentation?.headline ?? "Agent trajectory",
           parentId: resolvedThreadId,
           linkType: "subagent",
         }),
@@ -244,30 +244,32 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
       dispatch(switchToThread({ id: childChatId }));
       dispatch(push({ name: "chat" }));
     },
-    [dispatch, model?.headline, resolvedThreadId],
+    [dispatch, presentation?.headline, resolvedThreadId],
   );
 
   const preserveScrollAnchor = useChatScrollAnchor();
   const prepareScrollAnchor = usePrepareChatScrollAnchor();
-  const handleCollaborationToggle = useCallback(() => {
+  const handleCompactToggle = useCallback(() => {
     preserveScrollAnchor(handleToggle);
   }, [handleToggle, preserveScrollAnchor]);
   const family = lookupAgenticFamily(toolCall.function.name);
 
-  if (collaboration && family)
+  if (presentation && family)
     return (
       <>
         <span data-testid="agentic-tool" hidden />
         <ToolCallTooltip toolCall={toolCall}>
-          <CollaborationCard
-            aria-label="Collaboration receipt"
+          <CompactCard
+            aria-label={
+              isCollaboration ? "Collaboration receipt" : "Agentic tool"
+            }
             density="compact"
             icon={agenticIcon(family.icon)}
-            title={collaboration.headline}
+            title={presentation.headline}
             status={
-              collaboration.tone === "danger"
+              presentation.tone === "danger"
                 ? "error"
-                : collaboration.tone === "active"
+                : !maybeResult && (isStreaming || isWaiting)
                   ? "running"
                   : "idle"
             }
@@ -275,22 +277,40 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
             onPointerDownCapture={prepareScrollAnchor}
             onMouseDownCapture={prepareScrollAnchor}
             onKeyDownCapture={prepareScrollAnchor}
-            onOpenChange={handleCollaborationToggle}
+            onOpenChange={handleCompactToggle}
             actions={
               <Badge
-                role={collaboration.tone === "danger" ? "alert" : "status"}
+                role={presentation.tone === "danger" ? "alert" : "status"}
                 tone={
-                  collaboration.tone === "danger" ||
-                  collaboration.tone === "warning"
-                    ? collaboration.tone
+                  presentation.tone === "danger" ||
+                  presentation.tone === "warning"
+                    ? presentation.tone
                     : "muted"
                 }
               >
-                {collaboration.stateLabel}
+                {presentation.stateLabel}
               </Badge>
             }
           >
-            <CompactToolDetails facts={collaboration.facts}>
+            <CompactToolDetails
+              facts={presentation.facts}
+              navigation={
+                model?.childChatId ? (
+                  <FamilyChildLink
+                    childChatId={model.childChatId}
+                    onOpen={handleOpenChild}
+                  />
+                ) : undefined
+              }
+            >
+              {model &&
+                familyBody({
+                  model,
+                  content,
+                  extra: maybeResult?.extra,
+                  argumentsRaw: toolCall.function.arguments,
+                  onOpenChildTrajectory: handleOpenChild,
+                })}
               <PagedText
                 label="Raw arguments"
                 body={toolCall.function.arguments}
@@ -308,42 +328,12 @@ export const AgenticTool: React.FC<AgenticToolProps> = ({
                 />
               )}
             </CompactToolDetails>
-          </CollaborationCard>
+          </CompactCard>
         </ToolCallTooltip>
       </>
     );
 
-  if (!model) return null;
-
-  const status: ToolStatus =
-    model.status === "pending"
-      ? "running"
-      : model.status === "failed"
-        ? "error"
-        : "success";
-
-  return (
-    <>
-      <span data-testid="agentic-tool" hidden />
-      <ToolCard
-        icon={<Icon icon={agenticIcon(model.icon)} size="sm" />}
-        summary={model.headline}
-        meta={model.statusLabel ?? undefined}
-        status={status}
-        isOpen={isOpen}
-        onToggle={handleToggle}
-        toolCall={toolCall}
-      >
-        {familyBody({
-          model,
-          content,
-          extra: maybeResult?.extra,
-          argumentsRaw: toolCall.function.arguments,
-          onOpenChildTrajectory: handleOpenChild,
-        })}
-      </ToolCard>
-    </>
-  );
+  return null;
 };
 
 export default AgenticTool;

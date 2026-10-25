@@ -2,6 +2,13 @@ import { User } from "lucide-react";
 import React, { useMemo } from "react";
 import { ToolCall } from "../../../services/refact/types";
 import { ReportToolCard, type ReportData } from "./ReportToolCard";
+import { useThreadId } from "../../../features/Chat/Thread";
+import { useAppSelector } from "../../../hooks/useAppSelector";
+import {
+  selectIsStreamingById,
+  selectIsWaitingById,
+  selectToolResultByThreadAndId,
+} from "../../../features/Chat/Thread/selectors";
 import {
   readCompactRecord,
   readCompactText,
@@ -35,6 +42,16 @@ export const SubagentTool: React.FC<SubagentToolProps> = ({
   toolCall,
   presentation = "panel",
 }) => {
+  const threadId = useThreadId();
+  const result = useAppSelector((state) =>
+    selectToolResultByThreadAndId(state, threadId, toolCall.id),
+  );
+  const streaming = useAppSelector((state) =>
+    selectIsStreamingById(state, threadId),
+  );
+  const waiting = useAppSelector((state) =>
+    selectIsWaitingById(state, threadId),
+  );
   const args = useMemo(
     () => readCompactRecord(toolCall.function.arguments),
     [toolCall.function.arguments],
@@ -73,6 +90,15 @@ export const SubagentTool: React.FC<SubagentToolProps> = ({
       meta={meta}
       extractReport={extractSubagentReport}
       compact={presentation === "inline"}
+      compactTransportState={
+        result
+          ? result.tool_failed
+            ? "failed"
+            : "succeeded"
+          : streaming || waiting
+            ? "running"
+            : "pending"
+      }
       unboundedContent
     />
   );
