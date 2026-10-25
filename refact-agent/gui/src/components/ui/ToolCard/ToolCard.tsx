@@ -18,6 +18,7 @@ export interface ToolCardProps
   title: React.ReactNode;
   icon?: LucideIcon;
   status?: ToolCardStatus;
+  density?: "default" | "compact";
   actions?: React.ReactNode;
   open?: boolean;
   defaultOpen?: boolean;
@@ -94,6 +95,7 @@ export function ToolCard({
   title,
   icon,
   status = "idle",
+  density = "default",
   actions,
   open,
   defaultOpen = true,
@@ -130,7 +132,13 @@ export function ToolCard({
 
   return (
     <section
-      className={classNames(styles.root, styles[`status-${status}`], className)}
+      className={classNames(
+        styles.root,
+        styles[`status-${status}`],
+        density === "compact" && styles.compact,
+        className,
+      )}
+      data-density={density}
       data-open={isOpen}
       data-status={status}
       {...props}

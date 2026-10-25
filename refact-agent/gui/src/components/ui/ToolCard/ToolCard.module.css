@@ -132,6 +132,32 @@
   border-radius: 0;
 }
 
+.compact {
+  gap: 0;
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+}
+
+.compact .header {
+  height: var(--rf-space-6);
+  padding: 0;
+}
+
+.compact .toggle {
+  height: var(--rf-space-6);
+}
+
+.compact .title {
+  flex: 1 1 auto;
+  font-size: var(--rf-text-2);
+  font-weight: var(--rf-weight-regular);
+  line-height: var(--rf-line-2);
+}
+
+.compact .spacer {
+  display: none;
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .bodyGrid {
     transition: grid-template-rows var(--rf-toolcard-motion-duration)

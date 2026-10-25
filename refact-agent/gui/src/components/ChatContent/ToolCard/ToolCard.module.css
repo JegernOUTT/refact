@@ -44,6 +44,11 @@
   white-space: nowrap;
 }
 
+.card[data-density="compact"] .meta {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
 .content {
   --rf-code-block-bg: transparent;
   --rf-code-block-border-width: 0;

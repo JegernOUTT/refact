@@ -21,6 +21,8 @@ export interface ToolCardProps {
   icon: React.ReactNode;
   summary: React.ReactNode;
   meta?: React.ReactNode;
+  density?: "default" | "compact";
+  actions?: React.ReactNode;
   status: ToolStatus;
   isOpen: boolean;
   onToggle: () => void;
@@ -34,6 +36,8 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
   icon,
   summary,
   meta,
+  density = "default",
+  actions,
   status,
   isOpen,
   onToggle,
@@ -78,6 +82,7 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
 
   const card = (
     <KitToolCard
+      actions={actions}
       className={classNames(
         "rf-enter",
         styles.card,
@@ -86,6 +91,7 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
         status === "error" && styles.error,
         className,
       )}
+      density={density}
       open={isOpen}
       onPointerDownCapture={prepareScrollAnchor}
       onMouseDownCapture={prepareScrollAnchor}
