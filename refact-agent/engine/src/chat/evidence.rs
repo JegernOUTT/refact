@@ -1030,15 +1030,8 @@ pub fn evidence_note(record: &EvidenceRecord) -> String {
     }
 }
 
-/// A card's verification contracts. The card's declared `target_files` are the only
-/// inputs its evidence may be cached on: a card that declares none is re-run every
-/// time rather than keyed on inputs nobody named.
 pub fn specs_from_card(card: &BoardCard, defaults: &EvidenceDefaults) -> Vec<VerificationSpec> {
-    let mut specs = instruction_specs(&card.id, &card.instructions, defaults);
-    for spec in specs.iter_mut() {
-        spec.cache.deterministic_inputs = card.target_files.clone();
-    }
-    specs
+    instruction_specs(&card.id, &card.instructions, defaults)
 }
 
 /// Planner-authored contracts recovered from instruction prose.

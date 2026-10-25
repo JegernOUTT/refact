@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 
 use crate::chat::evidence::{
     unexecuted_record, EvidenceRecord, EvidenceRunner, EvidenceService, EvidenceVerdict,
-    VerificationSpec,
+    ExpectedArtifact, VerificationSpec,
 };
 
 const ABSENT: &str = "<absent>";
@@ -114,6 +114,10 @@ pub(crate) fn digest_text(text: &str) -> String {
 /// its own and the key proven to move.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CacheKeyInputs {
+    pub spec_id: String,
+    pub spec_revision: u64,
+    pub required: bool,
+    pub criterion_ids: Vec<String>,
     pub argv: Vec<String>,
     pub cwd: Option<String>,
     pub env: BTreeMap<String, String>,
@@ -121,11 +125,16 @@ pub struct CacheKeyInputs {
     pub toolchain: Vec<String>,
     pub policy: String,
     pub expected_exit_codes: Vec<i32>,
+    pub expected_artifacts: Vec<ExpectedArtifact>,
 }
 
 impl CacheKeyInputs {
     pub async fn collect(worktree: &Path, spec: &VerificationSpec, policy: &str) -> Self {
         Self {
+            spec_id: spec.spec_id.clone(),
+            spec_revision: spec.revision,
+            required: spec.required,
+            criterion_ids: spec.criterion_ids.clone(),
             argv: spec.argv.clone(),
             cwd: spec
                 .cwd
@@ -141,12 +150,20 @@ impl CacheKeyInputs {
             toolchain: spec.toolchain_inputs.clone(),
             policy: policy.to_string(),
             expected_exit_codes: spec.expected_exit_codes.clone(),
+            expected_artifacts: spec.expected_artifacts.clone(),
         }
     }
 
     pub fn key(&self) -> EvidenceCacheKey {
-        let mut canonical = String::new();
-        canonical.push_str("argv:");
+        let mut canonical = serde_json::json!({
+            "spec_id": self.spec_id,
+            "revision": self.spec_revision,
+            "required": self.required,
+            "criterion_ids": self.criterion_ids,
+            "expected_artifacts": self.expected_artifacts,
+        })
+        .to_string();
+        canonical.push_str("\nargv:");
         for argument in &self.argv {
             canonical.push_str(argument);
             canonical.push(FIELD);
@@ -611,10 +628,12 @@ pub(crate) fn test_cache() -> Mutex<EvidenceCache> {
 mod tests {
     use super::*;
     use crate::chat::evidence::{
-        evaluate_gates, EvidenceContext, EvidenceDefaults, SpecAuthority, VerificationSpec,
+        evaluate_gates, ArtifactAssertion, EvidenceContext, EvidenceDefaults, SpecAuthority,
+        VerificationSpec,
     };
     use crate::chat::verify_cmd::VerifyCommandPolicy;
-    use crate::tasks::types::{VerificationOutcome, VerificationResult};
+    use crate::tasks::assignment::{specs_for_validation, Assignment};
+    use crate::tasks::types::{BoardCard, ScopeGuardMode, VerificationOutcome, VerificationResult};
     use async_trait::async_trait;
     use std::sync::Arc;
 
@@ -785,6 +804,24 @@ mod tests {
 
         let mutations: Vec<(&str, Box<dyn Fn(&mut VerificationSpec)>)> = vec![
             (
+                "spec identity",
+                Box::new(|spec: &mut VerificationSpec| spec.spec_id = "S-2".to_string()),
+            ),
+            (
+                "spec revision",
+                Box::new(|spec: &mut VerificationSpec| spec.revision += 1),
+            ),
+            (
+                "required status",
+                Box::new(|spec: &mut VerificationSpec| spec.required = false),
+            ),
+            (
+                "criterion identity",
+                Box::new(|spec: &mut VerificationSpec| {
+                    spec.criterion_ids = vec!["C-2".to_string()]
+                }),
+            ),
+            (
                 "argv",
                 Box::new(|spec: &mut VerificationSpec| {
                     spec.command = "RUST_BACKTRACE=1 cargo test --doc".to_string()
@@ -802,6 +839,28 @@ mod tests {
                     spec.toolchain_inputs = vec!["cargo 1.80.0".to_string()]
                 }),
             ),
+            (
+                "exit assertion",
+                Box::new(|spec: &mut VerificationSpec| spec.expected_exit_codes = vec![1]),
+            ),
+            (
+                "artifact path",
+                Box::new(|spec: &mut VerificationSpec| {
+                    spec.expected_artifacts = vec![ExpectedArtifact {
+                        path: "src/lib.rs".to_string(),
+                        assertion: ArtifactAssertion::Exists,
+                    }]
+                }),
+            ),
+            (
+                "artifact assertion",
+                Box::new(|spec: &mut VerificationSpec| {
+                    spec.expected_artifacts = vec![ExpectedArtifact {
+                        path: "src/lib.rs".to_string(),
+                        assertion: ArtifactAssertion::Contains("missing".to_string()),
+                    }]
+                }),
+            ),
         ];
         let mut expected_runs = 1;
         for (label, mutate) in mutations {
@@ -810,7 +869,7 @@ mod tests {
             let record = execute_cached(
                 &service,
                 &cache,
-                mutated,
+                mutated.clone(),
                 &mut runner,
                 CacheMode::Replay,
                 1_000,
@@ -819,6 +878,27 @@ mod tests {
             expected_runs += 1;
             assert!(!record.from_cache, "{label} must miss");
             assert_eq!(runner.runs, expected_runs, "{label} must run the command");
+            assert_eq!(record.spec_id, mutated.spec_id, "{label}");
+            assert_eq!(record.spec_revision, mutated.revision, "{label}");
+            assert_eq!(record.required, mutated.required, "{label}");
+            assert_eq!(record.criterion_ids, mutated.criterion_ids, "{label}");
+            assert_eq!(record.content_revision.spec_id, mutated.spec_id, "{label}");
+            assert_eq!(
+                record.content_revision.spec_revision, mutated.revision,
+                "{label}"
+            );
+            if mutated.required {
+                let gates = evaluate_gates(&[mutated], &[record.clone()]);
+                assert_eq!(
+                    gates.completion_allowed(),
+                    record.verdict.is_passed(),
+                    "{label} must answer the current gate"
+                );
+                assert!(gates
+                    .blocks
+                    .iter()
+                    .all(|block| block.verdict == record.verdict));
+            }
         }
 
         tokio::fs::write(temp.path().join("src").join("lib.rs"), "fn main() { 1; }")
@@ -900,6 +980,7 @@ mod tests {
             "the replay time is recorded apart from the execution time"
         );
         assert_eq!(replayed.verdict, executed.verdict);
+        assert!(evaluate_gates(&[spec("cargo test --lib")], &[replayed]).completion_allowed());
     }
 
     #[tokio::test]
@@ -985,6 +1066,26 @@ mod tests {
             gates.blocks[0].reason
         );
         assert!(gates.blocks[0].reason.contains(&failed.started_at));
+        assert_eq!(replayed.verdict, EvidenceVerdict::Failed);
+        assert_eq!(replayed.started_at, failed.started_at);
+
+        runner.exit_code = 0;
+        let mut current = spec("cargo test --lib");
+        current.spec_id = "S-2".to_string();
+        let fresh = execute_cached(
+            &service,
+            &cache,
+            current.clone(),
+            &mut runner,
+            CacheMode::Replay,
+            6_000,
+        )
+        .await;
+        assert!(!fresh.from_cache);
+        assert_eq!(runner.runs, 2);
+        assert!(evaluate_gates(&[current], &[fresh]).completion_allowed());
+        assert_eq!(failed.verdict, EvidenceVerdict::Failed);
+        assert_eq!(replayed.verdict, EvidenceVerdict::Failed);
     }
 
     #[tokio::test]
@@ -1075,6 +1176,64 @@ mod tests {
         );
         assert_eq!(runner.runs, 2);
         assert!(cache.lock().await.is_empty());
+
+        let mut card: BoardCard = serde_json::from_value(serde_json::json!({
+            "id": "T-1",
+            "title": "Workspace formatter",
+            "instructions": "## Verification\n- Verify: `npm run format:check`",
+            "column": "doing",
+            "created_at": "2026-05-16T00:00:00Z",
+        }))
+        .unwrap();
+        card.target_files = vec!["src/lib.rs".to_string()];
+        card.scope_guard_mode = ScopeGuardMode::Strict;
+        let assignment = Assignment::from_card(&card);
+        for dispatched in [None, Some(&assignment)] {
+            let undeclared = specs_for_validation(dispatched, &card, &defaults()).remove(0);
+            assert_eq!(
+                spec_is_cacheable(&undeclared),
+                Err(NonCacheable::NoDeclaredInputs)
+            );
+            tokio::fs::write(
+                temp.path().join("src/outside_edit_target.rs"),
+                "unformatted",
+            )
+            .await
+            .unwrap();
+            let runs_before = runner.runs;
+            runner.exit_code = 1;
+            let failed = execute_cached(
+                &service,
+                &cache,
+                undeclared.clone(),
+                &mut runner,
+                CacheMode::Replay,
+                2_000,
+            )
+            .await;
+            assert_eq!(failed.verdict, EvidenceVerdict::Failed);
+            assert!(!failed.from_cache);
+            tokio::fs::write(temp.path().join("src/outside_edit_target.rs"), "formatted")
+                .await
+                .unwrap();
+            runner.exit_code = 0;
+            for _ in 0..2 {
+                let fresh = execute_cached(
+                    &service,
+                    &cache,
+                    undeclared.clone(),
+                    &mut runner,
+                    CacheMode::Replay,
+                    3_000,
+                )
+                .await;
+                assert!(!fresh.from_cache);
+                assert!(evaluate_gates(&[undeclared.clone()], &[fresh]).completion_allowed());
+            }
+            assert_eq!(runner.runs, runs_before + 3);
+            assert_eq!(failed.verdict, EvidenceVerdict::Failed);
+            assert!(cache.lock().await.is_empty());
+        }
     }
 
     #[tokio::test]

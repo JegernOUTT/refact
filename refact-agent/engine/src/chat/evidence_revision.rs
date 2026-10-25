@@ -302,8 +302,8 @@ async fn supersede_reason(worktree: &Path, drift: &RevisionDrift) -> String {
 mod tests {
     use super::*;
     use crate::chat::evidence::{
-        evaluate_gates, specs_from_card, ArtifactAssertion, EvidenceContext, EvidenceDefaults,
-        EvidenceRunner, EvidenceService, ExpectedArtifact, SpecAuthority,
+        evaluate_gates, ArtifactAssertion, EvidenceContext, EvidenceDefaults, EvidenceRunner,
+        EvidenceService, ExpectedArtifact, SpecAuthority,
     };
     use crate::chat::verify_cmd::VerifyCommandPolicy;
     use crate::tasks::types::{BoardCard, ScopeGuardMode, TaskBoard, VerificationResult};
@@ -337,6 +337,17 @@ mod tests {
             timeout_secs: 60,
             output_cap_bytes: 4_000,
         }
+    }
+
+    fn declared_specs_from_card(
+        card: &BoardCard,
+        defaults: &EvidenceDefaults,
+    ) -> Vec<VerificationSpec> {
+        let mut specs = crate::chat::evidence::specs_from_card(card, defaults);
+        for spec in &mut specs {
+            spec.cache.deterministic_inputs = vec!["src".to_string()];
+        }
+        specs
     }
 
     fn service(worktree: &Path) -> EvidenceService {
@@ -423,7 +434,7 @@ mod tests {
         let temp = worktree_with_source().await;
         let mut runner = CountingRunner::default();
         let mut board = board();
-        let specs = specs_from_card(board.get_card("T-1").unwrap(), &defaults());
+        let specs = declared_specs_from_card(board.get_card("T-1").unwrap(), &defaults());
         let records = verify(temp.path(), &specs, &mut runner).await;
         assert_eq!(records[0].verdict, EvidenceVerdict::Passed);
         let produced_against = records[0].fingerprint.content_revision.clone();
@@ -433,7 +444,7 @@ mod tests {
         unrelated.title = "renamed while the verdict was in flight".to_string();
         unrelated.column = "doing".to_string();
         unrelated.instructions = "## Acceptance Criteria\n- Verify: `npm test`".to_string();
-        let specs = specs_from_card(board.get_card("T-1").unwrap(), &defaults());
+        let specs = declared_specs_from_card(board.get_card("T-1").unwrap(), &defaults());
         let records = supersede_stale(temp.path(), None, &specs, records).await;
         let gates = evaluate_gates(&specs, &records);
 
@@ -455,7 +466,7 @@ mod tests {
     async fn editing_a_declared_file_after_a_pass_supersedes_the_verdict() {
         let temp = worktree_with_source().await;
         let mut runner = CountingRunner::default();
-        let specs = specs_from_card(board().get_card("T-1").unwrap(), &defaults());
+        let specs = declared_specs_from_card(board().get_card("T-1").unwrap(), &defaults());
         let records = verify(temp.path(), &specs, &mut runner).await;
         assert_eq!(records[0].verdict, EvidenceVerdict::Passed);
 
@@ -482,7 +493,7 @@ mod tests {
     async fn a_file_rewritten_with_identical_content_is_not_superseded() {
         let temp = worktree_with_source().await;
         let mut runner = CountingRunner::default();
-        let specs = specs_from_card(board().get_card("T-1").unwrap(), &defaults());
+        let specs = declared_specs_from_card(board().get_card("T-1").unwrap(), &defaults());
         let records = verify(temp.path(), &specs, &mut runner).await;
 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -502,7 +513,7 @@ mod tests {
     async fn changing_the_spec_revision_supersedes_prior_evidence() {
         let temp = worktree_with_source().await;
         let mut runner = CountingRunner::default();
-        let specs = specs_from_card(board().get_card("T-1").unwrap(), &defaults());
+        let specs = declared_specs_from_card(board().get_card("T-1").unwrap(), &defaults());
         let records = verify(temp.path(), &specs, &mut runner).await;
 
         let revised: Vec<VerificationSpec> = specs
@@ -532,7 +543,7 @@ mod tests {
         tokio::fs::write(temp.path().join("report.json"), "{\"passed\": 12}")
             .await
             .unwrap();
-        let mut specs = specs_from_card(board().get_card("T-1").unwrap(), &defaults());
+        let mut specs = declared_specs_from_card(board().get_card("T-1").unwrap(), &defaults());
         specs[0].expected_artifacts = vec![ExpectedArtifact {
             path: "report.json".to_string(),
             assertion: ArtifactAssertion::Contains("passed".to_string()),
@@ -557,7 +568,7 @@ mod tests {
     async fn a_moved_commit_supersedes_evidence_about_the_earlier_tree() {
         let temp = worktree_with_source().await;
         let mut runner = CountingRunner::default();
-        let specs = specs_from_card(board().get_card("T-1").unwrap(), &defaults());
+        let specs = declared_specs_from_card(board().get_card("T-1").unwrap(), &defaults());
         let service = EvidenceService::new(
             VerifyCommandPolicy::permissive(),
             EvidenceContext {
@@ -583,7 +594,7 @@ mod tests {
     async fn superseded_blocks_completion_until_the_evidence_is_produced_again() {
         let temp = worktree_with_source().await;
         let mut runner = CountingRunner::default();
-        let specs = specs_from_card(board().get_card("T-1").unwrap(), &defaults());
+        let specs = declared_specs_from_card(board().get_card("T-1").unwrap(), &defaults());
         let records = verify(temp.path(), &specs, &mut runner).await;
         tokio::fs::write(temp.path().join("src").join("lib.rs"), "fn main() { 1; }")
             .await
@@ -615,7 +626,7 @@ mod tests {
         let temp = worktree_with_source().await;
         let other = worktree_with_source().await;
         let mut runner = CountingRunner::default();
-        let specs = specs_from_card(board().get_card("T-1").unwrap(), &defaults());
+        let specs = declared_specs_from_card(board().get_card("T-1").unwrap(), &defaults());
         let records = verify(temp.path(), &specs, &mut runner).await;
 
         let records = supersede_stale(other.path(), None, &specs, records).await;
@@ -628,7 +639,7 @@ mod tests {
     async fn a_verdict_that_obtained_no_evidence_keeps_its_own_reason() {
         let temp = worktree_with_source().await;
         let mut runner = CountingRunner::default();
-        let mut specs = specs_from_card(board().get_card("T-1").unwrap(), &defaults());
+        let mut specs = declared_specs_from_card(board().get_card("T-1").unwrap(), &defaults());
         specs[0].command = "cargo test | tee log".to_string();
         let records = verify(temp.path(), &specs, &mut runner).await;
         assert_eq!(records[0].verdict, EvidenceVerdict::Blocked);
@@ -650,7 +661,7 @@ mod tests {
     async fn an_executed_record_carries_the_revision_it_was_produced_against() {
         let temp = worktree_with_source().await;
         let mut runner = CountingRunner::default();
-        let specs = specs_from_card(board().get_card("T-1").unwrap(), &defaults());
+        let specs = declared_specs_from_card(board().get_card("T-1").unwrap(), &defaults());
 
         let records = verify(temp.path(), &specs, &mut runner).await;
 

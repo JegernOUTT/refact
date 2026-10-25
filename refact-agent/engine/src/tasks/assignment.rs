@@ -202,9 +202,6 @@ pub fn specs_for_validation(
         {
             continue;
         }
-        if let Some(assignment) = assignment {
-            spec.cache.deterministic_inputs = assignment.scope.target_files.clone();
-        }
         while specs
             .iter()
             .any(|existing| existing.spec_id == spec.spec_id)
@@ -418,13 +415,15 @@ mod tests {
 
     #[test]
     fn a_typed_verification_spec_is_preserved_alongside_live_verify_lines() {
-        let card = card("## Verification\n- Verify: `cargo test --lib`");
-        let typed = VerificationSpec::propose(
+        let mut card = card("## Verification\n- Verify: `cargo test --lib`");
+        card.target_files = vec!["src/lib.rs".to_string()];
+        let mut typed = VerificationSpec::propose(
             "T-1:typed",
             "cargo test --lib -- assignment",
             SpecAuthority::CardInstructions,
             &defaults(),
         );
+        typed.cache.deterministic_inputs = vec!["src".to_string(), "Cargo.toml".to_string()];
 
         let assignment = Assignment::from_card(&card).with_verification(vec![typed.clone()]);
 
@@ -432,6 +431,12 @@ mod tests {
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0], typed);
         assert_eq!(specs[1].command, "cargo test --lib");
+        assert!(specs[1].cache.deterministic_inputs.is_empty());
+        assert!(crate::chat::evidence_cache::spec_is_cacheable(&specs[0]).is_ok());
+        assert_eq!(
+            crate::chat::evidence_cache::spec_is_cacheable(&specs[1]),
+            Err(crate::chat::evidence_cache::NonCacheable::NoDeclaredInputs)
+        );
     }
 
     #[test]
@@ -459,10 +464,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["cargo test --lib -- rewritten".to_string()]
         );
-        assert_eq!(
-            validated[0].cache.deterministic_inputs,
-            vec!["src/lib.rs".to_string()]
-        );
+        assert!(validated[0].cache.deterministic_inputs.is_empty());
         assert_eq!(assignment.scope.enforcement(), ScopeEnforcement::Declared);
         assert_eq!(
             specs_from_card(&card, &defaults())
@@ -495,12 +497,17 @@ mod tests {
 
     #[test]
     fn a_card_without_an_assignment_validates_exactly_as_before() {
-        let card = card("## Verification\n- Verify: `cargo test --lib`");
+        let mut card = card("## Verification\n- Verify: `cargo test --lib`");
+        card.target_files = vec!["src/lib.rs".to_string()];
 
         assert_eq!(
             specs_for_validation(None, &card, &defaults()),
             specs_from_card(&card, &defaults())
         );
+        assert!(specs_for_validation(None, &card, &defaults())[0]
+            .cache
+            .deterministic_inputs
+            .is_empty());
     }
 
     #[test]

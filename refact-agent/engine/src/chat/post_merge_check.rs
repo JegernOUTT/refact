@@ -1325,8 +1325,13 @@ mod tests {
             .await
             .unwrap();
         let mut card = card("## Verification\n- Verify: `cargo test --lib`");
-        card.target_files = vec![input];
-        let assignment = crate::tasks::assignment::Assignment::from_card(&card);
+        card.target_files = vec![input.clone()];
+        let mut spec =
+            crate::chat::evidence::specs_from_card(&card, &EvidenceDefaults::from_settings())
+                .remove(0);
+        spec.cache.deterministic_inputs = vec![input];
+        let assignment =
+            crate::tasks::assignment::Assignment::from_card(&card).with_verification(vec![spec]);
         write_task(gcx.clone(), temp.path(), card.clone()).await;
         crate::tasks::assignment::save_assignment(gcx.clone(), "task-1", &assignment)
             .await
