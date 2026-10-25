@@ -89,7 +89,7 @@ impl Drop for TransitionReservation {
 use crate::chat::get_or_create_session_with_trajectory;
 use crate::chat::context_rebuild::{
     ManualCompressionApplyResult, ManualCompressionPreview, apply_manual_context_rebuild,
-    compression_attempt_active, preview_manual_context_rebuild,
+    compression_attempt_active, live_tool_call_ids, preview_manual_context_rebuild,
 };
 use refact_chat_api::GoalSnapshot;
 use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
@@ -324,12 +324,13 @@ pub async fn handle_llm_compress_preview(
         &chat_id,
     )
     .await;
-    let (state, active, messages, thread, trajectory_version) = {
+    let (state, active, messages, live_ids, thread, trajectory_version) = {
         let session = session_arc.lock().await;
         (
             session.runtime.state,
             compression_attempt_active(&session),
             session.messages.clone(),
+            live_tool_call_ids(&session),
             session.thread.clone(),
             session.trajectory_version,
         )
@@ -339,6 +340,7 @@ pub async fn handle_llm_compress_preview(
         state,
         active,
         &messages,
+        &live_ids,
         &thread,
         req.requested_model(),
     )

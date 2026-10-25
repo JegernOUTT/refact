@@ -716,6 +716,103 @@ describe("ChatForm", () => {
     expect(form.className).toContain("chatFormCollapsed");
   });
 
+  test("chat error banner is dismiss-only, shows detail, and clears only the local error", async () => {
+    const commandSpy = vi.fn();
+    const diagnosticsSpy = vi.fn();
+    server.use(
+      http.post("*/v1/chats/:id/commands", async ({ request }) => {
+        commandSpy(await request.json());
+        return HttpResponse.json({ status: "queued" });
+      }),
+      http.post("*/v1/buddy/diagnostics/collect", () => {
+        diagnosticsSpy();
+        return HttpResponse.json({});
+      }),
+    );
+
+    const detail =
+      "Context rebuild failed: summary model returned an empty response";
+    const chat = chatStateWithThread({ model: "openai/gpt-4o" });
+    const threadId = chat.current_thread_id;
+    chat.threads[threadId].error = detail;
+
+    const { user, ...app } = render(<App />, {
+      preloadedState: { chat, ...engineConfigState },
+    });
+
+    expect(screen.getByText(detail, { exact: false })).toBeInTheDocument();
+    expect(screen.getByText("Click to close")).toBeInTheDocument();
+    expect(screen.queryByText("Click to retry")).not.toBeInTheDocument();
+
+    await user.click(screen.getByText(/Context rebuild failed/));
+
+    await waitFor(() => {
+      expect(app.store.getState().chat.threads[threadId]?.error).toBeNull();
+    });
+    expect(
+      screen.queryByText(detail, { exact: false }),
+    ).not.toBeInTheDocument();
+    expect(commandSpy).not.toHaveBeenCalled();
+    const thread = app.store.getState().chat.threads[threadId];
+    expect(thread?.streaming).toBe(false);
+    expect(thread?.waiting_for_response).toBe(false);
+  });
+
+  test("global error banner is dismiss-only and clears the global error", async () => {
+    const commandSpy = vi.fn();
+    server.use(
+      http.post("*/v1/chats/:id/commands", async ({ request }) => {
+        commandSpy(await request.json());
+        return HttpResponse.json({ status: "queued" });
+      }),
+    );
+
+    const { user, ...app } = render(<App />, {
+      preloadedState: {
+        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+        error: {
+          message: "Engine unreachable",
+          capsProviders: { message: null },
+        },
+        ...engineConfigState,
+      },
+    });
+
+    expect(screen.getByText(/Engine unreachable/)).toBeInTheDocument();
+    expect(screen.getByText("Click to close")).toBeInTheDocument();
+    expect(screen.queryByText("Click to retry")).not.toBeInTheDocument();
+
+    await user.click(screen.getByText(/Engine unreachable/));
+
+    await waitFor(() => {
+      expect(app.store.getState().error.message).toBeNull();
+    });
+    expect(commandSpy).not.toHaveBeenCalled();
+  });
+
+  test("auth error banner keeps provider guidance without dismiss or retry labels", () => {
+    render(<App />, {
+      preloadedState: {
+        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+        error: {
+          message: "Unauthorized",
+          isAuthError: true,
+          capsProviders: { message: null },
+        },
+        ...engineConfigState,
+      },
+    });
+
+    expect(screen.getByText(/Unauthorized/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Check your provider configuration, API key, and network access.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Click to close")).not.toBeInTheDocument();
+    expect(screen.queryByText("Click to retry")).not.toBeInTheDocument();
+  });
+
   test("control display rules stay zero-specificity so container-query hiding wins", async () => {
     const css = await readFile(
       resolve(process.cwd(), "src", "components/ChatForm/ChatForm.module.css"),

@@ -12,6 +12,8 @@ mod compression_vocabulary_tests;
 pub mod config;
 mod content;
 pub mod context_rebuild;
+#[cfg(test)]
+mod context_rebuild_recovery_tests;
 pub mod delivery;
 pub mod diagnostics;
 mod generation;

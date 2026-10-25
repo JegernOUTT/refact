@@ -96,6 +96,305 @@ fn pending_tools(messages: &[ChatMessage]) -> bool {
     !pending.is_empty()
 }
 
+pub(crate) const SKIP_SESSION_CHANGED: &str = "Context rebuild canceled: session changed";
+pub(crate) const SKIP_CHANGED_DURING_HOOK: &str = "Chat changed while PreCompact hook was running";
+pub(crate) const SKIP_NOT_IDLE: &str = "Rebuild requires an idle session with no active stream";
+pub(crate) const SKIP_OTHER_PENDING: &str = "Another context operation is pending";
+pub(crate) const SKIP_ALREADY_ATTEMPTED: &str = "Rebuild was already attempted for this context";
+pub(crate) const SKIP_PENDING_TOOLS: &str =
+    "Rebuild requires nonempty context and completed tool results";
+const SKIP_CANCELLED: &str = "Context reconstruction cancelled";
+
+pub(crate) fn is_routine_rebuild_skip(error: &str) -> bool {
+    [
+        SKIP_SESSION_CHANGED,
+        SKIP_CHANGED_DURING_HOOK,
+        SKIP_NOT_IDLE,
+        SKIP_OTHER_PENDING,
+        SKIP_ALREADY_ATTEMPTED,
+        SKIP_PENDING_TOOLS,
+        SKIP_CANCELLED,
+    ]
+    .contains(&error)
+}
+
+pub(crate) const ABANDONED_NOTE_SOURCE: &str = "chat.context_rebuild";
+pub(crate) const ABANDONED_RESULT_EXTRA: &str = "abandoned_tool_call";
+pub(crate) const NORMALIZATION_REPORT_EXTRA: &str = "reconstruction_input_normalization";
+const MAX_LISTED_ABANDONED_CALLS: usize = 32;
+pub(crate) const ABANDONED_OUTCOME_TEXT: &str = "Outcome unknown: this historical tool call has no recorded result and was superseded by a later turn. Its side effects were neither confirmed nor ruled out; do not assume it succeeded or that it never ran.";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct AbandonedCall {
+    pub tool_call_id: String,
+    pub name: String,
+    pub assistant_message_id: String,
+}
+
+pub(crate) fn live_tool_call_ids(session: &ChatSession) -> std::collections::HashSet<String> {
+    let mut ids: std::collections::HashSet<String> = session
+        .runtime
+        .pause_reasons
+        .iter()
+        .map(|reason| reason.tool_call_id.clone())
+        .collect();
+    if let Some((_, paused)) = &session.confirmation_paused_at {
+        ids.extend(paused.iter().cloned());
+    }
+    ids.extend(
+        session
+            .pending_questions
+            .iter()
+            .filter(|set| set.status == refact_chat_api::PendingQuestionStatus::Pending)
+            .map(|set| set.tool_call_id.clone()),
+    );
+    ids
+}
+
+fn unique_message_id(base: String, used: &mut std::collections::HashSet<String>) -> String {
+    let mut candidate = base.clone();
+    let mut n = 1usize;
+    while used.contains(&candidate) {
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+    used.insert(candidate.clone());
+    candidate
+}
+
+pub(crate) fn normalize_rebuild_input(
+    messages: &[ChatMessage],
+    live_ids: &std::collections::HashSet<String>,
+) -> (Vec<ChatMessage>, Vec<AbandonedCall>) {
+    let answered: std::collections::HashSet<&str> = messages
+        .iter()
+        .filter(|m| matches!(m.role.as_str(), "tool" | "diff" | "context_file"))
+        .map(|m| m.tool_call_id.as_str())
+        .collect();
+    let Some(last_assistant) = messages.iter().rposition(|m| m.role == "assistant") else {
+        return (messages.to_vec(), Vec::new());
+    };
+    let mut used_ids: std::collections::HashSet<String> =
+        messages.iter().map(|m| m.message_id.clone()).collect();
+    let mut abandoned = Vec::new();
+    let mut output = Vec::with_capacity(messages.len());
+    let mut pending: Vec<ChatMessage> = Vec::new();
+    let mut window: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (index, message) in messages.iter().enumerate() {
+        let in_window = matches!(message.role.as_str(), "tool" | "diff" | "context_file")
+            && window.contains(message.tool_call_id.as_str());
+        if !in_window {
+            output.append(&mut pending);
+            window.clear();
+        }
+        output.push(message.clone());
+        if message.role != "assistant" || index >= last_assistant {
+            continue;
+        }
+        let calls = message.tool_calls.iter().flatten();
+        let orphans: Vec<_> = calls
+            .filter(|c| !answered.contains(c.id.as_str()) && !live_ids.contains(&c.id))
+            .collect();
+        if orphans.is_empty() {
+            continue;
+        }
+        window = message
+            .tool_calls
+            .iter()
+            .flatten()
+            .map(|c| c.id.as_str())
+            .collect();
+        for call in orphans {
+            let id = unique_message_id(format!("abandoned-result-{}", call.id), &mut used_ids);
+            let mut result = ChatMessage::new("tool".into(), ABANDONED_OUTCOME_TEXT.into());
+            result.message_id = id;
+            result.tool_call_id = call.id.clone();
+            result.tool_failed = Some(true);
+            result.extra.insert(
+                ABANDONED_RESULT_EXTRA.into(),
+                serde_json::json!({"outcome": "unknown", "source": ABANDONED_NOTE_SOURCE}),
+            );
+            pending.push(result);
+            abandoned.push(AbandonedCall {
+                tool_call_id: call.id.clone(),
+                name: call.function.name.clone(),
+                assistant_message_id: message.message_id.clone(),
+            });
+        }
+    }
+    output.append(&mut pending);
+    (output, abandoned)
+}
+
+fn abandoned_summary(abandoned: &[AbandonedCall]) -> serde_json::Value {
+    serde_json::json!({
+        "reason": "abandoned_tool_call",
+        "outcome": "unknown",
+        "count": abandoned.len(),
+        "tool_calls": abandoned.iter().take(MAX_LISTED_ABANDONED_CALLS).collect::<Vec<_>>(),
+        "truncated": abandoned.len() > MAX_LISTED_ABANDONED_CALLS,
+    })
+}
+
+pub(crate) fn abandoned_calls_note(abandoned: &[AbandonedCall]) -> Option<ChatMessage> {
+    if abandoned.is_empty() {
+        return None;
+    }
+    let mut names: Vec<String> = abandoned
+        .iter()
+        .take(MAX_LISTED_ABANDONED_CALLS)
+        .map(|c| format!("{} ({})", c.name, c.tool_call_id))
+        .collect();
+    if abandoned.len() > MAX_LISTED_ABANDONED_CALLS {
+        names.push(format!(
+            "and {} more",
+            abandoned.len() - MAX_LISTED_ABANDONED_CALLS
+        ));
+    }
+    Some(crate::chat::internal_roles::event(
+        crate::chat::internal_roles::EventSubkind::CancellationNote,
+        ABANDONED_NOTE_SOURCE,
+        abandoned_summary(abandoned),
+        format!(
+            "Historical tool call(s) abandoned without a recorded result: {}. Outcome unknown — side effects were neither confirmed nor ruled out; verify before relying on them.",
+            names.join(", ")
+        ),
+    ))
+}
+
+fn message_text_for_units(message: &ChatMessage) -> String {
+    let mut text = message.content.content_text_only();
+    if let Some(reasoning) = &message.reasoning_content {
+        text.push_str(reasoning);
+    }
+    for call in message.tool_calls.iter().flatten() {
+        text.push_str(&call.function.name);
+        text.push_str(&call.function.arguments);
+    }
+    text
+}
+
+fn is_mandatory_control(message: &ChatMessage) -> bool {
+    matches!(message.role.as_str(), "goal" | "plan")
+        || message
+            .extra
+            .get("event")
+            .and_then(|e| e.get("subkind"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|k| matches!(k, "plan_delta" | "goal_delta" | "goal_pursuit"))
+}
+
+pub(crate) fn token_cap_to_symbol_budget(
+    messages: &[ChatMessage],
+    cap_tokens: usize,
+    tokenizer: Option<Arc<tokenizers::Tokenizer>>,
+) -> usize {
+    let (mut control_symbols, mut control_tokens) = (0usize, 0usize);
+    let (mut symbols, mut tokens) = (0usize, 0usize);
+    for message in messages {
+        let text = message_text_for_units(message);
+        let s = refact_agentic::mode_transition::message_symbols(message);
+        let t = crate::tokens::count_text_tokens(tokenizer.clone(), &text)
+            .unwrap_or_else(|_| text.len() / 3 + 1);
+        if is_mandatory_control(message) {
+            control_symbols = control_symbols.saturating_add(s);
+            control_tokens = control_tokens.saturating_add(t);
+        } else {
+            symbols = symbols.saturating_add(s);
+            tokens = tokens.saturating_add(t);
+        }
+    }
+    let Some(rest_tokens) = cap_tokens.checked_sub(control_tokens) else {
+        return control_symbols;
+    };
+    let rest_symbols = if tokens == 0 {
+        rest_tokens
+    } else {
+        ((rest_tokens as u128 * symbols as u128) / tokens as u128).min(usize::MAX as u128) as usize
+    };
+    control_symbols
+        .saturating_add(rest_symbols.min(symbols.saturating_sub(1)))
+}
+
+pub(crate) fn is_abandoned_note(message: &ChatMessage) -> bool {
+    message.role == "event"
+        && message.extra.get("event").is_some_and(|e| {
+            e.get("subkind").and_then(serde_json::Value::as_str) == Some("cancellation_note")
+                && e.get("source").and_then(serde_json::Value::as_str)
+                    == Some(ABANDONED_NOTE_SOURCE)
+        })
+}
+
+fn noted_call_ids(note: &ChatMessage) -> impl Iterator<Item = &str> {
+    note.extra
+        .get("event")
+        .and_then(|e| e.pointer("/payload/tool_calls"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.get("tool_call_id").and_then(serde_json::Value::as_str))
+}
+
+pub(crate) fn rebuild_notes(source: &[ChatMessage], abandoned: &[AbandonedCall]) -> Vec<ChatMessage> {
+    let mut seen = std::collections::HashSet::new();
+    let mut notes: Vec<ChatMessage> = source
+        .iter()
+        .filter(|m| is_abandoned_note(m) && seen.insert(m.message_id.clone()))
+        .cloned()
+        .collect();
+    let noted: std::collections::HashSet<String> = notes
+        .iter()
+        .flat_map(|n| noted_call_ids(n).map(str::to_owned).collect::<Vec<_>>())
+        .collect();
+    let fresh: Vec<AbandonedCall> = abandoned
+        .iter()
+        .filter(|c| !noted.contains(&c.tool_call_id))
+        .cloned()
+        .collect();
+    notes.extend(abandoned_calls_note(&fresh));
+    notes
+}
+
+fn notes_tokens(notes: &[ChatMessage], tokenizer: Option<Arc<tokenizers::Tokenizer>>) -> usize {
+    notes
+        .iter()
+        .map(|note| {
+            let text = format!(
+                "{}{}",
+                note.content.content_text_only(),
+                serde_json::to_string(&note.extra).unwrap_or_default()
+            );
+            crate::tokens::count_text_tokens(tokenizer.clone(), &text)
+                .unwrap_or_else(|_| text.len() / 3 + 1)
+                .saturating_add(16)
+        })
+        .fold(0usize, usize::saturating_add)
+}
+
+fn raw_rebuild_input(messages: &[ChatMessage], explicit: bool) -> Result<Vec<ChatMessage>, String> {
+    if explicit && requires_explicit_rebuild(messages) {
+        legacy_rebuild_input(messages)
+    } else {
+        active_context(messages).map(|v| v.messages)
+    }
+    .map_err(|e| e.to_string())
+}
+
+pub(crate) fn with_abandoned_notes(
+    mut output: Vec<ChatMessage>,
+    notes: Vec<ChatMessage>,
+) -> Vec<ChatMessage> {
+    let ids: std::collections::HashSet<String> =
+        notes.iter().map(|n| n.message_id.clone()).collect();
+    output.retain(|m| !is_abandoned_note(m) && !ids.contains(&m.message_id));
+    let at = output
+        .iter()
+        .rposition(|m| m.role == "user")
+        .unwrap_or(output.len());
+    output.splice(at..at, notes);
+    output
+}
+
 pub(crate) fn fold_controls_for_rebuild(
     messages: Vec<ChatMessage>,
     limits: ProjectionLimits,
@@ -405,7 +704,7 @@ where
         || serde_json::to_value(&session.thread).ok() != serde_json::to_value(thread).ok()
         || session.pending_deliveries_for_snapshot() != deliveries
     {
-        return Err("Context rebuild canceled: session changed".into());
+        return Err(SKIP_SESSION_CHANGED.into());
     }
     let mut snapshot = crate::chat::trajectories::trajectory_snapshot_from_session(session);
     snapshot.messages.push(report.clone());
@@ -542,7 +841,13 @@ where
                 result
                     .as_ref()
                     .err()
-                    .map(|_| CompressionReason::SourceChanged),
+                    .map(|error| {
+                        if is_routine_rebuild_skip(error) {
+                            CompressionReason::SourceChanged
+                        } else {
+                            CompressionReason::TransientFailure
+                        }
+                    }),
             );
         }
         let messages_after = active_context(&session.messages)
@@ -581,14 +886,11 @@ pub async fn preview_manual_context_rebuild(
     state: SessionState,
     compression_active: bool,
     messages: &[ChatMessage],
+    live_ids: &std::collections::HashSet<String>,
     thread: &ThreadParams,
     requested_model: Option<&str>,
 ) -> ManualCompressionPreview {
-    let input = if requires_explicit_rebuild(messages) {
-        legacy_rebuild_input(messages)
-    } else {
-        active_context(messages).map(|v| v.messages)
-    };
+    let input = raw_rebuild_input(messages, true);
     let mut preview = ManualCompressionPreview {
         eligible: false,
         trajectory_version: None,
@@ -601,17 +903,18 @@ pub async fn preview_manual_context_rebuild(
     let input = match input {
         Ok(v) => v,
         Err(e) => {
-            preview.reason = Some(e.to_string());
+            preview.reason = Some(e);
             return preview;
         }
     };
     preview.source_messages = input.len();
     preview.approximate_source_tokens = crate::chat::trajectory_ops::approx_token_count(&input);
+    let (normalized, _) = normalize_rebuild_input(&input, live_ids);
     if !matches!(
         state,
         SessionState::Idle | SessionState::Error | SessionState::Completed
     ) || compression_active
-        || pending_tools(&input)
+        || pending_tools(&normalized)
         || input.is_empty()
     {
         preview.reason = Some("Rebuild requires an idle session and completed tool results".into());
@@ -643,7 +946,7 @@ pub async fn rebuild_session(
             return Err("Chat changed since preview; preview again".into());
         }
         if session.pending_mode_handoff.is_some() || session.pending_context_rebuild.is_some() {
-            return Err("Another context operation is pending".into());
+            return Err(SKIP_OTHER_PENDING.into());
         }
         let explicit_idle = explicit
             && matches!(
@@ -656,22 +959,18 @@ pub async fn rebuild_session(
             && session.draft_usage.is_none()
             && session.stream_started_at.is_none();
         if !explicit_idle && (!idle(&session) || compression_attempt_active(&session)) {
-            return Err("Rebuild requires an idle session with no active stream".into());
+            return Err(SKIP_NOT_IDLE.into());
         }
         if !explicit && requires_explicit_rebuild(&session.messages) {
             return Err("Legacy context requires an explicit rebuild".into());
         }
-        let messages = if explicit && requires_explicit_rebuild(&session.messages) {
-            legacy_rebuild_input(&session.messages)
-        } else {
-            active_context(&session.messages).map(|v| v.messages)
-        }
-        .map_err(|e| e.to_string())?;
-        if messages.is_empty() || pending_tools(&messages) {
-            return Err("Rebuild requires nonempty context and completed tool results".into());
+        let messages = raw_rebuild_input(&session.messages, explicit)?;
+        let (normalized, _) = normalize_rebuild_input(&messages, &live_tool_call_ids(&session));
+        if messages.is_empty() || pending_tools(&normalized) {
+            return Err(SKIP_PENDING_TOOLS.into());
         }
         if !explicit && session.last_rebuild_attempt_version == Some(session.trajectory_version) {
-            return Err("Rebuild was already attempted for this context".into());
+            return Err(SKIP_ALREADY_ATTEMPTED.into());
         }
         (
             messages,
@@ -718,6 +1017,7 @@ pub async fn rebuild_session(
     }
     let (
         messages,
+        abandoned,
         rebuild_input,
         thread,
         version,
@@ -733,34 +1033,31 @@ pub async fn rebuild_session(
             || serde_json::to_value(&session.thread).ok() != serde_json::to_value(&hook_thread).ok()
             || session.pending_deliveries_for_snapshot() != hook_deliveries
         {
-            return Err("Chat changed while PreCompact hook was running".into());
+            return Err(SKIP_CHANGED_DURING_HOOK.into());
         }
         if session.pending_mode_handoff.is_some() || session.pending_context_rebuild.is_some() {
-            return Err("Another context operation is pending".into());
+            return Err(SKIP_OTHER_PENDING.into());
         }
         if explicit {
             prepare_explicit_idle(&mut session);
         }
         if !idle(&session) || compression_attempt_active(&session) {
-            return Err("Rebuild requires an idle session with no active stream".into());
+            return Err(SKIP_NOT_IDLE.into());
         }
-        let messages = if explicit && requires_explicit_rebuild(&session.messages) {
-            legacy_rebuild_input(&session.messages)
-        } else {
-            active_context(&session.messages).map(|v| v.messages)
+        let raw = raw_rebuild_input(&session.messages, explicit)?;
+        if serde_json::to_value(&raw).ok() != serde_json::to_value(&hook_messages).ok() {
+            return Err(SKIP_CHANGED_DURING_HOOK.into());
         }
-        .map_err(|e| e.to_string())?;
-        if messages.is_empty() || pending_tools(&messages) {
-            return Err("Rebuild requires nonempty context and completed tool results".into());
-        }
-        if serde_json::to_value(&messages).ok() != serde_json::to_value(&hook_messages).ok() {
-            return Err("Chat changed while PreCompact hook was running".into());
+        let (normalized, abandoned) =
+            normalize_rebuild_input(&raw, &live_tool_call_ids(&session));
+        if normalized.is_empty() || pending_tools(&normalized) {
+            return Err(SKIP_PENDING_TOOLS.into());
         }
         let rebuild_input = fold_controls_for_rebuild(
-            messages.clone(),
+            normalized,
             crate::runtime_settings::plan_projection_limits(),
         );
-        let messages_before = messages.len();
+        let messages_before = raw.len();
         session.last_rebuild_attempt_version = Some(session.trajectory_version);
         session.compression_attempt_generation =
             session.compression_attempt_generation.wrapping_add(1);
@@ -772,7 +1069,8 @@ pub async fn rebuild_session(
             Some(chrono::Utc::now().timestamp_millis() as u64);
         status(&mut session, CompressionPhase::Running, None);
         (
-            messages,
+            raw,
+            abandoned,
             rebuild_input,
             session.thread.clone(),
             session.trajectory_version,
@@ -873,6 +1171,13 @@ pub async fn rebuild_session(
     }
     let request_cap =
         payload_request_cap(&budget_thread, n_ctx, output_reserve, tokenizer.clone())?;
+    let notes = rebuild_notes(&rebuild_input, &abandoned);
+    let builder_cap = request_cap
+        .checked_sub(notes_tokens(&notes, tokenizer.clone()))
+        .filter(|cap| *cap > 0)
+        .ok_or("Abandoned-call notice exceeds the request cap")?;
+    let target_budget_symbols =
+        token_cap_to_symbol_budget(&rebuild_input, builder_cap, tokenizer.clone());
     let outcome = crate::agentic::mode_transition::reconstruct_context(
         gcx.clone(),
         crate::agentic::mode_transition::ReconstructionRequest {
@@ -884,7 +1189,7 @@ pub async fn rebuild_session(
             chat_model: Some(thread.model.clone()),
             abort_flag: Some(abort.clone()),
             hints: None,
-            target_budget_symbols: Some(request_cap),
+            target_budget_symbols: Some(target_budget_symbols),
             preserve_goal_messages: true,
         },
     )
@@ -903,9 +1208,10 @@ pub async fn rebuild_session(
             return Err(e);
         }
     };
-    let metrics = validate_output(&messages, &outcome.messages, request_cap, tokenizer)?;
+    let output = with_abandoned_notes(outcome.messages, notes);
+    let metrics = validate_output(&messages, &output, request_cap, tokenizer)?;
     let report = make_reconstruction_report(
-        outcome.messages,
+        output,
         ReconstructionMetadata {
             source_version: Some(version),
             model: Some(outcome.model),
@@ -915,6 +1221,14 @@ pub async fn rebuild_session(
             metrics: Some(metrics.to_json()),
         },
     )
+    .map(|mut report| {
+        if !abandoned.is_empty() {
+            report
+                .extra
+                .insert(NORMALIZATION_REPORT_EXTRA.into(), abandoned_summary(&abandoned));
+        }
+        report
+    })
     .map_err(|e| e.to_string());
     let session_arc = session_arc.clone();
     tokio::spawn(async move {
@@ -967,10 +1281,11 @@ pub async fn apply_manual_context_rebuild(
     requested_model: Option<&str>,
     expected_version: Option<u64>,
 ) -> ManualCompressionApplyResult {
-    let (messages, thread, state, active, version) = {
+    let (messages, live_ids, thread, state, active, version) = {
         let s = session_arc.lock().await;
         (
             s.messages.clone(),
+            live_tool_call_ids(&s),
             s.thread.clone(),
             s.runtime.state,
             compression_attempt_active(&s),
@@ -982,6 +1297,7 @@ pub async fn apply_manual_context_rebuild(
         state,
         active,
         &messages,
+        &live_ids,
         &thread,
         requested_model,
     )
@@ -1089,23 +1405,54 @@ pub async fn apply_context_rebuild_with_reason(
     .await
     {
         Ok(()) => CompactionOutcome::Applied,
-        Err(e) => {
-            let mut s = session.lock().await;
-            if e.starts_with("blocked by PreCompact hook:") {
-                return CompactionOutcome::NothingToCompact;
-            }
-            if compression_attempt_active(&s) || s.abort_flag.load(Ordering::SeqCst) {
-                return CompactionOutcome::NothingToCompact;
-            }
-            s.append_error_message_deduped(&format!(
-                "Context rebuild failed: {}",
-                crate::chat::diagnostics::safe_provider_error_diagnostic(&e)
-            ));
-            s.last_rebuild_attempt_version = Some(s.trajectory_version);
-            s.set_runtime_state(SessionState::Error, Some("Context rebuild failed".into()));
-            CompactionOutcome::LlmUnavailable
-        }
+        Err(e) => record_rebuild_failure(&mut *session.lock().await, &e),
     }
+}
+
+pub(crate) fn record_rebuild_failure(s: &mut ChatSession, e: &str) -> CompactionOutcome {
+    if e.starts_with("blocked by PreCompact hook:") {
+        return CompactionOutcome::NothingToCompact;
+    }
+    if compression_attempt_active(s) || s.abort_flag.load(Ordering::SeqCst) {
+        return CompactionOutcome::NothingToCompact;
+    }
+    if is_routine_rebuild_skip(e) {
+        tracing::info!("context rebuild skipped for {}: {e}", s.chat_id);
+        let reason = if e == SKIP_PENDING_TOOLS {
+            CompressionReason::PendingToolCalls
+        } else {
+            CompressionReason::SourceChanged
+        };
+        status(s, CompressionPhase::Skipped, Some(reason));
+        return CompactionOutcome::NothingToCompact;
+    }
+    let detail = format!(
+        "Context rebuild failed: {}",
+        crate::chat::diagnostics::safe_provider_error_diagnostic(e)
+    );
+    s.append_error_message_deduped(&detail);
+    s.last_rebuild_attempt_version = Some(s.trajectory_version);
+    s.set_runtime_state(SessionState::Error, Some(detail));
+    CompactionOutcome::LlmUnavailable
+}
+
+pub(crate) fn record_requested_rebuild_skip(
+    session: &mut ChatSession,
+    trigger: &str,
+    error: &str,
+) -> Result<(), String> {
+    if !is_routine_rebuild_skip(error) && !error.starts_with("blocked by PreCompact hook:") {
+        return Err(error.to_string());
+    }
+    record_rebuild_failure(session, error);
+    let reason = crate::chat::diagnostics::safe_provider_error_diagnostic(error);
+    session.add_message(crate::chat::internal_roles::event(
+        crate::chat::internal_roles::EventSubkind::SystemNotice,
+        "chat.context_rebuild",
+        serde_json::json!({"trigger": trigger, "applied": false, "reason": reason}),
+        format!("Requested context rebuild was not applied: {reason}. Request it again when the conversation is ready."),
+    ));
+    Ok(())
 }
 
 /// Drain only after every sibling tool result and post-tool side effect landed.
@@ -1129,7 +1476,11 @@ pub async fn drain_pending(
         return Ok(true);
     }
     if let Some(request) = rebuild {
-        rebuild_session(gcx, session_arc, request, None, true).await?;
+        let trigger = request.trigger.clone();
+        if let Err(error) = rebuild_session(gcx, session_arc, request, None, true).await {
+            let mut s = session_arc.lock().await;
+            record_requested_rebuild_skip(&mut s, &trigger, &error)?;
+        }
     }
     Ok(false)
 }

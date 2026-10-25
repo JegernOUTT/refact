@@ -664,7 +664,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       onFocusCapture={handleComposerFocusCapture}
     >
       {visibleError && (
-        <ErrorCallout timeout={3000} onClick={clearVisibleError}>
+        <ErrorCallout timeout={3000} onClick={clearVisibleError} preventRetry>
           {visibleError}
         </ErrorCallout>
       )}

@@ -1622,11 +1622,12 @@ async fn start_generation_iteration(
         Ok(true) => return GenerationAttemptStart::Stop,
         Err(error) => {
             let mut session = session_arc.lock().await;
-            session.append_error_message_deduped(&format!(
+            let detail = format!(
                 "Context operation failed: {}",
                 safe_provider_error_diagnostic(&error)
-            ));
-            session.set_runtime_state(SessionState::Error, Some(error));
+            );
+            session.append_error_message_deduped(&detail);
+            session.set_runtime_state(SessionState::Error, Some(detail));
             return GenerationAttemptStart::Stop;
         }
         Ok(false) => {}

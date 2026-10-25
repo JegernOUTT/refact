@@ -315,7 +315,7 @@ async fn archive_stays_unchanged_and_update_plan_appends_after_rebuild() {
 fn rebuild_wiring_folds_only_after_unfolded_hook_equality_check() {
     let source = include_str!("context_rebuild.rs");
     let hook_equality = source
-        .find("serde_json::to_value(&messages).ok() != serde_json::to_value(&hook_messages).ok()")
+        .find("serde_json::to_value(&raw).ok() != serde_json::to_value(&hook_messages).ok()")
         .unwrap();
     let fold = source
         .find("let rebuild_input = fold_controls_for_rebuild(")
