@@ -9,6 +9,13 @@ for (const width of [360, 1280]) {
       await page.goto(
         `/tests/e2e/route-showcase.html?route=agent-message&theme=${theme}`,
       );
+      await page
+        .locator('[data-density="compact"] button[aria-expanded]')
+        .first()
+        .click();
+      await page
+        .getByRole("button", { name: "More details", exact: true })
+        .click();
       const receipt = page.getByLabel("Agent message receipt", { exact: true });
       await expect(receipt).toBeVisible();
       await expect(receipt).toContainText("Message queued");
@@ -38,6 +45,13 @@ for (const width of [360, 1280]) {
       await page.goto(
         `/tests/e2e/route-showcase.html?route=agent-broadcast&theme=${theme}`,
       );
+      await page
+        .locator('[data-density="compact"] button[aria-expanded]')
+        .first()
+        .click();
+      await page
+        .getByRole("button", { name: "More details", exact: true })
+        .click();
       const receipt = page.getByLabel("Agent message receipt", { exact: true });
       await expect(receipt).toBeVisible();
       await expect(receipt).toContainText("4 of 7 board agents reached");

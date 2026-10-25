@@ -1046,21 +1046,37 @@ describe("neutral dedicated outcome regressions", () => {
     },
   );
 
-  it.each(["code_review", "task_done"])(
-    "%s explicitly busy request may run but never promotes an outcome",
-    (name) => {
+  it.each([
+    ["code_review", true, "running"],
+    ["task_done", true, "running"],
+    ["agent_finish", true, "running"],
+    ["agent_finish", false, "idle"],
+  ] as const)(
+    "%s absent result with busy=%s stays %s without promoting an outcome",
+    (name, busy, status) => {
       const { container } = renderToolContent(name, "", {
         missing: true,
-        busy: true,
+        busy,
       });
       expect(container.querySelector("section")).toHaveAttribute(
         "data-status",
-        "running",
+        status,
       );
+      expect(Boolean(container.querySelector(".lucide-loader-circle"))).toBe(
+        busy,
+      );
+      expect(container.querySelector(".lucide-circle-check")).toBeNull();
+      expect(screen.queryByTestId("generic-tool")).toBeNull();
       expect(container.querySelector("button")).toHaveAttribute(
         "aria-expanded",
         "false",
       );
+      if (name === "agent_finish") {
+        expect(screen.getByRole("button")).toHaveTextContent("Awaiting report");
+        expect(screen.getByRole("button")).not.toHaveTextContent(
+          /queued|completed|verified|success/iu,
+        );
+      }
     },
   );
 

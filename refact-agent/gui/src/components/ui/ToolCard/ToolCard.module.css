@@ -98,7 +98,7 @@
   pointer-events: none;
 }
 
-.root[data-open="true"] .bodyGrid {
+.root[data-open="true"] > .bodyGrid {
   pointer-events: auto;
 }
 
@@ -108,7 +108,7 @@
   transform: translateY(var(--rf-collapse-enter-y));
 }
 
-.root[data-open="true"] .bodyShell {
+.root[data-open="true"] > .bodyGrid > .bodyShell {
   opacity: 1;
   transform: translateY(0);
 }

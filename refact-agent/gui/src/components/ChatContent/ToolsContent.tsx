@@ -107,6 +107,7 @@ import {
 type FinalReportToolCardProps = {
   toolCall: ToolCall;
   content: string | null;
+  hasResult: boolean;
   rawContent?: ToolResult["content"];
   toolFailed?: boolean;
   extra?: Record<string, unknown>;
@@ -115,18 +116,31 @@ type FinalReportToolCardProps = {
 const FinalReportToolCard: React.FC<FinalReportToolCardProps> = ({
   toolCall,
   content,
+  hasResult,
   rawContent,
   toolFailed,
   extra,
 }) => {
+  const threadId = useThreadId();
+  const isStreaming = useAppSelector((state) =>
+    selectIsStreamingById(state, threadId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, threadId),
+  );
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
   const presentation = finalReportPresentation(
-    content ?? (rawContent === undefined ? null : ""),
+    content ?? (hasResult ? "" : null),
     toolFailed,
   );
   const report = content ? parseFinalReport(content) : null;
-  const status = presentation.tone === "danger" ? "error" : "idle";
+  const status =
+    presentation.tone === "danger"
+      ? "error"
+      : !hasResult && (isStreaming || isWaiting)
+        ? "running"
+        : "idle";
   const statusIcon =
     status === "error" ? (
       <CircleX data-testid="final-report-tool-error-icon" />
@@ -1389,6 +1403,7 @@ function processToolCalls(
         key={`final-report-tool-${head.id ?? processed.length}`}
         toolCall={normalizedHead}
         content={typeof result?.content === "string" ? result.content : null}
+        hasResult={Boolean(result)}
         toolFailed={result?.tool_failed}
         rawContent={result?.content}
         extra={result?.extra}

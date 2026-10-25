@@ -593,8 +593,9 @@ describe("control and merge outcomes", () => {
   it("keeps local merge, conflict, error and unknown outcomes distinct", () => {
     const report = { card_id: "T-1", merged: true, conflict: false };
     const local = present("merge_ready_in_order", [report]);
-    expect(local.stateLabel).toBe("Merged locally · push unconfirmed");
+    expect(local.stateLabel).toBe("Merged locally");
     expect(local.tone).toBe("neutral");
+    expect(facts(local)).toContain("push and verification unconfirmed");
     const conflict = present("merge_ready_in_order", [
       report,
       { card_id: "T-2", merged: false, conflict: true },

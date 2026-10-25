@@ -9,6 +9,13 @@ for (const width of [360, 1280]) {
       await page.goto(
         `/tests/e2e/route-showcase.html?route=agent-resume&theme=${theme}`,
       );
+      await page
+        .locator('[data-density="compact"] button[aria-expanded]')
+        .first()
+        .click();
+      await page
+        .getByRole("button", { name: "More details", exact: true })
+        .click();
       const card = page.getByLabel("Child resume", { exact: true });
       await expect(card).toBeVisible();
       await expect(card).toContainText("Inspection only");

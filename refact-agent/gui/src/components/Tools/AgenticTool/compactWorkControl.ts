@@ -707,7 +707,7 @@ export function buildCompactWorkControlPresentation(
             state = { stateLabel: "Merge error reported", tone: "danger" };
           else if (reports.every((row) => row?.merged === true))
             state = {
-              stateLabel: "Merged locally · push unconfirmed",
+              stateLabel: "Merged locally",
               tone: "neutral",
             };
           else state = { stateLabel: "Merge not confirmed", tone: "neutral" };

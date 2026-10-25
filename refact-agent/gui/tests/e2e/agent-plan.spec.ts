@@ -9,6 +9,13 @@ for (const width of [360, 1280]) {
       await page.goto(
         `/tests/e2e/route-showcase.html?route=agent-plan&theme=${theme}`,
       );
+      await page
+        .locator('[data-density="compact"] button[aria-expanded]')
+        .first()
+        .click();
+      await page
+        .getByRole("button", { name: "More details", exact: true })
+        .click();
       const receipt = page.getByLabel("Plan receipt", { exact: true });
       await expect(receipt).toBeVisible();
       await expect(receipt).toContainText("Read only");
