@@ -790,7 +790,7 @@ impl Tool for ToolCodeReview {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Run a multi-stage agentic code review of the current change. Each stage is an agent that investigates with tools and reports findings with quoted evidence and, where it could get one, an executed reproduction. Findings the pipeline could verify are reported as facts; the rest are reported as hypotheses for you to triage. Every stage reports what it read, ran, and could not do. The machine-readable ReviewReport is attached to the tool result metadata.".to_string(),
+            description: "Run a multi-stage agentic code review of the current change. Each stage runs as a subagent that investigates with tools and reports findings with quoted evidence and, where it could get one, an executed reproduction. Do not invoke this tool when the user forbids subagents or delegation; review directly instead. Findings the pipeline could verify are reported as facts; the rest are reported as hypotheses for you to triage. Every stage reports what it read, ran, and could not do. The machine-readable ReviewReport is attached to the tool result metadata.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

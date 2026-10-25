@@ -81,6 +81,57 @@ impl Tool for ToolSubagent {
             },
             "required": ["type"]
         });
+        let goal_schema = json!({
+            "description": "Optional installed goal: null, a nonempty string, or an object requiring nonempty content. Content must contain non-whitespace text. A budget-only object is invalid; use goal.budget.max_turns for a step limit.",
+            "oneOf": [
+                {"type": "null"},
+                {"type": "string", "minLength": 1},
+                {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "minLength": 1, "description": "Full goal body, required and nonempty after trimming whitespace."},
+                        "criteria": {
+                            "description": "Optional structured success criteria the verifier checks one by one; omitted or null means no criteria.",
+                            "oneOf": [
+                                {"type": "null"},
+                                {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": {"type": "string", "description": "Short stable id, e.g. C1."},
+                                            "text": {"type": "string", "description": "The criterion itself."},
+                                            "verify_hint": {"oneOf": [{"type": "string"}, {"type": "null"}], "description": "Optional prose hint for the judge. Never executed."},
+                                            "verify_command": {"oneOf": [{"type": "string"}, {"type": "null"}], "description": crate::chat::verify_cmd::VERIFY_COMMAND_DESCRIPTION}
+                                        },
+                                        "required": ["id", "text"]
+                                    }
+                                }
+                            ]
+                        },
+                        "budget": {
+                            "description": "Optional goal pursuit budget; omitted or null uses a resolved profile budget when present, else engine defaults. Within an object, omitted, null or zero hard limits are unlimited; omitted cooldown and token threshold use engine defaults.",
+                            "oneOf": [
+                                {"type": "null"},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "max_turns": {"oneOf": [{"type": "integer", "minimum": 0, "maximum": u32::MAX}, {"type": "null"}], "description": "Maximum goal turns; omitted, null or zero means unlimited."},
+                                        "max_minutes": {"oneOf": [{"type": "integer", "minimum": 0, "maximum": u32::MAX}, {"type": "null"}], "description": "Maximum elapsed minutes; omitted, null or zero means unlimited."},
+                                        "max_tokens": {"oneOf": [{"type": "integer", "minimum": 0, "maximum": u64::MAX}, {"type": "null"}], "description": "Maximum tokens; omitted, null or zero means unlimited."},
+                                        "max_cost_cents": {"oneOf": [{"type": "integer", "minimum": 0, "maximum": u64::MAX}, {"type": "null"}], "description": "Maximum cost in cents; omitted, null or zero means unlimited."},
+                                        "cooldown_ms": {"type": "integer", "minimum": 0, "maximum": u64::MAX, "description": "Goal pursuit nudge cooldown in milliseconds; omitted uses the engine default. Not nullable."},
+                                        "no_progress_token_threshold": {"type": "integer", "minimum": 0, "maximum": u64::MAX, "description": "Completion-token threshold for counting a turn as progress; omitted uses the engine default. Not nullable."},
+                                        "no_progress_turns": {"oneOf": [{"type": "integer", "minimum": 0, "maximum": u32::MAX}, {"type": "null"}], "description": "Consecutive no-progress turn limit; omitted, null or zero disables this limit."}
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "required": ["content"]
+                }
+            ]
+        });
         ToolDesc {
             name: "subagent".to_string(),
             display_name: "Subagent".to_string(),
@@ -90,18 +141,18 @@ impl Tool for ToolSubagent {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Spawn a background-only, stateful child trajectory for research or implementation. The child inherits all parent-chat tools by default, can select a configured model or named model, and may receive a goal with a step budget, plan, target files, and an isolated worktree that auto-merges by default. A trajectory link is returned immediately and completion is auto-pushed. Use `agents_overview` and `agent_message` to coordinate with peers.".to_string(),
+            description: "Spawn a background-only, stateful child trajectory for research or implementation. The child inherits all parent-chat tools by default; task wording such as 'read-only' does not restrict capabilities. Use tools and sandbox explicitly for capability boundaries. The child can select a configured model or named model, and may receive a goal with a step budget, plan, target files, and an isolated worktree that auto-merges by default. A trajectory link is returned immediately and completion is auto-pushed. Use `agents_overview` and `agent_message` to coordinate with peers.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "task": {"type": "string", "description": "Focused instructions for the background subagent."},
                     "expected_result": {"type": "string", "description": "Concrete outcome the subagent should deliver."},
                     "target_files": {"type": "array", "items": {"type": "string"}, "description": "Optional declared edit targets, used as collision hints. This is declared intent, not an enforced sandbox: it only restricts built-in mutations when the run's scope guard is strict."},
-                    "sandbox": {"type": "string", "enum": ["read_only", "workspace_write", "full_access"], "description": "Optional confinement this run requires for shell execution. If this engine and terminal security mode cannot enforce it, the launch fails before dispatch instead of running unsandboxed. Omit to accept the engine default."},
-                    "tools": {"type": "string", "description": "Optional comma-separated tool names. Omit to inherit all parent-chat tools."},
+                    "sandbox": {"type": "string", "enum": ["read_only", "workspace_write", "full_access"], "description": "Optional confinement this run requires for shell execution, not a filter on other tools or a grant of authority. For read-only research, combine an explicit read-tool allowlist with read_only confinement where supported; task wording alone enforces neither. If this engine and terminal security mode cannot enforce it, the launch fails before dispatch instead of running unsandboxed. Omit to accept the engine default."},
+                    "tools": {"type": "string", "description": "Optional comma-separated tool allowlist that narrows inherited authority. Omit or leave empty to inherit all parent-chat tools. Task wording such as 'read-only' does not restrict tools. For read-only research, explicitly list only required read tools (e.g. cat, tree, glob, search_pattern) and request supported sandbox=read_only for shell confinement. Exclude subagent and review when nested delegation is not intended. Coordination tools may still be added within parent authority."},
                     "model_type": {"type": "string", "enum": MODEL_TYPES, "description": "Configured model slot. Ignored when model_name is supplied."},
                     "model_name": {"type": "string", "description": "Concrete chat model id. Takes precedence over model_type."},
-                    "goal": {"description": format!("Optional string or object {{content, criteria?, budget?}}; use goal.budget.max_turns for a step limit. For criteria[].verify_command: {}", crate::chat::verify_cmd::VERIFY_COMMAND_DESCRIPTION)},
+                    "goal": goal_schema,
                     "plan": {"type": "string", "description": "Optional installed plan; it is ground truth for the child."},
                     "worktree": {"type": "string", "enum": ["inherit", "isolated"], "default": "inherit", "description": "Use the parent worktree or create an isolated worktree."},
                     "push": PushMode::schema(),
@@ -2153,6 +2204,10 @@ mod tests {
         }
         .tool_description()
         .input_schema;
+        assert_eq!(schema["type"], "object");
+        for union in ["oneOf", "anyOf", "allOf"] {
+            assert!(schema.get(union).is_none());
+        }
         let properties = schema["properties"].as_object().unwrap();
         for absent in ["wait", "max_steps", "notify_parent"] {
             assert!(
@@ -2177,6 +2232,41 @@ mod tests {
                 properties.contains_key(present),
                 "{present} must be exposed"
             );
+        }
+        let goal_variants = properties["goal"]["oneOf"].as_array().unwrap();
+        assert_eq!(goal_variants.len(), 3);
+        assert_eq!(goal_variants[0]["type"], "null");
+        assert_eq!(goal_variants[1]["type"], "string");
+        assert_eq!(goal_variants[1]["minLength"], 1);
+        let goal_object = &goal_variants[2];
+        assert_eq!(goal_object["type"], "object");
+        assert_eq!(goal_object["required"], json!(["content"]));
+        assert_eq!(goal_object["properties"]["content"]["minLength"], 1);
+        let goal_properties = &goal_object["properties"];
+        let criterion = &goal_properties["criteria"]["oneOf"][1]["items"];
+        assert_eq!(criterion["required"], json!(["id", "text"]));
+        assert_eq!(
+            criterion["properties"]["verify_command"]["description"],
+            crate::chat::verify_cmd::VERIFY_COMMAND_DESCRIPTION
+        );
+        let budget = &goal_properties["budget"]["oneOf"][1];
+        for (field, maximum) in [
+            ("max_turns", json!(u32::MAX)),
+            ("max_minutes", json!(u32::MAX)),
+            ("max_tokens", json!(u64::MAX)),
+            ("max_cost_cents", json!(u64::MAX)),
+            ("no_progress_turns", json!(u32::MAX)),
+        ] {
+            let variants = &budget["properties"][field]["oneOf"];
+            assert_eq!(variants[0]["type"], "integer");
+            assert_eq!(variants[0]["minimum"], 0);
+            assert_eq!(variants[0]["maximum"], maximum);
+            assert_eq!(variants[1]["type"], "null");
+        }
+        for field in ["cooldown_ms", "no_progress_token_threshold"] {
+            assert_eq!(budget["properties"][field]["type"], "integer");
+            assert_eq!(budget["properties"][field]["minimum"], 0);
+            assert_eq!(budget["properties"][field]["maximum"], json!(u64::MAX));
         }
     }
 
@@ -2693,6 +2783,7 @@ mod tests {
 
     #[test]
     fn goal_string_and_object_parse() {
+        assert!(parse_subagent_args(&args()).unwrap().goal.is_none());
         let mut string = args();
         string.insert("goal".to_string(), json!("Ship frogs"));
         let parsed = parse_subagent_args(&string).unwrap();
@@ -2703,14 +2794,42 @@ mod tests {
             "goal".to_string(),
             json!({
                 "content": "Ship frogs",
-                "criteria": [{"id": "C1", "text": "tests", "verify_hint": "cargo test"}],
-                "budget": {"max_turns": 3, "max_tokens": 200}
+                "criteria": [{"id": "C1", "text": "tests", "verify_hint": "inspect results", "verify_command": "git diff --check"}],
+                "budget": {"max_turns": 3, "max_minutes": 0, "max_tokens": 200, "max_cost_cents": 0, "no_progress_turns": null, "cooldown_ms": 0, "no_progress_token_threshold": 0}
             }),
         );
         let parsed = parse_subagent_args(&object).unwrap();
         let goal = parsed.goal.unwrap();
         assert_eq!(goal.criteria[0].id, "C1");
+        assert_eq!(
+            goal.criteria[0].verify_command.as_deref(),
+            Some("git diff --check")
+        );
         assert_eq!(goal.budget.unwrap().max_turns, Some(3));
+
+        for accepted in [
+            Value::Null,
+            json!({"content": "Ship frogs"}),
+            json!({"content": "Ship frogs", "criteria": null, "budget": null}),
+            json!({"content": "Ship frogs", "criteria": [{"id": "C1", "text": "tests", "verify_hint": null, "verify_command": null}], "budget": {}}),
+        ] {
+            object.insert("goal".to_string(), accepted.clone());
+            assert!(parse_subagent_args(&object).is_ok(), "{accepted}");
+        }
+        for rejected in [
+            json!(""),
+            json!(" "),
+            json!({"budget": {"max_turns": 16}}),
+            json!({"content": " "}),
+            json!({"content": "Ship frogs", "criteria": [{"text": "tests"}]}),
+            json!({"content": "Ship frogs", "criteria": [{"id": "C1"}]}),
+            json!({"content": "Ship frogs", "budget": {"max_turns": -1}}),
+            json!({"content": "Ship frogs", "budget": {"cooldown_ms": null}}),
+            json!({"content": "Ship frogs", "budget": {"no_progress_token_threshold": null}}),
+        ] {
+            object.insert("goal".to_string(), rejected.clone());
+            assert!(parse_subagent_args(&object).is_err(), "{rejected}");
+        }
     }
 
     #[test]
