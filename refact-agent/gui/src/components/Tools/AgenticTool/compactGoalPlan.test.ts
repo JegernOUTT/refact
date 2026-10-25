@@ -419,6 +419,140 @@ describe("compact goal projection", () => {
     },
   );
 
+  test("describes a persisted past snooze as recorded metadata, not an active hold", () => {
+    const presentation = present("get_goal", {
+      result: { goal: goal({ snoozed_until_ms: 1 }) },
+    });
+    expect(presentation.stateLabel).toBe("Snooze recorded (snapshot)");
+    expect(presentation.tone).toBe("neutral");
+    expect(presentation.facts).toContainEqual({
+      label: "Recorded snooze until",
+      value: "1 ms since Unix epoch",
+    });
+  });
+
+  test.each([15_000, 4_102_444_800_000, Number.MAX_SAFE_INTEGER])(
+    "uses the same recorded-only semantics for expired and future timestamps: %s",
+    (snoozed_until_ms) => {
+      const result = Object.freeze({
+        goal: Object.freeze(goal({ snoozed_until_ms })),
+      });
+      const presentation = present("get_goal", { result });
+      expect(presentation.stateLabel).toBe("Snooze recorded (snapshot)");
+      expect(presentation.tone).toBe("neutral");
+      expect(presentation.facts).toContainEqual({
+        label: "Recorded snooze until",
+        value: `${snoozed_until_ms} ms since Unix epoch`,
+      });
+      expect(present("get_goal", { result })).toEqual(presentation);
+      expect(present("get_goal", { result: JSON.stringify(result) })).toEqual(
+        presentation,
+      );
+    },
+  );
+
+  test.each([
+    undefined,
+    null,
+    0,
+    -1,
+    1.5,
+    NaN,
+    Infinity,
+    -Infinity,
+    Number.MAX_SAFE_INTEGER + 1,
+    "15000",
+    true,
+    [],
+    {},
+  ])(
+    "ignores absent, zero and invalid snooze timestamps %#",
+    (snoozed_until_ms) => {
+      const result = { goal: goal({ snoozed_until_ms }) };
+      for (const receipt of [result, JSON.stringify(result)]) {
+        expect(present("get_goal", { result: receipt })).toEqual(
+          present("get_goal", { result: { goal: goal() } }),
+        );
+      }
+    },
+  );
+
+  test.each([
+    [{ status: "paused" }, "Paused (snapshot)"],
+    [{ status: "stopped" }, "Stopped (snapshot)"],
+    [{ status: "transferred" }, "Transferred (snapshot)"],
+    [{ status: "completed" }, "Completed (snapshot)"],
+    [{ status: "verifying" }, "Verifying (snapshot)"],
+    [{ status: "budget_exhausted" }, "Budget exhausted (snapshot)"],
+    [{ status: "no_progress" }, "No progress (snapshot)"],
+    [{ active: false }, "Not owned here (snapshot)"],
+  ])(
+    "preserves explicit state over recorded snooze %#",
+    (overrides, stateLabel) => {
+      for (const snoozed_until_ms of [1, 4_102_444_800_000]) {
+        const presentation = present("get_goal", {
+          result: {
+            goal: goal({
+              ...overrides,
+              wait: { subject: { kind: "event", name: "ci" } },
+              snoozed_until_ms,
+            }),
+          },
+        });
+        expect(presentation.stateLabel).toBe(stateLabel);
+        expect(presentation.facts).toContainEqual({
+          label: "Recorded snooze until",
+          value: `${snoozed_until_ms} ms since Unix epoch`,
+        });
+      }
+    },
+  );
+
+  test.each([
+    { kind: "process", process_id: "proc-1" },
+    { kind: "child", agent_id: "agent-1" },
+    { kind: "event", name: "ci" },
+    { kind: "deadline", until_ms: 1 },
+  ])("keeps typed wait precedence over recorded snooze %#", (subject) => {
+    const waiting = goal({ wait: { subject, since_ms: 0, deadline_ms: 1 } });
+    for (const snoozed_until_ms of [1, 4_102_444_800_000]) {
+      const presentation = present("get_goal", {
+        result: { goal: { ...waiting, snoozed_until_ms } },
+      });
+      expect(presentation.stateLabel).toBe(
+        present("get_goal", { result: { goal: waiting } }).stateLabel,
+      );
+      expect(presentation.tone).toBe("neutral");
+    }
+  });
+
+  test("retains validation and limits alongside recorded snooze without changing the full snapshot", () => {
+    const result = Object.freeze({
+      goal: Object.freeze(
+        goal({
+          snoozed_until_ms: 1,
+          latest_verdict: "unmet",
+          gaps: Object.freeze(["Tests", "Docs"]),
+          budget: Object.freeze({ max_turns: 12, max_tokens: 2000 }),
+        }),
+      ),
+    });
+    const before = JSON.stringify(result);
+    expect(present("get_goal", { result }).facts).toEqual([
+      { label: "Latest validation", value: "Criteria not met · 2 gaps" },
+      { label: "Recorded snooze until", value: "1 ms since Unix epoch" },
+      { label: "Budget limits", value: "12 turns · 2000 tokens" },
+    ]);
+    expect(JSON.stringify(result)).toBe(before);
+    expect(result.goal.turns_used).toBe(8);
+    expect(result.goal.tokens_used).toBe(1500);
+    expect(
+      present("get_goal", {
+        result: { goal: goal({ snoozed_until_ms: 1, budget: null }) },
+      }).facts[2],
+    ).toEqual({ label: "Base version", value: "1" });
+  });
+
   test("does not override held states with wait, snooze or a past verdict", () => {
     const held = {
       latest_verdict: "met",
@@ -443,7 +577,7 @@ describe("compact goal projection", () => {
     expect(
       present("get_goal", { result: { goal: goal({ snoozed_until_ms: 1 }) } })
         .stateLabel,
-    ).toBe("Snoozed (snapshot)");
+    ).toBe("Snooze recorded (snapshot)");
     expect(
       present("get_goal", {
         result: {

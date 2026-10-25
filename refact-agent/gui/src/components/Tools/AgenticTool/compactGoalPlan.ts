@@ -180,6 +180,9 @@ function goalPresentation(
     (goal.active !== undefined && typeof goal.active !== "boolean")
   )
     return null;
+  const snoozedUntil = positive(goal.snoozed_until_ms)
+    ? goal.snoozed_until_ms
+    : null;
   let state: CompactState = GOAL_STATES[goal.status];
   if (goal.status === "active") {
     const waiting = waitSubject(goal.wait);
@@ -187,8 +190,8 @@ function goalPresentation(
       state = { stateLabel: "Not owned here (snapshot)", tone: "neutral" };
     } else if (waiting !== null) {
       state = { stateLabel: `${waiting} (snapshot)`, tone: "neutral" };
-    } else if (positive(goal.snoozed_until_ms)) {
-      state = { stateLabel: "Snoozed (snapshot)", tone: "neutral" };
+    } else if (snoozedUntil !== null) {
+      state = { stateLabel: "Snooze recorded (snapshot)", tone: "neutral" };
     }
   }
   const budget = budgetText(goal.budget);
@@ -202,10 +205,15 @@ function goalPresentation(
           goal.gaps.length
         } gaps`,
       },
-      {
-        label: "Usage",
-        value: `${goal.turns_used} turns · ${goal.tokens_used} tokens`,
-      },
+      snoozedUntil === null
+        ? {
+            label: "Usage",
+            value: `${goal.turns_used} turns · ${goal.tokens_used} tokens`,
+          }
+        : {
+            label: "Recorded snooze until",
+            value: `${snoozedUntil} ms since Unix epoch`,
+          },
       budget === null
         ? { label: "Base version", value: goal.version }
         : { label: "Budget limits", value: budget },
