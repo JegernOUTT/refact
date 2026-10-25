@@ -1,6 +1,7 @@
 pub mod approval;
 pub(crate) mod approval_target;
 pub mod command_approval;
+pub mod compression_context;
 pub mod delivery;
 pub mod execution;
 pub mod handoff;

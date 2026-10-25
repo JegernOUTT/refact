@@ -314,13 +314,15 @@ async fn archive_stays_unchanged_and_update_plan_appends_after_rebuild() {
 #[test]
 fn rebuild_wiring_folds_only_after_unfolded_hook_equality_check() {
     let source = include_str!("context_rebuild.rs");
-    let hook_equality = source
-        .find("serde_json::to_value(&raw).ok() != serde_json::to_value(&hook_messages).ok()")
-        .unwrap();
+    let reserved = source.find("async fn rebuild_session_reserved(").unwrap();
+    let source = &source[reserved..];
+    let hook_equality = source.find("|| !source.matches(&session)").unwrap();
+    let normalization = source.find("normalize_rebuild_input(&raw,").unwrap();
     let fold = source
         .find("let rebuild_input = fold_controls_for_rebuild(")
         .unwrap();
     let reconstruction = source.find("messages: &rebuild_input,").unwrap();
     let validation = source.find("validate_output(&messages,").unwrap();
-    assert!(hook_equality < fold && fold < reconstruction && reconstruction < validation);
+    assert!(hook_equality < normalization && normalization < fold);
+    assert!(fold < reconstruction && reconstruction < validation);
 }

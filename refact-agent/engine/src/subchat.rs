@@ -417,6 +417,7 @@ async fn apply_subchat_reactive_compaction(
             hints: None,
             target_budget_symbols: Some(config.n_ctx.saturating_mul(2)),
             preserve_goal_messages: true,
+            live_agents_scope: config.chat_id.as_deref(),
         },
     ))
     .await;

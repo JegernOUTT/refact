@@ -244,36 +244,57 @@ pub async fn drain_deliveries_at_boundary(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> bool {
-    let (delivered, wake, processor_running, queue_notify, source_root, statuses) = {
-        let mut session = session_arc.lock().await;
-        session.drain_post_tool_side_effects();
-        if session.pending_deliveries.is_empty() {
-            return false;
-        }
-        let tracked: Vec<String> = session
-            .pending_deliveries
-            .iter()
-            .map(|pending| pending.id.clone())
-            .collect();
-        let (delivered_ids, wake) = session.drain_pending_deliveries();
-        let statuses: Vec<(String, DeliveryStatus)> = tracked
-            .into_iter()
-            .map(|id| {
-                let status = session.delivery_status(&id);
-                (id, status)
-            })
-            .collect();
+    let batch = collect_boundary_deliveries(&mut *session_arc.lock().await);
+    finalize_boundary_deliveries(app, session_arc, batch).await
+}
 
-        (
-            !delivered_ids.is_empty(),
-            wake,
-            session.queue_processor_running.clone(),
-            session.queue_notify.clone(),
-            crate::coordination::scope::session_source_root(&session),
-            statuses,
-        )
-    };
+pub(crate) struct DeliveryDrainBatch {
+    delivered: bool,
+    wake: bool,
+    processor_running: Arc<std::sync::atomic::AtomicBool>,
+    queue_notify: Arc<tokio::sync::Notify>,
+    source_root: Option<std::path::PathBuf>,
+    statuses: Vec<(String, DeliveryStatus)>,
+}
 
+pub(crate) fn collect_boundary_deliveries(session: &mut ChatSession) -> DeliveryDrainBatch {
+    session.drain_post_tool_side_effects();
+    let tracked: Vec<String> = session
+        .pending_deliveries
+        .iter()
+        .map(|pending| pending.id.clone())
+        .collect();
+    let (delivered_ids, wake) = session.drain_pending_deliveries();
+    let statuses = tracked
+        .into_iter()
+        .map(|id| {
+            let status = session.delivery_status(&id);
+            (id, status)
+        })
+        .collect();
+    DeliveryDrainBatch {
+        delivered: !delivered_ids.is_empty(),
+        wake,
+        processor_running: session.queue_processor_running.clone(),
+        queue_notify: session.queue_notify.clone(),
+        source_root: crate::coordination::scope::session_source_root(session),
+        statuses,
+    }
+}
+
+pub(crate) async fn finalize_boundary_deliveries(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+    batch: DeliveryDrainBatch,
+) -> bool {
+    let DeliveryDrainBatch {
+        delivered,
+        wake,
+        processor_running,
+        queue_notify,
+        source_root,
+        statuses,
+    } = batch;
     if !delivered {
         return false;
     }

@@ -494,6 +494,42 @@ pub async fn assemble_reconstruction(
     preserve_goal_messages: bool,
     preloaded_files: &std::collections::HashMap<String, String>,
 ) -> Result<Vec<ChatMessage>, String> {
+    assemble_reconstruction_with_mandatory(
+        messages,
+        decisions,
+        target_mode,
+        workspace_dirs,
+        budget,
+        preserve_goal_messages,
+        preloaded_files,
+        &[],
+    )
+    .await
+}
+
+pub fn is_live_agents_snapshot(message: &ChatMessage) -> bool {
+    message.role == "event"
+        && message
+            .extra
+            .get("event")
+            .and_then(|event| event.get("source"))
+            .and_then(|source| source.as_str())
+            == Some(LIVE_AGENTS_EVENT_SOURCE)
+}
+
+pub const LIVE_AGENTS_EVENT_SOURCE: &str = "agents.compression_context";
+
+#[allow(clippy::too_many_arguments)]
+pub async fn assemble_reconstruction_with_mandatory(
+    messages: &[ChatMessage],
+    decisions: &ParsedDecisions,
+    target_mode: &str,
+    workspace_dirs: &[PathBuf],
+    budget: TransitionContextBudget,
+    preserve_goal_messages: bool,
+    preloaded_files: &std::collections::HashMap<String, String>,
+    mandatory: &[ChatMessage],
+) -> Result<Vec<ChatMessage>, String> {
     let mut controls = if let Some(base) = current_base_plan_message(messages) {
         let mut controls = vec![base.clone()];
         controls.extend(messages.iter().filter(|m| is_plan_delta_event(m)).cloned());
@@ -525,9 +561,21 @@ pub async fn assemble_reconstruction(
     for control in &mut controls {
         normalize_control_metadata(control, target_mode);
     }
-    let mandatory = controls.iter().map(message_symbols).sum::<usize>();
-    if mandatory >= budget.total_symbols {
-        return Err(format!("Mandatory plan/goal context ({mandatory} symbols) does not fit reconstruction budget ({})", budget.total_symbols));
+    let live_agents = mandatory
+        .iter()
+        .map(|m| {
+            message_symbols(m)
+                + m.extra
+                    .get("event")
+                    .map_or(0, |event| text_symbols(&event.to_string()))
+        })
+        .sum::<usize>();
+    let mandatory_symbols = controls.iter().map(message_symbols).sum::<usize>() + live_agents;
+    if mandatory_symbols >= budget.total_symbols {
+        if live_agents > 0 {
+            return Err(format!("Mandatory live-agent and plan/goal context ({mandatory_symbols} symbols, of which live agents {live_agents}) does not fit reconstruction budget ({}); refusing to truncate agent IDs or tasks", budget.total_symbols));
+        }
+        return Err(format!("Mandatory plan/goal context ({mandatory_symbols} symbols) does not fit reconstruction budget ({})", budget.total_symbols));
     }
     let continuation = format!(
         "## Summary\n\n{}\n\n## Pending Tasks\n\n{}\n\n## Next Action\n\n{}",
@@ -536,10 +584,10 @@ pub async fn assemble_reconstruction(
         decisions.handoff_message
     );
     let continuation_symbols = text_symbols(&continuation);
-    if mandatory + continuation_symbols > budget.total_symbols {
+    if mandatory_symbols + continuation_symbols > budget.total_symbols {
         return Err("Mandatory controls and continuation exceed reconstruction budget".into());
     }
-    let available = budget.total_symbols - mandatory - continuation_symbols;
+    let available = budget.total_symbols - mandatory_symbols - continuation_symbols;
     let narrative_budget = TransitionContextBudget {
         total_symbols: available,
         files_symbols: budget.files_symbols.min(available / 2),
@@ -561,6 +609,7 @@ pub async fn assemble_reconstruction(
     )
     .await?;
     result.push(ChatMessage::new("user".into(), continuation));
+    result.extend(mandatory.iter().cloned());
     result.extend(controls);
     let size = result.iter().map(message_symbols).sum::<usize>();
     if size > budget.total_symbols {
@@ -2059,6 +2108,76 @@ mod tests {
         .is_err());
     }
 
+    fn live_agents_event(task: &str) -> ChatMessage {
+        let mut message = ChatMessage::new("event".into(), "live subagents".into());
+        message.message_id = "live-agents".into();
+        message.extra.insert(
+            "event".into(),
+            serde_json::json!({
+                "subkind": "system_notice",
+                "source": LIVE_AGENTS_EVENT_SOURCE,
+                "payload": {"agents": [{"agent_id": "bgagent-1", "task": task}]},
+            }),
+        );
+        message
+    }
+
+    #[tokio::test]
+    async fn mandatory_live_agents_are_carried_exactly_and_reserved_first() {
+        let snapshot = live_agents_event(&"exact task ".repeat(50));
+        let messages = vec![
+            ChatMessage::new("user".into(), "x".repeat(5000)),
+            live_agents_event("stale"),
+        ];
+        let decisions = ParsedDecisions {
+            summary: "s".into(),
+            handoff_message: "h".into(),
+            messages_to_preserve: vec!["MSG_ID:0".into()],
+            ..Default::default()
+        };
+        let budget = TransitionContextBudget {
+            previous_symbols: 10_000,
+            total_symbols: 3_000,
+            files_symbols: 1_500,
+            messages_symbols: 1_500,
+            max_images: 0,
+        };
+        let rebuilt = assemble_reconstruction_with_mandatory(
+            &messages,
+            &decisions,
+            "agent",
+            &[],
+            budget,
+            true,
+            &Default::default(),
+            std::slice::from_ref(&snapshot),
+        )
+        .await
+        .unwrap();
+        let carried: Vec<_> = rebuilt
+            .iter()
+            .filter(|m| is_live_agents_snapshot(m))
+            .collect();
+        assert_eq!(carried.len(), 1);
+        assert_eq!(carried[0].extra, snapshot.extra);
+        assert!(rebuilt.iter().map(message_symbols).sum::<usize>() <= budget.total_symbols);
+        let error = assemble_reconstruction_with_mandatory(
+            &messages,
+            &decisions,
+            "agent",
+            &[],
+            TransitionContextBudget {
+                total_symbols: 200,
+                ..budget
+            },
+            true,
+            &Default::default(),
+            std::slice::from_ref(&snapshot),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("live-agent"), "{error}");
+    }
     #[tokio::test]
     async fn reconstruction_does_not_read_unapproved_files() {
         let messages = vec![ChatMessage {

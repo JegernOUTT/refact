@@ -170,6 +170,8 @@ fn runtime_owned_calls_are_never_reconciled() {
             status: refact_chat_api::PendingQuestionStatus::Pending,
             answers: vec![],
             resolution_id: None,
+            response_protocol_version: refact_chat_api::QUESTION_RESPONSE_PROTOCOL_VERSION,
+            response: None,
         });
     assert!(live_tool_call_ids(&s).contains("orphan"));
     s.pending_questions[0].status = refact_chat_api::PendingQuestionStatus::Answered;
@@ -361,6 +363,48 @@ fn token_cap_converts_to_symbols_and_reserves_low_density_controls() {
     assert!(huge < 70_000, "budget can never be a no-op");
 }
 
+#[tokio::test]
+async fn fresh_live_agents_are_reserved_before_source_size_budget_cap() {
+    let history = vec![msg("request", "user", &"continue work ".repeat(40))];
+    let mut live = crate::chat::internal_roles::event(
+        crate::chat::internal_roles::EventSubkind::SystemNotice,
+        refact_agentic::mode_transition::LIVE_AGENTS_EVENT_SOURCE,
+        serde_json::json!({"agents": [{"agent_id": "bgagent-exact", "task": "retain task detail ".repeat(500)}]}),
+        "current live subagent state",
+    );
+    live.message_id = "live-state".into();
+    let mandatory_symbols = refact_agentic::mode_transition::message_symbols(&live)
+        + live.extra["event"].to_string().chars().count();
+    assert!(token_cap_to_symbol_budget(&history, 20_000, None) < mandatory_symbols);
+    let input =
+        crate::agentic::mode_transition::replace_live_agents_context(&history, Some(live.clone()));
+    let total_symbols = token_cap_to_symbol_budget(&input, 20_000, None);
+    assert!(total_symbols > mandatory_symbols);
+    let rebuilt = refact_agentic::mode_transition::assemble_reconstruction_with_mandatory(
+        &input,
+        &refact_agentic::mode_transition::ParsedDecisions::default(),
+        "agent",
+        &[],
+        refact_agentic::mode_transition::TransitionContextBudget {
+            previous_symbols: total_symbols * 2,
+            total_symbols,
+            files_symbols: total_symbols / 2,
+            messages_symbols: total_symbols / 2,
+            max_images: 0,
+        },
+        true,
+        &Default::default(),
+        std::slice::from_ref(&live),
+    )
+    .await
+    .unwrap();
+    let carried = rebuilt
+        .iter()
+        .find(|message| refact_agentic::mode_transition::is_live_agents_snapshot(message))
+        .unwrap();
+    assert_eq!(carried.extra, live.extra);
+}
+
 #[test]
 fn token_cap_scales_down_when_characters_cost_multiple_tokens() {
     let text = "🦀".repeat(10_000);
@@ -404,7 +448,7 @@ async fn failed_persistence_is_fatal_redacted_and_never_publishes_a_report() {
     let before = serde_json::to_value(&s.messages).unwrap();
     s.active_compression_attempt = Some(1);
     status(&mut s, CompressionPhase::Running, None);
-    let version = s.trajectory_version;
+    let source = RebuildSource::capture(&s).unwrap();
     let thread = s.thread.clone();
     let session = Arc::new(Mutex::new(s));
     let report = make_reconstruction_report(
@@ -417,10 +461,9 @@ async fn failed_persistence_is_fatal_redacted_and_never_publishes_a_report() {
         gcx,
         &session,
         report,
-        version,
+        &source,
         1,
         &thread,
-        &[],
         &std::sync::atomic::AtomicBool::new(false),
         "manual",
         1,
@@ -521,6 +564,8 @@ async fn apply_blocks_runtime_owned_question_but_proceeds_past_abandoned_call() 
                     status: refact_chat_api::PendingQuestionStatus::Pending,
                     answers: vec![],
                     resolution_id: None,
+                    response_protocol_version: refact_chat_api::QUESTION_RESPONSE_PROTOCOL_VERSION,
+                    response: None,
                 });
         }
         let before = serde_json::to_string(&s.messages).unwrap();

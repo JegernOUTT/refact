@@ -710,6 +710,7 @@ async fn finalize_handoff_inner(
             hints: Some(decisions),
             target_budget_symbols: None,
             preserve_goal_messages: false,
+            live_agents_scope: None,
         },
     ))
     .await?;

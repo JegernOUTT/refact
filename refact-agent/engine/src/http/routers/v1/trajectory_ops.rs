@@ -676,6 +676,7 @@ pub async fn handle_mode_transition_apply(
             hints: None,
             target_budget_symbols: None,
             preserve_goal_messages: false,
+            live_agents_scope: None,
         },
     )
     .await
@@ -874,6 +875,7 @@ pub async fn handle_planner_from_transition(
             hints: None,
             target_budget_symbols: None,
             preserve_goal_messages: false,
+            live_agents_scope: None,
         },
     )
     .await

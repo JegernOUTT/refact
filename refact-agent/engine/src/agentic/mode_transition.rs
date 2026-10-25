@@ -5,7 +5,7 @@ pub use refact_agentic::mode_transition::{
     count_images_in_messages, current_base_goal_message, extract_conversation_metadata,
     extract_initial_plan_text, format_annotated_messages, format_budget_summary, format_file_list,
     format_memory_list, insert_goal_messages_before_plan, is_goal_delta_event,
-    make_pinned_plan_message, message_symbols, normalize_control_metadata,
+    is_live_agents_snapshot, make_pinned_plan_message, message_symbols, normalize_control_metadata,
     normalize_goal_message_content, parse_llm_response, push_context_file_with_budget,
     text_symbols, transfer_goal_ownership, GoalTransferResult, truncate_utf8,
 };
@@ -72,6 +72,7 @@ pub struct ReconstructionRequest<'a> {
     pub hints: Option<ReconstructionHints>,
     pub target_budget_symbols: Option<usize>,
     pub preserve_goal_messages: bool,
+    pub live_agents_scope: Option<&'a str>,
 }
 
 pub struct ReconstructionOutcome {
@@ -161,6 +162,18 @@ fn is_control_message(message: &ChatMessage) -> bool {
             .is_some_and(|s| matches!(s, "plan_delta" | "goal_delta" | "goal_pursuit"))
 }
 
+pub(crate) fn replace_live_agents_context(
+    messages: &[ChatMessage],
+    snapshot: Option<ChatMessage>,
+) -> Vec<ChatMessage> {
+    messages
+        .iter()
+        .filter(|message| !is_live_agents_snapshot(message))
+        .cloned()
+        .chain(snapshot)
+        .collect()
+}
+
 /// The current request and plan/goal controls are mandatory; everything else gets a
 /// bounded preview and may be omitted when the conversation is too long.
 fn analysis_entries(metadata: &ConversationMetadata) -> Vec<AnalysisEntry<'_>> {
@@ -175,8 +188,23 @@ fn analysis_entries(metadata: &ConversationMetadata) -> Vec<AnalysisEntry<'_>> {
         .map(|(index, (id, message))| AnalysisEntry {
             id,
             message,
-            text: message.content.content_text_only(),
-            mandatory: Some(index) == latest_user || is_control_message(message),
+            text: if is_live_agents_snapshot(message) {
+                format!(
+                    "{}\n{}",
+                    message.content.content_text_only(),
+                    message
+                        .extra
+                        .get("event")
+                        .and_then(|event| event.get("payload"))
+                        .map(|payload| payload.to_string())
+                        .unwrap_or_default()
+                )
+            } else {
+                message.content.content_text_only()
+            },
+            mandatory: Some(index) == latest_user
+                || is_control_message(message)
+                || is_live_agents_snapshot(message),
         })
         .collect()
 }
@@ -381,7 +409,15 @@ async fn analyze_reconstruction(
                 )
                 .replace("{file_list}", &file_list)
                 .replace("{memory_list}", &memory_list)
-                .replace("{budget_summary}", &budget_summary),
+                .replace("{budget_summary}", &budget_summary)
+                .replace(
+                    "{live_agents_policy}",
+                    if request.live_agents_scope.is_some() {
+                        "A fresh live-subagents event (source agents.compression_context) is carried verbatim by the backend. Reference its exact agent IDs and pending questions where they drive next actions; do not restate its payload."
+                    } else {
+                        "Any live-subagents event in source history is historical context, not a mandatory carried snapshot. Preserve relevant exact agent IDs, ownership and pending questions in the summary/pending tasks. Agents remain owned by their original chat; do not imply transfer."
+                    },
+                ),
             hints
         )
     };
@@ -533,7 +569,39 @@ pub async fn reconstruct_context(
     gcx: Arc<GlobalContext>,
     request: ReconstructionRequest<'_>,
 ) -> Result<ReconstructionOutcome, String> {
+    check_cancelled(&request)?;
+    let live_before = match request.live_agents_scope {
+        Some(scope) => {
+            Some(crate::agents::compression_context::collect_live_agents(gcx.clone(), scope).await?)
+        }
+        None => None,
+    };
+    let source = match &live_before {
+        Some(snapshot) => replace_live_agents_context(request.messages, snapshot.to_message()),
+        None => request.messages.to_vec(),
+    };
+    let request = ReconstructionRequest {
+        messages: &source,
+        target_mode: request.target_mode,
+        target_mode_description: request.target_mode_description,
+        parent_chat_id: request.parent_chat_id,
+        model_override: request.model_override,
+        chat_model: request.chat_model,
+        abort_flag: request.abort_flag,
+        hints: request.hints,
+        target_budget_symbols: request.target_budget_symbols,
+        preserve_goal_messages: request.preserve_goal_messages,
+        live_agents_scope: request.live_agents_scope,
+    };
     let (mut decisions, model, budget) = analyze_reconstruction(gcx.clone(), &request).await?;
+    let live_agents = match (request.live_agents_scope, live_before) {
+        (Some(scope), Some(before)) => {
+            let after =
+                crate::agents::compression_context::collect_live_agents(gcx.clone(), scope).await?;
+            after.merged_with_earlier(before).to_message()
+        }
+        _ => None,
+    };
     let workspace_dirs = gcx.workspace_folders();
     let metadata = extract_conversation_metadata(request.messages);
     let allowed: std::collections::HashSet<_> = metadata
@@ -614,7 +682,7 @@ pub async fn reconstruct_context(
         }
         *paths = safe;
     }
-    let mut messages = refact_agentic::mode_transition::assemble_reconstruction(
+    let mut messages = refact_agentic::mode_transition::assemble_reconstruction_with_mandatory(
         request.messages,
         &decisions,
         request.target_mode,
@@ -622,6 +690,7 @@ pub async fn reconstruct_context(
         budget,
         request.preserve_goal_messages,
         &preloaded,
+        live_agents.as_slice(),
     )
     .await?;
     let reread_paths = messages
@@ -690,6 +759,7 @@ pub async fn analyze_mode_transition(
             hints: None,
             target_budget_symbols: None,
             preserve_goal_messages: false,
+            live_agents_scope: None,
         },
     )
     .await
@@ -725,10 +795,35 @@ mod tests {
             hints: None,
             target_budget_symbols: None,
             preserve_goal_messages: true,
+            live_agents_scope: None,
         };
         assert!(check_cancelled(&request).is_err());
         flag.store(false, Ordering::Release);
         assert!(check_cancelled(&request).is_ok());
+    }
+
+    #[test]
+    fn replacing_empty_agent_context_removes_stale_snapshot_but_keeps_other_events() {
+        let old = crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            refact_agentic::mode_transition::LIVE_AGENTS_EVENT_SOURCE,
+            serde_json::json!({"agents": [{"agent_id": "old-agent"}]}),
+            "old snapshot",
+        );
+        let other = crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "other.source",
+            serde_json::json!({}),
+            "keep me",
+        );
+        let history = vec![text_message("user", "request"), old, other];
+        let replaced = replace_live_agents_context(&history, None);
+        assert_eq!(replaced.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&replaced[1]).unwrap(),
+            serde_json::to_value(&history[2]).unwrap()
+        );
+        assert!(!replaced.iter().any(is_live_agents_snapshot));
     }
 
     fn text_message(role: &str, text: &str) -> ChatMessage {

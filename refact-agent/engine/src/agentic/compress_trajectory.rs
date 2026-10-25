@@ -39,6 +39,7 @@ pub async fn compress_trajectory(
             hints: None,
             target_budget_symbols: None,
             preserve_goal_messages: true,
+            live_agents_scope: None,
         },
     )
     .await?;

@@ -1811,7 +1811,7 @@ mod tests {
     }
 
     #[test]
-    fn goal_monitor_canceled_compression_attempt_does_not_block_recovery() {
+    fn goal_monitor_canceled_compression_waits_for_owner_cleanup_before_recovery() {
         let now = Instant::now();
         for age_ms in [0, 16 * 60 * 1000] {
             let mut session = active_goal_session();
@@ -1825,20 +1825,28 @@ mod tests {
             session.compression_attempt_started_at_ms = Some(epoch_ms_now().saturating_sub(age_ms));
             session.last_activity = now - Duration::from_secs(40);
 
-            // AttemptGuard cancels synchronously; same-owner status cleanup may
-            // still be waiting for the session lock. Age alone is not cancellation.
             abort.store(true, Ordering::SeqCst);
             assert_eq!(
                 apply_monitor(&mut session, 10_000, now),
+                GoalNudgeOutcome::Skipped(GoalNudgeSkip::Busy)
+            );
+            assert!(session.start_stream().is_none());
+            crate::chat::context_rebuild::status(
+                &mut session,
+                CompressionPhase::Failed,
+                Some(crate::chat::types::CompressionReason::TransientFailure),
+            );
+            assert_eq!(
+                apply_monitor(&mut session, 10_000, now),
                 GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle),
-                "canceled reservation must recover immediately at age {age_ms}ms"
+                "released reservation must recover at age {age_ms}ms"
             );
             assert!(!session.abort_flag.load(Ordering::SeqCst));
             assert!(!session.user_interrupt_flag.load(Ordering::SeqCst));
             assert!(!session.delivery_wake_sources.is_empty());
             assert!(
                 session.start_stream().is_some(),
-                "canceled reservation must allow generation"
+                "released reservation must allow generation"
             );
         }
     }

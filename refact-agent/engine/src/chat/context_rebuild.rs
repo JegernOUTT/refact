@@ -65,22 +65,17 @@ pub struct ManualCompressionApplyResult {
 }
 
 pub(crate) fn compression_attempt_active(session: &ChatSession) -> bool {
-    // Guard cancellation is synchronous even if same-owner status cleanup awaits a lock.
-    !session
-        .compression_abort_flag
-        .as_ref()
-        .is_some_and(|flag| flag.load(Ordering::SeqCst))
-        && (session.active_compression_attempt.is_some()
-            || session.is_compressing
-            || session.runtime.is_compressing
-            || matches!(
-                session.compression_phase,
-                Some(CompressionPhase::Checking | CompressionPhase::Running)
-            )
-            || matches!(
-                session.runtime.compression_phase,
-                Some(CompressionPhase::Checking | CompressionPhase::Running)
-            ))
+    session.active_compression_attempt.is_some()
+        || session.is_compressing
+        || session.runtime.is_compressing
+        || matches!(
+            session.compression_phase,
+            Some(CompressionPhase::Checking | CompressionPhase::Running)
+        )
+        || matches!(
+            session.runtime.compression_phase,
+            Some(CompressionPhase::Checking | CompressionPhase::Running)
+        )
 }
 
 fn pending_tools(messages: &[ChatMessage]) -> bool {
@@ -263,7 +258,11 @@ pub(crate) fn abandoned_calls_note(abandoned: &[AbandonedCall]) -> Option<ChatMe
 }
 
 fn message_text_for_units(message: &ChatMessage) -> String {
-    let mut text = message.content.content_text_only();
+    let mut text = if message.role == "event" {
+        refact_llm::adapters::render_extra::render_event_message(message)
+    } else {
+        message.content.content_text_only()
+    };
     if let Some(reasoning) = &message.reasoning_content {
         text.push_str(reasoning);
     }
@@ -276,6 +275,7 @@ fn message_text_for_units(message: &ChatMessage) -> String {
 
 fn is_mandatory_control(message: &ChatMessage) -> bool {
     matches!(message.role.as_str(), "goal" | "plan")
+        || refact_agentic::mode_transition::is_live_agents_snapshot(message)
         || message
             .extra
             .get("event")
@@ -293,7 +293,15 @@ pub(crate) fn token_cap_to_symbol_budget(
     let (mut symbols, mut tokens) = (0usize, 0usize);
     for message in messages {
         let text = message_text_for_units(message);
-        let s = refact_agentic::mode_transition::message_symbols(message);
+        let mut s = refact_agentic::mode_transition::message_symbols(message);
+        if refact_agentic::mode_transition::is_live_agents_snapshot(message) {
+            s = s.saturating_add(
+                message
+                    .extra
+                    .get("event")
+                    .map_or(0, |event| event.to_string().chars().count()),
+            );
+        }
         let t = crate::tokens::count_text_tokens(tokenizer.clone(), &text)
             .unwrap_or_else(|_| text.len() / 3 + 1);
         if is_mandatory_control(message) {
@@ -454,34 +462,87 @@ pub(crate) fn emit_compression_skipped_status(
     }
 }
 
-/// Releases the reservation even when the caller drops the provider future.
 struct AttemptGuard {
     session: Arc<Mutex<ChatSession>>,
     attempt: u64,
     abort: Arc<AtomicBool>,
+    gcx: Option<Arc<GlobalContext>>,
 }
 impl Drop for AttemptGuard {
     fn drop(&mut self) {
         self.abort.store(true, Ordering::SeqCst);
         let session = self.session.clone();
         let attempt = self.attempt;
+        let gcx = self.gcx.take();
         let release = move |s: &mut ChatSession| {
-            if s.active_compression_attempt == Some(attempt) {
-                status(
-                    s,
-                    CompressionPhase::Failed,
-                    Some(CompressionReason::TransientFailure),
-                );
-            }
+            terminal_attempt(
+                s,
+                attempt,
+                CompressionPhase::Failed,
+                Some(CompressionReason::TransientFailure),
+            )
         };
-        if let Ok(mut s) = session.try_lock() {
-            release(&mut s);
-        } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let session = session.clone();
+        let batch = match session.try_lock() {
+            Ok(mut s) => Some(release(&mut s)),
+            Err(_) => None,
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                release(&mut *session.lock().await);
+                let batch = match batch {
+                    Some(batch) => batch,
+                    None => release(&mut *session.lock().await),
+                };
+                if let Some(gcx) = gcx {
+                    finish_held_deliveries(gcx, session, batch).await;
+                }
             });
-        };
+        }
+    }
+}
+
+fn terminal_attempt(
+    session: &mut ChatSession,
+    attempt: u64,
+    phase: CompressionPhase,
+    reason: Option<CompressionReason>,
+) -> Option<crate::chat::delivery::DeliveryDrainBatch> {
+    if session.active_compression_attempt != Some(attempt) {
+        return None;
+    }
+    status(session, phase, reason);
+    Some(crate::chat::delivery::collect_boundary_deliveries(session))
+}
+
+async fn finish_held_deliveries(
+    gcx: Arc<GlobalContext>,
+    session: Arc<Mutex<ChatSession>>,
+    batch: Option<crate::chat::delivery::DeliveryDrainBatch>,
+) {
+    if let Some(batch) = batch {
+        let finalizer = tokio::spawn(async move {
+            let app = crate::app_state::AppState::from_gcx(gcx).await;
+            crate::chat::delivery::finalize_boundary_deliveries(app, session, batch).await;
+        });
+        let _ = finalizer.await;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RebuildSource {
+    messages: Vec<u8>,
+    thread: Vec<u8>,
+}
+
+impl RebuildSource {
+    pub(crate) fn capture(session: &ChatSession) -> Result<Self, String> {
+        Ok(Self {
+            messages: serde_json::to_vec(&session.messages).map_err(|e| e.to_string())?,
+            thread: serde_json::to_vec(&session.thread).map_err(|e| e.to_string())?,
+        })
+    }
+
+    fn matches(&self, session: &ChatSession) -> bool {
+        Self::capture(session).is_ok_and(|current| current == *self)
     }
 }
 
@@ -534,11 +595,19 @@ fn estimated_tokens(
         let tokens = messages
             .iter()
             .map(|message| {
-                let content = message
-                    .content
-                    .count_tokens(tokenizer.clone(), &None)
+                let content = if message.role == "event" {
+                    crate::tokens::count_text_tokens(
+                        tokenizer.clone(),
+                        &refact_llm::adapters::render_extra::render_event_message(message),
+                    )
                     .unwrap_or(0)
-                    .max(0) as usize;
+                } else {
+                    message
+                        .content
+                        .count_tokens(tokenizer.clone(), &None)
+                        .unwrap_or(0)
+                        .max(0) as usize
+                };
                 let calls = message
                     .tool_calls
                     .as_ref()
@@ -688,10 +757,8 @@ impl ReconstructionMetrics {
 async fn commit_report<F, Fut>(
     session: &mut ChatSession,
     report: ChatMessage,
-    version: u64,
+    source: &RebuildSource,
     attempt: u64,
-    thread: &ThreadParams,
-    deliveries: &[refact_core::chat_types::PendingDelivery],
     abort: &AtomicBool,
     persist: F,
 ) -> Result<(), String>
@@ -702,15 +769,14 @@ where
     if session.active_compression_attempt != Some(attempt)
         || !idle(session)
         || abort.load(Ordering::SeqCst)
-        || session.trajectory_version != version
-        || serde_json::to_value(&session.thread).ok() != serde_json::to_value(thread).ok()
-        || session.pending_deliveries_for_snapshot() != deliveries
+        || !source.matches(session)
     {
         return Err(SKIP_SESSION_CHANGED.into());
     }
+    let version = session.trajectory_version.saturating_add(1);
     let mut snapshot = crate::chat::trajectories::trajectory_snapshot_from_session(session);
     snapshot.messages.push(report.clone());
-    snapshot.version = version.saturating_add(1);
+    snapshot.version = version;
     snapshot.previous_response_id = None;
     snapshot.frozen_request_prefix = None;
     snapshot.claude_code_identity = None;
@@ -722,10 +788,11 @@ where
     session.openai_codex_websocket = Default::default();
     session.reset_cache_guard_snapshot();
     session.provider_usage_stale = true;
-    session.trajectory_committed_version = session.trajectory_version;
+    session.trajectory_version = version;
+    session.trajectory_committed_version = version;
     session.trajectory_dirty = false;
     session.trajectory_save_error = None;
-    session.last_rebuild_attempt_version = Some(session.trajectory_version);
+    session.last_rebuild_attempt_version = Some(version);
     Ok(())
 }
 
@@ -806,10 +873,9 @@ pub(super) async fn commit_report_then_observe<F, Fut>(
     gcx: Arc<GlobalContext>,
     session_arc: &Arc<Mutex<ChatSession>>,
     report: ChatMessage,
-    version: u64,
+    source: &RebuildSource,
     attempt: u64,
     thread: &ThreadParams,
-    deliveries: &[refact_core::chat_types::PendingDelivery],
     abort: &AtomicBool,
     trigger: &str,
     messages_before: usize,
@@ -819,41 +885,31 @@ where
     F: FnOnce(crate::chat::trajectories::TrajectorySnapshot) -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,
 {
-    let (result, messages_after) = {
+    let (result, messages_after, batch) = {
         let mut session = session_arc.lock().await;
-        let result = commit_report(
-            &mut session,
-            report,
-            version,
-            attempt,
-            thread,
-            deliveries,
-            abort,
-            persist,
-        )
-        .await;
-        if session.active_compression_attempt == Some(attempt) {
-            status(
-                &mut session,
-                if result.is_ok() {
-                    CompressionPhase::Applied
-                } else {
-                    CompressionPhase::Failed
-                },
-                result.as_ref().err().map(|error| {
-                    if is_routine_rebuild_skip(error) {
-                        CompressionReason::SourceChanged
-                    } else {
-                        CompressionReason::TransientFailure
-                    }
-                }),
-            );
-        }
+        let result = commit_report(&mut session, report, source, attempt, abort, persist).await;
         let messages_after = active_context(&session.messages)
             .map(|view| view.messages.len())
             .unwrap_or(session.messages.len());
-        (result, messages_after)
+        let batch = terminal_attempt(
+            &mut session,
+            attempt,
+            if result.is_ok() {
+                CompressionPhase::Applied
+            } else {
+                CompressionPhase::Failed
+            },
+            result.as_ref().err().map(|error| {
+                if is_routine_rebuild_skip(error) {
+                    CompressionReason::SourceChanged
+                } else {
+                    CompressionReason::TransientFailure
+                }
+            }),
+        );
+        (result, messages_after, batch)
     };
+    finish_held_deliveries(gcx.clone(), session_arc.clone(), batch).await;
     if result.is_ok() {
         postcompact_observation(gcx, thread, trigger, messages_before, messages_after).await;
     }
@@ -939,25 +995,53 @@ pub async fn rebuild_session(
     expected_version: Option<u64>,
     explicit: bool,
 ) -> Result<(), String> {
-    let (hook_messages, hook_thread, hook_version, hook_deliveries) = {
-        let session = session_arc.lock().await;
+    let mut guard = None;
+    let result = rebuild_session_reserved(
+        gcx.clone(),
+        session_arc,
+        request,
+        expected_version,
+        explicit,
+        &mut guard,
+    )
+    .await;
+    if let Some(mut guard) = guard.take() {
+        let batch = {
+            let mut session = session_arc.lock().await;
+            terminal_attempt(
+                &mut session,
+                guard.attempt,
+                CompressionPhase::Failed,
+                Some(CompressionReason::TransientFailure),
+            )
+        };
+        finish_held_deliveries(gcx, session_arc.clone(), batch).await;
+        guard.gcx = None;
+        drop(guard);
+    }
+    result
+}
+
+async fn rebuild_session_reserved(
+    gcx: Arc<GlobalContext>,
+    session_arc: &Arc<Mutex<ChatSession>>,
+    request: PendingContextRebuild,
+    expected_version: Option<u64>,
+    explicit: bool,
+    guard: &mut Option<AttemptGuard>,
+) -> Result<(), String> {
+    let (hook_messages, hook_thread, source, attempt, abort) = {
+        let mut session = session_arc.lock().await;
         if expected_version.is_some_and(|v| v != session.trajectory_version) {
             return Err("Chat changed since preview; preview again".into());
         }
         if session.pending_mode_handoff.is_some() || session.pending_context_rebuild.is_some() {
             return Err(SKIP_OTHER_PENDING.into());
         }
-        let explicit_idle = explicit
-            && matches!(
-                session.runtime.state,
-                SessionState::Idle | SessionState::Error | SessionState::Completed
-            )
-            && !session.closed
-            && !compression_attempt_active(&session)
-            && session.draft_message.is_none()
-            && session.draft_usage.is_none()
-            && session.stream_started_at.is_none();
-        if !explicit_idle && (!idle(&session) || compression_attempt_active(&session)) {
+        if explicit {
+            prepare_explicit_idle(&mut session);
+        }
+        if !idle(&session) || compression_attempt_active(&session) {
             return Err(SKIP_NOT_IDLE.into());
         }
         if !explicit && requires_explicit_rebuild(&session.messages) {
@@ -971,13 +1055,24 @@ pub async fn rebuild_session(
         if !explicit && session.last_rebuild_attempt_version == Some(session.trajectory_version) {
             return Err(SKIP_ALREADY_ATTEMPTED.into());
         }
-        (
-            messages,
-            session.thread.clone(),
-            session.trajectory_version,
-            session.pending_deliveries_for_snapshot(),
-        )
+        let source = RebuildSource::capture(&session)?;
+        session.compression_attempt_generation =
+            session.compression_attempt_generation.wrapping_add(1);
+        let attempt = session.compression_attempt_generation;
+        let abort = Arc::new(AtomicBool::new(false));
+        session.active_compression_attempt = Some(attempt);
+        session.compression_abort_flag = Some(abort.clone());
+        session.compression_attempt_started_at_ms =
+            Some(chrono::Utc::now().timestamp_millis() as u64);
+        status(&mut session, CompressionPhase::Checking, None);
+        (messages, session.thread.clone(), source, attempt, abort)
     };
+    *guard = Some(AttemptGuard {
+        session: session_arc.clone(),
+        attempt,
+        abort: abort.clone(),
+        gcx: Some(gcx.clone()),
+    });
     match precompact_control(
         gcx.clone(),
         &hook_thread,
@@ -987,22 +1082,22 @@ pub async fn rebuild_session(
     .await
     {
         ControlVerdict::Deny(reason) => {
-            let mut session = session_arc.lock().await;
-            if session.trajectory_version == hook_version
-                && serde_json::to_value(&session.thread).ok()
-                    == serde_json::to_value(&hook_thread).ok()
-                && session.pending_deliveries_for_snapshot() == hook_deliveries
-                && session.active_compression_attempt.is_none()
-            {
-                if !explicit {
-                    session.last_rebuild_attempt_version = Some(hook_version);
+            let batch = {
+                let mut session = session_arc.lock().await;
+                if session.active_compression_attempt == Some(attempt)
+                    && !explicit
+                    && source.matches(&session)
+                {
+                    session.last_rebuild_attempt_version = Some(session.trajectory_version);
                 }
-                status(
+                terminal_attempt(
                     &mut session,
+                    attempt,
                     CompressionPhase::Skipped,
                     Some(CompressionReason::PreCompactDenied),
-                );
-            }
+                )
+            };
+            finish_held_deliveries(gcx.clone(), session_arc.clone(), batch).await;
             return Err(bounded_precompact_reason(
                 &reason,
                 crate::ext::hooks_runner::HookLimits::from(&gcx.hooks_config).max_output_bytes,
@@ -1014,39 +1109,19 @@ pub async fn rebuild_session(
         ),
         ControlVerdict::Allow => {}
     }
-    let (
-        messages,
-        abandoned,
-        rebuild_input,
-        thread,
-        version,
-        attempt,
-        abort,
-        save_mutex,
-        deliveries,
-        catalog,
-        messages_before,
-    ) = {
+    let (messages, abandoned, rebuild_input, thread, version, save_mutex, catalog, messages_before) = {
         let mut session = session_arc.lock().await;
-        if session.trajectory_version != hook_version
-            || serde_json::to_value(&session.thread).ok() != serde_json::to_value(&hook_thread).ok()
-            || session.pending_deliveries_for_snapshot() != hook_deliveries
+        if session.active_compression_attempt != Some(attempt)
+            || abort.load(Ordering::SeqCst)
+            || !idle(&session)
+            || !source.matches(&session)
         {
             return Err(SKIP_CHANGED_DURING_HOOK.into());
         }
         if session.pending_mode_handoff.is_some() || session.pending_context_rebuild.is_some() {
             return Err(SKIP_OTHER_PENDING.into());
         }
-        if explicit {
-            prepare_explicit_idle(&mut session);
-        }
-        if !idle(&session) || compression_attempt_active(&session) {
-            return Err(SKIP_NOT_IDLE.into());
-        }
-        let raw = raw_rebuild_input(&session.messages, explicit)?;
-        if serde_json::to_value(&raw).ok() != serde_json::to_value(&hook_messages).ok() {
-            return Err(SKIP_CHANGED_DURING_HOOK.into());
-        }
+        let raw = hook_messages;
         let (normalized, abandoned) = normalize_rebuild_input(&raw, &live_tool_call_ids(&session));
         if normalized.is_empty() || pending_tools(&normalized) {
             return Err(SKIP_PENDING_TOOLS.into());
@@ -1057,14 +1132,6 @@ pub async fn rebuild_session(
         );
         let messages_before = raw.len();
         session.last_rebuild_attempt_version = Some(session.trajectory_version);
-        session.compression_attempt_generation =
-            session.compression_attempt_generation.wrapping_add(1);
-        let attempt = session.compression_attempt_generation;
-        let abort = Arc::new(AtomicBool::new(false));
-        session.active_compression_attempt = Some(attempt);
-        session.compression_abort_flag = Some(abort.clone());
-        session.compression_attempt_started_at_ms =
-            Some(chrono::Utc::now().timestamp_millis() as u64);
         status(&mut session, CompressionPhase::Running, None);
         (
             raw,
@@ -1072,18 +1139,10 @@ pub async fn rebuild_session(
             rebuild_input,
             session.thread.clone(),
             session.trajectory_version,
-            attempt,
-            abort,
             session.trajectory_save_mutex.clone(),
-            session.pending_deliveries_for_snapshot(),
             session.tool_catalog.clone(),
             messages_before,
         )
-    };
-    let _guard = AttemptGuard {
-        session: session_arc.clone(),
-        attempt,
-        abort: abort.clone(),
     };
     let (target_model, n_ctx) = resolve_model(gcx.clone(), &thread, None).await?;
     let tokenizer = model_tokenizer(gcx.clone(), &target_model).await;
@@ -1169,6 +1228,12 @@ pub async fn rebuild_session(
     }
     let request_cap =
         payload_request_cap(&budget_thread, n_ctx, output_reserve, tokenizer.clone())?;
+    let live_agents =
+        crate::agents::compression_context::collect_live_agents(gcx.clone(), &thread.id).await?;
+    let rebuild_input = crate::agentic::mode_transition::replace_live_agents_context(
+        &rebuild_input,
+        live_agents.to_message(),
+    );
     let notes = rebuild_notes(&rebuild_input, &abandoned);
     let builder_cap = request_cap
         .checked_sub(notes_tokens(&notes, tokenizer.clone()))
@@ -1189,20 +1254,13 @@ pub async fn rebuild_session(
             hints: None,
             target_budget_symbols: Some(target_budget_symbols),
             preserve_goal_messages: true,
+            live_agents_scope: Some(&thread.id),
         },
     )
     .await;
     let outcome = match outcome {
         Ok(v) => v,
         Err(e) => {
-            let mut s = session_arc.lock().await;
-            if s.active_compression_attempt == Some(attempt) {
-                status(
-                    &mut s,
-                    CompressionPhase::Failed,
-                    Some(CompressionReason::TransientFailure),
-                );
-            }
             return Err(e);
         }
     };
@@ -1231,7 +1289,7 @@ pub async fn rebuild_session(
     .map_err(|e| e.to_string());
     let session_arc = session_arc.clone();
     tokio::spawn(async move {
-        let _writer = save_mutex.lock().await;
+        let writer = save_mutex.lock_owned().await;
         match report {
             Ok(report) => {
                 let persist_gcx = gcx.clone();
@@ -1239,33 +1297,28 @@ pub async fn rebuild_session(
                     gcx,
                     &session_arc,
                     report,
-                    version,
+                    &source,
                     attempt,
                     &thread,
-                    &deliveries,
                     &abort,
                     &request.trigger,
                     messages_before,
                     |snapshot| async move {
-                        crate::chat::trajectories::persist_trajectory_snapshot_with_intent(
-                            persist_gcx,
-                            snapshot,
-                            TrajectoryCommitIntent::Required,
-                        )
-                        .await
+                        let result =
+                            crate::chat::trajectories::persist_trajectory_snapshot_with_intent(
+                                persist_gcx,
+                                snapshot,
+                                TrajectoryCommitIntent::Required,
+                            )
+                            .await;
+                        drop(writer);
+                        result
                     },
                 )
                 .await
             }
             Err(error) => {
-                let mut session = session_arc.lock().await;
-                if session.active_compression_attempt == Some(attempt) {
-                    status(
-                        &mut session,
-                        CompressionPhase::Failed,
-                        Some(CompressionReason::SourceChanged),
-                    );
-                }
+                drop(writer);
                 Err(error)
             }
         }
@@ -1487,21 +1540,23 @@ pub async fn drain_pending(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fixture() -> (ChatSession, ThreadParams, u64, ChatMessage) {
+    use refact_core::chat_types::{DeliveryOutcome, PendingDelivery, PushMode};
+
+    fn fixture() -> (ChatSession, RebuildSource, u64, ChatMessage) {
         let mut s = ChatSession::new("transaction-test".into());
         s.add_message(ChatMessage::new(
             "user".into(),
             "ARCHIVED_SENTINEL ".repeat(100),
         ));
+        let source = RebuildSource::capture(&s).unwrap();
         s.active_compression_attempt = Some(1);
         status(&mut s, CompressionPhase::Running, None);
         let mut context = ChatMessage::new("user".into(), "active request".into());
         context.message_id = "rebuilt-request".into();
         let report =
             make_reconstruction_report(vec![context], ReconstructionMetadata::default()).unwrap();
-        let thread = s.thread.clone();
         let version = s.trajectory_version;
-        (s, thread, version, report)
+        (s, source, version, report)
     }
 
     #[test]
@@ -1670,15 +1725,13 @@ mod tests {
 
     #[tokio::test]
     async fn success_appends_report_after_persist_and_repeat_uses_active_only() {
-        let (mut s, thread, version, report) = fixture();
+        let (mut s, source, version, report) = fixture();
         let archived = serde_json::to_value(&s.messages).unwrap();
         commit_report(
             &mut s,
             report,
-            version,
+            &source,
             1,
-            &thread,
-            &[],
             &AtomicBool::new(false),
             |snapshot| async move {
                 assert_eq!(snapshot.version, version + 1);
@@ -1691,7 +1744,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(serde_json::to_value(&s.messages[..1]).unwrap(), archived);
+        assert_eq!(s.trajectory_version, version + 1);
         assert_eq!(s.trajectory_committed_version, s.trajectory_version);
+        assert!(!s.trajectory_dirty);
         assert!(s.provider_usage_stale);
         let active = active_context(&s.messages).unwrap().messages;
         assert_eq!(active.len(), 1);
@@ -1703,14 +1758,12 @@ mod tests {
         assert_eq!(second_input.len(), 2);
         let report =
             make_reconstruction_report(second_input, ReconstructionMetadata::default()).unwrap();
-        let version = s.trajectory_version;
+        let source = RebuildSource::capture(&s).unwrap();
         commit_report(
             &mut s,
             report,
-            version,
+            &source,
             1,
-            &thread,
-            &[],
             &AtomicBool::new(false),
             |_| async { Ok(()) },
         )
@@ -1722,15 +1775,13 @@ mod tests {
 
     #[tokio::test]
     async fn failed_persistence_never_publishes_report() {
-        let (mut s, thread, version, report) = fixture();
+        let (mut s, source, version, report) = fixture();
         let before = serde_json::to_value(&s.messages).unwrap();
         assert!(commit_report(
             &mut s,
             report,
-            version,
+            &source,
             1,
-            &thread,
-            &[],
             &AtomicBool::new(false),
             |_| async { Err("disk failed".into()) }
         )
@@ -1743,48 +1794,155 @@ mod tests {
             session: session.clone(),
             attempt: 1,
             abort: Arc::new(AtomicBool::new(false)),
+            gcx: None,
         });
         assert!(!compression_attempt_active(&*session.lock().await));
     }
 
+    fn delivery(id: &str, push: PushMode) -> PendingDelivery {
+        PendingDelivery::with_id(
+            id,
+            vec![ChatMessage::new("user".into(), format!("delivery {id}"))],
+            push,
+            "test",
+            false,
+        )
+    }
+
     #[tokio::test]
-    async fn canceled_version_settings_and_delivery_races_never_persist() {
-        for race in 0..5 {
-            let (mut s, thread, version, report) = fixture();
+    async fn abort_history_settings_and_owner_races_never_persist() {
+        for race in 0..4 {
+            let (mut s, source, _, report) = fixture();
             let abort = AtomicBool::new(false);
             match race {
                 0 => abort.store(true, Ordering::SeqCst),
                 1 => s.add_message(ChatMessage::new("user".into(), "race".into())),
                 2 => s.thread.model = "changed".into(),
-                3 => s.pending_deliveries.push_back(
-                    refact_core::chat_types::PendingDelivery::with_id(
-                        "new-delivery",
-                        vec![ChatMessage::new(
-                            "user".into(),
-                            "accepted but not model input".into(),
-                        )],
-                        refact_core::chat_types::PushMode::WhenIdle,
-                        "test",
-                        false,
-                    ),
-                ),
                 _ => s.active_compression_attempt = Some(2),
             }
             let before = serde_json::to_value(&s.messages).unwrap();
-            assert!(commit_report(
-                &mut s,
-                report,
-                version,
-                1,
-                &thread,
-                &[],
-                &abort,
-                |_| async { panic!("CAS must precede persistence") }
-            )
-            .await
-            .is_err());
+            assert!(
+                commit_report(&mut s, report, &source, 1, &abort, |_| async {
+                    panic!("CAS must precede persistence")
+                })
+                .await
+                .is_err()
+            );
             assert_eq!(serde_json::to_value(&s.messages).unwrap(), before);
         }
+    }
+
+    #[tokio::test]
+    async fn queued_deliveries_goal_and_runtime_changes_commit_with_current_state() {
+        let mut s = ChatSession::new("queued-commit".into());
+        s.install_goal(
+            "agent",
+            "ship",
+            true,
+            refact_chat_api::GoalBudget::default(),
+        );
+        s.add_message(ChatMessage::new(
+            "user".into(),
+            "ARCHIVED_SENTINEL ".repeat(100),
+        ));
+        let source = RebuildSource::capture(&s).unwrap();
+        s.active_compression_attempt = Some(1);
+        status(&mut s, CompressionPhase::Running, None);
+        let mut rebuilt = ChatMessage::new("user".into(), "active request".into());
+        rebuilt.message_id = "queued-rebuilt-request".into();
+        let report =
+            make_reconstruction_report(vec![rebuilt], ReconstructionMetadata::default()).unwrap();
+        let history = serde_json::to_value(&s.messages).unwrap();
+        for (id, push) in [
+            ("append", PushMode::Append),
+            ("idle", PushMode::WhenIdle),
+            ("urgent", PushMode::Preempt),
+        ] {
+            assert_eq!(
+                s.enqueue_delivery(delivery(id, push)).unwrap(),
+                DeliveryOutcome::Queued
+            );
+        }
+        assert_eq!(
+            s.enqueue_delivery(delivery("append", PushMode::Append))
+                .unwrap(),
+            DeliveryOutcome::Duplicate
+        );
+        s.add_message(ChatMessage::new("event".into(), "legacy event".into()));
+        assert!(s.goal_set_snooze(Some(123)));
+        assert_eq!(serde_json::to_value(&s.messages).unwrap(), history);
+        assert!(!s.abort_flag.load(Ordering::SeqCst));
+        assert!(compression_attempt_active(&s));
+        let current = s.trajectory_version;
+        let ledger = s.goal_ledger.len();
+        commit_report(
+            &mut s,
+            report,
+            &source,
+            1,
+            &AtomicBool::new(false),
+            |snapshot| async move {
+                assert_eq!(snapshot.version, current + 1);
+                assert_eq!(snapshot.pending_deliveries.len(), 4);
+                assert_eq!(snapshot.goal_ledger.len(), ledger);
+                assert_eq!(snapshot.goal.as_ref().unwrap().snoozed_until_ms, Some(123));
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(s.trajectory_version, current + 1);
+        assert_eq!(s.trajectory_committed_version, current + 1);
+        assert_eq!(s.goal.as_ref().unwrap().snoozed_until_ms, Some(123));
+        assert_eq!(s.pending_deliveries.len(), 4);
+        status(&mut s, CompressionPhase::Applied, None);
+        let (delivered, _) = s.drain_pending_deliveries();
+        assert_eq!(delivered.len(), 4);
+        assert_eq!(delivered[..3], ["append", "idle", "urgent"]);
+        assert!(s.pending_deliveries.is_empty());
+        let tail: Vec<_> = s.messages[history.as_array().unwrap().len() + 1..]
+            .iter()
+            .map(|m| m.content.content_text_only())
+            .collect();
+        assert_eq!(
+            tail,
+            vec![
+                "delivery append",
+                "delivery idle",
+                "delivery urgent",
+                "legacy event"
+            ]
+        );
+        assert!(!s.abort_flag.load(Ordering::SeqCst));
+        assert!(s.drain_pending_deliveries().0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_or_denied_attempt_releases_held_deliveries() {
+        for phase in [CompressionPhase::Failed, CompressionPhase::Skipped] {
+            let (mut s, _, _, _) = fixture();
+            assert_eq!(
+                s.enqueue_delivery(delivery("held", PushMode::Append))
+                    .unwrap(),
+                DeliveryOutcome::Queued
+            );
+            assert!(s.drain_pending_deliveries().0.is_empty());
+            status(&mut s, phase, Some(CompressionReason::TransientFailure));
+            assert_eq!(s.drain_pending_deliveries().0, vec!["held"]);
+        }
+    }
+
+    #[test]
+    fn explicit_abort_still_cancels_rebuild_and_opens_boundary() {
+        let (mut s, _, _, _) = fixture();
+        let abort = Arc::new(AtomicBool::new(false));
+        s.compression_abort_flag = Some(abort.clone());
+        s.enqueue_delivery(delivery("held", PushMode::Append))
+            .unwrap();
+        s.abort_stream();
+        assert!(abort.load(Ordering::SeqCst));
+        assert!(!compression_attempt_active(&s));
+        assert!(s.delivery_boundary_open(PushMode::Append));
     }
 
     #[tokio::test]
@@ -1797,6 +1955,7 @@ mod tests {
             session: session.clone(),
             attempt: 1,
             abort: abort.clone(),
+            gcx: None,
         });
         assert!(abort.load(Ordering::SeqCst));
         drop(lock);
@@ -1807,6 +1966,7 @@ mod tests {
             session: session.clone(),
             attempt: 1,
             abort,
+            gcx: None,
         });
         assert_eq!(session.lock().await.active_compression_attempt, Some(2));
     }
@@ -1953,5 +2113,74 @@ mod tests {
         s.draft_message = None;
         s.runtime.state = SessionState::ExecutingTools;
         assert!(!idle(&s));
+    }
+    #[test]
+    fn payload_heavy_event_output_must_fit_rendered_wire_budget() {
+        let source = vec![ChatMessage::new("user".into(), "history ".repeat(30_000))];
+        let mut event = ChatMessage::new("event".into(), "task snapshot".into());
+        event.extra.insert(
+            "event".into(),
+            serde_json::json!({
+                "subkind": "tasks_snapshot",
+                "payload": {"tasks": "<& task detail > ".repeat(2_000)}
+            }),
+        );
+        let wire = refact_llm::adapters::render_extra::render_event_message(&event);
+        let wire_tokens = crate::tokens::count_text_tokens(None, &wire).unwrap();
+        assert!(wire_tokens > 128);
+        assert!(estimated_tokens(&[event.clone()], None, false) >= wire_tokens);
+        assert!(validate_output(&source, &[event.clone()], usize::MAX, None).is_ok());
+        assert!(validate_output(&source, &[event], 128, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn dropped_gcx_guard_flushes_once_and_preserves_new_owner() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        for replace_owner in [false, true] {
+            let (mut s, _, _, _) = fixture();
+            s.enqueue_delivery(delivery("held", PushMode::Append))
+                .unwrap();
+            let session = Arc::new(Mutex::new(s));
+            let abort = Arc::new(AtomicBool::new(false));
+            let mut lock = session.lock().await;
+            drop(AttemptGuard {
+                session: session.clone(),
+                attempt: 1,
+                abort: abort.clone(),
+                gcx: Some(gcx.clone()),
+            });
+            assert!(abort.load(Ordering::SeqCst));
+            let new_abort = Arc::new(AtomicBool::new(false));
+            if replace_owner {
+                lock.active_compression_attempt = Some(2);
+                lock.compression_abort_flag = Some(new_abort.clone());
+                status(&mut lock, CompressionPhase::Checking, None);
+            }
+            drop(lock);
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while Arc::strong_count(&session) != 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("guard finalizer must finish");
+            let mut s = session.lock().await;
+            assert!(s.command_queue.is_empty());
+            assert!(!s.queue_processor_running.load(Ordering::SeqCst));
+            if replace_owner {
+                assert_eq!(s.active_compression_attempt, Some(2));
+                assert_eq!(s.compression_phase, Some(CompressionPhase::Checking));
+                assert!(!new_abort.load(Ordering::SeqCst));
+                assert_eq!(s.pending_deliveries.len(), 1);
+                assert_eq!(s.messages.len(), 1);
+            } else {
+                assert!(!compression_attempt_active(&s));
+                assert_eq!(s.compression_phase, Some(CompressionPhase::Failed));
+                assert!(s.pending_deliveries.is_empty());
+                assert_eq!(s.messages.len(), 2);
+                assert_eq!(s.messages[1].content.content_text_only(), "delivery held");
+                assert!(s.drain_pending_deliveries().0.is_empty());
+            }
+        }
     }
 }

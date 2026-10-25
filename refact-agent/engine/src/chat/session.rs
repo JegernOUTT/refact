@@ -2237,7 +2237,9 @@ impl ChatSession {
         // Legacy event producers must not insert ahead of an uncommitted draft
         // or between an assistant tool call and its results.
         if message.role == "event"
-            && (self.draft_message.is_some() || self.has_pending_tool_result_window())
+            && (self.draft_message.is_some()
+                || self.has_pending_tool_result_window()
+                || crate::chat::context_rebuild::compression_attempt_active(self))
         {
             self.pending_deliveries.push_back(PendingDelivery::new(
                 vec![message],
@@ -2368,7 +2370,10 @@ impl ChatSession {
     }
 
     pub fn drain_post_tool_side_effects(&mut self) {
-        if self.draft_message.is_some() || self.has_pending_tool_result_window() {
+        if self.draft_message.is_some()
+            || self.has_pending_tool_result_window()
+            || crate::chat::context_rebuild::compression_attempt_active(self)
+        {
             return;
         }
         let side_effects = std::mem::take(&mut self.post_tool_side_effects);
@@ -2437,6 +2442,9 @@ impl ChatSession {
     ///   so the provider-visible prefix stays append-only.
     /// * `WhenIdle` additionally needs the whole turn to be over.
     pub fn delivery_boundary_open(&self, push: PushMode) -> bool {
+        if crate::chat::context_rebuild::compression_attempt_active(self) {
+            return false;
+        }
         match push {
             PushMode::Preempt => true,
             PushMode::Append => {

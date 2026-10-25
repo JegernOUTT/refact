@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: mode_transition
 title: Unified Context Reconstruction
 description: Rebuild self-contained continuation context for compression, mode switches, and restarts
@@ -27,6 +27,7 @@ messages:
     Distinguish verified results from hypotheses and unrun tests. Preserve chronology when
     later decisions supersede earlier ones. Mandatory plan/goal artifacts are carried by
     the backend unchanged; do not rewrite them or imply ownership/status changed.
+    {live_agents_policy}
 
     TARGET MODE: {target_mode}
     TARGET MODE DESCRIPTION: {target_mode_description}
