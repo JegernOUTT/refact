@@ -172,9 +172,11 @@ mod tests {
             events: Vec::new(),
             criteria: Vec::new(),
             snoozed_until_ms: None,
+            wait: None,
             stop_reason: None,
             transferred_from: None,
             transferred_to: None,
+            sub_goals: Default::default(),
         }
     }
 
