@@ -5,6 +5,10 @@ import { http, HttpResponse } from "msw";
 import { server } from "../../../utils/mockServer";
 import { ProviderForm, type ProviderListItem } from "./ProviderForm";
 
+HTMLElement.prototype.hasPointerCapture = () => false;
+HTMLElement.prototype.releasePointerCapture = () => undefined;
+HTMLElement.prototype.scrollIntoView = () => undefined;
+
 const provider: ProviderListItem = {
   name: "claude_code",
   base_provider: "claude_code",
@@ -272,5 +276,235 @@ describe("Claude Code usage resets", () => {
     expect(
       screen.queryByText(/No usage resets are available/),
     ).not.toBeInTheDocument();
+  });
+});
+
+const backendSchema = `
+description: Claude Code
+fields:
+  backend:
+    f_type: select
+    f_label: Backend
+    f_default: oauth
+    f_options:
+      - {value: oauth, label: "Claude subscription"}
+      - {value: anthropic, label: "Anthropic API"}
+      - {value: bedrock, label: "Amazon Bedrock"}
+      - {value: vertex, label: "Google Vertex AI"}
+      - {value: foundry, label: "Microsoft Foundry"}
+      - {value: custom, label: "Custom endpoint"}
+  auth_type:
+    f_type: select
+    f_label: Authentication
+    f_default: api_key
+    f_options:
+      - {value: api_key, label: "API key option"}
+      - {value: bearer, label: "Bearer option", f_visible_when: {backend: [custom]}}
+      - {value: none, label: "None option", f_visible_when: {backend: [custom]}}
+      - {value: oauth, label: "Console sign-in option"}
+    f_visible_when: {backend: [anthropic, custom]}
+oauth:
+  supported: true
+  methods:
+    - id: max
+      label: "Claude Pro/Max"
+`;
+
+function useBackendHandlers(
+  settings: Record<string, unknown>,
+  readonly = false,
+  oauthSchema = backendSchema,
+) {
+  let quotaRequests = 0;
+  useProviderHandlers(
+    http.get("*/v1/providers/claude_code", () =>
+      HttpResponse.json({
+        ...provider,
+        readonly,
+        settings,
+        runtime: null,
+      }),
+    ),
+    http.get("*/v1/providers/claude_code/schema", () =>
+      HttpResponse.json({ name: "claude_code", schema: oauthSchema }),
+    ),
+    http.get("*/v1/providers/claude_code/quota", () => {
+      quotaRequests++;
+      return HttpResponse.json(quota);
+    }),
+    http.get("*/v1/providers/claude_code/usage/resets", () => {
+      quotaRequests++;
+      return HttpResponse.json({ data: null });
+    }),
+  );
+  return () => quotaRequests;
+}
+
+describe("Claude Code sign-in actions", () => {
+  it.each([
+    [
+      { backend: "anthropic", auth_type: "oauth" },
+      "Login with Anthropic Console",
+    ],
+    [{ backend: "bedrock" }, "Login with AWS SSO"],
+    [{ backend: "vertex" }, "Login with Google Cloud"],
+    [{ backend: "foundry" }, "Login with Microsoft Azure"],
+  ])(
+    "offers login for %o without subscription quota",
+    async (settings, label) => {
+      const quotaRequests = useBackendHandlers(settings);
+      render(<ProviderForm currentProvider={provider} />, { preloadedState });
+      expect(await screen.findByText(label)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Login" })).toBeEnabled();
+      expect(screen.queryByText("Quota")).not.toBeInTheDocument();
+      expect(
+        screen.queryByTestId("claude-code-resets"),
+      ).not.toBeInTheDocument();
+      expect(quotaRequests()).toBe(0);
+    },
+  );
+
+  it("keeps subscription login together with quota", async () => {
+    useBackendHandlers({ backend: "oauth" });
+    render(<ProviderForm currentProvider={provider} />, { preloadedState });
+    expect(await screen.findByText("Login with Anthropic")).toBeInTheDocument();
+    expect(await screen.findByText("Quota")).toBeInTheDocument();
+  });
+
+  it.each([
+    [{ backend: "anthropic" }],
+    [{ backend: "anthropic", auth_type: "api_key" }],
+    [{ backend: "custom", auth_type: "oauth" }],
+    [{ backend: "custom", auth_type: "bearer" }],
+  ])("does not offer login for %o", async (settings) => {
+    useBackendHandlers(settings);
+    render(<ProviderForm currentProvider={provider} />, { preloadedState });
+    expect(
+      await screen.findByText(/Credentials are resolved by the engine/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Login" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("explains native credential precedence for cloud backends", async () => {
+    useBackendHandlers({ backend: "bedrock" });
+    render(<ProviderForm currentProvider={provider} />, { preloadedState });
+    expect(
+      await screen.findByText(
+        /Credential fields saved here win first, then engine environment variables, then the engine host's native credential store/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("disables login for readonly providers", async () => {
+    useBackendHandlers({ backend: "vertex" }, true);
+    render(<ProviderForm currentProvider={provider} />, { preloadedState });
+    await screen.findByText("Login with Google Cloud");
+    expect(screen.getByRole("button", { name: "Login" })).toBeDisabled();
+  });
+
+  it("respects engine login method conditions", async () => {
+    const conditioned = backendSchema.replace(
+      `    - id: max
+      label: "Claude Pro/Max"`,
+      `    - id: max
+      label: "Claude Pro/Max"
+      f_visible_when: {backend: [oauth]}
+    - id: native
+      label: "Cloud sign-in"
+      f_visible_when: {backend: [bedrock, vertex]}`,
+    );
+    useBackendHandlers({ backend: "foundry" }, false, conditioned);
+    render(<ProviderForm currentProvider={provider} />, { preloadedState });
+    expect(
+      await screen.findByText(/native credential store/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Login" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides the Console auth option for custom endpoints", async () => {
+    useBackendHandlers({ backend: "custom" });
+    const { user } = render(<ProviderForm currentProvider={provider} />, {
+      preloadedState,
+    });
+    const authSelect = await screen.findByRole("combobox", {
+      name: /Authentication/,
+    });
+    await user.click(authSelect);
+    expect(await screen.findByText("Bearer option")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Console sign-in option"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers the Console auth option for the Anthropic backend", async () => {
+    useBackendHandlers({ backend: "anthropic" });
+    const { user } = render(<ProviderForm currentProvider={provider} />, {
+      preloadedState,
+    });
+    const authSelect = await screen.findByRole("combobox", {
+      name: /Authentication/,
+    });
+    await user.click(authSelect);
+    expect(
+      await screen.findByText("Console sign-in option"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Bearer option")).not.toBeInTheDocument();
+  });
+
+  it("resets an in-flight native session when the saved backend changes", async () => {
+    const settings: Record<string, unknown> = { backend: "bedrock" };
+    const logouts: unknown[] = [];
+    useBackendHandlers(settings);
+    server.use(
+      http.get("*/v1/providers/claude_code", () =>
+        HttpResponse.json({ ...provider, settings, runtime: null }),
+      ),
+      http.post("*/v1/providers/claude_code/oauth/start", () =>
+        HttpResponse.json({
+          session_id: "native-bedrock",
+          authorize_url: "",
+          mode: "native",
+          instructions: "Run the AWS sign-in on the engine host.",
+          poll_interval: 30,
+        }),
+      ),
+      http.post(
+        "*/v1/providers/claude_code/oauth/logout",
+        async ({ request }) => {
+          logouts.push(await request.json());
+          return HttpResponse.json({ success: true });
+        },
+      ),
+      http.post("*/v1/providers/claude_code", async ({ request }) => {
+        Object.assign(settings, await request.json());
+        return HttpResponse.json({ success: true });
+      }),
+    );
+    const { user } = render(<ProviderForm currentProvider={provider} />, {
+      preloadedState,
+    });
+    await user.click(await screen.findByRole("button", { name: "Login" }));
+    expect(
+      await screen.findByText("Run the AWS sign-in on the engine host."),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: /Backend/ }));
+    await user.click(
+      await screen.findByRole("option", { name: "Google Vertex AI" }),
+    );
+
+    expect(
+      await screen.findByText("Login with Google Cloud"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Run the AWS sign-in on the engine host."),
+    ).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(logouts).toEqual([{ session_id: "native-bedrock" }]);
+    });
   });
 });

@@ -378,6 +378,153 @@ fn signature_exact_bytes_time_region_and_token() {
 }
 
 #[test]
+fn azure_plan_preserves_identity_priority_and_falls_back_to_cli() {
+    let plan = |vars: &[&str]| {
+        let vars: Vec<String> = vars.iter().map(|v| v.to_string()).collect();
+        azure_plan(move |name| vars.iter().any(|v| v == name))
+    };
+    let secret = ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"];
+    assert_eq!(
+        plan(
+            &[
+                &secret[..],
+                &["AZURE_FEDERATED_TOKEN_FILE", "IDENTITY_ENDPOINT"]
+            ]
+            .concat()
+        ),
+        AzurePlan::ClientSecret
+    );
+    assert_eq!(
+        plan(&[
+            "AZURE_TENANT_ID",
+            "AZURE_CLIENT_ID",
+            "AZURE_FEDERATED_TOKEN_FILE",
+            "MSI_ENDPOINT"
+        ]),
+        AzurePlan::WorkloadIdentity
+    );
+    assert_eq!(plan(&["IDENTITY_ENDPOINT"]), AzurePlan::ManagedIdentity);
+    assert_eq!(plan(&["MSI_ENDPOINT"]), AzurePlan::ManagedIdentity);
+    assert_eq!(
+        plan(&["AZURE_TENANT_ID", "AZURE_CLIENT_ID"]),
+        AzurePlan::ImdsThenDeveloperTools
+    );
+    assert_eq!(plan(&[]), AzurePlan::ImdsThenDeveloperTools);
+    assert_eq!(
+        azure_chain(AzurePlan::ImdsThenDeveloperTools)
+            .unwrap()
+            .sources
+            .len(),
+        2
+    );
+}
+
+fn stub_source(
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    token: Option<&'static str>,
+    expires_in_minutes: i64,
+    delay: Option<Duration>,
+    timeout: Option<Duration>,
+) -> AzureSource {
+    AzureSource {
+        fetch: Arc::new(move || {
+            let calls = calls.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
+                token
+                    .map(|t| {
+                        azure_core::credentials::AccessToken::new(
+                            t,
+                            azure_core::time::OffsetDateTime::UNIX_EPOCH
+                                + azure_core::time::Duration::minutes(expires_in_minutes),
+                        )
+                    })
+                    .ok_or_else(|| "stub failure secret-detail".to_string())
+            })
+        }),
+        timeout,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn azure_chain_falls_back_to_cli_caches_and_sticks_to_selected_source() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let epoch = azure_core::time::OffsetDateTime::UNIX_EPOCH;
+    let imds = Arc::new(AtomicUsize::new(0));
+    let cli = Arc::new(AtomicUsize::new(0));
+    let chain = AzureChain::new(vec![
+        stub_source(
+            imds.clone(),
+            Some("imds-token"),
+            60,
+            Some(Duration::from_secs(60)),
+            Some(Duration::from_secs(3)),
+        ),
+        stub_source(cli.clone(), Some("cli-token"), 60, None, None),
+    ]);
+    assert_eq!(chain.token(epoch).await.unwrap(), "cli-token");
+    assert_eq!(
+        chain
+            .token(epoch + azure_core::time::Duration::minutes(54))
+            .await
+            .unwrap(),
+        "cli-token"
+    );
+    assert_eq!((imds.load(SeqCst), cli.load(SeqCst)), (1, 1));
+    assert_eq!(
+        chain
+            .token(epoch + azure_core::time::Duration::minutes(56))
+            .await
+            .unwrap(),
+        "cli-token"
+    );
+    assert_eq!((imds.load(SeqCst), cli.load(SeqCst)), (1, 2));
+
+    let first = Arc::new(AtomicUsize::new(0));
+    let second = Arc::new(AtomicUsize::new(0));
+    let chain = AzureChain::new(vec![
+        stub_source(first.clone(), Some("managed-token"), 60, None, None),
+        stub_source(second.clone(), Some("cli-token"), 60, None, None),
+    ]);
+    assert_eq!(chain.token(epoch).await.unwrap(), "managed-token");
+    assert_eq!(second.load(SeqCst), 0);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let chain = AzureChain::new(vec![
+        stub_source(calls.clone(), None, 60, None, None),
+        stub_source(calls.clone(), None, 60, None, None),
+    ]);
+    let error = chain.token(epoch).await.unwrap_err();
+    assert_eq!(error, "Azure token acquisition failed");
+    assert!(!error.contains("secret-detail"));
+    assert_eq!(calls.load(SeqCst), 2);
+}
+
+#[tokio::test]
+async fn foundry_explicit_credentials_bypass_azure_chain() {
+    let mut c = config(ClaudeBackend::Foundry);
+    c.azure_resource = Some("resource".into());
+    c.api_key = Some("azure-key".into());
+    c.auth_token = Some("azure-token".into());
+    let p = prepare_attempt(
+        "https://ignored.invalid".into(),
+        HeaderMap::new(),
+        json!({}),
+        "m",
+        false,
+        &c,
+    )
+    .await
+    .unwrap();
+    assert_eq!(p.headers["authorization"], "Bearer azure-token");
+    assert!(p.headers["authorization"].is_sensitive());
+    assert!(!p.headers.contains_key("api-key"));
+}
+
+#[test]
 fn endpoint_rejects_credentials_and_encodes_path() {
     assert!(endpoint("https://user:password@example.com", &["model"]).is_err());
     assert!(endpoint("https://example.com?secret=x", &["model"]).is_err());
@@ -385,4 +532,244 @@ fn endpoint_rejects_credentials_and_encodes_path() {
         endpoint("https://example.com/root/", &["model", "a/b %"]).unwrap(),
         "https://example.com/root/model/a%2Fb%20%25"
     );
+}
+
+fn console_config() -> ClaudeTransportConfig {
+    let mut c = config(ClaudeBackend::Anthropic);
+    c.auth_type = ClaudeAuthType::Oauth;
+    c.auth_token = Some("console-token".into());
+    c.api_key = Some("unused-key".into());
+    c
+}
+
+async fn prepare_with(
+    headers: HeaderMap,
+    c: &ClaudeTransportConfig,
+) -> Result<PreparedRequest, String> {
+    prepare_attempt(
+        "https://wrong-provider.invalid/v1/messages".into(),
+        headers,
+        json!({"model":"claude","stream":true,"messages":[]}),
+        "claude",
+        true,
+        c,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn console_oauth_uses_bearer_default_endpoint_betas_and_workspace() {
+    let mut headers = stale_headers();
+    header(
+        &mut headers,
+        "anthropic-beta",
+        "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
+    )
+    .unwrap();
+    header(&mut headers, "anthropic-workspace-id", "stale-workspace").unwrap();
+    let mut c = console_config();
+    c.oauth_workspace_id = Some(" wrkspc_1 ".into());
+    let p = prepare_with(headers, &c).await.unwrap();
+    assert_eq!(p.url, "https://api.anthropic.com/v1/messages");
+    assert_eq!(p.framing, ResponseFraming::Sse);
+    assert_eq!(p.headers["authorization"], "Bearer console-token");
+    assert!(p.headers["authorization"].is_sensitive());
+    assert!(!p.headers.contains_key("x-api-key"));
+    assert!(!p.headers.contains_key("x-refact-internal-claude-transport"));
+    assert_eq!(
+        p.headers["anthropic-beta"],
+        "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,oauth-2025-04-20"
+    );
+    assert_eq!(p.headers["anthropic-workspace-id"], "wrkspc_1");
+    assert_eq!(p.headers["anthropic-version"], "2023-06-01");
+    assert_eq!(p.headers.get_all("authorization").iter().count(), 1);
+
+    for workspace in [None, Some(""), Some("   ")] {
+        let mut headers = stale_headers();
+        header(&mut headers, "anthropic-workspace-id", "stale-workspace").unwrap();
+        let mut c = console_config();
+        c.oauth_workspace_id = workspace.map(str::to_string);
+        let p = prepare_with(headers, &c).await.unwrap();
+        assert!(!p.headers.contains_key("anthropic-workspace-id"));
+        assert_eq!(p.headers["anthropic-beta"], "oauth-2025-04-20");
+        assert_eq!(p.headers["authorization"], "Bearer console-token");
+    }
+}
+
+#[tokio::test]
+async fn console_oauth_rejects_endpoints_missing_token_and_custom_oauth() {
+    for base in [
+        "https://api.anthropic.com",
+        "https://proxy.invalid",
+        "http://127.0.0.1:8123",
+        "",
+    ] {
+        let mut c = console_config();
+        c.base_url = Some(base.into());
+        assert!(prepare_with(stale_headers(), &c)
+            .await
+            .err()
+            .unwrap()
+            .contains("default Anthropic endpoint"));
+    }
+    for token in [None, Some(""), Some("  ")] {
+        let mut c = console_config();
+        c.auth_token = token.map(str::to_string);
+        assert!(prepare_with(stale_headers(), &c)
+            .await
+            .err()
+            .unwrap()
+            .contains("auth_token"));
+    }
+    let mut c = config(ClaudeBackend::Custom);
+    c.auth_type = ClaudeAuthType::Oauth;
+    c.base_url = Some("https://custom.invalid".into());
+    c.auth_token = Some("token".into());
+    c.api_key = Some("key".into());
+    assert!(prepare_with(stale_headers(), &c)
+        .await
+        .err()
+        .unwrap()
+        .contains("custom endpoints"));
+}
+
+#[tokio::test]
+async fn stale_workspace_header_never_reaches_other_backends() {
+    let mut anthropic = config(ClaudeBackend::Anthropic);
+    anthropic.api_key = Some("api".into());
+    anthropic.oauth_workspace_id = Some("wrkspc_1".into());
+    let mut custom = config(ClaudeBackend::Custom);
+    custom.base_url = Some("https://custom.invalid".into());
+    custom.api_key = Some("key".into());
+    custom.oauth_workspace_id = Some("wrkspc_1".into());
+    let mut bedrock = config(ClaudeBackend::Bedrock);
+    bedrock.aws_region = Some("us-east-1".into());
+    bedrock.auth_token = Some("aws".into());
+    let mut vertex = config(ClaudeBackend::Vertex);
+    vertex.gcp_project = Some("p".into());
+    vertex.gcp_region = Some("global".into());
+    vertex.auth_token = Some("gcp".into());
+    let mut foundry = config(ClaudeBackend::Foundry);
+    foundry.azure_resource = Some("resource".into());
+    foundry.api_key = Some("azure".into());
+    for c in [anthropic, custom, bedrock, vertex, foundry] {
+        let mut headers = stale_headers();
+        header(&mut headers, "anthropic-workspace-id", "stale-workspace").unwrap();
+        header(&mut headers, "anthropic-beta", "oauth-2025-04-20").unwrap();
+        let p = prepare_with(headers, &c).await.unwrap();
+        assert!(!p.headers.contains_key("anthropic-workspace-id"));
+        assert!(!p.headers.contains_key("anthropic-beta"));
+        assert!(!p.headers.contains_key("x-refact-internal-claude-transport"));
+        assert!(p
+            .headers
+            .get("authorization")
+            .is_none_or(|v| v != "Bearer oauth-secret"));
+        assert!(p.headers.get("x-api-key").is_none_or(|v| v != "wrong"));
+    }
+    let mut headers = stale_headers();
+    header(&mut headers, "anthropic-workspace-id", "subscription-ws").unwrap();
+    let p = prepare_with(headers, &config(ClaudeBackend::Oauth))
+        .await
+        .unwrap();
+    assert_eq!(p.url, "https://wrong-provider.invalid/v1/messages");
+    assert_eq!(p.headers["authorization"], "Bearer oauth-secret");
+    assert_eq!(p.headers["anthropic-workspace-id"], "subscription-ws");
+}
+
+#[tokio::test]
+async fn resettable_gives_fresh_arc_keeps_in_flight_holder_and_singleflight() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let slot: Resettable<OnceCell<usize>> = Resettable::new();
+    let held = slot.get();
+    assert!(Arc::ptr_eq(&held, &slot.get()));
+    let calls = AtomicUsize::new(0);
+    let init = || async {
+        calls.fetch_add(1, SeqCst);
+        tokio::task::yield_now().await;
+        1usize
+    };
+    let in_flight = held.get_or_init(init);
+    slot.reset();
+    assert_eq!(in_flight.await, &1);
+    assert_eq!(held.get(), Some(&1));
+    let fresh = slot.get();
+    assert!(!Arc::ptr_eq(&held, &fresh));
+    assert!(fresh.get().is_none());
+    let (a, b) = tokio::join!(
+        fresh.get_or_init(|| async {
+            calls.fetch_add(1, SeqCst);
+            tokio::task::yield_now().await;
+            2usize
+        }),
+        fresh.get_or_init(|| async {
+            calls.fetch_add(1, SeqCst);
+            3usize
+        }),
+    );
+    assert_eq!((*a, *b), (2, 2));
+    assert_eq!(calls.load(SeqCst), 2);
+    assert!(Arc::ptr_eq(&fresh, &slot.get()));
+}
+
+#[tokio::test]
+async fn reset_cached_credentials_isolates_backends() {
+    let snapshot = || {
+        (
+            AWS_CREDENTIALS.get(),
+            AWS_SDK.get(),
+            GOOGLE_ADC.get(),
+            AZURE_CHAIN.get(),
+        )
+    };
+    let (aws_creds, aws_sdk, google, azure) = snapshot();
+    for backend in [
+        ClaudeBackend::Oauth,
+        ClaudeBackend::Anthropic,
+        ClaudeBackend::Custom,
+    ] {
+        reset_cached_credentials(backend).await;
+    }
+    let same = snapshot();
+    assert!(Arc::ptr_eq(&aws_creds, &same.0));
+    assert!(Arc::ptr_eq(&aws_sdk, &same.1));
+    assert!(Arc::ptr_eq(&google, &same.2));
+    assert!(Arc::ptr_eq(&azure, &same.3));
+
+    reset_cached_credentials(ClaudeBackend::Bedrock).await;
+    let after = snapshot();
+    assert!(!Arc::ptr_eq(&aws_creds, &after.0));
+    assert!(!Arc::ptr_eq(&aws_sdk, &after.1));
+    assert!(Arc::ptr_eq(&google, &after.2));
+    assert!(Arc::ptr_eq(&azure, &after.3));
+
+    reset_cached_credentials(ClaudeBackend::Vertex).await;
+    let after_vertex = snapshot();
+    assert!(Arc::ptr_eq(&after.0, &after_vertex.0));
+    assert!(Arc::ptr_eq(&after.1, &after_vertex.1));
+    assert!(!Arc::ptr_eq(&google, &after_vertex.2));
+    assert!(Arc::ptr_eq(&azure, &after_vertex.3));
+
+    reset_cached_credentials(ClaudeBackend::Foundry).await;
+    let after_foundry = snapshot();
+    assert!(Arc::ptr_eq(&after_vertex.0, &after_foundry.0));
+    assert!(Arc::ptr_eq(&after_vertex.1, &after_foundry.1));
+    assert!(Arc::ptr_eq(&after_vertex.2, &after_foundry.2));
+    assert!(!Arc::ptr_eq(&azure, &after_foundry.3));
+
+    let key = (Some("reset-test".into()), Some("us-east-1".into()));
+    let entry = AWS_CREDENTIALS.get().entry(key.clone()).await.unwrap();
+    *entry.lock().await = Some(CachedAwsCredentials {
+        credentials: Credentials::new("old", "secret", None, None, "test"),
+        refresh_at: SystemTime::now() + Duration::from_secs(3600),
+    });
+    reset_cached_credentials(ClaudeBackend::Bedrock).await;
+    assert!(entry.lock().await.is_some());
+    let fresh = AWS_CREDENTIALS.get().entry(key).await.unwrap();
+    assert!(!Arc::ptr_eq(&entry, &fresh));
+    let refreshed = resolve_aws_credentials(&fresh, SystemTime::now, || async {
+        Ok(Credentials::new("new", "secret", None, None, "test"))
+    })
+    .await
+    .unwrap();
+    assert_eq!(refreshed.access_key_id(), "new");
 }

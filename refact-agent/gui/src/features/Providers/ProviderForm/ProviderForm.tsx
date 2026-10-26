@@ -7,7 +7,13 @@ import { ProviderOAuth } from "./ProviderOAuth";
 import { Spinner } from "../../../components/Spinner";
 
 import { useProviderForm } from "./useProviderForm";
-import { effectiveClaudeBackend } from "./schemaConditions";
+import {
+  claudeLoginKind,
+  effectiveClaudeAuthType,
+  effectiveClaudeBackend,
+  isOAuthLoginAvailable,
+} from "./schemaConditions";
+import type { ClaudeLoginKind } from "./schemaConditions";
 import type {
   ClaudeCodeResetClaimData,
   ClaudeCodeResetGrant,
@@ -524,6 +530,18 @@ export const ProviderQuotaPanel: React.FC<ProviderQuotaPanelProps> = ({
     </Surface>
   );
 };
+const describeClaudeCredentialSources = (
+  loginKind: ClaudeLoginKind | undefined,
+): string => {
+  if (loginKind === "console") {
+    return "Credentials are resolved by the engine, not the browser. Anthropic Console sign-in stores an OAuth credential for this provider instance on the engine host.";
+  }
+  if (loginKind === "native") {
+    return "Credentials are resolved by the engine, not the browser. Credential fields saved here win first, then engine environment variables, then the engine host's native credential store (AWS profiles and SSO cache, Google Application Default Credentials, or Azure CLI and managed identity). Signing in updates that native store on the engine host and only takes effect while explicit credentials are blank.";
+  }
+  return "Credentials are resolved by the engine, not the browser. Saved settings override engine environment variables.";
+};
+
 export const ProviderForm: React.FC<ProviderFormProps> = ({
   currentProvider,
 }) => {
@@ -564,10 +582,20 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
     return <Spinner spinning />;
   }
 
+  const loginKind = claudeLoginKind(
+    baseProvider,
+    claudeBackend,
+    effectiveClaudeAuthType(formValues),
+  );
   const hasOAuth =
-    parsedSchema.oauth?.supported === true &&
-    (claudeBackend === undefined ||
-      (baseProvider === "claude_code" && claudeBackend === "oauth"));
+    claudeBackend === undefined
+      ? parsedSchema.oauth?.supported === true
+      : loginKind !== undefined &&
+        isOAuthLoginAvailable(
+          parsedSchema.oauth,
+          parsedSchema.fields,
+          formValues,
+        );
   const status: ProviderStatus =
     detailedProvider?.status ?? currentProvider.status;
   const hasCredentials =
@@ -625,11 +653,7 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
         <div className={styles.formSection}>
           {claudeBackend && claudeBackend !== "oauth" ? (
             <div className={styles.providerDescription}>
-              Credentials are resolved by the engine, not the browser. Saved
-              settings override engine environment variables; native cloud
-              backends can use the engine host&apos;s AWS credential chain,
-              Google Application Default Credentials, or Azure identity chain.
-              Leave credential fields blank to use those sources.
+              {describeClaudeCredentialSources(loginKind)}
             </div>
           ) : null}
           {hasOAuth ? (
@@ -643,8 +667,14 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
                 </div>
               ) : null}
               <ProviderOAuth
+                key={`${currentProvider.name}:${claudeBackend ?? ""}:${
+                  loginKind ?? ""
+                }`}
                 providerName={currentProvider.name}
                 baseProvider={baseProvider}
+                loginKind={loginKind}
+                backend={claudeBackend}
+                readonly={isReadonly}
                 oauthConnected={Boolean(
                   "oauth_connected" in formValues && formValues.oauth_connected,
                 )}

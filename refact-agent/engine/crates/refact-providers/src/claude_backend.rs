@@ -34,6 +34,52 @@ impl ClaudeCodeProvider {
         self.transport.backend == ClaudeBackend::Oauth
     }
 
+    pub fn is_console_oauth(&self) -> bool {
+        self.transport.backend == ClaudeBackend::Anthropic
+            && self.transport.auth_type == ClaudeAuthType::Oauth
+    }
+
+    pub fn supports_oauth(&self) -> bool {
+        self.oauth_mode().is_some()
+    }
+
+    pub fn oauth_mode(&self) -> Option<crate::claude_code_oauth::OAuthMode> {
+        use crate::claude_code_oauth::OAuthMode;
+        if self.is_subscription() {
+            Some(OAuthMode::Max)
+        } else if self.is_console_oauth() {
+            Some(OAuthMode::Console)
+        } else {
+            None
+        }
+    }
+
+    pub fn active_oauth_tokens(&self) -> &crate::claude_code_oauth::OAuthTokens {
+        if self.is_console_oauth() {
+            &self.console_oauth_tokens
+        } else {
+            &self.oauth_tokens
+        }
+    }
+
+    pub fn set_active_oauth_tokens(&mut self, mut tokens: crate::claude_code_oauth::OAuthTokens) {
+        if self.supports_oauth() {
+            if tokens
+                .oauth_mode
+                .as_ref()
+                .is_some_and(|mode| Some(mode) != self.oauth_mode().as_ref())
+            {
+                return;
+            }
+            tokens.oauth_mode = self.oauth_mode();
+            if self.is_console_oauth() {
+                self.console_oauth_tokens = tokens;
+            } else {
+                self.oauth_tokens = tokens;
+            }
+        }
+    }
+
     pub fn supports_live_discovery(&self) -> bool {
         matches!(
             self.transport.backend,
@@ -51,8 +97,14 @@ impl ClaudeCodeProvider {
         match t.backend {
             ClaudeBackend::Oauth => {}
             ClaudeBackend::Anthropic => {
-                result.api_key = resolve(&t.api_key, &["ANTHROPIC_API_KEY"]);
-                result.base_url = resolve(&t.base_url, &["ANTHROPIC_BASE_URL"]);
+                if self.is_console_oauth() {
+                    result.auth_token = self.resolve_auth().ok();
+                    result.oauth_workspace_id = self.console_oauth_tokens.workspace_id.clone();
+                    result.base_url = None;
+                } else {
+                    result.api_key = resolve(&t.api_key, &["ANTHROPIC_API_KEY"]);
+                    result.base_url = resolve(&t.base_url, &["ANTHROPIC_BASE_URL"]);
+                }
             }
             ClaudeBackend::Custom => {
                 result.base_url = resolve(&t.base_url, &["ANTHROPIC_BASE_URL"]);
@@ -63,7 +115,7 @@ impl ClaudeCodeProvider {
                     ClaudeAuthType::Bearer => {
                         result.auth_token = resolve(&t.auth_token, &["ANTHROPIC_AUTH_TOKEN"])
                     }
-                    ClaudeAuthType::None => {}
+                    ClaudeAuthType::None | ClaudeAuthType::Oauth => {}
                 }
             }
             ClaudeBackend::Bedrock => {
@@ -143,7 +195,7 @@ impl ClaudeCodeProvider {
             if SECRET_FIELDS.contains(&name) && value.as_str() == Some("***") {
                 continue;
             }
-            if name == "oauth_tokens" {
+            if ["oauth_tokens", "console_oauth_tokens"].contains(&name) {
                 let tokens = value.as_mapping().ok_or("oauth_tokens must be a mapping")?;
                 let old = map
                     .entry(key.clone())
@@ -158,14 +210,51 @@ impl ClaudeCodeProvider {
                 map.insert(key.clone(), value.clone());
             }
         }
-        let candidate: Self = serde_yaml::from_value(current)
+        let mut candidate: Self = serde_yaml::from_value(current)
             .map_err(|_| "Malformed Claude provider setting".to_string())?;
+        if candidate.transport.backend != self.transport.backend
+            && !patch.contains_key(serde_yaml::Value::String("auth_type".into()))
+        {
+            if (candidate.transport.backend == ClaudeBackend::Custom
+                && candidate.transport.auth_type == ClaudeAuthType::Oauth)
+                || (candidate.transport.backend == ClaudeBackend::Anthropic
+                    && !matches!(
+                        candidate.transport.auth_type,
+                        ClaudeAuthType::ApiKey | ClaudeAuthType::Oauth
+                    ))
+            {
+                candidate.transport.auth_type = ClaudeAuthType::ApiKey;
+            }
+        }
+        if candidate.is_console_oauth()
+            && patch
+                .get(serde_yaml::Value::String("auth_type".into()))
+                .and_then(serde_yaml::Value::as_str)
+                == Some("oauth")
+            && !patch.contains_key(serde_yaml::Value::String("base_url".into()))
+        {
+            candidate.transport.base_url = None;
+        }
         candidate.validate_settings()?;
         *self = candidate;
         Ok(())
     }
 
     pub fn validate_settings(&self) -> Result<(), String> {
+        if self.transport.auth_type == ClaudeAuthType::Oauth
+            && self.transport.backend == ClaudeBackend::Custom
+        {
+            return Err("Console OAuth requires the Anthropic backend; custom endpoints do not support OAuth".into());
+        }
+        if self.is_console_oauth()
+            && self
+                .transport
+                .base_url
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
+        {
+            return Err("Clear Base URL before using Console OAuth; Console OAuth only supports the default Anthropic endpoint".into());
+        }
         let value = serde_json::to_value(&self.transport).map_err(|_| "Invalid backend config")?;
         for (field, v) in value.as_object().ok_or("Invalid backend config")? {
             if let Some(s) = v.as_str() {
@@ -229,27 +318,28 @@ fields:
     f_default: oauth
     f_options:
       - {value: oauth, label: "Claude subscription"}
-      - {value: anthropic, label: "Anthropic API key"}
+      - {value: anthropic, label: "Anthropic API"}
       - {value: bedrock, label: "Amazon Bedrock"}
       - {value: vertex, label: "Google Vertex AI"}
       - {value: foundry, label: "Microsoft Foundry / Azure"}
       - {value: custom, label: "Custom endpoint"}
-    f_desc: "OAuth login and usage apply only to Claude subscriptions. Cloud/custom backends use explicit custom model IDs."
+    f_desc: "OAuth supports Claude subscriptions and the Anthropic Console. Usage and resets apply only to subscriptions. Cloud/custom backends use explicit custom model IDs."
   auth_type:
     f_type: select
-    f_label: "Custom authentication"
+    f_label: "Authentication"
     f_default: api_key
     f_options:
       - {value: api_key, label: "API key"}
-      - {value: bearer, label: "Bearer token"}
-      - {value: none, label: "No authentication"}
-    f_visible_when: {backend: [custom]}
+      - {value: oauth, label: "Console OAuth", f_visible_when: {backend: [anthropic]}}
+      - {value: bearer, label: "Bearer token", f_visible_when: {backend: [custom]}}
+      - {value: none, label: "No authentication", f_visible_when: {backend: [custom]}}
+    f_visible_when: {backend: [anthropic, custom]}
   api_key:
     f_type: string_long
     f_label: "API Key"
     f_secret: true
     f_visible_when_any:
-      - {backend: [anthropic]}
+      - {backend: [anthropic], auth_type: [api_key]}
       - {backend: [custom], auth_type: [api_key]}
     f_desc: "Literal or $ENV reference. Empty uses ANTHROPIC_API_KEY."
     f_placeholder: "sk-ant-... or $MY_API_KEY"
@@ -264,7 +354,9 @@ fields:
   base_url:
     f_type: string
     f_label: "Base URL"
-    f_visible_when: {backend: [anthropic, custom]}
+    f_visible_when_any:
+      - {backend: [anthropic], auth_type: [api_key]}
+      - {backend: [custom]}
     f_desc: "Required for custom endpoints. HTTP(S) API root, optionally ending in /v1. Accepts $ENV. Empty uses ANTHROPIC_BASE_URL."
     f_placeholder: "https://api.anthropic.com"
   aws_region:
@@ -347,6 +439,15 @@ oauth:
     - id: max
       label: "Claude Pro/Max"
       description: "Login with your Claude Pro or Max subscription"
+      f_visible_when: {backend: [oauth]}
+    - id: console
+      label: "Anthropic Console"
+      description: "Login with your Anthropic Console account"
+      f_visible_when: {backend: [anthropic], auth_type: [oauth]}
+    - id: native
+      label: "Cloud sign-in"
+      description: "Sign in using your cloud platform CLI"
+      f_visible_when: {backend: [bedrock, vertex, foundry]}
 description: |
   Use Claude subscriptions, the Anthropic API, cloud platforms, or a custom Messages endpoint. Credentials are verified on request, not on save.
 available:

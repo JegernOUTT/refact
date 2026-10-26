@@ -585,7 +585,9 @@ export type ProjectModelDefaultsResponse = {
   defaults: ProjectModelDefaults;
 };
 
-export type OAuthStartMode = "callback" | "manual_code" | "device";
+export type OAuthStartMode = "callback" | "manual_code" | "device" | "native";
+
+export type OAuthStartRequestMode = "max" | "console";
 
 export type OAuthStartResponse = {
   session_id: string;
@@ -601,6 +603,7 @@ export type OAuthExchangeResponse = {
   auth_status: string;
   status?: string;
   poll_interval?: number;
+  output?: string;
 };
 
 export type ErrorLogInstance = {
@@ -1609,7 +1612,7 @@ export const providersApi = createApi({
 
     oauthStart: builder.mutation<
       OAuthStartResponse,
-      { providerName: string; mode?: string }
+      { providerName: string; mode?: OAuthStartRequestMode }
     >({
       invalidatesTags: (_result, _error, { providerName }) => [
         { type: "QUOTA", id: providerName },
@@ -1698,7 +1701,7 @@ export const providersApi = createApi({
 
     oauthLogout: builder.mutation<
       { success: boolean },
-      { providerName: string }
+      { providerName: string; session_id?: string }
     >({
       invalidatesTags: (_result, _error, { providerName }) => [
         { type: "PROVIDER", id: providerName },
@@ -1718,6 +1721,7 @@ export const providersApi = createApi({
           ...extraOptions,
           method: "POST",
           url,
+          ...(args.session_id ? { body: { session_id: args.session_id } } : {}),
           credentials: "same-origin",
           redirect: "follow",
         });
@@ -2204,7 +2208,12 @@ function isProviderQuotaListResponse(
 }
 
 function isOAuthStartMode(data: unknown): data is OAuthStartMode {
-  return data === "callback" || data === "manual_code" || data === "device";
+  return (
+    data === "callback" ||
+    data === "manual_code" ||
+    data === "device" ||
+    data === "native"
+  );
 }
 
 function isOptionalStringField(data: object, key: string): boolean {
@@ -2242,6 +2251,7 @@ function isOAuthExchangeResponse(data: unknown): data is OAuthExchangeResponse {
     return false;
   if (!isOptionalStringField(data, "status")) return false;
   if (!isOptionalNumberField(data, "poll_interval")) return false;
+  if (!isOptionalStringField(data, "output")) return false;
   return true;
 }
 

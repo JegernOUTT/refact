@@ -119,10 +119,10 @@ async fn try_refresh_claude_code_instances(
                 let claude = provider
                     .as_any()
                     .downcast_ref::<crate::providers::claude_code::ClaudeCodeProvider>()?;
-                if !claude.is_subscription() {
+                if !claude.supports_oauth() {
                     return None;
                 }
-                let oauth_tokens = claude.oauth_tokens.clone();
+                let oauth_tokens = claude.active_oauth_tokens().clone();
                 Some(OAuthRefreshCandidate {
                     instance_id: provider.name().to_string(),
                     display_name: provider.display_name().to_string(),
@@ -277,7 +277,7 @@ pub async fn force_refresh_claude_code_for_retry(
     let Some(mut provider) = provider.take() else {
         return Ok(None);
     };
-    if !provider.is_subscription() {
+    if !provider.supports_oauth() {
         return Ok(None);
     }
     sync_claude_code_tokens_from_disk(gcx, &config_dir, provider_name, &mut provider).await?;
@@ -291,7 +291,7 @@ pub async fn force_refresh_claude_code_for_retry(
     if proactive_refresh_can_reuse_newer_expiry(
         rejected_expires_at,
         rejected_status,
-        provider.oauth_tokens.expires_at,
+        provider.active_oauth_tokens().expires_at,
     ) {
         return Ok(Some(provider));
     }
@@ -299,57 +299,65 @@ pub async fn force_refresh_claude_code_for_retry(
     if let Some(status) = rejected_status {
         if !crate::providers::claude_code::ClaudeCodeProvider::should_force_refresh_for_status(
             status,
-            &provider.oauth_tokens.refresh_token,
+            &provider.active_oauth_tokens().refresh_token,
             false,
         ) {
             return Ok(None);
         }
     } else {
-        if !needs_refresh(provider.oauth_tokens.expires_at) {
+        if !needs_refresh(provider.active_oauth_tokens().expires_at) {
             return Ok(Some(provider));
         }
-        if provider.oauth_tokens.refresh_token.is_empty() {
+        if provider.active_oauth_tokens().refresh_token.is_empty() {
             return Ok(None);
         }
     }
 
-    let previous_tokens = provider.oauth_tokens.clone();
-    let refreshed_tokens = match crate::providers::claude_code_oauth::refresh_access_token(
-        http_client,
-        &previous_tokens.refresh_token,
-    )
-    .await
-    {
-        Ok(tokens) => tokens,
-        Err(error) if is_permanent_refresh_error(&error) => {
-            let cleared = save_claude_code_refreshed_tokens(
-                gcx,
-                &config_dir,
-                provider_name,
-                &previous_tokens,
-                &crate::providers::claude_code_oauth::OAuthTokens::default(),
-            )
-            .await?;
-            if !cleared {
-                return Ok(current_claude_code_provider(gcx, provider_name).await);
-            }
-            mark_invalid_refresh_token(provider_name, &previous_tokens.refresh_token);
-            drop(oauth_file_guard);
-            drop(refresh_guard);
-            invalidate_caps(gcx).await;
-            return Err(format!(
+    let mode = provider.oauth_mode().ok_or("Claude login mode changed")?;
+    let previous_tokens = provider.active_oauth_tokens().clone();
+    let mut refreshed_tokens =
+        match crate::providers::claude_code_oauth::refresh_access_token_for_mode(
+            http_client,
+            &previous_tokens.refresh_token,
+            &mode,
+        )
+        .await
+        {
+            Ok(tokens) => tokens,
+            Err(error) if is_permanent_refresh_error(&error) => {
+                let cleared = save_claude_code_refreshed_tokens(
+                    gcx,
+                    &config_dir,
+                    provider_name,
+                    &previous_tokens,
+                    &mode,
+                    &crate::providers::claude_code_oauth::OAuthTokens::default(),
+                )
+                .await?;
+                if !cleared {
+                    return Ok(current_claude_code_provider(gcx, provider_name).await);
+                }
+                mark_invalid_refresh_token(provider_name, &previous_tokens.refresh_token);
+                drop(oauth_file_guard);
+                drop(refresh_guard);
+                invalidate_caps(gcx).await;
+                return Err(format!(
                 "Claude Code OAuth refresh token is invalid. Please log in again in Claude Code provider settings: {}",
                 error
             ));
-        }
-        Err(error) => return Err(format!("Claude Code OAuth refresh failed: {}", error)),
-    };
+            }
+            Err(error) => return Err(format!("Claude Code OAuth refresh failed: {}", error)),
+        };
 
+    if refreshed_tokens.workspace_id.is_none() {
+        refreshed_tokens.workspace_id = previous_tokens.workspace_id.clone();
+    }
     if !save_claude_code_refreshed_tokens(
         gcx,
         &config_dir,
         provider_name,
         &previous_tokens,
+        &mode,
         &refreshed_tokens,
     )
     .await?
@@ -357,7 +365,7 @@ pub async fn force_refresh_claude_code_for_retry(
         return Ok(current_claude_code_provider(gcx, provider_name).await);
     }
 
-    provider.oauth_tokens = refreshed_tokens;
+    provider.set_active_oauth_tokens(refreshed_tokens);
     drop(oauth_file_guard);
     drop(refresh_guard);
     invalidate_caps(gcx).await;
@@ -382,38 +390,33 @@ async fn sync_claude_code_tokens_from_disk(
     };
     let yaml: serde_yaml::Value = serde_yaml::from_str(&content)
         .map_err(|error| format!("Claude Code provider config is invalid YAML: {error}"))?;
-    if yaml
-        .get("backend")
-        .and_then(serde_yaml::Value::as_str)
-        .is_some_and(|backend| backend != "oauth")
-    {
-        return Err("Claude backend changed; OAuth refresh cancelled".to_string());
+    let identity = crate::providers::identity::provider_identity_from_yaml(provider_name, &yaml)?;
+    if identity.base_provider != "claude_code" {
+        return Err("Provider identity changed; OAuth refresh cancelled".into());
     }
-    let Some(tokens_value) = yaml.get("oauth_tokens").cloned() else {
-        return Ok(());
-    };
-    let disk_tokens: crate::providers::claude_code_oauth::OAuthTokens =
-        serde_yaml::from_value(tokens_value)
-            .map_err(|error| format!("Failed to parse Claude Code OAuth tokens: {error}"))?;
-    if disk_tokens == provider.oauth_tokens {
+    let mut disk_provider = crate::providers::claude_code::ClaudeCodeProvider::default();
+    disk_provider.provider_settings_apply(yaml.clone())?;
+    if disk_provider.oauth_mode() != provider.oauth_mode() {
+        return Err("Claude login mode changed; OAuth refresh cancelled".into());
+    }
+    let disk_tokens = disk_provider.active_oauth_tokens().clone();
+    if &disk_tokens == provider.active_oauth_tokens() {
         return Ok(());
     }
 
-    provider.oauth_tokens = disk_tokens.clone();
+    provider.set_active_oauth_tokens(disk_tokens.clone());
     let mut registry = gcx.providers.write().await;
     if let Some(current) = registry.get_mut(provider_name).and_then(|current| {
         current
             .as_any_mut()
             .downcast_mut::<crate::providers::claude_code::ClaudeCodeProvider>()
     }) {
-        if !current.is_subscription() {
+        if !current.supports_oauth() {
             return Ok(());
         }
-        current.apply_oauth_refresh_tokens(
-            &disk_tokens.access_token,
-            &disk_tokens.refresh_token,
-            disk_tokens.expires_at,
-        );
+        if current.oauth_mode() == provider.oauth_mode() {
+            current.set_active_oauth_tokens(disk_tokens);
+        }
     }
     Ok(())
 }
@@ -431,8 +434,8 @@ pub(crate) async fn refresh_claude_code_instance_if_needed(
                     .as_any()
                     .downcast_ref::<crate::providers::claude_code::ClaudeCodeProvider>()
             })
-            .filter(|provider| provider.is_subscription())
-            .map(|provider| provider.oauth_tokens.clone())
+            .filter(|provider| provider.supports_oauth())
+            .map(|provider| provider.active_oauth_tokens().clone())
     };
     let Some(tokens) = tokens else {
         return Ok(());
@@ -475,13 +478,31 @@ async fn current_claude_code_provider(
         .cloned()
 }
 
+fn claude_tokens_match(
+    current: &crate::providers::claude_code_oauth::OAuthTokens,
+    expected: &crate::providers::claude_code_oauth::OAuthTokens,
+    mode: &crate::providers::claude_code_oauth::OAuthMode,
+) -> bool {
+    let mut current = current.clone();
+    let mut expected = expected.clone();
+    current.oauth_mode.get_or_insert_with(|| mode.clone());
+    expected.oauth_mode.get_or_insert_with(|| mode.clone());
+    current == expected
+}
+
 async fn save_claude_code_refreshed_tokens(
     gcx: &Arc<GlobalContext>,
     config_dir: &std::path::Path,
     provider_name: &str,
     expected_tokens: &crate::providers::claude_code_oauth::OAuthTokens,
+    mode: &crate::providers::claude_code_oauth::OAuthMode,
     refreshed_tokens: &crate::providers::claude_code_oauth::OAuthTokens,
 ) -> Result<bool, String> {
+    let field = if *mode == crate::providers::claude_code_oauth::OAuthMode::Console {
+        "console_oauth_tokens"
+    } else {
+        "oauth_tokens"
+    };
     let registry_matches = {
         let registry = gcx.providers.read().await;
         registry
@@ -492,7 +513,8 @@ async fn save_claude_code_refreshed_tokens(
                     .downcast_ref::<crate::providers::claude_code::ClaudeCodeProvider>()
             })
             .is_some_and(|provider| {
-                provider.is_subscription() && &provider.oauth_tokens == expected_tokens
+                provider.oauth_mode().as_ref() == Some(mode)
+                    && claude_tokens_match(provider.active_oauth_tokens(), expected_tokens, mode)
             })
     };
     if !registry_matches {
@@ -506,26 +528,25 @@ async fn save_claude_code_refreshed_tokens(
         let mut yaml_map = value.as_mapping().cloned().ok_or_else(|| {
             "Config file root is not a YAML mapping. Cannot safely patch.".to_string()
         })?;
-        if yaml_map
-            .get(&serde_yaml::Value::String("backend".to_string()))
-            .and_then(serde_yaml::Value::as_str)
-            .is_some_and(|backend| backend != "oauth")
-        {
+        let identity = crate::providers::identity::provider_identity_from_yaml(
+            provider_name,
+            &serde_yaml::Value::Mapping(yaml_map.clone()),
+        )?;
+        if identity.base_provider != "claude_code" {
             return Ok(None);
         }
-        let current_tokens: crate::providers::claude_code_oauth::OAuthTokens = yaml_map
-            .get(&serde_yaml::Value::String("oauth_tokens".to_string()))
-            .cloned()
-            .map(serde_yaml::from_value)
-            .transpose()
-            .map_err(|error| format!("Failed to parse existing OAuth tokens: {}", error))?
-            .unwrap_or_default();
-        if &current_tokens != expected_tokens {
+        let mut disk_provider = crate::providers::claude_code::ClaudeCodeProvider::default();
+        disk_provider.provider_settings_apply(serde_yaml::Value::Mapping(yaml_map.clone()))?;
+        if disk_provider.oauth_mode().as_ref() != Some(mode) {
+            return Ok(None);
+        }
+        let current_tokens = disk_provider.active_oauth_tokens().clone();
+        if !claude_tokens_match(&current_tokens, expected_tokens, mode) {
             return Ok(None);
         }
 
         yaml_map.insert(
-            serde_yaml::Value::String("oauth_tokens".to_string()),
+            serde_yaml::Value::String(field.to_string()),
             serde_yaml::to_value(refreshed_tokens)
                 .map_err(|error| format!("Failed to serialize OAuth tokens: {}", error))?,
         );
@@ -546,14 +567,11 @@ async fn save_claude_code_refreshed_tokens(
                     .downcast_mut::<crate::providers::claude_code::ClaudeCodeProvider>()
             })
             .filter(|provider| {
-                provider.is_subscription() && &provider.oauth_tokens == expected_tokens
+                provider.oauth_mode().as_ref() == Some(mode)
+                    && claude_tokens_match(provider.active_oauth_tokens(), expected_tokens, mode)
             })
             .map(|provider| {
-                provider.apply_oauth_refresh_tokens(
-                    &refreshed_tokens.access_token,
-                    &refreshed_tokens.refresh_token,
-                    refreshed_tokens.expires_at,
-                );
+                provider.set_active_oauth_tokens(refreshed_tokens.clone());
             })
             .is_some()
     };
@@ -1543,6 +1561,55 @@ mod tests {
         assert_eq!(provider.oauth_tokens.refresh_token, "must-not-refresh");
     }
 
+    #[tokio::test]
+    async fn console_refresh_adopts_own_tokens_and_rejects_cross_mode_write() {
+        use crate::providers::claude_code_oauth::{OAuthMode, OAuthTokens};
+        use crate::providers::traits::ProviderTrait;
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let dir = gcx.config_dir.join("providers.d");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let yaml = serde_yaml::to_value(serde_json::json!({"backend":"anthropic", "auth_type":"oauth", "oauth_tokens":{"access_token":"subscription"}, "console_oauth_tokens":{"access_token":"fresh-console","refresh_token":"fresh-refresh","expires_at":i64::MAX}})).unwrap();
+        tokio::fs::write(
+            dir.join("claude_code.yaml"),
+            serde_yaml::to_string(&yaml).unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut provider = crate::providers::claude_code::ClaudeCodeProvider::default();
+        provider.provider_settings_apply(yaml).unwrap();
+        provider.console_oauth_tokens = OAuthTokens {
+            access_token: "stale-console".into(),
+            refresh_token: "stale-refresh".into(),
+            expires_at: 1,
+            ..Default::default()
+        };
+        gcx.providers.write().await.add(Box::new(provider));
+        let adopted = super::force_refresh_claude_code_for_retry(
+            &gcx,
+            &gcx.http_client,
+            "claude_code",
+            "stale-console",
+            None,
+            Some(reqwest::StatusCode::UNAUTHORIZED),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(adopted.active_oauth_tokens().access_token, "fresh-console");
+        assert_eq!(adopted.oauth_tokens.access_token, "subscription");
+        let saved = super::save_claude_code_refreshed_tokens(
+            &gcx,
+            &gcx.config_dir,
+            "claude_code",
+            adopted.active_oauth_tokens(),
+            &OAuthMode::Max,
+            &OAuthTokens::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!saved);
+    }
+
     lazy_static::lazy_static! {
         static ref REFRESH_TRACKING_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     }
@@ -1616,6 +1683,7 @@ mod tests {
                 access_token: "stale-access".to_string(),
                 refresh_token: "stale-refresh".to_string(),
                 expires_at: 1,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -1655,6 +1723,7 @@ mod tests {
                 access_token: "same-access".to_string(),
                 refresh_token: "refresh".to_string(),
                 expires_at: i64::MAX,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -1710,6 +1779,7 @@ mod tests {
             access_token: "old".to_string(),
             refresh_token: "old-refresh".to_string(),
             expires_at: 1,
+            ..Default::default()
         };
         let provider = crate::providers::claude_code::ClaudeCodeProvider {
             enabled: true,
@@ -1730,6 +1800,7 @@ mod tests {
             access_token: "new".to_string(),
             refresh_token: "new-refresh".to_string(),
             expires_at: i64::MAX,
+            ..Default::default()
         };
 
         let saved = super::save_claude_code_refreshed_tokens(
@@ -1737,6 +1808,7 @@ mod tests {
             &config_dir,
             "claude-code-work",
             &expected_tokens,
+            &crate::providers::claude_code_oauth::OAuthMode::Max,
             &refreshed_tokens,
         )
         .await
@@ -1774,12 +1846,14 @@ mod tests {
             access_token: "old-access".to_string(),
             refresh_token: "old-refresh".to_string(),
             expires_at: 1,
+            ..Default::default()
         };
         let provider = crate::providers::claude_code::ClaudeCodeProvider {
             oauth_tokens: crate::providers::claude_code_oauth::OAuthTokens {
                 access_token: "login-access".to_string(),
                 refresh_token: "login-refresh".to_string(),
                 expires_at: 99,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -1796,6 +1870,7 @@ mod tests {
             access_token: "stale-access".to_string(),
             refresh_token: "stale-refresh".to_string(),
             expires_at: i64::MAX,
+            ..Default::default()
         };
 
         let saved = super::save_claude_code_refreshed_tokens(
@@ -1803,6 +1878,7 @@ mod tests {
             &config_dir,
             "claude-code-work",
             &stale_tokens,
+            &crate::providers::claude_code_oauth::OAuthMode::Max,
             &stale_refresh,
         )
         .await

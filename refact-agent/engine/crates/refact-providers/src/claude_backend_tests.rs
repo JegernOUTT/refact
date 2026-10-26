@@ -227,3 +227,112 @@ fn schema_includes_six_backends_and_secret_metadata() {
         assert_eq!(schema["fields"][*field]["f_secret"].as_bool(), Some(true));
     }
 }
+
+#[test]
+fn console_oauth_is_separate_and_confined_to_default_transport() {
+    use crate::claude_code_oauth::{OAuthMode, OAuthTokens};
+    let mut p = ClaudeCodeProvider::default();
+    p.oauth_tokens = OAuthTokens {
+        access_token: "subscription-secret".into(),
+        expires_at: i64::MAX,
+        ..Default::default()
+    };
+    apply(
+        &mut p,
+        "backend: anthropic\nauth_type: oauth\nenabled: true\nenabled_models: [explicit]",
+    )
+    .unwrap();
+    assert!(p.resolve_auth().is_err());
+    p.set_active_oauth_tokens(OAuthTokens {
+        access_token: "console-secret".into(),
+        expires_at: i64::MAX,
+        workspace_id: Some("workspace".into()),
+        ..Default::default()
+    });
+    assert_eq!(p.oauth_mode(), Some(OAuthMode::Console));
+    assert!(!p.is_subscription());
+    let runtime = p.build_runtime().unwrap();
+    assert!(runtime.enabled);
+    assert!(runtime.auth_token.is_empty());
+    assert!(runtime.api_key.is_empty());
+    let transport: ClaudeTransportConfig =
+        serde_json::from_str(&runtime.extra_headers[CLAUDE_TRANSPORT_HEADER]).unwrap();
+    assert!(transport.base_url.is_none());
+    assert_eq!(transport.auth_token.as_deref(), Some("console-secret"));
+    assert_eq!(transport.oauth_workspace_id.as_deref(), Some("workspace"));
+    assert!(transport.api_key.is_none());
+    assert_eq!(
+        runtime.chat_endpoint,
+        "https://api.anthropic.com/v1/messages"
+    );
+    assert!(apply(&mut p, "base_url: https://evil.invalid")
+        .unwrap_err()
+        .contains("Clear Base URL"));
+    p.transport.base_url = Some("$ANTHROPIC_BASE_URL".into());
+    assert!(p.build_runtime().is_err());
+    p.transport.base_url = None;
+    apply(&mut p, "backend: oauth").unwrap();
+    assert_eq!(p.resolve_auth().unwrap(), "subscription-secret");
+    apply(&mut p, "backend: anthropic").unwrap();
+    assert_eq!(p.resolve_auth().unwrap(), "console-secret");
+    assert!(!format!("{p:?} {:?}", p.console_oauth_tokens).contains("console-secret"));
+}
+
+#[test]
+fn backend_auth_transitions_normalize_only_stale_choices() {
+    let mut p = ClaudeCodeProvider::default();
+    apply(
+        &mut p,
+        "backend: custom\nauth_type: bearer\nbase_url: https://custom.invalid",
+    )
+    .unwrap();
+    apply(&mut p, "backend: anthropic").unwrap();
+    assert_eq!(
+        serde_json::to_value(&p.transport).unwrap()["auth_type"],
+        "api_key"
+    );
+    apply(&mut p, "auth_type: oauth").unwrap();
+    assert!(p.transport.base_url.is_none());
+    apply(&mut p, "backend: custom").unwrap();
+    assert_eq!(
+        serde_json::to_value(&p.transport).unwrap()["auth_type"],
+        "api_key"
+    );
+    assert!(apply(&mut p, "auth_type: oauth").is_err());
+    apply(&mut p, "backend: anthropic\nauth_type: oauth").unwrap();
+    assert!(apply(&mut p, "base_url: https://custom.invalid").is_err());
+}
+
+#[tokio::test]
+async fn console_usage_is_rejected_before_network() {
+    let mut p = ClaudeCodeProvider::default();
+    apply(&mut p, "backend: anthropic\nauth_type: oauth").unwrap();
+    let error = p.fetch_usage(&reqwest::Client::new()).await.err().unwrap();
+    assert!(error.contains("subscriptions"));
+    assert!(p
+        .fetch_usage_once(&reqwest::Client::new(), "must-not-send")
+        .await
+        .is_err());
+}
+
+#[test]
+fn oauth_schema_has_conditional_modes_and_auth_defaults() {
+    let schema: serde_yaml::Value = serde_yaml::from_str(crate::claude_backend::SCHEMA).unwrap();
+    assert_eq!(schema["fields"]["auth_type"]["f_default"], "api_key");
+    let methods = schema["oauth"]["methods"].as_sequence().unwrap();
+    assert_eq!(methods.len(), 3);
+    assert_eq!(methods[0]["f_visible_when"]["backend"][0], "oauth");
+    assert_eq!(methods[1]["id"], "console");
+    assert_eq!(methods[1]["f_visible_when"]["auth_type"][0], "oauth");
+    assert_eq!(
+        methods[2]["f_visible_when"]["backend"]
+            .as_sequence()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        schema["fields"]["api_key"]["f_visible_when_any"][0]["auth_type"][0],
+        "api_key"
+    );
+}

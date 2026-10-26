@@ -387,12 +387,22 @@ fn openai_codex_instance_id(model_rec: &BaseModelRecord) -> Option<&str> {
     .then_some(provider_name)
 }
 
+fn is_claude_console_oauth(config: &refact_core::claude_backend::ClaudeTransportConfig) -> bool {
+    config.backend == refact_core::claude_backend::ClaudeBackend::Anthropic
+        && config.auth_type == refact_core::claude_backend::ClaudeAuthType::Oauth
+}
+
 fn claude_code_instance_id(model_rec: &BaseModelRecord) -> Option<&str> {
-    if model_rec
+    if let Some(value) = model_rec
         .extra_headers
-        .contains_key(refact_core::claude_backend::CLAUDE_TRANSPORT_HEADER)
+        .get(refact_core::claude_backend::CLAUDE_TRANSPORT_HEADER)
     {
-        return None;
+        let config =
+            serde_json::from_str::<refact_core::claude_backend::ClaudeTransportConfig>(value)
+                .ok()?;
+        if !is_claude_console_oauth(&config) {
+            return None;
+        }
     }
     let (provider_name, _) = model_rec.id.split_once('/')?;
     (model_rec.wire_format == crate::llm::WireFormat::AnthropicMessages
@@ -632,7 +642,19 @@ async fn force_refresh_claude_code_for_retry(
     status: reqwest::StatusCode,
     current_access_token: &str,
     current_expires_at: Option<i64>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<crate::providers::claude_code::ClaudeCodeProvider>, String> {
+    #[cfg(test)]
+    if let Ok(result) = claude_cloud_tests::REFRESH_HOOK.try_with(|hook| {
+        let mut hook = hook.borrow_mut();
+        hook.calls.push((
+            provider_instance_id.to_string(),
+            status,
+            current_access_token.to_string(),
+        ));
+        hook.provider.clone()
+    }) {
+        return Ok(result);
+    }
     crate::providers::oauth_refresh::force_refresh_claude_code_for_retry(
         &app.gcx,
         http_client,
@@ -642,7 +664,6 @@ async fn force_refresh_claude_code_for_retry(
         Some(status),
     )
     .await
-    .map(|provider| provider.and_then(|provider| provider.resolve_auth().ok()))
 }
 
 #[derive(Default, Clone)]
@@ -2749,6 +2770,20 @@ async fn send_claude_cloud_request(
                 config,
             )
             .await?;
+            #[cfg(test)]
+            if let Ok(response) = claude_cloud_tests::REQUEST_HOOK.try_with(|hook| {
+                let mut hook = hook.borrow_mut();
+                hook.requests.push((
+                    request.url.clone(),
+                    request.headers.clone(),
+                    request.body_bytes.clone(),
+                ));
+                hook.responses
+                    .pop_front()
+                    .expect("unexpected cloud request")
+            }) {
+                return Ok(response);
+            }
             let aws = matches!(
                 request.framing,
                 refact_claude_cloud::ResponseFraming::AwsEventStream
@@ -2921,25 +2956,48 @@ async fn send_http_stream_request(
                     &client,
                     provider_instance_id,
                     status,
-                    &params.model_rec.auth_token,
+                    cloud_config.as_ref().and_then(|config| config.auth_token.as_deref()).unwrap_or(&params.model_rec.auth_token),
                     claude_code_request_expires_at(&params.model_rec),
                 ) => result,
                 _ = wait_for_abort_signal(params.abort_flag.clone(), params.abort_notify.clone()) => {
                     return Err(LlmStreamError::new(ABORT_ERROR_MESSAGE, partial_output_emitted));
                 }
             };
-            if let Some(new_access_token) = refresh_outcome
+            if let Some(provider) = refresh_outcome
                 .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?
             {
-                let mut retry_parts = HttpParts {
-                    url: http_parts.url.clone(),
-                    headers: http_parts.headers.clone(),
-                    body: http_parts.body.clone(),
-                };
-                set_bearer_authorization_header(&mut retry_parts.headers, &new_access_token)
-                    .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
-                response =
-                    if let Some((response_header_timeout, max_attempts)) = header_retry_config {
+                if cloud_config.as_ref().is_some_and(is_claude_console_oauth) {
+                    if !provider.is_console_oauth() {
+                        return Err(LlmStreamError::new(
+                            "Claude OAuth mode changed during refresh",
+                            partial_output_emitted,
+                        ));
+                    }
+                    let config = provider.resolved_transport();
+                    response = send_claude_cloud_request(app, params, prepared, &config)
+                        .await
+                        .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+                    status = response.status();
+                } else {
+                    if !provider.is_subscription() {
+                        return Err(LlmStreamError::new(
+                            "Claude OAuth mode changed during refresh",
+                            partial_output_emitted,
+                        ));
+                    }
+                    let new_access_token = provider
+                        .resolve_auth()
+                        .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+                    let mut retry_parts = HttpParts {
+                        url: http_parts.url.clone(),
+                        headers: http_parts.headers.clone(),
+                        body: http_parts.body.clone(),
+                    };
+                    set_bearer_authorization_header(&mut retry_parts.headers, &new_access_token)
+                        .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+                    response = if let Some((response_header_timeout, max_attempts)) =
+                        header_retry_config
+                    {
                         send_llm_http_request_with_header_timeout(
                             &client,
                             &retry_parts,
@@ -2961,9 +3019,14 @@ async fn send_http_stream_request(
                         .await
                     }
                     .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
-                capture_xai_oauth_rate_limit_headers(&app, &params.model_rec, response.headers())
+                    capture_xai_oauth_rate_limit_headers(
+                        &app,
+                        &params.model_rec,
+                        response.headers(),
+                    )
                     .await;
-                status = response.status();
+                    status = response.status();
+                }
             }
         }
     }

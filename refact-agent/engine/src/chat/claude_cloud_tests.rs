@@ -154,6 +154,10 @@ fn frame(event: &str) -> Vec<u8> {
 }
 
 async fn response(bytes: Vec<u8>) -> reqwest::Response {
+    response_with_status(bytes, reqwest::StatusCode::OK).await
+}
+
+async fn response_with_status(bytes: Vec<u8>, status: reqwest::StatusCode) -> reqwest::Response {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -163,7 +167,8 @@ async fn response(bytes: Vec<u8>) -> reqwest::Response {
         socket
             .write_all(
                 format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    status,
                     bytes.len()
                 )
                 .as_bytes(),
@@ -326,4 +331,326 @@ fn native_marker_disables_subscription_identity_even_with_stale_token() {
         );
         assert!(claude_code_instance_id(&model).is_none());
     }
+}
+
+pub(super) struct RefreshHook {
+    pub(super) provider: Option<crate::providers::claude_code::ClaudeCodeProvider>,
+    pub(super) calls: Vec<(String, reqwest::StatusCode, String)>,
+}
+
+pub(super) struct RequestHook {
+    pub(super) requests: Vec<(String, reqwest::header::HeaderMap, Vec<u8>)>,
+    pub(super) responses: std::collections::VecDeque<reqwest::Response>,
+}
+
+tokio::task_local! {
+    pub(super) static REFRESH_HOOK: std::cell::RefCell<RefreshHook>;
+    pub(super) static REQUEST_HOOK: std::cell::RefCell<RequestHook>;
+}
+
+fn retry_params(config: Option<ClaudeTransportConfig>) -> StreamRunParams {
+    let mut model = tests::model_record("claude_code");
+    model.wire_format = WireFormat::AnthropicMessages;
+    model.endpoint = "http://unexpected.invalid/override".into();
+    if let Some(config) = config {
+        model.extra_headers.insert(
+            CLAUDE_TRANSPORT_HEADER.into(),
+            serde_json::to_string(&config).unwrap(),
+        );
+    } else {
+        model.auth_token = "subscription-rejected".into();
+    }
+    StreamRunParams {
+        llm_request: LlmRequest::new(
+            model.id.clone(),
+            vec![crate::call_validation::ChatMessage::new(
+                "user".into(),
+                "hello".into(),
+            )],
+        ),
+        model_rec: model,
+        chat_id: None,
+        allow_websocket: false,
+        abort_flag: None,
+        abort_notify: None,
+        supports_tools: false,
+        supports_reasoning: false,
+        reasoning_type: None,
+        supports_temperature: true,
+        priority: RequestPriority::Interactive,
+    }
+}
+
+fn retry_prepared(params: &StreamRunParams) -> PreparedLlmStreamRequest {
+    PreparedLlmStreamRequest {
+        client: reqwest::Client::new(),
+        wire_format: params.model_rec.wire_format,
+        adapter: get_adapter(params.model_rec.wire_format),
+        adapter_settings: tests::adapter_settings(&params.model_rec),
+        http_parts: HttpParts {
+            url: params.model_rec.endpoint.clone(),
+            headers: Default::default(),
+            body: json!({}),
+        },
+        command_credential: None,
+        snapshot_for_commit: None,
+        header_retry_config: Some((Duration::from_secs(1), 1)),
+    }
+}
+
+fn console_config() -> ClaudeTransportConfig {
+    ClaudeTransportConfig {
+        backend: ClaudeBackend::Anthropic,
+        auth_type: refact_core::claude_backend::ClaudeAuthType::Oauth,
+        auth_token: Some("console-rejected".into()),
+        oauth_workspace_id: Some("old-workspace".into()),
+        ..Default::default()
+    }
+}
+
+async fn status_response(status: reqwest::StatusCode) -> reqwest::Response {
+    response_with_status(Vec::new(), status).await
+}
+
+#[tokio::test]
+async fn console_oauth_rejection_refreshes_transport_and_retries_default_endpoint() {
+    use crate::providers::traits::ProviderTrait;
+    let mut provider = crate::providers::claude_code::ClaudeCodeProvider::default();
+    provider
+        .provider_settings_apply(
+            serde_yaml::from_str("backend: anthropic\nauth_type: oauth").unwrap(),
+        )
+        .unwrap();
+    provider.console_oauth_tokens.access_token = "console-fresh".into();
+    provider.console_oauth_tokens.expires_at = i64::MAX;
+    provider.console_oauth_tokens.workspace_id = Some("fresh-workspace".into());
+    for status in [
+        reqwest::StatusCode::UNAUTHORIZED,
+        reqwest::StatusCode::FORBIDDEN,
+    ] {
+        let app = tests::app_with_privacy_policy(tests::privacy_policy("claude_code")).await;
+        let params = retry_params(Some(console_config()));
+        assert!(params.model_rec.auth_token.is_empty());
+        let prepared = retry_prepared(&params);
+        let responses = [
+            status_response(status).await,
+            status_response(reqwest::StatusCode::OK).await,
+        ]
+        .into();
+        REFRESH_HOOK
+            .scope(
+                std::cell::RefCell::new(RefreshHook {
+                    provider: Some(provider.clone()),
+                    calls: vec![],
+                }),
+                async {
+                    REQUEST_HOOK
+                        .scope(
+                            std::cell::RefCell::new(RequestHook {
+                                requests: vec![],
+                                responses,
+                            }),
+                            async {
+                                let (response, _) = send_http_stream_request(
+                                    &app,
+                                    &params,
+                                    &prepared,
+                                    "claude_code",
+                                )
+                                .await
+                                .unwrap();
+                                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                                REQUEST_HOOK.with(|hook| {
+                                    let hook = hook.borrow();
+                                    assert_eq!(hook.requests.len(), 2);
+                                    for ((url, headers, body), token) in hook
+                                        .requests
+                                        .iter()
+                                        .zip(["console-rejected", "console-fresh"])
+                                    {
+                                        assert_eq!(url, "https://api.anthropic.com/v1/messages");
+                                        assert_eq!(
+                                            headers["authorization"],
+                                            format!("Bearer {token}")
+                                        );
+                                        assert!(!headers.contains_key(CLAUDE_TRANSPORT_HEADER));
+                                        assert!(!String::from_utf8_lossy(body).contains(token));
+                                        assert!(!String::from_utf8_lossy(body).contains("mcp_"));
+                                    }
+                                    assert_eq!(
+                                        hook.requests[1].1["anthropic-workspace-id"],
+                                        "fresh-workspace"
+                                    );
+                                });
+                                REFRESH_HOOK.with(|hook| {
+                                    assert_eq!(
+                                        hook.borrow().calls,
+                                        vec![(
+                                            "claude_code".into(),
+                                            status,
+                                            "console-rejected".into()
+                                        )]
+                                    )
+                                });
+                                assert!(params.model_rec.auth_token.is_empty());
+                            },
+                        )
+                        .await;
+                },
+            )
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn non_console_cloud_rejection_does_not_refresh_and_console_base_override_is_rejected() {
+    for config in [
+        ClaudeTransportConfig {
+            backend: ClaudeBackend::Custom,
+            auth_type: refact_core::claude_backend::ClaudeAuthType::Bearer,
+            auth_token: Some("custom".into()),
+            base_url: Some("http://custom.invalid".into()),
+            ..Default::default()
+        },
+        ClaudeTransportConfig {
+            base_url: Some("http://unexpected.invalid".into()),
+            ..console_config()
+        },
+    ] {
+        let app = tests::app_with_privacy_policy(tests::privacy_policy("claude_code")).await;
+        let params = retry_params(Some(config.clone()));
+        let prepared = retry_prepared(&params);
+        let responses = [status_response(reqwest::StatusCode::UNAUTHORIZED).await].into();
+        REFRESH_HOOK
+            .scope(
+                std::cell::RefCell::new(RefreshHook {
+                    provider: None,
+                    calls: vec![],
+                }),
+                async {
+                    REQUEST_HOOK
+                        .scope(
+                            std::cell::RefCell::new(RequestHook {
+                                requests: vec![],
+                                responses,
+                            }),
+                            async {
+                                let error = send_http_stream_request(
+                                    &app,
+                                    &params,
+                                    &prepared,
+                                    "claude_code",
+                                )
+                                .await
+                                .err()
+                                .unwrap();
+                                if is_claude_console_oauth(&config) {
+                                    assert!(error.message.contains("default Anthropic endpoint"));
+                                    REQUEST_HOOK
+                                        .with(|hook| assert!(hook.borrow().requests.is_empty()));
+                                }
+                                REFRESH_HOOK.with(|hook| assert!(hook.borrow().calls.is_empty()));
+                            },
+                        )
+                        .await;
+                },
+            )
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn subscription_oauth_rejection_still_retries_bearer_without_cloud_transport() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for (token, status) in [
+            ("subscription-rejected", "401 Unauthorized"),
+            ("subscription-fresh", "200 OK"),
+        ] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            loop {
+                let mut buffer = [0u8; 4096];
+                let read = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(read, 0);
+                bytes.extend_from_slice(&buffer[..read]);
+                if bytes.windows(4).any(|s| s == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            assert!(String::from_utf8_lossy(&bytes)
+                .to_ascii_lowercase()
+                .contains(&format!("authorization: bearer {token}")));
+            socket
+                .write_all(
+                    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let app = tests::app_with_privacy_policy(tests::privacy_policy("claude_code")).await;
+    let mut params = retry_params(None);
+    params.model_rec.endpoint = format!("http://{address}");
+    let mut prepared = retry_prepared(&params);
+    set_bearer_authorization_header(&mut prepared.http_parts.headers, "subscription-rejected")
+        .unwrap();
+    let mut provider = crate::providers::claude_code::ClaudeCodeProvider::default();
+    provider.oauth_tokens.access_token = "subscription-fresh".into();
+    provider.oauth_tokens.expires_at = i64::MAX;
+    REFRESH_HOOK
+        .scope(
+            std::cell::RefCell::new(RefreshHook {
+                provider: Some(provider),
+                calls: vec![],
+            }),
+            async {
+                let (response, _) =
+                    send_http_stream_request(&app, &params, &prepared, "claude_code")
+                        .await
+                        .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                REFRESH_HOOK
+                    .with(|hook| assert_eq!(hook.borrow().calls[0].2, "subscription-rejected"));
+            },
+        )
+        .await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn console_oauth_retry_rejects_provider_mode_switch() {
+    let app = tests::app_with_privacy_policy(tests::privacy_policy("claude_code")).await;
+    let params = retry_params(Some(console_config()));
+    let prepared = retry_prepared(&params);
+    let responses = [status_response(reqwest::StatusCode::UNAUTHORIZED).await].into();
+    REFRESH_HOOK
+        .scope(
+            std::cell::RefCell::new(RefreshHook {
+                provider: Some(crate::providers::claude_code::ClaudeCodeProvider::default()),
+                calls: vec![],
+            }),
+            async {
+                REQUEST_HOOK
+                    .scope(
+                        std::cell::RefCell::new(RequestHook {
+                            requests: vec![],
+                            responses,
+                        }),
+                        async {
+                            let error =
+                                send_http_stream_request(&app, &params, &prepared, "claude_code")
+                                    .await
+                                    .err()
+                                    .unwrap();
+                            assert!(error.message.contains("mode changed"));
+                            REQUEST_HOOK.with(|hook| assert_eq!(hook.borrow().requests.len(), 1));
+                        },
+                    )
+                    .await;
+            },
+        )
+        .await;
 }

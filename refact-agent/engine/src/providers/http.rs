@@ -740,7 +740,7 @@ pub async fn handle_v1_provider_get(
                 && provider
                     .as_any()
                     .downcast_ref::<ClaudeCodeProvider>()
-                    .is_some_and(ClaudeCodeProvider::is_subscription)
+                    .is_some_and(ClaudeCodeProvider::supports_oauth)
         })
     };
     if is_claude_code {
@@ -912,8 +912,45 @@ pub async fn handle_v1_provider_update(
             )?;
             let settings = settings_with_forced_identity(settings, &identity)?;
             let had_existing = existing_settings.is_some();
-            let existing = existing_settings
+            let mut existing = existing_settings
                 .unwrap_or_else(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+            let mut settings = settings;
+            if identity.base_provider == "claude_code" {
+                let old_backend = existing
+                    .get("backend")
+                    .and_then(serde_yaml::Value::as_str)
+                    .unwrap_or("oauth");
+                let backend = settings
+                    .get("backend")
+                    .and_then(serde_yaml::Value::as_str)
+                    .unwrap_or(old_backend)
+                    .to_string();
+                let auth = existing
+                    .get("auth_type")
+                    .and_then(serde_yaml::Value::as_str)
+                    .unwrap_or("api_key");
+                if backend != old_backend
+                    && settings.get("auth_type").is_none()
+                    && ((backend == "custom" && auth == "oauth")
+                        || (backend == "anthropic" && !matches!(auth, "api_key" | "oauth")))
+                {
+                    settings.as_mapping_mut().expect("settings mapping").insert(
+                        serde_yaml::Value::String("auth_type".into()),
+                        serde_yaml::Value::String("api_key".into()),
+                    );
+                }
+                if backend == "anthropic"
+                    && settings
+                        .get("auth_type")
+                        .and_then(serde_yaml::Value::as_str)
+                        == Some("oauth")
+                    && settings.get("base_url").is_none()
+                {
+                    if let Some(map) = existing.as_mapping_mut() {
+                        map.remove(serde_yaml::Value::String("base_url".into()));
+                    }
+                }
+            }
             let merged_settings = if had_existing
                 || supports_structured_command_credentials(&identity.base_provider)
             {
@@ -2484,24 +2521,6 @@ fn ensure_oauth_identity_for_instance_sync(
             ),
         ));
     }
-    if base_provider == "claude_code" {
-        let settings = serde_yaml::Value::Mapping(yaml_map.clone());
-        validate_claude_http_settings(base_provider, &settings)?;
-        let transport: refact_core::claude_backend::ClaudeTransportConfig =
-            serde_yaml::from_value(settings).map_err(|_| {
-                ScratchError::new(
-                    StatusCode::CONFLICT,
-                    "Invalid Claude transport settings".to_string(),
-                )
-            })?;
-        if transport.backend != refact_core::claude_backend::ClaudeBackend::Oauth {
-            return Err(ScratchError::new(
-                StatusCode::CONFLICT,
-                "Claude backend changed during OAuth login; restart login for the selected backend"
-                    .to_string(),
-            ));
-        }
-    }
     ensure_yaml_identity_fields(yaml_map, &identity);
     Ok(identity)
 }
@@ -2525,8 +2544,13 @@ async fn oauth_base_provider_for_instance(
             format!("OAuth not supported for provider '{}'", provider_name),
         ));
     }
-    if identity.base_provider == "claude_code" {
-        ensure_claude_subscription(gcx, provider_name).await?;
+    let (provider, _) =
+        resolve_provider_for_base(gcx, provider_name, &identity.base_provider).await?;
+    if provider.is_readonly() {
+        return Err(ScratchError::new(
+            StatusCode::FORBIDDEN,
+            "Provider is readonly".into(),
+        ));
     }
     Ok(identity.base_provider)
 }
@@ -2541,7 +2565,20 @@ pub async fn handle_v1_provider_oauth_start(
     let base_provider = oauth_base_provider_for_instance(&gcx, &params.name).await?;
     match base_provider.as_str() {
         "claude_code" => {
-            let mode = crate::providers::claude_code_oauth::OAuthMode::Max;
+            let (provider, _) =
+                resolve_provider_for_base(&gcx, &params.name, "claude_code").await?;
+            let claude = downcast_provider::<ClaudeCodeProvider>(provider.as_ref(), "Claude Code")?;
+            if claude.oauth_mode().is_none() {
+                let result = super::native_auth::start(
+                    &params.name,
+                    &claude.resolved_transport(),
+                    gcx.shutdown_flag.clone(),
+                )
+                .await
+                .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+                return json_response(StatusCode::OK, &result);
+            }
+            let mode = claude.oauth_mode().unwrap();
             let (callback_listener, callback_port) =
                 crate::providers::claude_code_oauth::bind_callback_listener()
                     .await
@@ -2801,12 +2838,35 @@ pub async fn handle_v1_provider_oauth_exchange(
 
     match base_provider.as_str() {
         "claude_code" => {
+            let (provider, _) =
+                resolve_provider_for_base(&gcx, &params.name, "claude_code").await?;
+            let claude = downcast_provider::<ClaudeCodeProvider>(provider.as_ref(), "Claude Code")?;
+            let Some(mode) = claude.oauth_mode() else {
+                if !request.code.is_empty() {
+                    return Err(ScratchError::new(
+                        StatusCode::BAD_REQUEST,
+                        "Native sign-in accepts polling only; do not submit an OAuth code".into(),
+                    ));
+                }
+                let result = super::native_auth::poll(
+                    &params.name,
+                    &claude.resolved_transport(),
+                    &request.session_id,
+                )
+                .await
+                .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+                if result["status"] == "completed" {
+                    invalidate_caps(gcx.clone()).await;
+                }
+                return json_response(StatusCode::OK, &result);
+            };
             let (tokens, session_provider_name) =
                 crate::providers::claude_code_oauth::exchange_code(
                     &http_client,
                     &request.session_id,
                     &request.code,
                     &params.name,
+                    &mode,
                 )
                 .await
                 .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
@@ -3011,22 +3071,52 @@ pub async fn handle_v1_provider_oauth_exchange(
 pub async fn handle_v1_provider_oauth_logout(
     State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
+    body_bytes: hyper::body::Bytes,
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let base_provider = oauth_base_provider_for_instance(&gcx, &params.name).await?;
+    let request: Value = if body_bytes.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice(&body_bytes)
+            .map_err(|_| ScratchError::new(StatusCode::BAD_REQUEST, "Invalid logout JSON".into()))?
+    };
+    if let Some(session_id) = request.get("session_id").and_then(Value::as_str) {
+        super::native_auth::cancel(&params.name, Some(session_id))
+            .await
+            .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+        return json_response(StatusCode::OK, &json!({"success":true}));
+    }
     let config_dir = gcx.config_dir.clone();
 
     match base_provider.as_str() {
         "claude_code" => {
-            let empty =
-                serde_yaml::to_value(&crate::providers::claude_code_oauth::OAuthTokens::default())
-                    .map_err(|e| {
-                        ScratchError::new(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Failed to serialize: {}", e),
-                        )
-                    })?;
+            let (provider, _) =
+                resolve_provider_for_base(&gcx, &params.name, "claude_code").await?;
+            let claude = downcast_provider::<ClaudeCodeProvider>(provider.as_ref(), "Claude Code")?;
+            let Some(mode) = claude.oauth_mode() else {
+                if !matches!(
+                    claude.resolved_transport().backend,
+                    refact_core::claude_backend::ClaudeBackend::Bedrock
+                        | refact_core::claude_backend::ClaudeBackend::Vertex
+                        | refact_core::claude_backend::ClaudeBackend::Foundry
+                ) {
+                    return Err(ScratchError::new(
+                        StatusCode::BAD_REQUEST,
+                        "Sign-in unsupported for selected Claude backend".into(),
+                    ));
+                }
+                super::native_auth::cancel(&params.name, None)
+                    .await
+                    .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+                return json_response(StatusCode::OK, &json!({"success":true}));
+            };
+            let empty = serde_yaml::to_value(crate::providers::claude_code_oauth::OAuthTokens {
+                oauth_mode: Some(mode),
+                ..Default::default()
+            })
+            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             save_provider_oauth_tokens(&gcx, &config_dir, &params.name, "claude_code", &empty)
                 .await?;
         }
@@ -4600,6 +4690,15 @@ async fn save_provider_oauth_tokens(
             format!("OAuth not supported for provider '{}'", provider_name),
         ));
     }
+    let claude_mode = if base_provider == "claude_code" {
+        use crate::providers::claude_code_oauth::{OAuthMode, OAuthTokens};
+        let tokens: OAuthTokens = serde_yaml::from_value(tokens_value.clone()).map_err(|_| {
+            ScratchError::new(StatusCode::BAD_REQUEST, "Invalid OAuth tokens".into())
+        })?;
+        Some(tokens.oauth_mode.unwrap_or(OAuthMode::Max))
+    } else {
+        None
+    };
     let _claude_code_refresh_guard = if base_provider == "claude_code" {
         Some(
             ClaudeCodeProvider::lock_refresh_guard()
@@ -4627,6 +4726,16 @@ async fn save_provider_oauth_tokens(
     } else {
         None
     };
+    if let Some(mode) = claude_mode.as_ref() {
+        let (provider, _) = resolve_provider_for_base(gcx, provider_name, "claude_code").await?;
+        let claude = downcast_provider::<ClaudeCodeProvider>(provider.as_ref(), "Claude Code")?;
+        if provider.is_readonly() || claude.oauth_mode().as_ref() != Some(mode) {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                "Claude login mode changed; restart login".into(),
+            ));
+        }
+    }
     config_store::update_provider_config_with(
         config_dir,
         provider_name,
@@ -4649,8 +4758,29 @@ async fn save_provider_oauth_tokens(
                 &mut yaml_map,
             )?;
 
+            let token_field = if let Some(mode) = claude_mode.as_ref() {
+                let mut current = ClaudeCodeProvider::default();
+                current
+                    .provider_settings_apply(serde_yaml::Value::Mapping(yaml_map.clone()))
+                    .map_err(|_| {
+                        ScratchError::new(StatusCode::CONFLICT, "Invalid Claude settings".into())
+                    })?;
+                if current.oauth_mode().as_ref() != Some(mode) {
+                    return Err(ScratchError::new(
+                        StatusCode::CONFLICT,
+                        "Claude login mode changed; restart login".into(),
+                    ));
+                }
+                if current.is_console_oauth() {
+                    "console_oauth_tokens"
+                } else {
+                    "oauth_tokens"
+                }
+            } else {
+                "oauth_tokens"
+            };
             yaml_map.insert(
-                serde_yaml::Value::String("oauth_tokens".to_string()),
+                serde_yaml::Value::String(token_field.to_string()),
                 tokens_value.clone(),
             );
 
@@ -5142,6 +5272,7 @@ oauth_tokens:
                 access_token: "stale-access".to_string(),
                 refresh_token: "stale-refresh".to_string(),
                 expires_at: 1,
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -5708,6 +5839,7 @@ extra_headers:
             access_token: "alias-access".to_string(),
             refresh_token: "alias-refresh".to_string(),
             expires_at: i64::MAX,
+            ..Default::default()
         };
         crate::providers::oauth_refresh::mark_invalid_refresh_token(
             "claude_code_2",

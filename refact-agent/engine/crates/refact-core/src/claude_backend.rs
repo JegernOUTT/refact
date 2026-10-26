@@ -21,6 +21,7 @@ pub enum ClaudeAuthType {
     ApiKey,
     Bearer,
     None,
+    Oauth,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,6 +43,7 @@ pub struct ClaudeTransportConfig {
     pub foundry_api_key: Option<String>,
     pub foundry_auth_token: Option<String>,
     pub foundry_base_url: Option<String>,
+    pub oauth_workspace_id: Option<String>,
 }
 
 impl std::fmt::Debug for ClaudeTransportConfig {

@@ -1,4 +1,5 @@
 pub mod http;
+pub mod native_auth;
 pub mod oauth_refresh;
 pub mod operator_defaults;
 pub mod pricing;

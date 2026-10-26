@@ -116,6 +116,7 @@ pub async fn prepare_attempt(
             "x-stainless-helper-method",
             "x-amz-security-token",
             "x-amz-date",
+            "anthropic-workspace-id",
             "host",
             "content-length",
         ] {
@@ -141,20 +142,53 @@ pub async fn prepare_attempt(
     match config.backend {
         ClaudeBackend::Oauth => {}
         ClaudeBackend::Anthropic => {
-            target = messages_endpoint(
-                config
-                    .base_url
+            if config.auth_type == ClaudeAuthType::Oauth {
+                if config.base_url.is_some() {
+                    return Err(
+                        "Claude Console OAuth supports only the default Anthropic endpoint".into(),
+                    );
+                }
+                target = messages_endpoint("https://api.anthropic.com")?;
+                header(
+                    &mut headers,
+                    "authorization",
+                    &format!("Bearer {}", required(&config.auth_token, "auth_token")?),
+                )?;
+                let betas = match headers.get("anthropic-beta") {
+                    Some(beta) => format!(
+                        "{},oauth-2025-04-20",
+                        beta.to_str().map_err(|_| "Invalid Anthropic beta header")?
+                    ),
+                    None => "oauth-2025-04-20".to_string(),
+                };
+                header(&mut headers, "anthropic-beta", &betas)?;
+                if let Some(workspace) = config
+                    .oauth_workspace_id
                     .as_deref()
-                    .unwrap_or("https://api.anthropic.com"),
-            )?;
-            header(
-                &mut headers,
-                "x-api-key",
-                required(&config.api_key, "api_key")?,
-            )?;
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    header(&mut headers, "anthropic-workspace-id", workspace)?;
+                }
+            } else {
+                target = messages_endpoint(
+                    config
+                        .base_url
+                        .as_deref()
+                        .unwrap_or("https://api.anthropic.com"),
+                )?;
+                header(
+                    &mut headers,
+                    "x-api-key",
+                    required(&config.api_key, "api_key")?,
+                )?;
+            }
             header(&mut headers, "anthropic-version", "2023-06-01")?;
         }
         ClaudeBackend::Custom => {
+            if config.auth_type == ClaudeAuthType::Oauth {
+                return Err("Claude OAuth is not supported for custom endpoints".into());
+            }
             target = messages_endpoint(required(&config.base_url, "base_url")?)?;
             match config.auth_type {
                 ClaudeAuthType::ApiKey => header(
@@ -168,6 +202,9 @@ pub async fn prepare_attempt(
                     &format!("Bearer {}", required(&config.auth_token, "auth_token")?),
                 )?,
                 ClaudeAuthType::None => {}
+                ClaudeAuthType::Oauth => {
+                    return Err("Claude OAuth is not supported for custom endpoints".into())
+                }
             }
             header(&mut headers, "anthropic-version", "2023-06-01")?;
         }
@@ -377,10 +414,7 @@ async fn aws_credentials(config: &ClaudeTransportConfig) -> Result<Credentials, 
             )
         }
     }
-    static CACHE: OnceCell<AwsKeyCache<Mutex<Option<CachedAwsCredentials>>>> =
-        OnceCell::const_new();
-    let cache = CACHE.get_or_init(|| async { AwsKeyCache::default() }).await;
-    let entry = cache.entry(aws_key(config)).await?;
+    let entry = AWS_CREDENTIALS.get().entry(aws_key(config)).await?;
     resolve_aws_credentials(&entry, SystemTime::now, || async {
         let sdk = aws_sdk(config).await?;
         sdk.credentials_provider()
@@ -390,6 +424,45 @@ async fn aws_credentials(config: &ClaudeTransportConfig) -> Result<Credentials, 
             .map_err(|_| "AWS credential acquisition failed".into())
     })
     .await
+}
+
+struct Resettable<T>(std::sync::Mutex<Option<Arc<T>>>);
+
+impl<T: Default> Resettable<T> {
+    const fn new() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+
+    fn get(&self) -> Arc<T> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(Default::default)
+            .clone()
+    }
+
+    fn reset(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+static AWS_CREDENTIALS: Resettable<AwsKeyCache<Mutex<Option<CachedAwsCredentials>>>> =
+    Resettable::new();
+static AWS_SDK: Resettable<AwsKeyCache<OnceCell<aws_types::SdkConfig>>> = Resettable::new();
+static GOOGLE_ADC: Resettable<OnceCell<google_cloud_auth::credentials::AccessTokenCredentials>> =
+    Resettable::new();
+static AZURE_CHAIN: Resettable<OnceCell<AzureChain>> = Resettable::new();
+
+pub async fn reset_cached_credentials(backend: ClaudeBackend) {
+    match backend {
+        ClaudeBackend::Bedrock => {
+            AWS_CREDENTIALS.reset();
+            AWS_SDK.reset();
+        }
+        ClaudeBackend::Vertex => GOOGLE_ADC.reset(),
+        ClaudeBackend::Foundry => AZURE_CHAIN.reset(),
+        ClaudeBackend::Oauth | ClaudeBackend::Anthropic | ClaudeBackend::Custom => {}
+    }
 }
 
 type AwsKey = (Option<String>, Option<String>);
@@ -472,9 +545,7 @@ where
 }
 
 async fn aws_sdk(config: &ClaudeTransportConfig) -> Result<aws_types::SdkConfig, String> {
-    static CACHE: OnceCell<AwsKeyCache<OnceCell<aws_types::SdkConfig>>> = OnceCell::const_new();
-    let cache = CACHE.get_or_init(|| async { AwsKeyCache::default() }).await;
-    let entry = cache.entry(aws_key(config)).await?;
+    let entry = AWS_SDK.get().entry(aws_key(config)).await?;
     let sdk = entry
         .get_or_init(|| async {
             let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
@@ -538,9 +609,8 @@ async fn vertex_token(config: &ClaudeTransportConfig) -> Result<String, String> 
         return Ok(token);
     }
     tokio::time::timeout(Duration::from_secs(15), async {
-        static ADC: OnceCell<google_cloud_auth::credentials::AccessTokenCredentials> =
-            OnceCell::const_new();
-        let creds = ADC
+        let adc = GOOGLE_ADC.get();
+        let creds = adc
             .get_or_try_init(|| async {
                 google_cloud_auth::credentials::Builder::default()
                     .with_scopes(["https://www.googleapis.com/auth/cloud-platform"])
@@ -559,37 +629,165 @@ async fn vertex_token(config: &ClaudeTransportConfig) -> Result<String, String> 
     .map_err(str::to_string)
 }
 
-async fn azure_token() -> Result<String, String> {
-    static CREDENTIAL: tokio::sync::OnceCell<std::sync::Arc<dyn TokenCredential>> =
-        tokio::sync::OnceCell::const_new();
-    let credential = CREDENTIAL
-        .get_or_try_init(|| async {
-            let credential: std::sync::Arc<dyn TokenCredential> = if let (
-                Ok(tenant),
-                Ok(client),
-                Ok(secret),
-            ) = (
-                std::env::var("AZURE_TENANT_ID"),
-                std::env::var("AZURE_CLIENT_ID"),
-                std::env::var("AZURE_CLIENT_SECRET"),
-            ) {
-                azure_identity::ClientSecretCredential::new(&tenant, client, secret.into(), None)
-                    .map_err(|_| "Azure client secret configuration failed")?
-            } else if std::env::var_os("AZURE_FEDERATED_TOKEN_FILE").is_some() {
-                azure_identity::WorkloadIdentityCredential::new(None)
-                    .map_err(|_| "Azure workload identity configuration failed")?
-            } else {
-                azure_identity::ManagedIdentityCredential::new(None)
-                    .map_err(|_| "Azure managed identity configuration failed")?
+const AZURE_SCOPE: &str = "https://cognitiveservices.azure.com/.default";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AzurePlan {
+    ClientSecret,
+    WorkloadIdentity,
+    ManagedIdentity,
+    ImdsThenDeveloperTools,
+}
+
+fn azure_plan(present: impl Fn(&str) -> bool) -> AzurePlan {
+    if present("AZURE_TENANT_ID") && present("AZURE_CLIENT_ID") && present("AZURE_CLIENT_SECRET") {
+        AzurePlan::ClientSecret
+    } else if present("AZURE_FEDERATED_TOKEN_FILE") {
+        AzurePlan::WorkloadIdentity
+    } else if present("IDENTITY_ENDPOINT") || present("MSI_ENDPOINT") {
+        AzurePlan::ManagedIdentity
+    } else {
+        AzurePlan::ImdsThenDeveloperTools
+    }
+}
+
+type AzureFetch = Arc<
+    dyn Fn() -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<azure_core::credentials::AccessToken, String>,
+                    > + Send,
+            >,
+        > + Send
+        + Sync,
+>;
+
+struct AzureSource {
+    fetch: AzureFetch,
+    timeout: Option<Duration>,
+}
+
+#[derive(Default)]
+struct AzureChainState {
+    selected: Option<usize>,
+    token: Option<azure_core::credentials::AccessToken>,
+}
+
+struct AzureChain {
+    sources: Vec<AzureSource>,
+    state: Mutex<AzureChainState>,
+}
+
+impl AzureChain {
+    fn new(sources: Vec<AzureSource>) -> Self {
+        Self {
+            sources,
+            state: Mutex::new(AzureChainState::default()),
+        }
+    }
+
+    async fn token(&self, now: azure_core::time::OffsetDateTime) -> Result<String, String> {
+        let mut state = self.state.lock().await;
+        if let Some(token) = state
+            .token
+            .as_ref()
+            .filter(|t| now + azure_core::time::Duration::minutes(5) < t.expires_on)
+        {
+            return Ok(token.token.secret().to_string());
+        }
+        let indices: Vec<usize> = match state.selected {
+            Some(index) => vec![index],
+            None => (0..self.sources.len()).collect(),
+        };
+        for index in indices {
+            let source = &self.sources[index];
+            let result = match source.timeout {
+                Some(limit) => tokio::time::timeout(limit, (source.fetch)())
+                    .await
+                    .unwrap_or_else(|_| Err("Azure credential source timed out".into())),
+                None => (source.fetch)().await,
             };
-            Ok::<_, String>(credential)
+            if let Ok(token) = result {
+                let secret = token.token.secret().to_string();
+                state.selected = Some(index);
+                state.token = Some(token);
+                return Ok(secret);
+            }
+        }
+        state.token = None;
+        Err("Azure token acquisition failed".into())
+    }
+}
+
+fn azure_source(credential: Arc<dyn TokenCredential>, timeout: Option<Duration>) -> AzureSource {
+    AzureSource {
+        fetch: Arc::new(move || {
+            let credential = credential.clone();
+            Box::pin(async move {
+                credential
+                    .get_token(&[AZURE_SCOPE], None)
+                    .await
+                    .map_err(|_| "Azure token acquisition failed".to_string())
+            })
+        }),
+        timeout,
+    }
+}
+
+fn azure_chain(plan: AzurePlan) -> Result<AzureChain, String> {
+    let sources = match plan {
+        AzurePlan::ClientSecret => {
+            let var =
+                |name| std::env::var(name).map_err(|_| "Azure client secret configuration failed");
+            vec![azure_source(
+                azure_identity::ClientSecretCredential::new(
+                    &var("AZURE_TENANT_ID")?,
+                    var("AZURE_CLIENT_ID")?,
+                    var("AZURE_CLIENT_SECRET")?.into(),
+                    None,
+                )
+                .map_err(|_| "Azure client secret configuration failed")?,
+                None,
+            )]
+        }
+        AzurePlan::WorkloadIdentity => vec![azure_source(
+            azure_identity::WorkloadIdentityCredential::new(None)
+                .map_err(|_| "Azure workload identity configuration failed")?,
+            None,
+        )],
+        AzurePlan::ManagedIdentity => vec![azure_source(
+            azure_identity::ManagedIdentityCredential::new(None)
+                .map_err(|_| "Azure managed identity configuration failed")?,
+            None,
+        )],
+        AzurePlan::ImdsThenDeveloperTools => vec![
+            azure_source(
+                azure_identity::ManagedIdentityCredential::new(None)
+                    .map_err(|_| "Azure managed identity configuration failed")?,
+                Some(Duration::from_secs(3)),
+            ),
+            azure_source(
+                azure_identity::DeveloperToolsCredential::new(None)
+                    .map_err(|_| "Azure CLI credential configuration failed")?,
+                None,
+            ),
+        ],
+    };
+    Ok(AzureChain::new(sources))
+}
+
+async fn azure_token() -> Result<String, String> {
+    let slot = AZURE_CHAIN.get();
+    let chain = slot
+        .get_or_try_init(|| async {
+            azure_chain(azure_plan(|name| {
+                std::env::var_os(name).is_some_and(|v| !v.is_empty())
+            }))
         })
         .await?;
-    credential
-        .get_token(&["https://cognitiveservices.azure.com/.default"], None)
+    chain
+        .token(azure_core::time::OffsetDateTime::now_utc())
         .await
-        .map(|token| token.token.secret().to_string())
-        .map_err(|_| "Azure token acquisition failed".into())
 }
 
 #[cfg(test)]

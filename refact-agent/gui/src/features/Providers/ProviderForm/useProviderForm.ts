@@ -11,7 +11,16 @@ import {
 } from "../../../services/refact";
 import { useAppDispatch } from "../../../hooks";
 import type { SchemaFieldDef } from "./SchemaField";
-import { effectiveClaudeBackend, isFieldVisible } from "./schemaConditions";
+import {
+  effectiveClaudeBackend,
+  isFieldVisible,
+  parseConditionList,
+  parseConditionMap,
+  parseOAuthSchema,
+  parseSchemaOptions,
+  visibleFieldOptions,
+} from "./schemaConditions";
+import type { ParsedOAuthSchema } from "./schemaConditions";
 
 export type ProviderFormValues = {
   enabled: boolean;
@@ -23,11 +32,7 @@ export type ProviderFormValues = {
 
 type ParsedSchema = {
   fields: SchemaFieldDef[];
-  oauth?: {
-    supported: boolean;
-    warning?: string;
-    methods?: { id: string; label: string; description?: string }[];
-  };
+  oauth?: ParsedOAuthSchema;
   description?: string;
 };
 
@@ -58,44 +63,10 @@ export async function parseSchema(yamlStr: string): Promise<ParsedSchema> {
           def.f_default !== undefined && def.f_default !== null
             ? String(def.f_default)
             : undefined,
-        f_options: Array.isArray(def.f_options)
-          ? def.f_options.filter(
-              (option: unknown): option is { value: string; label: string } =>
-                typeof option === "object" &&
-                option !== null &&
-                "value" in option &&
-                typeof option.value === "string" &&
-                "label" in option &&
-                typeof option.label === "string",
-            )
-          : undefined,
-        f_visible_when:
-          def.f_visible_when && typeof def.f_visible_when === "object"
-            ? Object.fromEntries(
-                Object.entries(def.f_visible_when).filter(
-                  (entry): entry is [string, string[]] =>
-                    Array.isArray(entry[1]) &&
-                    entry[1].every(
-                      (value: unknown) => typeof value === "string",
-                    ),
-                ),
-              )
-            : undefined,
+        f_options: parseSchemaOptions(def.f_options),
+        f_visible_when: parseConditionMap(def.f_visible_when),
         f_extra: Boolean(def.f_extra),
-        f_visible_when_any: Array.isArray(def.f_visible_when_any)
-          ? def.f_visible_when_any.filter(
-              (condition: unknown): condition is Record<string, string[]> =>
-                typeof condition === "object" &&
-                condition !== null &&
-                Object.values(condition).every(
-                  (allowed: unknown) =>
-                    Array.isArray(allowed) &&
-                    allowed.every(
-                      (value: unknown) => typeof value === "string",
-                    ),
-                ),
-            )
-          : undefined,
+        f_visible_when_any: parseConditionList(def.f_visible_when_any),
         f_secret: Boolean(def.f_secret),
         f_object: Boolean(def.f_object),
         f_confirmation: Boolean(def.f_confirmation),
@@ -109,7 +80,7 @@ export async function parseSchema(yamlStr: string): Promise<ParsedSchema> {
     }
   }
 
-  const oauth = parsed.oauth as ParsedSchema["oauth"] | undefined;
+  const oauth = parseOAuthSchema(parsed.oauth);
   const description = parsed.description
     ? String(parsed.description)
     : undefined;
@@ -159,9 +130,21 @@ export function useProviderForm({ providerName }: { providerName: string }) {
     if (!parsedSchema) return { importantFields: [], extraFields: [] };
     const important: SchemaFieldDef[] = [];
     const extra: SchemaFieldDef[] = [];
-    for (const field of parsedSchema.fields) {
-      if (!isFieldVisible(field, parsedSchema.fields, formValues ?? {}))
-        continue;
+    const values = formValues ?? {};
+    const baseProvider = formValues?.base_provider ?? "";
+    for (const schemaField of parsedSchema.fields) {
+      if (!isFieldVisible(schemaField, parsedSchema.fields, values)) continue;
+      const field = schemaField.f_options
+        ? {
+            ...schemaField,
+            f_options: visibleFieldOptions(
+              schemaField,
+              parsedSchema.fields,
+              values,
+              baseProvider,
+            ),
+          }
+        : schemaField;
       if (field.f_extra) {
         extra.push(field);
       } else {

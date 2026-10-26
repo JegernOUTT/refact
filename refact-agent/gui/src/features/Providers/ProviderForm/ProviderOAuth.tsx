@@ -14,6 +14,7 @@ import type {
 import { useAppDispatch } from "../../../hooks";
 import { useOpenUrl } from "../../../hooks/useOpenUrl";
 import { Button, FieldText, Surface } from "../../../components/ui";
+import type { ClaudeLoginKind } from "./schemaConditions";
 
 import styles from "./ProviderOAuth.module.css";
 
@@ -32,11 +33,28 @@ const PROVIDER_LOGIN_LABELS: Partial<Record<string, string>> = {
   google_antigravity: "Login with Google",
 };
 
+const NATIVE_BACKEND_NAMES: Partial<Record<string, string>> = {
+  bedrock: "AWS SSO",
+  vertex: "Google Cloud",
+  foundry: "Microsoft Azure",
+};
+
+const NATIVE_POLL_SECONDS = 2;
+
 type ProviderOAuthProps = {
   providerName: string;
   baseProvider?: string;
   oauthConnected: boolean;
   authStatus: string;
+  loginKind?: ClaudeLoginKind;
+  backend?: string;
+  readonly?: boolean;
+};
+
+type ActiveSession = {
+  providerName: string;
+  sessionId: string;
+  native: boolean;
 };
 
 function getErrorMessage(error: unknown, fallback: string) {
@@ -67,11 +85,28 @@ function inferOAuthMode(
   return "manual_code";
 }
 
+function nativeServiceName(backend: string | undefined): string {
+  return (backend && NATIVE_BACKEND_NAMES[backend]) ?? "cloud provider";
+}
+
+function loginLabelFor(
+  baseProvider: string,
+  loginKind: ClaudeLoginKind | undefined,
+  backend: string | undefined,
+): string {
+  if (loginKind === "console") return "Login with Anthropic Console";
+  if (loginKind === "native") return `Login with ${nativeServiceName(backend)}`;
+  return PROVIDER_LOGIN_LABELS[baseProvider] ?? "Login";
+}
+
 export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
   providerName,
   baseProvider = providerName,
   oauthConnected,
   authStatus,
+  loginKind,
+  backend,
+  readonly = false,
 }) => {
   const dispatch = useAppDispatch();
   const openUrl = useOpenUrl();
@@ -88,6 +123,10 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
     null,
   );
   const [deviceStatus, setDeviceStatus] = useState<string | null>(null);
+  const [nativeOutput, setNativeOutput] = useState<string | null>(null);
+  const [completionMessage, setCompletionMessage] = useState<string | null>(
+    null,
+  );
   const [isDevicePolling, setIsDevicePolling] = useState(false);
   const [devicePollTick, setDevicePollTick] = useState(0);
   const [code, setCode] = useState("");
@@ -98,8 +137,16 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
     null,
   );
   const devicePollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeSessionRef = useRef<ActiveSession | null>(null);
 
-  const loginLabel = PROVIDER_LOGIN_LABELS[baseProvider] ?? "Login";
+  const loginLabel = loginLabelFor(baseProvider, loginKind, backend);
+  const serviceName = loginLabel.replace("Login with ", "");
+  const identity = `${providerName}\u0000${baseProvider}\u0000${
+    loginKind ?? ""
+  }\u0000${backend ?? ""}`;
+  const identityRef = useRef(identity);
+  identityRef.current = identity;
+  const mountedRef = useRef(false);
   const surfaceClassName = `${styles.container} rf-stagger`;
 
   const clearCallbackPollTimer = useCallback(() => {
@@ -132,6 +179,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
   }, [dispatch, invalidateProvider]);
 
   const resetOAuthState = useCallback(() => {
+    activeSessionRef.current = null;
     setSessionId(null);
     setAuthorizeUrl(null);
     setOauthMode(null);
@@ -139,6 +187,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
     setInstructions(null);
     setPollIntervalSeconds(null);
     setDeviceStatus(null);
+    setNativeOutput(null);
     setIsDevicePolling(false);
     setDevicePollTick(0);
     setCode("");
@@ -147,30 +196,73 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
     clearDevicePollTimer();
   }, [clearCallbackPollTimer, clearDevicePollTimer]);
 
+  const isCurrentSession = useCallback(
+    (id: string) => activeSessionRef.current?.sessionId === id,
+    [],
+  );
+
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      clearCallbackPollTimer();
-      clearDevicePollTimer();
+      mountedRef.current = false;
     };
-  }, [clearCallbackPollTimer, clearDevicePollTimer]);
+  }, []);
+
+  useEffect(() => {
+    const sessions = activeSessionRef;
+    return () => {
+      const active = sessions.current;
+      if (active?.native) {
+        void oauthLogout({
+          providerName: active.providerName,
+          session_id: active.sessionId,
+        });
+      }
+      resetOAuthState();
+      setError(null);
+      setCompletionMessage(null);
+      setIsLoading(false);
+    };
+  }, [identity, oauthLogout, resetOAuthState]);
 
   const handleStartOAuth = async () => {
+    if (readonly) return;
     setError(null);
+    setCompletionMessage(null);
     setIsLoading(true);
     clearCallbackPollTimer();
     clearDevicePollTimer();
+    const startIdentity = identity;
     try {
-      const result = await oauthStart({ providerName, mode: "max" }).unwrap();
+      const result = await oauthStart({
+        providerName,
+        mode: loginKind === "console" ? "console" : "max",
+      }).unwrap();
+      if (startIdentity !== identityRef.current || !mountedRef.current) {
+        if (result.mode === "native") {
+          void oauthLogout({ providerName, session_id: result.session_id });
+        }
+        return;
+      }
       const mode = inferOAuthMode(baseProvider, result);
+      activeSessionRef.current = {
+        providerName,
+        sessionId: result.session_id,
+        native: mode === "native",
+      };
       setSessionId(result.session_id);
       setAuthorizeUrl(result.authorize_url);
       setOauthMode(mode);
       setUserCode(result.user_code ?? null);
       setInstructions(result.instructions ?? null);
-      setPollIntervalSeconds(result.poll_interval ?? null);
+      setPollIntervalSeconds(
+        result.poll_interval ??
+          (mode === "native" ? NATIVE_POLL_SECONDS : null),
+      );
       setDeviceStatus(null);
+      setNativeOutput(null);
       setCode("");
-      openUrl(result.authorize_url);
+      if (result.authorize_url) openUrl(result.authorize_url);
 
       if (mode === "callback") {
         setWaitingForCallback(true);
@@ -181,51 +273,86 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
         setWaitingForCallback(false);
       }
 
-      if (mode === "device") {
-        setDeviceStatus("Waiting for device authorization");
+      if (mode === "device" || mode === "native") {
+        setDeviceStatus(
+          mode === "native"
+            ? "Waiting for the sign-in command to finish"
+            : "Waiting for device authorization",
+        );
         setIsDevicePolling(true);
         setDevicePollTick(0);
       } else {
         setIsDevicePolling(false);
       }
     } catch (e) {
-      setError(getErrorMessage(e, "Failed to start OAuth"));
+      if (startIdentity === identityRef.current) {
+        setError(getErrorMessage(e, "Failed to start OAuth"));
+      }
     } finally {
-      setIsLoading(false);
+      if (startIdentity === identityRef.current) setIsLoading(false);
     }
   };
 
   const handlePollDeviceOAuth = useCallback(async () => {
     if (!sessionId) return;
+    const polledSession = sessionId;
+    const native = oauthMode === "native";
     setError(null);
     setIsLoading(true);
     try {
       const result = await oauthExchange({
         providerName,
-        session_id: sessionId,
+        session_id: polledSession,
         code: "",
       }).unwrap();
+      if (!isCurrentSession(polledSession)) return;
       if (result.success) {
         resetOAuthState();
         invalidateProviderAndCaps();
+        if (native) {
+          setCompletionMessage(
+            `${serviceName} sign-in finished on the engine host. The engine checks the resulting credentials on the next request; explicit credentials saved for this provider still take precedence.`,
+          );
+        }
         return;
       }
-      setDeviceStatus(result.auth_status || "Waiting for device authorization");
+      if (native) {
+        setNativeOutput(result.output ?? null);
+        if (result.status !== "pending") {
+          activeSessionRef.current = null;
+          setIsDevicePolling(false);
+          setError(result.auth_status || `${serviceName} sign-in failed`);
+          return;
+        }
+        setDeviceStatus(
+          result.auth_status || "Waiting for the sign-in command to finish",
+        );
+      } else {
+        setDeviceStatus(
+          result.auth_status || "Waiting for device authorization",
+        );
+      }
       setPollIntervalSeconds(result.poll_interval ?? pollIntervalSeconds);
       setIsDevicePolling(true);
       setDevicePollTick((tick) => tick + 1);
     } catch (e) {
+      if (!isCurrentSession(polledSession)) return;
       setIsDevicePolling(false);
       setError(getErrorMessage(e, "Failed to check authorization"));
     } finally {
-      setIsLoading(false);
+      if (isCurrentSession(polledSession) || !activeSessionRef.current) {
+        setIsLoading(false);
+      }
     }
   }, [
     invalidateProviderAndCaps,
+    isCurrentSession,
     oauthExchange,
+    oauthMode,
     pollIntervalSeconds,
     providerName,
     resetOAuthState,
+    serviceName,
     sessionId,
   ]);
 
@@ -293,6 +420,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
   };
 
   const handleLogout = async () => {
+    if (readonly) return;
     setError(null);
     setIsLoading(true);
     try {
@@ -308,6 +436,21 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
 
   const handleCancel = () => {
     resetOAuthState();
+  };
+
+  const handleCancelNative = async () => {
+    const active = activeSessionRef.current;
+    resetOAuthState();
+    setIsLoading(false);
+    if (!active?.native) return;
+    try {
+      await oauthLogout({
+        providerName: active.providerName,
+        session_id: active.sessionId,
+      }).unwrap();
+    } catch (e) {
+      setError(getErrorMessage(e, "Failed to cancel sign-in"));
+    }
   };
 
   const handleOpenAuthorizeUrl = () => {
@@ -327,12 +470,64 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
           <Button
             variant="danger"
             size="sm"
-            disabled={isLoading}
+            disabled={isLoading || readonly}
             onClick={() => void handleLogout()}
           >
             Disconnect
           </Button>
         </div>
+      </Surface>
+    );
+  }
+
+  if (sessionId && oauthMode === "native") {
+    return (
+      <Surface className={surfaceClassName} variant="glass" animated="rise">
+        <div className={`${styles.title} rf-enter-rise`}>
+          Sign in with {serviceName}
+        </div>
+        <div className={`${styles.copy} rf-enter-rise`}>
+          {instructions ??
+            "The engine host is running the cloud sign-in command. Follow the instructions below to finish."}
+        </div>
+        {nativeOutput ? (
+          <div className={`${styles.codeBox} rf-enter-rise`}>
+            {nativeOutput.split("\n").map((line, index) => (
+              <div key={index}>{line}</div>
+            ))}
+          </div>
+        ) : null}
+        {isDevicePolling ? (
+          <div className={`${styles.copy} rf-enter-rise`} role="status">
+            {deviceStatus ?? "Waiting for the sign-in command to finish"}
+            {pollIntervalSeconds
+              ? ` Checking every ${pollIntervalSeconds} seconds.`
+              : ""}
+          </div>
+        ) : null}
+        <div className={`${styles.actionRow} rf-enter-rise`}>
+          {!isDevicePolling ? (
+            <Button
+              variant="primary"
+              disabled={isLoading || readonly}
+              onClick={() => void handleStartOAuth()}
+            >
+              Try again
+            </Button>
+          ) : null}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void handleCancelNative()}
+          >
+            Cancel
+          </Button>
+        </div>
+        {error ? (
+          <div className={`${styles.errorText} rf-enter-rise`} role="alert">
+            {error}
+          </div>
+        ) : null}
       </Surface>
     );
   }
@@ -492,12 +687,17 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
         <div className={styles.title}>{loginLabel}</div>
         <Button
           variant="primary"
-          disabled={isLoading}
+          disabled={isLoading || readonly}
           onClick={() => void handleStartOAuth()}
         >
           {isLoading ? "Starting..." : "Login"}
         </Button>
       </div>
+      {completionMessage ? (
+        <div className={`${styles.copy} rf-enter-rise`} role="status">
+          {completionMessage}
+        </div>
+      ) : null}
       {error ? (
         <div className={`${styles.errorText} rf-enter-rise`}>{error}</div>
       ) : null}

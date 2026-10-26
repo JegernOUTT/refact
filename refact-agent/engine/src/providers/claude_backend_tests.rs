@@ -20,7 +20,7 @@ async fn save_fixture(gcx: &Arc<GlobalContext>, name: &str, settings: Value) {
 }
 
 #[tokio::test]
-async fn native_backends_reject_oauth_and_do_not_fetch_subscription_usage() {
+async fn native_backends_reject_oauth_codes_and_do_not_fetch_subscription_usage() {
     for backend in ["anthropic", "bedrock", "vertex", "foundry", "custom"] {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         save_fixture(&gcx, "work-claude", json!({
@@ -35,13 +35,15 @@ async fn native_backends_reject_oauth_and_do_not_fetch_subscription_usage() {
                 name: "work-claude".into(),
             })
         };
-        assert!(handle_v1_provider_oauth_start(
-            State(app.clone()),
-            path(),
-            hyper::body::Bytes::new()
-        )
-        .await
-        .is_err());
+        if matches!(backend, "anthropic" | "custom") {
+            assert!(handle_v1_provider_oauth_start(
+                State(app.clone()),
+                path(),
+                hyper::body::Bytes::new()
+            )
+            .await
+            .is_err());
+        }
         assert!(handle_v1_provider_oauth_exchange(
             State(app.clone()),
             path(),
@@ -49,9 +51,13 @@ async fn native_backends_reject_oauth_and_do_not_fetch_subscription_usage() {
         )
         .await
         .is_err());
-        assert!(handle_v1_provider_oauth_logout(State(app.clone()), path())
-            .await
-            .is_err());
+        let logout =
+            handle_v1_provider_oauth_logout(State(app.clone()), path(), hyper::body::Bytes::new())
+                .await;
+        assert_eq!(
+            logout.is_ok(),
+            matches!(backend, "bedrock" | "vertex" | "foundry")
+        );
         let status = json_body(
             handle_v1_provider_get(State(app.clone()), path())
                 .await
@@ -207,8 +213,205 @@ async fn legacy_anthropic_alias_keeps_identity_and_models_without_oauth() {
     assert_eq!(detail["name"], "anthropic-work");
     assert_eq!(detail["base_provider"], "anthropic");
     assert_eq!(detail["display_name"], "Legacy work");
-    assert!(handle_v1_provider_oauth_logout(State(app.clone()), path())
-        .await
-        .is_err());
+    assert!(
+        handle_v1_provider_oauth_logout(State(app.clone()), path(), hyper::body::Bytes::new())
+            .await
+            .is_err()
+    );
     assert!(handle_v1_provider_models(State(app), path()).await.is_ok());
+}
+
+#[tokio::test]
+async fn console_persistence_is_mode_bound_and_logout_preserves_subscription() {
+    use crate::providers::claude_code_oauth::{OAuthMode, OAuthTokens};
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    save_fixture(&gcx, "console-work", json!({"base_provider":"claude_code", "backend":"anthropic", "auth_type":"oauth", "display_name":"Console work", "unknown_setting":"keep", "oauth_tokens":{"access_token":"subscription-secret"}})).await;
+    let tokens = OAuthTokens {
+        access_token: "console-secret".into(),
+        refresh_token: "console-refresh".into(),
+        expires_at: i64::MAX,
+        oauth_mode: Some(OAuthMode::Console),
+        ..Default::default()
+    };
+    save_provider_oauth_tokens(
+        &gcx,
+        &gcx.config_dir,
+        "console-work",
+        "claude_code",
+        &serde_yaml::to_value(&tokens).unwrap(),
+    )
+    .await
+    .unwrap();
+    let file = provider_file_path(&gcx.config_dir, "console-work");
+    let saved: serde_yaml::Value =
+        serde_yaml::from_slice(&tokio::fs::read(&file).await.unwrap()).unwrap();
+    assert_eq!(
+        saved["console_oauth_tokens"]["access_token"].as_str(),
+        Some("console-secret")
+    );
+    assert_eq!(
+        saved["oauth_tokens"]["access_token"].as_str(),
+        Some("subscription-secret")
+    );
+    assert_eq!(saved["unknown_setting"].as_str(), Some("keep"));
+    let max = OAuthTokens {
+        oauth_mode: Some(OAuthMode::Max),
+        ..tokens.clone()
+    };
+    assert_eq!(
+        save_provider_oauth_tokens(
+            &gcx,
+            &gcx.config_dir,
+            "console-work",
+            "claude_code",
+            &serde_yaml::to_value(max).unwrap()
+        )
+        .await
+        .unwrap_err()
+        .status_code,
+        StatusCode::CONFLICT
+    );
+    let app = AppState::from_gcx(gcx.clone()).await;
+    let path = || {
+        Path(ProviderPathParams {
+            name: "console-work".into(),
+        })
+    };
+    let usage = json_body(
+        handle_v1_provider_usage(State(app.clone()), path())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(usage["error"].as_str().unwrap().contains("unsupported"));
+    handle_v1_provider_oauth_logout(State(app), path(), hyper::body::Bytes::new())
+        .await
+        .unwrap();
+    let saved: serde_yaml::Value =
+        serde_yaml::from_slice(&tokio::fs::read(&file).await.unwrap()).unwrap();
+    assert_eq!(
+        saved["oauth_tokens"]["access_token"].as_str(),
+        Some("subscription-secret")
+    );
+    assert_eq!(
+        saved["console_oauth_tokens"]["access_token"].as_str(),
+        Some("")
+    );
+    save_fixture(
+        &gcx,
+        "console-work",
+        json!({"base_provider":"claude_code","backend":"custom","auth_type":"none"}),
+    )
+    .await;
+    assert!(save_provider_oauth_tokens(
+        &gcx,
+        &gcx.config_dir,
+        "console-work",
+        "claude_code",
+        &serde_yaml::to_value(tokens).unwrap()
+    )
+    .await
+    .is_err());
+}
+
+#[tokio::test]
+async fn native_cleanup_after_backend_change_never_clears_oauth_tokens() {
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    save_fixture(&gcx, "work-native", json!({"base_provider":"claude_code", "backend":"custom", "auth_type":"none", "oauth_tokens":{"access_token":"keep"}})).await;
+    let app = AppState::from_gcx(gcx.clone()).await;
+    handle_v1_provider_oauth_logout(
+        State(app.clone()),
+        Path(ProviderPathParams {
+            name: "work-native".into(),
+        }),
+        hyper::body::Bytes::from(r#"{"session_id":"already-cancelled"}"#),
+    )
+    .await
+    .unwrap();
+    let saved: serde_yaml::Value = serde_yaml::from_slice(
+        &tokio::fs::read(provider_file_path(&gcx.config_dir, "work-native"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved["oauth_tokens"]["access_token"].as_str(), Some("keep"));
+    let error = handle_v1_provider_oauth_exchange(
+        State(app),
+        Path(ProviderPathParams {
+            name: "work-native".into(),
+        }),
+        hyper::body::Bytes::from(r#"{"session_id":"unknown","code":""}"#),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn http_backend_switch_normalizes_authentication_defaults() {
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    save_fixture(&gcx, "switch-work", json!({"base_provider":"claude_code", "backend":"custom", "auth_type":"none", "base_url":"https://custom.invalid"})).await;
+    let app = AppState::from_gcx(gcx.clone()).await;
+    handle_v1_provider_update(
+        State(app.clone()),
+        Path(ProviderPathParams {
+            name: "switch-work".into(),
+        }),
+        hyper::body::Bytes::from(r#"{"backend":"anthropic"}"#),
+    )
+    .await
+    .unwrap();
+    {
+        let registry = gcx.providers.read().await;
+        let claude = registry
+            .get("switch-work")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ClaudeCodeProvider>()
+            .unwrap();
+        assert_eq!(
+            claude.resolved_transport().auth_type,
+            refact_core::claude_backend::ClaudeAuthType::ApiKey
+        );
+    }
+    let file = provider_file_path(&gcx.config_dir, "switch-work");
+    for patch in [r#"{"auth_type":"oauth"}"#, r#"{"backend":"custom"}"#] {
+        handle_v1_provider_update(
+            State(app.clone()),
+            Path(ProviderPathParams {
+                name: "switch-work".into(),
+            }),
+            hyper::body::Bytes::from(patch),
+        )
+        .await
+        .unwrap();
+        let saved: serde_yaml::Value =
+            serde_yaml::from_slice(&tokio::fs::read(&file).await.unwrap()).unwrap();
+        if patch.contains("auth_type") {
+            assert!(saved.get("base_url").is_none_or(serde_yaml::Value::is_null));
+            assert_eq!(saved["auth_type"].as_str(), Some("oauth"));
+            let registry = gcx.providers.read().await;
+            assert!(registry
+                .get("switch-work")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<ClaudeCodeProvider>()
+                .unwrap()
+                .is_console_oauth());
+        } else {
+            assert_eq!(saved["backend"].as_str(), Some("custom"));
+            assert_eq!(saved["auth_type"].as_str(), Some("api_key"));
+        }
+    }
+    let before = tokio::fs::read(&file).await.unwrap();
+    assert!(handle_v1_provider_update(
+        State(app),
+        Path(ProviderPathParams {
+            name: "switch-work".into(),
+        }),
+        hyper::body::Bytes::from(r#"{"backend":"custom","auth_type":"oauth"}"#),
+    )
+    .await
+    .is_err());
+    assert_eq!(tokio::fs::read(&file).await.unwrap(), before);
 }

@@ -25,9 +25,10 @@ const CALLBACK_REQUEST_MAX_BYTES: usize = 8192;
 pub enum OAuthMode {
     #[default]
     Max,
+    Console,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PkceSession {
     pub verifier: String,
     pub state: String,
@@ -40,7 +41,7 @@ pub struct PkceSession {
     pub created_at: i64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct OAuthTokens {
     #[serde(default)]
     pub access_token: String,
@@ -48,6 +49,27 @@ pub struct OAuthTokens {
     pub refresh_token: String,
     #[serde(default)]
     pub expires_at: i64,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub oauth_mode: Option<OAuthMode>,
+}
+
+impl std::fmt::Debug for OAuthTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthTokens")
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OAuthMode {
+    fn client_id(&self) -> &'static str {
+        match self {
+            Self::Max => CLIENT_ID,
+            Self::Console => "41077d10-94b8-4194-be48-d251e9eb21b4",
+        }
+    }
 }
 
 impl OAuthTokens {
@@ -63,19 +85,28 @@ impl OAuthTokens {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct TokenResponse {
     access_token: String,
     refresh_token: String,
     expires_in: i64,
+    #[serde(default)]
+    workspace: Option<Workspace>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct RefreshTokenResponse {
     access_token: String,
     #[serde(default)]
     refresh_token: Option<String>,
     expires_in: i64,
+    #[serde(default)]
+    workspace: Option<Workspace>,
+}
+
+#[derive(Deserialize)]
+struct Workspace {
+    id: String,
 }
 
 fn expires_at_ms(now_ms: i64, expires_in_secs: i64) -> i64 {
@@ -87,6 +118,8 @@ fn oauth_tokens_from_token_response(token_resp: TokenResponse, now_ms: i64) -> O
         access_token: token_resp.access_token,
         refresh_token: token_resp.refresh_token.trim().to_string(),
         expires_at: expires_at_ms(now_ms, token_resp.expires_in),
+        workspace_id: token_resp.workspace.map(|w| w.id),
+        oauth_mode: None,
     }
 }
 
@@ -105,6 +138,8 @@ fn oauth_tokens_from_refresh_response(
         access_token: token_resp.access_token,
         refresh_token,
         expires_at: expires_at_ms(now_ms, token_resp.expires_in),
+        workspace_id: token_resp.workspace.map(|w| w.id),
+        oauth_mode: None,
     }
 }
 
@@ -160,19 +195,29 @@ fn generate_code_challenge(verifier: &str) -> String {
 }
 
 fn build_authorize_url(
-    _mode: &OAuthMode,
+    mode: &OAuthMode,
     code_challenge: &str,
     state: &str,
     redirect_uri: &str,
 ) -> String {
-    let mut url = url::Url::parse("https://claude.ai/oauth/authorize").expect("valid base URL");
+    let mut url = url::Url::parse(match mode {
+        OAuthMode::Max => "https://claude.ai/oauth/authorize",
+        OAuthMode::Console => "https://platform.claude.com/oauth/authorize",
+    })
+    .expect("valid base URL");
 
     url.query_pairs_mut()
         .append_pair("code", "true")
-        .append_pair("client_id", CLIENT_ID)
+        .append_pair("client_id", mode.client_id())
         .append_pair("response_type", "code")
         .append_pair("redirect_uri", redirect_uri)
-        .append_pair("scope", SCOPE)
+        .append_pair(
+            "scope",
+            match mode {
+                OAuthMode::Max => SCOPE,
+                OAuthMode::Console => "user:profile user:inference",
+            },
+        )
         .append_pair("code_challenge", code_challenge)
         .append_pair("code_challenge_method", "S256")
         .append_pair("state", state);
@@ -231,6 +276,7 @@ async fn exchange_code_with_session(
     code: &str,
     state: &str,
     expected_provider_instance_id: Option<&str>,
+    expected_mode: Option<&OAuthMode>,
 ) -> Result<(OAuthTokens, String), String> {
     if let Some(expected_provider_instance_id) = expected_provider_instance_id {
         if session.provider_instance_id != expected_provider_instance_id {
@@ -241,6 +287,9 @@ async fn exchange_code_with_session(
         }
     }
 
+    if expected_mode.is_some_and(|mode| mode != &session.mode) {
+        return Err("OAuth session mode does not match current backend".into());
+    }
     if state != session.state {
         return Err("OAuth state mismatch".to_string());
     }
@@ -249,7 +298,7 @@ async fn exchange_code_with_session(
         "code": code,
         "state": state,
         "grant_type": "authorization_code",
-        "client_id": CLIENT_ID,
+        "client_id": session.mode.client_id(),
         "redirect_uri": session.redirect_uri,
         "code_verifier": session.verifier,
     });
@@ -264,8 +313,7 @@ async fn exchange_code_with_session(
 
     if !response.status().is_success() {
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        return Err(format!("Token exchange failed ({}): {}", status, text));
+        return Err(format!("Token exchange failed ({})", status));
     }
 
     let token_resp: TokenResponse = response
@@ -273,9 +321,10 @@ async fn exchange_code_with_session(
         .await
         .map_err(|e| format!("Failed to parse token response: {}", e))?;
 
-    let tokens =
+    let mut tokens =
         oauth_tokens_from_token_response(token_resp, chrono::Utc::now().timestamp_millis());
 
+    tokens.oauth_mode = Some(session.mode);
     Ok((tokens, session.provider_instance_id))
 }
 
@@ -319,6 +368,7 @@ pub async fn exchange_code(
     session_id: &str,
     code_raw: &str,
     expected_provider_instance_id: &str,
+    expected_mode: &OAuthMode,
 ) -> Result<(OAuthTokens, String), String> {
     let session = {
         let mut sessions = PENDING_SESSIONS.lock().await;
@@ -335,6 +385,7 @@ pub async fn exchange_code(
         &code,
         &state,
         Some(expected_provider_instance_id),
+        Some(expected_mode),
     )
     .await
 }
@@ -362,7 +413,7 @@ pub async fn exchange_code_for_state(
             .ok_or_else(|| "Invalid or expired OAuth session".to_string())?
     };
 
-    exchange_code_with_session(http_client, session, code, state, None).await
+    exchange_code_with_session(http_client, session, code, state, None, None).await
 }
 
 fn raw_http_response(status: u16, body: &str) -> String {
@@ -612,36 +663,78 @@ pub async fn refresh_access_token(
     http_client: &reqwest::Client,
     refresh_token: &str,
 ) -> Result<OAuthTokens, String> {
-    let body = serde_json::json!({
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": CLIENT_ID,
-    });
+    refresh_access_token_for_mode(http_client, refresh_token, &OAuthMode::Max).await
+}
 
+pub async fn refresh_access_token_for_mode(
+    http_client: &reqwest::Client,
+    refresh_token: &str,
+    mode: &OAuthMode,
+) -> Result<OAuthTokens, String> {
+    let (endpoint, headers, body) = refresh_request(mode, refresh_token)?;
     let response = http_client
-        .post(TOKEN_URL)
-        .headers(token_request_headers()?)
+        .post(endpoint)
+        .headers(headers)
         .json(&body)
         .send()
         .await
         .map_err(|e| format!("Token refresh request failed: {}", e))?;
-
     if !response.status().is_success() {
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        return Err(format!("Token refresh failed ({}): {}", status, text));
+        let payload = response
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or_default();
+        let code = payload
+            .get("error")
+            .and_then(|error| {
+                error
+                    .as_str()
+                    .or_else(|| error.get("type").and_then(serde_json::Value::as_str))
+            })
+            .filter(|code| {
+                matches!(
+                    *code,
+                    "invalid_grant" | "invalid_client" | "unauthorized_client" | "invalid_request"
+                )
+            })
+            .unwrap_or("unknown_error");
+        return Err(format!("Token refresh failed ({}): {}", status, code));
     }
-
     let token_resp: RefreshTokenResponse = response
         .json()
         .await
         .map_err(|e| format!("Failed to parse refresh response: {}", e))?;
-
-    Ok(oauth_tokens_from_refresh_response(
+    let mut tokens = oauth_tokens_from_refresh_response(
         token_resp,
         refresh_token,
         chrono::Utc::now().timestamp_millis(),
-    ))
+    );
+    tokens.oauth_mode = Some(mode.clone());
+    Ok(tokens)
+}
+
+fn refresh_request(
+    mode: &OAuthMode,
+    refresh_token: &str,
+) -> Result<(&'static str, HeaderMap, serde_json::Value), String> {
+    let body = serde_json::json!({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": mode.client_id(),
+    });
+
+    let mut headers = token_request_headers()?;
+    let endpoint = if *mode == OAuthMode::Console {
+        headers.insert(
+            "anthropic-beta",
+            reqwest::header::HeaderValue::from_static("oauth-2025-04-20"),
+        );
+        "https://api.anthropic.com/v1/oauth/token"
+    } else {
+        TOKEN_URL
+    };
+    Ok((endpoint, headers, body))
 }
 
 #[cfg(test)]
@@ -669,6 +762,59 @@ pub async fn expire_pending_session_for_test(session_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_authorization_and_refresh_protocol() {
+        let url = url::Url::parse(&build_authorize_url(
+            &OAuthMode::Console,
+            "challenge",
+            "state",
+            "http://localhost:1234/callback",
+        ))
+        .unwrap();
+        assert_eq!(
+            url.origin().ascii_serialization(),
+            "https://platform.claude.com"
+        );
+        let query: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        assert_eq!(query["client_id"], "41077d10-94b8-4194-be48-d251e9eb21b4");
+        assert_eq!(query["scope"], "user:profile user:inference");
+        assert_eq!(query["code_challenge_method"], "S256");
+        let (endpoint, headers, body) = refresh_request(&OAuthMode::Console, "refresh").unwrap();
+        assert_eq!(endpoint, "https://api.anthropic.com/v1/oauth/token");
+        assert_eq!(headers["anthropic-beta"], "oauth-2025-04-20");
+        assert_eq!(body["client_id"], query["client_id"]);
+        assert_eq!(body["refresh_token"], "refresh");
+        let (endpoint, headers, body) = refresh_request(&OAuthMode::Max, "refresh").unwrap();
+        assert_eq!(endpoint, TOKEN_URL);
+        assert!(headers.get("anthropic-beta").is_none());
+        assert_eq!(body["client_id"], CLIENT_ID);
+        let response = serde_json::from_value(serde_json::json!({"access_token":"access", "refresh_token":"refresh", "expires_in":3600, "workspace":{"id":"workspace"}})).unwrap();
+        assert_eq!(
+            oauth_tokens_from_token_response(response, 0)
+                .workspace_id
+                .as_deref(),
+            Some("workspace")
+        );
+    }
+
+    #[tokio::test]
+    async fn mismatched_mode_rejects_before_request() {
+        let _guard = pending_sessions_test_guard().await;
+        clear_pending_sessions_for_test().await;
+        let (id, _) = start_oauth_session(OAuthMode::Console, 1234, "provider").await;
+        let error = exchange_code(
+            &reqwest::Client::new(),
+            &id,
+            "code#state",
+            "provider",
+            &OAuthMode::Max,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("mode"));
+        assert!(pending_session_provider_instance_id(&id).await.is_none());
+    }
 
     #[test]
     fn refresh_response_without_refresh_token_preserves_old_token() {
@@ -761,9 +907,15 @@ mod tests {
         let (session_id, _) = start_oauth_session(OAuthMode::Max, 34179, "claude_code_work").await;
         let client = reqwest::Client::new();
 
-        let err = exchange_code(&client, &session_id, "code#state", "claude_code")
-            .await
-            .unwrap_err();
+        let err = exchange_code(
+            &client,
+            &session_id,
+            "code#state",
+            "claude_code",
+            &OAuthMode::Max,
+        )
+        .await
+        .unwrap_err();
 
         assert!(err.contains("claude_code_work"));
         assert!(pending_session_provider_instance_id(&session_id)
@@ -784,6 +936,7 @@ mod tests {
             &session_id,
             "code#mismatched-state",
             "claude_code_work",
+            &OAuthMode::Max,
         )
         .await
         .unwrap_err();
@@ -803,9 +956,15 @@ mod tests {
         expire_pending_session_for_test(&session_id).await;
         let client = reqwest::Client::new();
 
-        let err = exchange_code(&client, &session_id, "code#state", "claude_code_work")
-            .await
-            .unwrap_err();
+        let err = exchange_code(
+            &client,
+            &session_id,
+            "code#state",
+            "claude_code_work",
+            &OAuthMode::Max,
+        )
+        .await
+        .unwrap_err();
 
         assert!(err.contains("Invalid or expired OAuth session"));
         assert!(pending_session_provider_instance_id(&session_id)

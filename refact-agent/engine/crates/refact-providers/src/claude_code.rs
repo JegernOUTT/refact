@@ -35,6 +35,8 @@ pub struct ClaudeCodeProvider {
     pub custom_models: HashMap<String, CustomModelConfig>,
     #[serde(default)]
     pub oauth_tokens: OAuthTokens,
+    #[serde(default)]
+    pub console_oauth_tokens: OAuthTokens,
 }
 
 impl std::fmt::Debug for ClaudeCodeProvider {
@@ -67,7 +69,12 @@ impl ClaudeCodeProvider {
         config_dir: &std::path::Path,
         instance_id: &str,
     ) -> Result<(), String> {
-        let tokens = self.oauth_tokens.clone();
+        let tokens = self.active_oauth_tokens().clone();
+        let field = if self.is_console_oauth() {
+            "console_oauth_tokens"
+        } else {
+            "oauth_tokens"
+        };
         crate::config_store::update_provider_config(config_dir, instance_id, |existing| {
             let mut yaml_map = match existing {
                 Some(value) => value.as_mapping().cloned().ok_or_else(|| {
@@ -77,7 +84,7 @@ impl ClaudeCodeProvider {
             };
 
             let mut tokens_map = yaml_map
-                .get(&serde_yaml::Value::String("oauth_tokens".to_string()))
+                .get(&serde_yaml::Value::String(field.to_string()))
                 .and_then(|v| v.as_mapping())
                 .cloned()
                 .unwrap_or_default();
@@ -95,8 +102,17 @@ impl ClaudeCodeProvider {
                 serde_yaml::Value::Number(serde_yaml::Number::from(tokens.expires_at)),
             );
 
+            tokens_map.insert(
+                serde_yaml::Value::String("workspace_id".into()),
+                serde_yaml::to_value(tokens.workspace_id)
+                    .map_err(|_| "Invalid workspace metadata")?,
+            );
+            tokens_map.insert(
+                serde_yaml::Value::String("oauth_mode".into()),
+                serde_yaml::to_value(tokens.oauth_mode).map_err(|_| "Invalid OAuth mode")?,
+            );
             yaml_map.insert(
-                serde_yaml::Value::String("oauth_tokens".to_string()),
+                serde_yaml::Value::String(field.to_string()),
                 serde_yaml::Value::Mapping(tokens_map),
             );
 
@@ -107,7 +123,7 @@ impl ClaudeCodeProvider {
     }
 
     fn diagnose_auth_status(&self) -> String {
-        if !self.is_subscription() {
+        if !self.supports_oauth() {
             return if self.has_credentials() {
                 "Configured — credentials are checked when a request is made"
             } else {
@@ -115,30 +131,36 @@ impl ClaudeCodeProvider {
             }
             .to_string();
         }
-        if self.oauth_tokens.access_token.is_empty() {
+        if self.active_oauth_tokens().access_token.is_empty() {
             return "Not configured — log in via OAuth".to_string();
         }
-        if self.oauth_tokens.is_expired() {
+        if self.active_oauth_tokens().is_expired() {
             return "OAuth token expired — needs refresh".to_string();
         }
         "OK (OAuth login)".to_string()
     }
 
-    /// Subscription-only auth: returns the in-app OAuth access token for this
-    /// provider instance, or an actionable error if not logged in / expired.
     pub fn resolve_auth(&self) -> Result<String, String> {
-        if !self.is_subscription() {
-            return Err("OAuth is only available for the subscription backend".into());
+        if !self.supports_oauth() {
+            return Err("Select the subscription backend or Anthropic Console OAuth".into());
         }
-        if self.oauth_tokens.access_token.is_empty() {
+        if self
+            .active_oauth_tokens()
+            .oauth_mode
+            .as_ref()
+            .is_some_and(|mode| Some(mode) != self.oauth_mode().as_ref())
+        {
+            return Err("Saved OAuth token mode does not match this backend; log in again".into());
+        }
+        if self.active_oauth_tokens().access_token.is_empty() {
             return Err("Claude Code: not logged in for this provider instance. \
                 Click 'Login with Anthropic' in provider settings."
                 .to_string());
         }
-        if self.oauth_tokens.is_expired() {
+        if self.active_oauth_tokens().is_expired() {
             return Err("Claude Code: OAuth token expired — refresh needed.".to_string());
         }
-        Ok(self.oauth_tokens.access_token.clone())
+        Ok(self.active_oauth_tokens().access_token.clone())
     }
 
     pub fn should_force_refresh_for_status(
@@ -158,14 +180,14 @@ impl ClaudeCodeProvider {
         &self,
         rejected_access_token: &str,
     ) -> Option<String> {
-        (self.is_subscription()
-            && !self.oauth_tokens.access_token.is_empty()
-            && self.oauth_tokens.access_token != rejected_access_token)
-            .then(|| self.oauth_tokens.access_token.clone())
+        (self.supports_oauth()
+            && !self.active_oauth_tokens().access_token.is_empty()
+            && self.active_oauth_tokens().access_token != rejected_access_token)
+            .then(|| self.active_oauth_tokens().access_token.clone())
     }
 
     pub fn auth_state_matches(&self, tokens: &OAuthTokens) -> bool {
-        &self.oauth_tokens == tokens
+        self.active_oauth_tokens() == tokens
     }
 
     pub fn update_auth_state_from_if_current(
@@ -173,14 +195,14 @@ impl ClaudeCodeProvider {
         source: &ClaudeCodeProvider,
         previous_tokens: &OAuthTokens,
     ) -> bool {
-        if !self.is_subscription()
-            || !source.is_subscription()
+        if !self.supports_oauth()
+            || self.oauth_mode() != source.oauth_mode()
             || source.auth_state_matches(previous_tokens)
             || !self.auth_state_matches(previous_tokens)
         {
             return false;
         }
-        self.oauth_tokens = source.oauth_tokens.clone();
+        self.set_active_oauth_tokens(source.active_oauth_tokens().clone());
         true
     }
 }
@@ -637,6 +659,9 @@ impl ClaudeCodeProvider {
         &self,
         http_client: &reqwest::Client,
     ) -> Result<ClaudeCodeUsage, String> {
+        if !self.is_subscription() {
+            return Err("Usage is only available for Claude subscriptions".into());
+        }
         let token = self.resolve_auth()?;
         self.fetch_usage_once(http_client, &token)
             .await
@@ -648,6 +673,11 @@ impl ClaudeCodeProvider {
         http_client: &reqwest::Client,
         access_token: &str,
     ) -> Result<ClaudeCodeUsage, ClaudeCodeUsageRequestError> {
+        if !self.is_subscription() {
+            return Err(ClaudeCodeUsageRequestError::Other(
+                "Usage is only available for Claude subscriptions".into(),
+            ));
+        }
         let resp = http_client
             .get("https://api.anthropic.com/api/oauth/usage")
             .header("Authorization", format!("Bearer {}", access_token))
@@ -989,9 +1019,7 @@ impl ProviderTrait for ClaudeCodeProvider {
 
     fn provider_settings_as_json(&self) -> serde_json::Value {
         let auth_status = self.diagnose_auth_status();
-        let oauth_connected = self.is_subscription()
-            && !self.oauth_tokens.access_token.is_empty()
-            && !self.oauth_tokens.is_expired();
+        let oauth_connected = self.supports_oauth() && self.resolve_auth().is_ok();
 
         let mut settings = serde_json::to_value(&self.transport).unwrap_or_else(|_| json!({}));
         for field in crate::claude_backend::SECRET_FIELDS {
@@ -1072,7 +1100,13 @@ impl ProviderTrait for ClaudeCodeProvider {
         let present = |v: &Option<String>| v.as_ref().is_some_and(|s| !s.is_empty());
         match t.backend {
             ClaudeBackend::Oauth => !self.oauth_tokens.access_token.is_empty(),
-            ClaudeBackend::Anthropic => present(&t.api_key),
+            ClaudeBackend::Anthropic => {
+                if self.is_console_oauth() {
+                    self.resolve_auth().is_ok()
+                } else {
+                    present(&t.api_key)
+                }
+            }
             ClaudeBackend::Bedrock | ClaudeBackend::Vertex | ClaudeBackend::Foundry => true,
             ClaudeBackend::Custom => {
                 present(&t.base_url)
@@ -1080,6 +1114,7 @@ impl ProviderTrait for ClaudeCodeProvider {
                         ClaudeAuthType::ApiKey => present(&t.api_key),
                         ClaudeAuthType::Bearer => present(&t.auth_token),
                         ClaudeAuthType::None => true,
+                        ClaudeAuthType::Oauth => false,
                     }
             }
         }
@@ -1129,7 +1164,7 @@ impl ProviderTrait for ClaudeCodeProvider {
             return custom_models_only();
         }
         let transport = self.resolved_transport();
-        let result = if self.is_subscription() {
+        let result = if self.supports_oauth() {
             match self.resolve_auth() {
                 Ok(token) => fetch_claude_code_models(http_client, &token).await,
                 Err(_) => return custom_models_only(),
@@ -1203,12 +1238,14 @@ impl ProviderTrait for ClaudeCodeProvider {
         refresh_token: &str,
         expires_at: i64,
     ) {
-        if !self.is_subscription() {
+        if !self.supports_oauth() {
             return;
         }
-        self.oauth_tokens.access_token = access_token.to_string();
-        self.oauth_tokens.refresh_token = refresh_token.to_string();
-        self.oauth_tokens.expires_at = expires_at;
+        let mut tokens = self.active_oauth_tokens().clone();
+        tokens.access_token = access_token.to_string();
+        tokens.refresh_token = refresh_token.to_string();
+        tokens.expires_at = expires_at;
+        self.set_active_oauth_tokens(tokens);
     }
 
     async fn startup_refresh_and_sync(
@@ -1217,49 +1254,39 @@ impl ProviderTrait for ClaudeCodeProvider {
         config_dir: &std::path::Path,
         instance_id: &str,
     ) -> Result<(), String> {
-        if !self.is_subscription()
-            || self.oauth_tokens.is_empty()
-            || self.oauth_tokens.refresh_token.is_empty()
+        let Some(mode) = self.oauth_mode() else {
+            return Ok(());
+        };
+        let previous = self.active_oauth_tokens().clone();
+        if previous.is_empty()
+            || previous.refresh_token.is_empty()
+            || !Self::needs_refresh_on_start(previous.expires_at)
         {
             return Ok(());
         }
-
-        if !Self::needs_refresh_on_start(self.oauth_tokens.expires_at) {
-            return Ok(());
-        }
-
         let _guard = Self::lock_refresh_guard().await?;
-        tracing::info!("Claude Code: refreshing OAuth token on startup");
-        let refreshed = match crate::claude_code_oauth::refresh_access_token(
+        let mut refreshed = match crate::claude_code_oauth::refresh_access_token_for_mode(
             http_client,
-            &self.oauth_tokens.refresh_token,
+            &previous.refresh_token,
+            &mode,
         )
         .await
         {
-            Ok(refreshed) => refreshed,
+            Ok(tokens) => tokens,
             Err(e) if crate::oauth_refresh::is_permanent_refresh_error(&e) => {
                 crate::oauth_refresh::mark_invalid_refresh_token(
                     instance_id,
-                    &self.oauth_tokens.refresh_token,
+                    &previous.refresh_token,
                 );
-                tracing::warn!(
-                    "Claude Code: OAuth refresh token is invalid; clearing saved OAuth tokens. Please log in again: {}",
-                    e
-                );
-                self.oauth_tokens = OAuthTokens::default();
-                self.save_oauth_tokens_config(config_dir, instance_id)
-                    .await?;
-                return Ok(());
+                self.set_active_oauth_tokens(OAuthTokens::default());
+                return self.save_oauth_tokens_config(config_dir, instance_id).await;
             }
             Err(e) => return Err(e),
         };
-
-        self.oauth_tokens.access_token = refreshed.access_token;
-        if !refreshed.refresh_token.is_empty() {
-            self.oauth_tokens.refresh_token = refreshed.refresh_token;
+        if refreshed.workspace_id.is_none() {
+            refreshed.workspace_id = previous.workspace_id;
         }
-        self.oauth_tokens.expires_at = refreshed.expires_at;
-
+        self.set_active_oauth_tokens(refreshed);
         self.save_oauth_tokens_config(config_dir, instance_id).await
     }
 }
@@ -1986,6 +2013,7 @@ mod tests {
             access_token: "old-access".to_string(),
             refresh_token: "old-refresh".to_string(),
             expires_at: 1,
+            ..Default::default()
         };
         let mut current = ClaudeCodeProvider {
             oauth_tokens: previous_tokens.clone(),
@@ -1997,6 +2025,8 @@ mod tests {
                 access_token: "new-access".to_string(),
                 refresh_token: "new-refresh".to_string(),
                 expires_at: 2,
+                oauth_mode: Some(crate::claude_code_oauth::OAuthMode::Max),
+                ..Default::default()
             },
             enabled_models: vec!["clobber-model".to_string()],
             ..Default::default()
