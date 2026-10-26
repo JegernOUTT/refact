@@ -2,7 +2,7 @@ import React, { useMemo } from "react";
 import classNames from "classnames";
 import { CheckCircle2, CircleX } from "lucide-react";
 import { Markdown, ShikiCodeBlock } from "../Markdown";
-import { Badge, Icon, ToolCard } from "../ui";
+import { Badge, Icon } from "../ui";
 import { AnimatedCollapsible } from "./shared/AnimatedCollapsible";
 import styles from "./FinalReportView.module.css";
 
@@ -11,7 +11,6 @@ import {
   finalReportPresentation,
   parseFinalReport,
   verificationPassed,
-  verificationSummary,
   type VerificationResult,
 } from "./finalReportJson";
 
@@ -73,7 +72,7 @@ const VerificationDetails: React.FC<{ item: VerificationResult }> = ({
         <Icon
           icon={verificationPassed(item) ? CheckCircle2 : CircleX}
           size="sm"
-          tone={verificationPassed(item) ? "success" : "muted"}
+          tone={verificationPassed(item) ? "success" : "danger"}
         />
         <code>{item.command}</code>
         {item.exit_code !== undefined && item.exit_code !== null && (
@@ -118,13 +117,13 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
     <div className={styles.root} data-testid="final-report-view">
       <header className={classNames(styles.header, "rf-enter")}>
         <span className={styles.title}>{title}</span>
-        <Badge tone={report.success ? "muted" : "danger"}>
+        <Badge tone={report.success ? "success" : "danger"}>
           <Icon
             icon={report.success ? CheckCircle2 : CircleX}
             size="sm"
-            tone={report.success ? "muted" : "danger"}
+            tone={report.success ? "success" : "danger"}
           />
-          {report.success ? "Reported success" : "Reported failure"}
+          {report.success ? "Success" : "Failed"}
         </Badge>
       </header>
       <Section title="Summary">
@@ -157,7 +156,6 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
         )}
       </Section>
       <Section title="Verification">
-        <p className={styles.none}>{verificationSummary(report)}</p>
         {report.verification.length > 0 ? (
           <div>
             {report.verification.map((item) => (
@@ -192,9 +190,6 @@ export const FinalReportView: React.FC<FinalReportViewProps> = ({
       </Section>
       <TextDetails title="Risks" items={report.risks} />
       <TextDetails title="Assumptions" items={report.assumptions} />
-      <ToolCard title="Technical details" defaultOpen={false}>
-        <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
-      </ToolCard>
     </div>
   );
 };

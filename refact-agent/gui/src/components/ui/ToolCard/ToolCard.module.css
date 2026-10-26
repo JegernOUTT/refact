@@ -49,6 +49,12 @@
   outline-offset: var(--rf-hairline);
 }
 
+.static,
+.static:hover {
+  color: inherit;
+  cursor: default;
+}
+
 .leadingIcon {
   display: inline-flex;
   flex: 0 0 auto;

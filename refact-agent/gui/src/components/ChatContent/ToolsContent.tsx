@@ -129,7 +129,7 @@ const FinalReportToolCard: React.FC<FinalReportToolCardProps> = ({
     selectIsWaitingById(state, threadId),
   );
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
-  const [isOpen, handleToggle] = useStoredOpen(storeKey, false);
+  const [isOpen, handleToggle] = useStoredOpen(storeKey, true);
   const presentation = finalReportPresentation(
     content ?? (hasResult ? "" : null),
     toolFailed,
@@ -140,7 +140,9 @@ const FinalReportToolCard: React.FC<FinalReportToolCardProps> = ({
       ? "error"
       : !hasResult && (isStreaming || isWaiting)
         ? "running"
-        : "idle";
+        : report?.success === true
+          ? "success"
+          : "idle";
   const statusIcon =
     status === "error" ? (
       <CircleX data-testid="final-report-tool-error-icon" />
@@ -155,9 +157,16 @@ const FinalReportToolCard: React.FC<FinalReportToolCardProps> = ({
       <span data-testid="final-report-tool" hidden />
       <ToolCard
         icon={statusIcon}
-        density="compact"
-        summary={presentation.headline}
-        meta={presentation.stateLabel}
+        summary="Task agent final report"
+        meta={
+          content === null
+            ? presentation.stateLabel
+            : report?.success === false
+              ? "failed"
+              : report?.success === true
+                ? "success"
+                : undefined
+        }
         status={status}
         isOpen={isOpen}
         onToggle={handleToggle}
@@ -166,23 +175,26 @@ const FinalReportToolCard: React.FC<FinalReportToolCardProps> = ({
         {content === null ? (
           <CompactToolDetails facts={presentation.facts} />
         ) : (
-          <FinalReportView compact content={content} />
+          <FinalReportView content={content} />
         )}
-        <DetailsCard title="Technical details" defaultOpen={false}>
-          <PagedText label="Raw arguments" body={toolCall.function.arguments} />
-          {rawContent !== undefined && typeof rawContent !== "string" && (
+        {content === null && rawContent !== undefined && (
+          <DetailsCard title="Technical details" defaultOpen={false}>
+            <PagedText
+              label="Raw arguments"
+              body={toolCall.function.arguments}
+            />
             <PagedText
               label="Full response"
               body={JSON.stringify(rawContent, null, 2)}
             />
-          )}
-          {extra && (
-            <PagedText
-              label="Response metadata"
-              body={JSON.stringify(extra, null, 2)}
-            />
-          )}
-        </DetailsCard>
+            {extra && (
+              <PagedText
+                label="Response metadata"
+                body={JSON.stringify(extra, null, 2)}
+              />
+            )}
+          </DetailsCard>
+        )}
       </ToolCard>
     </>
   );

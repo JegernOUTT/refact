@@ -1,9 +1,8 @@
-import { FileText } from "lucide-react";
+import { CircleCheck } from "lucide-react";
 import React from "react";
 import { ToolCall } from "../../../services/refact/types";
 import { ReportToolCard, type ReportData } from "./ReportToolCard";
 import { readCompactRecord } from "../../Tools/AgenticTool/compactPresentation";
-import { Icon } from "../../ui";
 
 interface TaskDoneToolProps {
   toolCall: ToolCall;
@@ -13,8 +12,7 @@ function extractTaskDoneReport(content: string): ReportData | null {
   const data = readCompactRecord(content);
   if (data?.type !== "task_done") return null;
   return {
-    summary:
-      typeof data.summary === "string" ? data.summary : "Task report received",
+    summary: typeof data.summary === "string" ? data.summary : "Task completed",
     markdown: typeof data.report === "string" ? data.report : content,
     filesChanged:
       Array.isArray(data.files_changed) &&
@@ -33,11 +31,12 @@ export const TaskDoneTool: React.FC<TaskDoneToolProps> = ({ toolCall }) => {
       <span data-testid="task-done-tool" hidden />
       <ReportToolCard
         toolCall={toolCall}
-        icon={<Icon icon={FileText} tone="muted" />}
-        defaultSummary="Task report"
+        icon={<CircleCheck />}
+        defaultSummary="Task completed"
         variant="taskDone"
         extractReport={extractTaskDoneReport}
-        compact
+        defaultOpen
+        unboundedContent
       />
     </>
   );

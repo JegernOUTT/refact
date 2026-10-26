@@ -23,6 +23,7 @@ export interface ToolCardProps
   open?: boolean;
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
+  collapsible?: boolean;
   children?: React.ReactNode;
 }
 
@@ -119,13 +120,14 @@ export function ToolCard({
   open,
   defaultOpen = true,
   onOpenChange,
+  collapsible = true,
   children,
   className,
   ...props
 }: ToolCardProps) {
   const [uncontrolledOpen, setUncontrolledOpen] = React.useState(defaultOpen);
   const isControlled = open !== undefined;
-  const isOpen = isControlled ? open : uncontrolledOpen;
+  const isOpen = !collapsible || (isControlled ? open : uncontrolledOpen);
   const bodyId = React.useId();
   const bodyRef = React.useRef<HTMLDivElement>(null);
   const tone = statusTone[status];
@@ -149,6 +151,23 @@ export function ToolCard({
     onOpenChange?.(nextOpen);
   };
 
+  const headerContent = (
+    <>
+      {icon ? (
+        <Icon
+          className={classNames(
+            styles.leadingIcon,
+            isActive && "rf-status-pulse",
+          )}
+          icon={icon}
+          tone={tone}
+        />
+      ) : null}
+      <span className={styles.title}>{titleContent}</span>
+      <span className={styles.spacer} />
+    </>
+  );
+
   return (
     <section
       className={classNames(
@@ -163,27 +182,22 @@ export function ToolCard({
       {...props}
     >
       <div className={styles.header}>
-        <button
-          aria-controls={bodyId}
-          aria-expanded={isOpen}
-          className={classNames(styles.toggle, "rf-pressable")}
-          type="button"
-          onClick={toggleOpen}
-        >
-          {icon ? (
-            <Icon
-              className={classNames(
-                styles.leadingIcon,
-                isActive && "rf-status-pulse",
-              )}
-              icon={icon}
-              tone={tone}
-            />
-          ) : null}
-          <span className={styles.title}>{titleContent}</span>
-          <span className={styles.spacer} />
-          <Icon className={styles.chevron} icon={ChevronDown} tone="faint" />
-        </button>
+        {collapsible ? (
+          <button
+            aria-controls={bodyId}
+            aria-expanded={isOpen}
+            className={classNames(styles.toggle, "rf-pressable")}
+            type="button"
+            onClick={toggleOpen}
+          >
+            {headerContent}
+            <Icon className={styles.chevron} icon={ChevronDown} tone="faint" />
+          </button>
+        ) : (
+          <div className={classNames(styles.toggle, styles.static)}>
+            {headerContent}
+          </div>
+        )}
         {actions ? <div className={styles.actions}>{actions}</div> : null}
       </div>
       <div

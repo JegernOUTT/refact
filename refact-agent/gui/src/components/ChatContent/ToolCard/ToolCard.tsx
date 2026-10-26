@@ -26,6 +26,7 @@ export interface ToolCardProps {
   status: ToolStatus;
   isOpen: boolean;
   onToggle: () => void;
+  collapsible?: boolean;
   children?: React.ReactNode;
   className?: string;
   animate?: boolean;
@@ -41,6 +42,7 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
   status,
   isOpen,
   onToggle,
+  collapsible = true,
   children,
   className,
   animate = true,
@@ -53,7 +55,7 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
     COLLAPSE_ANIMATION_MS,
     animate,
   );
-  const shouldRenderBody = isOpen || shouldRender;
+  const shouldRenderBody = !collapsible || isOpen || shouldRender;
   const handleToggle = React.useCallback(() => {
     preserveScrollAnchor(onToggle);
   }, [onToggle, preserveScrollAnchor]);
@@ -93,6 +95,7 @@ const ToolCardInner: React.FC<ToolCardProps> = ({
       )}
       density={density}
       open={isOpen}
+      collapsible={collapsible}
       onPointerDownCapture={prepareScrollAnchor}
       onMouseDownCapture={prepareScrollAnchor}
       onKeyDownCapture={prepareScrollAnchor}
